@@ -1,0 +1,15 @@
+# Install in a virtual environment.
+#
+# Whisper only:
+#   pip install openai-whisper
+#
+# Paraformer (FunASR) — needs PyTorch matching your CUDA/CPU; see https://pytorch.org
+#   pip install funasr modelscope
+#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124
+#
+# Both:
+#   pip install -r requirements-asr.txt
+
+openai-whisper>=20231117
+funasr>=1.0.0
+modelscope>=1.9.0

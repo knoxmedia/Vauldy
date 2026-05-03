@@ -1,0 +1,71 @@
+server:
+  host: "0.0.0.0"
+  port: 8200
+  mode: "release" # debug | release
+
+data:
+  dir: "./data"
+  db: "./data/knox-media.db"
+  transcode: "./data/transcode"
+  preview: "./data/preview"
+  subtitle: "./data/subtitles"
+  upload: "./data/upload"
+  chunks: "./data/upload/chunks"
+
+security:
+  jwt_secret: "change-me-in-production-use-long-random-string"
+  token_hours: 168
+
+# Bundled binaries under media/tools/ (Windows .exe). Run server with cwd = media/, or use absolute paths.
+# Re-fetch after clone: pwsh -File tools/download_media_tools.ps1
+ffmpeg:
+  ffprobe_path: "tools/ffmpeg/bin/ffprobe.exe"
+  ffmpeg_path: "tools/ffmpeg/bin/ffmpeg.exe"
+
+# CENC fMP4 HLS: Shaka first, then ffmpeg fallback. Empty shaka path skips Shaka.
+drm_packaging:
+  engine_order:
+    - shaka
+    - ffmpeg
+  shaka_packager_path: "tools/shaka-packager/packager.exe"
+  segment_seconds: 4
+
+drm:
+  widevine:
+    enabled: false
+    # Private compliant WV module endpoint (local/private deployment)
+    # Example: "http://127.0.0.1:9001/widevine/license"
+    private_module_url: "http://127.0.0.1:8080/license"
+    private_module_token: ""
+    private_module_timeout_seconds: 8
+  powerdrm:
+    enabled: true
+
+# Library scan: default skips full-file MD5 (very slow) and uses shorter ffprobe analysis.
+scan:
+  file_hash_on_scan: false
+  fast_ffprobe: true
+
+# Sidecar scan (srt/ass/ssa/vtt/sub), embedded extract to WebVTT, optional ASR.
+subtitle:
+  # When true, a new video discovered by library scan gets a pending subtitle_task (default: true).
+  auto_on_scan: true
+  asr:
+    provider: "none"
+    whisper_path: "whisper"
+    extra_args: []
+    shell: ""
+  graphical_ocr:
+    enabled: false
+    tesseract_path: "tesseract"
+    tessdata_prefix: ""
+    languages: "chi_sim+eng"
+    python_path: ""
+    script_path: ""
+    pgsrip_path: ""
+    mkvextract_path: ""
+    mkvmerge_path: ""
+
+cors:
+  allow_origins:
+    - "*"

@@ -1,0 +1,2 @@
+# PGS ripping (uses Tesseract; install tessdata and set TESSDATA_PREFIX if needed).
+pgsrip>=0.1.12

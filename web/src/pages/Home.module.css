@@ -1,0 +1,361 @@
+.page {
+  padding: 24px 0 48px;
+  background: #000;
+  min-height: calc(100vh - 64px);
+}
+
+.section {
+  margin-bottom: 40px;
+}
+
+.sectionHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.title {
+  margin: 0 !important;
+  font-size: 1.35em !important;
+  font-weight: 600 !important;
+  color: #fff !important;
+  letter-spacing: 0.02em;
+}
+
+.more {
+  color: #00a4dc;
+  font-size: 14px;
+}
+
+.more:hover {
+  color: #4cc3e0;
+}
+
+.rowScroll {
+  display: flex;
+  gap: 14px;
+  overflow-x: auto;
+  padding-bottom: 12px;
+  scroll-snap-type: x proximity;
+  -webkit-overflow-scrolling: touch;
+}
+
+.rowScroll::-webkit-scrollbar {
+  height: 8px;
+}
+
+.rowScroll::-webkit-scrollbar-thumb {
+  background: #333;
+  border-radius: 4px;
+}
+
+.carouselWrap {
+  position: relative;
+}
+
+.rowScrollNoBar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.rowScrollNoBar::-webkit-scrollbar {
+  display: none;
+}
+
+.carouselArrow {
+  position: absolute;
+  top: 40%;
+  z-index: 3;
+  width: 34px;
+  height: 34px;
+  border: 1px solid #2e2e2e;
+  border-radius: 17px;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  cursor: pointer;
+}
+
+.carouselArrow:hover {
+  background: rgba(0, 164, 220, 0.3);
+  border-color: #00a4dc;
+}
+
+.carouselArrowLeft {
+  left: 6px;
+}
+
+.carouselArrowRight {
+  right: 6px;
+}
+
+/* 媒体库大卡片 */
+.libCard {
+  flex: 0 0 min(420px, 85vw);
+  scroll-snap-align: start;
+  height: 200px;
+  border-radius: 8px;
+  overflow: hidden;
+  position: relative;
+  cursor: pointer;
+  border: 1px solid #222;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+  text-decoration: none;
+  color: inherit;
+  display: block;
+  background-size: cover;
+  background-position: center;
+}
+
+.libCard:hover {
+  transform: scale(1.02);
+  box-shadow: 0 8px 24px rgba(0, 164, 220, 0.15);
+}
+
+.libCardInner {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.85) 0%, transparent 55%);
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  padding: 20px;
+}
+
+.libScanOverlay {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  right: 10px;
+  z-index: 2;
+  border: 1px solid rgba(0, 164, 220, 0.55);
+  border-radius: 8px;
+  background: rgba(5, 15, 28, 0.7);
+  padding: 8px 10px;
+  backdrop-filter: blur(2px);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.libScanTitle {
+  color: #53c6ff;
+  font-weight: 600;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.libScanMeta {
+  margin-top: 4px;
+  color: #d6efff;
+  font-size: 12px;
+}
+
+.libScanInfo {
+  min-width: 0;
+}
+
+.libScanCircle :global(.ant-progress-text) {
+  color: #d6efff !important;
+  font-size: 11px !important;
+  font-weight: 600;
+}
+
+.libName {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: #fff;
+  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.8);
+}
+
+.libMeta {
+  margin-top: 6px;
+  font-size: 13px;
+  color: #aaa;
+}
+
+/* 横向 16:9 继续观看 */
+.thumb169 {
+  flex: 0 0 280px;
+  scroll-snap-align: start;
+  border-radius: 6px;
+  overflow: hidden;
+  position: relative;
+  background: #1a1a1a;
+  border: 1px solid #222;
+  cursor: pointer;
+  text-decoration: none;
+  color: inherit;
+  display: block;
+}
+
+.thumb169Box {
+  aspect-ratio: 16 / 9;
+  background: linear-gradient(135deg, #2a2a3a 0%, #1a1a24 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #555;
+  font-size: 42px;
+  position: relative;
+}
+
+.thumb169PlayBtn {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%) scale(0.95);
+  width: 56px;
+  height: 56px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 28px;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 28px;
+  opacity: 0;
+  transition: opacity 0.16s ease, transform 0.16s ease, background 0.16s ease;
+  cursor: pointer;
+  z-index: 2;
+}
+
+.thumb169:hover .thumb169PlayBtn,
+.thumb169:focus-within .thumb169PlayBtn {
+  opacity: 1;
+  transform: translate(-50%, -50%) scale(1);
+}
+
+.thumb169PlayBtn:hover {
+  background: rgba(0, 164, 220, 0.7);
+}
+
+.progressBar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.progressFill {
+  height: 100%;
+  background: #00a4dc;
+  transition: width 0.2s ease;
+}
+
+.thumb169Cap {
+  padding: 10px 8px 12px;
+  background: #0a0a0a;
+}
+
+.thumb169Title {
+  font-size: 13px;
+  color: #e6edf3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.thumb169Sub {
+  font-size: 12px;
+  color: #888;
+  margin-top: 4px;
+}
+
+/* 竖版海报 最近添加 */
+.thumbPoster {
+  flex: 0 0 130px;
+  scroll-snap-align: start;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #1a1a1a;
+  border: 1px solid #222;
+  cursor: pointer;
+  text-decoration: none;
+  color: inherit;
+  display: block;
+  position: relative;
+  transition: transform 0.16s ease, box-shadow 0.16s ease;
+}
+
+.thumbPoster:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 20px rgba(0, 0, 0, 0.35);
+}
+
+.posterBox {
+  aspect-ratio: 2 / 3;
+  background: linear-gradient(160deg, #3a3a4a 0%, #1e1e28 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.posterEmpty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  color: #8b94a8;
+  font-size: 22px;
+}
+
+.posterEmpty span {
+  font-size: 12px;
+  color: #b7bfcd;
+}
+
+.posterPlayBtn {
+  position: absolute;
+  left: 10px;
+  bottom: 46px;
+  width: 40px;
+  height: 40px;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 20px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity 0.16s ease, transform 0.16s ease, background 0.16s ease;
+  cursor: pointer;
+}
+
+.thumbPoster:hover .posterPlayBtn,
+.thumbPoster:focus-within .posterPlayBtn {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.posterPlayBtn:hover {
+  background: rgba(0, 164, 220, 0.7);
+}
+
+.posterCap {
+  padding: 8px 6px 10px;
+  background: #0a0a0a;
+}
+
+.posterTitle {
+  font-size: 12px;
+  color: #ddd;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.emptyHint {
+  color: #666;
+  font-size: 14px;
+  padding: 24px 0;
+}
