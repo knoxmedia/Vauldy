@@ -209,8 +209,11 @@ func (h *Handler) HLSInfo(c *gin.Context) {
 	fairplayCertURL := base + "/api/v1/drm/fairplay/cert"
 	fairplayLicenseURL := base + "/api/v1/drm/fairplay/license"
 	widevineServiceCertURL := ""
-	if h != nil && h.App != nil && h.App.Config != nil && strings.TrimSpace(h.App.Config.DRM.Widevine.PrivateModuleURL) != "" {
-		widevineServiceCertURL = base + "/api/v1/drm/widevine/service-cert"
+	if h != nil && h.App != nil && h.App.Config != nil {
+		wv := h.App.Config.DRM.Widevine
+		if wv.EmitServiceCertURL && strings.TrimSpace(wv.PrivateModuleURL) != "" {
+			widevineServiceCertURL = base + "/api/v1/drm/widevine/service-cert"
+		}
 	}
 	if accessToken != "" {
 		widevineURL = appendQueryValue(widevineURL, "access_token", accessToken)
@@ -314,12 +317,12 @@ func (h *Handler) HLSInfo(c *gin.Context) {
 				jitResumeURL = appendQueryValue(jitResumeURL, "access_token", accessToken)
 			}
 			c.JSON(http.StatusOK, gin.H{
-				"mode":          "jit_hls",
-				"hls_master":    fmt.Sprintf("%s/api/v1/jit/master/%s", base, fileID.String),
-				"status":        "processing",
-				"fallback":      playURL,
-				"media_profile": media,
-				"client_caps":   caps,
+				"mode":                   "jit_hls",
+				"hls_master":             fmt.Sprintf("%s/api/v1/jit/master/%s", base, fileID.String),
+				"status":                 "processing",
+				"fallback":               playURL,
+				"media_profile":          media,
+				"client_caps":            caps,
 				"jit_session_pause_url":  jitPauseURL,
 				"jit_session_resume_url": jitResumeURL,
 				"message":                "Source codec/container unsupported, switched to instant transcoding pipeline",

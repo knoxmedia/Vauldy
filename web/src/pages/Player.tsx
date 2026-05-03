@@ -20,6 +20,7 @@ type PlaybackPlan = {
   drm?: {
     widevine_license_url?: string;
     widevine_transport?: "json_local" | "raw";
+    /** Optional; only when drm.widevine.emit_service_cert_url is true in server config. */
     widevine_service_cert_url?: string;
     fairplay_cert_url?: string;
     fairplay_license_url?: string;

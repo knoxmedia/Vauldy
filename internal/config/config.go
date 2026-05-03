@@ -112,6 +112,10 @@ type DRMConfig struct {
 type WidevineConfig struct {
 	// Enabled controls whether DRM/Widevine packaging mode is available.
 	Enabled *bool `yaml:"enabled"`
+	// EmitServiceCertURL when true adds widevine_service_cert_url to the HLS DRM
+	// playback plan (requires private_module_url). Default false: CDM uses in-band
+	// SERVICE_CERTIFICATE_REQUEST on the license endpoint instead.
+	EmitServiceCertURL bool `yaml:"emit_service_cert_url"`
 	// PrivateModuleURL points to a privately deployed compliant widevine
 	// license module. When configured, backend uses raw challenge passthrough.
 	PrivateModuleURL string `yaml:"private_module_url"`

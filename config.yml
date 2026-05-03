@@ -33,6 +33,9 @@ drm_packaging:
 drm:
   widevine:
     enabled: false
+    # When true with private_module_url set, playback plan includes widevine_service_cert_url (Shaka serverCertificateUri).
+    # Default false: omit URL so CDM negotiates cert in-band via LICENSE POST (0x08 0x04).
+    emit_service_cert_url: false
     # Private compliant WV module endpoint (local/private deployment)
     # Example: "http://127.0.0.1:9001/widevine/license"
     private_module_url: "http://127.0.0.1:8080/license"
