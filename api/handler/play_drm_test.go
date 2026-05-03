@@ -5,11 +5,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
 
 	"knox-media/internal/app"
+	"knox-media/internal/config"
 	"knox-media/internal/store"
 )
 
@@ -54,6 +56,53 @@ func TestHLSInfoReturnsDRMFieldsForPackagedMedia(t *testing.T) {
 		`"widevine_license_url":"http://example.com/api/v1/drm/widevine/license"`,
 		`"fairplay_cert_url":"http://example.com/api/v1/drm/fairplay/cert"`,
 		`"fairplay_license_url":"http://example.com/api/v1/drm/fairplay/license"`,
+	) {
+		t.Fatalf("unexpected body: %s", body)
+	}
+	if strings.Contains(body, "widevine_service_cert_url") {
+		t.Fatalf("did not expect widevine_service_cert_url without private module: %s", body)
+	}
+}
+
+func TestHLSInfoIncludesWidevineServiceCertWhenPrivateModuleConfigured(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	dbPath := filepath.Join(t.TempDir(), "play-drm-sc.sqlite")
+	db, err := store.OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	if _, err := db.Exec(`INSERT INTO library (id, name, type, path) VALUES (1, 'lib', 'movie', 'E:/videos')`); err != nil {
+		t.Fatalf("insert library: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO media (id, library_id, file_id, file_path, meta_json, height) VALUES (1, 1, 'f-1', 'E:/videos/a.mkv', '{"format":{"format_name":"matroska"},"streams":[{"codec_type":"video","codec_name":"h264"}]}', 1080)`); err != nil {
+		t.Fatalf("insert media: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO package_task (media_id, pipeline_type, status, output_path) VALUES (1, 'cmaf_drm', 'done', 'E:/transcode/1/master.m3u8')`); err != nil {
+		t.Fatalf("insert package task: %v", err)
+	}
+
+	cfg := &config.Config{}
+	cfg.DRM.Widevine.PrivateModuleURL = "http://127.0.0.1:8080/license"
+	h := &Handler{App: &app.App{DB: db, Config: cfg}, runningScans: map[int64]scanRuntime{}}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/media/1/hls", nil)
+	req.Host = "example.com"
+	c.Request = req
+	c.Params = gin.Params{{Key: "id", Value: "1"}}
+
+	h.HLSInfo(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !containsAll(body,
+		`"widevine_service_cert_url":"http://example.com/api/v1/drm/widevine/service-cert"`,
+		`"widevine_transport":"raw"`,
 	) {
 		t.Fatalf("unexpected body: %s", body)
 	}

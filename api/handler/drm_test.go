@@ -52,6 +52,74 @@ func newDRMHandlerForTest(t *testing.T) *Handler {
 	return &Handler{App: &app.App{DB: db}, runningScans: map[int64]scanRuntime{}}
 }
 
+func TestWidevineServiceCertRequiresAuthorization(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := newDRMHandlerForTest(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/drm/widevine/service-cert", nil)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = req
+
+	h.WidevineServiceCert(c)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestWidevineServiceCertUnavailableWithoutPrivateModule(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := newDRMHandlerForTest(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/drm/widevine/service-cert", nil)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = req
+	c.Set("user_id", int64(1))
+
+	h.WidevineServiceCert(c)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestWidevineServiceCertProxiesUpstream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/service-cert" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = w.Write([]byte{0xde, 0xad, 0xbe, 0xef})
+	}))
+	t.Cleanup(up.Close)
+
+	h := newDRMHandlerForTest(t)
+	h.App.Config = &config.Config{
+		DRM: config.DRMConfig{
+			Widevine: config.WidevineConfig{
+				PrivateModuleURL:            up.URL + "/license",
+				PrivateModuleTimeoutSeconds: 5,
+			},
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/drm/widevine/service-cert", nil)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = req
+	c.Set("user_id", int64(1))
+
+	h.WidevineServiceCert(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if !bytes.Equal(w.Body.Bytes(), []byte{0xde, 0xad, 0xbe, 0xef}) {
+		t.Fatalf("unexpected body: %q", w.Body.String())
+	}
+}
+
 func TestWidevineLicenseRequiresAuthorization(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	h := newDRMHandlerForTest(t)

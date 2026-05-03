@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   adaptWidevineLicenseRequest,
   adaptWidevineLicenseResponse,
+  isShakaInvalidWidevineServerCertificate,
+  isShakaLoadInterrupted,
 } from "../Player";
 
 describe("player widevine drm adaptation", () => {
@@ -77,5 +79,16 @@ describe("player widevine drm adaptation", () => {
     const out = adaptWidevineLicenseResponse(wrapped);
 
     expect(Array.from(out)).toEqual([1, 2, 3]);
+  });
+
+  it("detects Shaka INVALID_SERVER_CERTIFICATE (DRM 6004)", () => {
+    expect(isShakaInvalidWidevineServerCertificate({ category: 6, code: 6004 })).toBe(true);
+    expect(isShakaInvalidWidevineServerCertificate({ category: 6, code: 6003 })).toBe(false);
+    expect(isShakaInvalidWidevineServerCertificate(new Error("x"))).toBe(false);
+  });
+
+  it("detects Shaka LOAD_INTERRUPTED (PLAYER 7000)", () => {
+    expect(isShakaLoadInterrupted({ category: 7, code: 7000 })).toBe(true);
+    expect(isShakaLoadInterrupted({ category: 7, code: 7001 })).toBe(false);
   });
 });

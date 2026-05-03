@@ -78,6 +78,7 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 			play.GET("/media/:id/preview/thumbs.vtt", h.PreviewVTT)
 			play.GET("/media/:id/subtitles/:sid/vtt", h.SubtitleVTT)
 			play.GET("/transcode/task/:id/status", h.GetTranscodeTaskStatus)
+			play.GET("/drm/widevine/service-cert", h.WidevineServiceCert)
 			play.POST("/drm/widevine/license", h.WidevineLicense)
 			play.GET("/drm/powerdrm/key", h.PowerDRMKey)
 			play.GET("/drm/hls/aes128/key", h.HLSAES128Key)

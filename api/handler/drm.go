@@ -6,10 +6,13 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -98,6 +101,19 @@ func (h *Handler) widevinePrivateModuleEnabled() bool {
 		strings.TrimSpace(h.App.Config.DRM.Widevine.PrivateModuleURL) != ""
 }
 
+// widevinePrivateServiceCertURL derives GET /service-cert from the configured POST .../license endpoint.
+func widevinePrivateServiceCertURL(licenseEndpoint string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(licenseEndpoint))
+	if err != nil {
+		return "", err
+	}
+	if path.Base(u.Path) != "license" {
+		return "", fmt.Errorf("private module URL path must end with /license")
+	}
+	u.Path = strings.TrimSuffix(u.Path, "license") + "service-cert"
+	return u.String(), nil
+}
+
 func classifyVerifyError(err error) string {
 	if err == nil {
 		return ""
@@ -140,6 +156,55 @@ func (h *Handler) licenseVersions() (kidVersion string, sigVersion string) {
 		sigVersion = drmsvc.DefaultSigVersion
 	}
 	return kidVersion, sigVersion
+}
+
+func (h *Handler) WidevineServiceCert(c *gin.Context) {
+	if middleware.UserID(c) <= 0 && !middleware.IsAPIClient(c) {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	if !h.widevinePrivateModuleEnabled() {
+		c.JSON(http.StatusNotFound, gin.H{"error": "widevine service certificate not available"})
+		return
+	}
+	cfg := h.App.Config.DRM.Widevine
+	upstream, err := widevinePrivateServiceCertURL(cfg.PrivateModuleURL)
+	if err != nil {
+		log.Printf("widevine service-cert: bad private module URL: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid widevine private module configuration"})
+		return
+	}
+	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, upstream, nil)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "service certificate request build failed"})
+		return
+	}
+	if tok := strings.TrimSpace(cfg.PrivateModuleToken); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
+	timeoutSec := cfg.PrivateModuleTimeoutSeconds
+	if timeoutSec <= 0 {
+		timeoutSec = 30
+	}
+	cli := &http.Client{Timeout: time.Duration(timeoutSec) * time.Second}
+	resp, err := cli.Do(req)
+	if err != nil {
+		log.Printf("widevine service-cert upstream failed: %v", err)
+		c.JSON(http.StatusBadGateway, gin.H{"error": "service certificate upstream failed"})
+		return
+	}
+	defer resp.Body.Close()
+	body, rerr := io.ReadAll(resp.Body)
+	if rerr != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "service certificate read failed"})
+		return
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.Printf("widevine service-cert non-2xx: status=%d bytes=%d", resp.StatusCode, len(body))
+		c.Data(resp.StatusCode, "application/octet-stream", body)
+		return
+	}
+	c.Data(http.StatusOK, "application/octet-stream", body)
 }
 
 func (h *Handler) WidevineLicense(c *gin.Context) {

@@ -208,11 +208,18 @@ func (h *Handler) HLSInfo(c *gin.Context) {
 	powerDRMKeyURL := base + "/api/v1/drm/powerdrm/key"
 	fairplayCertURL := base + "/api/v1/drm/fairplay/cert"
 	fairplayLicenseURL := base + "/api/v1/drm/fairplay/license"
+	widevineServiceCertURL := ""
+	if h != nil && h.App != nil && h.App.Config != nil && strings.TrimSpace(h.App.Config.DRM.Widevine.PrivateModuleURL) != "" {
+		widevineServiceCertURL = base + "/api/v1/drm/widevine/service-cert"
+	}
 	if accessToken != "" {
 		widevineURL = appendQueryValue(widevineURL, "access_token", accessToken)
 		powerDRMKeyURL = appendQueryValue(powerDRMKeyURL, "access_token", accessToken)
 		fairplayCertURL = appendQueryValue(fairplayCertURL, "access_token", accessToken)
 		fairplayLicenseURL = appendQueryValue(fairplayLicenseURL, "access_token", accessToken)
+		if widevineServiceCertURL != "" {
+			widevineServiceCertURL = appendQueryValue(widevineServiceCertURL, "access_token", accessToken)
+		}
 	}
 	if encReady, encMaster, encType := h.latestEncryptedManifest(id); encReady {
 		switch encType {
@@ -246,20 +253,24 @@ func (h *Handler) HLSInfo(c *gin.Context) {
 		if h != nil && h.App != nil && h.App.Config != nil && strings.TrimSpace(h.App.Config.DRM.Widevine.PrivateModuleURL) != "" {
 			widevineTransport = "raw"
 		}
+		drmPayload := gin.H{
+			"widevine_license_url": widevineURL,
+			"widevine_transport":   widevineTransport,
+			"powerdrm_key_url":     powerDRMKeyURL,
+			"fairplay_cert_url":    fairplayCertURL,
+			"fairplay_license_url": fairplayLicenseURL,
+			"dash_mpd_url":         dashURL,
+			"clearkey_keys":        clearKeys,
+		}
+		if widevineServiceCertURL != "" {
+			drmPayload["widevine_service_cert_url"] = widevineServiceCertURL
+		}
 		c.JSON(http.StatusOK, gin.H{
 			"mode":       "hls_drm",
 			"hls_master": fmt.Sprintf("%s/api/v1/media/%s/hls/master.m3u8", base, c.Param("id")),
 			"status":     "done",
-			"drm": gin.H{
-				"widevine_license_url": widevineURL,
-				"widevine_transport":   widevineTransport,
-				"powerdrm_key_url":     powerDRMKeyURL,
-				"fairplay_cert_url":    fairplayCertURL,
-				"fairplay_license_url": fairplayLicenseURL,
-				"dash_mpd_url":         dashURL,
-				"clearkey_keys":        clearKeys,
-			},
-			"fallback": playURL,
+			"drm":        drmPayload,
+			"fallback":   playURL,
 		})
 		return
 	}

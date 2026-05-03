@@ -20,6 +20,7 @@ type PlaybackPlan = {
   drm?: {
     widevine_license_url?: string;
     widevine_transport?: "json_local" | "raw";
+    widevine_service_cert_url?: string;
     fairplay_cert_url?: string;
     fairplay_license_url?: string;
     dash_mpd_url?: string;
@@ -91,6 +92,20 @@ export function adaptWidevineLicenseRequest(
     JSON.stringify({ media_id: mediaId, challenge: toBase64(toUint8Array(request.body)) })
   );
   return true;
+}
+
+/** Shaka `util.Error.Category.DRM` === 6, `Code.INVALID_SERVER_CERTIFICATE` === 6004 */
+export function isShakaInvalidWidevineServerCertificate(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const o = err as { category?: number; code?: number };
+  return o.category === 6 && o.code === 6004;
+}
+
+/** Shaka `Category.PLAYER` === 7, `Code.LOAD_INTERRUPTED` === 7000 */
+export function isShakaLoadInterrupted(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const o = err as { category?: number; code?: number };
+  return o.category === 7 && o.code === 7000;
 }
 
 export function adaptWidevineLicenseResponse(
@@ -215,6 +230,8 @@ export default function PlayerPage() {
   const [searchParams] = useSearchParams();
   const nav = useNavigate();
   const domId = useId().replace(/:/g, "");
+  /** Stable mount node for players; avoids Strict Mode race where getElementById fails mid-async. */
+  const playerMountRef = useRef<HTMLDivElement | null>(null);
   const playerRef = useRef<Player | null>(null);
   const drmPlayerRef = useRef<any>(null);
   const drmVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -236,6 +253,10 @@ export default function PlayerPage() {
   const noAudioRetryTriedRef = useRef(false);
   const noAudioRetryInFlightRef = useRef(false);
   const hideTimerRef = useRef<number | null>(null);
+  /** Bumped on effect cleanup so stale async work (e.g. React Strict Mode) does not abort the active Shaka session (7000). */
+  const playbackGenerationRef = useRef(0);
+  /** Incremented while Shaka DRM is initializing/recursing so teardown of <video> does not trigger prefer_source xgplayer fallback. */
+  const drmRecoveryDepthRef = useRef(0);
   const startSec = (() => {
     const t = searchParams.get("t");
     if (!t) return 0;
@@ -253,7 +274,8 @@ export default function PlayerPage() {
   useEffect(() => {
     if (!mid || Number.isNaN(mid)) return;
     if (!token) return;
-    let cancelled = false;
+    const sessionGen = ++playbackGenerationRef.current;
+    const isStale = () => playbackGenerationRef.current !== sessionGen;
     let timer: number | null = null;
     const caps = detectClientCaps();
     const dbg = (...args: any[]) => console.log("[player]", ...args);
@@ -314,16 +336,27 @@ export default function PlayerPage() {
         powerPlayerRef.current = null;
       }
     };
+    const resolvePlayerHost = (): HTMLElement | null =>
+      playerMountRef.current ?? document.getElementById(domId);
+
     const playWithShakaDRM = async (
       manifestURL: string,
-      drm: NonNullable<PlaybackPlan["drm"]>
+      drm: NonNullable<PlaybackPlan["drm"]>,
+      opts?: { omitWidevineServiceCert?: boolean; loadInterruptRetry?: boolean }
     ) => {
-      dbg("playWithShakaDRM start", { mid, manifestURL, drm });
+      const omitWidevineServiceCert = !!opts?.omitWidevineServiceCert;
+      dbg("playWithShakaDRM start", { mid, manifestURL, drm, omitWidevineServiceCert });
+      drmRecoveryDepthRef.current++;
+      try {
       const shaka = await import("shaka-player/dist/shaka-player.ui.js");
+      if (isStale()) return;
       const shakaPlayer = (shaka as any).default || shaka;
       shakaPlayer.polyfill.installAll();
-      const host = document.getElementById(domId);
-      if (!host) throw new Error("player mount missing");
+      const host = resolvePlayerHost();
+      if (!host) {
+        if (isStale()) return;
+        throw new Error("player mount missing");
+      }
       host.innerHTML = "";
       const video = document.createElement("video");
       video.style.width = "100%";
@@ -334,6 +367,11 @@ export default function PlayerPage() {
       drmVideoRef.current = video;
       const player = new shakaPlayer.Player();
       await player.attach(video);
+      if (isStale()) {
+        await player.destroy().catch(() => {});
+        drmPlayerRef.current = null;
+        return;
+      }
       drmPlayerRef.current = player;
       player.addEventListener("error", (evt: any) => {
         const d = evt?.detail || evt;
@@ -347,7 +385,8 @@ export default function PlayerPage() {
           void (async () => {
             try {
               await destroyDRMPlayer();
-              await playWithShakaDRM(noAudioURL, drm);
+              if (isStale()) return;
+              await playWithShakaDRM(noAudioURL, drm, opts);
             } finally {
               noAudioRetryInFlightRef.current = false;
             }
@@ -363,6 +402,13 @@ export default function PlayerPage() {
         clearKeyDebugEnabled &&
         !!(drm.clearkey_keys && Object.keys(drm.clearkey_keys).length > 0);
       const widevineTransport = drm.widevine_transport || "json_local";
+      const drmAdvanced: Record<string, { serverCertificateUri: string }> = {};
+      if (drm.fairplay_cert_url) {
+        drmAdvanced["com.apple.fps"] = { serverCertificateUri: drm.fairplay_cert_url };
+      }
+      if (drm.widevine_service_cert_url && !omitWidevineServiceCert) {
+        drmAdvanced["com.widevine.alpha"] = { serverCertificateUri: drm.widevine_service_cert_url };
+      }
       player.configure({
         drm: {
           ...(hasClearKeys ? { clearKeys: drm.clearkey_keys } : {}),
@@ -381,13 +427,7 @@ export default function PlayerPage() {
                 ...(drm.widevine_license_url ? { "com.widevine.alpha": drm.widevine_license_url } : {}),
                 ...(drm.fairplay_license_url ? { "com.apple.fps": drm.fairplay_license_url } : {}),
               },
-          advanced: drm.fairplay_cert_url
-            ? {
-                "com.apple.fps": {
-                  serverCertificateUri: drm.fairplay_cert_url,
-                },
-              }
-            : undefined,
+          ...(Object.keys(drmAdvanced).length > 0 ? { advanced: drmAdvanced } : {}),
         },
       });
       const engine = player.getNetworkingEngine();
@@ -422,6 +462,14 @@ export default function PlayerPage() {
         }
       }
       video.addEventListener("error", () => {
+        if (drmRecoveryDepthRef.current > 0) {
+          dbg("skip source fallback during Shaka DRM setup/recovery");
+          return;
+        }
+        if (drmPlayerRef.current) {
+          dbg("skip HTMLMediaElement error fallback while Shaka instance attached");
+          return;
+        }
         if (noAudioRetryInFlightRef.current) {
           dbg("skip source fallback while no-audio retry in-flight");
           return;
@@ -461,9 +509,58 @@ export default function PlayerPage() {
         void savePlaybackProgress(mid, { position: cur, completed: 1 }).catch(() => {});
         void reportPlaybackEnd(mid, { position: cur, completed: 1 }).catch(() => {});
       });
-      await player.load(manifestURL);
+      if (isStale()) {
+        await player.destroy().catch(() => {});
+        drmPlayerRef.current = null;
+        return;
+      }
+      try {
+        await player.load(manifestURL);
+      } catch (err) {
+        if (
+          !omitWidevineServiceCert &&
+          drm.widevine_service_cert_url &&
+          isShakaInvalidWidevineServerCertificate(err)
+        ) {
+          dbg(
+            "Widevine server certificate rejected by CDM (6004); retrying without serverCertificateUri",
+            err
+          );
+          await destroyDRMPlayer();
+          if (isStale()) return;
+          await new Promise((r) => window.setTimeout(r, 48));
+          if (isStale()) return;
+          await playWithShakaDRM(manifestURL, drm, { omitWidevineServiceCert: true });
+          return;
+        }
+        if (
+          omitWidevineServiceCert &&
+          !opts?.loadInterruptRetry &&
+          isShakaLoadInterrupted(err) &&
+          !isStale()
+        ) {
+          dbg("Shaka load interrupted (7000) after dropping service cert; retrying once", err);
+          await destroyDRMPlayer();
+          await new Promise((r) => window.setTimeout(r, 64));
+          if (isStale()) return;
+          await playWithShakaDRM(manifestURL, drm, {
+            omitWidevineServiceCert: true,
+            loadInterruptRetry: true,
+          });
+          return;
+        }
+        throw err;
+      }
+      if (isStale()) {
+        await player.destroy().catch(() => {});
+        drmPlayerRef.current = null;
+        return;
+      }
       dbg("shaka load success", { manifestURL });
       setLoadingText("");
+      } finally {
+        drmRecoveryDepthRef.current--;
+      }
     };
     const playWithURL = async (
       url: string,
@@ -473,7 +570,7 @@ export default function PlayerPage() {
       forcePowerPlayer = false,
       forceXgHls = false
     ) => {
-      if (cancelled) return;
+      if (isStale()) return;
       playerRef.current?.destroy();
       await destroyDRMPlayer();
       await destroyPowerPlayer();
@@ -484,7 +581,7 @@ export default function PlayerPage() {
         if (!PowerPlayer) {
           throw new Error("PowerPlayer is not available in current runtime");
         }
-        const host = document.getElementById(domId);
+        const host = resolvePlayerHost();
         if (!host) throw new Error("player mount missing");
         host.innerHTML = "";
         const pp = new PowerPlayer({
@@ -621,7 +718,7 @@ export default function PlayerPage() {
       if (!statusResp.ok) throw new Error(`task status failed: ${statusResp.status}`);
       const state = (await statusResp.json()) as TaskStatus;
       dbg("task state", state);
-      if (cancelled) return;
+      if (isStale()) return;
       if (state.ready && state.hls_master) {
         setTranscodeStatus(null);
         setTranscodeProgress(100);
@@ -702,9 +799,9 @@ export default function PlayerPage() {
         }
       }
       if (!resp.ok) throw new Error(`playback plan failed: ${resp.status}`);
+      if (isStale()) return;
       const plan = (await resp.json()) as PlaybackPlan;
       dbg("playback plan", plan);
-      if (cancelled) return;
       if (
         plan.mode === "hls" ||
         plan.mode === "hls_drm" ||
@@ -737,9 +834,9 @@ export default function PlayerPage() {
       const preview = await fetchPreviewPlan();
       await playWithURL(nativeURL, preview);
     };
-    void resolvePlan().catch(() => {
-      dbgErr("resolvePlan failed; fallback to source");
-      if (cancelled) return;
+    void resolvePlan().catch((err: unknown) => {
+      if (isStale()) return;
+      dbgErr("resolvePlan failed; fallback to source", err);
       setTranscodeStatus(null);
       setLoadingText("播放准备失败，正在尝试原始播放...");
       void fetchPreviewPlan().then(async (preview) => {
@@ -751,7 +848,7 @@ export default function PlayerPage() {
       });
     });
     return () => {
-      cancelled = true;
+      playbackGenerationRef.current++;
       if (mid && playbackStartedRef.current && !playbackEndedRef.current) {
         playbackEndedRef.current = true;
         const cur = safeSeconds((playerRef.current as any)?.currentTime || 0) ?? 0;
@@ -808,7 +905,7 @@ export default function PlayerPage() {
       ) : null}
       {mid && !Number.isNaN(mid) ? (
         <>
-          <div id={domId} style={{ width: "100%", height: "100%" }} />
+          <div ref={playerMountRef} id={domId} style={{ width: "100%", height: "100%" }} />
           {loadingText ? (
             <div
               style={{
