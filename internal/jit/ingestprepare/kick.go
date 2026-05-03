@@ -1,7 +1,6 @@
 package ingestprepare
 
 import (
-	"context"
 	"database/sql"
 	"log"
 	"os"
@@ -9,7 +8,6 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
-	"time"
 
 	"knox-media/internal/mediautil"
 	"knox-media/internal/transcode"
@@ -80,13 +78,11 @@ func Kick(db *sql.DB, sched Scheduler, worker *transcode.Worker, mediaID int64) 
 
 	if drmEnabled != 0 && worker != nil {
 		go func(mid int64, fid, path string, srcH int) {
-			ctx, cancel := context.WithTimeout(context.Background(), 6*time.Hour)
-			defer cancel()
 			h := srcH
 			if h <= 0 {
 				h = 1080
 			}
-			if _, _, _, err := worker.EnsureHLS(ctx, fid, path, h, 1080, nil); err != nil {
+			if _, _, _, err := worker.EnsureHLS(fid, path, h, 1080, nil); err != nil {
 				log.Printf("ingest DRM EnsureHLS media=%d: %v", mid, err)
 			}
 		}(mediaID, fileID, fp, height)

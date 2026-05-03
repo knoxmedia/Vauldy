@@ -54,7 +54,11 @@ func (h *Handler) ListMedia(c *gin.Context) {
 			CAST(NULLIF(json_extract(m.meta_json, '$.year'), '') AS INTEGER),
 			CAST(substr(COALESCE(NULLIF(json_extract(m.meta_json, '$.scrape.release_date'), ''), NULLIF(json_extract(m.meta_json, '$.release_date'), '')), 1, 4) AS INTEGER),
 			0
-		) AS release_year
+		) AS release_year,
+		COALESCE(
+			NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.poster')), ''),
+			NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.extra.poster')), '')
+		) AS poster_url
 	FROM media m WHERE 1=1`
 	args := []any{}
 	if lib != "" {
@@ -84,9 +88,9 @@ func (h *Handler) ListMedia(c *gin.Context) {
 	for rows.Next() {
 		var mid int64
 		var libID sql.NullInt64
-		var fileID, title, orig, path, ftype, format, status, created, lastPlayAt, releaseDate sql.NullString
+		var fileID, title, orig, path, ftype, format, status, created, lastPlayAt, releaseDate, posterURL sql.NullString
 		var dur, w, h, br, releaseYear sql.NullInt64
-		if err := rows.Scan(&mid, &libID, &fileID, &title, &orig, &path, &ftype, &dur, &w, &h, &br, &format, &status, &created, &lastPlayAt, &releaseDate, &releaseYear); err != nil {
+		if err := rows.Scan(&mid, &libID, &fileID, &title, &orig, &path, &ftype, &dur, &w, &h, &br, &format, &status, &created, &lastPlayAt, &releaseDate, &releaseYear, &posterURL); err != nil {
 			continue
 		}
 		if strings.EqualFold(profile.LibraryScope, "selected") {
@@ -103,6 +107,7 @@ func (h *Handler) ListMedia(c *gin.Context) {
 			"file_type": ftype.String, "duration": dur.Int64, "width": w.Int64, "height": h.Int64,
 			"bitrate": br.Int64, "format": format.String, "status": status.String, "created_at": created.String,
 			"last_play_at": lastPlayAt.String, "release_date": releaseDate.String, "year": releaseYear.Int64,
+			"poster_url": posterURL.String,
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"items": items})

@@ -95,6 +95,10 @@ func (h *Handler) UploadSingle(c *gin.Context) {
 	}
 	mid, _ := res.LastInsertId()
 	h.enqueuePackageTaskForUploadedMedia(mid, ft, lid)
+	if ft == "video" {
+		go h.KickIngestJITPrepare(mid)
+	}
+	h.EnqueuePostIngestForNewMedia(mid, ft)
 	c.JSON(http.StatusOK, gin.H{"id": mid, "file_id": fileID, "path": dest, "md5": md5})
 }
 
@@ -214,6 +218,7 @@ func (h *Handler) UploadMerge(c *gin.Context) {
 	if ft == "video" {
 		go h.KickIngestJITPrepare(mid)
 	}
+	h.EnqueuePostIngestForNewMedia(mid, ft)
 	c.JSON(http.StatusOK, gin.H{"id": mid, "file_id": fileID, "path": path, "sha256": sha, "md5": md5})
 }
 

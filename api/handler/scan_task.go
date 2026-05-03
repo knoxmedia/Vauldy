@@ -163,14 +163,7 @@ func (h *Handler) runLibraryScanTask(ctx context.Context, taskID, libraryID int6
 		OnMediaAdded: func(mediaID int64, _ string, ft string) {
 			_ = atomic.AddInt64(&addedCount, 1)
 			_, _ = h.App.DB.Exec(`UPDATE scan_task SET processed_count = ?, total_count = ?, added_count = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, atomic.LoadInt64(&processedCount), totalCount, atomic.LoadInt64(&addedCount), taskID)
-			go func(mid int64, fileType string) {
-				h.enqueueScrapeTask(mid, 0, "auto-scan")
-				h.enqueuePreviewTask(mid, fileType)
-				h.capturePosterFromVideo(mid, fileType)
-				if h.Subtitle != nil && h.App.Config.SubtitleAutoOnScan() && fileType == "video" {
-					_ = h.Subtitle.EnsurePendingSubtitleTask(mid)
-				}
-			}(mediaID, ft)
+			h.EnqueuePostIngestForNewMedia(mediaID, ft)
 		},
 	}
 	added, err := s.ScanLibraryFoldersWithContext(ctx, libraryID, folders)
@@ -198,6 +191,22 @@ func (h *Handler) runLibraryScanTask(ctx context.Context, taskID, libraryID int6
 	h.scanMu.Lock()
 	delete(h.runningScans, libraryID)
 	h.scanMu.Unlock()
+}
+
+// EnqueuePostIngestForNewMedia matches library-scan ingest: auto scrape, preview sprites (if enabled), local poster frame, optional subtitles.
+// Upload merge/single must call this; realtime scanner uses main.enqueueAutoTasksOnMediaAdded instead.
+func (h *Handler) EnqueuePostIngestForNewMedia(mediaID int64, fileType string) {
+	if h == nil || h.App == nil || h.App.DB == nil || mediaID <= 0 {
+		return
+	}
+	go func(mid int64, ft string) {
+		h.enqueueScrapeTask(mid, 0, "auto-scan")
+		h.enqueuePreviewTask(mid, ft)
+		h.capturePosterFromVideo(mid, ft)
+		if h.Subtitle != nil && h.App.Config != nil && h.App.Config.SubtitleAutoOnScan() && ft == "video" {
+			_ = h.Subtitle.EnsurePendingSubtitleTask(mid)
+		}
+	}(mediaID, fileType)
 }
 
 // enqueuePreviewTask inserts/updates preview_task as waiting when library has preview_extract enabled.

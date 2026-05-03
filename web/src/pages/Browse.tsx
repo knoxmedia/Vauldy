@@ -9,7 +9,7 @@ import {
 import { Button, Empty, Segmented, Select, Space, Spin, Table, message } from "antd";
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { MediaItem, fetchMedia } from "../api/client";
+import { MediaItem, fetchMedia, mediaPosterSrc } from "../api/client";
 import styles from "./Browse.module.css";
 
 type ViewMode = "poster" | "thumb" | "list" | "table";
@@ -239,6 +239,16 @@ export default function BrowsePage() {
                 role="button"
                 tabIndex={0}
               >
+                <img
+                  className={styles.coverImg}
+                  src={mediaPosterSrc(r)}
+                  alt=""
+                  loading="lazy"
+                  decoding="async"
+                  onError={(e) => {
+                    e.currentTarget.style.display = "none";
+                  }}
+                />
                 <span className={styles.mediaTypeBadge}>{posterLike(r) ? "VIDEO" : (r.file_type || "MEDIA").toUpperCase()}</span>
               </div>
               <div className={styles.cardBody}>

@@ -20,6 +20,7 @@ import {
   fetchMediaDetail,
   fetchMediaStats,
   fetchUserHistory,
+  mediaPosterSrc,
 } from "../api/client";
 import styles from "./MediaDetail.module.css";
 
@@ -61,6 +62,9 @@ function parseMeta(metaJson?: string): ParsedMeta {
         overview?: string;
         release_date?: string;
         rating?: number;
+        poster?: string;
+        backdrop?: string;
+        logo?: string;
         extra?: Record<string, unknown>;
       };
     };
@@ -123,9 +127,23 @@ function parseMeta(metaJson?: string): ParsedMeta {
           }))
           .filter((x) => x.name.trim().length > 0);
       }
-      out.poster = typeof extra.poster === "string" ? extra.poster : "";
-      out.backdrop = typeof extra.backdrop === "string" ? extra.backdrop : "";
-      out.logo = typeof extra.logo === "string" ? extra.logo : "";
+      const pick = (a: string, b: string) => {
+        const x = (a || "").trim();
+        if (x) return x;
+        return (b || "").trim();
+      };
+      out.poster = pick(
+        typeof extra.poster === "string" ? extra.poster : "",
+        typeof scrape.poster === "string" ? scrape.poster : ""
+      );
+      out.backdrop = pick(
+        typeof extra.backdrop === "string" ? extra.backdrop : "",
+        typeof scrape.backdrop === "string" ? scrape.backdrop : ""
+      );
+      out.logo = pick(
+        typeof extra.logo === "string" ? extra.logo : "",
+        typeof scrape.logo === "string" ? scrape.logo : ""
+      );
     }
     return out;
   } catch {
@@ -211,7 +229,10 @@ export default function MediaDetailPage() {
   const showResumeActions = canResume && !isCompleted;
   const resumeTarget = `/player/${detail?.id}?t=${resumeSeconds}`;
   const playFromStartTarget = `/player/${detail?.id}`;
-  const posterUrl = meta.poster && !brokenImages.poster ? meta.poster : "";
+  const posterCandidate =
+    (meta.poster || "").trim() ||
+    (detail?.id ? mediaPosterSrc({ id: detail.id, poster_url: "" }) : "");
+  const posterUrl = posterCandidate && !brokenImages.poster ? posterCandidate : "";
   const bannerUrl = meta.backdrop && !brokenImages.backdrop ? meta.backdrop : "";
   const logoUrl = meta.logo && !brokenImages.logo ? meta.logo : "";
 

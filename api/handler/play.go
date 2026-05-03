@@ -331,7 +331,7 @@ func (h *Handler) HLSInfo(c *gin.Context) {
 		}
 	}
 
-	playlist, status, taskID, terr := h.Worker.EnsureHLS(c.Request.Context(), fileID.String, filePath.String, int(srcHeight.Int64), caps.MaxHeight, caps.Qualities)
+	playlist, status, taskID, terr := h.Worker.EnsureHLS(fileID.String, filePath.String, int(srcHeight.Int64), caps.MaxHeight, caps.Qualities)
 	if terr != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": terr.Error()})
 		return

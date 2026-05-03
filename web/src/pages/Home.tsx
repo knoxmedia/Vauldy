@@ -1,6 +1,6 @@
 import { Progress, Spin, Tag, Typography } from "antd";
 import { FileImageOutlined, LeftOutlined, PlayCircleOutlined, RightOutlined } from "@ant-design/icons";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
   Library,
@@ -9,6 +9,7 @@ import {
   fetchLibraries,
   fetchMedia,
   fetchUserHistory,
+  mediaPosterSrc,
 } from "../api/client";
 import styles from "./Home.module.css";
 
@@ -134,6 +135,16 @@ export default function HomePage() {
     };
   }, []);
 
+  /** Prefer poster_url from recent list when the same media appears in「继续观看」. */
+  const recentPosterById = useMemo(() => {
+    const m = new Map<number, string>();
+    for (const r of recent) {
+      const u = (r.poster_url || "").trim();
+      if (u) m.set(r.id, u);
+    }
+    return m;
+  }, [recent]);
+
   useEffect(() => {
     updateHistoryArrows();
     updateRecentArrows();
@@ -185,7 +196,7 @@ export default function HomePage() {
                         size={48}
                         percent={percent}
                         strokeColor={progressColor}
-                        trailColor="rgba(255,255,255,0.2)"
+                        railColor="rgba(255,255,255,0.2)"
                         className={styles.libScanCircle}
                       />
                       <div className={styles.libScanInfo}>
@@ -254,6 +265,10 @@ export default function HomePage() {
               {history.map((h) => {
                 const dur = h.duration > 0 ? h.duration : 1;
                 const pct = Math.min(100, Math.round((h.position / dur) * 100));
+                const thumbSrc = mediaPosterSrc({
+                  id: h.media_id,
+                  poster_url: recentPosterById.get(h.media_id) || "",
+                });
                 return (
                   <div
                     key={`${h.file_id}-${h.update_at}`}
@@ -269,7 +284,19 @@ export default function HomePage() {
                     }}
                   >
                     <div className={styles.thumb169Box}>
-                      <PlayCircleOutlined />
+                      <img
+                        className={styles.thumb169Cover}
+                        src={thumbSrc}
+                        alt=""
+                        loading="lazy"
+                        decoding="async"
+                        onError={(e) => {
+                          e.currentTarget.style.display = "none";
+                        }}
+                      />
+                      <div className={styles.thumb169IconBg} aria-hidden>
+                        <PlayCircleOutlined />
+                      </div>
                       <button
                         type="button"
                         className={styles.thumb169PlayBtn}
@@ -356,6 +383,16 @@ export default function HomePage() {
                   }}
                 >
                   <div className={styles.posterBox}>
+                    <img
+                      className={styles.posterFillImg}
+                      src={mediaPosterSrc(m)}
+                      alt=""
+                      loading="lazy"
+                      decoding="async"
+                      onError={(e) => {
+                        e.currentTarget.style.display = "none";
+                      }}
+                    />
                     <div className={styles.posterEmpty}>
                       <FileImageOutlined />
                       <span>暂无海报</span>

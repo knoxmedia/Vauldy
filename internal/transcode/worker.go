@@ -74,7 +74,10 @@ func (w *Worker) RunTask(ctx context.Context, taskID int64, inputPath, quality s
 	return w.runHLS(ctx, taskID, inputPath, outDir, ladder)
 }
 
-func (w *Worker) EnsureHLS(ctx context.Context, fileID, inputPath string, sourceHeight, maxHeight int, requested []string) (playlist string, status string, taskID int64, err error) {
+// EnsureHLS starts or resumes full-ladder HLS transcoding in a background goroutine.
+// Callers must not pass http.Request.Context(): it is canceled when the handler returns,
+// which would kill ffmpeg immediately. Async transcode uses an independent root context.
+func (w *Worker) EnsureHLS(fileID, inputPath string, sourceHeight, maxHeight int, requested []string) (playlist string, status string, taskID int64, err error) {
 	ladder := chooseLadder(sourceHeight, maxHeight, requested)
 	if len(ladder) == 0 {
 		ladder = selectRenditions("360p", 360)
@@ -112,7 +115,7 @@ func (w *Worker) EnsureHLS(ctx context.Context, fileID, inputPath string, source
 	tid, _ := res.LastInsertId()
 	outDir := filepath.Join(w.TranscodeDir, fileID, profileKey)
 	go func(taskID int64, ladder []Rendition) {
-		_ = w.runHLS(ctx, taskID, inputPath, outDir, ladder)
+		_ = w.runHLS(context.Background(), taskID, inputPath, outDir, ladder)
 	}(tid, ladder)
 
 	return filepath.Join(outDir, "master.m3u8"), "waiting", tid, nil
@@ -137,23 +140,32 @@ func (w *Worker) runHLS(ctx context.Context, taskID int64, inputPath, outDir str
 	_, _ = w.DB.Exec(`UPDATE transcode_task SET status = ?, progress = ? WHERE id = ?`, "running", 5, taskID)
 	for i, r := range ladder {
 		vf := fmt.Sprintf("scale=-2:%d", r.Height)
-		args := []string{"-y", "-i", inputPath, "-map", "0:v:0", "-map", "0:a:0?"}
-		args = append(args, w.encoderArgs(vf, r.VideoRate)...)
-		args = append(args,
+		prefix := []string{"-y", "-hide_banner", "-nostats", "-loglevel", "error", "-i", inputPath, "-map", "0:v:0", "-map", "0:a:0?"}
+		suffix := []string{
 			"-c:a", "aac", "-b:a", r.AudioRate,
 			"-f", "hls",
 			"-hls_time", "4",
 			"-hls_playlist_type", "vod",
 			"-hls_segment_filename", filepath.Join(outDir, r.Name+"_%03d.ts"),
 			filepath.Join(outDir, r.Name+".m3u8"),
-		)
-		cmd := exec.CommandContext(ctx2, w.FFmpegPath, args...)
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
-			failMsg := trimErrorMessage(fmt.Sprintf("ffmpeg failed: %v; stderr: %s", err, stderr.String()))
+		}
+		try := func(enc EncoderBackend) (stderrOut string, err error) {
+			args := append(append(append([]string{}, prefix...), w.encoderArgsFor(enc, vf, r.VideoRate)...), suffix...)
+			cmd := exec.CommandContext(ctx2, w.FFmpegPath, args...)
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			err = cmd.Run()
+			return stderr.String(), err
+		}
+		stderrStr, runErr := try(w.Encoder)
+		if runErr != nil && w.Encoder != EncoderX264 {
+			log.Printf("transcode task=%d rendition=%s encoder=%s failed, retry libx264: %v", taskID, r.Name, w.Encoder, runErr)
+			stderrStr, runErr = try(EncoderX264)
+		}
+		if runErr != nil {
+			failMsg := ffmpegFailureMessage(runErr, stderrStr)
 			_, _ = w.DB.Exec(`UPDATE transcode_task SET status = ?, progress = ?, error_message = ? WHERE id = ?`, "failed", 0, failMsg, taskID)
-			return err
+			return runErr
 		}
 		progress := 10 + ((i + 1) * 80 / len(ladder))
 		_, _ = w.DB.Exec(`UPDATE transcode_task SET progress = ? WHERE id = ?`, progress, taskID)
@@ -192,7 +204,11 @@ func (w *Worker) detectEncoderBackend() EncoderBackend {
 }
 
 func (w *Worker) encoderArgs(vf string, videoRate string) []string {
-	switch w.Encoder {
+	return w.encoderArgsFor(w.Encoder, vf, videoRate)
+}
+
+func (w *Worker) encoderArgsFor(enc EncoderBackend, vf string, videoRate string) []string {
+	switch enc {
 	case EncoderQSV:
 		return []string{"-vf", vf, "-c:v", "h264_qsv", "-b:v", videoRate, "-maxrate", videoRate, "-bufsize", "2M"}
 	case EncoderAMF:
@@ -208,6 +224,18 @@ func (w *Worker) encoderArgs(vf string, videoRate string) []string {
 	default:
 		return []string{"-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-b:v", videoRate, "-maxrate", videoRate, "-bufsize", "2M"}
 	}
+}
+
+// ffmpegFailureMessage formats stderr for DB/logs. FFmpeg prints a very long build
+// configuration banner by default; combined with trimErrorMessage limits, that hides
+// the real error unless we suppress the banner (-hide_banner) and prefer stderr tail.
+func ffmpegFailureMessage(runErr error, stderr string) string {
+	stderr = strings.TrimSpace(stderr)
+	const max = 1600
+	if len(stderr) > max {
+		stderr = "...[stderr truncated]\n" + stderr[len(stderr)-max:]
+	}
+	return trimErrorMessage(fmt.Sprintf("ffmpeg failed: %v; stderr: %s", runErr, stderr))
 }
 
 func chooseLadder(sourceHeight int, maxHeight int, requested []string) []Rendition {

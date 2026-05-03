@@ -96,7 +96,31 @@ export type MediaItem = {
   last_play_at?: string;
   release_date?: string;
   year?: number;
+  /** From scrape or empty; UI may fall back to `/uploads/posters/{id}.jpg`. */
+  poster_url?: string;
 };
+
+/** Normalize poster string from DB (some SQLite/json paths may retain JSON quotes). */
+function normalizeListPosterUrl(raw: string): string {
+  let s = (raw || "").trim();
+  if (s.length >= 2 && s.startsWith('"') && s.endsWith('"')) {
+    try {
+      const parsed = JSON.parse(s) as unknown;
+      if (typeof parsed === "string") s = parsed;
+      else s = s.slice(1, -1);
+    } catch {
+      s = s.slice(1, -1);
+    }
+  }
+  return s.trim();
+}
+
+/** Poster/thumbnail URL for grids: scraped poster or server-generated frame capture. */
+export function mediaPosterSrc(r: Pick<MediaItem, "id" | "poster_url">): string {
+  const u = normalizeListPosterUrl(r.poster_url || "");
+  if (u) return u;
+  return `/uploads/posters/${r.id}.jpg`;
+}
 
 export type HistoryItem = {
   file_id: string;

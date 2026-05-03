@@ -192,12 +192,29 @@
 .thumb169Box {
   aspect-ratio: 16 / 9;
   background: linear-gradient(135deg, #2a2a3a 0%, #1a1a24 100%);
+  position: relative;
+  overflow: hidden;
+}
+
+.thumb169Cover {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  z-index: 1;
+}
+
+.thumb169IconBg {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
   display: flex;
   align-items: center;
   justify-content: center;
   color: #555;
   font-size: 42px;
-  position: relative;
+  pointer-events: none;
 }
 
 .thumb169PlayBtn {
@@ -287,6 +304,7 @@
 }
 
 .posterBox {
+  position: relative;
   aspect-ratio: 2 / 3;
   background: linear-gradient(160deg, #3a3a4a 0%, #1e1e28 100%);
   display: flex;
@@ -294,7 +312,18 @@
   justify-content: center;
 }
 
+.posterFillImg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  z-index: 1;
+}
+
 .posterEmpty {
+  position: relative;
+  z-index: 0;
   display: flex;
   flex-direction: column;
   align-items: center;

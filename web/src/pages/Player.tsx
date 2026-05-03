@@ -302,7 +302,13 @@ export default function PlayerPage() {
           if (!ln.startsWith("#EXT-X-STREAM-INF:")) continue;
           const next = (lines[i + 1] || "").trim();
           if (!next || next.startsWith("#")) continue;
-          const abs = new URL(next, masterURL).toString();
+          let abs = new URL(next, masterURL).toString();
+          if (token && !abs.includes("access_token=")) {
+            abs = `${abs}${abs.includes("?") ? "&" : "?"}access_token=${encodeURIComponent(token)}`;
+          }
+          if (parentalUnlockToken && !abs.includes("parental_unlock=")) {
+            abs = `${abs}${abs.includes("?") ? "&" : "?"}parental_unlock=${encodeURIComponent(parentalUnlockToken)}`;
+          }
           const resMatch = ln.match(/RESOLUTION=(\d+)x(\d+)/i);
           const h = resMatch ? Number(resMatch[2]) : 0;
           const d = h > 0 ? `${h}p` : `L${defs.length + 1}`;
@@ -604,6 +610,9 @@ export default function PlayerPage() {
         await playWithShakaDRM(drmURL, drm || {});
         return;
       }
+      // Chromium/Firefox need MSE (xgplayer-hls); a bare .m3u8 URL on <video> fails there. Safari can do native HLS; plugin still works.
+      const useXgHlsPlugin =
+        forceXgHls || (!forcePowerPlayer && /\.m3u8(\?|#|$)/i.test(url));
       let textTrackList: ReturnType<typeof buildTextTrackList> = [];
       if (mid) {
         try {
@@ -634,7 +643,7 @@ export default function PlayerPage() {
           isDefaultOpen: false,
         };
       }
-      if (forceXgHls) {
+      if (useXgHlsPlugin) {
         const definitionList = await fetchHlsDefinitions(url);
         if (definitionList.length > 0) {
           options.definition = {
@@ -647,7 +656,7 @@ export default function PlayerPage() {
       playerRef.current = new Player(options);
       const xg = playerRef.current;
       if (!xg) throw new Error("xgplayer init failed");
-      dbg("xgplayer init", { url, forceXgHls });
+      dbg("xgplayer init", { url, useXgHlsPlugin });
       xg.on("error", () => {
         dbgErr("xgplayer error event", { mid, url });
         if (sourceFallbackTriedRef.current || !mid) return;
@@ -942,7 +951,7 @@ export default function PlayerPage() {
                     percent={transcodeProgress}
                     status="active"
                     strokeColor="#1677ff"
-                    trailColor="rgba(255,255,255,0.2)"
+                    railColor="rgba(255,255,255,0.2)"
                     format={(p) => `${Math.max(0, Math.min(99, p || 0))}%`}
                   />
                   <div style={{ marginTop: 8, color: "#c9c9c9", fontSize: 12 }}>{loadingText}</div>
