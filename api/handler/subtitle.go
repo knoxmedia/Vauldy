@@ -19,6 +19,9 @@ func (h *Handler) ListMediaSubtitles(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
 		return
 	}
+	if _, ok := h.requireMediaAccess(c, id, false); !ok {
+		return
+	}
 	items, err := h.Subtitle.List(id)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -40,6 +43,9 @@ func (h *Handler) SubtitleVTT(c *gin.Context) {
 	sid, err := strconv.ParseInt(c.Param("sid"), 10, 64)
 	if err != nil || sid <= 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid subtitle id"})
+		return
+	}
+	if _, ok := h.requireMediaAccess(c, mid, true); !ok {
 		return
 	}
 	p, err := h.Subtitle.VTTPath(mid, sid)

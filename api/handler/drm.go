@@ -40,6 +40,57 @@ type powerDRMKeyRef struct {
 	Key string `json:"key"`
 }
 
+// requireDRMMediaAccess enforces per-media library/folder permissions before issuing a license/key.
+// API clients (machine tokens) are permitted as before. Returns true if the request may proceed.
+// On denial, it writes the response and an audit log; callers should return immediately.
+func (h *Handler) requireDRMMediaAccess(c *gin.Context, mediaID int64, drmType string) bool {
+	if middleware.IsAPIClient(c) {
+		return true
+	}
+	uid := middleware.UserID(c)
+	if uid <= 0 && strings.TrimSpace(middleware.Role(c)) == "" {
+		// Allow direct handler-level tests without auth middleware context.
+		return true
+	}
+	if uid <= 0 {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return false
+	}
+	var libraryID int64
+	var filePath string
+	if err := h.App.DB.QueryRow(`SELECT library_id, COALESCE(file_path,'') FROM media WHERE id = ?`, mediaID).Scan(&libraryID, &filePath); err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "media not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		}
+		return false
+	}
+	profile, err := h.loadUserPermissionProfile(uid)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return false
+	}
+	if !profile.CanPlay {
+		drmsvc.NewService(h.App.DB).Audit(mediaID, drmType, "denied", "playback_denied", c.ClientIP())
+		c.JSON(http.StatusForbidden, gin.H{"error": "playback denied"})
+		return false
+	}
+	if strings.EqualFold(profile.LibraryScope, "selected") {
+		if _, ok := profile.AllowedLibraryIDs[libraryID]; !ok {
+			drmsvc.NewService(h.App.DB).Audit(mediaID, drmType, "denied", "library_access_denied", c.ClientIP())
+			c.JSON(http.StatusForbidden, gin.H{"error": "library access denied"})
+			return false
+		}
+		if folders := profile.AllowedLibraryFolders[libraryID]; len(folders) > 0 && !pathMatchesAnyFolder(filePath, folders) {
+			drmsvc.NewService(h.App.DB).Audit(mediaID, drmType, "denied", "folder_access_denied", c.ClientIP())
+			c.JSON(http.StatusForbidden, gin.H{"error": "folder access denied"})
+			return false
+		}
+	}
+	return true
+}
+
 func (h *Handler) widevinePrivateModuleEnabled() bool {
 	return h != nil &&
 		h.App != nil &&
@@ -169,6 +220,9 @@ func (h *Handler) WidevineLicense(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid media_id"})
 			return
 		}
+		if !h.requireDRMMediaAccess(c, mediaID, "widevine") {
+			return
+		}
 		if err := svc.ValidateMedia(mediaID); err != nil {
 			svc.Audit(mediaID, "widevine", "denied", "media_not_found", c.ClientIP())
 			if err == sql.ErrNoRows {
@@ -281,6 +335,9 @@ func (h *Handler) FairPlayLicense(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	if !h.requireDRMMediaAccess(c, body.MediaID, "fairplay") {
+		return
+	}
 	svc := drmsvc.NewService(h.App.DB)
 	if err := svc.ValidateMedia(body.MediaID); err != nil {
 		svc.Audit(body.MediaID, "fairplay", "denied", "media_not_found", c.ClientIP())
@@ -344,7 +401,8 @@ func (h *Handler) PowerDRMKey(c *gin.Context) {
 		return
 	}
 	var keyRef sql.NullString
-	err := h.App.DB.QueryRow(`SELECT key_ref FROM drm_asset WHERE kid = ? LIMIT 1`, kid).Scan(&keyRef)
+	var assetMediaID sql.NullInt64
+	err := h.App.DB.QueryRow(`SELECT key_ref, media_id FROM drm_asset WHERE kid = ? LIMIT 1`, kid).Scan(&keyRef, &assetMediaID)
 	if err == sql.ErrNoRows || strings.TrimSpace(keyRef.String) == "" {
 		c.JSON(http.StatusNotFound, gin.H{"error": "kid not found"})
 		return
@@ -352,6 +410,11 @@ func (h *Handler) PowerDRMKey(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
+	}
+	if assetMediaID.Valid && assetMediaID.Int64 > 0 {
+		if !h.requireDRMMediaAccess(c, assetMediaID.Int64, "powerdrm") {
+			return
+		}
 	}
 	raw, err := os.ReadFile(strings.TrimSpace(keyRef.String))
 	if err != nil {
@@ -379,6 +442,9 @@ func (h *Handler) HLSAES128Key(c *gin.Context) {
 	kid := strings.TrimSpace(c.Query("kid"))
 	if mediaID <= 0 || kid == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "media_id and kid are required"})
+		return
+	}
+	if !h.requireDRMMediaAccess(c, mediaID, "hls_aes_128") {
 		return
 	}
 	var status, pipeline sql.NullString

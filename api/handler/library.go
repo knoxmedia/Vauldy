@@ -33,6 +33,7 @@ type libraryBody struct {
 func (h *Handler) ListLibraries(c *gin.Context) {
 	widevineEnabled, powerdrmEnabled := h.drmCapabilities()
 	var profile userPermissionProfile
+	isAdmin := middleware.IsAdmin(c)
 	if !middleware.IsAPIClient(c) {
 		uid := middleware.UserID(c)
 		if uid > 0 {
@@ -76,6 +77,9 @@ func (h *Handler) ListLibraries(c *gin.Context) {
 			if _, ok := profile.AllowedLibraryIDs[int64(id)]; !ok {
 				continue
 			}
+		}
+		if !isAdmin && !middleware.IsAPIClient(c) && enabled != 1 {
+			continue
 		}
 		list = append(list, gin.H{
 			"id": id, "name": name, "type": typ, "path": path,

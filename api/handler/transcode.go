@@ -316,6 +316,11 @@ func (h *Handler) GetTranscodeTaskStatus(c *gin.Context) {
 	if !mediaID.Valid && fromPackage {
 		_ = h.App.DB.QueryRow(`SELECT media_id FROM package_task WHERE id = ? LIMIT 1`, id).Scan(&mediaID)
 	}
+	if mediaID.Valid && mediaID.Int64 > 0 {
+		if _, ok := h.requireMediaAccess(c, mediaID.Int64, false); !ok {
+			return
+		}
+	}
 
 	hlsMaster := ""
 	if status.String == "done" && out.Valid && strings.HasSuffix(strings.ToLower(out.String), ".m3u8") && mediaID.Valid {

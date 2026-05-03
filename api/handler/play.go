@@ -949,6 +949,9 @@ func (h *Handler) PreviewInfo(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
 		return
 	}
+	if _, ok := h.requireMediaAccess(c, id, true); !ok {
+		return
+	}
 	var filePath sql.NullString
 	var duration sql.NullInt64
 	var enabled sql.NullInt64
@@ -1023,6 +1026,9 @@ func (h *Handler) servePreviewAsset(c *gin.Context, col string, contentType stri
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || id <= 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	if _, ok := h.requireMediaAccess(c, id, true); !ok {
 		return
 	}
 	q := `SELECT ` + col + ` FROM preview_task WHERE media_id = ? AND status = 'ready' LIMIT 1`

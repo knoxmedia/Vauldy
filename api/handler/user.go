@@ -124,8 +124,9 @@ func (h *Handler) UserHistory(c *gin.Context) {
 			limit = n
 		}
 	}
+	profile, _ := h.loadUserPermissionProfile(uid)
 	q := `
-		SELECT p.file_id, p.position, p.update_at, m.id, m.title, m.file_path, m.duration,
+		SELECT p.file_id, p.position, p.update_at, m.id, m.title, m.file_path, m.duration, m.library_id,
 		       COALESCE(p.play_start_at,''), COALESCE(p.play_end_at,''), COALESCE(p.completed,0), COALESCE(p.play_count,0)
 		FROM play_progress p
 		LEFT JOIN media m ON m.file_id = p.file_id
@@ -145,10 +146,19 @@ func (h *Handler) UserHistory(c *gin.Context) {
 		var mid sql.NullInt64
 		var title, fpath sql.NullString
 		var dur sql.NullInt64
+		var libID sql.NullInt64
 		var playStartAt, playEndAt sql.NullString
 		var completed, playCount sql.NullInt64
-		if err := rows.Scan(&fid, &pos, &upd, &mid, &title, &fpath, &dur, &playStartAt, &playEndAt, &completed, &playCount); err != nil {
+		if err := rows.Scan(&fid, &pos, &upd, &mid, &title, &fpath, &dur, &libID, &playStartAt, &playEndAt, &completed, &playCount); err != nil {
 			continue
+		}
+		if mid.Valid && mid.Int64 > 0 && strings.EqualFold(profile.LibraryScope, "selected") {
+			if _, ok := profile.AllowedLibraryIDs[libID.Int64]; !ok {
+				continue
+			}
+			if folders := profile.AllowedLibraryFolders[libID.Int64]; len(folders) > 0 && !pathMatchesAnyFolder(fpath.String, folders) {
+				continue
+			}
 		}
 		items = append(items, gin.H{
 			"file_id": fid.String, "position": pos.Int64, "update_at": upd.String,

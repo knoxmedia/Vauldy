@@ -28,7 +28,19 @@ api.interceptors.response.use(
         window.location.assign(`/login?redirect=${encodeURIComponent(path + window.location.search)}`);
       }
     } else if (status === 403) {
-      message.error("权限不足（需要管理员）");
+      const data = (ax as { response?: { data?: { error?: string } } }).response?.data;
+      const errMsg = (data && typeof data.error === "string" && data.error.trim()) || "";
+      if (/library access denied|folder access denied/i.test(errMsg)) {
+        message.error("无权限访问该媒体库或目录");
+      } else if (/playback denied/i.test(errMsg)) {
+        message.error("无播放权限");
+      } else if (/download denied/i.test(errMsg)) {
+        message.error("无下载权限");
+      } else if (/parental/i.test(errMsg)) {
+        message.error("家长控制限制：" + errMsg);
+      } else {
+        message.error("权限不足（需要管理员或更高权限）");
+      }
     }
     return Promise.reject(err);
   }

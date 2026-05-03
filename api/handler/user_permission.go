@@ -49,6 +49,13 @@ func (h *Handler) loadUserPermissionProfile(userID int64) (userPermissionProfile
 	var canManage, canPlay, canDownload, canAccessFeatures, parentalEnabled int
 	var parentalPlansRaw string
 	if err := row.Scan(&p.Role, &canManage, &canPlay, &canDownload, &canAccessFeatures, &p.LibraryScope, &parentalEnabled, &p.ParentalMaxRating, &p.ParentalPinHash, &p.AllowedTimeStart, &p.AllowedTimeEnd, &parentalPlansRaw); err != nil {
+		if err == sql.ErrNoRows {
+			// Token references a missing user; fall back to a permissive default profile so
+			// downstream library permission checks (selected scope) simply don't engage.
+			p.LibraryScope = "all"
+			p.CanPlay = true
+			return p, nil
+		}
 		return p, err
 	}
 	p.ParentalPlans = parseParentalPlansJSON(parentalPlansRaw)

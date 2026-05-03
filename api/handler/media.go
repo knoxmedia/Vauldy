@@ -36,7 +36,15 @@ func (h *Handler) ListMedia(c *gin.Context) {
 			}
 		}
 	}
-	lib := c.Query("library_id")
+	lib := strings.TrimSpace(c.Query("library_id"))
+	if lib != "" && strings.EqualFold(profile.LibraryScope, "selected") {
+		if libID, perr := strconv.ParseInt(lib, 10, 64); perr == nil && libID > 0 {
+			if _, ok := profile.AllowedLibraryIDs[libID]; !ok {
+				c.JSON(http.StatusForbidden, gin.H{"error": "library access denied"})
+				return
+			}
+		}
+	}
 	q := `SELECT 
 		m.id, m.library_id, m.file_id, m.title, m.original_title, m.file_path, m.file_type, m.duration, m.width, m.height, m.bitrate, m.format, m.status, m.created_at,
 		(SELECT MAX(pp.update_at) FROM play_progress pp WHERE pp.file_id = m.file_id) AS last_play_at,
