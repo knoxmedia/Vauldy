@@ -27,6 +27,9 @@ type FormData = {
     start_time?: dayjs.Dayjs;
     end_time?: dayjs.Dayjs;
   }>;
+  /** Preserved from API; hidden fields so saves do not wipe DB columns. */
+  allowed_time_start?: string;
+  allowed_time_end?: string;
 };
 
 export default function UsersPage() {
@@ -46,6 +49,7 @@ export default function UsersPage() {
   const [saving, setSaving] = useState(false);
   const [resettingPassword, setResettingPassword] = useState(false);
   const [form] = Form.useForm<FormData>();
+  const parentalEnabledWatch = Form.useWatch("parental_enabled", form);
 
   const hasParentalPlanConflict = (plans: NonNullable<FormData["parental_plans"]>) => {
     type Seg = { start: number; end: number };
@@ -98,6 +102,7 @@ export default function UsersPage() {
     form.setFieldsValue({
       allow_server_manage: false, can_manage: false, can_play: true, can_download: false, can_access_features: true,
       library_scope: "all", allow_all_libraries: true, library_ids: [], library_folders: {}, parental_enabled: false,
+      allowed_time_start: "", allowed_time_end: "",
     });
     setActiveTab("basic");
     setOpen(true);
@@ -107,6 +112,18 @@ export default function UsersPage() {
     setSaving(true);
     try {
       const v = await form.validateFields();
+      // library_ids / library_folders are updated via setFieldValue inside a shouldUpdate render;
+      // they are not mounted as named Form.Item fields, so validateFields() does not include them on `v`.
+      const library_ids = (form.getFieldValue("library_ids") as number[] | undefined) ?? [];
+      const library_folders = (form.getFieldValue("library_folders") as Record<string, string[]> | undefined) ?? {};
+      const hasFolderSelection = Object.values(library_folders).some((paths) => Array.isArray(paths) && paths.length > 0);
+      const hasLibrarySelection = library_ids.length > 0 || hasFolderSelection;
+      if (!v.allow_all_libraries && !hasLibrarySelection) {
+        message.error('请选择至少一个媒体库，或将「允许访问所有媒体库」打开');
+        setActiveTab("access");
+        setSaving(false);
+        return;
+      }
       const payload = {
         username: v.username,
         role: v.allow_server_manage ? "admin" : "user",
@@ -115,13 +132,13 @@ export default function UsersPage() {
         can_download: v.can_download ? 1 : 0,
         can_access_features: v.can_access_features ? 1 : 0,
         library_scope: v.allow_all_libraries ? "all" : "selected",
-        library_ids: v.library_ids || [],
-        library_folders: v.library_folders || {},
+        library_ids,
+        library_folders,
         parental_enabled: v.parental_enabled ? 1 : 0,
         parental_max_rating: v.parental_max_rating || "",
         parental_pin: v.parental_pin || "",
-        allowed_time_start: "",
-        allowed_time_end: "",
+        allowed_time_start: (v.allowed_time_start || "").trim(),
+        allowed_time_end: (v.allowed_time_end || "").trim(),
         parental_plans: (v.parental_plans || [])
           .map((p) => ({
             weekday: Number(p.weekday),
@@ -220,6 +237,8 @@ export default function UsersPage() {
                       start_time: p.start_time ? dayjs(p.start_time, "HH:mm") : undefined,
                       end_time: p.end_time ? dayjs(p.end_time, "HH:mm") : undefined,
                     })),
+                    allowed_time_start: r.allowed_time_start || "",
+                    allowed_time_end: r.allowed_time_end || "",
                     reset_password: "",
                     reset_password_confirm: "",
                   });
@@ -256,7 +275,13 @@ export default function UsersPage() {
         }
       >
         <Form form={form} layout="vertical">
-          <Tabs activeKey={activeTab} onChange={setActiveTab} items={[
+          <Form.Item name="allowed_time_start" hidden>
+            <Input />
+          </Form.Item>
+          <Form.Item name="allowed_time_end" hidden>
+            <Input />
+          </Form.Item>
+          <Tabs activeKey={activeTab} onChange={setActiveTab} destroyInactiveTabPane={false} items={[
             {
               key: "basic",
               label: "基本属性",
@@ -337,6 +362,7 @@ export default function UsersPage() {
                                         const nextFolders = { ...selectedFolders };
                                         if (isChecked) {
                                           nextFolders[libKey] = [...folders];
+                                          form.setFieldValue("allow_all_libraries", false);
                                         } else {
                                           delete nextFolders[libKey];
                                         }
@@ -366,6 +392,9 @@ export default function UsersPage() {
                                               const nextIDs = nextFolderList.length > 0
                                                 ? Array.from(new Set([...selected, lib.id]))
                                                 : selected.filter((id) => id !== lib.id);
+                                              if (nextFolderList.length > 0) {
+                                                form.setFieldValue("allow_all_libraries", false);
+                                              }
                                               setFieldValue("library_folders", nextFolders);
                                               setFieldValue("library_ids", nextIDs);
                                             }}
@@ -413,73 +442,102 @@ export default function UsersPage() {
                     <Divider style={{ margin: "10px 0 14px" }} />
                   <Form.Item name="parental_enabled" label="家长控制开关" valuePropName="checked"><Switch /></Form.Item>
                   <Form.Item shouldUpdate noStyle>
-                    {({ getFieldValue }) => getFieldValue("parental_enabled") ? (
-                      <>
-                        <Form.Item name="parental_max_rating" label="最高分级">
-                          <Select allowClear options={["G", "PG", "PG-13", "R", "NC-17"].map((x) => ({ value: x, label: x }))} />
-                        </Form.Item>
-                        <Form.Item name="parental_pin" label="家长 PIN（留空则不修改）"><Input.Password /></Form.Item>
-                        <Divider style={{ margin: "10px 0 14px" }} />
-                        <Typography.Text strong>访问计划</Typography.Text>
-                        <Typography.Paragraph type="secondary" style={{ margin: "4px 0 10px" }}>
-                          可添加多个时间计划。仅在计划覆盖的星期与时间段内允许访问。
-                        </Typography.Paragraph>
-                        <Form.List name="parental_plans">
-                          {(fields, { add, remove }) => (
-                            <>
-                              {fields.map((field) => (
-                                <Space key={field.key} align="baseline" wrap style={{ display: "flex", marginBottom: 8 }}>
-                                  <Form.Item
-                                    {...field}
-                                    name={[field.name, "weekday"]}
-                                    label="星期"
-                                    rules={[{ required: true, message: "请选择星期" }]}
-                                  >
-                                    <Select
-                                      style={{ width: 120 }}
-                                      options={[
-                                        { value: 0, label: "星期日" },
-                                        { value: 1, label: "星期一" },
-                                        { value: 2, label: "星期二" },
-                                        { value: 3, label: "星期三" },
-                                        { value: 4, label: "星期四" },
-                                        { value: 5, label: "星期五" },
-                                        { value: 6, label: "星期六" },
-                                      ]}
-                                    />
-                                  </Form.Item>
-                                  <Form.Item
-                                    {...field}
-                                    name={[field.name, "start_time"]}
-                                    label="开始"
-                                    rules={[{ required: true, message: "请选择开始时间" }]}
-                                  >
-                                    <TimePicker format="HH:mm" minuteStep={5} />
-                                  </Form.Item>
-                                  <Form.Item
-                                    {...field}
-                                    name={[field.name, "end_time"]}
-                                    label="结束"
-                                    rules={[{ required: true, message: "请选择结束时间" }]}
-                                  >
-                                    <TimePicker format="HH:mm" minuteStep={5} />
-                                  </Form.Item>
-                                  <Button icon={<MinusCircleOutlined />} onClick={() => remove(field.name)} />
-                                </Space>
-                              ))}
-                              <Button
-                                type="dashed"
-                                icon={<PlusOutlined />}
-                                onClick={() => add({ weekday: 1 })}
-                              >
-                                添加访问计划
-                              </Button>
-                            </>
-                          )}
-                        </Form.List>
-                      </>
-                    ) : null}
+                    {({ getFieldValue }) =>
+                      getFieldValue("parental_enabled") ? (
+                        <>
+                          <Form.Item name="parental_max_rating" label="最高分级">
+                            <Select allowClear options={["G", "PG", "PG-13", "R", "NC-17"].map((x) => ({ value: x, label: x }))} />
+                          </Form.Item>
+                          <Form.Item name="parental_pin" label="家长 PIN（留空则不修改）"><Input.Password /></Form.Item>
+                        </>
+                      ) : null}
                   </Form.Item>
+                  <Divider style={{ margin: "10px 0 14px" }} />
+                  <Typography.Text strong>访问计划</Typography.Text>
+                  <Typography.Paragraph type="secondary" style={{ margin: "4px 0 10px" }}>
+                    可添加多个时间计划。仅在计划覆盖的星期与时间段内允许访问（关闭家长控制时计划仍保留在表单中，避免保存时被清空）。
+                  </Typography.Paragraph>
+                  <div style={{ display: parentalEnabledWatch ? "block" : "none" }}>
+                    <Form.List name="parental_plans">
+                      {(fields, { add, remove }) => (
+                        <>
+                          {fields.map((field) => (
+                            <Space key={field.key} align="baseline" wrap style={{ display: "flex", marginBottom: 8 }}>
+                              <Form.Item
+                                {...field}
+                                name={[field.name, "weekday"]}
+                                label="星期"
+                                dependencies={["parental_enabled"]}
+                                rules={[
+                                  ({ getFieldValue }) => ({
+                                    validator(_, value) {
+                                      if (!getFieldValue("parental_enabled")) return Promise.resolve();
+                                      const n = Number(value);
+                                      if (!Number.isInteger(n) || n < 0 || n > 6) {
+                                        return Promise.reject(new Error("请选择星期"));
+                                      }
+                                      return Promise.resolve();
+                                    },
+                                  }),
+                                ]}
+                              >
+                                <Select
+                                  style={{ width: 120 }}
+                                  options={[
+                                    { value: 0, label: "星期日" },
+                                    { value: 1, label: "星期一" },
+                                    { value: 2, label: "星期二" },
+                                    { value: 3, label: "星期三" },
+                                    { value: 4, label: "星期四" },
+                                    { value: 5, label: "星期五" },
+                                    { value: 6, label: "星期六" },
+                                  ]}
+                                />
+                              </Form.Item>
+                              <Form.Item
+                                {...field}
+                                name={[field.name, "start_time"]}
+                                label="开始"
+                                dependencies={["parental_enabled"]}
+                                rules={[
+                                  ({ getFieldValue }) => ({
+                                    validator(_, value) {
+                                      if (!getFieldValue("parental_enabled")) return Promise.resolve();
+                                      if (!value) return Promise.reject(new Error("请选择开始时间"));
+                                      return Promise.resolve();
+                                    },
+                                  }),
+                                ]}
+                              >
+                                <TimePicker format="HH:mm" minuteStep={5} />
+                              </Form.Item>
+                              <Form.Item
+                                {...field}
+                                name={[field.name, "end_time"]}
+                                label="结束"
+                                dependencies={["parental_enabled"]}
+                                rules={[
+                                  ({ getFieldValue }) => ({
+                                    validator(_, value) {
+                                      if (!getFieldValue("parental_enabled")) return Promise.resolve();
+                                      if (!value) return Promise.reject(new Error("请选择结束时间"));
+                                      return Promise.resolve();
+                                    },
+                                  }),
+                                ]}
+                              >
+                                <TimePicker format="HH:mm" minuteStep={5} />
+                              </Form.Item>
+                              <Button icon={<MinusCircleOutlined />} onClick={() => remove(field.name)} />
+                            </Space>
+                          ))}
+                          <Button type="dashed" icon={<PlusOutlined />} onClick={() => add({ weekday: 1 })}>
+                            添加访问计划
+                          </Button>
+                        </>
+                      )}
+                    </Form.List>
+                  </div>
                   </div>
                 </>
               ),

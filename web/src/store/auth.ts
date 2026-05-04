@@ -7,8 +7,10 @@ type AuthState = {
   token: string | null;
   role: UserRole | null;
   username: string | null;
+  /** From GET /user/info; null until loaded for this session. */
+  canPlay: boolean | null;
   setToken: (t: string | null) => void;
-  setProfile: (username: string, role: UserRole) => void;
+  setProfile: (username: string, role: UserRole, caps?: { canPlay?: boolean }) => void;
   clearSession: () => void;
 };
 
@@ -18,9 +20,15 @@ export const useAuthStore = create<AuthState>()(
       token: null,
       role: null,
       username: null,
+      canPlay: null,
       setToken: (t) => set({ token: t }),
-      setProfile: (username, role) => set({ username, role }),
-      clearSession: () => set({ token: null, role: null, username: null }),
+      setProfile: (username, role, caps) =>
+        set({
+          username,
+          role,
+          ...(caps?.canPlay !== undefined ? { canPlay: caps.canPlay } : {}),
+        }),
+      clearSession: () => set({ token: null, role: null, username: null, canPlay: null }),
     }),
     {
       name: "knox-media-auth",

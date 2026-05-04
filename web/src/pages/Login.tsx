@@ -47,7 +47,7 @@ export default function LoginPage() {
                 const t = await login(v.username, v.password);
                 setToken(t);
                 const u = await fetchUserInfo();
-                setProfile(u.username, u.role as UserRole);
+                setProfile(u.username, u.role as UserRole, { canPlay: u.can_play !== false });
                 message.success("登录成功");
                 const redir = params.get("redirect");
                 nav(redir && redir.startsWith("/") ? redir : "/", { replace: true });

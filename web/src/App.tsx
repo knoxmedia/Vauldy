@@ -82,7 +82,7 @@ function ProfileSync() {
   useEffect(() => {
     if (!token) return;
     void fetchUserInfo()
-      .then((u) => setProfile(u.username, u.role))
+      .then((u) => setProfile(u.username, u.role, { canPlay: u.can_play !== false }))
       .catch(() => clearSession());
   }, [token, setProfile, clearSession]);
 

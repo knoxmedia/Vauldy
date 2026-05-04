@@ -333,10 +333,17 @@ export async function login(username: string, password: string) {
   return data.token;
 }
 
+export type SessionUserInfo = {
+  id: number;
+  username: string;
+  role: string;
+  /** When omitted (legacy server), treated as allowed. */
+  can_play?: boolean;
+  can_download?: boolean;
+};
+
 export async function fetchUserInfo() {
-  const { data } = await api.get<{ id: number; username: string; role: string }>(
-    "/api/v1/user/info"
-  );
+  const { data } = await api.get<SessionUserInfo>("/api/v1/user/info");
   return { ...data, role: data.role as UserRole };
 }
 

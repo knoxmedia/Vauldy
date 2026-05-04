@@ -62,7 +62,8 @@ func (h *Handler) ListUsersAdmin(c *gin.Context) {
 			"can_manage": canManage, "can_play": canPlay, "can_download": canDownload, "can_access_features": canAccessFeatures,
 			"library_scope": libraryScope, "library_ids": libraryIDs,
 			"library_folders": libraryFolders,
-			"parental_enabled": parentalEnabled, "parental_max_rating": parentalMaxRating, "allowed_time_start": allowedTimeStart, "allowed_time_end": allowedTimeEnd,
+			"parental_enabled": parentalEnabled, "parental_max_rating": parentalMaxRating,
+			"allowed_time_start": allowedTimeStart, "allowed_time_end": allowedTimeEnd,
 			"parental_plans": parentalPlans,
 		})
 	}
@@ -109,6 +110,12 @@ func (h *Handler) CreateUserAdmin(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "parental plans conflict: overlapping schedules on same weekday"})
 		return
 	}
+	if libraryScope == "selected" {
+		if merged := mergeLibraryIDsForSelected(body.LibraryIDs, body.LibraryFolders); len(merged) == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "library_scope selected requires at least one media library"})
+			return
+		}
+	}
 	res, err := h.App.DB.Exec(`
 		INSERT INTO user (username, password, role, can_manage, can_play, can_download, can_access_features, library_scope, parental_enabled, parental_max_rating, parental_pin_hash, allowed_time_start, allowed_time_end, parental_access_plan_json)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -119,7 +126,8 @@ func (h *Handler) CreateUserAdmin(c *gin.Context) {
 	}
 	id, _ := res.LastInsertId()
 	if libraryScope == "selected" {
-		_ = h.replaceUserLibraryPermissions(id, body.LibraryIDs)
+		merged := mergeLibraryIDsForSelected(body.LibraryIDs, body.LibraryFolders)
+		_ = h.replaceUserLibraryPermissions(id, merged)
 		_ = h.replaceUserLibraryFolderPermissions(id, body.LibraryFolders)
 	}
 	c.JSON(http.StatusCreated, gin.H{"id": id})
@@ -158,6 +166,12 @@ func (h *Handler) UpdateUserAdmin(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "parental plans conflict: overlapping schedules on same weekday"})
 		return
 	}
+	if libraryScope == "selected" {
+		if merged := mergeLibraryIDsForSelected(body.LibraryIDs, body.LibraryFolders); len(merged) == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "library_scope selected requires at least one media library"})
+			return
+		}
+	}
 	pinHashExpr := ""
 	args := []any{username, role, canManage, canPlay, canDownload, canAccessFeatures, libraryScope, parentalEnabled, strings.TrimSpace(body.ParentalMaxRating), normalizeHHMM(body.AllowedTimeStart), normalizeHHMM(body.AllowedTimeEnd), parentalPlansJSON}
 	if pin := strings.TrimSpace(body.ParentalPIN); pin != "" {
@@ -179,7 +193,8 @@ func (h *Handler) UpdateUserAdmin(c *gin.Context) {
 		return
 	}
 	if libraryScope == "selected" {
-		_ = h.replaceUserLibraryPermissions(id, body.LibraryIDs)
+		merged := mergeLibraryIDsForSelected(body.LibraryIDs, body.LibraryFolders)
+		_ = h.replaceUserLibraryPermissions(id, merged)
 		_ = h.replaceUserLibraryFolderPermissions(id, body.LibraryFolders)
 	} else {
 		_, _ = h.App.DB.Exec(`DELETE FROM user_library_permission WHERE user_id = ?`, id)
@@ -258,6 +273,34 @@ func normalizeLibraryScope(v string) string {
 		return "selected"
 	}
 	return "all"
+}
+
+// mergeLibraryIDsForSelected deduplicates library IDs from the payload and from library_folders map keys.
+func mergeLibraryIDsForSelected(ids []int64, folders map[string][]string) []int64 {
+	seen := map[int64]struct{}{}
+	out := make([]int64, 0)
+	for _, lid := range ids {
+		if lid <= 0 {
+			continue
+		}
+		if _, ok := seen[lid]; ok {
+			continue
+		}
+		seen[lid] = struct{}{}
+		out = append(out, lid)
+	}
+	for k := range folders {
+		lid, err := strconv.ParseInt(strings.TrimSpace(k), 10, 64)
+		if err != nil || lid <= 0 {
+			continue
+		}
+		if _, ok := seen[lid]; ok {
+			continue
+		}
+		seen[lid] = struct{}{}
+		out = append(out, lid)
+	}
+	return out
 }
 
 func intOrDefault(v *int, d int) int {

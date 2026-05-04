@@ -202,3 +202,44 @@ func TestPlayMediaDeniedForUnauthorizedLibrary(t *testing.T) {
 		t.Fatalf("expected 403, got status=%d body=%s", w.Code, w.Body.String())
 	}
 }
+
+func TestPlayMediaDeniedWhenCanPlayDisabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := setupAccessTestDB(t)
+	if _, err := h.App.DB.Exec(`UPDATE user SET can_play = 0 WHERE id = 1`); err != nil {
+		t.Fatalf("update can_play: %v", err)
+	}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/media/10/play", nil)
+	c.Params = gin.Params{{Key: "id", Value: "10"}}
+	setUserCtx(c, 1, "user", "normal")
+	h.PlayMedia(c)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got status=%d body=%s", w.Code, w.Body.String())
+	}
+	var payload struct {
+		Error string `json:"error"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &payload)
+	if payload.Error != "playback denied" {
+		t.Fatalf("expected playback denied, got %q body=%s", payload.Error, w.Body.String())
+	}
+}
+
+func TestGetMediaAllowsWhenCanPlayDisabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := setupAccessTestDB(t)
+	if _, err := h.App.DB.Exec(`UPDATE user SET can_play = 0 WHERE id = 1`); err != nil {
+		t.Fatalf("update can_play: %v", err)
+	}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/media/10", nil)
+	c.Params = gin.Params{{Key: "id", Value: "10"}}
+	setUserCtx(c, 1, "user", "normal")
+	h.GetMedia(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 so browsing works without play, got status=%d body=%s", w.Code, w.Body.String())
+	}
+}

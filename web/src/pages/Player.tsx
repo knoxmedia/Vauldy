@@ -202,6 +202,33 @@ function buildTextTrackList(mediaId: number, token: string, rows: MediaSubtitleR
   });
 }
 
+/** Maps backend `requireMediaAccess` / play handler error codes to user-readable text. */
+function playbackForbiddenMessage(code: string): string {
+  const c = (code || "").trim().toLowerCase();
+  switch (c) {
+    case "playback denied":
+      return "当前账号未开通播放权限，请联系管理员在「用户管理 → 基本属性 → 操作权限」中开启「播放」。";
+    case "library access denied":
+      return "无权播放：该内容所属媒体库不在您的访问范围内。";
+    case "folder access denied":
+      return "无权播放：该文件所在文件夹未对您共享，请联系管理员检查文件夹权限。";
+    case "outside parental allowed time":
+      return "当前不在家长控制允许的观看时段内。";
+    case "parental pin required":
+      return "需要家长 PIN 才能播放此分级内容。";
+    default:
+      if (!code) return "播放被拒绝（403），请重新登录或联系管理员。";
+      return `播放被拒绝：${code}`;
+  }
+}
+
+class PlaybackPermissionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PlaybackPermissionError";
+  }
+}
+
 function detectClientCaps() {
   const probe = document.createElement("video");
   const supports = (mime: string) => {
@@ -241,6 +268,7 @@ export default function PlayerPage() {
     id ? Number(id) : Number(searchParams.get("id") || "")
   );
   const token = useAuthStore((s) => s.token);
+  const canPlay = useAuthStore((s) => s.canPlay);
   const [showBack, setShowBack] = useState(true);
   const [loadingText, setLoadingText] = useState("正在准备播放...");
   const [parentalUnlockToken, setParentalUnlockToken] = useState<string>("");
@@ -275,6 +303,14 @@ export default function PlayerPage() {
   useEffect(() => {
     if (!mid || Number.isNaN(mid)) return;
     if (!token) return;
+    if (canPlay === false) {
+      setTranscodeStatus(null);
+      setLoadingText("当前账号未开通播放权限");
+      message.warning(
+        "当前账号未开通播放权限。请在「用户管理」中为该用户开启「播放」，或联系管理员处理。"
+      );
+      return;
+    }
     const sessionGen = ++playbackGenerationRef.current;
     const isStale = () => playbackGenerationRef.current !== sessionGen;
     let timer: number | null = null;
@@ -771,7 +807,8 @@ export default function PlayerPage() {
         } catch {
           errBody = null;
         }
-        if (String(errBody?.error || "").includes("parental pin required")) {
+        const errStr = String(errBody?.error || "");
+        if (errStr.includes("parental pin required")) {
           const pin = await new Promise<string>((resolve) => {
             const id = `parental-pin-${Date.now()}`;
             Modal.confirm({
@@ -807,6 +844,7 @@ export default function PlayerPage() {
           timer = window.setTimeout(() => void resolvePlan(), 10);
           return;
         }
+        throw new PlaybackPermissionError(playbackForbiddenMessage(errStr));
       }
       if (!resp.ok) throw new Error(`playback plan failed: ${resp.status}`);
       if (isStale()) return;
@@ -846,6 +884,12 @@ export default function PlayerPage() {
     };
     void resolvePlan().catch((err: unknown) => {
       if (isStale()) return;
+      if (err instanceof PlaybackPermissionError) {
+        setTranscodeStatus(null);
+        setLoadingText(err.message);
+        message.error(err.message);
+        return;
+      }
       dbgErr("resolvePlan failed; fallback to source", err);
       setTranscodeStatus(null);
       setLoadingText("播放准备失败，正在尝试原始播放...");
@@ -873,7 +917,7 @@ export default function PlayerPage() {
       void destroyDRMPlayer();
       void destroyPowerPlayer();
     };
-  }, [mid, domId, token, startSec, parentalUnlockToken]);
+  }, [mid, domId, token, startSec, parentalUnlockToken, canPlay]);
 
   useEffect(() => {
     return () => {

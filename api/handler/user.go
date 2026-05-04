@@ -81,9 +81,11 @@ func (h *Handler) Logout(c *gin.Context) {
 func (h *Handler) UserInfo(c *gin.Context) {
 	if middleware.IsAPIClient(c) {
 		c.JSON(http.StatusOK, gin.H{
-			"id":       0,
-			"username": middleware.Username(c),
-			"role":     "api_client",
+			"id":             0,
+			"username":       middleware.Username(c),
+			"role":           "api_client",
+			"can_play":       true,
+			"can_download":   true,
 		})
 		return
 	}
@@ -93,8 +95,8 @@ func (h *Handler) UserInfo(c *gin.Context) {
 		return
 	}
 	var username, role string
-	var canManage int
-	if err := h.App.DB.QueryRow(`SELECT username, role, COALESCE(can_manage,0) FROM user WHERE id = ?`, uid).Scan(&username, &role, &canManage); err != nil {
+	var canManage, canPlay, canDownload int
+	if err := h.App.DB.QueryRow(`SELECT username, role, COALESCE(can_manage,0), COALESCE(can_play,1), COALESCE(can_download,0) FROM user WHERE id = ?`, uid).Scan(&username, &role, &canManage, &canPlay, &canDownload); err != nil {
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 			return
@@ -105,7 +107,12 @@ func (h *Handler) UserInfo(c *gin.Context) {
 	if canManage == 1 {
 		role = "admin"
 	}
-	c.JSON(http.StatusOK, gin.H{"id": uid, "username": username, "role": role})
+	playOK := canPlay == 1 || strings.EqualFold(role, "admin")
+	downloadOK := canDownload == 1 || strings.EqualFold(role, "admin")
+	c.JSON(http.StatusOK, gin.H{
+		"id": uid, "username": username, "role": role,
+		"can_play": playOK, "can_download": downloadOK,
+	})
 }
 
 func (h *Handler) UserHistory(c *gin.Context) {
