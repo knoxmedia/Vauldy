@@ -864,9 +864,10 @@ func (h *Handler) clearkeyMapByMediaID(mediaID int64) (map[string]string, error)
 	return map[string]string{kid: key}, nil
 }
 
+// Position 使用指针：binding:"required" 在数值类型上会拒绝 0，而 position=0 用于「未观看」等合法场景。
 type progressBody struct {
-	Position  int64 `json:"position" binding:"required"`
-	Completed *int  `json:"completed"`
+	Position  *int64 `json:"position" binding:"required"`
+	Completed *int   `json:"completed"`
 }
 
 type playbackLogBody struct {
@@ -886,6 +887,11 @@ func (h *Handler) SaveProgress(c *gin.Context) {
 	var body progressBody
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	pos := *body.Position
+	if pos < 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid position"})
 		return
 	}
 	if middleware.IsAPIClient(c) {
@@ -914,9 +920,9 @@ func (h *Handler) SaveProgress(c *gin.Context) {
 	}
 	var execErr error
 	if n == 0 {
-		_, execErr = h.App.DB.Exec(`INSERT INTO play_progress (user_id, file_id, position, completed) VALUES (?, ?, ?, ?)`, uid, fileID, body.Position, completed)
+		_, execErr = h.App.DB.Exec(`INSERT INTO play_progress (user_id, file_id, position, completed) VALUES (?, ?, ?, ?)`, uid, fileID, pos, completed)
 	} else {
-		_, execErr = h.App.DB.Exec(`UPDATE play_progress SET position = ?, completed = ?, update_at = CURRENT_TIMESTAMP WHERE user_id = ? AND file_id = ?`, body.Position, completed, uid, fileID)
+		_, execErr = h.App.DB.Exec(`UPDATE play_progress SET position = ?, completed = ?, update_at = CURRENT_TIMESTAMP WHERE user_id = ? AND file_id = ?`, pos, completed, uid, fileID)
 	}
 	if execErr != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": execErr.Error()})

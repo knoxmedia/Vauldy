@@ -63,10 +63,11 @@ body {
   align-items: center;
 }
 
-/* 主内容区：横向铺满，左右留白 */
+/* 主内容区：横向铺满，左右留白；min-width:0 保证在 flex 布局下随侧栏收放占满剩余宽度 */
 .app-main-centered {
   width: 100%;
   max-width: 100%;
+  min-width: 0;
   margin: 0;
   padding-left: var(--app-page-gutter);
   padding-right: var(--app-page-gutter);
@@ -94,6 +95,15 @@ body {
 
 /* 主壳：左侧栏 + 内容区 */
 .app-shell-inner {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 侧栏展开/收起时，主列始终吃掉剩余宽度 */
+.app-shell-content {
+  flex: 1 1 auto;
   min-width: 0;
 }
 
