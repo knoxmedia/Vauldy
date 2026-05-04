@@ -292,6 +292,7 @@ export default function LibraryPage() {
                     { value: "movie", label: "电影" },
                     { value: "tv", label: "剧集" },
                     { value: "anime", label: "动漫" },
+                    { value: "video", label: "其他影片" },
                     { value: "music", label: "音乐" },
                     { value: "photo", label: "图片" },
                     { value: "document", label: "文档" },

@@ -34,8 +34,11 @@
 
 .rowScroll {
   display: flex;
+  align-items: flex-start;
   gap: 14px;
   overflow-x: auto;
+  overflow-y: visible;
+  padding-top: 4px;
   padding-bottom: 12px;
   scroll-snap-type: x proximity;
   -webkit-overflow-scrolling: touch;
@@ -87,6 +90,23 @@
 
 .carouselArrowRight {
   right: 6px;
+}
+
+/* 继续观看：标题行右侧横向排列，避免被下方滚动层盖住 */
+.historyHeadControls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.carouselArrowInline {
+  position: relative;
+  top: auto;
+  left: auto;
+  right: auto;
+  z-index: 1;
+  flex-shrink: 0;
 }
 
 /* 媒体库大卡片 */
@@ -174,12 +194,12 @@
   color: #aaa;
 }
 
-/* 横向 16:9 继续观看 */
+/* 横向 16:9 继续观看（悬停遮罩与电影卡角标一致） */
 .thumb169 {
   flex: 0 0 280px;
   scroll-snap-align: start;
   border-radius: 6px;
-  overflow: hidden;
+  overflow: visible;
   position: relative;
   background: #1a1a1a;
   border: 1px solid #222;
@@ -190,10 +210,55 @@
 }
 
 .thumb169Box {
+  --poster-movie-ring: 2px;
   aspect-ratio: 16 / 9;
   background: linear-gradient(135deg, #2a2a3a 0%, #1a1a24 100%);
   position: relative;
-  overflow: hidden;
+  overflow: visible;
+  border-radius: 6px 6px 0 0;
+}
+
+.thumb169Box::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 12;
+  box-sizing: border-box;
+  border: var(--poster-movie-ring) solid transparent;
+  border-radius: inherit;
+  pointer-events: none;
+  transition: border-color 0.15s ease;
+}
+
+.thumb169:hover .thumb169Box::after,
+.thumb169:focus-within .thumb169Box::after,
+.thumb169Selected .thumb169Box::after {
+  border-color: #fadb14;
+}
+
+.thumb169Overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.48);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s ease;
+}
+
+.thumb169:hover .thumb169Overlay,
+.thumb169:focus-within .thumb169Overlay {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.thumb169Selected .posterOverlaySelect {
+  background: rgba(255, 255, 255, 0.95);
+  color: #141414;
+  border-color: rgba(255, 255, 255, 0.95);
 }
 
 .thumb169Cover {
@@ -203,49 +268,6 @@
   height: 100%;
   object-fit: cover;
   z-index: 1;
-}
-
-.thumb169IconBg {
-  position: absolute;
-  inset: 0;
-  z-index: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #555;
-  font-size: 42px;
-  pointer-events: none;
-}
-
-.thumb169PlayBtn {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%) scale(0.95);
-  width: 56px;
-  height: 56px;
-  border: 1px solid rgba(255, 255, 255, 0.35);
-  border-radius: 28px;
-  background: rgba(0, 0, 0, 0.62);
-  color: #fff;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 28px;
-  opacity: 0;
-  transition: opacity 0.16s ease, transform 0.16s ease, background 0.16s ease;
-  cursor: pointer;
-  z-index: 2;
-}
-
-.thumb169:hover .thumb169PlayBtn,
-.thumb169:focus-within .thumb169PlayBtn {
-  opacity: 1;
-  transform: translate(-50%, -50%) scale(1);
-}
-
-.thumb169PlayBtn:hover {
-  background: rgba(0, 164, 220, 0.7);
 }
 
 .progressBar {
@@ -282,7 +304,7 @@
   margin-top: 4px;
 }
 
-/* 竖版海报 最近添加 */
+/* 竖版海报 · 最近添加（默认）；横版见 .thumbPosterLandscape */
 .thumbPoster {
   flex: 0 0 130px;
   scroll-snap-align: start;
@@ -303,6 +325,10 @@
   box-shadow: 0 10px 20px rgba(0, 0, 0, 0.35);
 }
 
+.thumbPosterLandscape {
+  flex: 0 0 min(220px, 70vw);
+}
+
 .posterBox {
   position: relative;
   aspect-ratio: 2 / 3;
@@ -310,6 +336,10 @@
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+.posterBoxLandscape {
+  aspect-ratio: 16 / 9;
 }
 
 .posterFillImg {
@@ -363,6 +393,10 @@
   transform: translateY(0);
 }
 
+.posterPlayBtnLandscape {
+  bottom: 40px;
+}
+
 .posterPlayBtn:hover {
   background: rgba(0, 164, 220, 0.7);
 }
@@ -381,6 +415,219 @@
   line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+/* 最近添加的电影：固定卡片与海报尺寸；黑底无灰色拉伸块 */
+.thumbPoster.thumbPosterMovie {
+  overflow: visible;
+}
+
+.thumbPosterMovie {
+  flex: 0 0 auto;
+  width: 140px;
+  max-width: 140px;
+  display: flex;
+  flex-direction: column;
+  align-self: flex-start;
+  background: #000;
+  overflow: visible;
+  border: none;
+}
+
+.thumbPosterMovie:focus-visible {
+  outline: none;
+}
+
+.posterBoxMovie {
+  --poster-movie-ring: 2px;
+  flex: 0 0 210px;
+  width: 100%;
+  height: 210px;
+  aspect-ratio: auto;
+  box-sizing: border-box;
+  background: #000;
+  border-radius: 4px;
+  overflow: visible;
+}
+
+/* 顶层描边：避免 border 被子层盖住或被横向滚动容器裁掉上下边 */
+.posterBoxMovie::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 12;
+  box-sizing: border-box;
+  border: var(--poster-movie-ring) solid transparent;
+  border-radius: inherit;
+  pointer-events: none;
+  transition: border-color 0.15s ease;
+}
+
+.posterBoxMovie:hover::after,
+.thumbPosterMovie:focus-within .posterBoxMovie::after,
+.thumbPosterMovieSelected .posterBoxMovie::after {
+  border-color: #fadb14;
+}
+
+/* 电影海报：铺满海报格（与黄框 ::after 之间无额外边距），contain 仅保留必要黑边 */
+.posterImgMovie {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: block;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  object-fit: contain;
+  object-position: center;
+  box-sizing: border-box;
+}
+
+.posterImgContain {
+  object-fit: contain;
+}
+
+.posterEmptyMovie {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #4a4f5c;
+  font-size: 28px;
+  pointer-events: none;
+}
+
+/* 电影卡无海报：仅纯色底，无图标 */
+.posterEmptyMovieSolid {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background: #1a1a1a;
+  pointer-events: none;
+}
+
+/* 铺满 .posterBoxMovie，角标与黄框（::after 2px）对齐 */
+.posterOverlay {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.48);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s ease;
+}
+
+.thumbPosterMovie:hover .posterOverlay,
+.thumbPosterMovie:focus-within .posterOverlay {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.posterOverlayIconBtn {
+  position: absolute;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 12px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.posterOverlayIconBtn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}
+
+.posterOverlaySelect {
+  top: calc(8px + var(--poster-movie-ring));
+  left: calc(8px + var(--poster-movie-ring));
+  /* 描边算在 24×24 内，避免比另两个按钮“大一圈” */
+  border: 1px solid rgba(255, 255, 255, 0.95);
+  background: rgba(0, 0, 0, 0.25);
+  font-size: 11px;
+}
+
+.thumbPosterMovieSelected .posterOverlaySelect {
+  background: rgba(255, 255, 255, 0.95);
+  color: #141414;
+  border-color: rgba(255, 255, 255, 0.95);
+}
+
+.posterOverlayEdit {
+  bottom: calc(8px + var(--poster-movie-ring));
+  left: calc(8px + var(--poster-movie-ring));
+}
+
+.posterOverlayMore {
+  bottom: calc(8px + var(--poster-movie-ring));
+  right: calc(8px + var(--poster-movie-ring));
+}
+
+.posterPlayFab {
+  position: relative;
+  width: 44px;
+  height: 44px;
+  border-radius: 22px;
+  border: 2px solid rgba(255, 255, 255, 0.9);
+  background: rgba(0, 0, 0, 0.35);
+  color: #fff;
+  font-size: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.15s ease;
+}
+
+.posterPlayFab :global(.anticon) {
+  margin-left: 2px;
+}
+
+.posterPlayFab:hover {
+  background: #fa8c16;
+  border-color: #fa8c16;
+  color: #141414;
+  transform: scale(1.04);
+}
+
+.posterCapMovie {
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  width: 100%;
+  padding: 8px 6px 10px;
+  background: #000;
+  cursor: pointer;
+}
+
+.posterTitleOneLine {
+  font-size: 13px;
+  font-weight: 400;
+  color: #e8eaed;
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.posterYearLine {
+  font-size: 12px;
+  color: #8b9099;
+  margin-top: 4px;
+  line-height: 1.3;
 }
 
 .emptyHint {
