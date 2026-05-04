@@ -1,16 +1,20 @@
-import { Dropdown, Progress, Spin, Tag, Typography } from "antd";
+import { Dropdown, Popover, Progress, Spin, Tag, Typography } from "antd";
 import type { MenuProps } from "antd";
 import {
   CaretRightOutlined,
+  CheckCircleOutlined,
   CheckOutlined,
+  CloseOutlined,
   EditOutlined,
   EllipsisOutlined,
   FileImageOutlined,
   LeftOutlined,
+  MoreOutlined,
   PlayCircleOutlined,
   RightOutlined,
+  UnorderedListOutlined,
 } from "@ant-design/icons";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
   Library,
@@ -55,20 +59,29 @@ function mediaReleaseYear(m: MediaItem): string {
   return formatYear(m.file_path);
 }
 
-/** 继续观看：悬停遮罩与角标逻辑对齐「最近添加的电影」 */
+function historyRowKey(h: HistoryItem): string {
+  return `${h.file_id}\0${h.update_at}`;
+}
+
+/** 继续观看：悬停遮罩与角标逻辑对齐「最近添加的电影」；批量点选同详情页 */
 function HistoryContinueCard({
   h,
   nav,
   thumbSrc,
   pct,
+  selected,
+  onToggleSelect,
+  bulkSelectMode,
 }: {
   h: HistoryItem;
   nav: ReturnType<typeof useNavigate>;
   thumbSrc: string;
   pct: number;
+  selected: boolean;
+  onToggleSelect: () => void;
+  bulkSelectMode: boolean;
 }) {
   const [posterFailed, setPosterFailed] = useState(false);
-  const [selected, setSelected] = useState(false);
   const moreItems: MenuProps["items"] = useMemo(
     () => [
       { key: "detail", label: "查看详情", onClick: () => nav(`/detail/${h.media_id}`) },
@@ -79,18 +92,33 @@ function HistoryContinueCard({
 
   return (
     <div
-      className={`${styles.thumb169} ${selected ? styles.thumb169Selected : ""}`}
+      className={`${styles.thumb169} ${selected ? styles.thumb169Selected : ""} ${bulkSelectMode ? styles.thumb169Bulk : ""}`}
       role="button"
       tabIndex={0}
-      onClick={() => nav(`/detail/${h.media_id}`)}
+      onClick={(e) => {
+        if (bulkSelectMode && (e.target as HTMLElement).closest(`.${styles.thumb169Box}`)) return;
+        nav(`/detail/${h.media_id}`);
+      }}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
-          nav(`/detail/${h.media_id}`);
+          if (bulkSelectMode) onToggleSelect();
+          else nav(`/detail/${h.media_id}`);
         }
       }}
     >
-      <div className={styles.thumb169Box}>
+      <div
+        className={styles.thumb169Box}
+        role="presentation"
+        onClick={(e) => {
+          if (bulkSelectMode) {
+            if ((e.target as HTMLElement).closest("[data-home-history-action]")) return;
+            onToggleSelect();
+            return;
+          }
+          nav(`/detail/${h.media_id}`);
+        }}
+      >
         {posterFailed ? (
           <div className={styles.posterEmptyMovieSolid} aria-hidden />
         ) : (
@@ -107,66 +135,79 @@ function HistoryContinueCard({
           className={styles.thumb169Overlay}
           onClick={(e) => {
             e.stopPropagation();
-            nav(`/detail/${h.media_id}`);
+            if (bulkSelectMode) onToggleSelect();
+            else nav(`/detail/${h.media_id}`);
           }}
           role="presentation"
         >
           <button
             type="button"
+            data-home-history-action
             className={`${styles.posterOverlayIconBtn} ${styles.posterOverlaySelect}`}
             aria-label={selected ? "取消选中" : "选中"}
             onClick={(e) => {
               e.stopPropagation();
-              setSelected((s) => !s);
+              onToggleSelect();
             }}
           >
             {selected ? <CheckOutlined /> : null}
           </button>
-          <button
-            type="button"
-            className={styles.posterPlayFab}
-            aria-label={`播放 ${h.title || "影片"}`}
-            onClick={(e) => {
-              e.stopPropagation();
-              nav(`/player/${h.media_id}?t=${h.position}`);
-            }}
-          >
-            <CaretRightOutlined />
-          </button>
-          <button
-            type="button"
-            className={`${styles.posterOverlayIconBtn} ${styles.posterOverlayEdit}`}
-            aria-label="编辑"
-            onClick={(e) => {
-              e.stopPropagation();
-              nav(`/detail/${h.media_id}`);
-            }}
-          >
-            <EditOutlined />
-          </button>
-          <Dropdown menu={{ items: moreItems }} trigger={["click"]} placement="bottomRight">
-            <button
-              type="button"
-              className={`${styles.posterOverlayIconBtn} ${styles.posterOverlayMore}`}
-              aria-label="更多"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <EllipsisOutlined style={{ transform: "rotate(90deg)" }} />
-            </button>
-          </Dropdown>
+          {bulkSelectMode ? null : (
+            <>
+              <button
+                type="button"
+                className={styles.posterPlayFab}
+                aria-label={`播放 ${h.title || "影片"}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  nav(`/player/${h.media_id}?t=${h.position}`);
+                }}
+              >
+                <CaretRightOutlined />
+              </button>
+              <button
+                type="button"
+                className={`${styles.posterOverlayIconBtn} ${styles.posterOverlayEdit}`}
+                aria-label="编辑"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  nav(`/detail/${h.media_id}`);
+                }}
+              >
+                <EditOutlined />
+              </button>
+              <Dropdown menu={{ items: moreItems }} trigger={["click"]} placement="bottomRight">
+                <button
+                  type="button"
+                  className={`${styles.posterOverlayIconBtn} ${styles.posterOverlayMore}`}
+                  aria-label="更多"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <EllipsisOutlined style={{ transform: "rotate(90deg)" }} />
+                </button>
+              </Dropdown>
+            </>
+          )}
         </div>
       </div>
       <div className={styles.progressBar}>
         <div className={styles.progressFill} style={{ width: `${pct}%` }} />
       </div>
-      <div className={styles.thumb169Cap}>
+      <div
+        className={styles.thumb169Cap}
+        role="presentation"
+        onClick={(e) => {
+          e.stopPropagation();
+          nav(`/detail/${h.media_id}`);
+        }}
+      >
         <div className={styles.thumb169Title}>{h.title || "未命名"}</div>
         <div className={styles.thumb169Sub}>
           {pct}% · {formatYear(h.file_path)}
         </div>
-        <div className={styles.thumb169Sub} style={{ display: "flex", gap: 6, marginTop: 4, alignItems: "center", flexWrap: "wrap" }}>
-          {h.completed === 1 ? <Tag color="green" style={{ marginInlineEnd: 0 }}>已看完</Tag> : null}
-          <Tag color="blue" style={{ marginInlineEnd: 0 }}>播放 {h.play_count ?? 0} 次</Tag>
+        <div className={styles.thumb169Tags}>
+          {h.completed === 1 ? <Tag color="green" style={{ marginInlineEnd: 0, flexShrink: 0 }}>已看完</Tag> : null}
+          <Tag color="blue" style={{ marginInlineEnd: 0, flexShrink: 0 }}>播放 {h.play_count ?? 0} 次</Tag>
         </div>
       </div>
     </div>
@@ -188,11 +229,14 @@ function RecentMovieShelfCard({
   nav,
   selected,
   onToggleSelect,
+  bulkSelectMode,
 }: {
   m: MediaItem;
   nav: ReturnType<typeof useNavigate>;
   selected: boolean;
   onToggleSelect: () => void;
+  /** 已有选中项时：海报区点选切换，隐藏播放/编辑/更多 */
+  bulkSelectMode: boolean;
 }) {
   const [posterFailed, setPosterFailed] = useState(false);
   const year = mediaReleaseYear(m);
@@ -203,19 +247,34 @@ function RecentMovieShelfCard({
 
   return (
     <div
-      className={`${styles.thumbPoster} ${styles.thumbPosterMovie} ${selected ? styles.thumbPosterMovieSelected : ""}`}
+      className={`${styles.thumbPoster} ${styles.thumbPosterMovie} ${selected ? styles.thumbPosterMovieSelected : ""} ${
+        bulkSelectMode ? styles.thumbPosterMovieBulk : ""
+      }`}
+      role="button"
       tabIndex={0}
+      onClick={(e) => {
+        if (bulkSelectMode && (e.target as HTMLElement).closest(`.${styles.posterBoxMovie}`)) return;
+        nav(`/detail/${m.id}`);
+      }}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
-          nav(`/detail/${m.id}`);
+          if (bulkSelectMode) onToggleSelect();
+          else nav(`/detail/${m.id}`);
         }
       }}
     >
       <div
         className={`${styles.posterBox} ${styles.posterBoxMovie}`}
         role="presentation"
-        onClick={() => nav(`/detail/${m.id}`)}
+        onClick={(e) => {
+          if (bulkSelectMode) {
+            if ((e.target as HTMLElement).closest("[data-home-shelf-action]")) return;
+            onToggleSelect();
+            return;
+          }
+          nav(`/detail/${m.id}`);
+        }}
       >
         <>
           {posterFailed ? (
@@ -234,12 +293,14 @@ function RecentMovieShelfCard({
             className={styles.posterOverlay}
             onClick={(e) => {
               e.stopPropagation();
-              nav(`/detail/${m.id}`);
+              if (bulkSelectMode) onToggleSelect();
+              else nav(`/detail/${m.id}`);
             }}
             role="presentation"
           >
             <button
               type="button"
+              data-home-shelf-action
               className={`${styles.posterOverlayIconBtn} ${styles.posterOverlaySelect}`}
               aria-label={selected ? "取消选中" : "选中"}
               onClick={(e) => {
@@ -249,38 +310,42 @@ function RecentMovieShelfCard({
             >
               {selected ? <CheckOutlined /> : null}
             </button>
-            <button
-              type="button"
-              className={styles.posterPlayFab}
-              aria-label={`播放 ${m.title || "影片"}`}
-              onClick={(e) => {
-                e.stopPropagation();
-                nav(`/player/${m.id}`);
-              }}
-            >
-              <CaretRightOutlined />
-            </button>
-            <button
-              type="button"
-              className={`${styles.posterOverlayIconBtn} ${styles.posterOverlayEdit}`}
-              aria-label="编辑"
-              onClick={(e) => {
-                e.stopPropagation();
-                nav(`/detail/${m.id}`);
-              }}
-            >
-              <EditOutlined />
-            </button>
-            <Dropdown menu={{ items: moreItems }} trigger={["click"]} placement="bottomRight">
-              <button
-                type="button"
-                className={`${styles.posterOverlayIconBtn} ${styles.posterOverlayMore}`}
-                aria-label="更多"
-                onClick={(e) => e.stopPropagation()}
-              >
-                <EllipsisOutlined style={{ transform: "rotate(90deg)" }} />
-              </button>
-            </Dropdown>
+            {bulkSelectMode ? null : (
+              <>
+                <button
+                  type="button"
+                  className={styles.posterPlayFab}
+                  aria-label={`播放 ${m.title || "影片"}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    nav(`/player/${m.id}`);
+                  }}
+                >
+                  <CaretRightOutlined />
+                </button>
+                <button
+                  type="button"
+                  className={`${styles.posterOverlayIconBtn} ${styles.posterOverlayEdit}`}
+                  aria-label="编辑"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    nav(`/detail/${m.id}`);
+                  }}
+                >
+                  <EditOutlined />
+                </button>
+                <Dropdown menu={{ items: moreItems }} trigger={["click"]} placement="bottomRight">
+                  <button
+                    type="button"
+                    className={`${styles.posterOverlayIconBtn} ${styles.posterOverlayMore}`}
+                    aria-label="更多"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <EllipsisOutlined style={{ transform: "rotate(90deg)" }} />
+                  </button>
+                </Dropdown>
+              </>
+            )}
           </div>
         </>
       </div>
@@ -305,26 +370,23 @@ function RecentAddedRow({
   landscape,
   sectionKey,
   nav,
+  movieSelectedIds,
+  onToggleMovieSelect,
+  homeBulkActive,
 }: {
   sectionTitle: string;
   items: MediaItem[];
   landscape: boolean;
   sectionKey: string;
   nav: ReturnType<typeof useNavigate>;
+  movieSelectedIds: Set<number>;
+  onToggleMovieSelect: (id: number) => void;
+  /** 继续观看或最近添加电影任一侧有选中 */
+  homeBulkActive: boolean;
 }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [showLeft, setShowLeft] = useState(false);
   const [showRight, setShowRight] = useState(false);
-  const [selectedMovieIds, setSelectedMovieIds] = useState<Set<number>>(() => new Set());
-
-  const toggleMovieSelect = (id: number) => {
-    setSelectedMovieIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
 
   const updateArrows = () => {
     const el = scrollRef.current;
@@ -395,8 +457,9 @@ function RecentAddedRow({
               key={m.id}
               m={m}
               nav={nav}
-              selected={selectedMovieIds.has(m.id)}
-              onToggleSelect={() => toggleMovieSelect(m.id)}
+              selected={movieSelectedIds.has(m.id)}
+              onToggleSelect={() => onToggleMovieSelect(m.id)}
+              bulkSelectMode={homeBulkActive}
             />
           ) : (
             <div
@@ -457,9 +520,32 @@ export default function HomePage() {
   const [libs, setLibs] = useState<Library[]>([]);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [allRecent, setAllRecent] = useState<MediaItem[]>([]);
+  const [historySelectedKeys, setHistorySelectedKeys] = useState<Set<string>>(() => new Set());
+  const [movieSelectedIds, setMovieSelectedIds] = useState<Set<number>>(() => new Set());
   const historyScrollRef = useRef<HTMLDivElement | null>(null);
   const [showHistoryLeft, setShowHistoryLeft] = useState(false);
   const [showHistoryRight, setShowHistoryRight] = useState(false);
+
+  const toggleHistoryRow = useCallback((key: string) => {
+    setHistorySelectedKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    const valid = new Set(history.map(historyRowKey));
+    setHistorySelectedKeys((prev) => {
+      const next = new Set<string>();
+      for (const k of prev) {
+        if (valid.has(k)) next.add(k);
+      }
+      if (next.size === prev.size && [...next].every((k) => prev.has(k))) return prev;
+      return next;
+    });
+  }, [history]);
 
   const updateHistoryArrows = () => {
     const el = historyScrollRef.current;
@@ -568,6 +654,132 @@ export default function HomePage() {
     return out;
   }, [allRecent, libraryTypeById]);
 
+  const movieShelfItems = recentBySection.get("movie") ?? [];
+
+  const homeBulkCount = historySelectedKeys.size + movieSelectedIds.size;
+  const homeBulkActive = homeBulkCount > 0;
+
+  const [homeBulkDock, setHomeBulkDock] = useState({ left: 0, width: 0 });
+  const measureHomeBulkDock = useCallback(() => {
+    const shell = document.querySelector(".app-main-centered");
+    if (!shell) return;
+    const r = shell.getBoundingClientRect();
+    setHomeBulkDock({ left: r.left, width: r.width });
+  }, []);
+
+  const toggleMovieSelect = useCallback((id: number) => {
+    setMovieSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const clearHomeBulkSelection = useCallback(() => {
+    setHistorySelectedKeys(new Set());
+    setMovieSelectedIds(new Set());
+  }, []);
+
+  const selectAllHomeBulkOrClear = useCallback(() => {
+    const hk = history.map(historyRowKey);
+    const mids = movieShelfItems.map((m) => m.id);
+    const allHist = hk.length === 0 || hk.every((k) => historySelectedKeys.has(k));
+    const allMov = mids.length === 0 || mids.every((id) => movieSelectedIds.has(id));
+    const anyList = hk.length + mids.length > 0;
+    const everything = anyList && allHist && allMov;
+    if (everything) {
+      setHistorySelectedKeys(new Set());
+      setMovieSelectedIds(new Set());
+    } else {
+      setHistorySelectedKeys(new Set(hk));
+      setMovieSelectedIds(new Set(mids));
+    }
+  }, [history, historySelectedKeys, movieShelfItems, movieSelectedIds]);
+
+  const firstBulkPlayTarget = useMemo(() => {
+    for (const h of history) {
+      if (historySelectedKeys.has(historyRowKey(h))) return { kind: "history" as const, h };
+    }
+    for (const m of movieShelfItems) {
+      if (movieSelectedIds.has(m.id)) return { kind: "movie" as const, id: m.id };
+    }
+    return undefined;
+  }, [history, historySelectedKeys, movieShelfItems, movieSelectedIds]);
+
+  const firstBulkDetailMediaId = useMemo(() => {
+    const p = firstBulkPlayTarget;
+    if (!p) return undefined;
+    return p.kind === "history" ? p.h.media_id : p.id;
+  }, [firstBulkPlayTarget]);
+
+  const homeBulkListContent = useMemo(() => {
+    const histLines = history
+      .filter((h) => historySelectedKeys.has(historyRowKey(h)))
+      .map((h) => ({ key: historyRowKey(h), text: `继续观看 · ${h.title || "未命名"}` }));
+    const movLines = movieShelfItems
+      .filter((m) => movieSelectedIds.has(m.id))
+      .map((m) => ({ key: `m-${m.id}`, text: `最近添加 · ${m.title || "未命名"}` }));
+    const lines = [...histLines, ...movLines];
+    if (lines.length === 0) return <span className={styles.homeShelfBulkPopoverEmpty}>无</span>;
+    return (
+      <ul className={styles.homeShelfBulkPopoverList}>
+        {lines.map((row) => (
+          <li key={row.key}>{row.text}</li>
+        ))}
+      </ul>
+    );
+  }, [history, historySelectedKeys, movieShelfItems, movieSelectedIds]);
+
+  const homeBulkMoreItems: MenuProps["items"] = useMemo(() => {
+    const p = firstBulkPlayTarget;
+    const detailId = firstBulkDetailMediaId;
+    return [
+      {
+        key: "play1",
+        label: "播放第一个",
+        onClick: () => {
+          if (p == null) return;
+          if (p.kind === "history") nav(`/player/${p.h.media_id}?t=${p.h.position}`);
+          else nav(`/player/${p.id}`);
+        },
+      },
+      {
+        key: "detail1",
+        label: "查看第一个详情",
+        onClick: () => {
+          if (detailId != null) nav(`/detail/${detailId}`);
+        },
+      },
+    ];
+  }, [firstBulkPlayTarget, firstBulkDetailMediaId, nav]);
+
+  useLayoutEffect(() => {
+    if (!homeBulkActive) return;
+    measureHomeBulkDock();
+    const shell = document.querySelector(".app-main-centered");
+    if (!shell) return;
+    const ro = new ResizeObserver(() => measureHomeBulkDock());
+    ro.observe(shell);
+    window.addEventListener("resize", measureHomeBulkDock);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", measureHomeBulkDock);
+    };
+  }, [homeBulkActive, measureHomeBulkDock]);
+
+  useEffect(() => {
+    const valid = new Set(movieShelfItems.map((m) => m.id));
+    setMovieSelectedIds((prev) => {
+      const next = new Set<number>();
+      for (const id of prev) {
+        if (valid.has(id)) next.add(id);
+      }
+      if (next.size === prev.size && [...next].every((id) => prev.has(id))) return prev;
+      return next;
+    });
+  }, [movieShelfItems]);
+
   useEffect(() => {
     updateHistoryArrows();
     const onResize = () => {
@@ -577,6 +789,18 @@ export default function HomePage() {
     return () => window.removeEventListener("resize", onResize);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [history.length]);
+
+  const homeBulkAllFullySelected = useMemo(() => {
+    const hk = history.map(historyRowKey);
+    const mids = movieShelfItems.map((m) => m.id);
+    if (hk.length + mids.length === 0) return false;
+    return (
+      (hk.length === 0 || hk.every((k) => historySelectedKeys.has(k))) &&
+      (mids.length === 0 || mids.every((id) => movieSelectedIds.has(id)))
+    );
+  }, [history, historySelectedKeys, movieShelfItems, movieSelectedIds]);
+
+  const homeBulkSelectAllDisabled = history.length === 0 && movieShelfItems.length === 0;
 
   if (loading) {
     return (
@@ -588,6 +812,66 @@ export default function HomePage() {
 
   return (
     <div className={styles.page}>
+      {homeBulkActive ? (
+        <div
+          className={styles.homeShelfBulkBar}
+          role="toolbar"
+          aria-label="首页批量操作"
+          style={{
+            top: 72,
+            zIndex: 1000,
+            left: homeBulkDock.left,
+            width: homeBulkDock.width,
+            maxWidth: homeBulkDock.width,
+            opacity: homeBulkDock.width > 0 ? 1 : 0,
+            pointerEvents: homeBulkDock.width > 0 ? "auto" : "none",
+          }}
+        >
+          <div className={styles.homeShelfBulkLeft}>
+            <CheckOutlined className={styles.homeShelfBulkOrangeMark} aria-hidden />
+            <span className={styles.homeShelfBulkOrangeText}>已选择 {homeBulkCount} 个项目</span>
+          </div>
+          <div className={styles.homeShelfBulkCenter}>
+            <button
+              type="button"
+              className={styles.homeShelfBulkIconBtn}
+              aria-label="播放第一个"
+              disabled={firstBulkPlayTarget == null}
+              onClick={() => {
+                const p = firstBulkPlayTarget;
+                if (p == null) return;
+                if (p.kind === "history") nav(`/player/${p.h.media_id}?t=${p.h.position}`);
+                else nav(`/player/${p.id}`);
+              }}
+            >
+              <PlayCircleOutlined />
+            </button>
+            <button
+              type="button"
+              className={styles.homeShelfBulkIconBtn}
+              aria-label={homeBulkAllFullySelected ? "取消全选继续观看与最近电影" : "全选继续观看与最近电影"}
+              disabled={homeBulkSelectAllDisabled}
+              onClick={selectAllHomeBulkOrClear}
+            >
+              <CheckCircleOutlined />
+            </button>
+            <Popover content={homeBulkListContent} trigger="click" placement="bottom">
+              <button type="button" className={styles.homeShelfBulkIconBtn} aria-label="已选列表">
+                <UnorderedListOutlined />
+              </button>
+            </Popover>
+            <Dropdown menu={{ items: homeBulkMoreItems }} trigger={["click"]} placement="bottomRight">
+              <button type="button" className={styles.homeShelfBulkIconBtn} aria-label="更多">
+                <MoreOutlined />
+              </button>
+            </Dropdown>
+          </div>
+          <button type="button" className={styles.homeShelfBulkCancel} onClick={clearHomeBulkSelection}>
+            <CloseOutlined aria-hidden />
+            <span>取消全选</span>
+          </button>
+        </div>
+      ) : null}
       <section className={styles.section}>
         <div className={styles.sectionHead}>
           <Title level={3} className={styles.title}>
@@ -696,13 +980,17 @@ export default function HomePage() {
                   id: h.media_id,
                   poster_url: recentPosterById.get(h.media_id) || "",
                 });
+                const rowKey = historyRowKey(h);
                 return (
                   <HistoryContinueCard
-                    key={`${h.file_id}-${h.update_at}`}
+                    key={rowKey}
                     h={h}
                     nav={nav}
                     thumbSrc={thumbSrc}
                     pct={pct}
+                    selected={historySelectedKeys.has(rowKey)}
+                    onToggleSelect={() => toggleHistoryRow(rowKey)}
+                    bulkSelectMode={homeBulkActive}
                   />
                 );
               })}
@@ -721,6 +1009,9 @@ export default function HomePage() {
               landscape={sec.landscape}
               sectionKey={sec.key}
               nav={nav}
+              movieSelectedIds={movieSelectedIds}
+              onToggleMovieSelect={toggleMovieSelect}
+              homeBulkActive={homeBulkActive}
             />
           </section>
         );

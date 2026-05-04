@@ -699,13 +699,28 @@
 }
 
 .relatedCard {
-  width: 118px;
+  width: 142px;
+  min-width: 0;
   flex: 0 0 auto;
   text-decoration: none;
   color: inherit;
+  display: block;
+  cursor: pointer;
+}
+
+.relatedCard:focus-visible {
+  outline: 2px solid rgba(0, 164, 220, 0.65);
+  outline-offset: 2px;
+}
+
+/* 相关卡片批量点选态（与首页 .thumbPosterMovieBulk 语义一致） */
+.relatedCardBulkPick {
+  contain: layout;
 }
 
 .relatedPosterWrap {
+  --related-ring: 2px;
+  position: relative;
   aspect-ratio: 2 / 3;
   border-radius: 8px;
   border: 1px solid #2c3348;
@@ -713,16 +728,38 @@
   background: linear-gradient(160deg, #2a3142 0%, #171b26 100%);
 }
 
+.relatedPosterWrap::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 12;
+  box-sizing: border-box;
+  border: var(--related-ring) solid transparent;
+  border-radius: inherit;
+  pointer-events: none;
+  transition: border-color 0.15s ease;
+}
+
+/* 仅悬停海报区域时黄框；已选中时始终黄框（取消全选后鼠标离开海报即消失） */
+.relatedPosterWrap:hover::after,
+.relatedCardSelected .relatedPosterWrap::after {
+  border-color: #fadb14;
+}
+
 .relatedPosterImg {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
   object-fit: cover;
   display: block;
+  z-index: 1;
 }
 
 .relatedPosterFallback {
-  width: 100%;
-  height: 100%;
+  position: absolute;
+  inset: 0;
+  z-index: 1;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -731,15 +768,239 @@
   color: #4a5568;
 }
 
+.relatedPosterOverlay {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.48);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s ease;
+}
+
+/* 仅悬停海报区域时展开遮罩（避免鼠标在标题上仍显示按钮） */
+.relatedPosterWrap:hover .relatedPosterOverlay {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* 已选中：黄框 + 遮罩与选择态始终可见；仅当鼠标回到海报上时加深遮罩 */
+.relatedCardSelected .relatedPosterOverlay {
+  opacity: 1;
+  pointer-events: auto;
+  background: rgba(0, 0, 0, 0.22);
+}
+
+.relatedCardSelected .relatedPosterWrap:hover .relatedPosterOverlay {
+  background: rgba(0, 0, 0, 0.48);
+}
+
+.relatedOverlayBtn {
+  position: absolute;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 12px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 14px;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
+}
+
+.relatedOverlayBtn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}
+
+/* 较编辑/更多更小一圈，弱化空心选择环 */
+.relatedOverlaySelect {
+  top: calc(8px + var(--related-ring));
+  left: calc(8px + var(--related-ring));
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  min-height: 16px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.82);
+  background: rgba(0, 0, 0, 0.3);
+  font-size: 8px;
+}
+
+.relatedCardSelected .relatedOverlaySelect {
+  background: rgba(255, 255, 255, 0.95);
+  color: #141414;
+  border-color: rgba(255, 255, 255, 0.95);
+}
+
+.relatedOverlayEdit {
+  bottom: calc(6px + var(--related-ring));
+  left: calc(6px + var(--related-ring));
+}
+
+.relatedOverlayMore {
+  bottom: calc(6px + var(--related-ring));
+  right: calc(6px + var(--related-ring));
+}
+
+.relatedOverlayPlay {
+  position: relative;
+  width: 44px;
+  height: 44px;
+  border-radius: 22px;
+  border: 2px solid rgba(255, 255, 255, 0.9);
+  background: rgba(0, 0, 0, 0.35);
+  color: #fff;
+  font-size: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease,
+    transform 0.15s ease;
+}
+
+.relatedOverlayPlay :global(.anticon) {
+  margin-left: 2px;
+}
+
+.relatedOverlayPlay:hover {
+  background: #fa8c16;
+  border-color: #fa8c16;
+  color: #141414;
+  transform: scale(1.04);
+}
+
+/* fixed：不随主区滚动；left/width 由 JS 对齐 .app-main-centered */
+.relatedBulkBar {
+  position: fixed;
+  z-index: 1000;
+  top: 72px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  padding: 8px 16px;
+  background: rgba(10, 10, 14, 0.96);
+  border: 1px solid #fa8c16;
+  border-radius: 8px;
+  box-shadow: 0 10px 36px rgba(0, 0, 0, 0.55);
+  transition: opacity 0.12s ease;
+}
+
+.relatedBulkLeft {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.relatedBulkOrangeMark {
+  font-size: 16px;
+  color: #fa8c16 !important;
+}
+
+.relatedBulkOrangeText {
+  font-size: 13px;
+  font-weight: 500;
+  color: #fa8c16;
+  white-space: nowrap;
+}
+
+.relatedBulkCenter {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+}
+
+.relatedBulkIconBtn {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 15px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease;
+}
+
+.relatedBulkIconBtn:hover {
+  background: rgba(255, 255, 255, 0.16);
+  border-color: rgba(255, 255, 255, 0.35);
+  color: #fff;
+}
+
+.relatedBulkCancel {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  margin: 0;
+  padding: 4px 2px 4px 8px;
+  border: none;
+  background: transparent;
+  color: #f0f4ff;
+  font-size: 13px;
+  cursor: pointer;
+  border-radius: 6px;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.relatedBulkCancel:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+.relatedBulkPopoverList {
+  margin: 0;
+  padding-left: 18px;
+  max-height: 220px;
+  overflow-y: auto;
+  font-size: 12px;
+  color: #e8ecf5;
+  line-height: 1.5;
+}
+
+.relatedBulkPopoverEmpty {
+  font-size: 12px;
+  color: #8b96ad;
+}
+
 .relatedTitle {
   margin-top: 8px;
   font-size: 12px;
   color: #e2e6f0;
   line-height: 1.35;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
+  white-space: nowrap;
   overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }
 
 .relatedYear {
@@ -932,7 +1193,7 @@
 }
 
 .panel .relatedCard {
-  width: 132px;
+  width: 158px;
 }
 
 @media (max-width: 900px) {

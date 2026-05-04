@@ -197,6 +197,10 @@
 /* 横向 16:9 继续观看（悬停遮罩与电影卡角标一致） */
 .thumb169 {
   flex: 0 0 280px;
+  width: 280px;
+  min-width: 0;
+  max-width: 280px;
+  box-sizing: border-box;
   scroll-snap-align: start;
   border-radius: 6px;
   overflow: visible;
@@ -261,6 +265,21 @@
   border-color: rgba(255, 255, 255, 0.95);
 }
 
+/* 继续观看 · 批量点选（对齐 .thumbPosterMovieBulk） */
+.thumb169Bulk .thumb169Overlay {
+  opacity: 1;
+  pointer-events: auto;
+  background: rgba(0, 0, 0, 0.22);
+}
+
+.thumb169Bulk.thumb169Selected .thumb169Box:hover .thumb169Overlay {
+  background: rgba(0, 0, 0, 0.48);
+}
+
+.thumb169Bulk:not(.thumb169Selected) .thumb169Box:hover::after {
+  border-color: transparent;
+}
+
 .thumb169Cover {
   position: absolute;
   inset: 0;
@@ -288,6 +307,9 @@
 .thumb169Cap {
   padding: 10px 8px 12px;
   background: #0a0a0a;
+  min-width: 0;
+  overflow: hidden;
+  cursor: pointer;
 }
 
 .thumb169Title {
@@ -296,12 +318,27 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .thumb169Sub {
   font-size: 12px;
   color: #888;
   margin-top: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.thumb169Tags {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+  align-items: center;
+  flex-wrap: nowrap;
+  min-width: 0;
+  overflow: hidden;
 }
 
 /* 竖版海报 · 最近添加（默认）；横版见 .thumbPosterLandscape */
@@ -552,19 +589,40 @@
   color: #fff;
 }
 
+/* 与详情页相关视频 .relatedOverlaySelect 一致 */
 .posterOverlaySelect {
   top: calc(8px + var(--poster-movie-ring));
   left: calc(8px + var(--poster-movie-ring));
-  /* 描边算在 24×24 内，避免比另两个按钮“大一圈” */
-  border: 1px solid rgba(255, 255, 255, 0.95);
-  background: rgba(0, 0, 0, 0.25);
-  font-size: 11px;
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  min-height: 16px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.82);
+  background: rgba(0, 0, 0, 0.3);
+  font-size: 8px;
+  line-height: 1;
 }
 
 .thumbPosterMovieSelected .posterOverlaySelect {
   background: rgba(255, 255, 255, 0.95);
   color: #141414;
   border-color: rgba(255, 255, 255, 0.95);
+}
+
+/* 批量点选：弱遮罩常显；未选中海报悬停不描黄框；回到已选中海报上加深遮罩 */
+.thumbPosterMovieBulk .posterOverlay {
+  opacity: 1;
+  pointer-events: auto;
+  background: rgba(0, 0, 0, 0.22);
+}
+
+.thumbPosterMovieBulk.thumbPosterMovieSelected .posterBoxMovie:hover .posterOverlay {
+  background: rgba(0, 0, 0, 0.48);
+}
+
+.thumbPosterMovieBulk:not(.thumbPosterMovieSelected) .posterBoxMovie:hover::after {
+  border-color: transparent;
 }
 
 .posterOverlayEdit {
@@ -634,4 +692,116 @@
   color: #666;
   font-size: 14px;
   padding: 24px 0;
+}
+
+/* 首页「最近添加的电影」浮动工具条（对齐详情 .relatedBulkBar） */
+.homeShelfBulkBar {
+  position: fixed;
+  z-index: 1000;
+  top: 72px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  padding: 8px 16px;
+  background: rgba(10, 10, 14, 0.96);
+  border: 1px solid #fa8c16;
+  border-radius: 8px;
+  box-shadow: 0 10px 36px rgba(0, 0, 0, 0.55);
+  transition: opacity 0.12s ease;
+}
+
+.homeShelfBulkLeft {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.homeShelfBulkOrangeMark {
+  font-size: 16px;
+  color: #fa8c16 !important;
+}
+
+.homeShelfBulkOrangeText {
+  font-size: 13px;
+  font-weight: 500;
+  color: #fa8c16;
+  white-space: nowrap;
+}
+
+.homeShelfBulkCenter {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+}
+
+.homeShelfBulkIconBtn {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 15px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease;
+}
+
+.homeShelfBulkIconBtn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.16);
+  border-color: rgba(255, 255, 255, 0.35);
+  color: #fff;
+}
+
+.homeShelfBulkIconBtn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.homeShelfBulkCancel {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  margin: 0;
+  padding: 4px 2px 4px 8px;
+  border: none;
+  background: transparent;
+  color: #f0f4ff;
+  font-size: 13px;
+  cursor: pointer;
+  border-radius: 6px;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.homeShelfBulkCancel:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+.homeShelfBulkPopoverList {
+  margin: 0;
+  padding-left: 18px;
+  max-height: 240px;
+  overflow: auto;
+  color: rgba(0, 0, 0, 0.88);
+  font-size: 13px;
+}
+
+.homeShelfBulkPopoverEmpty {
+  color: rgba(0, 0, 0, 0.45);
+  font-size: 13px;
 }

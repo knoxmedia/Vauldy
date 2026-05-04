@@ -351,6 +351,8 @@ export default function BrowsePage() {
   }, [sortedRows, browseSelectedIds]);
 
   const browseSelectionCount = browseSelectedIds.size;
+  /** 任意项已选中时：隐藏播放/编辑/更多，海报区点击切换选中 */
+  const browseBulkPick = browseSelectionCount > 0;
 
   return (
     <div style={{ padding: "16px 0 32px" }}>
@@ -550,8 +552,14 @@ export default function BrowsePage() {
                   style={{ gridTemplateColumns: tableGridTemplate }}
                   data-selected={isSel ? "" : undefined}
                   data-stripe={globalIdx % 2 === 1 ? "" : undefined}
+                  data-bulk-pick={browseBulkPick ? "" : undefined}
                   onClick={(e) => {
                     if ((e.target as HTMLElement).closest("[data-browse-table-action]")) return;
+                    if ((e.target as HTMLElement).closest("[data-browse-table-detail]")) return;
+                    if (browseBulkPick) {
+                      toggleBrowseSelect(r.id);
+                      return;
+                    }
                     nav(`/detail/${r.id}`);
                   }}
                 >
@@ -566,24 +574,54 @@ export default function BrowsePage() {
                         e.stopPropagation();
                         toggleBrowseSelect(r.id);
                       }}
-                    />
+                    >
+                      {isSel ? <CheckOutlined /> : null}
+                    </button>
                   </div>
                   {tableOrderedSpecs.map((spec) =>
                     spec.key === "title" ? (
                       <div key={spec.key} className={styles.browseTdTitle}>
-                        <button
-                          type="button"
-                          className={styles.browseRowPlay}
-                          data-browse-table-action
-                          aria-label="播放"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            nav(`/player/${r.id}`);
-                          }}
+                        {!browseBulkPick ? (
+                          <button
+                            type="button"
+                            className={styles.browseRowPlay}
+                            data-browse-table-action
+                            aria-label="播放"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              nav(`/player/${r.id}`);
+                            }}
+                          >
+                            <CaretRightOutlined />
+                          </button>
+                        ) : null}
+                        <span
+                          className={styles.browseTitleText}
+                          data-browse-table-detail=""
+                          role={browseBulkPick ? "link" : undefined}
+                          tabIndex={browseBulkPick ? 0 : undefined}
+                          onClick={
+                            browseBulkPick
+                              ? (e) => {
+                                  e.stopPropagation();
+                                  nav(`/detail/${r.id}`);
+                                }
+                              : undefined
+                          }
+                          onKeyDown={
+                            browseBulkPick
+                              ? (e) => {
+                                  if (e.key === "Enter" || e.key === " ") {
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    nav(`/detail/${r.id}`);
+                                  }
+                                }
+                              : undefined
+                          }
                         >
-                          <CaretRightOutlined />
-                        </button>
-                        <span className={styles.browseTitleText}>{renderTableCell(r, spec.key)}</span>
+                          {renderTableCell(r, spec.key)}
+                        </span>
                       </div>
                     ) : (
                       <div key={spec.key} className={styles.browseTd}>
@@ -592,30 +630,32 @@ export default function BrowsePage() {
                     )
                   )}
                   <div className={styles.browseTdActions}>
-                    <Dropdown
-                      menu={{
-                        items: [
-                          { key: "play", label: "播放" },
-                          { key: "detail", label: "详情" },
-                        ],
-                        onClick: ({ key }) => {
-                          if (key === "play") nav(`/player/${r.id}`);
-                          if (key === "detail") nav(`/detail/${r.id}`);
-                        },
-                      }}
-                      trigger={["click"]}
-                      placement="bottomRight"
-                    >
-                      <Button
-                        type="text"
-                        size="small"
-                        data-browse-table-action
-                        className={styles.browseRowMoreBtn}
-                        icon={<EllipsisOutlined rotate={90} />}
-                        aria-label="更多"
-                        onClick={(e) => e.stopPropagation()}
-                      />
-                    </Dropdown>
+                    {!browseBulkPick ? (
+                      <Dropdown
+                        menu={{
+                          items: [
+                            { key: "play", label: "播放" },
+                            { key: "detail", label: "详情" },
+                          ],
+                          onClick: ({ key }) => {
+                            if (key === "play") nav(`/player/${r.id}`);
+                            if (key === "detail") nav(`/detail/${r.id}`);
+                          },
+                        }}
+                        trigger={["click"]}
+                        placement="bottomRight"
+                      >
+                        <Button
+                          type="text"
+                          size="small"
+                          data-browse-table-action
+                          className={styles.browseRowMoreBtn}
+                          icon={<EllipsisOutlined rotate={90} />}
+                          aria-label="更多"
+                          onClick={(e) => e.stopPropagation()}
+                        />
+                      </Dropdown>
+                    ) : null}
                   </div>
                 </div>
               );
@@ -643,6 +683,7 @@ export default function BrowsePage() {
                 key={r.id}
                 className={styles.listRow}
                 data-selected={isListSelected ? "" : undefined}
+                data-bulk-pick={browseBulkPick ? "" : undefined}
               >
                 <div className={styles.listSelectSlot}>
                   <button
@@ -655,22 +696,44 @@ export default function BrowsePage() {
                       e.stopPropagation();
                       toggleBrowseSelect(r.id);
                     }}
-                  />
+                  >
+                    {isListSelected ? <CheckOutlined /> : null}
+                  </button>
                 </div>
                 <div
                   className={styles.listRowMain}
                   tabIndex={0}
-                  aria-label={`${r.title || "未命名"}，查看详情`}
-                  onClick={() => nav(`/detail/${r.id}`)}
+                  aria-label={
+                    browseBulkPick
+                      ? `${r.title || "未命名"}，Enter 切换选择，标题可打开详情`
+                      : `${r.title || "未命名"}，查看详情`
+                  }
+                  onClick={() => {
+                    if (!browseBulkPick) nav(`/detail/${r.id}`);
+                  }}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" || e.key === " ") {
                       e.preventDefault();
-                      nav(`/detail/${r.id}`);
+                      if (browseBulkPick) toggleBrowseSelect(r.id);
+                      else nav(`/detail/${r.id}`);
                     }
                   }}
                 >
-                  <div className={styles.listPosterBlock}>
-                    <div className={styles.listPosterInner}>
+                  <div
+                    className={styles.listPosterBlock}
+                    onClick={
+                      browseBulkPick
+                        ? (e) => {
+                            e.stopPropagation();
+                            toggleBrowseSelect(r.id);
+                          }
+                        : undefined
+                    }
+                  >
+                    <div
+                      className={styles.listPosterInner}
+                      data-selected={isListSelected ? "" : undefined}
+                    >
                       <img
                         className={styles.listPosterImg}
                         src={mediaPosterSrc(r)}
@@ -681,53 +744,61 @@ export default function BrowsePage() {
                           e.currentTarget.style.display = "none";
                         }}
                       />
-                      <button
-                        type="button"
-                        className={styles.listPlayOverlay}
-                        aria-label="播放"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          nav(`/player/${r.id}`);
-                        }}
-                      >
-                        <span className={styles.listPlayCircle}>
-                          <CaretRightOutlined />
-                        </span>
-                      </button>
+                      {!browseBulkPick ? (
+                        <button
+                          type="button"
+                          className={styles.listPlayOverlay}
+                          aria-label="播放"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            nav(`/player/${r.id}`);
+                          }}
+                        >
+                          <span className={styles.listPlayCircle}>
+                            <CaretRightOutlined />
+                          </span>
+                        </button>
+                      ) : null}
                     </div>
                   </div>
-                  <div className={styles.listInfo}>
+                  <div
+                    className={styles.listInfo}
+                    onClick={browseBulkPick ? () => nav(`/detail/${r.id}`) : undefined}
+                    style={browseBulkPick ? { cursor: "pointer" } : undefined}
+                  >
                     <div className={styles.listTitle}>{r.title || "未命名"}</div>
                     <div className={styles.listMeta}>
                       {displayYear(r)} · {fmtDurationZh(r.duration)}
                     </div>
                   </div>
                 </div>
-                <div className={styles.listMoreSlot}>
-                  <Dropdown
-                    menu={{
-                      items: [
-                        { key: "play", label: "播放" },
-                        { key: "detail", label: "详情" },
-                      ],
-                      onClick: ({ key }) => {
-                        if (key === "play") nav(`/player/${r.id}`);
-                        if (key === "detail") nav(`/detail/${r.id}`);
-                      },
-                    }}
-                    trigger={["click"]}
-                    placement="bottomRight"
-                  >
-                    <Button
-                      type="text"
-                      size="small"
-                      className={styles.listMoreBtn}
-                      icon={<EllipsisOutlined rotate={90} />}
-                      aria-label="更多"
-                      onClick={(e) => e.stopPropagation()}
-                    />
-                  </Dropdown>
-                </div>
+                {!browseBulkPick ? (
+                  <div className={styles.listMoreSlot}>
+                    <Dropdown
+                      menu={{
+                        items: [
+                          { key: "play", label: "播放" },
+                          { key: "detail", label: "详情" },
+                        ],
+                        onClick: ({ key }) => {
+                          if (key === "play") nav(`/player/${r.id}`);
+                          if (key === "detail") nav(`/detail/${r.id}`);
+                        },
+                      }}
+                      trigger={["click"]}
+                      placement="bottomRight"
+                    >
+                      <Button
+                        type="text"
+                        size="small"
+                        className={styles.listMoreBtn}
+                        icon={<EllipsisOutlined rotate={90} />}
+                        aria-label="更多"
+                        onClick={(e) => e.stopPropagation()}
+                      />
+                    </Dropdown>
+                  </div>
+                ) : null}
               </div>
             );
           })}
@@ -742,16 +813,26 @@ export default function BrowsePage() {
                 <div
                   className={coverClass}
                   data-selected={isCardSelected ? "" : undefined}
+                  data-bulk-pick={browseBulkPick ? "" : undefined}
                   tabIndex={0}
-                  aria-label={`${r.title || "未命名"}，查看详情`}
+                  aria-label={
+                    browseBulkPick
+                      ? `${r.title || "未命名"}，点击海报切换选择`
+                      : `${r.title || "未命名"}，查看详情`
+                  }
                   onClick={(e) => {
                     if ((e.target as HTMLElement).closest("[data-browse-card-action]")) return;
+                    if (browseBulkPick) {
+                      toggleBrowseSelect(r.id);
+                      return;
+                    }
                     nav(`/detail/${r.id}`);
                   }}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" || e.key === " ") {
                       e.preventDefault();
-                      nav(`/detail/${r.id}`);
+                      if (browseBulkPick) toggleBrowseSelect(r.id);
+                      else nav(`/detail/${r.id}`);
                     }
                   }}
                 >
@@ -772,56 +853,60 @@ export default function BrowsePage() {
                       ev.currentTarget.parentElement?.removeAttribute("data-cover-loaded");
                     }}
                   />
-                  <div className={styles.gridHoverShade}>
-                    <button
-                      type="button"
-                      data-browse-card-action
-                      className={`${styles.gridCornerBtn} ${styles.gridEditBtn}`}
-                      aria-label="编辑"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        nav(`/detail/${r.id}`);
-                      }}
-                    >
-                      <EditOutlined />
-                    </button>
-                    <button
-                      type="button"
-                      data-browse-card-action
-                      className={styles.gridPlayBtn}
-                      aria-label="播放"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        nav(`/player/${r.id}`);
-                      }}
-                    >
-                      <CaretRightOutlined />
-                    </button>
-                    <div className={styles.gridMoreCorner} data-browse-card-action>
-                      <Dropdown
-                        menu={{
-                          items: [
-                            { key: "play", label: "播放" },
-                            { key: "detail", label: "详情" },
-                          ],
-                          onClick: ({ key }) => {
-                            if (key === "play") nav(`/player/${r.id}`);
-                            if (key === "detail") nav(`/detail/${r.id}`);
-                          },
-                        }}
-                        trigger={["click"]}
-                        placement="bottomRight"
-                      >
-                        <Button
-                          type="text"
-                          size="small"
-                          className={styles.gridMoreIconBtn}
-                          icon={<EllipsisOutlined rotate={90} />}
-                          aria-label="更多"
-                          onClick={(e) => e.stopPropagation()}
-                        />
-                      </Dropdown>
-                    </div>
+                  <div className={styles.gridHoverShade} aria-hidden={browseBulkPick ? true : undefined}>
+                    {!browseBulkPick ? (
+                      <>
+                        <button
+                          type="button"
+                          data-browse-card-action
+                          className={`${styles.gridCornerBtn} ${styles.gridEditBtn}`}
+                          aria-label="编辑"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            nav(`/detail/${r.id}`);
+                          }}
+                        >
+                          <EditOutlined />
+                        </button>
+                        <button
+                          type="button"
+                          data-browse-card-action
+                          className={styles.gridPlayBtn}
+                          aria-label="播放"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            nav(`/player/${r.id}`);
+                          }}
+                        >
+                          <CaretRightOutlined />
+                        </button>
+                        <div className={styles.gridMoreCorner} data-browse-card-action>
+                          <Dropdown
+                            menu={{
+                              items: [
+                                { key: "play", label: "播放" },
+                                { key: "detail", label: "详情" },
+                              ],
+                              onClick: ({ key }) => {
+                                if (key === "play") nav(`/player/${r.id}`);
+                                if (key === "detail") nav(`/detail/${r.id}`);
+                              },
+                            }}
+                            trigger={["click"]}
+                            placement="bottomRight"
+                          >
+                            <Button
+                              type="text"
+                              size="small"
+                              className={styles.gridMoreIconBtn}
+                              icon={<EllipsisOutlined rotate={90} />}
+                              aria-label="更多"
+                              onClick={(e) => e.stopPropagation()}
+                            />
+                          </Dropdown>
+                        </div>
+                      </>
+                    ) : null}
                   </div>
                   <button
                     type="button"
@@ -834,9 +919,15 @@ export default function BrowsePage() {
                       e.stopPropagation();
                       toggleBrowseSelect(r.id);
                     }}
-                  />
+                  >
+                    {isCardSelected ? <CheckOutlined /> : null}
+                  </button>
                 </div>
-                <div className={styles.cardBody}>
+                <div
+                  className={styles.cardBody}
+                  onClick={browseBulkPick ? () => nav(`/detail/${r.id}`) : undefined}
+                  style={browseBulkPick ? { cursor: "pointer" } : undefined}
+                >
                   <div className={styles.cardTitle}>{r.title || "未命名"}</div>
                 </div>
               </div>
