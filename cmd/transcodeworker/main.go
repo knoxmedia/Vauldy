@@ -113,9 +113,12 @@ func NewTranscodeWorker(cfg *Config) *TranscodeWorker {
 func (w *TranscodeWorker) Start() {
 	ctx := context.Background()
 
-	w.logger.Info("Transcode worker started", zap.String("worker_id", w.workerID))
+	w.logger.Info("Transcode worker started",
+		zap.String("worker_id", w.workerID),
+		zap.Int("max_concurrent", cap(w.semaphore)),
+	)
 
-	// 轮询多个优先级队列
+	// 优先级从高到低；只有当某档无任务时才落到下一档。
 	queues := []string{
 		"transcode:queue:high",
 		"transcode:queue:normal",
@@ -123,30 +126,55 @@ func (w *TranscodeWorker) Start() {
 	}
 
 	for {
+		// 关键修复：先占用一个 slot 再去拉任务。这避免「pop 出 low priority 任务 → 进 in-memory FIFO →
+		// 把 high priority 用户请求挡在身后」的优先级反转。
+		w.semaphore <- struct{}{}
+
+		var task *models.TranscodeTask
 		for _, queue := range queues {
-			// 从队列中获取任务
-			result, err := w.redis.ZPopMin(ctx, queue, 1).Result()
-			if err != nil || len(result) == 0 {
+			res, err := w.redis.ZPopMin(ctx, queue, 1).Result()
+			if err != nil || len(res) == 0 {
 				continue
 			}
-
-			taskData := []byte(result[0].Member.(string))
-			var task models.TranscodeTask
-			if err := json.Unmarshal(taskData, &task); err != nil {
-				w.logger.Error("Failed to parse task", zap.Error(err))
+			taskData, ok := res[0].Member.(string)
+			if !ok {
+				w.logger.Error("Unexpected member type", zap.String("queue", queue))
 				continue
 			}
-
-			// 异步处理
-			go func() {
-				w.semaphore <- struct{}{}
-				defer func() { <-w.semaphore }()
-
-				w.processTranscodeTask(&task)
-			}()
+			var t models.TranscodeTask
+			if err := json.Unmarshal([]byte(taskData), &t); err != nil {
+				w.logger.Error("Failed to parse task",
+					zap.String("queue", queue), zap.Error(err))
+				continue
+			}
+			task = &t
+			break
 		}
 
-		time.Sleep(100 * time.Millisecond)
+		if task == nil {
+			// 三档全空：释放 slot 并退避一会儿，避免 100% 空转 CPU。
+			<-w.semaphore
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+
+		// 关键修复：goroutine 内捕获 task 的值副本，否则 loop 后续迭代覆盖 task 指针会让
+		// 该 goroutine 执行错误的 fileID / segmentID（典型 Go 闭包陷阱）。
+		t := *task
+		go func(t models.TranscodeTask) {
+			defer func() { <-w.semaphore }()
+			defer func() {
+				if r := recover(); r != nil {
+					w.logger.Error("transcode task panic",
+						zap.Any("recover", r),
+						zap.String("file_id", t.FileID),
+						zap.Int("segment_id", t.SegmentID),
+					)
+					w.updateSegmentStatus(t.FileID, t.SegmentID, t.Bitrate, "failed")
+				}
+			}()
+			w.processTranscodeTask(&t)
+		}(t)
 	}
 }
 
@@ -260,7 +288,9 @@ func (w *TranscodeWorker) processTranscodeTask(task *models.TranscodeTask) {
 		zap.Int("size", len(data)),
 	)
 
-	// 10. 预取后续切片（如果是从高优先级队列处理的）
+	// 10. 预取后续切片（仅当 lookahead 节流允许）。每完成一段再往后追 2 段，单清晰度模式下足够。
+	//     原本固定追 5 段会与 sliceworker 的 EnqueueInitialSegments 叠加，让低优先级队列堵成
+	//     高优先级队列的搬运瓶颈。
 	if task.Priority == 0 {
 		w.prefetchNextSegments(task.FileID, task.SegmentID, task.Bitrate)
 	}
@@ -633,7 +663,8 @@ func (w *TranscodeWorker) prefetchNextSegments(fileID string, currentSegID int, 
 	// Jellyfin/Emby 风格：仅当客户端最近请求段在 currentSegID 附近时才继续预取，
 	// 否则停止预取避免远超前于播放头浪费 CPU/GPU。
 	maxAhead := lookaheadLimit()
-	for i := 1; i <= 5; i++ {
+	// 仅追 2 段：客户端按顺序拉，到达第 N+2 段时再触发下一次链式追档。
+	for i := 1; i <= 2; i++ {
 		segID := currentSegID + i
 
 		tsPath := fmt.Sprintf("ts/video/%s/%s/%d.ts", fileID, bitrate, segID)

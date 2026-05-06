@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -125,7 +126,7 @@ func main() {
 		StoragePath:   instantStorage,
 		FFmpegPath:    cfg.FFmpeg.FFmpegPath,
 		WorkerID:      "embedded-transcode",
-		MaxConcurrent: 2,
+		MaxConcurrent: instantMaxConcurrent(),
 	})
 	go instantSliceWorker.Start()
 	go instantTranscodeWorker.Start()
@@ -196,6 +197,25 @@ func seedUsers(db *sql.DB) error {
 }
 
 // resolveConfigPath finds config.yml when cwd is the repo root (e.g. VS Code debug) or media/.
+// instantMaxConcurrent picks how many ffmpeg children the embedded JIT transcode worker may run
+// in parallel. Default = max(2, NumCPU/2) so single-quality user requests never sit behind
+// prefetch tasks. Override with KNOX_MEDIA_JIT_MAX_CONCURRENT.
+func instantMaxConcurrent() int {
+	if v := strings.TrimSpace(os.Getenv("KNOX_MEDIA_JIT_MAX_CONCURRENT")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	n := runtime.NumCPU() / 2
+	if n < 2 {
+		n = 2
+	}
+	if n > 8 {
+		n = 8
+	}
+	return n
+}
+
 func resolveConfigPath() string {
 	if p := os.Getenv("KNOX_MEDIA_CONFIG"); p != "" {
 		return p

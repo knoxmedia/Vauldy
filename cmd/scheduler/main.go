@@ -752,8 +752,29 @@ func (s *Scheduler) handleVideoSegment(c *gin.Context) {
 		}
 	}
 
-	if err := s.waitForSegment(fileID, segID, bitrate, 15*time.Second); err != nil {
-		c.JSON(504, gin.H{"error": "Transcode timeout"})
+	// 首段（segID 较小或 seek 后的第一段）放宽到 60s：cold disk + ffprobe MOOV box +
+	// 软编都可能让首帧延迟到几十秒。后续段已通过 prefetch 预热，等待时间通常 <5s。
+	waitTimeout := 30 * time.Second
+	if segID == 0 || s.sessionSeekBoostActive(sessionID) {
+		waitTimeout = 60 * time.Second
+	}
+	if err := s.waitForSegment(fileID, segID, bitrate, waitTimeout); err != nil {
+		// 把当前 segment 状态回到诊断里，方便定位（transcoding=worker 没出片；
+		// failed=worker 早已报错；空=任务还没入队/被吞掉）。
+		st := s.getSegmentStatus(fileID, segID, bitrate)
+		s.logger.Warn("segment wait timeout",
+			zap.String("file_id", fileID),
+			zap.Int("segment_id", segID),
+			zap.String("bitrate", bitrate),
+			zap.String("status", st),
+			zap.Duration("waited", waitTimeout),
+		)
+		c.JSON(504, gin.H{
+			"error":           "Transcode timeout",
+			"segment_status":  st,
+			"segment_id":      segID,
+			"waited_seconds":  int(waitTimeout.Seconds()),
+		})
 		return
 	}
 

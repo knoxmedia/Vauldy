@@ -390,7 +390,9 @@ func (w *SliceWorker) processSliceTask(task *models.SliceTask) {
 	)
 
 	// 5. 当只触发了一个分片时入预热队列；prefetch 仍按 segment id 顺序。
-	if err := preheat.EnqueueInitialSegments(context.Background(), w.redis, task.FileID, len(index.VideoSegments)); err != nil {
+	// 单清晰度模式下默认预热 720p（最常被选中）。具体档位由 profile.Pick 决定，
+	// 但 sliceworker 拿不到那个上下文；用 720p 作为兜底，落差时刚好能命中或快速重转。
+	if err := preheat.EnqueueInitialSegments(context.Background(), w.redis, task.FileID, len(index.VideoSegments), "2000k"); err != nil {
 		logger.Warn("JIT preheat enqueue failed", zap.Error(err))
 	}
 
