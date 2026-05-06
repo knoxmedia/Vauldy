@@ -160,6 +160,15 @@ func (h *Handler) PlaybackEnd(c *gin.Context) {
 			_ = h.touchPlayProgressOnEnd(uid, fileID)
 		}
 	}
+
+	// 通知 JIT 调度器结束会话以便立即停止转码进程，避免 35s TTL 自然过期带来的资源浪费
+	if h.Instant != nil {
+		sessionID := strings.TrimSpace(c.GetHeader("X-Session-ID"))
+		if sessionID == "" {
+			sessionID = c.ClientIP() + "-" + c.Request.UserAgent()
+		}
+		h.Instant.EndSession(sessionID)
+	}
 	pos := int64(0)
 	if body.Position != nil && *body.Position > 0 {
 		pos = *body.Position
@@ -293,9 +302,13 @@ func (h *Handler) HLSInfo(c *gin.Context) {
 			}(fileID.String, sessionID)
 			jitPauseURL := base + "/api/v1/jit/session/pause"
 			jitResumeURL := base + "/api/v1/jit/session/resume"
+			jitEndURL := base + "/api/v1/jit/session/end"
+			jitSeekURL := base + "/api/v1/jit/session/seek"
 			if accessToken != "" {
 				jitPauseURL = appendQueryValue(jitPauseURL, "access_token", accessToken)
 				jitResumeURL = appendQueryValue(jitResumeURL, "access_token", accessToken)
+				jitEndURL = appendQueryValue(jitEndURL, "access_token", accessToken)
+				jitSeekURL = appendQueryValue(jitSeekURL, "access_token", accessToken)
 			}
 			c.JSON(http.StatusOK, gin.H{
 				"mode":                   "jit_hls",
@@ -306,6 +319,8 @@ func (h *Handler) HLSInfo(c *gin.Context) {
 				"client_caps":            caps,
 				"jit_session_pause_url":  jitPauseURL,
 				"jit_session_resume_url": jitResumeURL,
+				"jit_session_end_url":    jitEndURL,
+				"jit_session_seek_url":   jitSeekURL,
 				"message":                "JIT transcoding pipeline (per-segment on demand)",
 			})
 			return
