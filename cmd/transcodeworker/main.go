@@ -2,14 +2,17 @@
 package transcodeworker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-redis/redis/v8"
@@ -68,22 +71,79 @@ func (s *LocalStorage) GetSegmentPath(fileID string, segID int, segmentType stri
 }
 
 func (s *LocalStorage) SaveSegment(fileID string, segID int, segmentType string, data []byte) error {
-	outputDir := filepath.Join(s.basePath, segmentType, fileID)
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
+	// Layout must match scheduler handleVideoSegment / LoadSegment:
+	//   <base>/ts/video/<fileID>/<bitrate>/<seg>.ts
+	bitrate := strings.TrimPrefix(segmentType, "ts/video/")
+	if bitrate == segmentType || bitrate == "" {
+		return fmt.Errorf("SaveSegment: expected segmentType ts/video/<bitrate>, got %q", segmentType)
+	}
+	outputDir := filepath.Join(s.basePath, "ts", "video", fileID, bitrate)
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		return err
 	}
 	outputPath := filepath.Join(outputDir, fmt.Sprintf("%d.ts", segID))
-	return os.WriteFile(outputPath, data, 0644)
+	return os.WriteFile(outputPath, data, 0o644)
 }
 
 type TranscodeWorker struct {
-	redis     *redis.Client
-	storage   Storage
-	ffmpeg    string
-	logger    *zap.Logger
-	workerID  string
-	semaphore chan struct{}
-	hwEncoder hwenc.ID
+	redis       *redis.Client
+	storage     Storage
+	ffmpeg      string
+	logger      *zap.Logger
+	workerID    string
+	semaphore   chan struct{}
+	hwEncoder   hwenc.ID
+	ffmpegLogMu sync.Mutex // serializes ffmpeg console lines from concurrent tasks
+}
+
+// linePrefixWriter buffers subprocess output and emits whole lines prefixed for readability.
+type linePrefixWriter struct {
+	mu     *sync.Mutex
+	out    io.Writer
+	prefix string
+	buf    bytes.Buffer
+}
+
+func (w *linePrefixWriter) Write(p []byte) (n int, err error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	n = len(p)
+	w.buf.Write(p)
+	for {
+		b := w.buf.Bytes()
+		idx := bytes.IndexByte(b, '\n')
+		if idx < 0 {
+			break
+		}
+		line := append([]byte(nil), b[:idx+1]...)
+		w.buf.Next(idx + 1)
+		w.mu.Lock()
+		_, werr := w.out.Write(append([]byte(w.prefix), line...))
+		w.mu.Unlock()
+		if werr != nil {
+			return n, werr
+		}
+	}
+	return n, nil
+}
+
+func (w *linePrefixWriter) flush() error {
+	b := w.buf.Bytes()
+	if len(b) == 0 {
+		return nil
+	}
+	w.buf.Reset()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if _, err := fmt.Fprintf(w.out, "%s%s", w.prefix, b); err != nil {
+		return err
+	}
+	if !bytes.HasSuffix(b, []byte{'\n'}) {
+		_, err := w.out.Write([]byte{'\n'})
+		return err
+	}
+	return nil
 }
 
 func NewTranscodeWorker(cfg *Config) *TranscodeWorker {
@@ -243,8 +303,23 @@ func (w *TranscodeWorker) processTranscodeTask(task *models.TranscodeTask) {
 	// 6. 执行转码
 	outputPath := filepath.Join(w.storage.BasePath(), "tmp",
 		fmt.Sprintf("%s_%d_%s.ts", task.FileID, task.SegmentID, task.Bitrate))
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
+		logger.Error("Failed to create transcode tmp dir", zap.Error(err), zap.String("dir", filepath.Dir(outputPath)))
+		w.updateSegmentStatus(task.FileID, task.SegmentID, task.Bitrate, "failed")
+		return
+	}
 
-	cmd := exec.Command(w.ffmpeg, w.buildTranscodeArgs(inputPath, outputPath, task, ssSec, durSec)...)
+	transcodeArgs := w.buildTranscodeArgs(inputPath, outputPath, task, ssSec, durSec)
+	logger.Info("ffmpeg transcode args", zap.String("args", strings.Join(transcodeArgs, " ")))
+
+	logPrefix := fmt.Sprintf("[transcode file=%s seg=%d br=%s session=%s] ",
+		task.FileID, task.SegmentID, task.Bitrate, task.SessionID)
+	outLog := &linePrefixWriter{mu: &w.ffmpegLogMu, out: os.Stdout, prefix: logPrefix}
+	errLog := &linePrefixWriter{mu: &w.ffmpegLogMu, out: os.Stderr, prefix: logPrefix}
+
+	cmd := exec.Command(w.ffmpeg, transcodeArgs...)
+	cmd.Stdout = outLog
+	cmd.Stderr = errLog
 
 	if err := cmd.Start(); err != nil {
 		logger.Error("Transcode start failed", zap.Error(err))
@@ -257,6 +332,8 @@ func (w *TranscodeWorker) processTranscodeTask(task *models.TranscodeTask) {
 	}
 	err = cmd.Wait()
 	close(done)
+	_ = outLog.flush()
+	_ = errLog.flush()
 	if err != nil {
 		logger.Error("Transcode failed", zap.Error(err))
 		w.updateSegmentStatus(task.FileID, task.SegmentID, task.Bitrate, "failed")

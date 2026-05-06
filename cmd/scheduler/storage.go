@@ -56,6 +56,16 @@ func (s *LocalStorage) GetSegmentPath(fileID string, segID int, segmentType stri
 }
 
 func (s *LocalStorage) SaveSegment(fileID string, segID int, segmentType string, data []byte) error {
+	// JIT video: <base>/ts/video/<fileID>/<bitrate>/<seg>.ts (same as handleVideoSegment, LoadSegment)
+	if strings.HasPrefix(segmentType, "ts/video/") {
+		br := strings.TrimPrefix(segmentType, "ts/video/")
+		targetDir := filepath.Join(s.basePath, "ts", "video", fileID, br)
+		if err := os.MkdirAll(targetDir, 0o755); err != nil {
+			return err
+		}
+		targetPath := filepath.Join(targetDir, fmt.Sprintf("%d.ts", segID))
+		return os.WriteFile(targetPath, data, 0o644)
+	}
 	targetDir := filepath.Join(s.basePath, segmentType, fileID)
 	if err := os.MkdirAll(targetDir, 0o755); err != nil {
 		return err

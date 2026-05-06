@@ -32,9 +32,9 @@ func DetectH264Encoder(ffmpegPath string) ID {
 		id     ID
 		skip   func() bool
 	}{
+		{" h264_nvenc", H264NVENC, nil},
 		{" h264_qsv", H264QSV, nil},
 		{" h264_amf", H264AMF, nil},
-		{" h264_nvenc", H264NVENC, nil},
 		{" h264_vaapi", H264VAAPI, func() bool {
 			return runtime.GOOS == "linux" && !vaapiRenderNodeOK()
 		}},
