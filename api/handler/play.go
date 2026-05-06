@@ -196,8 +196,8 @@ func (h *Handler) HLSInfo(c *gin.Context) {
 		return
 	}
 	var fileID, filePath, metaJSON sql.NullString
-	var srcHeight sql.NullInt64
-	if err := h.App.DB.QueryRow(`SELECT file_id, file_path, meta_json, height FROM media WHERE id = ?`, id).Scan(&fileID, &filePath, &metaJSON, &srcHeight); err != nil {
+	var srcHeight, srcWidth, srcDuration sql.NullInt64
+	if err := h.App.DB.QueryRow(`SELECT file_id, file_path, meta_json, height, width, duration FROM media WHERE id = ?`, id).Scan(&fileID, &filePath, &metaJSON, &srcHeight, &srcWidth, &srcDuration); err != nil {
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 			return
@@ -297,6 +297,7 @@ func (h *Handler) HLSInfo(c *gin.Context) {
 			sessionID = c.ClientIP() + "-" + c.Request.UserAgent()
 		}
 		if err := h.Instant.PrepareVideoMeta(fileID.String, filePath.String, media.Container, media.Video, media.Audio); err == nil {
+			h.Instant.PrepareVideoMetaExt(fileID.String, int(srcWidth.Int64), int(srcHeight.Int64), float64(srcDuration.Int64))
 			go func(fid, sid string) {
 				_ = h.Instant.TriggerSlicing(fid, sid)
 			}(fileID.String, sessionID)

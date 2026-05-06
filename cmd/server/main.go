@@ -113,11 +113,12 @@ func main() {
 		scheduler.NewLocalStorage(instantStorage),
 	)
 	instantSliceWorker := sliceworker.NewSliceWorker(&sliceworker.Config{
-		RedisAddr:   redisAddr,
-		StoragePath: instantStorage,
-		FFmpegPath:  cfg.FFmpeg.FFmpegPath,
-		FFprobePath: cfg.FFmpeg.FFprobePath,
-		WorkerID:    "embedded-slice",
+		RedisAddr:         redisAddr,
+		StoragePath:       instantStorage,
+		FFmpegPath:        cfg.FFmpeg.FFmpegPath,
+		FFprobePath:       cfg.FFmpeg.FFprobePath,
+		WorkerID:          "embedded-slice",
+		KeyframesCacheDir: filepath.Join(instantStorage, "keyframes"),
 	})
 	instantTranscodeWorker := transcodeworker.NewTranscodeWorker(&transcodeworker.Config{
 		RedisAddr:     redisAddr,

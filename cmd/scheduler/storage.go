@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	models "knox-media/internal/model"
 )
@@ -71,4 +72,28 @@ func (s *LocalStorage) LoadSegment(fileID string, segID int, segmentType string,
 		p = filepath.Join(s.basePath, "ts", "video", fileID, variant, fmt.Sprintf("%d.ts", segID))
 	}
 	return os.ReadFile(p)
+}
+
+// CleanupFile 删除该 fileID 下的全部即时转码产物：
+//   - <base>/ts/video/<fileID>/...     转码后的 .ts 切片
+//   - <base>/raw/audio/<fileID>/...    旧路径预切音频（兼容）
+//   - <base>/raw/video/<fileID>/...    旧路径 MKV 切片（兼容）
+//
+// 不影响别的 fileID，也不影响关键帧缓存。在 EndSession 中无活跃会话时调用。
+func (s *LocalStorage) CleanupFile(fileID string) error {
+	if s == nil || strings.TrimSpace(fileID) == "" {
+		return nil
+	}
+	dirs := []string{
+		filepath.Join(s.basePath, "ts", "video", fileID),
+		filepath.Join(s.basePath, "raw", "audio", fileID),
+		filepath.Join(s.basePath, "raw", "video", fileID),
+	}
+	var firstErr error
+	for _, d := range dirs {
+		if err := os.RemoveAll(d); err != nil && !os.IsNotExist(err) && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }

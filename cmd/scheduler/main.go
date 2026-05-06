@@ -16,6 +16,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
 	"go.uber.org/zap"
+
+	"knox-media/internal/jit/profile"
 	models "knox-media/internal/model"
 )
 
@@ -83,6 +85,29 @@ func (s *Scheduler) PrepareVideoMeta(fileID, filePath, format, videoCodec, audio
 	).Err()
 }
 
+// PrepareVideoMetaExt 同步 width/height/duration 等附加字段，便于 master playlist 无需等待切片即可
+// 选定单清晰度档位。重复键以最新值覆盖。
+func (s *Scheduler) PrepareVideoMetaExt(fileID string, width, height int, duration float64) {
+	if s == nil || s.redis == nil || strings.TrimSpace(fileID) == "" {
+		return
+	}
+	ctx := context.Background()
+	args := []interface{}{}
+	if width > 0 {
+		args = append(args, "width", width)
+	}
+	if height > 0 {
+		args = append(args, "height", height)
+	}
+	if duration > 0 {
+		args = append(args, "duration", duration)
+	}
+	if len(args) == 0 {
+		return
+	}
+	_ = s.redis.HSet(ctx, "video:meta:"+fileID, args...).Err()
+}
+
 func (s *Scheduler) TriggerSlicing(fileID, sessionID string) error {
 	return s.ensureVideoSliced(fileID, sessionID)
 }
@@ -90,14 +115,122 @@ func (s *Scheduler) TriggerSlicing(fileID, sessionID string) error {
 // EndSession 删除 session:* Redis 键并清理相关辅助键。transcodeworker 在下一次心跳时检测到
 // session 不再存活后会向其 ffmpeg 子进程发 SIGKILL，从而立即释放转码资源。
 // 用户主动退出播放或客户端关闭页面时调用本方法。
+//
+// 当该会话退出后没有其他同 fileID 的活跃会话时，同步清理切片产物（ts/raw/audio/raw/video/audio）
+// 与 Redis 索引/状态键，避免长视频残留几 GB 的临时切片。
 func (s *Scheduler) EndSession(sessionID string) {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" || s == nil || s.redis == nil {
 		return
 	}
 	ctx := context.Background()
+
+	fileID, _ := s.redis.HGet(ctx, "session:"+sessionID, "file_id").Result()
+	fileID = strings.TrimSpace(fileID)
+
 	s.redis.Del(ctx, "session:"+sessionID)
 	s.redis.Del(ctx, "jit:session_seek_boost:"+sessionID)
+
+	if fileID == "" {
+		return
+	}
+	if s.fileHasOtherActiveSessions(fileID, sessionID) {
+		return
+	}
+	s.cleanupFileArtifacts(fileID)
+}
+
+// fileHasOtherActiveSessions 扫描所有 session:* 键，看是否还有别的会话观看同一 fileID。
+// 用 SCAN MATCH 防止 KEYS 阻塞 Redis；结果数通常是 1-3。
+func (s *Scheduler) fileHasOtherActiveSessions(fileID, excludeSessionID string) bool {
+	ctx := context.Background()
+	iter := s.redis.Scan(ctx, 0, "session:*", 64).Iterator()
+	excludeKey := "session:" + excludeSessionID
+	for iter.Next(ctx) {
+		key := iter.Val()
+		if key == excludeKey {
+			continue
+		}
+		fid, err := s.redis.HGet(ctx, key, "file_id").Result()
+		if err != nil {
+			continue
+		}
+		if strings.TrimSpace(fid) == fileID {
+			return true
+		}
+	}
+	return false
+}
+
+// cleanupFileArtifacts 删除该 fileID 在切片存储里的所有产物 (ts/raw/audio/raw/video) 以及
+// Redis 中的 video:index/video:meta/lock 等键。无活跃会话时调用。
+// 关键帧缓存 (cacheDir/<fileID>.json) 不删除——下次再播放复用。
+func (s *Scheduler) cleanupFileArtifacts(fileID string) {
+	if s == nil || s.storage == nil {
+		return
+	}
+	if c, ok := s.storage.(interface{ CleanupFile(string) error }); ok {
+		if err := c.CleanupFile(fileID); err != nil {
+			s.logger.Warn("cleanup file artifacts failed",
+				zap.String("file_id", fileID), zap.Error(err))
+		} else {
+			s.logger.Info("cleaned up file artifacts", zap.String("file_id", fileID))
+		}
+	}
+	ctx := context.Background()
+	s.redis.Del(ctx,
+		"video:index:"+fileID,
+		"video:meta:"+fileID,
+		"retry:slice:"+fileID,
+	)
+	// 状态键按 segment_id+bitrate 分散，使用 SCAN 清理
+	for _, prefix := range []string{
+		"segment:status:" + fileID + ":",
+		"segment:access:" + fileID + ":",
+		"transcode:stats:" + fileID + ":",
+	} {
+		iter := s.redis.Scan(ctx, 0, prefix+"*", 256).Iterator()
+		batch := make([]string, 0, 32)
+		flush := func() {
+			if len(batch) > 0 {
+				s.redis.Del(ctx, batch...)
+				batch = batch[:0]
+			}
+		}
+		for iter.Next(ctx) {
+			batch = append(batch, iter.Val())
+			if len(batch) >= 256 {
+				flush()
+			}
+		}
+		flush()
+	}
+	// 删除该 fileID 的待办 transcode 任务
+	s.dropAllTranscodeTasksForFile(fileID)
+}
+
+// dropAllTranscodeTasksForFile 同时清空 high/low 队列中属于 fileID 的待办任务。
+func (s *Scheduler) dropAllTranscodeTasksForFile(fileID string) {
+	if s == nil || s.redis == nil {
+		return
+	}
+	ctx := context.Background()
+	needle := `"file_id":"` + fileID + `"`
+	for _, q := range []string{"transcode:queue:high", "transcode:queue:low"} {
+		members, err := s.redis.ZRange(ctx, q, 0, -1).Result()
+		if err != nil {
+			continue
+		}
+		stale := make([]interface{}, 0, len(members))
+		for _, m := range members {
+			if strings.Contains(m, needle) {
+				stale = append(stale, m)
+			}
+		}
+		if len(stale) > 0 {
+			s.redis.ZRem(ctx, q, stale...)
+		}
+	}
 }
 
 // MarkSessionSeek 提升会话的 seek 状态，由播放器在拖动进度条后调用。
@@ -110,78 +243,49 @@ func (s *Scheduler) MarkSessionSeek(sessionID string) {
 }
 
 // ==================== Master Playlist ====================
+// handleMasterPlaylist 不再阻塞等待切片完成。仅需 video:meta（由 PrepareVideoMeta + PrepareVideoMetaExt 写入）
+// 即可决定 single-quality 档位并立刻返回。切片在后台并行进行；当客户端拉取 variant playlist
+// (handleVideoPlaylist) 时会等待索引 ready（最多 30s）再返回 #EXTINF 列表。
 func (s *Scheduler) handleMasterPlaylist(c *gin.Context) {
 	fileID := c.Param("fileId")
 	sessionID := s.getOrCreateSessionID(c)
 
-	// 1. 确保视频已被切片（触发切片任务）
-	if err := s.ensureVideoSliced(fileID, sessionID); err != nil {
-		ctx := context.Background()
-		metaKey := "video:meta:" + fileID
-		meta, _ := s.redis.HGetAll(ctx, metaKey).Result()
-		sliceErr := strings.TrimSpace(meta["slice_error"])
-		filePath := strings.TrimSpace(meta["file_path"])
-		metaStatus := strings.TrimSpace(meta["status"])
-
-		retryKey := "retry:slice:" + fileID
-		retryN, rerr := s.redis.Get(ctx, retryKey).Int64()
-		switch rerr {
-		case redis.Nil:
-			retryN = 0
-		case nil:
-			// ok
-		default:
-			retryN = -1
-		}
-
-		logFields := []zap.Field{
-			zap.Error(err),
-			zap.String("file_id", fileID),
-			zap.String("meta_status", metaStatus),
-		}
-		if retryN >= 0 {
-			logFields = append(logFields, zap.Int64("slice_retry_count", retryN))
-		}
-		if filePath != "" {
-			logFields = append(logFields, zap.String("file_path", filePath))
-		}
-		if sliceErr != "" {
-			logFields = append(logFields, zap.String("slice_error", sliceErr))
-		}
-		s.logger.Error("Failed to ensure video sliced", logFields...)
-
-		body := gin.H{"error": "Video processing failed: " + err.Error()}
-		if sliceErr != "" {
-			body["slice_error"] = sliceErr
-		}
-		if filePath != "" {
-			body["file_path"] = filePath
-		}
-		if metaStatus != "" {
-			body["meta_status"] = metaStatus
-		}
-		if retryN >= 0 {
-			body["slice_retry_count"] = retryN
-		}
-		if sliceErr == "" {
-			body["hint"] = "slice_error is empty in Redis. Verify file_path exists and ffprobe works; DEL " + retryKey + " to reset the retry counter after fixing the issue."
-		}
-		c.JSON(500, body)
+	ctx := context.Background()
+	meta, err := s.redis.HGetAll(ctx, "video:meta:"+fileID).Result()
+	if err != nil || len(meta) == 0 || strings.TrimSpace(meta["file_path"]) == "" {
+		c.JSON(404, gin.H{"error": "Video not prepared; call /hls?... first"})
 		return
 	}
 
-	// 2. 获取视频元数据
-	metadata, err := s.getVideoMetadata(fileID)
-	if err != nil {
-		c.JSON(404, gin.H{"error": "Video not found"})
-		return
-	}
+	// 后台触发切片（幂等：sliceworker 通过 video:meta status 字段去重）
+	go func(fid, sid string) {
+		_ = s.ensureVideoSliced(fid, sid)
+	}(fileID, sessionID)
 
-	// 3. 生成 Master Playlist（子播放列表/分片 URL 需带 access_token，否则 hls.js 请求会 401）
+	metadata := videoMetadataFromHash(fileID, meta)
+
 	content := s.generateMasterPlaylist(c, fileID, metadata)
-
+	c.Header("Cache-Control", "no-store")
 	c.Header("Content-Type", "application/vnd.apple.mpegurl")
 	c.String(200, content)
+}
+
+// videoMetadataFromHash 把 redis HGetAll 的扁平结果转成 *VideoMetadata；缺失字段保持零值。
+func videoMetadataFromHash(fileID string, h map[string]string) *models.VideoMetadata {
+	m := &models.VideoMetadata{
+		FileID:     fileID,
+		FilePath:   strings.TrimSpace(h["file_path"]),
+		Codec:      strings.TrimSpace(h["codec"]),
+		AudioCodec: strings.TrimSpace(h["audio_codec"]),
+		Format:     strings.TrimSpace(h["format"]),
+	}
+	m.Duration, _ = strconv.ParseFloat(strings.TrimSpace(h["duration"]), 64)
+	m.Width, _ = strconv.Atoi(strings.TrimSpace(h["width"]))
+	m.Height, _ = strconv.Atoi(strings.TrimSpace(h["height"]))
+	if v, err := strconv.ParseInt(strings.TrimSpace(h["size"]), 10, 64); err == nil {
+		m.Size = v
+	}
+	return m
 }
 
 // jitAccessTokenForPlaylists reads the same JWT the client used for the master request (query or Bearer).
@@ -324,6 +428,35 @@ func (s *Scheduler) startSlicingTask(fileID, sessionID string) error {
 	return nil
 }
 
+// waitForIndexReady 等待 video:meta status 进入 ready/未触发；处于 slicing 时阻塞到 timeout。
+// 与 waitForSlicingComplete 区别：本函数不需要预存 status（首次调用时会触发切片）。
+func (s *Scheduler) waitForIndexReady(fileID string, timeout time.Duration) error {
+	ctx := context.Background()
+	deadline := time.Now().Add(timeout)
+	first := true
+	for time.Now().Before(deadline) {
+		status, err := s.redis.HGet(ctx, "video:meta:"+fileID, "status").Result()
+		if err == redis.Nil || strings.TrimSpace(status) == "" {
+			if first {
+				// 触发切片
+				_ = s.ensureVideoSliced(fileID, "playlist")
+				first = false
+			}
+		} else if status == "ready" {
+			return nil
+		} else if status == "failed" {
+			detail, _ := s.redis.HGet(ctx, "video:meta:"+fileID, "slice_error").Result()
+			detail = strings.TrimSpace(detail)
+			if detail != "" {
+				return fmt.Errorf("slicing failed: %s", detail)
+			}
+			return fmt.Errorf("slicing failed")
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return fmt.Errorf("timeout")
+}
+
 func (s *Scheduler) waitForSlicingComplete(fileID string, timeout time.Duration) error {
 	ctx := context.Background()
 	deadline := time.Now().Add(timeout)
@@ -354,6 +487,12 @@ func (s *Scheduler) handleVideoPlaylist(c *gin.Context) {
 	fileID := c.Param("fileId")
 	bitrate := c.Param("bitrate")
 
+	// 客户端常常在 master 之后立刻拉 variant；如果切片正在进行，等待最多 30s（首播 fast path 通常 < 1s）。
+	if err := s.waitForIndexReady(fileID, 30*time.Second); err != nil {
+		c.JSON(404, gin.H{"error": "Video not ready: " + err.Error()})
+		return
+	}
+
 	index, err := s.getSegmentIndex(fileID)
 	if err != nil {
 		c.JSON(404, gin.H{"error": "Video not ready"})
@@ -381,6 +520,11 @@ func (s *Scheduler) handleVideoPlaylist(c *gin.Context) {
 func (s *Scheduler) handleAudioPlaylist(c *gin.Context) {
 	fileID := c.Param("fileId")
 	lang := c.Param("lang")
+
+	if err := s.waitForIndexReady(fileID, 30*time.Second); err != nil {
+		c.JSON(404, gin.H{"error": "Video not ready: " + err.Error()})
+		return
+	}
 
 	index, err := s.getSegmentIndex(fileID)
 	if err != nil {
@@ -431,8 +575,12 @@ func (s *Scheduler) handleVideoSegment(c *gin.Context) {
 		if d < 0 {
 			d = -d
 		}
-		if d >= 4 {
+		// >= 2 段跳转即认为是 seek（>=4 时之前判定过宽，对快进 / 快退响应不及时）。
+		if d >= 2 {
 			s.markSessionSeekBoost(sessionID)
+			// 清理之前位置堆积的 prefetch 任务，避免转码 worker 浪费 CPU 处理
+			// 不可能再被请求到的段。会话内仍以本次 segID 为新的播放头。
+			s.dropStaleTranscodeTasksForFile(fileID)
 		}
 	}
 
@@ -787,6 +935,31 @@ func (s *Scheduler) markSessionSeekBoost(sessionID string) {
 	s.redis.Set(ctx, key, "1", 20*time.Second)
 }
 
+// dropStaleTranscodeTasksForFile 清理 transcode:queue:low 中属于该 fileID 的低优先级（prefetch）任务。
+// 用户 seek 后旧位置附近的 prefetch 不再有意义，避免转码 worker 浪费在 CPU 上。
+// 高优先级队列保留：用户的明确请求即使被 seek 替代也快速失败/超时即可。
+func (s *Scheduler) dropStaleTranscodeTasksForFile(fileID string) {
+	if s == nil || s.redis == nil || strings.TrimSpace(fileID) == "" {
+		return
+	}
+	ctx := context.Background()
+	// ZSet 成员是 task JSON；按 fileID 子串过滤后批量 ZRem。fileID 是 UUID/file id，碰撞概率极低。
+	members, err := s.redis.ZRange(ctx, "transcode:queue:low", 0, -1).Result()
+	if err != nil {
+		return
+	}
+	needle := `"file_id":"` + fileID + `"`
+	stale := make([]interface{}, 0, len(members))
+	for _, m := range members {
+		if strings.Contains(m, needle) {
+			stale = append(stale, m)
+		}
+	}
+	if len(stale) > 0 {
+		s.redis.ZRem(ctx, "transcode:queue:low", stale...)
+	}
+}
+
 func (s *Scheduler) updateSession(sessionID, fileID, bitrate string, segID int) {
 	ctx := context.Background()
 	key := "session:" + sessionID
@@ -892,15 +1065,6 @@ func (s *Scheduler) serveSegment(c *gin.Context, path string) {
 }
 
 func (s *Scheduler) generateMasterPlaylist(c *gin.Context, fileID string, meta *models.VideoMetadata) string {
-	// 读取索引以拿到已就绪的音轨语言和实际分片时长
-	index, _ := s.getSegmentIndex(fileID)
-	languages := []string{"und"}
-	if index != nil {
-		if got := audioLanguages(index.AudioSegments); len(got) > 0 {
-			languages = got
-		}
-	}
-
 	// 客户端期望最大高度，参数与 /api/v1/media/{id}/hls 共享 max_height
 	maxClientHeight := 0
 	if v := strings.TrimSpace(c.Query("max_height")); v != "" {
@@ -908,57 +1072,31 @@ func (s *Scheduler) generateMasterPlaylist(c *gin.Context, fileID string, meta *
 			maxClientHeight = n
 		}
 	}
+
 	srcHeight := 0
-	srcCodec := ""
-	srcAudio := ""
 	if meta != nil {
 		srcHeight = meta.Height
-		srcCodec = strings.ToLower(strings.TrimSpace(meta.Codec))
-		srcAudio = strings.ToLower(strings.TrimSpace(meta.AudioCodec))
 	}
-	ladder := adaptiveLadder(srcHeight, maxClientHeight)
+	// 单清晰度策略：根据源高度、客户端能力、机器实时 CPU/GPU 负载选定唯一档位。
+	picked := profile.Pick(c.Request.Context(), s.redis, srcHeight, maxClientHeight)
 
 	var b strings.Builder
 	b.WriteString("#EXTM3U\n")
 	b.WriteString("#EXT-X-VERSION:4\n")
 	b.WriteString("#EXT-X-INDEPENDENT-SEGMENTS\n\n")
 
-	// 音轨：每种语言一条 EXT-X-MEDIA；首个标记为 DEFAULT
-	for i, lang := range languages {
-		def := "NO"
-		auto := "NO"
-		if i == 0 {
-			def = "YES"
-			auto = "YES"
-		}
-		uri := jitURLWithAccessToken(c, "/api/v1/jit/playlist/"+fileID+"/audio/"+lang)
-		name := strings.ToUpper(lang)
-		b.WriteString(fmt.Sprintf(
-			"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",LANGUAGE=\"%s\",NAME=\"%s\",DEFAULT=%s,AUTOSELECT=%s,URI=\"%s\"\n",
-			lang, name, def, auto, uri,
-		))
+	// 单一 EXT-X-STREAM-INF：音频已混流进 .ts，故无需 EXT-X-MEDIA / AUDIO 分组。
+	bw := picked.Bandwidth
+	if bw <= 0 {
+		bw = formatBitrate(picked.Bitrate)
 	}
-	b.WriteString("\n")
-
-	// 视频码率档：源高度 + 客户端 max_height 双重过滤
-	clientPrefersAAC := strings.EqualFold(srcAudio, "aac") || srcAudio == ""
-	for _, br := range ladder {
-		bw := br.Bandwidth
-		if bw <= 0 {
-			bw = formatBitrate(br.Name)
-		}
-		codecs := videoCodecsAttr(br.Passthrough, srcCodec)
-		if !clientPrefersAAC {
-			// 当源音频不是 AAC 时仍声明 mp4a.40.2，因为转码 worker 会输出 AAC
-			codecs = "avc1.640028,mp4a.40.2"
-		}
-		b.WriteString(fmt.Sprintf(
-			"#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%dx%d,CODECS=\"%s\",AUDIO=\"audio\"\n",
-			bw, br.Width, br.Height, codecs,
-		))
-		videoURI := jitURLWithAccessToken(c, fmt.Sprintf("/api/v1/jit/playlist/%s/video/%s", fileID, br.Name))
-		b.WriteString(videoURI + "\n\n")
-	}
+	codecs := "avc1.640028,mp4a.40.2"
+	b.WriteString(fmt.Sprintf(
+		"#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%dx%d,CODECS=\"%s\"\n",
+		bw, picked.Width, picked.Height, codecs,
+	))
+	videoURI := jitURLWithAccessToken(c, fmt.Sprintf("/api/v1/jit/playlist/%s/video/%s", fileID, picked.Bitrate))
+	b.WriteString(videoURI + "\n")
 
 	return b.String()
 }

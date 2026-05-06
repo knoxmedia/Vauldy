@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"knox-media/cmd/sliceworker"
@@ -30,11 +31,12 @@ func main() {
 	}
 
 	w := sliceworker.NewSliceWorker(&sliceworker.Config{
-		RedisAddr:   redisAddr,
-		StoragePath: cfg.Data.Transcode,
-		FFmpegPath:  cfg.FFmpeg.FFmpegPath,
-		FFprobePath: cfg.FFmpeg.FFprobePath,
-		WorkerID:    workerID,
+		RedisAddr:         redisAddr,
+		StoragePath:       cfg.Data.Transcode,
+		FFmpegPath:        cfg.FFmpeg.FFmpegPath,
+		FFprobePath:       cfg.FFmpeg.FFprobePath,
+		WorkerID:          workerID,
+		KeyframesCacheDir: filepath.Join(cfg.Data.Transcode, "keyframes"),
 	})
 	w.Start()
 }

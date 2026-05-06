@@ -405,6 +405,10 @@ func (w *TranscodeWorker) buildTranscodeArgs(inputPath, outputPath string, task 
 		enc = hwenc.Libx264
 	}
 
+	// 音频处理：源已经是 AAC 时直接 -c:a copy（避免重编码），否则 transcode 为 AAC 128k。
+	// 不再单独输出音频段；音视频混流到同一个 .ts 由播放器消费。
+	audioArgs := w.audioOutputArgs(task)
+
 	// Codec passthrough：当源已经是 H.264 且没有强制软编时，直接 -c:v copy 可大幅降低 CPU。
 	// 仅当请求的目标比特率不显著低于源（缩小档）时启用，否则继续走重编码以适配 ABR。
 	if !forceSW && w.canVideoPassthrough(task) {
@@ -412,65 +416,74 @@ func (w *TranscodeWorker) buildTranscodeArgs(inputPath, outputPath string, task 
 		args := w.appendStdInput(head, inputPath, ssSec, durSec)
 		args = append(args,
 			"-map", "0:v:0",
+			"-map", "0:a:0?",
 			"-c:v", "copy",
 			"-bsf:v", "h264_mp4toannexb",
-			"-f", "mpegts",
-			"-an",
-			"-muxdelay", "0",
-			outputPath,
 		)
+		args = append(args, audioArgs...)
+		args = append(args, "-f", "mpegts", "-muxdelay", "0", outputPath)
 		return args
 	}
 
 	wPx, hPx := parseResolutionWH(res)
 	gops := []string{"-g", "48", "-keyint_min", "48", "-sc_threshold", "0"}
 	head := []string{"-hide_banner", "-loglevel", "error"}
+	mapArgs := []string{"-map", "0:v:0", "-map", "0:a:0?"}
 
 	switch enc {
 	case hwenc.H264QSV:
 		vf := "scale=" + wPx + ":" + hPx + ",format=nv12"
 		args := w.appendStdInput(head, inputPath, ssSec, durSec)
+		args = append(args, mapArgs...)
 		args = append(args, "-vf", vf,
 			"-c:v", "h264_qsv",
 			"-preset", mapX264PresetToQSV(preset),
 			"-b:v", task.Bitrate, "-maxrate", task.Bitrate, "-bufsize", "2M",
 			"-profile:v", "high")
 		args = append(args, gops...)
-		return append(args, "-an", "-f", "mpegts", "-muxdelay", "0", outputPath)
+		args = append(args, audioArgs...)
+		return append(args, "-f", "mpegts", "-muxdelay", "0", outputPath)
 	case hwenc.H264AMF:
 		vf := "scale=" + wPx + ":" + hPx
 		args := w.appendStdInput(head, inputPath, ssSec, durSec)
+		args = append(args, mapArgs...)
 		args = append(args, "-vf", vf,
 			"-c:v", "h264_amf",
 			"-quality", mapX264PresetToAMF(preset),
 			"-rc", "vbr_peak",
 			"-b:v", task.Bitrate)
 		args = append(args, gops...)
-		return append(args, "-an", "-f", "mpegts", "-muxdelay", "0", outputPath)
+		args = append(args, audioArgs...)
+		return append(args, "-f", "mpegts", "-muxdelay", "0", outputPath)
 	case hwenc.H264NVENC:
 		vf := "scale=" + wPx + ":" + hPx
 		args := w.appendStdInput(head, inputPath, ssSec, durSec)
+		args = append(args, mapArgs...)
 		args = append(args, "-vf", vf,
 			"-c:v", "h264_nvenc",
 			"-preset", mapX264PresetToNVENC(preset),
 			"-b:v", task.Bitrate, "-maxrate", task.Bitrate, "-bufsize", "2M",
 			"-profile:v", "high")
 		args = append(args, gops...)
-		return append(args, "-an", "-f", "mpegts", "-muxdelay", "0", outputPath)
+		args = append(args, audioArgs...)
+		return append(args, "-f", "mpegts", "-muxdelay", "0", outputPath)
 	case hwenc.H264VAAPI:
 		dev := hwenc.VAAPIDevice()
 		vf := "format=nv12,hwupload,scale_vaapi=w=" + wPx + ":h=" + hPx
 		args := w.appendVAAPIInput(head, dev, inputPath, ssSec, durSec)
+		args = append(args, mapArgs...)
 		args = append(args, "-vf", vf,
 			"-c:v", "h264_vaapi", "-b:v", task.Bitrate)
 		args = append(args, gops...)
-		return append(args, "-an", "-f", "mpegts", "-muxdelay", "0", outputPath)
+		args = append(args, audioArgs...)
+		return append(args, "-f", "mpegts", "-muxdelay", "0", outputPath)
 	default:
 		codec := strings.TrimSpace(task.Codec)
 		if codec == "" {
 			codec = "libx264"
 		}
 		args := w.appendStdInput(head, inputPath, ssSec, durSec)
+		args = append(args, mapArgs...)
 		args = append(args,
 			"-c:v", codec,
 			"-b:v", task.Bitrate,
@@ -478,8 +491,24 @@ func (w *TranscodeWorker) buildTranscodeArgs(inputPath, outputPath string, task 
 			"-preset", preset,
 			"-profile:v", "high")
 		args = append(args, gops...)
-		return append(args, "-an", "-f", "mpegts", "-muxdelay", "0", outputPath)
+		args = append(args, audioArgs...)
+		return append(args, "-f", "mpegts", "-muxdelay", "0", outputPath)
 	}
+}
+
+// audioOutputArgs 返回 ffmpeg 音频输出参数。源 AAC 直接 stream copy；其他格式重编码为 AAC 128k。
+// 当源没有音轨时使用 -an 避免 ffmpeg 报错。
+func (w *TranscodeWorker) audioOutputArgs(task *models.TranscodeTask) []string {
+	ctx := context.Background()
+	codec, _ := w.redis.HGet(ctx, "video:meta:"+task.FileID, "audio_codec").Result()
+	codec = strings.ToLower(strings.TrimSpace(codec))
+	if codec == "" {
+		return []string{"-an"}
+	}
+	if codec == "aac" {
+		return []string{"-c:a", "copy", "-bsf:a", "aac_adtstoasc"}
+	}
+	return []string{"-c:a", "aac", "-b:a", "128k", "-ac", "2", "-ar", "48000"}
 }
 
 func (w *TranscodeWorker) monitorSession(cmd *exec.Cmd, sessionID string, finished <-chan struct{}) {
