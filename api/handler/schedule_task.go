@@ -279,6 +279,26 @@ func (h *Handler) executeScheduledTask(taskType string, payload map[string]any) 
 		libID := int64(anyToInt(payload["library_id"]))
 		done, failed := h.Subtitle.RunBatch(context.Background(), libID, limit)
 		return fmt.Sprintf("字幕处理完成：成功 %d，失败 %d", done, failed), nil
+	case "atrack_process":
+		if h.AtrackWorker == nil {
+			return "", fmt.Errorf("atrack worker disabled")
+		}
+		limit := anyToInt(payload["limit"])
+		if limit <= 0 {
+			limit = 10
+		}
+		done, failed := h.AtrackWorker.RunBatch(limit)
+		return fmt.Sprintf("音轨提取完成：成功 %d，失败 %d", done, failed), nil
+	case "keyframe_process":
+		if h.KeyframeWorker == nil {
+			return "", fmt.Errorf("keyframe worker disabled")
+		}
+		limit := anyToInt(payload["limit"])
+		if limit <= 0 {
+			limit = 10
+		}
+		done, failed := h.KeyframeWorker.RunBatch(limit)
+		return fmt.Sprintf("关键帧提取完成：成功 %d，失败 %d", done, failed), nil
 	default:
 		return "", fmt.Errorf("unsupported task_type: %s", taskType)
 	}

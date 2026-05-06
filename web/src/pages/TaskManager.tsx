@@ -25,6 +25,8 @@ import {
   cleanupSubtitleTasksBefore,
   createScheduledTask,
   deleteScheduledTask,
+  fetchAtrackTasks,
+  fetchKeyframeTasks,
   fetchLibraries,
   fetchPreviewTasks,
   fetchScheduledTasks,
@@ -33,10 +35,14 @@ import {
   fetchSubtitleTasks,
   fetchTranscodeTasks,
   resetSubtitleTask,
+  retryAudioTrackExtraction,
+  retryKeyframeExtraction,
   retryPreviewTask,
   retryTranscodeTask,
   retrySubtitleTask,
   runScheduledTask,
+  type AtrackTask,
+  type KeyframeTask,
   type Library,
   updateScheduledTask,
   type PreviewTask,
@@ -92,6 +98,14 @@ export default function TaskManagerPage() {
   const [retryingSubtitleId, setRetryingSubtitleId] = useState<number | null>(null);
   const [cleaningSubtitleFailed, setCleaningSubtitleFailed] = useState(false);
   const [cleaningSubtitleOld, setCleaningSubtitleOld] = useState(false);
+  const [atrackTasks, setAtrackTasks] = useState<AtrackTask[]>([]);
+  const [atrackLoading, setAtrackLoading] = useState(false);
+  const [atrackStatusFilter, setAtrackStatusFilter] = useState("all");
+  const [retryingAtrackId, setRetryingAtrackId] = useState<number | null>(null);
+  const [keyframeTasks, setKeyframeTasks] = useState<KeyframeTask[]>([]);
+  const [keyframeLoading, setKeyframeLoading] = useState(false);
+  const [keyframeStatusFilter, setKeyframeStatusFilter] = useState("all");
+  const [retryingKeyframeId, setRetryingKeyframeId] = useState<number | null>(null);
   const [form] = Form.useForm<ScheduledTaskForm>();
   const [editForm] = Form.useForm<ScheduledTaskForm>();
   const createTaskType = Form.useWatch("task_type", form);
@@ -162,6 +176,28 @@ export default function TaskManagerPage() {
     }
   };
 
+  const loadAtrackTasks = async (silent = false) => {
+    if (!silent) setAtrackLoading(true);
+    try {
+      setAtrackTasks(await fetchAtrackTasks(100));
+    } catch {
+      if (!silent) setAtrackTasks([]);
+    } finally {
+      if (!silent) setAtrackLoading(false);
+    }
+  };
+
+  const loadKeyframeTasks = async (silent = false) => {
+    if (!silent) setKeyframeLoading(true);
+    try {
+      setKeyframeTasks(await fetchKeyframeTasks(100));
+    } catch {
+      if (!silent) setKeyframeTasks([]);
+    } finally {
+      if (!silent) setKeyframeLoading(false);
+    }
+  };
+
   const loadLibraries = async () => {
     try {
       setLibraries(await fetchLibraries());
@@ -177,6 +213,8 @@ export default function TaskManagerPage() {
     void loadScheduled();
     void loadScanTasks();
     void loadSubtitleTasks();
+    void loadAtrackTasks();
+    void loadKeyframeTasks();
     void loadLibraries();
   }, []);
 
@@ -189,6 +227,8 @@ export default function TaskManagerPage() {
       if (activeTab === "preview") void loadPreview(true);
       if (activeTab === "scan") void loadScanTasks(true);
       if (activeTab === "subtitle") void loadSubtitleTasks(true);
+      if (activeTab === "atrack") void loadAtrackTasks(true);
+      if (activeTab === "keyframe") void loadKeyframeTasks(true);
     }, 10000);
     return () => window.clearInterval(timer);
   }, [autoRefresh, activeTab]);
@@ -240,6 +280,14 @@ export default function TaskManagerPage() {
   const filteredSubtitle = useMemo(
     () => subtitleTasks.filter((x) => (subtitleStatusFilter === "all" ? true : x.status === subtitleStatusFilter)),
     [subtitleTasks, subtitleStatusFilter]
+  );
+  const filteredAtrack = useMemo(
+    () => atrackTasks.filter((x) => (atrackStatusFilter === "all" ? true : x.status === atrackStatusFilter)),
+    [atrackTasks, atrackStatusFilter]
+  );
+  const filteredKeyframe = useMemo(
+    () => keyframeTasks.filter((x) => (keyframeStatusFilter === "all" ? true : x.status === keyframeStatusFilter)),
+    [keyframeTasks, keyframeStatusFilter]
   );
   const statusOptions = useMemo(() => {
     const commonAll = [{ value: "all", label: "全部状态" }];
@@ -398,7 +446,11 @@ export default function TaskManagerPage() {
                       ? scanStatusFilter
                       : activeTab === "subtitle"
                         ? subtitleStatusFilter
-                        : previewStatusFilter
+                        : activeTab === "atrack"
+                          ? atrackStatusFilter
+                          : activeTab === "keyframe"
+                            ? keyframeStatusFilter
+                            : previewStatusFilter
             }
             style={{ width: 140 }}
             onChange={(v) => {
@@ -408,6 +460,8 @@ export default function TaskManagerPage() {
               if (activeTab === "preview") setPreviewStatusFilter(v);
               if (activeTab === "scan") setScanStatusFilter(v);
               if (activeTab === "subtitle") setSubtitleStatusFilter(v);
+              if (activeTab === "atrack") setAtrackStatusFilter(v);
+              if (activeTab === "keyframe") setKeyframeStatusFilter(v);
             }}
             options={statusOptions}
           />
@@ -806,6 +860,101 @@ export default function TaskManagerPage() {
                         setRetryingPreview(r.media_id);
                         void retryPreviewTask(r.media_id).then(() => message.success("已触发重试")).then(loadPreview).catch(() => message.error("重试失败")).finally(() => setRetryingPreview(null));
                       }}>
+                        重试
+                      </Button>
+                    ),
+                  },
+                ]}
+              />
+            </Card>
+          ),
+        },
+        {
+          key: "atrack",
+          label: "音轨提取任务",
+          children: (
+            <Card title="音轨提取任务" extra={<Button onClick={() => void loadAtrackTasks()}>刷新</Button>}>
+              <Table
+                rowKey="media_id"
+                loading={atrackLoading}
+                dataSource={filteredAtrack}
+                pagination={{ pageSize: 10 }}
+                columns={[
+                  { title: "媒体ID", dataIndex: "media_id", width: 90 },
+                  { title: "标题", dataIndex: "title", ellipsis: true },
+                  { title: "状态", dataIndex: "status", width: 110 },
+                  { title: "输出目录", dataIndex: "output_dir", ellipsis: true, render: (v?: string) => v || "-" },
+                  { title: "错误信息", dataIndex: "error_message", ellipsis: true, render: (v?: string) => v || "-" },
+                  { title: "更新时间", dataIndex: "updated_at", width: 180 },
+                  {
+                    title: "操作",
+                    key: "actions",
+                    width: 110,
+                    render: (_: unknown, r: AtrackTask) => (
+                      <Button
+                        size="small"
+                        loading={retryingAtrackId === r.media_id}
+                        onClick={async () => {
+                          setRetryingAtrackId(r.media_id);
+                          try {
+                            await retryAudioTrackExtraction(r.media_id);
+                            message.success("已触发重试");
+                            await loadAtrackTasks();
+                          } catch {
+                            message.error("重试失败");
+                          } finally {
+                            setRetryingAtrackId(null);
+                          }
+                        }}
+                      >
+                        重试
+                      </Button>
+                    ),
+                  },
+                ]}
+              />
+            </Card>
+          ),
+        },
+        {
+          key: "keyframe",
+          label: "关键帧提取任务",
+          children: (
+            <Card title="关键帧提取任务" extra={<Button onClick={() => void loadKeyframeTasks()}>刷新</Button>}>
+              <Table
+                rowKey="media_id"
+                loading={keyframeLoading}
+                dataSource={filteredKeyframe}
+                pagination={{ pageSize: 10 }}
+                columns={[
+                  { title: "媒体ID", dataIndex: "media_id", width: 90 },
+                  { title: "标题", dataIndex: "title", ellipsis: true },
+                  { title: "状态", dataIndex: "status", width: 110 },
+                  { title: "关键帧数", dataIndex: "keyframe_count", width: 100 },
+                  { title: "输出目录", dataIndex: "output_dir", ellipsis: true, render: (v?: string) => v || "-" },
+                  { title: "错误信息", dataIndex: "error_message", ellipsis: true, render: (v?: string) => v || "-" },
+                  { title: "更新时间", dataIndex: "updated_at", width: 180 },
+                  {
+                    title: "操作",
+                    key: "actions",
+                    width: 110,
+                    render: (_: unknown, r: KeyframeTask) => (
+                      <Button
+                        size="small"
+                        loading={retryingKeyframeId === r.media_id}
+                        onClick={async () => {
+                          setRetryingKeyframeId(r.media_id);
+                          try {
+                            await retryKeyframeExtraction(r.media_id);
+                            message.success("已触发重试");
+                            await loadKeyframeTasks();
+                          } catch {
+                            message.error("重试失败");
+                          } finally {
+                            setRetryingKeyframeId(null);
+                          }
+                        }}
+                      >
                         重试
                       </Button>
                     ),

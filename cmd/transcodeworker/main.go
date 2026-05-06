@@ -605,8 +605,17 @@ func (w *TranscodeWorker) buildTranscodeArgs(inputPath, outputPath string, task 
 
 // audioOutputArgs 返回 ffmpeg 音频输出参数。源 AAC 直接 stream copy；其他格式重编码为 AAC 128k。
 // 当源没有音轨时使用 -an 避免 ffmpeg 报错。
+// 如果外部已经分离了音轨（audio_playlist 键已在 Redis 中），跳过音频编码，只输出纯视频 TS。
 func (w *TranscodeWorker) audioOutputArgs(task *models.TranscodeTask) []string {
 	ctx := context.Background()
+	// If audio has been pre-extracted as HLS, skip audio in transcode output.
+	// Check both old single-key and new multi-track key.
+	if ap, _ := w.redis.HGet(ctx, "video:meta:"+task.FileID, "audio_playlists").Result(); strings.TrimSpace(ap) != "" {
+		return []string{"-an"}
+	}
+	if ap, _ := w.redis.HGet(ctx, "video:meta:"+task.FileID, "audio_playlist").Result(); strings.TrimSpace(ap) != "" {
+		return []string{"-an"}
+	}
 	codec, _ := w.redis.HGet(ctx, "video:meta:"+task.FileID, "audio_codec").Result()
 	codec = strings.ToLower(strings.TrimSpace(codec))
 	if codec == "" {

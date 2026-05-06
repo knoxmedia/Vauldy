@@ -553,21 +553,32 @@ func (w *SliceWorker) generateSegmentIndex(fileID string, info *VideoInfo) (*mod
 		UpdatedAt:   time.Now(),
 	}
 
-	// 根据关键帧生成视频切片
+	// 根据关键帧生成视频切片。
+	// 策略：以 target=6s 为基准，在窗口内找离 endTime 最近的 keyframe（而非第一个），
+	// 同时跳过距离 currentTime 太近的 keyframe（低于 minSegment 的），避免密集 GOP 产生 1s 短段。
 	segmentDuration := 6.0
+	minSegment := 2.0
 	currentTime := 0.0
 	segID := 0
 
 	for currentTime < info.Duration {
-		// 找到下一个关键帧位置
 		endTime := currentTime + segmentDuration
-		nextKeyframe := endTime
+		bestKf := -1.0
 
 		for _, kf := range info.Keyframes {
-			if kf > currentTime && kf <= endTime+0.5 {
-				nextKeyframe = kf
+			if kf <= currentTime+minSegment {
+				continue
+			}
+			if kf <= endTime+0.5 {
+				bestKf = kf
+			} else {
 				break
 			}
+		}
+
+		nextKeyframe := endTime
+		if bestKf > 0 {
+			nextKeyframe = bestKf
 		}
 
 		if nextKeyframe > info.Duration {
@@ -575,6 +586,18 @@ func (w *SliceWorker) generateSegmentIndex(fileID string, info *VideoInfo) (*mod
 		}
 
 		duration := nextKeyframe - currentTime
+		// Tiny remainder: merge into previous segment instead of creating a sub-minSegment chunk.
+		if duration < minSegment && nextKeyframe >= info.Duration-minSegment {
+			n := len(index.VideoSegments)
+			if n > 0 {
+				index.VideoSegments[n-1].EndTime = nextKeyframe
+				index.VideoSegments[n-1].Duration = nextKeyframe - index.VideoSegments[n-1].StartTime
+			}
+			break
+		}
+		if duration < 0.01 && nextKeyframe >= info.Duration-0.01 {
+			break
+		}
 
 		index.VideoSegments = append(index.VideoSegments, models.VideoSegmentInfo{
 			ID:        segID,

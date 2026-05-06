@@ -12,14 +12,16 @@ import (
 	"knox-media/api/middleware"
 	"knox-media/cmd/scheduler"
 	"knox-media/internal/app"
+	"knox-media/internal/atrack"
 	"knox-media/internal/config"
+	"knox-media/internal/keyframe"
 	"knox-media/internal/preview"
 	"knox-media/internal/subtitle"
 	"knox-media/internal/transcode"
 	"knox-media/internal/upload"
 )
 
-func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worker, packageWorker *transcode.PackageWorker, previewWorker *preview.Worker, sub *subtitle.Service, up *upload.Service, instant *scheduler.Scheduler) *gin.Engine {
+func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worker, packageWorker *transcode.PackageWorker, previewWorker *preview.Worker, sub *subtitle.Service, up *upload.Service, instant *scheduler.Scheduler, atw *atrack.Worker, kfw *keyframe.Worker) *gin.Engine {
 	if cfg.Server.Mode == "release" {
 		gin.SetMode(gin.ReleaseMode)
 	}
@@ -27,8 +29,9 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 	r.Use(gin.Logger(), gin.Recovery())
 	r.Use(middleware.CORS(cfg.CORS.AllowOrigins))
 	r.Static("/uploads", cfg.Data.Upload)
+	r.Static("/atracks", cfg.Data.ATracks)
 
-	h := handler.New(application, worker, packageWorker, previewWorker, sub, up, instant)
+	h := handler.New(application, worker, packageWorker, previewWorker, sub, up, instant, atw, kfw)
 	go h.StartScheduleLoop(context.Background())
 
 	r.GET("/health", func(c *gin.Context) {
@@ -147,6 +150,12 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 			adm.POST("/subtitle/task/:mediaId/retry", h.RetrySubtitleTask)
 			adm.POST("/subtitle/task/cleanup-failed", h.CleanupSubtitleTasksFailed)
 			adm.POST("/subtitle/task/cleanup-before", h.CleanupSubtitleTasksBefore)
+			adm.POST("/media/:id/atrack", h.EnqueueAudioTrackExtraction)
+			adm.GET("/atrack/task", h.ListAudioTrackTasks)
+			adm.POST("/atrack/task/:mediaId/retry", h.RetryAudioTrackTask)
+			adm.POST("/media/:id/keyframe", h.EnqueueKeyframeExtraction)
+			adm.GET("/keyframe/task", h.ListKeyframeTasks)
+			adm.POST("/keyframe/task/:mediaId/retry", h.RetryKeyframeTask)
 			adm.GET("/schedule/task", h.ListScheduledTasks)
 			adm.POST("/schedule/task", h.CreateScheduledTask)
 			adm.PUT("/schedule/task/:id", h.UpdateScheduledTask)

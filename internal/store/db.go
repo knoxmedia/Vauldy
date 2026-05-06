@@ -373,6 +373,31 @@ CREATE TABLE IF NOT EXISTS subtitle_task (
 );
 CREATE INDEX IF NOT EXISTS idx_subtitle_task_status ON subtitle_task(status, updated_at);
 
+CREATE TABLE IF NOT EXISTS atrack_task (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    media_id INTEGER NOT NULL UNIQUE,
+    status TEXT NOT NULL DEFAULT 'waiting',
+    output_dir TEXT,
+    error_message TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (media_id) REFERENCES media(id)
+);
+CREATE INDEX IF NOT EXISTS idx_atrack_task_status ON atrack_task(status, updated_at);
+
+CREATE TABLE IF NOT EXISTS keyframe_task (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    media_id INTEGER NOT NULL UNIQUE,
+    status TEXT NOT NULL DEFAULT 'waiting',
+    output_dir TEXT,
+    keyframe_count INTEGER DEFAULT 0,
+    error_message TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (media_id) REFERENCES media(id)
+);
+CREATE INDEX IF NOT EXISTS idx_keyframe_task_status ON keyframe_task(status, updated_at);
+
 CREATE TABLE IF NOT EXISTS api_client (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -483,6 +508,14 @@ func seedScheduledTasks(db *sql.DB) {
 	_, _ = db.Exec(`
 		INSERT OR IGNORE INTO scheduled_task (name, category, task_type, interval_min, payload_json, enabled)
 		VALUES ('自动字幕处理', 'media', 'subtitle_process', 5, '{"limit":10}', 1)
+	`)
+	_, _ = db.Exec(`
+		INSERT OR IGNORE INTO scheduled_task (name, category, task_type, interval_min, payload_json, enabled)
+		VALUES ('自动音轨提取', 'media', 'atrack_process', 5, '{"limit":10}', 1)
+	`)
+	_, _ = db.Exec(`
+		INSERT OR IGNORE INTO scheduled_task (name, category, task_type, interval_min, payload_json, enabled)
+		VALUES ('自动关键帧提取', 'media', 'keyframe_process', 5, '{"limit":10}', 1)
 	`)
 }
 

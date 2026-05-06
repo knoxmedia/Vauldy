@@ -4,6 +4,8 @@ import type { NavigateFunction } from "react-router-dom";
 import {
   addFavorite,
   createScrapeTasks,
+  extractAudioTrack,
+  extractKeyframes,
   markUnwatched,
   markWatched,
   transcodeAsync,
@@ -16,10 +18,16 @@ export interface MediaMenuTarget {
 export function buildMediaMenuItems(
   r: MediaMenuTarget,
   nav: NavigateFunction,
-  extra?: { isWatched?: boolean },
+  extra?: {
+    isWatched?: boolean;
+    atrackDone?: boolean;
+    keyframeDone?: boolean;
+  },
 ): MenuProps {
   const isWatched = extra?.isWatched ?? false;
   const watchedLabel = isWatched ? "标记为未观看" : "标记为已观看";
+  const atrackDone = extra?.atrackDone ?? false;
+  const keyframeDone = extra?.keyframeDone ?? false;
 
   return {
     items: [
@@ -39,6 +47,9 @@ export function buildMediaMenuItems(
       { key: "refreshMetadata", label: "刷新元数据" },
       { key: "analyze", label: "分析" },
       { key: "optimize", label: "优化" },
+      { type: "divider" as const },
+      { key: "extractAudio", label: atrackDone ? "重新分离音轨" : "分离音轨" },
+      { key: "extractKeyframes", label: keyframeDone ? "重新提取关键帧" : "提取关键帧" },
       { type: "divider" as const },
       { key: "viewHistory", label: "查看播放历史" },
       { key: "getInfo", label: "获取信息" },
@@ -84,6 +95,16 @@ export function buildMediaMenuItems(
         case "optimize":
           transcodeAsync(r.id, "optimize")
             .then(() => message.success("已创建优化任务"))
+            .catch(() => message.error("操作失败"));
+          break;
+        case "extractAudio":
+          extractAudioTrack(r.id)
+            .then(() => message.success("已创建音轨提取任务"))
+            .catch(() => message.error("操作失败"));
+          break;
+        case "extractKeyframes":
+          extractKeyframes(r.id)
+            .then(() => message.success("已创建关键帧提取任务"))
             .catch(() => message.error("操作失败"));
           break;
         case "viewHistory":

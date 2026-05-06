@@ -50,11 +50,12 @@ func trimSliceMetaErr(s string) string {
 }
 
 type Scheduler struct {
-	redis     *redis.Client
-	storage   Storage
-	logger    *zap.Logger
-	mu        sync.RWMutex
-	sliceLock map[string]*sync.Mutex
+	redis                *redis.Client
+	storage              Storage
+	logger               *zap.Logger
+	mu                   sync.RWMutex
+	sliceLock            map[string]*sync.Mutex
+	hlsMultiAudioEnabled bool
 }
 
 type Storage interface {
@@ -71,6 +72,13 @@ func NewScheduler(redisClient *redis.Client, storage Storage) *Scheduler {
 		storage:   storage,
 		logger:    zap.L(),
 		sliceLock: make(map[string]*sync.Mutex),
+	}
+}
+
+// SetHLSMultiAudioEnabled controls whether the master playlist may emit separate audio groups.
+func (s *Scheduler) SetHLSMultiAudioEnabled(v bool) {
+	if s != nil {
+		s.hlsMultiAudioEnabled = v
 	}
 }
 
@@ -117,6 +125,47 @@ func (s *Scheduler) PrepareVideoMetaExt(fileID string, width, height int, durati
 		return
 	}
 	_ = s.redis.HSet(ctx, "video:meta:"+fileID, args...).Err()
+}
+
+// SetAudioPlaylists stores pre-extracted HLS audio playlist infos for this file.
+// When set, generateMasterPlaylist will emit EXT-X-MEDIA AUDIO groups for each track,
+// and the transcodeworker will skip audio encoding (-an).
+func (s *Scheduler) SetAudioPlaylists(fileID string, playlists []models.AudioPlaylistInfo) {
+	if s == nil || s.redis == nil || strings.TrimSpace(fileID) == "" {
+		return
+	}
+	if len(playlists) == 0 {
+		return
+	}
+	b, err := json.Marshal(playlists)
+	if err != nil {
+		return
+	}
+	_ = s.redis.HSet(context.Background(), "video:meta:"+fileID, "audio_playlists", string(b)).Err()
+}
+
+// SetAudioPlaylist stores the URL path to a pre-extracted HLS audio playlist for this file.
+// Deprecated: use SetAudioPlaylists for multi-track support.
+func (s *Scheduler) SetAudioPlaylist(fileID string, audioPlaylistURL string) {
+	if s == nil || s.redis == nil || strings.TrimSpace(fileID) == "" {
+		return
+	}
+	// Upgrade single URL to the multi-track format.
+	playlists := []models.AudioPlaylistInfo{
+		{Index: 0, Language: "und", Codec: "aac", URL: audioPlaylistURL},
+	}
+	b, _ := json.Marshal(playlists)
+	_ = s.redis.HSet(context.Background(), "video:meta:"+fileID, "audio_playlists", string(b)).Err()
+	// Keep backward compat key for transcodeworker.
+	_ = s.redis.HSet(context.Background(), "video:meta:"+fileID, "audio_playlist", audioPlaylistURL).Err()
+}
+
+// SetKeyframeCachePath stores the path to pre-extracted keyframe JSON cache.
+func (s *Scheduler) SetKeyframeCachePath(fileID string, kfCachePath string) {
+	if s == nil || s.redis == nil || strings.TrimSpace(fileID) == "" {
+		return
+	}
+	_ = s.redis.HSet(context.Background(), "video:meta:"+fileID, "kf_cache_path", kfCachePath).Err()
 }
 
 func (s *Scheduler) TriggerSlicing(fileID, sessionID string) error {
@@ -288,7 +337,10 @@ func videoMetadataFromHash(fileID string, h map[string]string) *models.VideoMeta
 		FilePath:   strings.TrimSpace(h["file_path"]),
 		Codec:      strings.TrimSpace(h["codec"]),
 		AudioCodec: strings.TrimSpace(h["audio_codec"]),
-		Format:     strings.TrimSpace(h["format"]),
+		Format:           strings.TrimSpace(h["format"]),
+	}
+	if raw := strings.TrimSpace(h["audio_playlists"]); raw != "" {
+		_ = json.Unmarshal([]byte(raw), &m.AudioPlaylists)
 	}
 	m.Duration, _ = strconv.ParseFloat(strings.TrimSpace(h["duration"]), 64)
 	m.Width, _ = strconv.Atoi(strings.TrimSpace(h["width"]))
@@ -1203,21 +1255,59 @@ func (s *Scheduler) generateMasterPlaylist(c *gin.Context, fileID string, meta *
 	// 单清晰度策略：根据源高度、客户端能力、机器实时 CPU/GPU 负载选定唯一档位。
 	picked := profile.Pick(c.Request.Context(), s.redis, srcHeight, maxClientHeight)
 
+	// Check if pre-extracted audio HLS is available (separated audio tracks).
+	// Only emit separate audio groups when config allows it.
+	audioTracks := meta.AudioPlaylists
+	hasAudio := len(audioTracks) > 0 && s.hlsMultiAudioEnabled
+
 	var b strings.Builder
 	b.WriteString("#EXTM3U\n")
 	b.WriteString("#EXT-X-VERSION:4\n")
 	b.WriteString("#EXT-X-INDEPENDENT-SEGMENTS\n\n")
 
-	// 单一 EXT-X-STREAM-INF：音频已混流进 .ts，故无需 EXT-X-MEDIA / AUDIO 分组。
+	if hasAudio {
+		// Emit one EXT-X-MEDIA per audio track. First track is DEFAULT=YES.
+		for i, at := range audioTracks {
+			if strings.TrimSpace(at.URL) == "" {
+				continue
+			}
+			name := at.Language
+			if name == "" || name == "und" {
+				name = "Audio"
+			}
+			if len(audioTracks) > 1 {
+				name = fmt.Sprintf("%s (%s)", name, at.Language)
+			}
+			defaultFlag := ""
+			if i == 0 {
+				defaultFlag = ",DEFAULT=YES"
+			}
+			b.WriteString(fmt.Sprintf(
+				"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"%s\",LANGUAGE=\"%s\"%s,AUTOSELECT=YES,URI=\"%s\"\n",
+				name, at.Language, defaultFlag,
+				jitURLWithAccessToken(c, at.URL),
+			))
+		}
+		b.WriteString("\n")
+	}
+
 	bw := picked.Bandwidth
 	if bw <= 0 {
 		bw = formatBitrate(picked.Bitrate)
 	}
 	codecs := "avc1.640028,mp4a.40.2"
-	b.WriteString(fmt.Sprintf(
-		"#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%dx%d,CODECS=\"%s\"\n",
+	if hasAudio {
+		// When external audio is used, the video variant contains no audio stream.
+		codecs = "avc1.640028"
+	}
+	streamInf := fmt.Sprintf(
+		"#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%dx%d,CODECS=\"%s\"",
 		bw, picked.Width, picked.Height, codecs,
-	))
+	)
+	if hasAudio {
+		streamInf += ",AUDIO=\"audio\""
+	}
+	b.WriteString(streamInf + "\n")
 	videoURI := jitURLWithAccessToken(c, fmt.Sprintf("/api/v1/jit/playlist/%s/video/%s", fileID, picked.Bitrate))
 	b.WriteString(videoURI + "\n")
 

@@ -58,6 +58,37 @@ func TestGenerateSegmentIndex_SeparatesAudioSegments(t *testing.T) {
 	}
 }
 
+func TestGenerateSegmentIndex_DenseKeyframesAvoidTinySegments(t *testing.T) {
+	w := &SliceWorker{}
+	// Simulate a dense-GOP video with keyframes every ~1 second.
+	kfs := []float64{0.033}
+	for i := 1.0; i < 30.0; i += 1.0 {
+		kfs = append(kfs, i)
+	}
+	info := &VideoInfo{
+		Duration:   30.0,
+		VideoCodec: "h264",
+		AudioCodec: "aac",
+		Keyframes:  kfs,
+	}
+	idx, err := w.generateSegmentIndex("dense-kf", info)
+	if err != nil {
+		t.Fatalf("generateSegmentIndex failed: %v", err)
+	}
+	for i, seg := range idx.VideoSegments {
+		if seg.Duration < 2.0 {
+			t.Fatalf("segment[%d] duration=%.3f, want >= 2.0s (dense GOP should not produce tiny segments)", i, seg.Duration)
+		}
+		if seg.Duration > 8.0 {
+			t.Fatalf("segment[%d] duration=%.3f, want <= 8.0s (should stay near target 6s)", i, seg.Duration)
+		}
+	}
+	// With duration=30s and target segment=6s, expect ~5 segments.
+	if len(idx.VideoSegments) < 3 || len(idx.VideoSegments) > 8 {
+		t.Fatalf("got %d segments, want 3-8 for 30s source", len(idx.VideoSegments))
+	}
+}
+
 func TestGenerateSegmentIndex_NoAudioCodecDoesNotCreateAudioSegments(t *testing.T) {
 	w := &SliceWorker{}
 	info := &VideoInfo{

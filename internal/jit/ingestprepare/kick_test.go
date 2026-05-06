@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	models "knox-media/internal/model"
 	"knox-media/internal/store"
 )
 
@@ -34,6 +35,10 @@ func (s *schedulerSpy) TriggerSlicing(fileID, sessionID string) error {
 	s.fileID = fileID
 	s.sessionID = sessionID
 	return nil
+}
+
+func (s *schedulerSpy) SetAudioPlaylists(fileID string, playlists []models.AudioPlaylistInfo) {
+	// no-op for test
 }
 
 func TestKick_IngestPrepareAnalyzesCodecAndTriggersSlicing(t *testing.T) {

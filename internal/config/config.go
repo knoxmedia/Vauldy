@@ -18,6 +18,7 @@ type Config struct {
 	DRM          DRMConfig                `yaml:"drm"`
 	Scan         ScanConfig               `yaml:"scan"`
 	Subtitle     SubtitleProcessingConfig `yaml:"subtitle"`
+	ATrack       ATrackConfig             `yaml:"atrack"`
 	CORS         CORSConfig               `yaml:"cors"`
 }
 
@@ -33,6 +34,10 @@ type ServerConfig struct {
 	Host string `yaml:"host"`
 	Port int    `yaml:"port"`
 	Mode string `yaml:"mode"`
+	// HLSMultiAudioEnabled controls whether the JIT master playlist may emit
+	// EXT-X-MEDIA TYPE=AUDIO groups for pre-extracted audio tracks. When disabled,
+	// audio is always embedded in the video TS (traditional single-muxed behavior).
+	HLSMultiAudioEnabled *bool `yaml:"hls_multi_audio_enabled"`
 }
 
 type DataConfig struct {
@@ -43,6 +48,8 @@ type DataConfig struct {
 	Subtitle  string `yaml:"subtitle"`
 	Upload    string `yaml:"upload"`
 	Chunks    string `yaml:"chunks"`
+	ATracks   string `yaml:"atracks"`
+	Keyframes string `yaml:"keyframes"`
 }
 
 // SubtitleProcessing configures post-processing (sidecar scan, embedded extract, optional ASR).
@@ -52,6 +59,12 @@ type SubtitleProcessingConfig struct {
 	AutoOnScan   *bool              `yaml:"auto_on_scan"`
 	ASR          ASRConfig          `yaml:"asr"`
 	GraphicalOCR GraphicalOCRConfig `yaml:"graphical_ocr"`
+}
+
+// ATrackConfig controls audio track extraction behavior.
+type ATrackConfig struct {
+	// AutoOnScan inserts a waiting atrack_task when library scan discovers a new video.
+	AutoOnScan *bool `yaml:"auto_on_scan"`
 }
 
 // GraphicalOCR enables Tesseract-based OCR for bitmap subtitles (PGS, VobSub, etc.).
@@ -166,6 +179,12 @@ func Load(path string) (*Config, error) {
 	if c.Data.Chunks == "" {
 		c.Data.Chunks = filepath.Join(c.Data.Upload, "chunks")
 	}
+	if c.Data.ATracks == "" {
+		c.Data.ATracks = filepath.Join(c.Data.Dir, "atracks")
+	}
+	if c.Data.Keyframes == "" {
+		c.Data.Keyframes = filepath.Join(c.Data.Dir, "keyframes")
+	}
 	if c.Security.TokenHours == 0 {
 		c.Security.TokenHours = 168
 	}
@@ -187,6 +206,14 @@ func Load(path string) (*Config, error) {
 	if c.Subtitle.AutoOnScan == nil {
 		t := true
 		c.Subtitle.AutoOnScan = &t
+	}
+	if c.ATrack.AutoOnScan == nil {
+		t := true
+		c.ATrack.AutoOnScan = &t
+	}
+	if c.Server.HLSMultiAudioEnabled == nil {
+		t := true
+		c.Server.HLSMultiAudioEnabled = &t
 	}
 	if c.Scan.FastFFprobe == nil {
 		t := true
@@ -266,12 +293,34 @@ func (c *Config) SubtitleAutoOnScan() bool {
 	return *c.Subtitle.AutoOnScan
 }
 
+// ATrackAutoOnScan reports whether scan should enqueue atrack tasks for new videos.
+func (c *Config) ATrackAutoOnScan() bool {
+	if c == nil {
+		return false
+	}
+	if c.ATrack.AutoOnScan == nil {
+		return true
+	}
+	return *c.ATrack.AutoOnScan
+}
+
+// HLSMultiAudioEnabled reports whether JIT master playlist may emit separate audio groups.
+func (c *Config) HLSMultiAudioEnabled() bool {
+	if c == nil {
+		return false
+	}
+	if c.Server.HLSMultiAudioEnabled == nil {
+		return true
+	}
+	return *c.Server.HLSMultiAudioEnabled
+}
+
 func (c *Config) Addr() string {
 	return fmt.Sprintf("%s:%d", c.Server.Host, c.Server.Port)
 }
 
 func (c *Config) EnsureDirs() error {
-	for _, d := range []string{c.Data.Dir, c.Data.Transcode, c.Data.Preview, c.Data.Subtitle, c.Data.Upload, c.Data.Chunks} {
+	for _, d := range []string{c.Data.Dir, c.Data.Transcode, c.Data.Preview, c.Data.Subtitle, c.Data.Upload, c.Data.Chunks, c.Data.ATracks, c.Data.Keyframes} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return err
 		}

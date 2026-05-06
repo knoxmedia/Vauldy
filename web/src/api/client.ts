@@ -898,3 +898,58 @@ export async function createUploadDirectory(payload: {
   const { data } = await api.post<{ ok: boolean; path: string }>("/api/v1/upload/mkdir", payload);
   return data;
 }
+
+// --- Audio Track Extraction (atrack) ---
+
+export type AtrackTask = {
+  id: number;
+  media_id: number;
+  title: string;
+  file_path: string;
+  status: string;
+  output_dir: string;
+  error_message?: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export async function extractAudioTrack(mediaId: number) {
+  await api.post(`/api/v1/media/${mediaId}/atrack`);
+}
+
+export async function retryAudioTrackExtraction(mediaId: number) {
+  await api.post(`/api/v1/atrack/task/${mediaId}/retry`);
+}
+
+export async function fetchAtrackTasks(limit = 100) {
+  const { data } = await api.get<{ items: AtrackTask[] }>("/api/v1/atrack/task", { params: { limit } });
+  return data.items ?? [];
+}
+
+// --- Keyframe Extraction ---
+
+export type KeyframeTask = {
+  id: number;
+  media_id: number;
+  title: string;
+  file_path: string;
+  status: string;
+  output_dir: string;
+  keyframe_count: number;
+  error_message?: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export async function extractKeyframes(mediaId: number) {
+  await api.post(`/api/v1/media/${mediaId}/keyframe`);
+}
+
+export async function retryKeyframeExtraction(mediaId: number) {
+  await api.post(`/api/v1/keyframe/task/${mediaId}/retry`);
+}
+
+export async function fetchKeyframeTasks(limit = 100) {
+  const { data } = await api.get<{ items: KeyframeTask[] }>("/api/v1/keyframe/task", { params: { limit } });
+  return data.items ?? [];
+}

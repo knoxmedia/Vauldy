@@ -2,6 +2,11 @@ server:
   host: "0.0.0.0"
   port: 8200
   mode: "release" # debug | release
+  # When true, JIT master playlist may emit EXT-X-MEDIA TYPE=AUDIO for pre-extracted audio tracks.
+  # This saves transcode cost (video TS is video-only) but requires the player to support multi-audio HLS.
+  # Safari supports this natively; Chromium/Firefox need xgplayer-hls (which may have partial support).
+  # Default: true.
+  hls_multi_audio_enabled: false
 
 data:
   dir: "./data"
@@ -68,6 +73,11 @@ subtitle:
     pgsrip_path: ""
     mkvextract_path: ""
     mkvmerge_path: ""
+
+# Audio track extraction: separate audio from video on library scan.
+atrack:
+  # When true, a new video discovered by library scan gets a waiting atrack_task (default: true).
+  auto_on_scan: false
 
 cors:
   allow_origins:

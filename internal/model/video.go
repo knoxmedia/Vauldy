@@ -5,17 +5,26 @@ import "time"
 
 // 视频元数据
 type VideoMetadata struct {
-	FileID     string    `json:"file_id"`
-	FilePath   string    `json:"file_path"`
-	Duration   float64   `json:"duration"`
-	Width      int       `json:"width"`
-	Height     int       `json:"height"`
-	Bitrate    int       `json:"bitrate"`
-	Codec      string    `json:"codec"`
-	AudioCodec string    `json:"audio_codec"`
-	Format     string    `json:"format"`
-	Size       int64     `json:"size"`
-	CreatedAt  time.Time `json:"created_at"`
+	FileID          string    `json:"file_id"`
+	FilePath        string    `json:"file_path"`
+	Duration        float64   `json:"duration"`
+	Width           int       `json:"width"`
+	Height          int       `json:"height"`
+	Bitrate         int       `json:"bitrate"`
+	Codec           string    `json:"codec"`
+	AudioCodec      string    `json:"audio_codec"`
+	Format          string    `json:"format"`
+	Size            int64     `json:"size"`
+	AudioPlaylists []AudioPlaylistInfo `json:"audio_playlists,omitempty"`
+	CreatedAt      time.Time           `json:"created_at"`
+}
+
+// AudioPlaylistInfo describes one external audio HLS playlist for the master playlist.
+type AudioPlaylistInfo struct {
+	Index    int    `json:"index"`
+	Language string `json:"language"`
+	Codec    string `json:"codec"`
+	URL      string `json:"url"`
 }
 
 // 切片索引（存储在 Redis）

@@ -2,6 +2,7 @@ package ingestprepare
 
 import (
 	"database/sql"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"strings"
 
 	"knox-media/internal/mediautil"
+	models "knox-media/internal/model"
 	"knox-media/internal/transcode"
 )
 
@@ -17,6 +19,7 @@ import (
 type Scheduler interface {
 	PrepareVideoMeta(fileID, filePath, format, videoCodec, audioCodec string) error
 	TriggerSlicing(fileID, sessionID string) error
+	SetAudioPlaylists(fileID string, playlists []models.AudioPlaylistInfo)
 }
 
 // Kick runs PrepareVideoMeta + TriggerSlicing when the library has jit_prepare_on_ingest or drm_enabled.
@@ -71,6 +74,15 @@ func Kick(db *sql.DB, sched Scheduler, worker *transcode.Worker, mediaID int64) 
 	if err := sched.PrepareVideoMeta(fileID, fp, formatStr, prof.Video, prof.Audio); err != nil {
 		log.Printf("ingest JIT PrepareVideoMeta media=%d: %v", mediaID, err)
 		return
+	}
+	// If audio track was already extracted, notify the scheduler so the master playlist
+	// can reference it as an external AUDIO group (saving transcode cost).
+	var atrackStatus sql.NullString
+	if err := db.QueryRow(`SELECT status FROM atrack_task WHERE media_id = ? AND status = 'done' LIMIT 1`, mediaID).Scan(&atrackStatus); err == nil && atrackStatus.String == "done" {
+		audioURL := fmt.Sprintf("/atracks/%d/0/index.m3u8", mediaID)
+		sched.SetAudioPlaylists(fileID, []models.AudioPlaylistInfo{
+			{Index: 0, Language: "und", URL: audioURL},
+		})
 	}
 	if err := sched.TriggerSlicing(fileID, "ingest:"+strconv.FormatInt(mediaID, 10)); err != nil {
 		log.Printf("ingest JIT TriggerSlicing media=%d: %v", mediaID, err)
