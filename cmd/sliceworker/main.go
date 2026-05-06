@@ -172,11 +172,20 @@ func formatToolExit(tool string, input string, err error, stderr string) error {
 	return fmt.Errorf("%s %q: %w", tool, input, err)
 }
 
+// SliceQueueKey is the durable Redis LIST used to queue slice tasks. Keep RPUSH-LPOP semantics
+// so messages survive worker restarts (unlike pubsub, which silently drops messages when no
+// subscriber is connected at publish time — root cause of "video:meta status stuck on slicing").
+const SliceQueueKey = "slice:jobs:queue"
+
+// SliceQueueLegacyChannel is kept for backwards compatibility: external pubsub subscribers can
+// still observe job arrivals, but the worker no longer relies on this channel.
+const SliceQueueLegacyChannel = "slice:jobs"
+
 func (w *SliceWorker) Start() {
 	ctx := context.Background()
 
-	// 订阅切片任务
-	pubsub := w.redis.Subscribe(ctx, "slice:jobs")
+	// Pubsub is kept open only as a fallback (older clients may publish on this channel).
+	pubsub := w.redis.Subscribe(ctx, SliceQueueLegacyChannel)
 	defer pubsub.Close()
 
 	if err := w.selfCheckFFprobe(); err != nil {
@@ -186,20 +195,138 @@ func (w *SliceWorker) Start() {
 		w.logger.Info("ffprobe self-check ok", zap.String("ffprobe", w.ffprobe), zap.String("worker_id", w.workerID))
 	}
 
-	w.logger.Info("Slice worker started", zap.String("worker_id", w.workerID))
+	w.logger.Info("Slice worker started",
+		zap.String("worker_id", w.workerID),
+		zap.String("queue_key", SliceQueueKey),
+	)
+
+	pubsubCh := pubsub.Channel()
+
+	go w.recoverStaleSlicing(ctx)
 
 	for {
+		// Block on the durable queue first; pubsub is read non-blocking via select with a
+		// short timeout so we never miss a queued job because we were waiting on pubsub.
 		select {
-		case msg := <-pubsub.Channel():
-			var task models.SliceTask
-			if err := json.Unmarshal([]byte(msg.Payload), &task); err != nil {
-				w.logger.Error("Failed to parse task", zap.Error(err))
+		case msg := <-pubsubCh:
+			if msg == nil {
 				continue
 			}
-
+			var task models.SliceTask
+			if err := json.Unmarshal([]byte(msg.Payload), &task); err != nil {
+				w.logger.Error("Failed to parse pubsub task", zap.Error(err))
+				continue
+			}
 			w.processSliceTask(&task)
+		default:
 		}
+
+		// BLPOP with 5s timeout: balances latency vs cost when the queue is empty.
+		res, err := w.redis.BLPop(ctx, 5*time.Second, SliceQueueKey).Result()
+		if err == redis.Nil {
+			continue
+		}
+		if err != nil {
+			w.logger.Warn("BLPop slice queue failed; retrying after 1s", zap.Error(err))
+			time.Sleep(time.Second)
+			continue
+		}
+		if len(res) < 2 {
+			continue
+		}
+		var task models.SliceTask
+		if err := json.Unmarshal([]byte(res[1]), &task); err != nil {
+			w.logger.Error("Failed to parse queued task", zap.Error(err))
+			continue
+		}
+		w.processSliceTask(&task)
 	}
+}
+
+// recoverStaleSlicing periodically scans video:meta:* hashes whose status=slicing has gone
+// stale (no heartbeat for >SliceStaleAfter). On hit it resets status to "" and re-enqueues
+// the task, so a request that arrived during a worker outage will eventually succeed.
+//
+// 这是修复 "video:meta status 一直是 slicing" 卡死的关键：即便切片任务因为 pubsub 丢失或
+// worker 重启而被遗忘，也能在 30s 内自愈。
+func (w *SliceWorker) recoverStaleSlicing(ctx context.Context) {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		w.scanAndRecoverOnce(ctx)
+	}
+}
+
+// SliceStaleAfter is how long we tolerate status=slicing without a heartbeat before
+// considering the job lost. Long enough to cover legitimate pauses while ffprobe runs
+// (a few seconds even on multi-GB sources), short enough that users see playback start
+// within ~1 minute on a worst-case stuck queue.
+const SliceStaleAfter = 60 * time.Second
+
+func (w *SliceWorker) scanAndRecoverOnce(ctx context.Context) {
+	now := time.Now().Unix()
+	iter := w.redis.Scan(ctx, 0, "video:meta:*", 256).Iterator()
+	for iter.Next(ctx) {
+		key := iter.Val()
+		got, err := w.redis.HMGet(ctx, key, "status", "slicing_started_at", "slicing_heartbeat_at", "file_path").Result()
+		if err != nil || len(got) < 4 {
+			continue
+		}
+		status, _ := got[0].(string)
+		if strings.TrimSpace(status) != "slicing" {
+			continue
+		}
+		startedAt := parseInt(got[1])
+		heartbeat := parseInt(got[2])
+		latest := heartbeat
+		if startedAt > latest {
+			latest = startedAt
+		}
+		if latest > 0 && now-latest < int64(SliceStaleAfter.Seconds()) {
+			continue
+		}
+		filePath, _ := got[3].(string)
+		filePath = strings.TrimSpace(filePath)
+		if filePath == "" {
+			continue
+		}
+		fileID := strings.TrimPrefix(key, "video:meta:")
+		w.logger.Warn("Recovering stale slicing task; re-enqueueing",
+			zap.String("file_id", fileID),
+			zap.Int64("seconds_since_heartbeat", now-latest),
+		)
+		// Wipe heartbeat fields and re-publish to the durable queue.
+		_ = w.redis.HDel(ctx, key, "status", "slice_error").Err()
+		_ = w.redis.Del(ctx, "lock:slice:"+fileID).Err()
+		task := models.SliceTask{
+			FileID:    fileID,
+			SessionID: "auto-recover",
+			CreatedAt: now,
+		}
+		raw, err := json.Marshal(task)
+		if err != nil {
+			continue
+		}
+		_ = w.redis.RPush(ctx, SliceQueueKey, raw).Err()
+	}
+}
+
+func parseInt(v interface{}) int64 {
+	s, _ := v.(string)
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 func (w *SliceWorker) processSliceTask(task *models.SliceTask) {
@@ -207,6 +334,7 @@ func (w *SliceWorker) processSliceTask(task *models.SliceTask) {
 	logger.Info("Processing slice task")
 
 	startTime := time.Now()
+	w.beatSlicing(task.FileID, startTime.Unix(), true)
 
 	videoPath, err := w.getVideoPath(task.FileID)
 	if err != nil {
@@ -219,6 +347,8 @@ func (w *SliceWorker) processSliceTask(task *models.SliceTask) {
 		videoPath = filepath.Clean(videoPath)
 	}
 
+	w.beatSlicing(task.FileID, time.Now().Unix(), false)
+
 	// 1. 元数据（流信息、时长）—— ffprobe -show_streams/-show_format，秒级返回。
 	videoInfo, err := w.analyzeVideoFast(videoPath)
 	if err != nil {
@@ -226,6 +356,7 @@ func (w *SliceWorker) processSliceTask(task *models.SliceTask) {
 		w.markSliceFailed(task.FileID, err.Error())
 		return
 	}
+	w.beatSlicing(task.FileID, time.Now().Unix(), false)
 
 	// 2. 关键帧：优先读盘缓存（命中即 µs 级）；缓存未命中则使用 6s 等距网格，先把 master.m3u8 顶起来，
 	//    后台异步精化关键帧索引（show_packets，仅 demux）。这是首播延迟从“分钟”降到“秒”的关键。
@@ -562,4 +693,22 @@ func (w *SliceWorker) getVideoPath(fileID string) (string, error) {
 		return "", err
 	}
 	return path, nil
+}
+
+// beatSlicing 写入 slicing_started_at + slicing_heartbeat_at，让 recoverStaleSlicing
+// 与 scheduler.waitForSlicingComplete 知道任务还活着。withStartedAt=true 时同时刷新起点，
+// 用于任务首次接管。
+func (w *SliceWorker) beatSlicing(fileID string, ts int64, withStartedAt bool) {
+	if w == nil || w.redis == nil || strings.TrimSpace(fileID) == "" {
+		return
+	}
+	ctx := context.Background()
+	args := []interface{}{
+		"slicing_heartbeat_at", ts,
+		"slicing_worker_id", w.workerID,
+	}
+	if withStartedAt {
+		args = append(args, "status", "slicing", "slicing_started_at", ts)
+	}
+	_ = w.redis.HSet(ctx, "video:meta:"+fileID, args...).Err()
 }

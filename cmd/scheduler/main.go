@@ -24,6 +24,17 @@ import (
 // jitPausedSessionTTL is Redis TTL for session:* while transcode_paused=1 (pause without segment heartbeats).
 const jitPausedSessionTTL = 2 * time.Hour
 
+// sliceQueueKey / sliceLegacyChannel must match cmd/sliceworker.SliceQueueKey / SliceQueueLegacyChannel.
+// They are duplicated here to avoid importing the worker package (would create a cycle / pull tools).
+const (
+	sliceQueueKey      = "slice:jobs:queue"
+	sliceLegacyChannel = "slice:jobs"
+)
+
+// sliceStaleAfter mirrors sliceworker.SliceStaleAfter. After this long without a heartbeat
+// the scheduler treats status=slicing as lost and forces a fresh enqueue.
+const sliceStaleAfter = 60 * time.Second
+
 const maxSliceMetaErr = 2000
 
 // maxSliceFailureRetries is how many times we re-queue slicing after status=failed before giving up
@@ -335,7 +346,12 @@ func (s *Scheduler) ensureVideoSliced(fileID, sessionID string) error {
 	case "ready":
 		return nil
 	case "slicing":
-		// 等待切片完成 (longer timeout for large files).
+		// 心跳过期则视为僵死任务，重置后重新入队；否则照常等待。
+		if s.sliceLooksStale(fileID) {
+			s.logger.Warn("ensureVideoSliced found stale slicing on entry; recovering",
+				zap.String("file_id", fileID))
+			s.forceReenqueueSlicing(fileID, sessionID)
+		}
 		return s.waitForSlicingComplete(fileID, 180*time.Second)
 	case "failed":
 		// 限制重试次数；熔断后不得再 INCR，否则每请求计数上涨、错误文案漂移（after 7/8/9…）
@@ -395,24 +411,34 @@ func (s *Scheduler) startSlicingTask(fileID, sessionID string) error {
 		return fmt.Errorf("source file not accessible: %s: %w", filePath, statErr)
 	}
 
-	// 更新状态为 slicing（新一次尝试，清掉上次的错误文案）
+	// 更新状态为 slicing（新一次尝试，清掉上次的错误文案）；同时写入起点用于陈旧检测。
+	now := time.Now().Unix()
 	_ = s.redis.HDel(ctx, "video:meta:"+fileID, "slice_error").Err()
-	s.redis.HSet(ctx, "video:meta:"+fileID, "status", "slicing")
+	s.redis.HSet(ctx, "video:meta:"+fileID,
+		"status", "slicing",
+		"slicing_started_at", now,
+		"slicing_heartbeat_at", now,
+	)
 
-	// 发布切片任务到队列
 	task := &models.SliceTask{
 		FileID:    fileID,
 		SessionID: sessionID,
-		CreatedAt: time.Now().Unix(),
+		CreatedAt: now,
 	}
 
 	taskData, _ := json.Marshal(task)
-	if err := s.redis.Publish(ctx, "slice:jobs", taskData).Err(); err != nil {
-		s.redis.HSet(ctx, "video:meta:"+fileID, "status", "failed", "slice_error", trimSliceMetaErr("redis publish slice:jobs: "+err.Error()))
+	// 1) 推到持久队列（worker 用 BLPop 消费，不会丢失）。
+	if err := s.redis.RPush(ctx, sliceQueueKey, taskData).Err(); err != nil {
+		s.redis.HSet(ctx, "video:meta:"+fileID, "status", "failed", "slice_error", trimSliceMetaErr("redis rpush slice queue: "+err.Error()))
 		return err
 	}
+	// 2) 同时 publish 老 channel，向后兼容旧 subscriber（失败不致命）。
+	if err := s.redis.Publish(ctx, sliceLegacyChannel, taskData).Err(); err != nil {
+		s.logger.Warn("publish legacy slice:jobs failed (non-fatal)",
+			zap.String("file_id", fileID), zap.Error(err))
+	}
 
-	s.logger.Info("Slicing task published", zap.String("file_id", fileID))
+	s.logger.Info("Slicing task enqueued", zap.String("file_id", fileID))
 
 	// 等待切片完成；超时时标记失败以便下次请求可重试
 	if err := s.waitForSlicingComplete(fileID, 120*time.Second); err != nil {
@@ -430,17 +456,18 @@ func (s *Scheduler) startSlicingTask(fileID, sessionID string) error {
 
 // waitForIndexReady 等待 video:meta status 进入 ready/未触发；处于 slicing 时阻塞到 timeout。
 // 与 waitForSlicingComplete 区别：本函数不需要预存 status（首次调用时会触发切片）。
+// 当 status=slicing 但心跳过期，主动 re-enqueue 防止永久卡死。
 func (s *Scheduler) waitForIndexReady(fileID string, timeout time.Duration) error {
 	ctx := context.Background()
 	deadline := time.Now().Add(timeout)
-	first := true
+	triggered := false
+	staleRetried := false
 	for time.Now().Before(deadline) {
 		status, err := s.redis.HGet(ctx, "video:meta:"+fileID, "status").Result()
 		if err == redis.Nil || strings.TrimSpace(status) == "" {
-			if first {
-				// 触发切片
+			if !triggered {
 				_ = s.ensureVideoSliced(fileID, "playlist")
-				first = false
+				triggered = true
 			}
 		} else if status == "ready" {
 			return nil
@@ -451,6 +478,11 @@ func (s *Scheduler) waitForIndexReady(fileID string, timeout time.Duration) erro
 				return fmt.Errorf("slicing failed: %s", detail)
 			}
 			return fmt.Errorf("slicing failed")
+		} else if status == "slicing" && !staleRetried && s.sliceLooksStale(fileID) {
+			s.logger.Warn("playlist wait found stale slicing; forcing re-enqueue",
+				zap.String("file_id", fileID))
+			s.forceReenqueueSlicing(fileID, "playlist-recover")
+			staleRetried = true
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
@@ -475,11 +507,81 @@ func (s *Scheduler) waitForSlicingComplete(fileID string, timeout time.Duration)
 				}
 				return fmt.Errorf("slicing failed")
 			}
+			if status == "slicing" && s.sliceLooksStale(fileID) {
+				// 卡死自愈：worker 没在心跳，直接重置状态并重入队列。
+				s.logger.Warn("slicing heartbeat stale; forcing re-enqueue",
+					zap.String("file_id", fileID))
+				s.forceReenqueueSlicing(fileID, "wait-recover")
+			}
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
 
 	return fmt.Errorf("slicing timeout")
+}
+
+// sliceLooksStale 返回 true 当 video:meta 上的心跳/起点都晚于 sliceStaleAfter 之前。
+// 字段缺失（worker 旧版本未写）也视为 stale，避免老 hash 永远卡 slicing。
+func (s *Scheduler) sliceLooksStale(fileID string) bool {
+	ctx := context.Background()
+	got, err := s.redis.HMGet(ctx, "video:meta:"+fileID,
+		"slicing_started_at", "slicing_heartbeat_at").Result()
+	if err != nil || len(got) < 2 {
+		return false
+	}
+	now := time.Now().Unix()
+	hb := redisFieldInt64(got[1])
+	st := redisFieldInt64(got[0])
+	latest := hb
+	if st > latest {
+		latest = st
+	}
+	if latest == 0 {
+		// 字段缺失：给 90s 宽限期再判 stale，防止刚启动的 worker 被误判
+		return false
+	}
+	return now-latest >= int64(sliceStaleAfter.Seconds())
+}
+
+// forceReenqueueSlicing 清掉 slicing 状态与锁，重新把 slice 任务推到持久队列，但不阻塞等待。
+// 调用方自行决定是否轮询 status；这样从 wait* 循环里调用本函数不会引起递归阻塞。
+func (s *Scheduler) forceReenqueueSlicing(fileID, reason string) {
+	if s == nil || s.redis == nil || strings.TrimSpace(fileID) == "" {
+		return
+	}
+	ctx := context.Background()
+	_ = s.redis.HDel(ctx, "video:meta:"+fileID,
+		"status", "slice_error", "slicing_started_at", "slicing_heartbeat_at").Err()
+	_ = s.redis.Del(ctx, "lock:slice:"+fileID).Err()
+	_ = s.redis.Del(ctx, "retry:slice:"+fileID).Err()
+
+	now := time.Now().Unix()
+	s.redis.HSet(ctx, "video:meta:"+fileID,
+		"status", "slicing",
+		"slicing_started_at", now,
+		"slicing_heartbeat_at", now,
+	)
+	task := &models.SliceTask{
+		FileID:    fileID,
+		SessionID: reason,
+		CreatedAt: now,
+	}
+	taskData, _ := json.Marshal(task)
+	if err := s.redis.RPush(ctx, sliceQueueKey, taskData).Err(); err != nil {
+		s.logger.Warn("force re-enqueue rpush failed",
+			zap.String("file_id", fileID), zap.Error(err))
+	}
+	_ = s.redis.Publish(ctx, sliceLegacyChannel, taskData).Err()
+}
+
+func redisFieldInt64(v interface{}) int64 {
+	s, _ := v.(string)
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0
+	}
+	n, _ := strconv.ParseInt(s, 10, 64)
+	return n
 }
 
 // ==================== Video Playlist ====================
