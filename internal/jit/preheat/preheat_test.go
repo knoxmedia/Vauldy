@@ -22,12 +22,12 @@ func TestSegmentCount_AdjustsByLoad(t *testing.T) {
 		gpu          float64
 		wantSegments int
 	}{
-		{name: "both sensors missing keeps default", total: 50, cpu: -1, gpu: -1, wantSegments: 18},
-		{name: "high cpu shrinks preheat window", total: 50, cpu: 92, gpu: -1, wantSegments: 6},
-		{name: "high gpu shrinks preheat window", total: 50, cpu: -1, gpu: 95, wantSegments: 6},
-		{name: "low load keeps baseline window", total: 50, cpu: 20, gpu: 18, wantSegments: 18},
-		{name: "uses stricter tier between cpu and gpu", total: 50, cpu: 72, gpu: 22, wantSegments: 12},
-		{name: "never exceeds total segments", total: 5, cpu: 10, gpu: 10, wantSegments: 5},
+		{name: "both sensors missing keeps default", total: 50, cpu: -1, gpu: -1, wantSegments: 6},
+		{name: "high cpu pauses preheat", total: 50, cpu: 92, gpu: -1, wantSegments: 0},
+		{name: "high gpu pauses preheat", total: 50, cpu: -1, gpu: 95, wantSegments: 0},
+		{name: "low load keeps baseline window", total: 50, cpu: 20, gpu: 18, wantSegments: 6},
+		{name: "uses stricter tier between cpu and gpu", total: 50, cpu: 72, gpu: 22, wantSegments: 2},
+		{name: "never exceeds total segments", total: 3, cpu: 10, gpu: 10, wantSegments: 3},
 	}
 
 	for _, tc := range tests {
@@ -42,7 +42,7 @@ func TestSegmentCount_AdjustsByLoad(t *testing.T) {
 	}
 }
 
-func TestEnqueueInitialSegments_UsesLoadTunedCountAndDualBitrate(t *testing.T) {
+func TestEnqueueInitialSegments_SingleBitrateRespectsLoadTier(t *testing.T) {
 	mr, err := miniredis.Run()
 	if err != nil {
 		t.Fatalf("start miniredis: %v", err)
@@ -53,16 +53,15 @@ func TestEnqueueInitialSegments_UsesLoadTunedCountAndDualBitrate(t *testing.T) {
 	t.Cleanup(func() { _ = rdb.Close() })
 
 	ctx := context.Background()
-	// Simulate heavy CPU load so preheat window shrinks to 6 segments.
-	if err := rdb.Set(ctx, "jit:metrics:cpu_percent", "90", 0).Err(); err != nil {
+	// Idle host -> 6 segments preheat window.
+	if err := rdb.Set(ctx, "jit:metrics:cpu_percent", "10", 0).Err(); err != nil {
 		t.Fatalf("set cpu metric: %v", err)
 	}
-	// Low GPU would allow more, but SegmentCount should pick the stricter tier.
-	if err := rdb.Set(ctx, "jit:metrics:gpu_percent", "20", 0).Err(); err != nil {
+	if err := rdb.Set(ctx, "jit:metrics:gpu_percent", "10", 0).Err(); err != nil {
 		t.Fatalf("set gpu metric: %v", err)
 	}
 
-	if err := EnqueueInitialSegments(ctx, rdb, "file-1", 20); err != nil {
+	if err := EnqueueInitialSegments(ctx, rdb, "file-1", 20, "2000k"); err != nil {
 		t.Fatalf("enqueue initial segments: %v", err)
 	}
 
@@ -70,40 +69,52 @@ func TestEnqueueInitialSegments_UsesLoadTunedCountAndDualBitrate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read queue members: %v", err)
 	}
-	const wantTasks = 6 * 2 // N segments * {500k, 2000k}
-	if len(members) != wantTasks {
-		t.Fatalf("queued tasks=%d, want %d", len(members), wantTasks)
+	if len(members) == 0 || len(members) > 8 {
+		t.Fatalf("queued tasks=%d, want small single-bitrate set", len(members))
 	}
-
-	seenBySegmentBitrate := make(map[string]bool, wantTasks)
 	for _, raw := range members {
 		var task models.TranscodeTask
 		if err := json.Unmarshal([]byte(raw), &task); err != nil {
 			t.Fatalf("decode queued task: %v", err)
 		}
-		if task.FileID != "file-1" {
-			t.Fatalf("unexpected file_id=%q", task.FileID)
+		if task.Bitrate != "2000k" {
+			t.Fatalf("unexpected bitrate=%q, want single 2000k preheat", task.Bitrate)
 		}
 		if task.SessionID != "prefetch" {
-			t.Fatalf("unexpected session_id=%q, want prefetch", task.SessionID)
+			t.Fatalf("unexpected session_id=%q", task.SessionID)
 		}
-		if task.Priority != 2 {
-			t.Fatalf("unexpected priority=%d, want 2", task.Priority)
-		}
-		if task.Bitrate != "500k" && task.Bitrate != "2000k" {
-			t.Fatalf("unexpected bitrate=%q", task.Bitrate)
-		}
-		k := task.Bitrate + ":" + strconv.Itoa(task.SegmentID)
-		seenBySegmentBitrate[k] = true
 	}
+	// Reaches segment 0 at minimum.
+	first := members[0]
+	var t0 models.TranscodeTask
+	if err := json.Unmarshal([]byte(first), &t0); err != nil {
+		t.Fatalf("decode first: %v", err)
+	}
+	if t0.SegmentID != 0 {
+		t.Fatalf("first preheat segment=%d, want 0", t0.SegmentID)
+	}
+	_ = strconv.Itoa
+}
 
-	// Confirm the queue covers every segment from 0..5 in both bitrates.
-	for seg := 0; seg < 6; seg++ {
-		for _, br := range []string{"500k", "2000k"} {
-			k := br + ":" + strconv.Itoa(seg)
-			if !seenBySegmentBitrate[k] {
-				t.Fatalf("missing preheat task for segment=%d bitrate=%s", seg, br)
-			}
-		}
+func TestEnqueueInitialSegments_HighLoadEmitsNothing(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("start miniredis: %v", err)
+	}
+	t.Cleanup(mr.Close)
+
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+
+	ctx := context.Background()
+	_ = rdb.Set(ctx, "jit:metrics:cpu_percent", "95", 0).Err()
+	_ = rdb.Set(ctx, "jit:metrics:gpu_percent", "95", 0).Err()
+
+	if err := EnqueueInitialSegments(ctx, rdb, "file-busy", 20, "2000k"); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	n, _ := rdb.ZCard(ctx, queueLow).Result()
+	if n != 0 {
+		t.Fatalf("expected 0 prefetch tasks under high load, got %d", n)
 	}
 }

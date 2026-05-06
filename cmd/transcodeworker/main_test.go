@@ -9,6 +9,7 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/go-redis/redis/v8"
+	"go.uber.org/zap"
 
 	"knox-media/internal/jit/hwenc"
 	models "knox-media/internal/model"
@@ -31,6 +32,7 @@ func newTestTranscodeWorker(t *testing.T) (*TranscodeWorker, *redis.Client, stri
 		redis:     rdb,
 		storage:   NewStorage(base),
 		ffmpeg:    "ffmpeg",
+		logger:    zap.NewNop(),
 		workerID:  "tw-test",
 		semaphore: make(chan struct{}, 1),
 		hwEncoder: hwenc.Libx264,

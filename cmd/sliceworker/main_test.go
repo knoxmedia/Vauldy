@@ -38,15 +38,22 @@ func TestGenerateSegmentIndex_SeparatesAudioSegments(t *testing.T) {
 			t.Fatalf("video segment[%d] duration must be positive, got %.3f", i, seg.Duration)
 		}
 	}
+	if len(idx.AudioSegments) != len(idx.VideoSegments) {
+		t.Fatalf("audio segments=%d, want one-per-video=%d (combined transcode)",
+			len(idx.AudioSegments), len(idx.VideoSegments))
+	}
 	for i, seg := range idx.AudioSegments {
-		if seg.Status != "pending" {
-			t.Fatalf("audio segment[%d] status=%q, want pending before physical slicing", i, seg.Status)
+		if seg.Status != "indexed" {
+			t.Fatalf("audio segment[%d] status=%q, want indexed (no physical pre-slicing)", i, seg.Status)
 		}
-		if seg.Language != "eng" {
-			t.Fatalf("audio segment[%d] language=%q, want eng", i, seg.Language)
+		if strings.TrimSpace(seg.SlicePath) != "" {
+			t.Fatalf("audio segment[%d] should be virtual, got path=%q", i, seg.SlicePath)
 		}
-		if !strings.HasPrefix(seg.SlicePath, "raw/audio/file-a/segment_") {
-			t.Fatalf("audio segment[%d] unexpected slice path=%q", i, seg.SlicePath)
+		if i < len(idx.VideoSegments) {
+			if seg.StartTime != idx.VideoSegments[i].StartTime {
+				t.Fatalf("audio segment[%d] start=%v, want match video=%v",
+					i, seg.StartTime, idx.VideoSegments[i].StartTime)
+			}
 		}
 	}
 }

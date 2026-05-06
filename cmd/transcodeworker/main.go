@@ -2,14 +2,17 @@
 package transcodeworker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-redis/redis/v8"
@@ -68,22 +71,79 @@ func (s *LocalStorage) GetSegmentPath(fileID string, segID int, segmentType stri
 }
 
 func (s *LocalStorage) SaveSegment(fileID string, segID int, segmentType string, data []byte) error {
-	outputDir := filepath.Join(s.basePath, segmentType, fileID)
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
+	// Layout must match scheduler handleVideoSegment / LoadSegment:
+	//   <base>/ts/video/<fileID>/<bitrate>/<seg>.ts
+	bitrate := strings.TrimPrefix(segmentType, "ts/video/")
+	if bitrate == segmentType || bitrate == "" {
+		return fmt.Errorf("SaveSegment: expected segmentType ts/video/<bitrate>, got %q", segmentType)
+	}
+	outputDir := filepath.Join(s.basePath, "ts", "video", fileID, bitrate)
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		return err
 	}
 	outputPath := filepath.Join(outputDir, fmt.Sprintf("%d.ts", segID))
-	return os.WriteFile(outputPath, data, 0644)
+	return os.WriteFile(outputPath, data, 0o644)
 }
 
 type TranscodeWorker struct {
-	redis     *redis.Client
-	storage   Storage
-	ffmpeg    string
-	logger    *zap.Logger
-	workerID  string
-	semaphore chan struct{}
-	hwEncoder hwenc.ID
+	redis       *redis.Client
+	storage     Storage
+	ffmpeg      string
+	logger      *zap.Logger
+	workerID    string
+	semaphore   chan struct{}
+	hwEncoder   hwenc.ID
+	ffmpegLogMu sync.Mutex // serializes ffmpeg console lines from concurrent tasks
+}
+
+// linePrefixWriter buffers subprocess output and emits whole lines prefixed for readability.
+type linePrefixWriter struct {
+	mu     *sync.Mutex
+	out    io.Writer
+	prefix string
+	buf    bytes.Buffer
+}
+
+func (w *linePrefixWriter) Write(p []byte) (n int, err error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	n = len(p)
+	w.buf.Write(p)
+	for {
+		b := w.buf.Bytes()
+		idx := bytes.IndexByte(b, '\n')
+		if idx < 0 {
+			break
+		}
+		line := append([]byte(nil), b[:idx+1]...)
+		w.buf.Next(idx + 1)
+		w.mu.Lock()
+		_, werr := w.out.Write(append([]byte(w.prefix), line...))
+		w.mu.Unlock()
+		if werr != nil {
+			return n, werr
+		}
+	}
+	return n, nil
+}
+
+func (w *linePrefixWriter) flush() error {
+	b := w.buf.Bytes()
+	if len(b) == 0 {
+		return nil
+	}
+	w.buf.Reset()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if _, err := fmt.Fprintf(w.out, "%s%s", w.prefix, b); err != nil {
+		return err
+	}
+	if !bytes.HasSuffix(b, []byte{'\n'}) {
+		_, err := w.out.Write([]byte{'\n'})
+		return err
+	}
+	return nil
 }
 
 func NewTranscodeWorker(cfg *Config) *TranscodeWorker {
@@ -113,9 +173,12 @@ func NewTranscodeWorker(cfg *Config) *TranscodeWorker {
 func (w *TranscodeWorker) Start() {
 	ctx := context.Background()
 
-	w.logger.Info("Transcode worker started", zap.String("worker_id", w.workerID))
+	w.logger.Info("Transcode worker started",
+		zap.String("worker_id", w.workerID),
+		zap.Int("max_concurrent", cap(w.semaphore)),
+	)
 
-	// 轮询多个优先级队列
+	// 优先级从高到低；只有当某档无任务时才落到下一档。
 	queues := []string{
 		"transcode:queue:high",
 		"transcode:queue:normal",
@@ -123,30 +186,55 @@ func (w *TranscodeWorker) Start() {
 	}
 
 	for {
+		// 关键修复：先占用一个 slot 再去拉任务。这避免「pop 出 low priority 任务 → 进 in-memory FIFO →
+		// 把 high priority 用户请求挡在身后」的优先级反转。
+		w.semaphore <- struct{}{}
+
+		var task *models.TranscodeTask
 		for _, queue := range queues {
-			// 从队列中获取任务
-			result, err := w.redis.ZPopMin(ctx, queue, 1).Result()
-			if err != nil || len(result) == 0 {
+			res, err := w.redis.ZPopMin(ctx, queue, 1).Result()
+			if err != nil || len(res) == 0 {
 				continue
 			}
-
-			taskData := []byte(result[0].Member.(string))
-			var task models.TranscodeTask
-			if err := json.Unmarshal(taskData, &task); err != nil {
-				w.logger.Error("Failed to parse task", zap.Error(err))
+			taskData, ok := res[0].Member.(string)
+			if !ok {
+				w.logger.Error("Unexpected member type", zap.String("queue", queue))
 				continue
 			}
-
-			// 异步处理
-			go func() {
-				w.semaphore <- struct{}{}
-				defer func() { <-w.semaphore }()
-
-				w.processTranscodeTask(&task)
-			}()
+			var t models.TranscodeTask
+			if err := json.Unmarshal([]byte(taskData), &t); err != nil {
+				w.logger.Error("Failed to parse task",
+					zap.String("queue", queue), zap.Error(err))
+				continue
+			}
+			task = &t
+			break
 		}
 
-		time.Sleep(100 * time.Millisecond)
+		if task == nil {
+			// 三档全空：释放 slot 并退避一会儿，避免 100% 空转 CPU。
+			<-w.semaphore
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+
+		// 关键修复：goroutine 内捕获 task 的值副本，否则 loop 后续迭代覆盖 task 指针会让
+		// 该 goroutine 执行错误的 fileID / segmentID（典型 Go 闭包陷阱）。
+		t := *task
+		go func(t models.TranscodeTask) {
+			defer func() { <-w.semaphore }()
+			defer func() {
+				if r := recover(); r != nil {
+					w.logger.Error("transcode task panic",
+						zap.Any("recover", r),
+						zap.String("file_id", t.FileID),
+						zap.Int("segment_id", t.SegmentID),
+					)
+					w.updateSegmentStatus(t.FileID, t.SegmentID, t.Bitrate, "failed")
+				}
+			}()
+			w.processTranscodeTask(&t)
+		}(t)
 	}
 }
 
@@ -215,8 +303,23 @@ func (w *TranscodeWorker) processTranscodeTask(task *models.TranscodeTask) {
 	// 6. 执行转码
 	outputPath := filepath.Join(w.storage.BasePath(), "tmp",
 		fmt.Sprintf("%s_%d_%s.ts", task.FileID, task.SegmentID, task.Bitrate))
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
+		logger.Error("Failed to create transcode tmp dir", zap.Error(err), zap.String("dir", filepath.Dir(outputPath)))
+		w.updateSegmentStatus(task.FileID, task.SegmentID, task.Bitrate, "failed")
+		return
+	}
 
-	cmd := exec.Command(w.ffmpeg, w.buildTranscodeArgs(inputPath, outputPath, task, ssSec, durSec)...)
+	transcodeArgs := w.buildTranscodeArgs(inputPath, outputPath, task, ssSec, durSec)
+	logger.Info("ffmpeg transcode args", zap.String("args", strings.Join(transcodeArgs, " ")))
+
+	logPrefix := fmt.Sprintf("[transcode file=%s seg=%d br=%s session=%s] ",
+		task.FileID, task.SegmentID, task.Bitrate, task.SessionID)
+	outLog := &linePrefixWriter{mu: &w.ffmpegLogMu, out: os.Stdout, prefix: logPrefix}
+	errLog := &linePrefixWriter{mu: &w.ffmpegLogMu, out: os.Stderr, prefix: logPrefix}
+
+	cmd := exec.Command(w.ffmpeg, transcodeArgs...)
+	cmd.Stdout = outLog
+	cmd.Stderr = errLog
 
 	if err := cmd.Start(); err != nil {
 		logger.Error("Transcode start failed", zap.Error(err))
@@ -229,6 +332,8 @@ func (w *TranscodeWorker) processTranscodeTask(task *models.TranscodeTask) {
 	}
 	err = cmd.Wait()
 	close(done)
+	_ = outLog.flush()
+	_ = errLog.flush()
 	if err != nil {
 		logger.Error("Transcode failed", zap.Error(err))
 		w.updateSegmentStatus(task.FileID, task.SegmentID, task.Bitrate, "failed")
@@ -260,7 +365,9 @@ func (w *TranscodeWorker) processTranscodeTask(task *models.TranscodeTask) {
 		zap.Int("size", len(data)),
 	)
 
-	// 10. 预取后续切片（如果是从高优先级队列处理的）
+	// 10. 预取后续切片（仅当 lookahead 节流允许）。每完成一段再往后追 2 段，单清晰度模式下足够。
+	//     原本固定追 5 段会与 sliceworker 的 EnqueueInitialSegments 叠加，让低优先级队列堵成
+	//     高优先级队列的搬运瓶颈。
 	if task.Priority == 0 {
 		w.prefetchNextSegments(task.FileID, task.SegmentID, task.Bitrate)
 	}
@@ -405,6 +512,10 @@ func (w *TranscodeWorker) buildTranscodeArgs(inputPath, outputPath string, task 
 		enc = hwenc.Libx264
 	}
 
+	// 音频处理：源已经是 AAC 时直接 -c:a copy（避免重编码），否则 transcode 为 AAC 128k。
+	// 不再单独输出音频段；音视频混流到同一个 .ts 由播放器消费。
+	audioArgs := w.audioOutputArgs(task)
+
 	// Codec passthrough：当源已经是 H.264 且没有强制软编时，直接 -c:v copy 可大幅降低 CPU。
 	// 仅当请求的目标比特率不显著低于源（缩小档）时启用，否则继续走重编码以适配 ABR。
 	if !forceSW && w.canVideoPassthrough(task) {
@@ -412,65 +523,74 @@ func (w *TranscodeWorker) buildTranscodeArgs(inputPath, outputPath string, task 
 		args := w.appendStdInput(head, inputPath, ssSec, durSec)
 		args = append(args,
 			"-map", "0:v:0",
+			"-map", "0:a:0?",
 			"-c:v", "copy",
 			"-bsf:v", "h264_mp4toannexb",
-			"-f", "mpegts",
-			"-an",
-			"-muxdelay", "0",
-			outputPath,
 		)
+		args = append(args, audioArgs...)
+		args = append(args, "-f", "mpegts", "-muxdelay", "0", outputPath)
 		return args
 	}
 
 	wPx, hPx := parseResolutionWH(res)
 	gops := []string{"-g", "48", "-keyint_min", "48", "-sc_threshold", "0"}
 	head := []string{"-hide_banner", "-loglevel", "error"}
+	mapArgs := []string{"-map", "0:v:0", "-map", "0:a:0?"}
 
 	switch enc {
 	case hwenc.H264QSV:
 		vf := "scale=" + wPx + ":" + hPx + ",format=nv12"
 		args := w.appendStdInput(head, inputPath, ssSec, durSec)
+		args = append(args, mapArgs...)
 		args = append(args, "-vf", vf,
 			"-c:v", "h264_qsv",
 			"-preset", mapX264PresetToQSV(preset),
 			"-b:v", task.Bitrate, "-maxrate", task.Bitrate, "-bufsize", "2M",
 			"-profile:v", "high")
 		args = append(args, gops...)
-		return append(args, "-an", "-f", "mpegts", "-muxdelay", "0", outputPath)
+		args = append(args, audioArgs...)
+		return append(args, "-f", "mpegts", "-muxdelay", "0", outputPath)
 	case hwenc.H264AMF:
 		vf := "scale=" + wPx + ":" + hPx
 		args := w.appendStdInput(head, inputPath, ssSec, durSec)
+		args = append(args, mapArgs...)
 		args = append(args, "-vf", vf,
 			"-c:v", "h264_amf",
 			"-quality", mapX264PresetToAMF(preset),
 			"-rc", "vbr_peak",
 			"-b:v", task.Bitrate)
 		args = append(args, gops...)
-		return append(args, "-an", "-f", "mpegts", "-muxdelay", "0", outputPath)
+		args = append(args, audioArgs...)
+		return append(args, "-f", "mpegts", "-muxdelay", "0", outputPath)
 	case hwenc.H264NVENC:
 		vf := "scale=" + wPx + ":" + hPx
 		args := w.appendStdInput(head, inputPath, ssSec, durSec)
+		args = append(args, mapArgs...)
 		args = append(args, "-vf", vf,
 			"-c:v", "h264_nvenc",
 			"-preset", mapX264PresetToNVENC(preset),
 			"-b:v", task.Bitrate, "-maxrate", task.Bitrate, "-bufsize", "2M",
 			"-profile:v", "high")
 		args = append(args, gops...)
-		return append(args, "-an", "-f", "mpegts", "-muxdelay", "0", outputPath)
+		args = append(args, audioArgs...)
+		return append(args, "-f", "mpegts", "-muxdelay", "0", outputPath)
 	case hwenc.H264VAAPI:
 		dev := hwenc.VAAPIDevice()
 		vf := "format=nv12,hwupload,scale_vaapi=w=" + wPx + ":h=" + hPx
 		args := w.appendVAAPIInput(head, dev, inputPath, ssSec, durSec)
+		args = append(args, mapArgs...)
 		args = append(args, "-vf", vf,
 			"-c:v", "h264_vaapi", "-b:v", task.Bitrate)
 		args = append(args, gops...)
-		return append(args, "-an", "-f", "mpegts", "-muxdelay", "0", outputPath)
+		args = append(args, audioArgs...)
+		return append(args, "-f", "mpegts", "-muxdelay", "0", outputPath)
 	default:
 		codec := strings.TrimSpace(task.Codec)
 		if codec == "" {
 			codec = "libx264"
 		}
 		args := w.appendStdInput(head, inputPath, ssSec, durSec)
+		args = append(args, mapArgs...)
 		args = append(args,
 			"-c:v", codec,
 			"-b:v", task.Bitrate,
@@ -478,8 +598,24 @@ func (w *TranscodeWorker) buildTranscodeArgs(inputPath, outputPath string, task 
 			"-preset", preset,
 			"-profile:v", "high")
 		args = append(args, gops...)
-		return append(args, "-an", "-f", "mpegts", "-muxdelay", "0", outputPath)
+		args = append(args, audioArgs...)
+		return append(args, "-f", "mpegts", "-muxdelay", "0", outputPath)
 	}
+}
+
+// audioOutputArgs 返回 ffmpeg 音频输出参数。源 AAC 直接 stream copy；其他格式重编码为 AAC 128k。
+// 当源没有音轨时使用 -an 避免 ffmpeg 报错。
+func (w *TranscodeWorker) audioOutputArgs(task *models.TranscodeTask) []string {
+	ctx := context.Background()
+	codec, _ := w.redis.HGet(ctx, "video:meta:"+task.FileID, "audio_codec").Result()
+	codec = strings.ToLower(strings.TrimSpace(codec))
+	if codec == "" {
+		return []string{"-an"}
+	}
+	if codec == "aac" {
+		return []string{"-c:a", "copy", "-bsf:a", "aac_adtstoasc"}
+	}
+	return []string{"-c:a", "aac", "-b:a", "128k", "-ac", "2", "-ar", "48000"}
 }
 
 func (w *TranscodeWorker) monitorSession(cmd *exec.Cmd, sessionID string, finished <-chan struct{}) {
@@ -604,7 +740,8 @@ func (w *TranscodeWorker) prefetchNextSegments(fileID string, currentSegID int, 
 	// Jellyfin/Emby 风格：仅当客户端最近请求段在 currentSegID 附近时才继续预取，
 	// 否则停止预取避免远超前于播放头浪费 CPU/GPU。
 	maxAhead := lookaheadLimit()
-	for i := 1; i <= 5; i++ {
+	// 仅追 2 段：客户端按顺序拉，到达第 N+2 段时再触发下一次链式追档。
+	for i := 1; i <= 2; i++ {
 		segID := currentSegID + i
 
 		tsPath := fmt.Sprintf("ts/video/%s/%s/%d.ts", fileID, bitrate, segID)

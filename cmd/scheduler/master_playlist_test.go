@@ -7,37 +7,17 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/gin-gonic/gin"
 
 	models "knox-media/internal/model"
 )
 
-func TestGenerateMasterPlaylist_FiltersLadderBySource1080(t *testing.T) {
+func TestGenerateMasterPlaylist_SingleVariantMatchesSource1080(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	s, rdb, _ := newTestScheduler(t)
-	ctx := context.Background()
+	s, _, _ := newTestScheduler(t)
 
 	fileID := "f-master"
-	idx := models.SegmentIndex{
-		FileID: fileID,
-		Status: "ready",
-		AudioSegments: []models.AudioSegmentInfo{
-			{Language: "eng", Duration: 6},
-			{Language: "chi", Duration: 6},
-		},
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
-	}
-	raw, err := json.Marshal(idx)
-	if err != nil {
-		t.Fatalf("marshal idx: %v", err)
-	}
-	if err := rdb.Set(ctx, "video:index:"+fileID, raw, 0).Err(); err != nil {
-		t.Fatalf("set index: %v", err)
-	}
-
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/jit/master/"+fileID, nil)
@@ -50,34 +30,25 @@ func TestGenerateMasterPlaylist_FiltersLadderBySource1080(t *testing.T) {
 	})
 
 	if !strings.Contains(out, "1920x1080") {
-		t.Fatalf("expected 1080p variant in master\n%s", out)
+		t.Fatalf("expected 1080p single variant in master\n%s", out)
 	}
 	if strings.Contains(out, "3840x2160") {
 		t.Fatalf("did not expect 4K variant for 1080p source\n%s", out)
 	}
-	// 应该按索引中的语言渲染至少两个 EXT-X-MEDIA TYPE=AUDIO 行
-	if strings.Count(out, "TYPE=AUDIO") < 2 {
-		t.Fatalf("expected multiple audio TYPE entries\n%s", out)
+	if strings.Count(out, "#EXT-X-STREAM-INF") != 1 {
+		t.Fatalf("expected exactly one STREAM-INF for single-quality master\n%s", out)
 	}
-	if !strings.Contains(out, `LANGUAGE="eng"`) || !strings.Contains(out, `LANGUAGE="chi"`) {
-		t.Fatalf("expected eng and chi languages in master\n%s", out)
+	// 单清晰度 + 内嵌音频：不应再渲染 TYPE=AUDIO 媒体行
+	if strings.Contains(out, "TYPE=AUDIO") {
+		t.Fatalf("single-quality master should embed audio in TS, not declare AUDIO group\n%s", out)
 	}
 }
 
 func TestGenerateMasterPlaylist_RespectsClientMaxHeight(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	s, rdb, _ := newTestScheduler(t)
-	ctx := context.Background()
+	s, _, _ := newTestScheduler(t)
 
 	fileID := "f-master-2"
-	idx := models.SegmentIndex{
-		FileID:        fileID,
-		Status:        "ready",
-		AudioSegments: []models.AudioSegmentInfo{{Language: "eng", Duration: 6}},
-	}
-	raw, _ := json.Marshal(idx)
-	_ = rdb.Set(ctx, "video:index:"+fileID, raw, 0).Err()
-
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/jit/master/"+fileID+"?max_height=720", nil)
@@ -184,6 +155,8 @@ func TestHandleVideoPlaylist_UsesMaxSegmentForTargetDuration(t *testing.T) {
 	}
 	raw, _ := json.Marshal(idx)
 	_ = rdb.Set(ctx, "video:index:"+fileID, raw, 0).Err()
+	// Variant playlist 现在等 video:meta status=ready 才返回
+	_ = rdb.HSet(ctx, "video:meta:"+fileID, "status", "ready", "file_path", "/tmp/x.mp4").Err()
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
