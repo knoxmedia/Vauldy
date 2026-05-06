@@ -69,6 +69,8 @@ func (s *Scheduler) RegisterRoutes(r gin.IRouter) {
 	r.GET("/jit/segment/:fileId/audio/:lang/:segId", s.handleAudioSegment)
 	r.POST("/jit/session/pause", s.handleJITSessionPause)
 	r.POST("/jit/session/resume", s.handleJITSessionResume)
+	r.POST("/jit/session/end", s.handleJITSessionEnd)
+	r.POST("/jit/session/seek", s.handleJITSessionSeek)
 }
 
 func (s *Scheduler) PrepareVideoMeta(fileID, filePath, format, videoCodec, audioCodec string) error {
@@ -83,6 +85,28 @@ func (s *Scheduler) PrepareVideoMeta(fileID, filePath, format, videoCodec, audio
 
 func (s *Scheduler) TriggerSlicing(fileID, sessionID string) error {
 	return s.ensureVideoSliced(fileID, sessionID)
+}
+
+// EndSession 删除 session:* Redis 键并清理相关辅助键。transcodeworker 在下一次心跳时检测到
+// session 不再存活后会向其 ffmpeg 子进程发 SIGKILL，从而立即释放转码资源。
+// 用户主动退出播放或客户端关闭页面时调用本方法。
+func (s *Scheduler) EndSession(sessionID string) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" || s == nil || s.redis == nil {
+		return
+	}
+	ctx := context.Background()
+	s.redis.Del(ctx, "session:"+sessionID)
+	s.redis.Del(ctx, "jit:session_seek_boost:"+sessionID)
+}
+
+// MarkSessionSeek 提升会话的 seek 状态，由播放器在拖动进度条后调用。
+func (s *Scheduler) MarkSessionSeek(sessionID string) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" || s == nil || s.redis == nil {
+		return
+	}
+	s.markSessionSeekBoost(sessionID)
 }
 
 // ==================== Master Playlist ====================
@@ -330,29 +354,24 @@ func (s *Scheduler) handleVideoPlaylist(c *gin.Context) {
 	fileID := c.Param("fileId")
 	bitrate := c.Param("bitrate")
 
-	// 获取切片索引
 	index, err := s.getSegmentIndex(fileID)
 	if err != nil {
 		c.JSON(404, gin.H{"error": "Video not ready"})
 		return
 	}
 
-	// 生成 Playlist
-	content := "#EXTM3U\n"
-	content += "#EXT-X-VERSION:3\n"
-	content += "#EXT-X-TARGETDURATION:10\n"
-	content += "#EXT-X-PLAYLIST-TYPE:VOD\n"
-	content += "#EXT-X-MEDIA-SEQUENCE:0\n\n"
-
+	target := targetDuration(index.VideoSegments)
+	entries := make([]segmentEntry, 0, len(index.VideoSegments))
 	for _, seg := range index.VideoSegments {
-		content += fmt.Sprintf("#EXTINF:%.3f,\n", seg.Duration)
 		segPath := fmt.Sprintf("/api/v1/jit/segment/%s/video/%s/%d", fileID, bitrate, seg.ID)
-		content += jitURLWithAccessToken(c, segPath) + "\n"
+		entries = append(entries, segmentEntry{
+			Duration: seg.Duration,
+			URL:      jitURLWithAccessToken(c, segPath),
+		})
 	}
+	content := renderMediaPlaylist(target, entries)
 
-	content += "#EXT-X-ENDLIST\n"
-
-	// 缓存 Playlist（1小时）
+	// 缓存 Playlist（1小时；分片数量与时长在切片完成后保持稳定）
 	c.Header("Cache-Control", "public, max-age=3600")
 	c.Header("Content-Type", "application/vnd.apple.mpegurl")
 	c.String(200, content)
@@ -369,29 +388,29 @@ func (s *Scheduler) handleAudioPlaylist(c *gin.Context) {
 		return
 	}
 
-	content := "#EXTM3U\n"
-	content += "#EXT-X-VERSION:3\n"
-	content += "#EXT-X-TARGETDURATION:10\n"
-	content += "#EXT-X-PLAYLIST-TYPE:VOD\n"
-	content += "#EXT-X-MEDIA-SEQUENCE:0\n\n"
-
-	segmentCount := 0
+	entries := make([]segmentEntry, 0, len(index.AudioSegments))
 	for _, seg := range index.AudioSegments {
-		if seg.Language != "" && seg.Language != lang {
+		// "und" 视为通配，匹配所有未标注语言的分片
+		segLang := strings.TrimSpace(seg.Language)
+		if segLang == "" {
+			segLang = "und"
+		}
+		if !strings.EqualFold(segLang, lang) && lang != "und" {
 			continue
 		}
-		content += fmt.Sprintf("#EXTINF:%.3f,\n", seg.Duration)
 		segPath := fmt.Sprintf("/api/v1/jit/segment/%s/audio/%s/%d", fileID, lang, seg.ID)
-		content += jitURLWithAccessToken(c, segPath) + "\n"
-		segmentCount++
+		entries = append(entries, segmentEntry{
+			Duration: seg.Duration,
+			URL:      jitURLWithAccessToken(c, segPath),
+		})
 	}
 
-	if segmentCount == 0 {
+	if len(entries) == 0 {
 		c.JSON(404, gin.H{"error": "Audio track not found"})
 		return
 	}
 
-	content += "#EXT-X-ENDLIST\n"
+	content := renderMediaPlaylist(targetDurationAudio(index.AudioSegments), entries)
 
 	c.Header("Cache-Control", "public, max-age=3600")
 	c.Header("Content-Type", "application/vnd.apple.mpegurl")
@@ -817,6 +836,43 @@ func (s *Scheduler) handleJITSessionResume(c *gin.Context) {
 	c.JSON(200, gin.H{"ok": true})
 }
 
+// handleJITSessionEnd 立即结束会话：删除 session:* 键，由 transcodeworker.monitorSession 检测到 isSessionAlive=false 后 SIGKILL 子进程。
+// 任何排队中的 prefetch 任务也由 transcodeworker 处理时返回 aborted。
+func (s *Scheduler) handleJITSessionEnd(c *gin.Context) {
+	sessionID := strings.TrimSpace(c.GetHeader("X-Session-ID"))
+	if sessionID == "" {
+		c.JSON(400, gin.H{"error": "X-Session-ID required"})
+		return
+	}
+	ctx := context.Background()
+	key := "session:" + sessionID
+	// 即使 session 不在也返回 ok（幂等），但仍清理 boost 等附属键。
+	s.redis.Del(ctx, key)
+	s.redis.Del(ctx, "jit:session_seek_boost:"+sessionID)
+	c.JSON(200, gin.H{"ok": true})
+}
+
+// handleJITSessionSeek 显式标记一次跳转，提示 transcodeworker 切换到 ultrafast 预设并优先服务跳转目标。
+// 客户端在用户拖动进度条后请求新分片前调用本接口可避免 N 段“缓冲洞”。
+func (s *Scheduler) handleJITSessionSeek(c *gin.Context) {
+	sessionID := strings.TrimSpace(c.GetHeader("X-Session-ID"))
+	if sessionID == "" {
+		c.JSON(400, gin.H{"error": "X-Session-ID required"})
+		return
+	}
+	ctx := context.Background()
+	key := "session:" + sessionID
+	if n, _ := s.redis.Exists(ctx, key).Result(); n == 0 {
+		c.JSON(404, gin.H{"error": "session not found"})
+		return
+	}
+	s.markSessionSeekBoost(sessionID)
+	// resume 暂停状态以便用户拖动后继续转码
+	s.redis.HSet(ctx, key, "transcode_paused", "0")
+	s.redis.Expire(ctx, key, 35*time.Second)
+	c.JSON(200, gin.H{"ok": true})
+}
+
 func (s *Scheduler) getOrCreateSessionID(c *gin.Context) string {
 	sessionID := c.GetHeader("X-Session-ID")
 	if sessionID == "" {
@@ -835,36 +891,76 @@ func (s *Scheduler) serveSegment(c *gin.Context, path string) {
 	c.File(path)
 }
 
-func (s *Scheduler) generateMasterPlaylist(c *gin.Context, fileID string, _ *models.VideoMetadata) string {
-	audioURI := jitURLWithAccessToken(c, "/api/v1/jit/playlist/"+fileID+"/audio/eng")
-
-	content := "#EXTM3U\n"
-	content += "#EXT-X-VERSION:4\n\n"
-
-	// 音频流（URI 需带 token，否则 hls.js 拉子列表 401）
-	content += "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",LANGUAGE=\"eng\",NAME=\"English\",DEFAULT=YES,URI=\"" + audioURI + "\"\n\n"
-
-	// 视频流（多码率）；CODECS 含 AAC 以匹配 AUDIO 组，避免部分 HLS 解析器拒绝 master
-	bitrates := []struct {
-		name       string
-		bandwidth  int
-		resolution string
-	}{
-		{"8000k", 8000000, "3840x2160"},
-		{"4000k", 4000000, "1920x1080"},
-		{"2000k", 2000000, "1280x720"},
-		{"1000k", 1000000, "854x480"},
-		{"500k", 500000, "640x360"},
+func (s *Scheduler) generateMasterPlaylist(c *gin.Context, fileID string, meta *models.VideoMetadata) string {
+	// 读取索引以拿到已就绪的音轨语言和实际分片时长
+	index, _ := s.getSegmentIndex(fileID)
+	languages := []string{"und"}
+	if index != nil {
+		if got := audioLanguages(index.AudioSegments); len(got) > 0 {
+			languages = got
+		}
 	}
 
-	for _, br := range bitrates {
-		content += fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%s,CODECS=\"avc1.640028,mp4a.40.2\",AUDIO=\"audio\"\n",
-			br.bandwidth, br.resolution)
-		videoURI := jitURLWithAccessToken(c, fmt.Sprintf("/api/v1/jit/playlist/%s/video/%s", fileID, br.name))
-		content += videoURI + "\n\n"
+	// 客户端期望最大高度，参数与 /api/v1/media/{id}/hls 共享 max_height
+	maxClientHeight := 0
+	if v := strings.TrimSpace(c.Query("max_height")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			maxClientHeight = n
+		}
+	}
+	srcHeight := 0
+	srcCodec := ""
+	srcAudio := ""
+	if meta != nil {
+		srcHeight = meta.Height
+		srcCodec = strings.ToLower(strings.TrimSpace(meta.Codec))
+		srcAudio = strings.ToLower(strings.TrimSpace(meta.AudioCodec))
+	}
+	ladder := adaptiveLadder(srcHeight, maxClientHeight)
+
+	var b strings.Builder
+	b.WriteString("#EXTM3U\n")
+	b.WriteString("#EXT-X-VERSION:4\n")
+	b.WriteString("#EXT-X-INDEPENDENT-SEGMENTS\n\n")
+
+	// 音轨：每种语言一条 EXT-X-MEDIA；首个标记为 DEFAULT
+	for i, lang := range languages {
+		def := "NO"
+		auto := "NO"
+		if i == 0 {
+			def = "YES"
+			auto = "YES"
+		}
+		uri := jitURLWithAccessToken(c, "/api/v1/jit/playlist/"+fileID+"/audio/"+lang)
+		name := strings.ToUpper(lang)
+		b.WriteString(fmt.Sprintf(
+			"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",LANGUAGE=\"%s\",NAME=\"%s\",DEFAULT=%s,AUTOSELECT=%s,URI=\"%s\"\n",
+			lang, name, def, auto, uri,
+		))
+	}
+	b.WriteString("\n")
+
+	// 视频码率档：源高度 + 客户端 max_height 双重过滤
+	clientPrefersAAC := strings.EqualFold(srcAudio, "aac") || srcAudio == ""
+	for _, br := range ladder {
+		bw := br.Bandwidth
+		if bw <= 0 {
+			bw = formatBitrate(br.Name)
+		}
+		codecs := videoCodecsAttr(br.Passthrough, srcCodec)
+		if !clientPrefersAAC {
+			// 当源音频不是 AAC 时仍声明 mp4a.40.2，因为转码 worker 会输出 AAC
+			codecs = "avc1.640028,mp4a.40.2"
+		}
+		b.WriteString(fmt.Sprintf(
+			"#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%dx%d,CODECS=\"%s\",AUDIO=\"audio\"\n",
+			bw, br.Width, br.Height, codecs,
+		))
+		videoURI := jitURLWithAccessToken(c, fmt.Sprintf("/api/v1/jit/playlist/%s/video/%s", fileID, br.Name))
+		b.WriteString(videoURI + "\n\n")
 	}
 
-	return content
+	return b.String()
 }
 
 func (s *Scheduler) getResolutionForBitrate(bitrate string) string {

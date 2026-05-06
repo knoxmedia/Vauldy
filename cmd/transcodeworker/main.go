@@ -200,6 +200,18 @@ func (w *TranscodeWorker) processTranscodeTask(task *models.TranscodeTask) {
 		return
 	}
 
+	// 5.1 lookahead 节流：当转码进度领先客户端请求过多，则延后该任务，避免无限制超前消耗 CPU/GPU。
+	// 行为对齐 Jellyfin/Emby 的 transcoding throttle：用户暂停或长时间停留时停止超前转码。
+	if w.shouldDeferLookahead(task) {
+		logger.Info("Deferring segment (lookahead throttle)",
+			zap.String("session_id", task.SessionID),
+			zap.Int("segment_id", task.SegmentID),
+		)
+		w.updateSegmentStatus(task.FileID, task.SegmentID, task.Bitrate, "deferred")
+		w.requeueLowPriority(task, 5*time.Second)
+		return
+	}
+
 	// 6. 执行转码
 	outputPath := filepath.Join(w.storage.BasePath(), "tmp",
 		fmt.Sprintf("%s_%d_%s.ts", task.FileID, task.SegmentID, task.Bitrate))
@@ -393,6 +405,23 @@ func (w *TranscodeWorker) buildTranscodeArgs(inputPath, outputPath string, task 
 		enc = hwenc.Libx264
 	}
 
+	// Codec passthrough：当源已经是 H.264 且没有强制软编时，直接 -c:v copy 可大幅降低 CPU。
+	// 仅当请求的目标比特率不显著低于源（缩小档）时启用，否则继续走重编码以适配 ABR。
+	if !forceSW && w.canVideoPassthrough(task) {
+		head := []string{"-hide_banner", "-loglevel", "error"}
+		args := w.appendStdInput(head, inputPath, ssSec, durSec)
+		args = append(args,
+			"-map", "0:v:0",
+			"-c:v", "copy",
+			"-bsf:v", "h264_mp4toannexb",
+			"-f", "mpegts",
+			"-an",
+			"-muxdelay", "0",
+			outputPath,
+		)
+		return args
+	}
+
 	wPx, hPx := parseResolutionWH(res)
 	gops := []string{"-g", "48", "-keyint_min", "48", "-sc_threshold", "0"}
 	head := []string{"-hide_banner", "-loglevel", "error"}
@@ -572,14 +601,20 @@ func (w *TranscodeWorker) updateTranscodeStats(fileID, bitrate string, success b
 }
 
 func (w *TranscodeWorker) prefetchNextSegments(fileID string, currentSegID int, bitrate string) {
-	// 预取后续5个切片
+	// Jellyfin/Emby 风格：仅当客户端最近请求段在 currentSegID 附近时才继续预取，
+	// 否则停止预取避免远超前于播放头浪费 CPU/GPU。
+	maxAhead := lookaheadLimit()
 	for i := 1; i <= 5; i++ {
 		segID := currentSegID + i
 
-		// 检查是否已存在
 		tsPath := fmt.Sprintf("ts/video/%s/%s/%d.ts", fileID, bitrate, segID)
 		if w.storage.SegmentExists(fileID, tsPath, 0) {
 			continue
+		}
+
+		// 若已超过任意活跃会话的 lookahead 上限，不再继续 prefetch
+		if w.fileLookaheadFull(fileID, segID, maxAhead) {
+			break
 		}
 
 		res := resolutionForBitrate(bitrate)
@@ -600,4 +635,130 @@ func (w *TranscodeWorker) prefetchNextSegments(fileID string, currentSegID int, 
 			Member: taskData,
 		})
 	}
+}
+
+// canVideoPassthrough returns true if the task target (bitrate ladder) matches the source resolution
+// and source codec is H.264, so we can stream-copy the video track instead of re-encoding.
+func (w *TranscodeWorker) canVideoPassthrough(task *models.TranscodeTask) bool {
+	if task == nil || task.FileID == "" {
+		return false
+	}
+	if strings.TrimSpace(os.Getenv("KNOX_MEDIA_JIT_DISABLE_PASSTHROUGH")) == "1" {
+		return false
+	}
+	ctx := context.Background()
+	meta, err := w.redis.HGetAll(ctx, "video:meta:"+task.FileID).Result()
+	if err != nil || len(meta) == 0 {
+		return false
+	}
+	srcCodec := strings.ToLower(strings.TrimSpace(meta["codec"]))
+	if !(srcCodec == "h264" || srcCodec == "avc1") {
+		return false
+	}
+	srcH, _ := strconv.Atoi(strings.TrimSpace(meta["height"]))
+	if srcH <= 0 {
+		return false
+	}
+	_, hStr := parseResolutionWH(task.Resolution)
+	tgtH, _ := strconv.Atoi(hStr)
+	if tgtH <= 0 {
+		return false
+	}
+	// 目标高度 ≥ 源高度的 90%：直接复制；否则需要降采样，仍走转码
+	if tgtH < srcH-int(float64(srcH)*0.1) {
+		return false
+	}
+	return true
+}
+
+// lookaheadLimit 是 ffmpeg 输出领先客户端请求的最大段数；超过则任务延后或不入队。
+// 默认 8 段；可由 KNOX_MEDIA_JIT_LOOKAHEAD 覆盖。
+func lookaheadLimit() int {
+	v := strings.TrimSpace(os.Getenv("KNOX_MEDIA_JIT_LOOKAHEAD"))
+	if v == "" {
+		return 8
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return 8
+	}
+	return n
+}
+
+// shouldDeferLookahead 当 task.SegmentID 比客户端最近请求的段超前过多时返回 true。
+// prefetch / 不存在 session 时也按所有相关活跃 session 的最大 current_segment 判断。
+func (w *TranscodeWorker) shouldDeferLookahead(task *models.TranscodeTask) bool {
+	if task == nil || task.SegmentID < 0 {
+		return false
+	}
+	max := lookaheadLimit()
+	ctx := context.Background()
+	if task.SessionID != "" && task.SessionID != "prefetch" {
+		// 单会话：以该会话的 current_segment 为准
+		v, err := w.redis.HGet(ctx, "session:"+task.SessionID, "current_segment").Result()
+		if err != nil {
+			// 会话还没产生段请求，允许首次预热（不阻塞）
+			return false
+		}
+		curr, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil {
+			return false
+		}
+		// seek 提速时段在请求左右大幅波动，放宽限制
+		if w.sessionSeekBoost(task.SessionID) {
+			return false
+		}
+		if task.SegmentID-curr > max {
+			return true
+		}
+		return false
+	}
+	// prefetch：比对该 fileID 的所有活跃会话
+	return w.fileLookaheadFull(task.FileID, task.SegmentID, max)
+}
+
+// fileLookaheadFull 返回 true 当请求段相对所有活跃会话 current_segment 全都超前 > max。
+// 没有任何会话时（典型为 ingest 预热）允许 prefetch 推进。
+func (w *TranscodeWorker) fileLookaheadFull(fileID string, segID int, max int) bool {
+	ctx := context.Background()
+	// 限定遍历会话数量以避免大量按键扫描；单服上一般同时只少数会话观看同一文件
+	iter := w.redis.Scan(ctx, 0, "session:*", 64).Iterator()
+	any := false
+	for iter.Next(ctx) {
+		key := iter.Val()
+		got, err := w.redis.HGetAll(ctx, key).Result()
+		if err != nil {
+			continue
+		}
+		if got["file_id"] != fileID {
+			continue
+		}
+		any = true
+		curr, err := strconv.Atoi(strings.TrimSpace(got["current_segment"]))
+		if err != nil {
+			continue
+		}
+		if segID-curr <= max {
+			return false
+		}
+	}
+	if !any {
+		return false
+	}
+	return true
+}
+
+// requeueLowPriority 延迟 backoff 后把任务重新入低优先级队列。
+func (w *TranscodeWorker) requeueLowPriority(task *models.TranscodeTask, backoff time.Duration) {
+	if task == nil {
+		return
+	}
+	data, err := json.Marshal(task)
+	if err != nil {
+		return
+	}
+	w.redis.ZAdd(context.Background(), "transcode:queue:low", &redis.Z{
+		Score:  float64(time.Now().Add(backoff).Unix()),
+		Member: data,
+	})
 }
