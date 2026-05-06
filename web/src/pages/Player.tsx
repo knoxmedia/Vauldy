@@ -10,8 +10,39 @@ import "xgplayer-subtitles/es/style/index.css";
 import { useAuthStore } from "../store/auth";
 import { fetchMediaSubtitles, type MediaSubtitleRow, reportPlaybackEnd, reportPlaybackStart, savePlaybackProgress } from "../api/client";
 
+/** fetch that aborts after timeoutMs (clears hung UI when backend blocks). */
+async function fetchWithTimeout(
+  input: string,
+  init: RequestInit = {},
+  timeoutMs: number
+): Promise<Response> {
+  const ctrl = new AbortController();
+  const tid = window.setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: ctrl.signal });
+  } finally {
+    window.clearTimeout(tid);
+  }
+}
+
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const t = window.setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    p.then(
+      (v) => {
+        window.clearTimeout(t);
+        resolve(v);
+      },
+      (e) => {
+        window.clearTimeout(t);
+        reject(e);
+      }
+    );
+  });
+}
+
 type PlaybackPlan = {
-  mode?: "native" | "hls" | "hls_drm" | "hls_aes_128" | "hls_powerdrm";
+  mode?: "native" | "hls" | "jit_hls" | "hls_drm" | "hls_aes_128" | "hls_powerdrm";
   playUrl?: string;
   hls_master?: string;
   status?: string;
@@ -301,8 +332,14 @@ export default function PlayerPage() {
   }, [id]);
 
   useEffect(() => {
-    if (!mid || Number.isNaN(mid)) return;
-    if (!token) return;
+    if (!mid || Number.isNaN(mid)) {
+      setLoadingText("缺少媒体 ID，无法播放。");
+      return;
+    }
+    if (!token) {
+      setLoadingText("等待登录…");
+      return;
+    }
     if (canPlay === false) {
       setTranscodeStatus(null);
       setLoadingText("当前账号未开通播放权限");
@@ -319,7 +356,11 @@ export default function PlayerPage() {
     const dbgErr = (...args: any[]) => console.error("[player]", ...args);
     const fetchPreviewPlan = async (): Promise<PreviewPlan | null> => {
       try {
-        const resp = await fetch(`/api/v1/media/${mid}/preview?access_token=${encodeURIComponent(token)}`);
+        const resp = await fetchWithTimeout(
+          `/api/v1/media/${mid}/preview?access_token=${encodeURIComponent(token)}`,
+          {},
+          15_000
+        );
         if (!resp.ok) return null;
         return (await resp.json()) as PreviewPlan;
       } catch {
@@ -328,7 +369,7 @@ export default function PlayerPage() {
     };
     const fetchHlsDefinitions = async (masterURL: string): Promise<XgDefinition[]> => {
       try {
-        const resp = await fetch(masterURL);
+        const resp = await fetchWithTimeout(masterURL, {}, 45_000);
         if (!resp.ok) return [];
         const txt = await resp.text();
         const lines = txt.split(/\r?\n/);
@@ -648,11 +689,11 @@ export default function PlayerPage() {
       }
       // Chromium/Firefox need MSE (xgplayer-hls); a bare .m3u8 URL on <video> fails there. Safari can do native HLS; plugin still works.
       const useXgHlsPlugin =
-        forceXgHls || (!forcePowerPlayer && /\.m3u8(\?|#|$)/i.test(url));
+        forceXgHls || (!forcePowerPlayer && (/\.m3u8(\?|#|$)/i.test(url) || /\/jit\/master\//i.test(url)));
       let textTrackList: ReturnType<typeof buildTextTrackList> = [];
       if (mid) {
         try {
-          const rows = await fetchMediaSubtitles(mid);
+          const rows = await withTimeout(fetchMediaSubtitles(mid), 12_000, "subtitles");
           textTrackList = buildTextTrackList(mid, token, rows);
         } catch {
           textTrackList = [];
@@ -680,7 +721,10 @@ export default function PlayerPage() {
         };
       }
       if (useXgHlsPlugin) {
-        const definitionList = await fetchHlsDefinitions(url);
+        // JIT master: do not pre-fetch the same URL again — /jit/master can block on first slice for minutes,
+        // which left the overlay on "正在准备播放…" with no backend error. xgplayer-hls loads the master URL directly.
+        const isJitMaster = /\/jit\/master\//i.test(url);
+        const definitionList = isJitMaster ? [] : await fetchHlsDefinitions(url);
         if (definitionList.length > 0) {
           options.definition = {
             list: [{ definition: "auto", text: "自动", url }, ...definitionList],
@@ -799,7 +843,7 @@ export default function PlayerPage() {
         max_height: String(caps.maxHeight),
         qualities: caps.qualities.join(","),
       });
-      const resp = await fetch(`/api/v1/media/${mid}/hls?${query.toString()}`);
+      const resp = await fetchWithTimeout(`/api/v1/media/${mid}/hls?${query.toString()}`, {}, 60_000);
       if (resp.status === 403) {
         let errBody: { error?: string } | null = null;
         try {
@@ -854,8 +898,16 @@ export default function PlayerPage() {
         plan.mode === "hls" ||
         plan.mode === "hls_drm" ||
         plan.mode === "hls_aes_128" ||
-        plan.mode === "hls_powerdrm"
+        plan.mode === "hls_powerdrm" ||
+        plan.mode === "jit_hls"
       ) {
+        // JIT HLS: scheduler serves master playlist; per-segment transcode on the fly.
+        if (plan.mode === "jit_hls" && plan.hls_master) {
+          setLoadingText("正在连接即时播放…");
+          const preview = await fetchPreviewPlan();
+          await playWithURL(appendToken(plan.hls_master), preview);
+          return;
+        }
         if (plan.status === "done" && plan.hls_master) {
           const preview = await fetchPreviewPlan();
           await playWithURL(
@@ -869,7 +921,7 @@ export default function PlayerPage() {
           return;
         }
         if (plan.task_id && plan.task_id > 0) {
-          setTranscodeStatus("waiting");
+          setTranscodeStatus(plan.status === "running" ? "running" : "waiting");
           setTranscodeProgress(0);
           await pollTaskStatus(plan.task_id, plan.fallback);
           return;

@@ -354,3 +354,55 @@ func (h *Handler) UpdateMediaAdmin(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true, "updated": n})
 }
+
+// ToggleWatched marks a media item as watched or unwatched for the current user.
+// PUT marks watched, DELETE marks unwatched.
+func (h *Handler) ToggleWatched(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+
+	userID := middleware.UserID(c)
+	if userID <= 0 {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	// Get the file_id for this media item.
+	var fileID string
+	if err := h.App.DB.QueryRow(`SELECT file_id FROM media WHERE id = ?`, id).Scan(&fileID); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "media not found"})
+		return
+	}
+
+	isPut := c.Request.Method == http.MethodPut
+
+	if isPut {
+		// Mark as watched: upsert play_progress with completed=1.
+		_, err = h.App.DB.Exec(`
+			INSERT INTO play_progress (user_id, file_id, play_end_at, completed)
+			VALUES (?, ?, CURRENT_TIMESTAMP, 1)
+			ON CONFLICT DO NOTHING`,
+			userID, fileID,
+		)
+		if err == nil {
+			// If no conflict, new row created. If conflict, try update.
+		}
+		_, _ = h.App.DB.Exec(`
+			UPDATE play_progress SET completed = 1, play_end_at = CURRENT_TIMESTAMP, update_at = CURRENT_TIMESTAMP
+			WHERE user_id = ? AND file_id = ?`,
+			userID, fileID,
+		)
+		c.JSON(http.StatusOK, gin.H{"ok": true, "watched": true})
+	} else {
+		// Mark as unwatched.
+		_, err = h.App.DB.Exec(`
+			UPDATE play_progress SET completed = 0, play_end_at = NULL, update_at = CURRENT_TIMESTAMP
+			WHERE user_id = ? AND file_id = ?`,
+			userID, fileID,
+		)
+		c.JSON(http.StatusOK, gin.H{"ok": true, "watched": false})
+	}
+}

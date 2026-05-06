@@ -8,9 +8,13 @@ import (
 
 	"knox-media/cmd/transcodeworker"
 	"knox-media/internal/config"
+	"knox-media/internal/zapglobal"
 )
 
 func main() {
+	zlog := zapglobal.MustReplaceGlobals()
+	defer func() { _ = zlog.Sync() }()
+
 	cfgPath := resolveConfigPath()
 	cfg, err := config.Load(cfgPath)
 	if err != nil {

@@ -295,6 +295,19 @@ CREATE TABLE IF NOT EXISTS scrape_config (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS ai_provider_config (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    api_url TEXT DEFAULT '',
+    api_key TEXT DEFAULT '',
+    model TEXT DEFAULT '',
+    enabled INTEGER DEFAULT 0,
+    request_count INTEGER DEFAULT 0,
+    token_count INTEGER DEFAULT 0,
+    last_used_at TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS scrape_task (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     media_id INTEGER NOT NULL,
@@ -428,5 +441,67 @@ func OpenSQLite(path string) (*sql.DB, error) {
 	_, _ = db.Exec(`ALTER TABLE user ADD COLUMN allowed_time_end TEXT DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE user ADD COLUMN parental_access_plan_json TEXT DEFAULT '[]'`)
 	_, _ = db.Exec(`INSERT OR IGNORE INTO scrape_config (id) VALUES (1)`)
+	// Seed default AI provider configs.
+	seedAIProviders(db)
+	// Seed default scheduled tasks so scrape/subtitle/cleanup run automatically.
+	seedScheduledTasks(db)
+	// Clean up stale transcode tasks that failed due to transient issues (path not found, context canceled).
+	cleanupStaleTranscodeTasks(db)
 	return db, nil
+}
+
+// seedAIProviders inserts default AI provider configs (OpenAI, DeepSeek, Tongyi, Ollama)
+// if they don't already exist.
+func seedAIProviders(db *sql.DB) {
+	if db == nil {
+		return
+	}
+	for _, p := range []struct{ id, name, apiURL, model string }{
+		{id: "openai", name: "OpenAI", apiURL: "https://api.openai.com/v1", model: "gpt-4o"},
+		{id: "deepseek", name: "DeepSeek", apiURL: "https://api.deepseek.com/v1", model: "deepseek-chat"},
+		{id: "tongyi", name: "通义千问", apiURL: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-plus"},
+		{id: "ollama", name: "Ollama", apiURL: "http://localhost:11434", model: ""},
+	} {
+		_, _ = db.Exec(
+			`INSERT OR IGNORE INTO ai_provider_config (id, name, api_url, model) VALUES (?, ?, ?, ?)`,
+			p.id, p.name, p.apiURL, p.model,
+		)
+	}
+}
+
+// seedScheduledTasks ensures default maintenance tasks exist so scrape, subtitle
+// processing, and transcode cleanup run automatically every 30 seconds (via
+// StartScheduleLoop). Uses INSERT OR IGNORE so existing tasks are preserved.
+func seedScheduledTasks(db *sql.DB) {
+	if db == nil {
+		return
+	}
+	_, _ = db.Exec(`
+		INSERT OR IGNORE INTO scheduled_task (name, category, task_type, interval_min, payload_json, enabled)
+		VALUES ('自动刮削', 'media', 'scrape_run', 2, '{"limit":10}', 1)
+	`)
+	_, _ = db.Exec(`
+		INSERT OR IGNORE INTO scheduled_task (name, category, task_type, interval_min, payload_json, enabled)
+		VALUES ('自动字幕处理', 'media', 'subtitle_process', 5, '{"limit":10}', 1)
+	`)
+}
+
+// cleanupStaleTranscodeTasks removes transcode_task rows that failed due to
+// transient infrastructure issues (ffmpeg path not found, context canceled by
+// process restart) so they don't clutter the task list permanently.
+func cleanupStaleTranscodeTasks(db *sql.DB) {
+	if db == nil {
+		return
+	}
+	_, _ = db.Exec(`
+		DELETE FROM transcode_task
+		WHERE status = 'failed'
+		  AND (error_message LIKE '%The system cannot find the path specified%'
+		       OR error_message LIKE '%context canceled%')
+	`)
+	_, _ = db.Exec(`
+		DELETE FROM package_task
+		WHERE status = 'failed'
+		  AND error_message LIKE '%The system cannot find the path specified%'
+	`)
 }

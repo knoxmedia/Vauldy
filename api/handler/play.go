@@ -66,7 +66,7 @@ func (h *Handler) PlayMedia(c *gin.Context) {
 		c.Redirect(http.StatusTemporaryRedirect, target)
 		return
 	}
-	if ready, _ := h.latestTranscodeManifestByMediaID(id); ready {
+	if ready, _, _, _ := h.latestTranscodeManifestByMediaID(id); ready {
 		if preferSource {
 			goto serveSource
 		}
@@ -277,30 +277,11 @@ func (h *Handler) HLSInfo(c *gin.Context) {
 		})
 		return
 	}
-	if hlsReady, _ := h.latestTranscodeManifestByMediaID(id); hlsReady {
-		c.JSON(http.StatusOK, gin.H{
-			"mode":       "hls",
-			"hls_master": fmt.Sprintf("%s/api/v1/media/%s/hls/master.m3u8", base, c.Param("id")),
-			"status":     "done",
-			"fallback":   playURL,
-			"message":    "Use completed transcoded stream",
-		})
-		return
-	}
 	caps := readClientCaps(c)
 	media := detectMediaProfile(metaJSON.String)
-	canDirect := canDirectPlay(media, caps)
-	if canDirect {
-		c.JSON(http.StatusOK, gin.H{
-			"mode":          "native",
-			"playUrl":       playURL,
-			"media_profile": media,
-			"client_caps":   caps,
-			"message":       "Client can decode source directly",
-		})
-		return
-	}
 
+	// JIT scheduler: preferred for all transcode (per-segment on demand, fastest to first frame).
+	// Comes before batch transcode check so stale completed tasks don't shadow JIT.
 	if h.Instant != nil && fileID.Valid && strings.TrimSpace(fileID.String) != "" && filePath.Valid && strings.TrimSpace(filePath.String) != "" {
 		sessionID := c.GetHeader("X-Session-ID")
 		if strings.TrimSpace(sessionID) == "" {
@@ -325,10 +306,36 @@ func (h *Handler) HLSInfo(c *gin.Context) {
 				"client_caps":            caps,
 				"jit_session_pause_url":  jitPauseURL,
 				"jit_session_resume_url": jitResumeURL,
-				"message":                "Source codec/container unsupported, switched to instant transcoding pipeline",
+				"message":                "JIT transcoding pipeline (per-segment on demand)",
 			})
 			return
 		}
+		log.Printf("JIT PrepareVideoMeta failed for media=%d file=%s, falling back", id, fileID.String)
+	}
+
+	// Fallback: check for existing batch transcode output.
+	if hlsReady, _, hlsStatus, hlsTaskID := h.latestTranscodeManifestByMediaID(id); hlsReady {
+		c.JSON(http.StatusOK, gin.H{
+			"mode":       "hls",
+			"hls_master": fmt.Sprintf("%s/api/v1/media/%s/hls/master.m3u8", base, c.Param("id")),
+			"status":     hlsStatus,
+			"task_id":    hlsTaskID,
+			"fallback":   playURL,
+			"message":    "Use transcoded stream",
+		})
+		return
+	}
+
+	canDirect := canDirectPlay(media, caps)
+	if canDirect {
+		c.JSON(http.StatusOK, gin.H{
+			"mode":          "native",
+			"playUrl":       playURL,
+			"media_profile": media,
+			"client_caps":   caps,
+			"message":       "Client can decode source directly",
+		})
+		return
 	}
 
 	playlist, status, taskID, terr := h.Worker.EnsureHLS(fileID.String, filePath.String, int(srcHeight.Int64), caps.MaxHeight, caps.Qualities)
@@ -677,7 +684,7 @@ func (h *Handler) hlsMasterPath(c *gin.Context) string {
 			return master
 		}
 	}
-	if ready, master := h.latestTranscodeManifestByMediaID(id); ready {
+	if ready, master, _, _ := h.latestTranscodeManifestByMediaID(id); ready {
 		if st, err := os.Stat(master); err == nil && !st.IsDir() {
 			return master
 		}
@@ -706,24 +713,29 @@ func (h *Handler) drmDashManifestByMediaID(mediaID int64) (bool, string) {
 	return false, ""
 }
 
-func (h *Handler) latestTranscodeManifestByMediaID(mediaID int64) (bool, string) {
+func (h *Handler) latestTranscodeManifestByMediaID(mediaID int64) (ready bool, manifestPath string, status string, taskID int64) {
 	if h == nil || h.App == nil || h.App.DB == nil || mediaID <= 0 {
-		return false, ""
+		return false, "", "", 0
 	}
 	var fileID sql.NullString
 	if err := h.App.DB.QueryRow(`SELECT file_id FROM media WHERE id = ?`, mediaID).Scan(&fileID); err != nil || !fileID.Valid || strings.TrimSpace(fileID.String) == "" {
-		return false, ""
+		return false, "", "", 0
 	}
 	var out sql.NullString
-	var status sql.NullString
+	var taskStatus sql.NullString
+	var tid sql.NullInt64
 	_ = h.App.DB.QueryRow(
-		`SELECT output_path, status FROM transcode_task WHERE file_id = ? AND quality LIKE 'abr:%' ORDER BY id DESC LIMIT 1`,
+		`SELECT id, output_path, status FROM transcode_task WHERE file_id = ? AND quality LIKE 'abr:%' ORDER BY id DESC LIMIT 1`,
 		fileID.String,
-	).Scan(&out, &status)
-	if !out.Valid || status.String != "done" {
-		return false, ""
+	).Scan(&tid, &out, &taskStatus)
+	if !out.Valid || (taskStatus.String != "done" && taskStatus.String != "running") {
+		return false, "", "", 0
 	}
-	return true, out.String
+	// Verify the master file still exists on disk (stale DB records can point to deleted files).
+	if st, err := os.Stat(out.String); err != nil || st.IsDir() {
+		return false, "", "", 0
+	}
+	return true, out.String, taskStatus.String, tid.Int64
 }
 
 type clientCaps struct {

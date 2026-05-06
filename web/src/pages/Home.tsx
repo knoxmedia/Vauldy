@@ -25,6 +25,7 @@ import {
   fetchUserHistory,
   mediaPosterSrc,
 } from "../api/client";
+import { buildMediaMenuItems } from "../components/mediaMenuItems";
 import styles from "./Home.module.css";
 
 const { Title } = Typography;
@@ -63,6 +64,14 @@ function historyRowKey(h: HistoryItem): string {
   return `${h.file_id}\0${h.update_at}`;
 }
 
+function makeMediaMenu(
+  mediaId: number,
+  nav: ReturnType<typeof useNavigate>,
+  extra?: { isWatched?: boolean },
+): MenuProps {
+  return buildMediaMenuItems({ id: mediaId }, nav, extra);
+}
+
 /** 继续观看：悬停遮罩与角标逻辑对齐「最近添加的电影」；批量点选同详情页 */
 function HistoryContinueCard({
   h,
@@ -82,12 +91,9 @@ function HistoryContinueCard({
   bulkSelectMode: boolean;
 }) {
   const [posterFailed, setPosterFailed] = useState(false);
-  const moreItems: MenuProps["items"] = useMemo(
-    () => [
-      { key: "detail", label: "查看详情", onClick: () => nav(`/detail/${h.media_id}`) },
-      { key: "play", label: "继续播放", onClick: () => nav(`/player/${h.media_id}?t=${h.position}`) },
-    ],
-    [h.media_id, h.position, nav]
+  const homeMediaMenu = useMemo(
+    () => makeMediaMenu(h.media_id, nav, { isWatched: h.completed === 1 }),
+    [h.media_id, h.completed, nav],
   );
 
   return (
@@ -176,7 +182,7 @@ function HistoryContinueCard({
               >
                 <EditOutlined />
               </button>
-              <Dropdown menu={{ items: moreItems }} trigger={["click"]} placement="bottomRight">
+              <Dropdown menu={homeMediaMenu} trigger={["click"]} placement="bottomRight">
                 <button
                   type="button"
                   className={`${styles.posterOverlayIconBtn} ${styles.posterOverlayMore}`}
@@ -240,10 +246,10 @@ function RecentMovieShelfCard({
 }) {
   const [posterFailed, setPosterFailed] = useState(false);
   const year = mediaReleaseYear(m);
-  const moreItems: MenuProps["items"] = [
-    { key: "detail", label: "查看详情", onClick: () => nav(`/detail/${m.id}`) },
-    { key: "play", label: "立即播放", onClick: () => nav(`/player/${m.id}`) },
-  ];
+  const homeMediaMenu = useMemo(
+    () => makeMediaMenu(m.id, nav),
+    [m.id, nav],
+  );
 
   return (
     <div
@@ -334,7 +340,7 @@ function RecentMovieShelfCard({
                 >
                   <EditOutlined />
                 </button>
-                <Dropdown menu={{ items: moreItems }} trigger={["click"]} placement="bottomRight">
+                <Dropdown menu={homeMediaMenu} trigger={["click"]} placement="bottomRight">
                   <button
                     type="button"
                     className={`${styles.posterOverlayIconBtn} ${styles.posterOverlayMore}`}

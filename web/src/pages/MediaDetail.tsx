@@ -65,6 +65,7 @@ import {
   removeFavorite,
   savePlaybackProgress,
 } from "../api/client";
+import { buildMediaMenuItems } from "../components/mediaMenuItems";
 import { isAdminRole, useAuthStore } from "../store/auth";
 import styles from "./MediaDetail.module.css";
 
@@ -447,12 +448,9 @@ function RelatedMovieCard({
   bulkSelectMode: boolean;
 }) {
   const relPoster = mediaPosterSrc(m);
-  const moreItems: MenuProps["items"] = useMemo(
-    () => [
-      { key: "detail", label: "查看详情", onClick: () => nav(`/detail/${m.id}`) },
-      { key: "play", label: "播放", onClick: () => nav(`/player/${m.id}`) },
-    ],
-    [m.id, nav]
+  const relatedMediaMenu: MenuProps = useMemo(
+    () => buildMediaMenuItems(m, nav),
+    [m.id, nav],
   );
 
   return (
@@ -533,7 +531,7 @@ function RelatedMovieCard({
               >
                 <EditOutlined />
               </button>
-              <Dropdown menu={{ items: moreItems }} trigger={["click"]} placement="bottomRight">
+              <Dropdown menu={relatedMediaMenu} trigger={["click"]} placement="bottomRight">
                 <button
                   type="button"
                   className={`${styles.relatedOverlayBtn} ${styles.relatedOverlayMore}`}

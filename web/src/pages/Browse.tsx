@@ -24,7 +24,12 @@ import { Button, Checkbox, Dropdown, Empty, Popover, Select, Space, Spin, Pagina
 import type { ComponentType } from "react";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { MediaItem, fetchMedia, mediaPosterSrc } from "../api/client";
+import { buildMediaMenuItems } from "../components/mediaMenuItems";
+import {
+  MediaItem,
+  fetchMedia,
+  mediaPosterSrc,
+} from "../api/client";
 import styles from "./Browse.module.css";
 
 type ViewMode = "poster" | "thumb" | "list" | "table";
@@ -354,6 +359,10 @@ export default function BrowsePage() {
   /** 任意项已选中时：隐藏播放/编辑/更多，海报区点击切换选中 */
   const browseBulkPick = browseSelectionCount > 0;
 
+  function makeMenu(r: MediaItem, extra?: { isWatched?: boolean }): MenuProps {
+    return buildMediaMenuItems(r, nav, extra);
+  }
+
   return (
     <div style={{ padding: "16px 0 32px" }}>
       <div className={styles.topBar}>
@@ -632,16 +641,7 @@ export default function BrowsePage() {
                   <div className={styles.browseTdActions}>
                     {!browseBulkPick ? (
                       <Dropdown
-                        menu={{
-                          items: [
-                            { key: "play", label: "播放" },
-                            { key: "detail", label: "详情" },
-                          ],
-                          onClick: ({ key }) => {
-                            if (key === "play") nav(`/player/${r.id}`);
-                            if (key === "detail") nav(`/detail/${r.id}`);
-                          },
-                        }}
+                        menu={makeMenu(r)}
                         trigger={["click"]}
                         placement="bottomRight"
                       >
@@ -775,16 +775,7 @@ export default function BrowsePage() {
                 {!browseBulkPick ? (
                   <div className={styles.listMoreSlot}>
                     <Dropdown
-                      menu={{
-                        items: [
-                          { key: "play", label: "播放" },
-                          { key: "detail", label: "详情" },
-                        ],
-                        onClick: ({ key }) => {
-                          if (key === "play") nav(`/player/${r.id}`);
-                          if (key === "detail") nav(`/detail/${r.id}`);
-                        },
-                      }}
+                      menu={makeMenu(r)}
                       trigger={["click"]}
                       placement="bottomRight"
                     >
@@ -882,16 +873,7 @@ export default function BrowsePage() {
                         </button>
                         <div className={styles.gridMoreCorner} data-browse-card-action>
                           <Dropdown
-                            menu={{
-                              items: [
-                                { key: "play", label: "播放" },
-                                { key: "detail", label: "详情" },
-                              ],
-                              onClick: ({ key }) => {
-                                if (key === "play") nav(`/player/${r.id}`);
-                                if (key === "detail") nav(`/detail/${r.id}`);
-                              },
-                            }}
+                            menu={makeMenu(r)}
                             trigger={["click"]}
                             placement="bottomRight"
                           >

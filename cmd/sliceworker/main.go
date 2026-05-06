@@ -4,6 +4,7 @@ package sliceworker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -30,6 +31,8 @@ type Config struct {
 	RedisAddr   string
 	StoragePath string
 	FFmpegPath  string
+	// FFprobePath used for analyzeVideo / keyframes; must be ffprobe, not ffmpeg.
+	FFprobePath string
 	WorkerID    string
 }
 
@@ -45,6 +48,7 @@ type SliceWorker struct {
 	redis    *redis.Client
 	storage  Storage
 	ffmpeg   string
+	ffprobe  string
 	logger   *zap.Logger
 	workerID string
 }
@@ -61,13 +65,100 @@ type VideoInfo struct {
 }
 
 func NewSliceWorker(cfg *Config) *SliceWorker {
-	return &SliceWorker{
+	ffprobe := strings.TrimSpace(cfg.FFprobePath)
+	if ffprobe == "" {
+		ffprobe = "ffprobe"
+	}
+	w := &SliceWorker{
 		redis:    redis.NewClient(&redis.Options{Addr: cfg.RedisAddr}),
 		storage:  NewStorage(cfg.StoragePath),
 		ffmpeg:   cfg.FFmpegPath,
+		ffprobe:  ffprobe,
 		logger:   zap.L(),
 		workerID: cfg.WorkerID,
 	}
+	w.warnIfProbeLooksLikeFFmpeg()
+	return w
+}
+
+// toolBinDir returns the directory containing the executable so Windows loads sibling DLLs reliably.
+func toolBinDir(toolPath string) string {
+	toolPath = strings.TrimSpace(toolPath)
+	if toolPath == "" {
+		return ""
+	}
+	p := toolPath
+	if !filepath.IsAbs(p) {
+		if lp, err := exec.LookPath(filepath.Base(p)); err == nil {
+			p = lp
+		} else if abs, err := filepath.Abs(p); err == nil {
+			p = abs
+		}
+	}
+	d := filepath.Dir(p)
+	if d == "." || d == "" || strings.EqualFold(d, toolPath) {
+		return ""
+	}
+	return d
+}
+
+func (w *SliceWorker) ffprobeCommand(args ...string) *exec.Cmd {
+	cmd := exec.Command(w.ffprobe, args...)
+	if dir := toolBinDir(w.ffprobe); dir != "" {
+		cmd.Dir = dir
+	}
+	return cmd
+}
+
+func (w *SliceWorker) ffmpegCommand(args ...string) *exec.Cmd {
+	cmd := exec.Command(w.ffmpeg, args...)
+	if dir := toolBinDir(w.ffmpeg); dir != "" {
+		cmd.Dir = dir
+	}
+	return cmd
+}
+
+func (w *SliceWorker) warnIfProbeLooksLikeFFmpeg() {
+	base := strings.ToLower(filepath.Base(strings.TrimSpace(w.ffprobe)))
+	if base == "" {
+		return
+	}
+	if strings.Contains(base, "ffmpeg") && !strings.Contains(base, "ffprobe") {
+		w.logger.Warn("FFprobePath appears to be ffmpeg, not ffprobe; use ffprobe_path in config",
+			zap.String("path", w.ffprobe))
+	}
+}
+
+func (w *SliceWorker) selfCheckFFprobe() error {
+	cmd := w.ffprobeCommand("-hide_banner", "-version")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s -version: %w: %s", w.ffprobe, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func formatToolExit(tool string, input string, err error, stderr string) error {
+	stderr = strings.TrimSpace(stderr)
+	tool = strings.TrimSpace(tool)
+	if tool == "" {
+		tool = "tool"
+	} else {
+		tool = filepath.Base(tool)
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		code := ee.ExitCode()
+		u := uint32(code)
+		if stderr != "" {
+			return fmt.Errorf("%s %q: exit code %d (0x%X): %s", tool, input, code, u, stderr)
+		}
+		return fmt.Errorf("%s %q: exit code %d (0x%X)", tool, input, code, u)
+	}
+	if stderr != "" {
+		return fmt.Errorf("%s %q: %v: %s", tool, input, err, stderr)
+	}
+	return fmt.Errorf("%s %q: %w", tool, input, err)
 }
 
 func (w *SliceWorker) Start() {
@@ -76,6 +167,13 @@ func (w *SliceWorker) Start() {
 	// 订阅切片任务
 	pubsub := w.redis.Subscribe(ctx, "slice:jobs")
 	defer pubsub.Close()
+
+	if err := w.selfCheckFFprobe(); err != nil {
+		w.logger.Error("ffprobe self-check failed; fix ffmpeg.ffprobe_path or install VC++ runtime for bundled tools",
+			zap.Error(err), zap.String("ffprobe", w.ffprobe), zap.String("worker_id", w.workerID))
+	} else {
+		w.logger.Info("ffprobe self-check ok", zap.String("ffprobe", w.ffprobe), zap.String("worker_id", w.workerID))
+	}
 
 	w.logger.Info("Slice worker started", zap.String("worker_id", w.workerID))
 
@@ -103,15 +201,19 @@ func (w *SliceWorker) processSliceTask(task *models.SliceTask) {
 	videoPath, err := w.getVideoPath(task.FileID)
 	if err != nil {
 		logger.Error("Failed to get video path", zap.Error(err))
-		w.markSliceFailed(task.FileID)
+		w.markSliceFailed(task.FileID, err.Error())
 		return
+	}
+	videoPath = strings.TrimSpace(videoPath)
+	if videoPath != "" {
+		videoPath = filepath.Clean(videoPath)
 	}
 
 	// 2. 分析视频（获取关键帧、时长等）
 	videoInfo, err := w.analyzeVideo(videoPath)
 	if err != nil {
 		logger.Error("Failed to analyze video", zap.Error(err))
-		w.markSliceFailed(task.FileID)
+		w.markSliceFailed(task.FileID, err.Error())
 		return
 	}
 
@@ -119,14 +221,14 @@ func (w *SliceWorker) processSliceTask(task *models.SliceTask) {
 	index, err := w.generateSegmentIndex(task.FileID, videoInfo)
 	if err != nil {
 		logger.Error("Failed to generate segment index", zap.Error(err))
-		w.markSliceFailed(task.FileID)
+		w.markSliceFailed(task.FileID, err.Error())
 		return
 	}
 
 	if len(index.AudioSegments) > 0 {
-		if err := w.sliceAudio(task.FileID, videoPath, index); err != nil {
+		if err := w.sliceAudio(task.FileID, videoPath, index, videoInfo.AudioCodec); err != nil {
 			logger.Error("Failed to slice audio", zap.Error(err))
-			w.markSliceFailed(task.FileID)
+			w.markSliceFailed(task.FileID, err.Error())
 			return
 		}
 	}
@@ -134,7 +236,7 @@ func (w *SliceWorker) processSliceTask(task *models.SliceTask) {
 	// 5. 保存索引到 Redis
 	if err := w.saveIndex(task.FileID, index); err != nil {
 		logger.Error("Failed to save index", zap.Error(err))
-		w.markSliceFailed(task.FileID)
+		w.markSliceFailed(task.FileID, err.Error())
 		return
 	}
 
@@ -153,17 +255,17 @@ func (w *SliceWorker) processSliceTask(task *models.SliceTask) {
 }
 
 func (w *SliceWorker) analyzeVideo(videoPath string) (*VideoInfo, error) {
-	cmd := exec.Command(w.ffmpeg,
-		"-i", videoPath,
+	cmd := w.ffprobeCommand(
+		"-v", "error",
+		"-print_format", "json",
 		"-show_format",
 		"-show_streams",
-		"-v", "quiet",
-		"-print_format", "json",
+		"-i", videoPath,
 	)
 
-	output, err := cmd.Output()
+	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return nil, err
+		return nil, formatToolExit(w.ffprobe, videoPath, err, string(output))
 	}
 
 	var probe struct {
@@ -204,28 +306,32 @@ func (w *SliceWorker) analyzeVideo(videoPath string) (*VideoInfo, error) {
 		}
 	}
 
-	// 获取关键帧位置
+	// 获取关键帧位置（必须跳过非关键帧，否则长片会枚举十几万帧，JSON 巨大导致 ffprobe 异常退出）
 	keyframes, err := w.getKeyframes(videoPath)
 	if err == nil {
 		info.Keyframes = keyframes
+	} else {
+		w.logger.Warn("Keyframe list unavailable; using fixed segment grid",
+			zap.Error(err), zap.Float64("duration_sec", info.Duration), zap.String("basename", filepath.Base(videoPath)))
 	}
 
 	return info, nil
 }
 
 func (w *SliceWorker) getKeyframes(videoPath string) ([]float64, error) {
-	cmd := exec.Command(w.ffmpeg,
-		"-i", videoPath,
+	cmd := w.ffprobeCommand(
+		"-v", "error",
+		"-skip_frame", "nokey",
+		"-print_format", "json",
 		"-select_streams", "v:0",
 		"-show_frames",
 		"-show_entries", "frame=pkt_pts_time,key_frame",
-		"-v", "quiet",
-		"-print_format", "json",
+		"-i", videoPath,
 	)
 
-	output, err := cmd.Output()
+	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return nil, err
+		return nil, formatToolExit(w.ffprobe, videoPath+" (keyframes)", err, string(output))
 	}
 
 	var frames struct {
@@ -330,31 +436,92 @@ func (w *SliceWorker) generateSegmentIndex(fileID string, info *VideoInfo) (*mod
 	return index, nil
 }
 
-// sliceAudio 单次 ffmpeg 流水线切分全部音频段（含 overlap），保证播放连续性。
-func (w *SliceWorker) sliceAudio(fileID, videoPath string, index *models.SegmentIndex) error {
+// sliceAudio 单次 ffmpeg 流水线切分全部音频段。长片整轨重编码极易在 Windows 上失败，故对 AAC 优先 stream copy。
+// 不使用 -segment_overlap_duration：部分发行版 ffmpeg 未编译该选项，会报 “Option not found”。
+func (w *SliceWorker) sliceAudio(fileID, videoPath string, index *models.SegmentIndex, audioCodec string) error {
 	outputDir := filepath.Join(w.storage.BasePath(), "raw", "audio", fileID)
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		return err
 	}
+	outPattern := filepath.Join(outputDir, "segment_%05d.m4a")
 
-	cmd := exec.Command(w.ffmpeg,
-		"-i", videoPath,
-		"-vn",
-		"-c:a", "aac",
-		"-b:a", "128k",
-		"-af", "afade=t=in:st=0:d=0.05",
-		"-f", "segment",
-		"-segment_time", "6",
-		"-segment_overlap_duration", "0.1",
-		filepath.Join(outputDir, "segment_%05d.m4a"),
-	)
-	if err := cmd.Run(); err != nil {
+	codec := strings.ToLower(strings.TrimSpace(audioCodec))
+	if codec == "aac" {
+		for _, useBSF := range []bool{false, true} {
+			if err := w.ffmpegAudioSegmentCopy(videoPath, outPattern, useBSF); err == nil {
+				w.logger.Info("Audio segmented via AAC stream copy",
+					zap.String("file_id", fileID), zap.Bool("aac_adtstoasc", useBSF))
+				for i := range index.AudioSegments {
+					index.AudioSegments[i].Status = "sliced"
+				}
+				return nil
+			}
+		}
+		w.logger.Warn("AAC stream copy failed; falling back to re-encode", zap.String("file_id", fileID))
+	}
+
+	if err := w.ffmpegAudioSegmentReencode(videoPath, outPattern); err != nil {
 		return err
 	}
 	for i := range index.AudioSegments {
 		index.AudioSegments[i].Status = "sliced"
 	}
 	return nil
+}
+
+func (w *SliceWorker) ffmpegAudioSegmentCopy(videoPath, outPattern string, aacADTSToASC bool) error {
+	args := []string{
+		"-nostdin", "-hide_banner", "-loglevel", "error",
+		"-i", videoPath,
+		"-vn",
+	}
+	if aacADTSToASC {
+		args = append(args, "-bsf:a", "aac_adtstoasc")
+	}
+	args = append(args,
+		"-c:a", "copy",
+		"-f", "segment",
+		"-segment_time", "6",
+		outPattern,
+	)
+	cmd := w.ffmpegCommand(args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ffmpeg slice audio (copy, aac_adtstoasc=%v): %w: %s", aacADTSToASC, err, stderrTail(string(out), 1800))
+	}
+	return nil
+}
+
+func (w *SliceWorker) ffmpegAudioSegmentReencode(videoPath, outPattern string) error {
+	cmd := w.ffmpegCommand(
+		"-nostdin", "-hide_banner", "-loglevel", "error",
+		"-i", videoPath,
+		"-vn",
+		"-c:a", "aac",
+		"-b:a", "128k",
+		"-threads", "2",
+		"-af", "afade=t=in:st=0:d=0.05",
+		"-f", "segment",
+		"-segment_time", "6",
+		outPattern,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ffmpeg slice audio (re-encode): %w: %s", err, stderrTail(string(out), 1800))
+	}
+	return nil
+}
+
+func stderrTail(s string, max int) string {
+	s = strings.TrimSpace(strings.ReplaceAll(s, "\r\n", "\n"))
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	const pref = "…(stderr tail)\n"
+	if max <= len(pref) {
+		return s[len(s)-max:]
+	}
+	return pref + s[len(s)-(max-len(pref)):]
 }
 
 func (w *SliceWorker) saveIndex(fileID string, index *models.SegmentIndex) error {
@@ -373,8 +540,10 @@ func (w *SliceWorker) saveIndex(fileID string, index *models.SegmentIndex) error
 		return err
 	}
 
-	// 更新状态
+	// 更新状态，清除重试计数器与上次失败原因
 	w.redis.HSet(ctx, "video:meta:"+fileID, "status", "ready")
+	w.redis.HDel(ctx, "video:meta:"+fileID, "slice_error")
+	w.redis.Del(ctx, "retry:slice:"+fileID)
 
 	return nil
 }
@@ -393,10 +562,28 @@ func (w *SliceWorker) updateVideoMetadata(fileID string, info *VideoInfo) {
 		"bitrate", info.Bitrate,
 		"status", "ready",
 	)
+	w.redis.HDel(ctx, key, "slice_error")
+	w.redis.Del(ctx, "retry:slice:"+fileID)
 }
 
-func (w *SliceWorker) markSliceFailed(fileID string) {
+const maxSliceErrStored = 2000
+
+func trimSliceErrDetail(s string) string {
+	s = strings.TrimSpace(strings.ReplaceAll(s, "\r\n", "\n"))
+	if len(s) <= maxSliceErrStored {
+		return s
+	}
+	const pref = "…"
+	return pref + s[len(s)-(maxSliceErrStored-len(pref)):]
+}
+
+func (w *SliceWorker) markSliceFailed(fileID string, reason string) {
 	ctx := context.Background()
+	reason = trimSliceErrDetail(reason)
+	if reason != "" {
+		w.redis.HSet(ctx, "video:meta:"+fileID, "status", "failed", "slice_error", reason)
+		return
+	}
 	w.redis.HSet(ctx, "video:meta:"+fileID, "status", "failed")
 }
 

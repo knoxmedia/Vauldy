@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 
@@ -323,10 +324,17 @@ func (h *Handler) GetTranscodeTaskStatus(c *gin.Context) {
 	}
 
 	hlsMaster := ""
+	ready := status.String == "done"
+	// When running with at least one rendition complete, playback can start.
+	if status.String == "running" && prog.Int64 >= 5 && out.Valid && strings.HasSuffix(strings.ToLower(out.String), ".m3u8") && mediaID.Valid {
+		if st, err := os.Stat(out.String); err == nil && !st.IsDir() {
+			ready = true
+			hlsMaster = fmt.Sprintf("%s/api/v1/media/%d/hls/master.m3u8", base, mediaID.Int64)
+		}
+	}
 	if status.String == "done" && out.Valid && strings.HasSuffix(strings.ToLower(out.String), ".m3u8") && mediaID.Valid {
 		hlsMaster = fmt.Sprintf("%s/api/v1/media/%d/hls/master.m3u8", base, mediaID.Int64)
 	}
-	ready := status.String == "done"
 	failed := status.String == "failed" || status.String == "cancelled"
 	c.JSON(http.StatusOK, gin.H{
 		"task_id":       taskID,

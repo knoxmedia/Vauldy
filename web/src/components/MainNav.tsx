@@ -3,6 +3,8 @@ import type { MenuProps } from "antd";
 import {
   AppstoreOutlined,
   ApiOutlined,
+  DatabaseOutlined,
+  RobotOutlined,
   CloudUploadOutlined,
   ControlOutlined,
   EditOutlined,
@@ -85,6 +87,8 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
     if (path.startsWith("/api-credentials")) return ["api-credentials"];
     if (path.startsWith("/users")) return ["users"];
     if (path.startsWith("/console")) return ["console"];
+    if (path.startsWith("/scrape-config")) return ["scrape-config"];
+    if (path.startsWith("/ai-provider")) return ["ai-provider"];
     return [];
   }, [path, search]);
 
@@ -103,7 +107,9 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
         path.startsWith("/access-logs") ||
         path.startsWith("/api-credentials") ||
         path.startsWith("/users") ||
-        path.startsWith("/console"))
+        path.startsWith("/console") ||
+        path.startsWith("/scrape-config") ||
+        path.startsWith("/ai-provider"))
     ) {
       keys.push("admin-section");
     }
@@ -296,6 +302,24 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
             label: (
               <Link to="/api-credentials" onClick={onNavigate}>
                 API 凭证
+              </Link>
+            ),
+          },
+          {
+            key: "scrape-config",
+            icon: <DatabaseOutlined />,
+            label: (
+              <Link to="/scrape-config" onClick={onNavigate}>
+                元数据提供者
+              </Link>
+            ),
+          },
+          {
+            key: "ai-provider",
+            icon: <RobotOutlined />,
+            label: (
+              <Link to="/ai-provider" onClick={onNavigate}>
+                AI 提供商
               </Link>
             ),
           },

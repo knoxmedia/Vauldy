@@ -325,6 +325,18 @@ export async function removeFavorite(mediaId: number) {
   await api.delete(`/api/v1/media/${mediaId}/favorite`);
 }
 
+export async function markWatched(mediaId: number) {
+  await api.put(`/api/v1/media/${mediaId}/watched`);
+}
+
+export async function markUnwatched(mediaId: number) {
+  await api.delete(`/api/v1/media/${mediaId}/watched`);
+}
+
+export async function transcodeAsync(mediaId: number, mode = "auto") {
+  await api.post("/api/v1/transcode/async", { media_id: mediaId, mode });
+}
+
 export async function login(username: string, password: string) {
   const { data } = await api.post<{ token: string }>("/api/v1/user/login", {
     username,
@@ -745,6 +757,31 @@ export async function deleteScheduledTask(id: number) {
 export async function runScheduledTask(id: number) {
   const { data } = await api.post<{ ok: boolean; message?: string }>(`/api/v1/schedule/task/${id}/run`);
   return data;
+}
+
+export type AIProvider = {
+  id: string;
+  name: string;
+  api_url: string;
+  api_key: string;
+  model: string;
+  enabled: number;
+  request_count: number;
+  token_count: number;
+  last_used_at?: string;
+  updated_at?: string;
+};
+
+export async function fetchAIProviders() {
+  const { data } = await api.get<{ items: AIProvider[] }>("/api/v1/ai-provider");
+  return data.items ?? [];
+}
+
+export async function saveAIProvider(
+  id: string,
+  payload: { api_url?: string; api_key?: string; model?: string; enabled?: number },
+) {
+  await api.put(`/api/v1/ai-provider/${id}`, payload);
 }
 
 export type ScrapeConfig = {

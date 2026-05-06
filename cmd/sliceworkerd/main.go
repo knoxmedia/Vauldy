@@ -7,9 +7,13 @@ import (
 
 	"knox-media/cmd/sliceworker"
 	"knox-media/internal/config"
+	"knox-media/internal/zapglobal"
 )
 
 func main() {
+	zlog := zapglobal.MustReplaceGlobals()
+	defer func() { _ = zlog.Sync() }()
+
 	cfgPath := resolveConfigPath()
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
@@ -29,6 +33,7 @@ func main() {
 		RedisAddr:   redisAddr,
 		StoragePath: cfg.Data.Transcode,
 		FFmpegPath:  cfg.FFmpeg.FFmpegPath,
+		FFprobePath: cfg.FFmpeg.FFprobePath,
 		WorkerID:    workerID,
 	})
 	w.Start()

@@ -137,44 +137,66 @@ func (w *Worker) runHLS(ctx context.Context, taskID int64, inputPath, outDir str
 		w.mu.Unlock()
 	}()
 
-	_, _ = w.DB.Exec(`UPDATE transcode_task SET status = ?, progress = ? WHERE id = ?`, "running", 5, taskID)
-	for i, r := range ladder {
-		vf := fmt.Sprintf("scale=-2:%d", r.Height)
-		prefix := []string{"-y", "-hide_banner", "-nostats", "-loglevel", "error", "-i", inputPath, "-map", "0:v:0", "-map", "0:a:0?"}
-		suffix := []string{
-			"-c:a", "aac", "-b:a", r.AudioRate,
-			"-f", "hls",
-			"-hls_time", "4",
-			"-hls_playlist_type", "vod",
-			"-hls_segment_filename", filepath.Join(outDir, r.Name+"_%03d.ts"),
-			filepath.Join(outDir, r.Name+".m3u8"),
-		}
-		try := func(enc EncoderBackend) (stderrOut string, err error) {
-			args := append(append(append([]string{}, prefix...), w.encoderArgsFor(enc, vf, r.VideoRate)...), suffix...)
-			cmd := exec.CommandContext(ctx2, w.FFmpegPath, args...)
-			var stderr bytes.Buffer
-			cmd.Stderr = &stderr
-			err = cmd.Run()
-			return stderr.String(), err
-		}
-		stderrStr, runErr := try(w.Encoder)
-		if runErr != nil && w.Encoder != EncoderX264 {
-			log.Printf("transcode task=%d rendition=%s encoder=%s failed, retry libx264: %v", taskID, r.Name, w.Encoder, runErr)
-			stderrStr, runErr = try(EncoderX264)
-		}
-		if runErr != nil {
-			failMsg := ffmpegFailureMessage(runErr, stderrStr)
-			_, _ = w.DB.Exec(`UPDATE transcode_task SET status = ?, progress = ?, error_message = ? WHERE id = ?`, "failed", 0, failMsg, taskID)
-			return runErr
-		}
-		progress := 10 + ((i + 1) * 80 / len(ladder))
-		_, _ = w.DB.Exec(`UPDATE transcode_task SET progress = ? WHERE id = ?`, progress, taskID)
+	// Write placeholder .m3u8 files for all renditions so the player doesn't get 404.
+	for _, r := range ladder {
+		_ = writePlaceholderM3U8(filepath.Join(outDir, r.Name+".m3u8"))
 	}
-	if err := writeMasterPlaylist(outDir, ladder); err != nil {
-		_, _ = w.DB.Exec(`UPDATE transcode_task SET status = ?, progress = ?, error_message = ? WHERE id = ?`, "failed", 0, trimErrorMessage(err.Error()), taskID)
-		return err
+
+	if len(ladder) > 0 {
+		// Write master placeholder immediately, pointing to all (empty) renditions.
+		_ = writeMasterPlaylist(outDir, ladder)
+		_, _ = w.DB.Exec(`UPDATE transcode_task SET status = ?, progress = ?, output_path = ? WHERE id = ?`, "running", 2, outFile, taskID)
+
+		// Transcode renditions in serial (lightest first), updating master after each.
+		// Rendition ffmpeg overwrites the placeholder; after the first one finishes the
+		// polling endpoint returns ready=true and playback can begin.
+		for i := 0; i < len(ladder); i++ {
+			if err := w.transcodeRendition(ctx2, taskID, inputPath, outDir, ladder[i], i, len(ladder)); err != nil {
+				return err
+			}
+			_ = writeMasterPlaylistPartial(outDir, ladder, i)
+		}
+	} else {
+		_, _ = w.DB.Exec(`UPDATE transcode_task SET status = ?, progress = ?, output_path = ? WHERE id = ?`, "running", 5, outFile, taskID)
 	}
-	_, _ = w.DB.Exec(`UPDATE transcode_task SET status = ?, progress = ?, output_path = ?, error_message = NULL WHERE id = ?`, "done", 100, outFile, taskID)
+
+	// Final master with all renditions.
+	_ = writeMasterPlaylist(outDir, ladder)
+	_, _ = w.DB.Exec(`UPDATE transcode_task SET status = ?, progress = ?, error_message = NULL WHERE id = ?`, "done", 100, taskID)
+	return nil
+}
+
+func (w *Worker) transcodeRendition(ctx context.Context, taskID int64, inputPath, outDir string, r Rendition, idx, total int) error {
+	vf := fmt.Sprintf("scale=-2:%d", r.Height)
+	prefix := []string{"-y", "-hide_banner", "-nostats", "-loglevel", "error", "-i", inputPath, "-map", "0:v:0", "-map", "0:a:0?"}
+	suffix := []string{
+		"-c:a", "aac", "-b:a", r.AudioRate,
+		"-f", "hls",
+		"-hls_time", "4",
+		"-hls_playlist_type", "vod",
+		"-hls_segment_filename", filepath.Join(outDir, r.Name+"_%03d.ts"),
+		filepath.Join(outDir, r.Name+".m3u8"),
+	}
+	try := func(enc EncoderBackend) (stderrOut string, err error) {
+		args := append(append(append([]string{}, prefix...), w.encoderArgsFor(enc, vf, r.VideoRate)...), suffix...)
+		cmd := exec.CommandContext(ctx, w.FFmpegPath, args...)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		err = cmd.Run()
+		return stderr.String(), err
+	}
+	stderrStr, runErr := try(w.Encoder)
+	if runErr != nil && w.Encoder != EncoderX264 {
+		log.Printf("transcode task=%d rendition=%s encoder=%s failed, retry libx264: %v", taskID, r.Name, w.Encoder, runErr)
+		stderrStr, runErr = try(EncoderX264)
+	}
+	if runErr != nil {
+		failMsg := ffmpegFailureMessage(runErr, stderrStr)
+		_, _ = w.DB.Exec(`UPDATE transcode_task SET status = ?, progress = ?, error_message = ? WHERE id = ?`, "failed", 0, failMsg, taskID)
+		return runErr
+	}
+	progress := 10 + ((idx + 1) * 80 / total)
+	_, _ = w.DB.Exec(`UPDATE transcode_task SET progress = ? WHERE id = ?`, progress, taskID)
 	return nil
 }
 
@@ -318,6 +340,26 @@ func writeMasterPlaylist(outDir string, ladder []Rendition) error {
 		sb.WriteString(r.Name + ".m3u8\n")
 	}
 	return os.WriteFile(filepath.Join(outDir, "master.m3u8"), []byte(sb.String()), 0o644)
+}
+
+// writeMasterPlaylistPartial writes a master playlist referencing only the first
+// N renditions (0-indexed: up to and including index maxIdx).
+func writeMasterPlaylistPartial(outDir string, ladder []Rendition, maxIdx int) error {
+	var sb strings.Builder
+	sb.WriteString("#EXTM3U\n#EXT-X-VERSION:3\n")
+	for i := 0; i <= maxIdx && i < len(ladder); i++ {
+		r := ladder[i]
+		sb.WriteString(fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%dx%d\n", r.Bandwidth, r.Width, r.Height))
+		sb.WriteString(r.Name + ".m3u8\n")
+	}
+	return os.WriteFile(filepath.Join(outDir, "master.m3u8"), []byte(sb.String()), 0o644)
+}
+
+// writePlaceholderM3U8 creates an empty HLS playlist so the player doesn't get
+// a 404 before ffmpeg has started encoding the rendition.
+func writePlaceholderM3U8(path string) error {
+	// A minimal EXT-X-STREAM-INF playlist that signals "no segments yet".
+	return os.WriteFile(path, []byte("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n#EXT-X-PLAYLIST-TYPE:EVENT\n"), 0o644)
 }
 
 func trimErrorMessage(s string) string {

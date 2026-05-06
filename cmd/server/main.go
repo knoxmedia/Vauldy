@@ -32,10 +32,14 @@ import (
 	"knox-media/internal/subtitle"
 	"knox-media/internal/transcode"
 	"knox-media/internal/upload"
+	"knox-media/internal/zapglobal"
 	"knox-media/pkg/ffprobe"
 )
 
 func main() {
+	zlog := zapglobal.MustReplaceGlobals()
+	defer func() { _ = zlog.Sync() }()
+
 	cfgPath := resolveConfigPath()
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
@@ -112,6 +116,7 @@ func main() {
 		RedisAddr:   redisAddr,
 		StoragePath: instantStorage,
 		FFmpegPath:  cfg.FFmpeg.FFmpegPath,
+		FFprobePath: cfg.FFmpeg.FFprobePath,
 		WorkerID:    "embedded-slice",
 	})
 	instantTranscodeWorker := transcodeworker.NewTranscodeWorker(&transcodeworker.Config{

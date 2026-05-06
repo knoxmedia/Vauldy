@@ -14,9 +14,13 @@ import (
 	"knox-media/cmd/scheduler"
 	"knox-media/internal/config"
 	jitmetrics "knox-media/internal/jit/metrics"
+	"knox-media/internal/zapglobal"
 )
 
 func main() {
+	zlog := zapglobal.MustReplaceGlobals()
+	defer func() { _ = zlog.Sync() }()
+
 	cfgPath := resolveConfigPath()
 	cfg, err := config.Load(cfgPath)
 	if err != nil {

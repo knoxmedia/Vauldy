@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -19,6 +21,20 @@ import (
 
 // jitPausedSessionTTL is Redis TTL for session:* while transcode_paused=1 (pause without segment heartbeats).
 const jitPausedSessionTTL = 2 * time.Hour
+
+const maxSliceMetaErr = 2000
+
+// maxSliceFailureRetries is how many times we re-queue slicing after status=failed before giving up
+// (matches historical behavior: first 3 re-attempts allowed, then circuit open).
+const maxSliceFailureRetries = 3
+
+func trimSliceMetaErr(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= maxSliceMetaErr {
+		return s
+	}
+	return s[:maxSliceMetaErr] + "..."
+}
 
 type Scheduler struct {
 	redis     *redis.Client
@@ -76,8 +92,57 @@ func (s *Scheduler) handleMasterPlaylist(c *gin.Context) {
 
 	// 1. 确保视频已被切片（触发切片任务）
 	if err := s.ensureVideoSliced(fileID, sessionID); err != nil {
-		s.logger.Error("Failed to ensure video sliced", zap.Error(err))
-		c.JSON(500, gin.H{"error": "Video processing failed"})
+		ctx := context.Background()
+		metaKey := "video:meta:" + fileID
+		meta, _ := s.redis.HGetAll(ctx, metaKey).Result()
+		sliceErr := strings.TrimSpace(meta["slice_error"])
+		filePath := strings.TrimSpace(meta["file_path"])
+		metaStatus := strings.TrimSpace(meta["status"])
+
+		retryKey := "retry:slice:" + fileID
+		retryN, rerr := s.redis.Get(ctx, retryKey).Int64()
+		switch rerr {
+		case redis.Nil:
+			retryN = 0
+		case nil:
+			// ok
+		default:
+			retryN = -1
+		}
+
+		logFields := []zap.Field{
+			zap.Error(err),
+			zap.String("file_id", fileID),
+			zap.String("meta_status", metaStatus),
+		}
+		if retryN >= 0 {
+			logFields = append(logFields, zap.Int64("slice_retry_count", retryN))
+		}
+		if filePath != "" {
+			logFields = append(logFields, zap.String("file_path", filePath))
+		}
+		if sliceErr != "" {
+			logFields = append(logFields, zap.String("slice_error", sliceErr))
+		}
+		s.logger.Error("Failed to ensure video sliced", logFields...)
+
+		body := gin.H{"error": "Video processing failed: " + err.Error()}
+		if sliceErr != "" {
+			body["slice_error"] = sliceErr
+		}
+		if filePath != "" {
+			body["file_path"] = filePath
+		}
+		if metaStatus != "" {
+			body["meta_status"] = metaStatus
+		}
+		if retryN >= 0 {
+			body["slice_retry_count"] = retryN
+		}
+		if sliceErr == "" {
+			body["hint"] = "slice_error is empty in Redis. Verify file_path exists and ffprobe works; DEL " + retryKey + " to reset the retry counter after fixing the issue."
+		}
+		c.JSON(500, body)
 		return
 	}
 
@@ -88,11 +153,43 @@ func (s *Scheduler) handleMasterPlaylist(c *gin.Context) {
 		return
 	}
 
-	// 3. 生成 Master Playlist
-	content := s.generateMasterPlaylist(fileID, metadata)
+	// 3. 生成 Master Playlist（子播放列表/分片 URL 需带 access_token，否则 hls.js 请求会 401）
+	content := s.generateMasterPlaylist(c, fileID, metadata)
 
 	c.Header("Content-Type", "application/vnd.apple.mpegurl")
 	c.String(200, content)
+}
+
+// jitAccessTokenForPlaylists reads the same JWT the client used for the master request (query or Bearer).
+func jitAccessTokenForPlaylists(c *gin.Context) string {
+	if q := strings.TrimSpace(c.Query("access_token")); q != "" {
+		return q
+	}
+	h := c.GetHeader("Authorization")
+	if len(h) > 7 && strings.EqualFold(h[:7], "Bearer ") {
+		return strings.TrimSpace(h[7:])
+	}
+	return ""
+}
+
+// jitURLWithAccessToken appends access_token so nested HLS requests from the browser stay authenticated.
+func jitURLWithAccessToken(c *gin.Context, pathOrURL string) string {
+	pathOrURL = strings.TrimSpace(pathOrURL)
+	if pathOrURL == "" {
+		return ""
+	}
+	tok := jitAccessTokenForPlaylists(c)
+	if tok == "" {
+		return pathOrURL
+	}
+	if strings.Contains(pathOrURL, "access_token=") {
+		return pathOrURL
+	}
+	sep := "?"
+	if strings.Contains(pathOrURL, "?") {
+		sep = "&"
+	}
+	return pathOrURL + sep + "access_token=" + url.QueryEscape(tok)
 }
 
 // 确保视频已被切片（核心逻辑）
@@ -110,10 +207,29 @@ func (s *Scheduler) ensureVideoSliced(fileID, sessionID string) error {
 	case "ready":
 		return nil
 	case "slicing":
-		// 等待切片完成
-		return s.waitForSlicingComplete(fileID, 30*time.Second)
+		// 等待切片完成 (longer timeout for large files).
+		return s.waitForSlicingComplete(fileID, 180*time.Second)
 	case "failed":
-		// 重试切片
+		// 限制重试次数；熔断后不得再 INCR，否则每请求计数上涨、错误文案漂移（after 7/8/9…）
+		retryKey := "retry:slice:" + fileID
+		n, err := s.redis.Get(ctx, retryKey).Int64()
+		if err == redis.Nil {
+			n = 0
+		} else if err != nil {
+			return err
+		}
+		if n >= maxSliceFailureRetries {
+			detail, _ := s.redis.HGet(ctx, "video:meta:"+fileID, "slice_error").Result()
+			detail = strings.TrimSpace(detail)
+			if detail != "" {
+				return fmt.Errorf("slicing failed after %d retries: %s", maxSliceFailureRetries, detail)
+			}
+			return fmt.Errorf("slicing failed after %d retries", maxSliceFailureRetries)
+		}
+		if _, err := s.redis.Incr(ctx, retryKey).Result(); err != nil {
+			return err
+		}
+		s.redis.Expire(ctx, retryKey, 10*time.Minute)
 		return s.startSlicingTask(fileID, sessionID)
 	default:
 		return fmt.Errorf("unknown status: %s", status)
@@ -133,7 +249,7 @@ func (s *Scheduler) startSlicingTask(fileID, sessionID string) error {
 
 	if !locked {
 		// 其他节点已在切片，等待完成
-		return s.waitForSlicingComplete(fileID, 60*time.Second)
+		return s.waitForSlicingComplete(fileID, 180*time.Second)
 	}
 	defer s.redis.Del(ctx, lockKey)
 
@@ -143,7 +259,16 @@ func (s *Scheduler) startSlicingTask(fileID, sessionID string) error {
 		return nil
 	}
 
-	// 更新状态为 slicing
+	// 检查源文件是否可访问
+	filePath, _ := s.redis.HGet(ctx, "video:meta:"+fileID, "file_path").Result()
+	if _, statErr := os.Stat(filePath); statErr != nil {
+		detail := trimSliceMetaErr(fmt.Sprintf("source not accessible: %s: %v", filePath, statErr))
+		s.redis.HSet(ctx, "video:meta:"+fileID, "status", "failed", "slice_error", detail)
+		return fmt.Errorf("source file not accessible: %s: %w", filePath, statErr)
+	}
+
+	// 更新状态为 slicing（新一次尝试，清掉上次的错误文案）
+	_ = s.redis.HDel(ctx, "video:meta:"+fileID, "slice_error").Err()
 	s.redis.HSet(ctx, "video:meta:"+fileID, "status", "slicing")
 
 	// 发布切片任务到队列
@@ -155,14 +280,24 @@ func (s *Scheduler) startSlicingTask(fileID, sessionID string) error {
 
 	taskData, _ := json.Marshal(task)
 	if err := s.redis.Publish(ctx, "slice:jobs", taskData).Err(); err != nil {
-		s.redis.HSet(ctx, "video:meta:"+fileID, "status", "failed")
+		s.redis.HSet(ctx, "video:meta:"+fileID, "status", "failed", "slice_error", trimSliceMetaErr("redis publish slice:jobs: "+err.Error()))
 		return err
 	}
 
 	s.logger.Info("Slicing task published", zap.String("file_id", fileID))
 
-	// 等待切片完成
-	return s.waitForSlicingComplete(fileID, 120*time.Second)
+	// 等待切片完成；超时时标记失败以便下次请求可重试
+	if err := s.waitForSlicingComplete(fileID, 120*time.Second); err != nil {
+		if err.Error() == "slicing timeout" {
+			s.redis.HSet(ctx, "video:meta:"+fileID, "status", "failed",
+				"slice_error", trimSliceMetaErr("slicing timeout after 120s (worker did not set status=ready; check sliceworker / ffmpeg)"))
+		} else {
+			// worker 或更早步骤已写入 slice_error 时只保证 status=failed
+			s.redis.HSet(ctx, "video:meta:"+fileID, "status", "failed")
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *Scheduler) waitForSlicingComplete(fileID string, timeout time.Duration) error {
@@ -176,6 +311,11 @@ func (s *Scheduler) waitForSlicingComplete(fileID string, timeout time.Duration)
 				return nil
 			}
 			if status == "failed" {
+				detail, _ := s.redis.HGet(ctx, "video:meta:"+fileID, "slice_error").Result()
+				detail = strings.TrimSpace(detail)
+				if detail != "" {
+					return fmt.Errorf("slicing failed: %s", detail)
+				}
 				return fmt.Errorf("slicing failed")
 			}
 		}
@@ -206,8 +346,8 @@ func (s *Scheduler) handleVideoPlaylist(c *gin.Context) {
 
 	for _, seg := range index.VideoSegments {
 		content += fmt.Sprintf("#EXTINF:%.3f,\n", seg.Duration)
-		content += fmt.Sprintf("/api/v1/jit/segment/%s/video/%s/%d\n",
-			fileID, bitrate, seg.ID)
+		segPath := fmt.Sprintf("/api/v1/jit/segment/%s/video/%s/%d", fileID, bitrate, seg.ID)
+		content += jitURLWithAccessToken(c, segPath) + "\n"
 	}
 
 	content += "#EXT-X-ENDLIST\n"
@@ -241,7 +381,8 @@ func (s *Scheduler) handleAudioPlaylist(c *gin.Context) {
 			continue
 		}
 		content += fmt.Sprintf("#EXTINF:%.3f,\n", seg.Duration)
-		content += fmt.Sprintf("/api/v1/jit/segment/%s/audio/%s/%d\n", fileID, lang, seg.ID)
+		segPath := fmt.Sprintf("/api/v1/jit/segment/%s/audio/%s/%d", fileID, lang, seg.ID)
+		content += jitURLWithAccessToken(c, segPath) + "\n"
 		segmentCount++
 	}
 
@@ -694,14 +835,16 @@ func (s *Scheduler) serveSegment(c *gin.Context, path string) {
 	c.File(path)
 }
 
-func (s *Scheduler) generateMasterPlaylist(fileID string, _ *models.VideoMetadata) string {
+func (s *Scheduler) generateMasterPlaylist(c *gin.Context, fileID string, _ *models.VideoMetadata) string {
+	audioURI := jitURLWithAccessToken(c, "/api/v1/jit/playlist/"+fileID+"/audio/eng")
+
 	content := "#EXTM3U\n"
-	content += "#EXT-X-VERSION:6\n\n"
+	content += "#EXT-X-VERSION:4\n\n"
 
-	// 音频流
-	content += "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",LANGUAGE=\"eng\",NAME=\"English\",DEFAULT=YES,URI=\"/api/v1/jit/playlist/" + fileID + "/audio/eng\"\n\n"
+	// 音频流（URI 需带 token，否则 hls.js 拉子列表 401）
+	content += "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",LANGUAGE=\"eng\",NAME=\"English\",DEFAULT=YES,URI=\"" + audioURI + "\"\n\n"
 
-	// 视频流（多码率）
+	// 视频流（多码率）；CODECS 含 AAC 以匹配 AUDIO 组，避免部分 HLS 解析器拒绝 master
 	bitrates := []struct {
 		name       string
 		bandwidth  int
@@ -715,9 +858,10 @@ func (s *Scheduler) generateMasterPlaylist(fileID string, _ *models.VideoMetadat
 	}
 
 	for _, br := range bitrates {
-		content += fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%s,CODECS=\"avc1.640028\",AUDIO=\"audio\"\n",
+		content += fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%s,CODECS=\"avc1.640028,mp4a.40.2\",AUDIO=\"audio\"\n",
 			br.bandwidth, br.resolution)
-		content += fmt.Sprintf("/api/v1/jit/playlist/%s/video/%s\n\n", fileID, br.name)
+		videoURI := jitURLWithAccessToken(c, fmt.Sprintf("/api/v1/jit/playlist/%s/video/%s", fileID, br.name))
+		content += videoURI + "\n\n"
 	}
 
 	return content

@@ -61,6 +61,8 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 			auth.GET("/media/:id/subtitles", h.ListMediaSubtitles)
 
 			auth.POST("/media/:id/progress", h.SaveProgress)
+			auth.PUT("/media/:id/watched", h.ToggleWatched)
+			auth.DELETE("/media/:id/watched", h.ToggleWatched)
 		}
 
 		// Playback URLs: allow Bearer or ?access_token= for HTML5 video / players
@@ -117,6 +119,8 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 
 			adm.GET("/scrape/config", h.GetScrapeConfig)
 			adm.PUT("/scrape/config", h.SaveScrapeConfig)
+			adm.GET("/ai-provider", h.ListAIProviders)
+			adm.PUT("/ai-provider/:id", h.SaveAIProvider)
 			adm.GET("/scrape/task", h.ListScrapeTasks)
 			adm.POST("/scrape/task", h.CreateScrapeTasks)
 			adm.POST("/scrape/task/run", h.RunScrapeTasks)
