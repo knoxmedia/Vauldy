@@ -121,8 +121,11 @@ func main() {
 	instantScheduler.SetHLSMultiAudioEnabled(cfg.HLSMultiAudioEnabled())
 	instantScheduler.SetHLSContinuous(cfg.JITContinuousHLSEnabled())
 
-	// New Redis-free session manager.
-	sessionMgr := jitsession.NewManager(cfg.FFmpeg.FFmpegPath, cfg.FFmpeg.FFprobePath, cfg.Data.Dir)
+	// New Redis-free session manager (clears dataDir/jit from previous runs).
+	sessionMgr, err := jitsession.NewManager(cfg.FFmpeg.FFmpegPath, cfg.FFmpeg.FFprobePath, cfg.Data.Dir)
+	if err != nil {
+		log.Fatalf("jit session manager: %v", err)
+	}
 
 	instantSliceWorker := sliceworker.NewSliceWorker(&sliceworker.Config{
 		RedisAddr:   redisAddr,

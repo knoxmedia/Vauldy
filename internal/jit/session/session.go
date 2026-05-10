@@ -29,15 +29,20 @@ type Manager struct {
 	dataDir     string
 }
 
-// NewManager creates a new session manager.
-func NewManager(ffmpegPath, ffprobePath, dataDir string) *Manager {
+// NewManager creates a new session manager and removes any leftover files under
+// dataDir/jit from prior runs.
+func NewManager(ffmpegPath, ffprobePath, dataDir string) (*Manager, error) {
+	jitDir := filepath.Join(dataDir, "jit")
+	if err := os.RemoveAll(jitDir); err != nil {
+		return nil, fmt.Errorf("clear jit temp dir: %w", err)
+	}
 	m := &Manager{
 		sessions:    make(map[string]*Session),
 		ffmpegPath:  ffmpegPath,
 		ffprobePath: ffprobePath,
 		dataDir:     dataDir,
 	}
-	return m
+	return m, nil
 }
 
 // Session represents one JIT playback session.
@@ -75,11 +80,10 @@ type Session struct {
 // CreateSession allocates a new JIT playback session.
 func (m *Manager) CreateSession(mediaID int64, fileID, sourcePath, bitrate, resolution string, duration float64) (*Session, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	id := newSessionID()
 	tempDir := filepath.Join(m.dataDir, "jit", id)
 	if err := os.MkdirAll(tempDir, 0o755); err != nil {
+		m.mu.Unlock()
 		return nil, fmt.Errorf("create session dir: %w", err)
 	}
 
@@ -108,6 +112,8 @@ func (m *Manager) CreateSession(mediaID int64, fileID, sourcePath, bitrate, reso
 	s.latestSeg.Store(-1)
 
 	m.sessions[id] = s
+	m.mu.Unlock()
+	go s.schedulerLoop()
 	return s, nil
 }
 
@@ -136,12 +142,13 @@ func (m *Manager) RestoreSession(id string, mediaID int64, fileID, sourcePath, b
 		return nil, fmt.Errorf("invalid session id")
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if existing := m.sessions[id]; existing != nil {
+		m.mu.Unlock()
 		return existing, nil
 	}
 	tempDir := filepath.Join(m.dataDir, "jit", id)
 	if err := os.MkdirAll(tempDir, 0o755); err != nil {
+		m.mu.Unlock()
 		return nil, fmt.Errorf("create session dir: %w", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -168,6 +175,8 @@ func (m *Manager) RestoreSession(id string, mediaID int64, fileID, sourcePath, b
 	s.updateLastAccess()
 	s.latestSeg.Store(-1)
 	m.sessions[id] = s
+	m.mu.Unlock()
+	go s.schedulerLoop()
 	return s, nil
 }
 

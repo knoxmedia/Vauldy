@@ -131,15 +131,9 @@ func (s *Session) runTranscode(cfg TranscodeConfig) error {
 }
 
 // monitorSegments polls the segment m3u8 and updates LatestSeg.
-// Also runs the scheduling goroutine for pause/resume/timeout decisions.
 func (s *Session) monitorSegments(ctx context.Context, m3u8Path string) {
 	tk := time.NewTicker(200 * time.Millisecond)
 	defer tk.Stop()
-	// lastSeg := -1
-
-	// Scheduling ticker: runs every 5s regardless of requests.
-	schedTk := time.NewTicker(5 * time.Second)
-	defer schedTk.Stop()
 
 	for {
 		select {
@@ -148,14 +142,9 @@ func (s *Session) monitorSegments(ctx context.Context, m3u8Path string) {
 		case <-tk.C:
 			entries := parseSegmentM3U8(m3u8Path)
 			for _, e := range entries {
-				//if e.ID > lastSeg {
-				// lastSeg = e.ID
 				s.SetLatestSeg(e.ID)
 				break
-				//}
 			}
-		case <-schedTk.C:
-			s.runScheduler()
 		}
 	}
 }
@@ -200,6 +189,42 @@ func (s *Session) runScheduler() {
 			zap.Int("requested", req),
 		)
 		s.pause()
+	}
+}
+
+// schedulerLoop runs rules 1, 2, and 6 on a fixed interval for the whole time the session
+// is registered with the manager. It survives pause/seek (ctx replacement) and periods
+// without a running ffmpeg; monitorSegments only covers one ffmpeg run.
+func (s *Session) schedulerLoop() {
+	const tick = 5 * time.Second
+	staleCtxWaits := 0
+	for {
+		if s.mgr != nil && s.mgr.Get(s.ID) != s {
+			return
+		}
+		ctx := s.Ctx()
+		if ctx.Err() != nil {
+			staleCtxWaits++
+			if s.mgr == nil && staleCtxWaits > 40 {
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+		staleCtxWaits = 0
+
+		tk := time.NewTicker(tick)
+		func() {
+			defer tk.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-tk.C:
+					s.runScheduler()
+				}
+			}
+		}()
 	}
 }
 
