@@ -5,6 +5,9 @@ import zhCN from "antd/locale/zh_CN";
 import { BrowserRouter } from "react-router-dom";
 import App from "./App";
 import "./index.css";
+import { loadPowerPlayerScript } from "./loadPowerPlayerScript";
+
+loadPowerPlayerScript();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

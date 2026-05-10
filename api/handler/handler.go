@@ -7,6 +7,7 @@ import (
 	"knox-media/cmd/scheduler"
 	"knox-media/internal/app"
 	"knox-media/internal/atrack"
+	"knox-media/internal/jit/session"
 	"knox-media/internal/keyframe"
 	"knox-media/internal/preview"
 	"knox-media/internal/subtitle"
@@ -22,14 +23,15 @@ type Handler struct {
 	Subtitle       *subtitle.Service
 	Upload         *upload.Service
 	Instant        *scheduler.Scheduler
+	SessionManager *session.Manager
 	AtrackWorker   *atrack.Worker
 	KeyframeWorker *keyframe.Worker
 	scanMu         sync.Mutex
 	runningScans   map[int64]scanRuntime
 }
 
-func New(a *app.App, w *transcode.Worker, pkgw *transcode.PackageWorker, pw *preview.Worker, sub *subtitle.Service, u *upload.Service, instant *scheduler.Scheduler, atw *atrack.Worker, kfw *keyframe.Worker) *Handler {
-	h := &Handler{App: a, Worker: w, PackageWorker: pkgw, PreviewWorker: pw, Subtitle: sub, Upload: u, Instant: instant, AtrackWorker: atw, KeyframeWorker: kfw, runningScans: map[int64]scanRuntime{}}
+func New(a *app.App, w *transcode.Worker, pkgw *transcode.PackageWorker, pw *preview.Worker, sub *subtitle.Service, u *upload.Service, instant *scheduler.Scheduler, sm *session.Manager, atw *atrack.Worker, kfw *keyframe.Worker) *Handler {
+	h := &Handler{App: a, Worker: w, PackageWorker: pkgw, PreviewWorker: pw, Subtitle: sub, Upload: u, Instant: instant, SessionManager: sm, AtrackWorker: atw, KeyframeWorker: kfw, runningScans: map[int64]scanRuntime{}}
 	h.reconcileInterruptedScanTasks()
 	return h
 }

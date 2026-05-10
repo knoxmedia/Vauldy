@@ -56,6 +56,7 @@ type Scheduler struct {
 	mu                   sync.RWMutex
 	sliceLock            map[string]*sync.Mutex
 	hlsMultiAudioEnabled bool
+	hlsContinuous        bool
 }
 
 type Storage interface {
@@ -79,6 +80,13 @@ func NewScheduler(redisClient *redis.Client, storage Storage) *Scheduler {
 func (s *Scheduler) SetHLSMultiAudioEnabled(v bool) {
 	if s != nil {
 		s.hlsMultiAudioEnabled = v
+	}
+}
+
+// SetHLSContinuous controls whether continuous HLS mode is active.
+func (s *Scheduler) SetHLSContinuous(v bool) {
+	if s != nil {
+		s.hlsContinuous = v
 	}
 }
 
@@ -194,6 +202,10 @@ func (s *Scheduler) EndSession(sessionID string) {
 	if fileID == "" {
 		return
 	}
+	// Always stop continuous HLS for this file (worker goroutine will also self-detect session gone).
+	if !s.fileHasOtherActiveSessions(fileID, sessionID) {
+		s.stopAllContinuousHLSForFile(fileID)
+	}
 	if s.fileHasOtherActiveSessions(fileID, sessionID) {
 		return
 	}
@@ -267,6 +279,38 @@ func (s *Scheduler) cleanupFileArtifacts(fileID string) {
 	}
 	// 删除该 fileID 的待办 transcode 任务
 	s.dropAllTranscodeTasksForFile(fileID)
+	// 停止所有 continuous HLS worker
+	s.stopAllContinuousHLSForFile(fileID)
+}
+
+// stopAllContinuousHLSForFile deletes continuous HLS keys for all bitrates of a file.
+func (s *Scheduler) stopAllContinuousHLSForFile(fileID string) {
+	if s == nil || s.redis == nil {
+		return
+	}
+	ctx := context.Background()
+	prefix := fmt.Sprintf("continuous:hls:%s:", fileID)
+	iter := s.redis.Scan(ctx, 0, prefix+"*", 64).Iterator()
+	batch := make([]string, 0, 16)
+	flush := func() {
+		if len(batch) > 0 {
+			s.redis.Del(ctx, batch...)
+			batch = batch[:0]
+		}
+	}
+	for iter.Next(ctx) {
+		batch = append(batch, iter.Val())
+		if len(batch) >= 64 {
+			flush()
+		}
+	}
+	flush()
+	// Also clear continuous lock keys.
+	lockPrefix := fmt.Sprintf("lock:continuous:hls:%s:", fileID)
+	iter2 := s.redis.Scan(ctx, 0, lockPrefix+"*", 64).Iterator()
+	for iter2.Next(ctx) {
+		s.redis.Del(ctx, iter2.Val())
+	}
 }
 
 // dropAllTranscodeTasksForFile 同时清空 high/low 队列中属于 fileID 的待办任务。
@@ -337,7 +381,7 @@ func videoMetadataFromHash(fileID string, h map[string]string) *models.VideoMeta
 		FilePath:   strings.TrimSpace(h["file_path"]),
 		Codec:      strings.TrimSpace(h["codec"]),
 		AudioCodec: strings.TrimSpace(h["audio_codec"]),
-		Format:           strings.TrimSpace(h["format"]),
+		Format:     strings.TrimSpace(h["format"]),
 	}
 	if raw := strings.TrimSpace(h["audio_playlists"]); raw != "" {
 		_ = json.Unmarshal([]byte(raw), &m.AudioPlaylists)
@@ -735,6 +779,8 @@ func (s *Scheduler) handleVideoSegment(c *gin.Context) {
 			// 清理之前位置堆积的 prefetch 任务，避免转码 worker 浪费 CPU 处理
 			// 不可能再被请求到的段。会话内仍以本次 segID 为新的播放头。
 			s.dropStaleTranscodeTasksForFile(fileID)
+			// 重启连续 HLS 转码进程，以当前段号为起始。
+			s.restartContinuousHLS(fileID, bitrate, sessionID, segID)
 		}
 	}
 
@@ -765,7 +811,24 @@ func (s *Scheduler) handleVideoSegment(c *gin.Context) {
 		return
 	}
 
-	// 4. 启动转码任务
+	// 4. 启动转码任务（二选一模式）。
+	if s.isContinuousHLSMode() {
+		// Continuous HLS 模式：确保 worker 在运行（覆盖当前 segment），
+		// 同时入队一个快速逐段转码用于即时响应（seek 或首段）。
+		if !s.isContinuousHLSRunning(fileID, bitrate) {
+			s.ensureContinuousHLSStartedWithSeg(fileID, bitrate, sessionID, segID)
+		}
+		// 快速逐段转码：立即产出当前 segment（高优先级）。
+		_ = s.startTranscodeTask(fileID, segID, bitrate, sessionID)
+		// 等待转码完成。
+		if err := s.waitForSegment(fileID, segID, bitrate, 45*time.Second); err != nil {
+			c.JSON(504, gin.H{"error": "segment not ready", "segment_id": segID})
+			return
+		}
+		s.serveSegment(c, tsPath)
+		return
+	}
+	// 传统逐段转码模式。
 	if err := s.startTranscodeTask(fileID, segID, bitrate, sessionID); err != nil {
 		c.JSON(500, gin.H{"error": "Failed to start transcode"})
 		return
@@ -822,10 +885,10 @@ func (s *Scheduler) handleVideoSegment(c *gin.Context) {
 			zap.Duration("waited", waitTimeout),
 		)
 		c.JSON(504, gin.H{
-			"error":           "Transcode timeout",
-			"segment_status":  st,
-			"segment_id":      segID,
-			"waited_seconds":  int(waitTimeout.Seconds()),
+			"error":          "Transcode timeout",
+			"segment_status": st,
+			"segment_id":     segID,
+			"waited_seconds": int(waitTimeout.Seconds()),
 		})
 		return
 	}
@@ -912,6 +975,70 @@ func (s *Scheduler) startSingleSliceTask(fileID string, segID int, sessionID str
 }
 
 // 启动转码任务
+// isContinuousHLSMode reports whether continuous HLS is enabled (global config).
+func (s *Scheduler) isContinuousHLSMode() bool {
+	return s.hlsContinuous
+}
+
+// isContinuousHLSRunning checks if a continuous HLS transcode is active for this file+bitrate.
+func (s *Scheduler) isContinuousHLSRunning(fileID, bitrate string) bool {
+	key := fmt.Sprintf("continuous:hls:%s:%s", fileID, bitrate)
+	n, err := s.redis.Exists(context.Background(), key).Result()
+	return err == nil && n > 0
+}
+
+// restartContinuousHLS checks whether a running continuous HLS worker covers the target segment.
+// If the target is within the worker's current output range, do nothing (it will produce the segment soon).
+// If outside range, kill the worker and start a new one from the target segment.
+func (s *Scheduler) restartContinuousHLS(fileID, bitrate, sessionID string, targetSegID int) {
+	ctx := context.Background()
+	key := fmt.Sprintf("continuous:hls:%s:%s", fileID, bitrate)
+
+	// Check if a worker is already covering this range.
+	startStr, _ := s.redis.HGet(ctx, key, "start_seg").Result()
+	latestStr, _ := s.redis.HGet(ctx, key, "latest_seg").Result()
+	startSeg, _ := strconv.Atoi(startStr)
+	latestSeg, _ := strconv.Atoi(latestStr)
+
+	// If worker exists and target is within [start, latest+lookahead], no restart needed.
+	lookahead := 30 // segments ahead of latest that we consider "in range"
+	if latestStr != "" && targetSegID >= startSeg && targetSegID <= latestSeg+lookahead {
+		return
+	}
+
+	// Target is outside range: kill existing worker and start new one.
+	s.redis.Del(ctx, key)
+	lockKey := fmt.Sprintf("lock:continuous:hls:%s:%s", fileID, bitrate)
+	s.redis.Del(ctx, lockKey)
+	time.Sleep(200 * time.Millisecond)
+	s.ensureContinuousHLSStartedWithSeg(fileID, bitrate, sessionID, targetSegID)
+}
+
+// ensureContinuousHLSStarted enqueues a continuous HLS job if none is running for this file+bitrate.
+func (s *Scheduler) ensureContinuousHLSStarted(fileID, bitrate, sessionID string) {
+	s.ensureContinuousHLSStartedWithSeg(fileID, bitrate, sessionID, 0)
+}
+
+// ensureContinuousHLSStartedWithSeg enqueues a continuous HLS job with a specific start segment.
+func (s *Scheduler) ensureContinuousHLSStartedWithSeg(fileID, bitrate, sessionID string, startSegID int) {
+	if s.isContinuousHLSRunning(fileID, bitrate) {
+		return
+	}
+	lockKey := fmt.Sprintf("lock:continuous:hls:%s:%s", fileID, bitrate)
+	locked, _ := s.redis.SetNX(context.Background(), lockKey, sessionID, 30*time.Second).Result()
+	if !locked {
+		return
+	}
+	job := map[string]interface{}{
+		"file_id":      fileID,
+		"bitrate":      bitrate,
+		"session_id":   sessionID,
+		"start_seg_id": startSegID,
+	}
+	data, _ := json.Marshal(job)
+	s.redis.LPush(context.Background(), "continuous:jobs:queue", data)
+}
+
 func (s *Scheduler) startTranscodeTask(fileID string, segID int, bitrate, sessionID string) error {
 	ctx := context.Background()
 
@@ -1262,7 +1389,7 @@ func (s *Scheduler) generateMasterPlaylist(c *gin.Context, fileID string, meta *
 
 	var b strings.Builder
 	b.WriteString("#EXTM3U\n")
-	b.WriteString("#EXT-X-VERSION:4\n")
+	b.WriteString("#EXT-X-VERSION:6\n")
 	b.WriteString("#EXT-X-INDEPENDENT-SEGMENTS\n\n")
 
 	if hasAudio {

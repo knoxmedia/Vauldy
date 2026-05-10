@@ -43,6 +43,8 @@ type Config struct {
 	MaxConcurrent int
 	// VideoEncoder forces JIT encoder: libx264, h264_qsv, h264_amf, h264_nvenc, h264_vaapi (empty = detect).
 	VideoEncoder string
+	// HLSContinuousEnabled when true, uses a single ffmpeg process with -f segment muxer.
+	HLSContinuousEnabled bool
 }
 
 func NewStorage(basePath string) Storage {
@@ -86,14 +88,15 @@ func (s *LocalStorage) SaveSegment(fileID string, segID int, segmentType string,
 }
 
 type TranscodeWorker struct {
-	redis       *redis.Client
-	storage     Storage
-	ffmpeg      string
-	logger      *zap.Logger
-	workerID    string
-	semaphore   chan struct{}
-	hwEncoder   hwenc.ID
-	ffmpegLogMu sync.Mutex // serializes ffmpeg console lines from concurrent tasks
+	redis         *redis.Client
+	storage       Storage
+	ffmpeg        string
+	logger        *zap.Logger
+	workerID      string
+	semaphore     chan struct{}
+	hwEncoder     hwenc.ID
+	hlsContinuous bool
+	ffmpegLogMu   sync.Mutex // serializes ffmpeg console lines from concurrent tasks
 }
 
 // linePrefixWriter buffers subprocess output and emits whole lines prefixed for readability.
@@ -160,13 +163,14 @@ func NewTranscodeWorker(cfg *Config) *TranscodeWorker {
 	logger := zap.L()
 	logger.Info("Transcode worker JIT encoder", zap.String("encoder", string(hw)))
 	return &TranscodeWorker{
-		redis:     redis.NewClient(&redis.Options{Addr: cfg.RedisAddr}),
-		storage:   NewStorage(cfg.StoragePath),
-		ffmpeg:    cfg.FFmpegPath,
-		logger:    logger,
-		workerID:  cfg.WorkerID,
-		semaphore: make(chan struct{}, cfg.MaxConcurrent),
-		hwEncoder: hw,
+		redis:         redis.NewClient(&redis.Options{Addr: cfg.RedisAddr}),
+		storage:       NewStorage(cfg.StoragePath),
+		ffmpeg:        cfg.FFmpegPath,
+		logger:        logger,
+		workerID:      cfg.WorkerID,
+		semaphore:     make(chan struct{}, cfg.MaxConcurrent),
+		hwEncoder:     hw,
+		hlsContinuous: cfg.HLSContinuousEnabled,
 	}
 }
 
@@ -178,6 +182,14 @@ func (w *TranscodeWorker) Start() {
 		zap.Int("max_concurrent", cap(w.semaphore)),
 	)
 
+	// Continuous HLS 模式：额外启动连续转码循环（处理 long-running ffmpeg）。
+	if w.hlsContinuous {
+		go w.startContinuousHLSLoop()
+	}
+
+	// 逐段转码循环：在两种模式下都运行。
+	// - Continuous HLS 模式：处理 seek 后的即时响应段（高优先级，单段转码）。
+	// - 传统模式：处理所有段的转码。
 	// 优先级从高到低；只有当某档无任务时才落到下一档。
 	queues := []string{
 		"transcode:queue:high",
@@ -365,10 +377,8 @@ func (w *TranscodeWorker) processTranscodeTask(task *models.TranscodeTask) {
 		zap.Int("size", len(data)),
 	)
 
-	// 10. 预取后续切片（仅当 lookahead 节流允许）。每完成一段再往后追 2 段，单清晰度模式下足够。
-	//     原本固定追 5 段会与 sliceworker 的 EnqueueInitialSegments 叠加，让低优先级队列堵成
-	//     高优先级队列的搬运瓶颈。
-	if task.Priority == 0 {
+	// Continuous HLS 模式下不逐段 prefetch：long-running ffmpeg 自然产出后续段。
+	if !w.hlsContinuous && task.Priority == 0 {
 		w.prefetchNextSegments(task.FileID, task.SegmentID, task.Bitrate)
 	}
 }
@@ -907,4 +917,358 @@ func (w *TranscodeWorker) requeueLowPriority(task *models.TranscodeTask, backoff
 		Score:  float64(time.Now().Add(backoff).Unix()),
 		Member: data,
 	})
+}
+
+// ==================== Continuous HLS Transcode ====================
+
+// ContinuousHLSJob describes a long-running ffmpeg process that outputs HLS segments
+// directly via -f segment muxer, for a specific fileID + bitrate.
+type ContinuousHLSJob struct {
+	FileID    string `json:"file_id"`
+	Bitrate   string `json:"bitrate"`
+	SessionID string `json:"session_id"`
+	// StartSegID is the initial segment number (used for -segment_start_number).
+	StartSegID int `json:"start_seg_id"`
+}
+
+// continuousJobKey is the Redis key tracking an active continuous HLS job for this file+bitrate.
+func continuousJobKey(fileID, bitrate string) string {
+	return fmt.Sprintf("continuous:hls:%s:%s", fileID, bitrate)
+}
+
+// startContinuousHLSLoop checks for continuous HLS jobs and starts a goroutine per job.
+func (w *TranscodeWorker) startContinuousHLSLoop() {
+	ctx := context.Background()
+	queueKey := "continuous:jobs:queue"
+
+	for {
+		res, err := w.redis.BLPop(ctx, 5*time.Second, queueKey).Result()
+		if err != nil || len(res) < 2 {
+			continue
+		}
+		var job ContinuousHLSJob
+		if err := json.Unmarshal([]byte(res[1]), &job); err != nil {
+			continue
+		}
+
+		// Acquire slot
+		w.semaphore <- struct{}{}
+
+		jk := job // capture
+		go func() {
+			defer func() { <-w.semaphore }()
+			defer func() {
+				if r := recover(); r != nil {
+					w.logger.Error("continuous HLS panic", zap.Any("recover", r),
+						zap.String("file_id", jk.FileID), zap.String("bitrate", jk.Bitrate))
+				}
+			}()
+			w.runContinuousHLS(&jk)
+		}()
+	}
+}
+
+// runContinuousHLS builds ffmpeg args with -f segment muxer, runs a single long-lived
+// ffmpeg process that outputs TS segments directly to storage, and monitors the .m3u8
+// manifest to update per-segment status in Redis.
+func (w *TranscodeWorker) runContinuousHLS(job *ContinuousHLSJob) {
+	logger := w.logger.With(zap.String("file_id", job.FileID), zap.String("bitrate", job.Bitrate), zap.String("mode", "continuous-hls"))
+	logger.Info("Starting continuous HLS transcode", zap.Int("start_seg", job.StartSegID))
+
+	key := continuousJobKey(job.FileID, job.Bitrate)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Mark job as active, storing the start segment ID so the scheduler can
+	// decide whether a seek target is within our current range.
+	w.redis.Set(ctx, key, w.workerID, 0)
+	w.redis.HSet(ctx, key, "start_seg", job.StartSegID, "latest_seg", job.StartSegID)
+
+	// Clean up on exit.
+	defer func() {
+		w.redis.Del(ctx, key)
+		logger.Info("Continuous HLS transcode finished")
+	}()
+
+	// Watch for cancellation signals: Redis key deletion or session expiry.
+	go func() {
+		tk := time.NewTicker(500 * time.Millisecond)
+		defer tk.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tk.C:
+			}
+			// Cancelled externally (scheduler deleted the key).
+			n, err := w.redis.Exists(ctx, key).Result()
+			if err != nil || n == 0 {
+				logger.Info("Continuous HLS cancelled externally (key deleted)")
+				cancel()
+				return
+			}
+			// Session ended: stop if no active sessions reference this file.
+			if job.SessionID != "" && job.SessionID != "prefetch" {
+				sessExists, _ := w.redis.Exists(ctx, "session:"+job.SessionID).Result()
+				if sessExists == 0 {
+					logger.Info("Continuous HLS session ended", zap.String("session_id", job.SessionID))
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+
+	// Resolve source and segment index.
+	segIndex, segErr := w.getSegmentIndexRedis(job.FileID)
+	if segErr != nil {
+		logger.Error("Get segment index failed", zap.Error(segErr))
+		return
+	}
+
+	// Calculate the start time offset from the segment index.
+	var ssSec float64
+	if job.StartSegID > 0 && job.StartSegID < len(segIndex.VideoSegments) {
+		ssSec = segIndex.VideoSegments[job.StartSegID].StartTime
+	}
+
+	// Get source file path from Redis.
+	srcPath, err := w.redis.HGet(ctx, "video:meta:"+job.FileID, "file_path").Result()
+	if err != nil || strings.TrimSpace(srcPath) == "" {
+		logger.Error("Source file path not found", zap.Error(err))
+		return
+	}
+	inputPath := strings.TrimSpace(srcPath)
+
+	segDuration := 6.0 // matching sliceworker target
+
+	// Output directly into the segment storage directory.
+	outDir := filepath.Join(w.storage.BasePath(), "ts", "video", job.FileID, job.Bitrate)
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		logger.Error("Failed to create output dir", zap.Error(err))
+		return
+	}
+
+	m3u8Path := filepath.Join(outDir, "live.m3u8")
+	segPattern := filepath.Join(outDir, "%d.ts")
+
+	args := []string{"-hide_banner", "-loglevel", "error"}
+	if ssSec > 0.01 {
+		// Apply input seek: -copyts -start_at_zero keeps output timestamps starting from 0 after the seek point.
+		args = append(args, "-copyts", "-start_at_zero", "-ss", formatSeconds(ssSec))
+	}
+	args = append(args, "-i", inputPath)
+	args = append(args, "-map", "0:v:0")
+
+	// Audio: skip if external audio available.
+	audioArgs := w.audioOutputArgs(&models.TranscodeTask{FileID: job.FileID, Bitrate: job.Bitrate})
+	if !strings.EqualFold(audioArgs[0], "-an") {
+		args = append(args, "-map", "0:a:0?")
+	}
+	args = append(args, "-sn")
+
+	// Build video encoder args using existing logic.
+	videoArgs := w.buildVideoEncoderArgsCtn(job, segDuration)
+	args = append(args, videoArgs...)
+	args = append(args, audioArgs...)
+
+	// HLS segment muxer.
+	args = append(args,
+		"-max_delay", "5000000",
+		"-avoid_negative_ts", "disabled",
+		"-f", "segment",
+		"-segment_format", "mpegts",
+		"-segment_list", m3u8Path,
+		"-segment_list_type", "m3u8",
+		"-segment_time", fmt.Sprintf("%.3f", segDuration),
+		"-segment_start_number", strconv.Itoa(job.StartSegID),
+		"-individual_header_trailer", "0",
+		"-write_header_trailer", "0",
+		segPattern,
+	)
+
+	logger.Info("Continuous HLS ffmpeg args", zap.Float64("ss_sec", ssSec), zap.Int("start_seg", job.StartSegID), zap.String("args", strings.Join(args, " ")))
+
+	cmd := exec.CommandContext(ctx, w.ffmpeg, args...)
+	logPrefix := fmt.Sprintf("[continuous-hls file=%s br=%s sess=%s] ", job.FileID, job.Bitrate, job.SessionID)
+	outLog := &linePrefixWriter{mu: &w.ffmpegLogMu, out: os.Stdout, prefix: logPrefix}
+	errLog := &linePrefixWriter{mu: &w.ffmpegLogMu, out: os.Stderr, prefix: logPrefix}
+	cmd.Stdout = outLog
+	cmd.Stderr = errLog
+
+	if err := cmd.Start(); err != nil {
+		logger.Error("Continuous HLS start failed", zap.Error(err))
+		return
+	}
+	// Continuous HLS runs until cancelled (seek out of range) or source exhausted.
+	// No session-based pause/resume — the worker keeps producing segments regardless
+	// of playback pauses, avoiding encoder re-initialization cost.
+	w.monitorHLSSegments(ctx, m3u8Path, job.FileID, job.Bitrate)
+
+	if err := cmd.Wait(); err != nil {
+		if ctx.Err() != nil {
+			logger.Info("Continuous HLS ffmpeg cancelled")
+		} else {
+			logger.Warn("Continuous HLS ffmpeg exited", zap.Error(err))
+		}
+	}
+	_ = outLog.flush()
+	_ = errLog.flush()
+}
+
+// buildVideoEncoderArgsCtn builds video encoder arguments for continuous HLS mode.
+// It aligns with the per-segment buildTranscodeArgs but without -ss/-t input trimming,
+// since the continuous process handles timing via the segment muxer.
+func (w *TranscodeWorker) buildVideoEncoderArgsCtn(job *ContinuousHLSJob, segDuration float64) []string {
+	ctx := context.Background()
+
+	// Read codec preference from Redis metadata.
+	pickedBitrate := job.Bitrate
+	codec := strings.TrimSpace(w.hwEncoderCodec(ctx, job.FileID))
+	if codec == "libx264" {
+		w.hwEncoder = hwenc.Libx264
+	}
+
+	res := resolutionForBitrate(pickedBitrate)
+	wPx, hPx := parseResolutionWH(res)
+
+	gops := []string{"-g", fmt.Sprintf("%d", int(segDuration*8)), "-keyint_min", fmt.Sprintf("%d", int(segDuration*8)), "-sc_threshold", "0"}
+
+	switch w.hwEncoder {
+	case hwenc.H264QSV:
+		return append([]string{
+			"-vf", fmt.Sprintf("scale=%s:%s,format=nv12", wPx, hPx),
+			"-c:v", "h264_qsv",
+			"-preset", "medium",
+			"-b:v", pickedBitrate, "-maxrate", pickedBitrate, "-bufsize", "2M",
+			"-profile:v", "high",
+		}, append(gops)...)
+	case hwenc.H264AMF:
+		return append([]string{
+			"-vf", fmt.Sprintf("scale=%s:%s", wPx, hPx),
+			"-c:v", "h264_amf",
+			"-quality", "balanced",
+			"-b:v", pickedBitrate, "-maxrate", pickedBitrate, "-bufsize", "2M",
+			"-profile:v", "high",
+		}, append(gops)...)
+	case hwenc.H264NVENC:
+		return append([]string{
+			"-vf", fmt.Sprintf("scale=%s:%s", wPx, hPx),
+			"-c:v", "h264_nvenc",
+			"-preset", "p4",
+			"-b:v", pickedBitrate, "-maxrate", pickedBitrate, "-bufsize", "2M",
+			"-profile:v", "high",
+		}, append(gops)...)
+	case hwenc.H264VAAPI:
+		return append([]string{
+			"-vf", fmt.Sprintf("scale=%s:%s,format=nv12", wPx, hPx),
+			"-c:v", "h264_vaapi",
+			"-b:v", pickedBitrate, "-maxrate", pickedBitrate, "-bufsize", "2M",
+			"-profile:v", "high",
+		}, append(gops)...)
+	default:
+		return append([]string{
+			"-vf", fmt.Sprintf("scale=%s:%s", wPx, hPx),
+			"-c:v", "libx264",
+			"-preset", "medium",
+			"-b:v", pickedBitrate, "-maxrate", pickedBitrate, "-bufsize", "2M",
+			"-profile:v", "high",
+		}, append(gops)...)
+	}
+}
+
+// hwEncoderCodec reads the preferred codec for a file from Redis.
+func (w *TranscodeWorker) hwEncoderCodec(ctx context.Context, fileID string) string {
+	c, _ := w.redis.HGet(ctx, "video:meta:"+fileID, "codec").Result()
+	return strings.TrimSpace(c)
+}
+
+// monitorHLSSegments polls the segment m3u8 manifest and publishes segment readiness to Redis
+// as soon as each TS file appears on disk.
+func (w *TranscodeWorker) monitorHLSSegments(ctx context.Context, m3u8Path, fileID, bitrate string) {
+	tk := time.NewTicker(500 * time.Millisecond)
+	defer tk.Stop()
+
+	lastReportedSeg := -1
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tk.C:
+		}
+
+		entries := parseSegmentM3U8(m3u8Path)
+		for _, seg := range entries {
+			if seg.ID > lastReportedSeg {
+				tsPath := fmt.Sprintf("ts/video/%s/%s/%d.ts", fileID, bitrate, seg.ID)
+				if w.storage.FileExists(tsPath) {
+					w.updateSegmentStatus(fileID, seg.ID, bitrate, "ready")
+					lastReportedSeg = seg.ID
+					// Update latest_seg in Redis so scheduler knows current range.
+					w.redis.HSet(ctx, continuousJobKey(fileID, bitrate), "latest_seg", seg.ID)
+				}
+			}
+		}
+	}
+}
+
+// getSegmentIndexRedis reads the video segment index from Redis.
+func (w *TranscodeWorker) getSegmentIndexRedis(fileID string) (*models.SegmentIndex, error) {
+	ctx := context.Background()
+	raw, err := w.redis.Get(ctx, "video:index:"+fileID).Result()
+	if err != nil {
+		return nil, err
+	}
+	var idx models.SegmentIndex
+	if err := json.Unmarshal([]byte(raw), &idx); err != nil {
+		return nil, err
+	}
+	return &idx, nil
+}
+
+// formatSeconds produces an H:M:S.ms string suitable for ffmpeg -ss.
+func formatSeconds(sec float64) string {
+	h := int(sec) / 3600
+	m := (int(sec) % 3600) / 60
+	s := sec - float64(h*3600+m*60)
+	return fmt.Sprintf("%02d:%02d:%06.3f", h, m, s)
+}
+
+// segmentM3U8Entry represents one EXTINF entry in a segment m3u8 playlist.
+type segmentM3U8Entry struct {
+	ID       int
+	Duration float64
+	File     string
+}
+
+// parseSegmentM3U8 parses a simple ffmpeg segment_list m3u8 file.
+func parseSegmentM3U8(path string) []segmentM3U8Entry {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var entries []segmentM3U8Entry
+	lines := strings.Split(string(data), "\n")
+	var dur float64
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "#EXTINF:") {
+			s := strings.TrimPrefix(line, "#EXTINF:")
+			s = strings.TrimSuffix(s, ",")
+			dur, _ = strconv.ParseFloat(s, 64)
+			continue
+		}
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		// Segment filename: typically "segID.ts"
+		base := filepath.Base(line)
+		idStr := strings.TrimSuffix(base, ".ts")
+		if id, err := strconv.Atoi(idStr); err == nil {
+			entries = append(entries, segmentM3U8Entry{ID: id, Duration: dur, File: line})
+		}
+		dur = 0
+	}
+	return entries
 }

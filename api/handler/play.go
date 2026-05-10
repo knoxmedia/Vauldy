@@ -132,7 +132,15 @@ func (h *Handler) PlaybackStart(c *gin.Context) {
 	if isClient {
 		logUID = 0
 	}
-	h.logActivity(logUID, username, "playback_start", &id, fmt.Sprintf("playback start; pos=%d; completed=%d; ip=%s; ua=%s", pos, completed, c.ClientIP(), ua))
+	sid := ""
+	if body.SessionID != nil {
+		sid = strings.TrimSpace(*body.SessionID)
+	}
+	msg := fmt.Sprintf("playback start; pos=%d; completed=%d; ip=%s; ua=%s", pos, completed, c.ClientIP(), ua)
+	if sid != "" {
+		msg += "; session_id=" + sid
+	}
+	h.logActivity(logUID, username, "playback_start", &id, msg)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
@@ -182,8 +190,121 @@ func (h *Handler) PlaybackEnd(c *gin.Context) {
 	if isClient {
 		logUID = 0
 	}
-	h.logActivity(logUID, username, "playback_end", &id, fmt.Sprintf("playback end; pos=%d; completed=%d; ip=%s; ua=%s", pos, completed, c.ClientIP(), ua))
+	sid := ""
+	if body.SessionID != nil {
+		sid = strings.TrimSpace(*body.SessionID)
+	}
+	msg := fmt.Sprintf("playback end; pos=%d; completed=%d; ip=%s; ua=%s", pos, completed, c.ClientIP(), ua)
+	if sid != "" {
+		msg += "; session_id=" + sid
+	}
+	h.logActivity(logUID, username, "playback_end", &id, msg)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// powerPlayerPlaybackPlan returns defaults merged with server YAML (powerplayer:).
+func (h *Handler) powerPlayerPlaybackPlan() gin.H {
+	baseURL := "/static/powerplayer6"
+	skin := "skin.zip"
+	clientCert := "powerplayer"
+	var powerdrmURL, weburlparam, stats string
+	if h != nil && h.App != nil && h.App.Config != nil {
+		p := h.App.Config.PowerPlayer
+		if s := strings.TrimSpace(p.BaseURL); s != "" {
+			baseURL = s
+		}
+		if s := strings.TrimSpace(p.Skin); s != "" {
+			skin = s
+		}
+		if s := strings.TrimSpace(p.ClientCert); s != "" {
+			clientCert = s
+		}
+		powerdrmURL = strings.TrimSpace(p.PowerDRMURL)
+		weburlparam = strings.TrimSpace(p.WebURLParam)
+		stats = strings.TrimSpace(p.StatisticsServer)
+	}
+	return gin.H{
+		"base_url":          baseURL,
+		"skin":              skin,
+		"powerdrm_url":      powerdrmURL,
+		"weburlparam":       weburlparam,
+		"statistics_server": stats,
+		"client_cert":       clientCert,
+	}
+}
+
+func (h *Handler) withPlaybackPlan(base gin.H) gin.H {
+	if base == nil {
+		base = gin.H{}
+	}
+	base["powerplayer"] = h.powerPlayerPlaybackPlan()
+	return base
+}
+
+func defaultPlayerEngineOrder(planMode string) []string {
+	switch planMode {
+	case "hls_powerdrm":
+		return []string{"powerplayer"}
+	case "hls_drm":
+		return []string{"powerplayer", "shaka", "xgplayer"}
+	default:
+		// native, hls, jit_hls, hls_aes_128, and any future clear modes
+		return []string{"powerplayer", "xgplayer"}
+	}
+}
+
+func normalizePlayerEngineList(in []string, planMode string) []string {
+	allowed := map[string]struct{}{"powerplayer": {}, "shaka": {}, "xgplayer": {}}
+	var out []string
+	seen := map[string]struct{}{}
+	for _, s := range in {
+		x := strings.ToLower(strings.TrimSpace(s))
+		if x == "" {
+			continue
+		}
+		if _, ok := allowed[x]; !ok {
+			continue
+		}
+		if planMode == "hls_powerdrm" && x != "powerplayer" {
+			continue
+		}
+		if _, ok := seen[x]; ok {
+			continue
+		}
+		seen[x] = struct{}{}
+		out = append(out, x)
+	}
+	return out
+}
+
+func (h *Handler) resolvePlayerEngineOrder(planMode string) []string {
+	fallback := defaultPlayerEngineOrder(planMode)
+	if h == nil || h.App == nil || h.App.Config == nil {
+		return fallback
+	}
+	var fromCfg []string
+	switch planMode {
+	case "hls_powerdrm":
+		fromCfg = h.App.Config.Playback.Engines.HLSPowerDRM
+	case "hls_drm":
+		fromCfg = h.App.Config.Playback.Engines.DRM
+	default:
+		fromCfg = h.App.Config.Playback.Engines.ProgressiveHLS
+	}
+	if len(fromCfg) == 0 {
+		return fallback
+	}
+	norm := normalizePlayerEngineList(fromCfg, planMode)
+	if len(norm) == 0 {
+		return fallback
+	}
+	return norm
+}
+
+func (h *Handler) withPlaybackPlanForMode(planMode string, base gin.H) gin.H {
+	base = h.withPlaybackPlan(base)
+	base["player_engine_order"] = h.resolvePlayerEngineOrder(planMode)
+	return base
 }
 
 func (h *Handler) HLSInfo(c *gin.Context) {
@@ -236,16 +357,16 @@ func (h *Handler) HLSInfo(c *gin.Context) {
 	if encReady, encMaster, encType := h.latestEncryptedManifest(id); encReady {
 		switch encType {
 		case "hls_aes_128":
-			c.JSON(http.StatusOK, gin.H{
+			c.JSON(http.StatusOK, h.withPlaybackPlanForMode("hls_aes_128", gin.H{
 				"mode":       "hls_aes_128",
 				"hls_master": fmt.Sprintf("%s/api/v1/media/%s/hls/master.m3u8", base, c.Param("id")),
 				"status":     "done",
 				"fallback":   playURL,
-			})
+			}))
 			_ = encMaster
 			return
 		case "hls_powerdrm":
-			c.JSON(http.StatusOK, gin.H{
+			c.JSON(http.StatusOK, h.withPlaybackPlanForMode("hls_powerdrm", gin.H{
 				"mode":       "hls_powerdrm",
 				"hls_master": fmt.Sprintf("%s/api/v1/media/%s/hls/master.m3u8", base, c.Param("id")),
 				"status":     "done",
@@ -253,7 +374,7 @@ func (h *Handler) HLSInfo(c *gin.Context) {
 					"powerdrm_key_url": powerDRMKeyURL,
 				},
 				"fallback": playURL,
-			})
+			}))
 			return
 		}
 		dashURL := ""
@@ -277,20 +398,45 @@ func (h *Handler) HLSInfo(c *gin.Context) {
 		if widevineServiceCertURL != "" {
 			drmPayload["widevine_service_cert_url"] = widevineServiceCertURL
 		}
-		c.JSON(http.StatusOK, gin.H{
+		c.JSON(http.StatusOK, h.withPlaybackPlanForMode("hls_drm", gin.H{
 			"mode":       "hls_drm",
 			"hls_master": fmt.Sprintf("%s/api/v1/media/%s/hls/master.m3u8", base, c.Param("id")),
 			"status":     "done",
 			"drm":        drmPayload,
 			"fallback":   playURL,
-		})
+		}))
 		return
 	}
 	caps := readClientCaps(c)
 	media := detectMediaProfile(metaJSON.String)
 
-	// JIT scheduler: preferred for all transcode (per-segment on demand, fastest to first frame).
-	// Comes before batch transcode check so stale completed tasks don't shadow JIT.
+	// New Redis-free session JIT: preferred when SessionManager is available.
+	if h.SessionManager != nil && fileID.Valid && strings.TrimSpace(fileID.String) != "" && filePath.Valid && strings.TrimSpace(filePath.String) != "" {
+		bitrate := pickBitrate(media, int(srcWidth.Int64), int(srcHeight.Int64))
+		resolution := resolutionForBitrate(bitrate)
+		s, err := h.SessionManager.CreateSession(id, fileID.String, filePath.String, bitrate, resolution, float64(srcDuration.Int64))
+		if err == nil {
+			masterBase := fmt.Sprintf("%s/api/v1/jit/session/%s/master.m3u8", base, s.ID)
+			mq := url.Values{}
+			mq.Set("media_id", strconv.FormatInt(id, 10))
+			if accessToken != "" {
+				mq.Set("access_token", accessToken)
+			}
+			hlsMaster := masterBase + "?" + mq.Encode()
+			c.JSON(http.StatusOK, h.withPlaybackPlanForMode("jit_hls", gin.H{
+				"mode":       "jit_hls",
+				"hls_master": hlsMaster,
+				"status":     "processing",
+				"fallback":   playURL,
+				"message":    "JIT session (Redis-free)",
+				"session_id": s.ID,
+			}))
+			return
+		}
+		log.Printf("JIT session create failed for media=%d: %v, falling back", id, err)
+	}
+
+	// Legacy JIT scheduler: Redis-based per-segment transcode.
 	if h.Instant != nil && fileID.Valid && strings.TrimSpace(fileID.String) != "" && filePath.Valid && strings.TrimSpace(filePath.String) != "" {
 		sessionID := c.GetHeader("X-Session-ID")
 		if strings.TrimSpace(sessionID) == "" {
@@ -311,7 +457,7 @@ func (h *Handler) HLSInfo(c *gin.Context) {
 				jitEndURL = appendQueryValue(jitEndURL, "access_token", accessToken)
 				jitSeekURL = appendQueryValue(jitSeekURL, "access_token", accessToken)
 			}
-			c.JSON(http.StatusOK, gin.H{
+			c.JSON(http.StatusOK, h.withPlaybackPlanForMode("jit_hls", gin.H{
 				"mode":                   "jit_hls",
 				"hls_master":             fmt.Sprintf("%s/api/v1/jit/master/%s", base, fileID.String),
 				"status":                 "processing",
@@ -323,7 +469,7 @@ func (h *Handler) HLSInfo(c *gin.Context) {
 				"jit_session_end_url":    jitEndURL,
 				"jit_session_seek_url":   jitSeekURL,
 				"message":                "JIT transcoding pipeline (per-segment on demand)",
-			})
+			}))
 			return
 		}
 		log.Printf("JIT PrepareVideoMeta failed for media=%d file=%s, falling back", id, fileID.String)
@@ -331,26 +477,26 @@ func (h *Handler) HLSInfo(c *gin.Context) {
 
 	// Fallback: check for existing batch transcode output.
 	if hlsReady, _, hlsStatus, hlsTaskID := h.latestTranscodeManifestByMediaID(id); hlsReady {
-		c.JSON(http.StatusOK, gin.H{
+		c.JSON(http.StatusOK, h.withPlaybackPlanForMode("hls", gin.H{
 			"mode":       "hls",
 			"hls_master": fmt.Sprintf("%s/api/v1/media/%s/hls/master.m3u8", base, c.Param("id")),
 			"status":     hlsStatus,
 			"task_id":    hlsTaskID,
 			"fallback":   playURL,
 			"message":    "Use transcoded stream",
-		})
+		}))
 		return
 	}
 
 	canDirect := canDirectPlay(media, caps)
 	if canDirect {
-		c.JSON(http.StatusOK, gin.H{
+		c.JSON(http.StatusOK, h.withPlaybackPlanForMode("native", gin.H{
 			"mode":          "native",
 			"playUrl":       playURL,
 			"media_profile": media,
 			"client_caps":   caps,
 			"message":       "Client can decode source directly",
-		})
+		}))
 		return
 	}
 
@@ -363,7 +509,7 @@ func (h *Handler) HLSInfo(c *gin.Context) {
 	if playlist != "" {
 		playlistURL = fmt.Sprintf("%s/api/v1/media/%s/hls/master.m3u8", base, c.Param("id"))
 	}
-	c.JSON(http.StatusOK, gin.H{
+	c.JSON(http.StatusOK, h.withPlaybackPlanForMode("hls", gin.H{
 		"mode":          "hls",
 		"hls_master":    playlistURL,
 		"status":        status,
@@ -372,7 +518,7 @@ func (h *Handler) HLSInfo(c *gin.Context) {
 		"media_profile": media,
 		"client_caps":   caps,
 		"message":       "Source codec/container unsupported for direct playback, switching to adaptive HLS",
-	})
+	}))
 }
 
 func (h *Handler) latestDRMManifest(mediaID int64) (bool, string) {
@@ -788,6 +934,42 @@ func detectMediaProfile(metaJSON string) mediaProfile {
 	return mediaProfile{Container: p.Container, Video: p.Video, Audio: p.Audio}
 }
 
+// pickBitrate selects a single bitrate based on source resolution.
+func pickBitrate(media mediaProfile, width, height int) string {
+	maxH := height
+	if width > height {
+		maxH = width
+	}
+	switch {
+	case maxH >= 1080:
+		return "4000k"
+	case maxH >= 720:
+		return "2000k"
+	case maxH >= 480:
+		return "1000k"
+	default:
+		return "500k"
+	}
+}
+
+// resolutionForBitrate maps bitrate to WxH.
+func resolutionForBitrate(bitrate string) string {
+	switch bitrate {
+	case "8000k":
+		return "3840:2160"
+	case "4000k":
+		return "1920:1080"
+	case "2000k":
+		return "1280:720"
+	case "1000k":
+		return "854:480"
+	case "500k":
+		return "640:360"
+	default:
+		return "1280:720"
+	}
+}
+
 func canDirectPlay(media mediaProfile, caps clientCaps) bool {
 	if media.Video == "" {
 		return false
@@ -894,13 +1076,15 @@ func (h *Handler) clearkeyMapByMediaID(mediaID int64) (map[string]string, error)
 
 // Position 使用指针：binding:"required" 在数值类型上会拒绝 0，而 position=0 用于「未观看」等合法场景。
 type progressBody struct {
-	Position  *int64 `json:"position" binding:"required"`
-	Completed *int   `json:"completed"`
+	Position  *int64  `json:"position" binding:"required"`
+	Completed *int    `json:"completed"`
+	SessionID *string `json:"session_id"`
 }
 
 type playbackLogBody struct {
-	Position  *int64 `json:"position"`
-	Completed *int   `json:"completed"`
+	Position  *int64  `json:"position"`
+	Completed *int    `json:"completed"`
+	SessionID *string `json:"session_id"`
 }
 
 func (h *Handler) SaveProgress(c *gin.Context) {
@@ -958,7 +1142,15 @@ func (h *Handler) SaveProgress(c *gin.Context) {
 	}
 	var username sql.NullString
 	_ = h.App.DB.QueryRow(`SELECT username FROM user WHERE id = ?`, uid).Scan(&username)
-	h.logActivity(uid, username.String, "progress", &id, "save playback progress")
+	sid := ""
+	if body.SessionID != nil {
+		sid = strings.TrimSpace(*body.SessionID)
+	}
+	msg := "save playback progress"
+	if sid != "" {
+		msg += "; session_id=" + sid
+	}
+	h.logActivity(uid, username.String, "progress", &id, msg)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 

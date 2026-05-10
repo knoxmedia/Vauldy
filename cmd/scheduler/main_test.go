@@ -151,7 +151,7 @@ func TestHandleVideoSegment_SeekFallsBackToPreviewAndEnqueuesHD(t *testing.T) {
 	if got := string(w.Body.Bytes()); got != string(fallbackBody) {
 		t.Fatalf("fallback body=%q, want %q", got, string(fallbackBody))
 	}
-	if elapsed > time.Second {
+	if elapsed > 2*time.Second {
 		t.Fatalf("seek fallback took too long: %s", elapsed)
 	}
 

@@ -10,6 +10,7 @@ export default defineConfig({
       "/health": { target: "http://127.0.0.1:8200", changeOrigin: true },
       // Static posters / uploads are served by knox-media, not Vite — without this, list thumbnails 404 on :5173.
       "/uploads": { target: "http://127.0.0.1:8200", changeOrigin: true },
+      "/static": { target: "http://127.0.0.1:8200", changeOrigin: true },
     },
   },
   build: {

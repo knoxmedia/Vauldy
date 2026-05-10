@@ -18,6 +18,8 @@
     "shaka-player": "^5.1.1",
     "xgplayer": "^3.0.24",
     "xgplayer-hls": "^3.0.24",
+    "xgplayer-hls.js": "^3.0.24",
+    "xgplayer-shaka": "^3.0.24",
     "zustand": "^5.0.12"
   },
   "devDependencies": {

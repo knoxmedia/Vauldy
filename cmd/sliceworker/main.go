@@ -12,11 +12,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-redis/redis/v8"
-	"go.uber.org/zap"
-	"knox-media/internal/jit/keyframes"
 	"knox-media/internal/jit/preheat"
 	models "knox-media/internal/model"
+
+	"github.com/go-redis/redis/v8"
+	"go.uber.org/zap"
 )
 
 type Storage interface {
@@ -31,12 +31,10 @@ type Config struct {
 	RedisAddr   string
 	StoragePath string
 	FFmpegPath  string
-	// FFprobePath used for analyzeVideo / keyframes; must be ffprobe, not ffmpeg.
 	FFprobePath string
 	WorkerID    string
-	// KeyframesCacheDir 持久化关键帧 PTS 列表，避免每次播放重复扫描。
-	// 留空则缓存禁用（测试场景）。
-	KeyframesCacheDir string
+	// NoPreheat disables per-segment preheat enqueuing (use when continuous HLS handles all segments).
+	NoPreheat bool
 }
 
 func NewStorage(basePath string) Storage {
@@ -48,13 +46,13 @@ func (s *LocalStorage) BasePath() string {
 }
 
 type SliceWorker struct {
-	redis    *redis.Client
-	storage  Storage
-	ffmpeg   string
-	ffprobe  string
-	logger   *zap.Logger
-	workerID string
-	kfCache  *keyframes.Cache
+	redis     *redis.Client
+	storage   Storage
+	ffmpeg    string
+	ffprobe   string
+	logger    *zap.Logger
+	workerID  string
+	noPreheat bool
 }
 
 type VideoInfo struct {
@@ -65,7 +63,6 @@ type VideoInfo struct {
 	VideoCodec string
 	AudioCodec string
 	Bitrate    int
-	Keyframes  []float64
 }
 
 func NewSliceWorker(cfg *Config) *SliceWorker {
@@ -74,19 +71,13 @@ func NewSliceWorker(cfg *Config) *SliceWorker {
 		ffprobe = "ffprobe"
 	}
 	w := &SliceWorker{
-		redis:    redis.NewClient(&redis.Options{Addr: cfg.RedisAddr}),
-		storage:  NewStorage(cfg.StoragePath),
-		ffmpeg:   cfg.FFmpegPath,
-		ffprobe:  ffprobe,
-		logger:   zap.L(),
-		workerID: cfg.WorkerID,
-	}
-	if dir := strings.TrimSpace(cfg.KeyframesCacheDir); dir != "" {
-		if c, err := keyframes.NewCache(dir, ffprobe); err == nil {
-			w.kfCache = c
-		} else {
-			zap.L().Warn("keyframes cache disabled", zap.Error(err))
-		}
+		redis:     redis.NewClient(&redis.Options{Addr: cfg.RedisAddr}),
+		storage:   NewStorage(cfg.StoragePath),
+		ffmpeg:    cfg.FFmpegPath,
+		ffprobe:   ffprobe,
+		logger:    zap.L(),
+		workerID:  cfg.WorkerID,
+		noPreheat: cfg.NoPreheat,
 	}
 	w.warnIfProbeLooksLikeFFmpeg()
 	return w
@@ -331,6 +322,15 @@ func parseInt(v interface{}) int64 {
 
 func (w *SliceWorker) processSliceTask(task *models.SliceTask) {
 	logger := w.logger.With(zap.String("file_id", task.FileID))
+
+	// 防重复：如果已经完成切片，直接跳过。
+	ctx := context.Background()
+	status, _ := w.redis.HGet(ctx, "video:meta:"+task.FileID, "status").Result()
+	if status == "ready" {
+		logger.Debug("Slice already ready, skipping")
+		return
+	}
+
 	logger.Info("Processing slice task")
 
 	startTime := time.Now()
@@ -358,16 +358,7 @@ func (w *SliceWorker) processSliceTask(task *models.SliceTask) {
 	}
 	w.beatSlicing(task.FileID, time.Now().Unix(), false)
 
-	// 2. 关键帧：优先读盘缓存（命中即 µs 级）；缓存未命中则使用 6s 等距网格，先把 master.m3u8 顶起来，
-	//    后台异步精化关键帧索引（show_packets，仅 demux）。这是首播延迟从“分钟”降到“秒”的关键。
-	if w.kfCache != nil {
-		if got, err := w.kfCache.Load(task.FileID, videoPath); err == nil && got != nil && len(got.PTS) > 0 {
-			videoInfo.Keyframes = got.PTS
-			logger.Info("Keyframes loaded from cache", zap.Int("count", len(got.PTS)))
-		}
-	}
-
-	// 3. 生成视频分段索引（音频不再单独物理切片，将由 transcodeworker 与视频一起混流到 TS）
+	// 2. 生成视频分段索引（固定 6s 网格，不再对齐源片关键帧）
 	index, err := w.generateSegmentIndex(task.FileID, videoInfo)
 	if err != nil {
 		logger.Error("Failed to generate segment index", zap.Error(err))
@@ -386,51 +377,14 @@ func (w *SliceWorker) processSliceTask(task *models.SliceTask) {
 	logger.Info("Slice index ready",
 		zap.Duration("duration", time.Since(startTime)),
 		zap.Int("video_segments", len(index.VideoSegments)),
-		zap.Bool("keyframes_cached", len(videoInfo.Keyframes) > 0),
 	)
 
-	// 5. 当只触发了一个分片时入预热队列；prefetch 仍按 segment id 顺序。
-	// 单清晰度模式下默认预热 720p（最常被选中）。具体档位由 profile.Pick 决定，
-	// 但 sliceworker 拿不到那个上下文；用 720p 作为兜底，落差时刚好能命中或快速重转。
-	if err := preheat.EnqueueInitialSegments(context.Background(), w.redis, task.FileID, len(index.VideoSegments), "2000k"); err != nil {
-		logger.Warn("JIT preheat enqueue failed", zap.Error(err))
+	// 3. 预取后续切片（continuous HLS 模式下跳过，由 long-running ffmpeg 处理）。
+	if !w.noPreheat {
+		if err := preheat.EnqueueInitialSegments(context.Background(), w.redis, task.FileID, len(index.VideoSegments), "2000k"); err != nil {
+			logger.Warn("JIT preheat enqueue failed", zap.Error(err))
+		}
 	}
-
-	// 6. 后台精化：缓存未命中的话，跑 show_packets 把真实关键帧 PTS 写盘并刷新 Redis 索引。
-	if w.kfCache != nil && len(videoInfo.Keyframes) == 0 {
-		go w.refineKeyframesAsync(task.FileID, videoPath, videoInfo)
-	}
-}
-
-// refineKeyframesAsync 后台扫描关键帧 PTS，写盘缓存并把视频分段重新对齐到关键帧。
-// 不阻塞首播：即使长片需要数秒到 1-2 分钟，也只是后续切片更精准，不影响 m3u8 已经服务的初段。
-func (w *SliceWorker) refineKeyframesAsync(fileID, videoPath string, info *VideoInfo) {
-	logger := w.logger.With(zap.String("file_id", fileID), zap.String("phase", "kf-refine"))
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-	meta, err := w.kfCache.Extract(ctx, fileID, videoPath, info.Duration)
-	if err != nil {
-		logger.Warn("keyframe extract failed; keeping fixed grid", zap.Error(err))
-		return
-	}
-	if err := w.kfCache.Save(meta); err != nil {
-		logger.Warn("keyframe save failed", zap.Error(err))
-	}
-	if len(meta.PTS) == 0 {
-		return
-	}
-	info.Keyframes = meta.PTS
-	refined, err := w.generateSegmentIndex(fileID, info)
-	if err != nil {
-		logger.Warn("regenerate segment index failed", zap.Error(err))
-		return
-	}
-	if err := w.saveIndex(fileID, refined); err != nil {
-		logger.Warn("save refined index failed", zap.Error(err))
-		return
-	}
-	logger.Info("Keyframe index refined", zap.Int("count", len(meta.PTS)),
-		zap.Int("video_segments", len(refined.VideoSegments)))
 }
 
 // analyzeVideoFast 只执行 -show_format/-show_streams，不解码任何视频帧；秒级返回。
@@ -490,126 +444,55 @@ func (w *SliceWorker) analyzeVideoFast(videoPath string) (*VideoInfo, error) {
 	return info, nil
 }
 
-// analyzeVideo 兼容旧路径：返回带关键帧的完整视频信息。新代码请用 analyzeVideoFast + keyframes 缓存。
-func (w *SliceWorker) analyzeVideo(videoPath string) (*VideoInfo, error) {
-	info, err := w.analyzeVideoFast(videoPath)
-	if err != nil {
-		return nil, err
-	}
-	keyframes, err := w.getKeyframes(videoPath)
-	if err == nil {
-		info.Keyframes = keyframes
-	} else {
-		w.logger.Warn("Keyframe list unavailable; using fixed segment grid",
-			zap.Error(err), zap.Float64("duration_sec", info.Duration), zap.String("basename", filepath.Base(videoPath)))
-	}
-	return info, nil
-}
-
-func (w *SliceWorker) getKeyframes(videoPath string) ([]float64, error) {
-	cmd := w.ffprobeCommand(
-		"-v", "error",
-		"-skip_frame", "nokey",
-		"-print_format", "json",
-		"-select_streams", "v:0",
-		"-show_frames",
-		"-show_entries", "frame=pkt_pts_time,key_frame",
-		"-i", videoPath,
-	)
-
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return nil, formatToolExit(w.ffprobe, videoPath+" (keyframes)", err, string(output))
-	}
-
-	var frames struct {
-		Frames []struct {
-			KeyFrame int     `json:"key_frame"`
-			PtsTime  float64 `json:"pkt_pts_time"`
-		} `json:"frames"`
-	}
-
-	if err := json.Unmarshal(output, &frames); err != nil {
-		return nil, err
-	}
-
-	var keyframes []float64
-	for _, frame := range frames.Frames {
-		if frame.KeyFrame == 1 {
-			keyframes = append(keyframes, frame.PtsTime)
-		}
-	}
-
-	return keyframes, nil
-}
-
 func (w *SliceWorker) generateSegmentIndex(fileID string, info *VideoInfo) (*models.SegmentIndex, error) {
 	index := &models.SegmentIndex{
-		FileID:      fileID,
-		Status:      "slicing",
-		Duration:    info.Duration,
-		KeyframePTS: append([]float64(nil), info.Keyframes...),
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
+		FileID:    fileID,
+		Status:    "slicing",
+		Duration:  info.Duration,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
 	}
 
-	// 根据关键帧生成视频切片。
-	// 策略：以 target=6s 为基准，在窗口内找离 endTime 最近的 keyframe（而非第一个），
-	// 同时跳过距离 currentTime 太近的 keyframe（低于 minSegment 的），避免密集 GOP 产生 1s 短段。
-	segmentDuration := 6.0
-	minSegment := 2.0
+	// 根据固定时长生成视频切片（不再对齐源片关键帧）。
+	// 原因：转码（re-encode）时编码器使用自己的 GOP 节奏（-g 48 = ~2s @24fps），
+	// 源片的关键帧位置对转码输出的 TS 分片无意义。对齐源关键帧反而导致：
+	//   - 密集 GOP 源片 → 大量 1s 短段 → SourceBuffer 溢出
+	//   - 段边界与编码器输出 GOP 不一致 → 播放器首帧解码失败 / glitch
+	// 固定 6s 网格保证每段内至少 3 个 GOP（2s × 3 = 6s），播放器可平滑解码。
+	// Passthrough（-c:v copy）模式不受影响：sliceworker 不知道最终是 copy 还是 re-encode，
+	// 但 transcodeworker passthrough 时会用 -ss/-t 精确截取，关键帧对齐由 ffmpeg 保证。
+	segmentDuration := 3.0
 	currentTime := 0.0
 	segID := 0
 
 	for currentTime < info.Duration {
 		endTime := currentTime + segmentDuration
-		bestKf := -1.0
-
-		for _, kf := range info.Keyframes {
-			if kf <= currentTime+minSegment {
-				continue
-			}
-			if kf <= endTime+0.5 {
-				bestKf = kf
-			} else {
-				break
-			}
+		if endTime > info.Duration {
+			endTime = info.Duration
 		}
+		duration := endTime - currentTime
 
-		nextKeyframe := endTime
-		if bestKf > 0 {
-			nextKeyframe = bestKf
-		}
-
-		if nextKeyframe > info.Duration {
-			nextKeyframe = info.Duration
-		}
-
-		duration := nextKeyframe - currentTime
-		// Tiny remainder: merge into previous segment instead of creating a sub-minSegment chunk.
-		if duration < minSegment && nextKeyframe >= info.Duration-minSegment {
+		// Merge tiny trailing segment into the previous one.
+		if duration < 2.0 && endTime >= info.Duration-2.0 {
 			n := len(index.VideoSegments)
 			if n > 0 {
-				index.VideoSegments[n-1].EndTime = nextKeyframe
-				index.VideoSegments[n-1].Duration = nextKeyframe - index.VideoSegments[n-1].StartTime
+				index.VideoSegments[n-1].EndTime = endTime
+				index.VideoSegments[n-1].Duration = endTime - index.VideoSegments[n-1].StartTime
 			}
-			break
-		}
-		if duration < 0.01 && nextKeyframe >= info.Duration-0.01 {
 			break
 		}
 
 		index.VideoSegments = append(index.VideoSegments, models.VideoSegmentInfo{
 			ID:        segID,
 			StartTime: currentTime,
-			EndTime:   nextKeyframe,
+			EndTime:   endTime,
 			Duration:  duration,
 			Keyframe:  true,
 			SlicePath: "",
 			Status:    "indexed",
 		})
 
-		currentTime = nextKeyframe
+		currentTime = endTime
 		segID++
 	}
 

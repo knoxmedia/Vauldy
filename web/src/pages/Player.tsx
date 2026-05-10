@@ -4,6 +4,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import Player, { TextTrack } from "xgplayer";
 import HlsPlugin from "xgplayer-hls";
+import ShakaPlugin from "xgplayer-shaka";
 import "xgplayer/dist/index.min.css";
 import "xgplayer/es/plugins/track/index.css";
 import "xgplayer-subtitles/es/style/index.css";
@@ -41,13 +42,30 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   });
 }
 
+/** Subset of PowerPlayer 6 `.setup()` options supplied by GET /media/:id/hls (`powerplayer` in JSON). */
+type PowerPlayerPlanFields = {
+  base_url?: string;
+  skin?: string;
+  powerdrm_url?: string;
+  weburlparam?: string;
+  statistics_server?: string;
+  client_cert?: string;
+};
+
+type PlaybackEngineId = "powerplayer" | "shaka" | "xgplayer";
+
+/** Engine order from GET /media/:id/hls (`player_engine_order`), controlled by server `playback.engines`. */
 type PlaybackPlan = {
   mode?: "native" | "hls" | "jit_hls" | "hls_drm" | "hls_aes_128" | "hls_powerdrm";
   playUrl?: string;
   hls_master?: string;
+  /** Present for Redis-free JIT; echoed on progress / playback logs for log-based session recovery. */
+  session_id?: string;
   status?: string;
   task_id?: number;
   fallback?: string;
+  player_engine_order?: string[];
+  powerplayer?: PowerPlayerPlanFields;
   drm?: {
     widevine_license_url?: string;
     widevine_transport?: "json_local" | "raw";
@@ -60,6 +78,61 @@ type PlaybackPlan = {
   };
 };
 
+function coalesceEngineOrder(plan: Pick<PlaybackPlan, "mode" | "player_engine_order">): string[] {
+  const fromApi = plan.player_engine_order;
+  if (Array.isArray(fromApi) && fromApi.length > 0) {
+    return fromApi.map((s) => String(s).toLowerCase().trim()).filter(Boolean);
+  }
+  switch (plan.mode) {
+    case "hls_powerdrm":
+      return ["powerplayer"];
+    case "hls_drm":
+      return ["powerplayer", "shaka", "xgplayer"];
+    default:
+      return ["powerplayer", "xgplayer"];
+  }
+}
+
+function defaultEngineOrderForMode(mode?: PlaybackPlan["mode"]): string[] {
+  switch (mode) {
+    case "hls_powerdrm":
+      return ["powerplayer"];
+    case "hls_drm":
+      return ["powerplayer", "shaka", "xgplayer"];
+    default:
+      return ["powerplayer", "xgplayer"];
+  }
+}
+
+function isPowerPlayerRuntimeAvailable(): boolean {
+  if (typeof window === "undefined") return false;
+  return typeof window.powerplayer === "function" || !!window.PowerPlayer;
+}
+
+function pickPlaybackEngine(
+  order: string[],
+  ctx: { hasWidevineFairplay: boolean; powerDRMOnly: boolean }
+): PlaybackEngineId | null {
+  for (const raw of order) {
+    const e = String(raw).toLowerCase().trim();
+    if (!e) continue;
+    if (ctx.powerDRMOnly) {
+      if (e === "powerplayer" && isPowerPlayerRuntimeAvailable()) return "powerplayer";
+      continue;
+    }
+    if (ctx.hasWidevineFairplay) {
+      if (e === "powerplayer" && isPowerPlayerRuntimeAvailable()) return "powerplayer";
+      if (e === "shaka") return "shaka";
+      if (e === "xgplayer") return "xgplayer";
+      continue;
+    }
+    if (e === "shaka") continue;
+    if (e === "powerplayer" && isPowerPlayerRuntimeAvailable()) return "powerplayer";
+    if (e === "xgplayer") return "xgplayer";
+  }
+  return null;
+}
+
 type ShakaRequestLike = {
   uris?: string[];
   headers: Record<string, string>;
@@ -69,12 +142,40 @@ type ShakaRequestLike = {
 
 type PowerPlayerLike = {
   destroy?: () => void | Promise<void>;
+  remove?: () => void | Promise<void>;
   on?: (event: string, cb: (...args: any[]) => void) => void;
+  /** PowerPlayer 6+ lifecycle hooks (register callbacks). */
+  onReady?: (cb: () => void) => void;
+  onSeek?: (cb: (time: unknown) => void) => void;
+  onTime?: (cb: (event: unknown) => void) => void;
+  onComplete?: (cb: () => void) => void;
+  onPause?: (cb: () => void) => void;
+  onError?: (cb: (error: unknown) => void) => void;
+};
+
+/** Best-effort parse of `onTime` / `onSeek` payload (SDK varies: number vs { position }). */
+function readPowerPlayerTimePayload(arg: unknown): number | null {
+  if (typeof arg === "number" && Number.isFinite(arg)) return arg;
+  if (arg && typeof arg === "object") {
+    const o = arg as Record<string, unknown>;
+    for (const k of ["position", "time", "currentTime", "current", "seconds"]) {
+      const v = o[k];
+      if (typeof v === "number" && Number.isFinite(v)) return v;
+    }
+  }
+  return null;
+}
+
+/** Return value of `powerplayer(containerId)` before `.setup()` (PowerPlayer 6 style). */
+type PowerPlayerLegacyAPI = {
+  setup: (config: Record<string, unknown>) => PowerPlayerLike;
 };
 
 declare global {
   interface Window {
     PowerPlayer?: new (options: Record<string, any>) => PowerPlayerLike;
+    /** PowerPlayer 6: `powerplayer(containerId).setup({ ... })` */
+    powerplayer?: (containerId: string) => PowerPlayerLegacyAPI;
   }
 }
 
@@ -295,6 +396,13 @@ export default function PlayerPage() {
   const drmPlayerRef = useRef<any>(null);
   const drmVideoRef = useRef<HTMLVideoElement | null>(null);
   const powerPlayerRef = useRef<PowerPlayerLike | null>(null);
+  /** Last playback plan `powerplayer` block (for PowerPlayer setup when not passed explicitly). */
+  const powerPlayerPlanRef = useRef<PowerPlayerPlanFields | undefined>(undefined);
+  /** Last plan engine order + mode (e.g. poll transcode completion → HLS with same priority). */
+  const playbackPlanMetaRef = useRef<{
+    engineOrder: string[];
+    planMode: PlaybackPlan["mode"];
+  }>({ engineOrder: ["powerplayer", "xgplayer"], planMode: "hls" });
   const [mid, setMid] = useState<number | undefined>(
     id ? Number(id) : Number(searchParams.get("id") || "")
   );
@@ -315,6 +423,8 @@ export default function PlayerPage() {
   const hideTimerRef = useRef<number | null>(null);
   /** Bumped on effect cleanup so stale async work (e.g. React Strict Mode) does not abort the active Shaka session (7000). */
   const playbackGenerationRef = useRef(0);
+  /** JIT session id from HLS plan (`session_id`); attached to playback/progress API calls for access-log correlation. */
+  const jitPlaybackSessionIdRef = useRef<string | null>(null);
   /** Incremented while Shaka DRM is initializing/recursing so teardown of <video> does not trigger prefer_source xgplayer fallback. */
   const drmRecoveryDepthRef = useRef(0);
   const startSec = (() => {
@@ -350,7 +460,13 @@ export default function PlayerPage() {
     }
     const sessionGen = ++playbackGenerationRef.current;
     const isStale = () => playbackGenerationRef.current !== sessionGen;
+    jitPlaybackSessionIdRef.current = null;
     let timer: number | null = null;
+    const withPlaybackLog = <T extends Record<string, unknown>>(p: T): T & { session_id?: string } => {
+      const sid = jitPlaybackSessionIdRef.current?.trim();
+      if (!sid) return p;
+      return { ...p, session_id: sid };
+    };
     const caps = detectClientCaps();
     const dbg = (...args: any[]) => console.log("[player]", ...args);
     const dbgErr = (...args: any[]) => console.error("[player]", ...args);
@@ -400,6 +516,70 @@ export default function PlayerPage() {
       if (!Number.isFinite(v) || v < 0) return null;
       return Math.floor(v);
     };
+
+    const attachPowerPlayerEvents = (pp: PowerPlayerLike) => {
+      const bind = (method: keyof PowerPlayerLike, fn: (...args: any[]) => void) => {
+        const m = pp[method];
+        if (typeof m !== "function") return;
+        try {
+          (m as (...a: any[]) => void).call(pp, fn);
+        } catch (e) {
+          dbgErr(`powerplayer ${String(method)} bind failed`, e);
+        }
+      };
+
+      bind("onReady", () => {
+        if (isStale()) return;
+        dbg("powerplayer onReady");
+        setLoadingText("");
+      });
+
+      bind("onSeek", (time: unknown) => {
+        if (isStale() || !mid) return;
+        const raw = readPowerPlayerTimePayload(time);
+        const sec = raw !== null ? safeSeconds(raw) : null;
+        dbg("powerplayer onSeek", time);
+        if (sec !== null) void savePlaybackProgress(mid, withPlaybackLog({ position: sec, completed: 0 })).catch(() => {});
+      });
+
+      bind("onTime", (event: unknown) => {
+        if (isStale() || !mid) return;
+        const pos = readPowerPlayerTimePayload(event);
+        if (pos === null) return;
+        const cur = safeSeconds(pos);
+        if (cur === null || cur <= 0) return;
+        const now = Date.now();
+        if (cur <= lastProgressSecRef.current && now - lastProgressAtRef.current < 9000) return;
+        if (now - lastProgressAtRef.current < 9000) return;
+        lastProgressSecRef.current = cur;
+        lastProgressAtRef.current = now;
+        void savePlaybackProgress(mid, withPlaybackLog({ position: cur, completed: 0 })).catch(() => {});
+        if (!playbackStartedRef.current) {
+          playbackStartedRef.current = true;
+          void reportPlaybackStart(mid, withPlaybackLog({ position: cur, completed: 0 })).catch(() => {});
+        }
+      });
+
+      bind("onComplete", () => {
+        if (isStale() || !mid || playbackEndedRef.current) return;
+        playbackEndedRef.current = true;
+        dbg("powerplayer onComplete");
+        const endPos = lastProgressSecRef.current;
+        void savePlaybackProgress(mid, withPlaybackLog({ position: endPos, completed: 1 })).catch(() => {});
+        void reportPlaybackEnd(mid, withPlaybackLog({ position: endPos, completed: 1 })).catch(() => {});
+      });
+
+      bind("onPause", () => {
+        if (isStale() || !mid) return;
+        dbg("powerplayer onPause");
+        const cur = lastProgressSecRef.current;
+        if (cur > 0) void savePlaybackProgress(mid, withPlaybackLog({ position: cur, completed: 0 })).catch(() => {});
+      });
+
+      bind("onError", (error: unknown) => {
+        dbgErr("powerplayer onError", error);
+      });
+    };
     const destroyDRMPlayer = async () => {
       if (drmPlayerRef.current) {
         await drmPlayerRef.current.destroy();
@@ -414,8 +594,16 @@ export default function PlayerPage() {
     };
     const destroyPowerPlayer = async () => {
       if (!powerPlayerRef.current) return;
+      const pp = powerPlayerRef.current;
       try {
-        await powerPlayerRef.current.destroy?.();
+        await pp.destroy?.();
+      } catch {
+        // ignore
+      }
+      try {
+        await pp.remove?.();
+      } catch {
+        // ignore
       } finally {
         powerPlayerRef.current = null;
       }
@@ -446,6 +634,9 @@ export default function PlayerPage() {
       video.style.width = "100%";
       video.style.height = "100%";
       video.autoplay = true;
+      video.playsInline = true;
+      video.setAttribute("playsinline", "");
+      video.setAttribute("webkit-playsinline", "");
       video.controls = true;
       host.appendChild(video);
       drmVideoRef.current = video;
@@ -572,7 +763,7 @@ export default function PlayerPage() {
         playbackStartedRef.current = true;
         const cur = safeSeconds(video.currentTime);
         if (cur === null) return;
-        void reportPlaybackStart(mid, { position: cur, completed: 0 }).catch(() => {});
+        void reportPlaybackStart(mid, withPlaybackLog({ position: cur, completed: 0 })).catch(() => {});
       });
       video.addEventListener("timeupdate", () => {
         if (!mid) return;
@@ -584,14 +775,14 @@ export default function PlayerPage() {
         if (now - lastProgressAtRef.current < 9000) return;
         lastProgressSecRef.current = cur;
         lastProgressAtRef.current = now;
-        void savePlaybackProgress(mid, { position: cur, completed: 0 }).catch(() => {});
+        void savePlaybackProgress(mid, withPlaybackLog({ position: cur, completed: 0 })).catch(() => {});
       });
       video.addEventListener("ended", () => {
         if (playbackEndedRef.current || !mid) return;
         playbackEndedRef.current = true;
         const cur = safeSeconds(video.currentTime) ?? 0;
-        void savePlaybackProgress(mid, { position: cur, completed: 1 }).catch(() => {});
-        void reportPlaybackEnd(mid, { position: cur, completed: 1 }).catch(() => {});
+        void savePlaybackProgress(mid, withPlaybackLog({ position: cur, completed: 1 })).catch(() => {});
+        void reportPlaybackEnd(mid, withPlaybackLog({ position: cur, completed: 1 })).catch(() => {});
       });
       if (isStale()) {
         await player.destroy().catch(() => {});
@@ -646,50 +837,174 @@ export default function PlayerPage() {
         drmRecoveryDepthRef.current--;
       }
     };
-    const playWithURL = async (
-      url: string,
-      preview?: PreviewPlan | null,
-      drm?: PlaybackPlan["drm"],
-      forceShaka = false,
-      forcePowerPlayer = false,
-      forceXgHls = false
-    ) => {
+    type PlayWithURLOptions = {
+      drm?: PlaybackPlan["drm"];
+      engineOrder?: string[];
+      planMode?: PlaybackPlan["mode"];
+      powerPlayerCfg?: PowerPlayerPlanFields | null;
+    };
+
+    const playWithURL = async (url: string, preview?: PreviewPlan | null, opts?: PlayWithURLOptions) => {
       if (isStale()) return;
       playerRef.current?.destroy();
       await destroyDRMPlayer();
       await destroyPowerPlayer();
       playbackStartedRef.current = false;
       playbackEndedRef.current = false;
-      if (forcePowerPlayer) {
-        const PowerPlayer = window.PowerPlayer;
-        if (!PowerPlayer) {
-          throw new Error("PowerPlayer is not available in current runtime");
+
+      const drm = opts?.drm;
+      const planMode = opts?.planMode;
+      const powerPlayerCfg = opts?.powerPlayerCfg;
+      const engineOrder =
+        opts?.engineOrder && opts.engineOrder.length > 0
+          ? opts.engineOrder
+          : defaultEngineOrderForMode(planMode);
+
+      const hasWidevineFairplay = !!(drm?.widevine_license_url || drm?.fairplay_license_url);
+      const powerDRMOnly = planMode === "hls_powerdrm";
+
+      let chosen = pickPlaybackEngine(engineOrder, { hasWidevineFairplay, powerDRMOnly });
+      if (chosen === null) {
+        if (powerDRMOnly) {
+          throw new Error(
+            "未加载 PowerPlayer，无法播放 PowerDRM 内容。请将 powerplayer.min.js 部署到 /static/powerplayer6/ 并刷新页面。"
+          );
         }
+        chosen = hasWidevineFairplay ? "shaka" : "xgplayer";
+      }
+
+      dbg("playback engine choice", {
+        chosen,
+        engineOrder,
+        planMode,
+        hasWidevineFairplay,
+        powerDRMOnly,
+      });
+
+      if (chosen === "powerplayer") {
         const host = resolvePlayerHost();
         if (!host) throw new Error("player mount missing");
         host.innerHTML = "";
+        const legacyFn = window.powerplayer;
+        if (typeof legacyFn === "function") {
+          const isHls = /\.m3u8(\?|#|$)/i.test(url);
+          const ppSetup = powerPlayerCfg ?? powerPlayerPlanRef.current;
+          const baseUrl = ppSetup?.base_url?.trim() || "/static/powerplayer6";
+          const skin = ppSetup?.skin?.trim() || "skin.zip";
+          const clientcert = ppSetup?.client_cert?.trim() || "powerplayer";
+          const statisticsserver = ppSetup?.statistics_server?.trim() || "";
+          const weburlparam = ppSetup?.weburlparam?.trim() || "";
+          const powerdrmurl = ppSetup?.powerdrm_url?.trim() || "";
+          const pp = legacyFn(domId).setup({
+            modes: [{ type: "html5" }],
+            baseUrl,
+            skin,
+            fileid: "",
+            contentid: "",
+            siteid: "",
+            file: url,
+            height: "100%",
+            width: "100%",
+            streamid: "",
+            code: "",
+            username: "",
+            headtime: "0",
+            bottomtime: "0",
+            starttime: "",
+            endtime: "",
+            title: "",
+            rid: "",
+            statisticsserver,
+            weburlparam,
+            backcolor: "161616",
+            showrighttoolbar: true,
+            pip: true,
+            autostart: true,
+            playsinline: true,
+            provider: isHls ? "hls" : "http",
+            latencythreshold: 1,
+            "http.startparam": "start",
+            "shortcuts.step": 10,
+            seamless: true,
+            lastplayposition: startSec > 0 ? startSec : 0,
+            seekdisabled: false,
+            fullscreendisabled: false,
+            bulletscreen: false,
+            showthumbnails: false,
+            screenshot: true,
+            clientcert,
+            powerdrmurl,
+          });
+          powerPlayerRef.current = pp;
+          attachPowerPlayerEvents(pp);
+          dbg("powerplayer legacy setup", { url, provider: isHls ? "hls" : "http" });
+          setLoadingText("");
+          return;
+        }
+        const PowerPlayer = window.PowerPlayer;
+        if (!PowerPlayer) {
+          throw new Error("PowerPlayer is not available (need window.powerplayer or window.PowerPlayer)");
+        }
         const pp = new PowerPlayer({
           id: domId,
           url,
           autoplay: true,
+          playsinline: true,
           width: "100%",
           height: "100%",
         });
         powerPlayerRef.current = pp;
-        dbg("powerplayer init", { url });
+        attachPowerPlayerEvents(pp);
+        dbg("powerplayer constructor init", { url });
         setLoadingText("");
         return;
       }
-      if (forceShaka || (drm && (drm.widevine_license_url || drm.fairplay_license_url))) {
-        const drmURL = drm?.dash_mpd_url ? appendToken(drm.dash_mpd_url) : url;
-        dbg("switch to shaka drm path", { url: drmURL, drm });
-        noAudioRetryTriedRef.current = false;
-        await playWithShakaDRM(drmURL, drm || {});
+
+      if (chosen === "shaka" && hasWidevineFairplay && drm) {
+        const manifestURL = drm.dash_mpd_url ? appendToken(drm.dash_mpd_url) : url;
+        dbg("switch to standalone Shaka DRM", { url: manifestURL, drm });
+        await playWithShakaDRM(manifestURL, drm);
         return;
       }
-      // Chromium/Firefox need MSE (xgplayer-hls); a bare .m3u8 URL on <video> fails there. Safari can do native HLS; plugin still works.
+
+      if (chosen === "xgplayer" && hasWidevineFairplay && drm) {
+        const drmURL = drm.dash_mpd_url ? appendToken(drm.dash_mpd_url) : url;
+        dbg("switch to xgplayer-shaka DRM", { url: drmURL, drm });
+        noAudioRetryTriedRef.current = false;
+        const host = resolvePlayerHost();
+        if (!host) throw new Error("player mount missing");
+        host.innerHTML = "";
+        const drmOptions: any = {
+          id: domId,
+          url: drmURL,
+          fluid: false,
+          width: "100%",
+          height: "100%",
+          autoplay: true,
+          playsinline: true,
+          pip: true,
+          ...(startSec > 0 ? { startTime: startSec } : {}),
+          plugins: [ShakaPlugin],
+          shakaPlugin: {
+            drm: {
+              servers: {} as Record<string, string>,
+            },
+          },
+        };
+        if (drm.widevine_license_url) {
+          drmOptions.shakaPlugin.drm.servers["com.widevine.alpha"] = drm.widevine_license_url;
+        }
+        if (drm.fairplay_license_url) {
+          drmOptions.shakaPlugin.drm.servers["com.apple.fps"] = drm.fairplay_license_url;
+        }
+        playerRef.current = new Player(drmOptions);
+        setLoadingText("");
+        return;
+      }
+
+      // Clear progressive / AES-128 HLS: xgplayer (+ hls.js when needed).
       const useXgHlsPlugin =
-        forceXgHls || (!forcePowerPlayer && (/\.m3u8(\?|#|$)/i.test(url) || /\/jit\/master\//i.test(url)));
+        planMode === "hls_aes_128" || /\.m3u8(\?|#|$)/i.test(url) || /\/jit\/master\//i.test(url);
       let textTrackList: ReturnType<typeof buildTextTrackList> = [];
       if (mid) {
         try {
@@ -706,6 +1021,7 @@ export default function PlayerPage() {
         width: "100%",
         height: "100%",
         autoplay: true,
+        playsinline: true,
         pip: true,
         screenShot: true,
         ...(startSec > 0 ? { startTime: startSec } : {}),
@@ -760,7 +1076,7 @@ export default function PlayerPage() {
         }
         lastProgressSecRef.current = cur;
         lastProgressAtRef.current = now;
-        void savePlaybackProgress(mid, { position: cur, completed }).catch(() => {});
+        void savePlaybackProgress(mid, withPlaybackLog({ position: cur, completed })).catch(() => {});
       };
       xg.on("play", () => {
         if (playbackStartedRef.current) return;
@@ -768,7 +1084,7 @@ export default function PlayerPage() {
         if (!mid) return;
         const cur = safeSeconds((playerRef.current as any)?.currentTime || 0);
         if (cur === null) return;
-        void reportPlaybackStart(mid, { position: cur, completed: 0 }).catch(() => {});
+        void reportPlaybackStart(mid, withPlaybackLog({ position: cur, completed: 0 })).catch(() => {});
       });
       xg.on("timeupdate", () => reportProgress(0));
       xg.on("ended", () => {
@@ -777,7 +1093,7 @@ export default function PlayerPage() {
         if (!mid) return;
         const cur = safeSeconds((playerRef.current as any)?.currentTime || 0) ?? 0;
         reportProgress(1);
-        void reportPlaybackEnd(mid, { position: cur, completed: 1 }).catch(() => {});
+        void reportPlaybackEnd(mid, withPlaybackLog({ position: cur, completed: 1 })).catch(() => {});
       });
       setLoadingText("");
     };
@@ -813,7 +1129,12 @@ export default function PlayerPage() {
         setTranscodeStatus(null);
         setTranscodeProgress(100);
         const preview = await fetchPreviewPlan();
-        await playWithURL(appendToken(state.hls_master), preview);
+        const meta = playbackPlanMetaRef.current;
+        await playWithURL(appendToken(state.hls_master), preview, {
+          engineOrder: meta.engineOrder,
+          planMode: meta.planMode ?? "hls",
+          powerPlayerCfg: powerPlayerPlanRef.current,
+        });
         return;
       }
       if (state.failed) {
@@ -821,7 +1142,12 @@ export default function PlayerPage() {
         setTranscodeStatus(null);
         setLoadingText("转码失败，正在回退到原始播放...");
         const preview = await fetchPreviewPlan();
-        await playWithURL(fallbackURL, preview);
+        const meta = playbackPlanMetaRef.current;
+        await playWithURL(fallbackURL, preview, {
+          engineOrder: meta.engineOrder,
+          planMode: "native",
+          powerPlayerCfg: powerPlayerPlanRef.current,
+        });
         return;
       }
       const progress = Number.isFinite(state.progress) ? Math.max(0, Math.min(99, state.progress || 0)) : 0;
@@ -836,6 +1162,7 @@ export default function PlayerPage() {
       }, nextDelay);
     };
     const resolvePlan = async () => {
+      jitPlaybackSessionIdRef.current = null;
       const query = new URLSearchParams({
         access_token: token,
         video_codecs: caps.videoCodecs.join(","),
@@ -893,6 +1220,11 @@ export default function PlayerPage() {
       if (!resp.ok) throw new Error(`playback plan failed: ${resp.status}`);
       if (isStale()) return;
       const plan = (await resp.json()) as PlaybackPlan;
+      powerPlayerPlanRef.current = plan.powerplayer;
+      playbackPlanMetaRef.current = {
+        engineOrder: coalesceEngineOrder(plan),
+        planMode: plan.mode,
+      };
       dbg("playback plan", plan);
       if (
         plan.mode === "hls" ||
@@ -903,21 +1235,28 @@ export default function PlayerPage() {
       ) {
         // JIT HLS: scheduler serves master playlist; per-segment transcode on the fly.
         if (plan.mode === "jit_hls" && plan.hls_master) {
+          if (isStale()) return;
+          const sid = typeof plan.session_id === "string" ? plan.session_id.trim() : "";
+          jitPlaybackSessionIdRef.current = sid || null;
           setLoadingText("正在连接即时播放…");
           const preview = await fetchPreviewPlan();
-          await playWithURL(appendToken(plan.hls_master), preview);
+          await playWithURL(appendToken(plan.hls_master), preview, {
+            engineOrder: coalesceEngineOrder(plan),
+            planMode: plan.mode,
+            powerPlayerCfg: plan.powerplayer,
+          });
           return;
         }
         if (plan.status === "done" && plan.hls_master) {
           const preview = await fetchPreviewPlan();
-          await playWithURL(
-            appendToken(plan.hls_master),
-            preview,
-            plan.mode === "hls_drm" ? plan.drm : undefined,
-            plan.mode === "hls_drm",
-            plan.mode === "hls_powerdrm",
-            plan.mode === "hls_aes_128"
-          );
+          const drmPayload =
+            plan.mode === "hls_drm" || plan.mode === "hls_powerdrm" ? plan.drm : undefined;
+          await playWithURL(appendToken(plan.hls_master), preview, {
+            drm: drmPayload,
+            engineOrder: coalesceEngineOrder(plan),
+            planMode: plan.mode,
+            powerPlayerCfg: plan.powerplayer,
+          });
           return;
         }
         if (plan.task_id && plan.task_id > 0) {
@@ -932,7 +1271,11 @@ export default function PlayerPage() {
       }
       const nativeURL = appendToken(plan.playUrl || `/api/v1/media/${mid}/play`);
       const preview = await fetchPreviewPlan();
-      await playWithURL(nativeURL, preview);
+      await playWithURL(nativeURL, preview, {
+        engineOrder: coalesceEngineOrder(plan),
+        planMode: plan.mode,
+        powerPlayerCfg: plan.powerplayer,
+      });
     };
     void resolvePlan().catch((err: unknown) => {
       if (isStale()) return;
@@ -958,8 +1301,8 @@ export default function PlayerPage() {
       if (mid && playbackStartedRef.current && !playbackEndedRef.current) {
         playbackEndedRef.current = true;
         const cur = safeSeconds((playerRef.current as any)?.currentTime || 0) ?? 0;
-        void savePlaybackProgress(mid, { position: cur, completed: 0 }).catch(() => {});
-        void reportPlaybackEnd(mid, { position: cur, completed: 0 }).catch(() => {});
+        void savePlaybackProgress(mid, withPlaybackLog({ position: cur, completed: 0 })).catch(() => {});
+        void reportPlaybackEnd(mid, withPlaybackLog({ position: cur, completed: 0 })).catch(() => {});
       }
       if (timer) {
         window.clearTimeout(timer);

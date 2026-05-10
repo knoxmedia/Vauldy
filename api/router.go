@@ -14,6 +14,7 @@ import (
 	"knox-media/internal/app"
 	"knox-media/internal/atrack"
 	"knox-media/internal/config"
+	"knox-media/internal/jit/session"
 	"knox-media/internal/keyframe"
 	"knox-media/internal/preview"
 	"knox-media/internal/subtitle"
@@ -21,7 +22,7 @@ import (
 	"knox-media/internal/upload"
 )
 
-func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worker, packageWorker *transcode.PackageWorker, previewWorker *preview.Worker, sub *subtitle.Service, up *upload.Service, instant *scheduler.Scheduler, atw *atrack.Worker, kfw *keyframe.Worker) *gin.Engine {
+func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worker, packageWorker *transcode.PackageWorker, previewWorker *preview.Worker, sub *subtitle.Service, up *upload.Service, instant *scheduler.Scheduler, sm *session.Manager, atw *atrack.Worker, kfw *keyframe.Worker) *gin.Engine {
 	if cfg.Server.Mode == "release" {
 		gin.SetMode(gin.ReleaseMode)
 	}
@@ -30,8 +31,9 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 	r.Use(middleware.CORS(cfg.CORS.AllowOrigins))
 	r.Static("/uploads", cfg.Data.Upload)
 	r.Static("/atracks", cfg.Data.ATracks)
+	r.Static("/static", cfg.Data.Static)
 
-	h := handler.New(application, worker, packageWorker, previewWorker, sub, up, instant, atw, kfw)
+	h := handler.New(application, worker, packageWorker, previewWorker, sub, up, instant, sm, atw, kfw)
 	go h.StartScheduleLoop(context.Background())
 
 	r.GET("/health", func(c *gin.Context) {
@@ -91,6 +93,14 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 			play.POST("/drm/fairplay/license", h.FairPlayLicense)
 			if instant != nil {
 				instant.RegisterRoutes(play)
+			}
+			// New Redis-free JIT session routes.
+			if sm != nil {
+				play.GET("/jit/session/:sessionID/*asset", h.ServeJITAsset)
+				play.POST("/jit/session/:sessionID/pause", h.PauseJITSession)
+				play.POST("/jit/session/:sessionID/resume", h.ResumeJITSession)
+				play.POST("/jit/session/:sessionID/seek", h.SeekJITSession)
+				play.POST("/jit/session/:sessionID/end", h.EndJITSession)
 			}
 		}
 

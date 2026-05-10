@@ -480,15 +480,25 @@ export async function logout() {
   await api.post("/api/v1/user/logout");
 }
 
-export async function reportPlaybackStart(mediaId: number, payload?: { position?: number; completed?: number }) {
+/** Optional `session_id` is the JIT HLS session (e.g. `jit-…`) for correlating access logs after idle recovery. */
+export type PlaybackLogPayload = {
+  position?: number;
+  completed?: number;
+  session_id?: string;
+};
+
+export async function reportPlaybackStart(mediaId: number, payload?: PlaybackLogPayload) {
   await api.post(`/api/v1/media/${mediaId}/playback/start`, payload ?? {});
 }
 
-export async function reportPlaybackEnd(mediaId: number, payload?: { position?: number; completed?: number }) {
+export async function reportPlaybackEnd(mediaId: number, payload?: PlaybackLogPayload) {
   await api.post(`/api/v1/media/${mediaId}/playback/end`, payload ?? {});
 }
 
-export async function savePlaybackProgress(mediaId: number, payload: { position: number; completed?: number }) {
+export async function savePlaybackProgress(
+  mediaId: number,
+  payload: { position: number; completed?: number; session_id?: string }
+) {
   await api.post(`/api/v1/media/${mediaId}/progress`, payload);
 }
 

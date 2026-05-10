@@ -25,6 +25,7 @@ import (
 	"knox-media/internal/app"
 	"knox-media/internal/atrack"
 	"knox-media/internal/config"
+	jitsession "knox-media/internal/jit/session"
 	"knox-media/internal/jit/ingestprepare"
 	jitmetrics "knox-media/internal/jit/metrics"
 	"knox-media/internal/keyframe"
@@ -118,23 +119,38 @@ func main() {
 		scheduler.NewLocalStorage(instantStorage),
 	)
 	instantScheduler.SetHLSMultiAudioEnabled(cfg.HLSMultiAudioEnabled())
+	instantScheduler.SetHLSContinuous(cfg.JITContinuousHLSEnabled())
+
+	// New Redis-free session manager.
+	sessionMgr := jitsession.NewManager(cfg.FFmpeg.FFmpegPath, cfg.FFmpeg.FFprobePath, cfg.Data.Dir)
+
 	instantSliceWorker := sliceworker.NewSliceWorker(&sliceworker.Config{
-		RedisAddr:         redisAddr,
-		StoragePath:       instantStorage,
-		FFmpegPath:        cfg.FFmpeg.FFmpegPath,
-		FFprobePath:       cfg.FFmpeg.FFprobePath,
-		WorkerID:          "embedded-slice",
-		KeyframesCacheDir: cfg.Data.Keyframes,
+		RedisAddr:   redisAddr,
+		StoragePath: instantStorage,
+		FFmpegPath:  cfg.FFmpeg.FFmpegPath,
+		FFprobePath: cfg.FFmpeg.FFprobePath,
+		WorkerID:    "embedded-slice",
+		NoPreheat:   cfg.JITContinuousHLSEnabled(),
 	})
 	instantTranscodeWorker := transcodeworker.NewTranscodeWorker(&transcodeworker.Config{
-		RedisAddr:     redisAddr,
-		StoragePath:   instantStorage,
-		FFmpegPath:    cfg.FFmpeg.FFmpegPath,
-		WorkerID:      "embedded-transcode",
-		MaxConcurrent: instantMaxConcurrent(),
+		RedisAddr:            redisAddr,
+		StoragePath:          instantStorage,
+		FFmpegPath:           cfg.FFmpeg.FFmpegPath,
+		WorkerID:             "embedded-transcode",
+		MaxConcurrent:        instantMaxConcurrent(),
+		HLSContinuousEnabled: cfg.JITContinuousHLSEnabled(),
 	})
-	go instantSliceWorker.Start()
-	go instantTranscodeWorker.Start()
+	// Redis-free session JIT replaces these; only start old workers if Redis is available.
+	redisAvailable := false
+	if _, err := instantRedis.Ping(context.Background()).Result(); err == nil {
+		redisAvailable = true
+	}
+	if redisAvailable {
+		go instantSliceWorker.Start()
+		go instantTranscodeWorker.Start()
+	} else {
+		log.Printf("Redis not available; slice/transcode workers disabled (session-based JIT active)")
+	}
 
 	var ffprobeExtra []string
 	if cfg.LibraryScanFastFFprobe() {
@@ -158,7 +174,7 @@ func main() {
 	mon := monitor.NewService(db, sc, 15*time.Second)
 	go mon.Start(context.Background())
 
-	engine := api.NewEngine(cfg, application, worker, packageWorker, previewWorker, subSvc, up, instantScheduler, atrackWorker, keyframeWorker)
+	engine := api.NewEngine(cfg, application, worker, packageWorker, previewWorker, subSvc, up, instantScheduler, sessionMgr, atrackWorker, keyframeWorker)
 	log.Printf("knox-media listening on http://%s", cfg.Addr())
 	if err := engine.Run(cfg.Addr()); err != nil {
 		log.Fatal(err)

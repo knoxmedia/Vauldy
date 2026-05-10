@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -70,6 +71,34 @@ func TestHLSInfo_DRM_DoesNotExposeWidevineProxyFlag(t *testing.T) {
 	}
 	if got := payload["fallback"]; got != "http://example.com/api/v1/media/1/play" {
 		t.Fatalf("unexpected fallback: %v", got)
+	}
+	ppRaw, ok := payload["powerplayer"]
+	if !ok {
+		t.Fatalf("expected powerplayer in response: %s", w.Body.String())
+	}
+	pp, ok := ppRaw.(map[string]any)
+	if !ok {
+		t.Fatalf("expected powerplayer object, got %T", ppRaw)
+	}
+	if got := pp["base_url"]; got != "/static/powerplayer6" {
+		t.Fatalf("unexpected powerplayer.base_url: %v", got)
+	}
+	if got := pp["skin"]; got != "skin.zip" {
+		t.Fatalf("unexpected powerplayer.skin: %v", got)
+	}
+	if got := pp["client_cert"]; got != "powerplayer" {
+		t.Fatalf("unexpected powerplayer.client_cert: %v", got)
+	}
+	engRaw, ok := payload["player_engine_order"]
+	if !ok {
+		t.Fatalf("expected player_engine_order: %s", w.Body.String())
+	}
+	eng, ok := engRaw.([]any)
+	if !ok || len(eng) != 3 {
+		t.Fatalf("expected player_engine_order len 3, got %T %v", engRaw, engRaw)
+	}
+	if g0, g1, g2 := fmt.Sprint(eng[0]), fmt.Sprint(eng[1]), fmt.Sprint(eng[2]); g0 != "powerplayer" || g1 != "shaka" || g2 != "xgplayer" {
+		t.Fatalf("unexpected player_engine_order: %v %v %v", g0, g1, g2)
 	}
 	if _, exists := drm["widevine_raw_proxy"]; exists {
 		t.Fatalf("unexpected widevine_raw_proxy in drm payload: %s", w.Body.String())

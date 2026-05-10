@@ -11,7 +11,6 @@ func TestGenerateSegmentIndex_SeparatesAudioSegments(t *testing.T) {
 		Duration:   18.3,
 		VideoCodec: "h264",
 		AudioCodec: "aac",
-		Keyframes:  []float64{6.0, 12.0, 18.0},
 	}
 
 	idx, err := w.generateSegmentIndex("file-a", info)
@@ -60,32 +59,26 @@ func TestGenerateSegmentIndex_SeparatesAudioSegments(t *testing.T) {
 
 func TestGenerateSegmentIndex_DenseKeyframesAvoidTinySegments(t *testing.T) {
 	w := &SliceWorker{}
-	// Simulate a dense-GOP video with keyframes every ~1 second.
-	kfs := []float64{0.033}
-	for i := 1.0; i < 30.0; i += 1.0 {
-		kfs = append(kfs, i)
-	}
 	info := &VideoInfo{
 		Duration:   30.0,
 		VideoCodec: "h264",
 		AudioCodec: "aac",
-		Keyframes:  kfs,
 	}
 	idx, err := w.generateSegmentIndex("dense-kf", info)
 	if err != nil {
 		t.Fatalf("generateSegmentIndex failed: %v", err)
 	}
 	for i, seg := range idx.VideoSegments {
-		if seg.Duration < 2.0 {
-			t.Fatalf("segment[%d] duration=%.3f, want >= 2.0s (dense GOP should not produce tiny segments)", i, seg.Duration)
+		if seg.Duration < 5.0 {
+			t.Fatalf("segment[%d] duration=%.3f, want >= 5.0s (fixed 6s grid)", i, seg.Duration)
 		}
-		if seg.Duration > 8.0 {
-			t.Fatalf("segment[%d] duration=%.3f, want <= 8.0s (should stay near target 6s)", i, seg.Duration)
+		if seg.Duration > 7.0 {
+			t.Fatalf("segment[%d] duration=%.3f, want <= 7.0s", i, seg.Duration)
 		}
 	}
-	// With duration=30s and target segment=6s, expect ~5 segments.
-	if len(idx.VideoSegments) < 3 || len(idx.VideoSegments) > 8 {
-		t.Fatalf("got %d segments, want 3-8 for 30s source", len(idx.VideoSegments))
+	// With duration=30s and target segment=6s, expect exactly 5 segments.
+	if len(idx.VideoSegments) != 5 {
+		t.Fatalf("got %d segments, want 5 for 30s source", len(idx.VideoSegments))
 	}
 }
 
@@ -95,7 +88,6 @@ func TestGenerateSegmentIndex_NoAudioCodecDoesNotCreateAudioSegments(t *testing.
 		Duration:   12.0,
 		VideoCodec: "h264",
 		AudioCodec: "",
-		Keyframes:  []float64{6.0, 12.0},
 	}
 
 	idx, err := w.generateSegmentIndex("file-no-audio", info)

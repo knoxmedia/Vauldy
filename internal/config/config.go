@@ -19,7 +19,35 @@ type Config struct {
 	Scan         ScanConfig               `yaml:"scan"`
 	Subtitle     SubtitleProcessingConfig `yaml:"subtitle"`
 	ATrack       ATrackConfig             `yaml:"atrack"`
+	JIT          JITConfig                `yaml:"jit"`
 	CORS         CORSConfig               `yaml:"cors"`
+	// PowerPlayer is included in GET /media/:id/hls playback plans for the web player (PowerPlayer 6 setup).
+	PowerPlayer PowerPlayerWebConfig `yaml:"powerplayer"`
+	// Playback selects web player priority (see api/handler play.HLSInfo player_engine_order).
+	Playback PlaybackConfig `yaml:"playback"`
+}
+
+// PlaybackConfig controls browser player engine order in the playback plan JSON.
+type PlaybackConfig struct {
+	Engines PlaybackEnginesYAML `yaml:"engines"`
+}
+
+// PlaybackEnginesYAML lists engine ids: powerplayer | shaka | xgplayer.
+type PlaybackEnginesYAML struct {
+	// ProgressiveHLS: native direct file + clear HLS (hls, jit_hls, hls_aes_128).
+	ProgressiveHLS []string `yaml:"progressive_hls"`
+	HLSPowerDRM    []string `yaml:"hls_powerdrm"`
+	DRM            []string `yaml:"drm"` // Widevine/FairPlay (hls_drm / DASH)
+}
+
+// PowerPlayerWebConfig maps to PowerPlayer 6 .setup() fields (baseUrl, skin, powerdrmurl, etc.).
+type PowerPlayerWebConfig struct {
+	BaseURL          string `yaml:"base_url"`
+	Skin             string `yaml:"skin"`
+	PowerDRMURL      string `yaml:"powerdrm_url"`
+	WebURLParam      string `yaml:"weburlparam"`
+	StatisticsServer string `yaml:"statistics_server"`
+	ClientCert       string `yaml:"client_cert"`
 }
 
 // ScanConfig tunes library scan performance (ffprobe / optional file hashing).
@@ -50,6 +78,8 @@ type DataConfig struct {
 	Chunks    string `yaml:"chunks"`
 	ATracks   string `yaml:"atracks"`
 	Keyframes string `yaml:"keyframes"`
+	// Static is the filesystem root for HTTP path /static/ (e.g. PowerPlayer assets under static/powerplayer6/).
+	Static string `yaml:"static"`
 }
 
 // SubtitleProcessing configures post-processing (sidecar scan, embedded extract, optional ASR).
@@ -65,6 +95,15 @@ type SubtitleProcessingConfig struct {
 type ATrackConfig struct {
 	// AutoOnScan inserts a waiting atrack_task when library scan discovers a new video.
 	AutoOnScan *bool `yaml:"auto_on_scan"`
+}
+
+// JITConfig controls just-in-time transcode behavior.
+type JITConfig struct {
+	// ContinuousHLSEnabled when true, the transcodeworker uses a single long-running
+	// ffmpeg process with -f segment muxer to output all TS segments for a bitrate,
+	// instead of launching one ffmpeg per segment. Reduces overhead and avoids
+	// keyframe bursts at segment boundaries. Default: true.
+	ContinuousHLSEnabled *bool `yaml:"continuous_hls_enabled"`
 }
 
 // GraphicalOCR enables Tesseract-based OCR for bitmap subtitles (PGS, VobSub, etc.).
@@ -185,6 +224,9 @@ func Load(path string) (*Config, error) {
 	if c.Data.Keyframes == "" {
 		c.Data.Keyframes = filepath.Join(c.Data.Dir, "keyframes")
 	}
+	if c.Data.Static == "" {
+		c.Data.Static = filepath.Join(c.Data.Dir, "static")
+	}
 	if c.Security.TokenHours == 0 {
 		c.Security.TokenHours = 168
 	}
@@ -210,6 +252,10 @@ func Load(path string) (*Config, error) {
 	if c.ATrack.AutoOnScan == nil {
 		t := true
 		c.ATrack.AutoOnScan = &t
+	}
+	if c.JIT.ContinuousHLSEnabled == nil {
+		t := true
+		c.JIT.ContinuousHLSEnabled = &t
 	}
 	if c.Server.HLSMultiAudioEnabled == nil {
 		t := true
@@ -315,12 +361,23 @@ func (c *Config) HLSMultiAudioEnabled() bool {
 	return *c.Server.HLSMultiAudioEnabled
 }
 
+// JITContinuousHLSEnabled reports whether continuous HLS transcode mode is active.
+func (c *Config) JITContinuousHLSEnabled() bool {
+	if c == nil {
+		return false
+	}
+	if c.JIT.ContinuousHLSEnabled == nil {
+		return true
+	}
+	return *c.JIT.ContinuousHLSEnabled
+}
+
 func (c *Config) Addr() string {
 	return fmt.Sprintf("%s:%d", c.Server.Host, c.Server.Port)
 }
 
 func (c *Config) EnsureDirs() error {
-	for _, d := range []string{c.Data.Dir, c.Data.Transcode, c.Data.Preview, c.Data.Subtitle, c.Data.Upload, c.Data.Chunks, c.Data.ATracks, c.Data.Keyframes} {
+	for _, d := range []string{c.Data.Dir, c.Data.Transcode, c.Data.Preview, c.Data.Subtitle, c.Data.Upload, c.Data.Chunks, c.Data.ATracks, c.Data.Keyframes, c.Data.Static} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return err
 		}

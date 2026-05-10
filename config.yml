@@ -16,6 +16,7 @@ data:
   subtitle: "./data/subtitles"
   upload: "./data/upload"
   chunks: "./data/upload/chunks"
+  static: "./data/static"
 
 security:
   jwt_secret: "change-me-in-production-use-long-random-string"
@@ -49,6 +50,13 @@ drm:
   powerdrm:
     enabled: true
 
+# Web playback plan: player_engine_order (powerplayer | shaka | xgplayer). Omitted entries use server defaults.
+playback:
+  engines:
+    progressive_hls: ["powerplayer", "xgplayer"] # native + clear HLS (hls, jit_hls, hls_aes_128)
+    hls_powerdrm: ["powerplayer"]
+    drm: ["powerplayer", "shaka", "xgplayer"] # Widevine/FairPlay HLS or DASH
+
 # Library scan: default skips full-file MD5 (very slow) and uses shorter ffprobe analysis.
 scan:
   file_hash_on_scan: false
@@ -78,6 +86,13 @@ subtitle:
 atrack:
   # When true, a new video discovered by library scan gets a waiting atrack_task (default: true).
   auto_on_scan: false
+
+# Just-in-time transcode options.
+jit:
+  # When true, use a single long-running ffmpeg process that outputs HLS segments
+  # via -f segment muxer (instead of one ffmpeg per segment). Reduces overhead and
+  # avoids keyframe bursts at segment boundaries. Default: true.
+  continuous_hls_enabled: true
 
 cors:
   allow_origins:

@@ -2,6 +2,8 @@ package middleware
 
 import (
 	"net/http"
+	"strings"
+
 	"github.com/gin-gonic/gin"
 )
 
@@ -24,7 +26,12 @@ func CORS(allowOrigins []string) gin.HandlerFunc {
 			c.Header("Access-Control-Allow-Origin", allowed)
 		}
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Origin, Content-Type, Accept, Authorization")
+		// Echo browser preflight so third-party players (PowerPlayer, hls.js) can add custom headers.
+		if reqHdrs := strings.TrimSpace(c.GetHeader("Access-Control-Request-Headers")); reqHdrs != "" {
+			c.Header("Access-Control-Allow-Headers", reqHdrs)
+		} else {
+			c.Header("Access-Control-Allow-Headers", "Origin, Content-Type, Accept, Authorization, X-Requested-With, X-Session-ID, Range, If-Range, Cache-Control, Pragma")
+		}
 		c.Header("Access-Control-Expose-Headers", "Content-Length, Content-Range, Accept-Ranges")
 		if c.Request.Method == http.MethodOptions {
 			c.AbortWithStatus(http.StatusNoContent)
