@@ -14,6 +14,22 @@ import (
 	"knox-media/internal/store"
 )
 
+func TestContainerMimeType(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"matroska,webm", "video/webm"},
+		{"webm", "video/webm"},
+		{"matroska", "video/x-matroska"},
+		{"mov,mp4,m4a", "video/mp4"},
+		{"isom+mp4", "video/mp4"},
+		{"ogg", "video/ogg"},
+	}
+	for _, tc := range cases {
+		if got := containerMimeType(tc.in); got != tc.want {
+			t.Fatalf("containerMimeType(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestDirectPlayContainerNeeds(t *testing.T) {
 	cases := []struct {
 		in       string

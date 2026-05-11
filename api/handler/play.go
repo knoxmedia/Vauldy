@@ -945,32 +945,62 @@ func detectMediaProfile(metaJSON string) mediaProfile {
 
 // containerMimeType maps container format names (from ffprobe format_name) to MIME types.
 // The input is typically a comma-separated list like "mov,mp4,m4a,3gp,3g2,mj2"; we return the
-// first recognized MIME type.
+// first recognized MIME type. WebM files often report "matroska,webm"; in that case we return
+// video/webm, not video/x-matroska.
 func containerMimeType(container string) string {
 	c := strings.ToLower(strings.TrimSpace(container))
-	for _, part := range strings.Split(c, ",") {
-		p := strings.TrimSpace(part)
-		switch p {
-		case "mp4", "m4a", "m4v", "3gp", "3g2", "mov", "mj2":
-			return "video/mp4"
-		case "mpegts", "mts", "m2ts", "ts":
-			return "video/mp2t"
-		case "mpeg", "mpg", "mpe", "vob":
-			return "video/mpeg"
-		case "webm":
-			return "video/webm"
-		case "matroska", "mkv":
-			return "video/x-matroska"
-		case "ogg", "ogv":
-			return "video/ogg"
-		case "flv":
-			return "video/x-flv"
-		case "avi":
-			return "video/x-msvideo"
-		case "wmv":
-			return "video/x-ms-wmv"
-		case "asf":
-			return "video/x-ms-asf"
+	if c == "" {
+		return "video/mp4"
+	}
+	hasWebM, hasMatroska := false, false
+	for _, fragment := range strings.Split(c, ",") {
+		fragment = strings.TrimSpace(fragment)
+		if fragment == "" {
+			continue
+		}
+		for _, part := range strings.Split(fragment, "+") {
+			p := strings.TrimSpace(part)
+			switch p {
+			case "webm":
+				hasWebM = true
+			case "matroska", "mkv":
+				hasMatroska = true
+			}
+		}
+	}
+	if hasWebM {
+		return "video/webm"
+	}
+	if hasMatroska {
+		return "video/x-matroska"
+	}
+	for _, fragment := range strings.Split(c, ",") {
+		fragment = strings.TrimSpace(fragment)
+		if fragment == "" {
+			continue
+		}
+		for _, part := range strings.Split(fragment, "+") {
+			p := strings.TrimSpace(part)
+			switch p {
+			case "mp4", "m4a", "m4v", "3gp", "3g2", "mov", "mj2":
+				return "video/mp4"
+			case "mpegts", "mts", "m2ts", "ts":
+				return "video/mp2t"
+			case "mpeg", "mpg", "mpe", "vob":
+				return "video/mpeg"
+			case "ogg", "ogv":
+				return "video/ogg"
+			case "flv":
+				return "video/x-flv"
+			case "avi":
+				return "video/x-msvideo"
+			case "wmv":
+				return "video/x-ms-wmv"
+			case "asf":
+				return "video/x-ms-asf"
+			case "isom", "iso2", "iso5", "iso6":
+				return "video/mp4"
+			}
 		}
 	}
 	return "video/mp4" // fallback
