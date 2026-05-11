@@ -908,6 +908,10 @@ type clientCaps struct {
 	AudioCodecs []string `json:"audio_codecs"`
 	MaxHeight   int      `json:"max_height"`
 	Qualities   []string `json:"qualities"`
+	// Containers lists MIME-derived container tokens the browser reports (mp4/mkv/webm/ogg).
+	Containers []string `json:"containers,omitempty"`
+	// Mcap is a compact MediaCapabilities summary from the web player (H.264/H.265 × ladder).
+	Mcap string `json:"mcap,omitempty"`
 }
 
 type mediaProfile struct {
@@ -921,6 +925,8 @@ func readClientCaps(c *gin.Context) clientCaps {
 		VideoCodecs: parseCSV(c.Query("video_codecs")),
 		AudioCodecs: parseCSV(c.Query("audio_codecs")),
 		Qualities:   parseCSV(c.Query("qualities")),
+		Containers:  parseCSV(c.Query("containers")),
+		Mcap:        strings.TrimSpace(c.Query("mcap")),
 		MaxHeight:   1080,
 	}
 	if cap.MaxHeight <= 0 {
@@ -1006,6 +1012,81 @@ func resolutionForBitrate(bitrate string) string {
 	}
 }
 
+// directPlayContainerNeeds maps ffprobe format_name (comma-separated) to a client "containers" token
+// (mp4 / mkv / webm / ogg). The second value is false if the mux cannot be direct-played in a typical
+// HTMLMediaElement path (e.g. MPEG-TS, FLV). When the first value is empty and the second is true,
+// there is no token to match against the client's list (empty meta or only unrecognized tags).
+func directPlayContainerNeeds(formatName string) (need string, ok bool) {
+	c := strings.ToLower(strings.TrimSpace(formatName))
+	if c == "" {
+		return "", true
+	}
+	toks := make(map[string]struct{})
+	for _, fragment := range strings.Split(c, ",") {
+		fragment = strings.TrimSpace(fragment)
+		if fragment == "" {
+			continue
+		}
+		for _, part := range strings.Split(fragment, "+") {
+			p := strings.TrimSpace(part)
+			if p == "" {
+				continue
+			}
+			switch p {
+			case "flv", "mpegts", "mts", "m2ts", "ts", "avi", "wmv", "asf", "mpeg", "mpg", "mpe", "vob":
+				return "", false
+			case "matroska", "mkv":
+				toks["mkv"] = struct{}{}
+			case "webm":
+				toks["webm"] = struct{}{}
+			case "ogg", "ogv":
+				toks["ogg"] = struct{}{}
+			case "mp4", "m4a", "m4v", "mov", "mj2", "3gp", "3g2", "isom", "iso2", "iso5", "iso6":
+				toks["mp4"] = struct{}{}
+			case "dash", "crypto", "cenc":
+				// auxiliary hints; ignore
+			default:
+				// unknown fragment
+			}
+		}
+	}
+	if len(toks) == 0 {
+		return "", true
+	}
+	// ffprobe often reports WebM as "matroska,webm". Browsers advertise `webm` in <video> probes,
+	// not `mkv`, so prefer webm whenever that tag is present; use mkv only for matroska-only sources.
+	switch {
+	case containsToken(toks, "webm"):
+		return "webm", true
+	case containsToken(toks, "mkv"):
+		return "mkv", true
+	case containsToken(toks, "ogg"):
+		return "ogg", true
+	case containsToken(toks, "mp4"):
+		return "mp4", true
+	default:
+		return "", true
+	}
+}
+
+func containsToken(m map[string]struct{}, k string) bool {
+	_, v := m[k]
+	return v
+}
+
+func clientContainersInclude(list []string, want string) bool {
+	want = strings.ToLower(strings.TrimSpace(want))
+	if want == "" {
+		return true
+	}
+	for _, it := range list {
+		if strings.ToLower(strings.TrimSpace(it)) == want {
+			return true
+		}
+	}
+	return false
+}
+
 func canDirectPlay(media mediaProfile, caps clientCaps) bool {
 	if media.Video == "" {
 		return false
@@ -1019,8 +1100,18 @@ func canDirectPlay(media mediaProfile, caps clientCaps) bool {
 	if media.Audio != "" && len(caps.AudioCodecs) > 0 && !codecInSet(media.Audio, caps.AudioCodecs) {
 		return false
 	}
-	if media.Container != "" {
-		if strings.Contains(media.Container, "matroska") || strings.Contains(media.Container, "flv") {
+	need, allow := directPlayContainerNeeds(media.Container)
+	if !allow {
+		return false
+	}
+	if len(caps.Containers) > 0 {
+		if need != "" && !clientContainersInclude(caps.Containers, need) {
+			return false
+		}
+	} else {
+		// Legacy clients (no container probe): keep conservative blocks.
+		mc := strings.ToLower(media.Container)
+		if strings.Contains(mc, "matroska") || strings.Contains(mc, "flv") {
 			return false
 		}
 	}
@@ -1057,6 +1148,15 @@ func codecInSet(codec string, set []string) bool {
 			return true
 		}
 		if (n == "h265" || n == "hevc") && (codec == "h265" || codec == "hevc") {
+			return true
+		}
+		if n == "vp9" && (codec == "vp9" || codec == "vp09") {
+			return true
+		}
+		if n == "ac3" && (codec == "ac3" || codec == "ac-3") {
+			return true
+		}
+		if (n == "eac3" || n == "ec-3") && (codec == "eac3" || codec == "ec-3") {
 			return true
 		}
 	}

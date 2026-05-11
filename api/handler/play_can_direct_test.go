@@ -1,0 +1,189 @@
+package handler
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"path/filepath"
+	"testing"
+
+	"github.com/gin-gonic/gin"
+
+	"knox-media/internal/app"
+	"knox-media/internal/jit/session"
+	"knox-media/internal/store"
+)
+
+func TestDirectPlayContainerNeeds(t *testing.T) {
+	cases := []struct {
+		in       string
+		wantNeed string
+		wantOK   bool
+	}{
+		{"mov,mp4,m4a", "mp4", true},
+		{"isom+mp4", "mp4", true},
+		{"matroska", "mkv", true},
+		{"matroska,webm", "webm", true},
+		{"webm", "webm", true},
+		{"ogg", "ogg", true},
+		{"ogv", "ogg", true},
+		{"flv", "", false},
+		{"mpegts", "", false},
+		{"", "", true},
+		{"dash,cenc", "", true},
+	}
+	for _, tc := range cases {
+		gotNeed, gotOK := directPlayContainerNeeds(tc.in)
+		if gotOK != tc.wantOK || gotNeed != tc.wantNeed {
+			t.Fatalf("directPlayContainerNeeds(%q) = (%q,%v), want (%q,%v)", tc.in, gotNeed, gotOK, tc.wantNeed, tc.wantOK)
+		}
+	}
+}
+
+func TestHLSInfoMkvNativeWhenClientListsMkvContainer(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	base := t.TempDir()
+
+	dbPath := filepath.Join(base, "play-mkv-native-containers.sqlite")
+	db, err := store.OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	if _, err := db.Exec(`INSERT INTO library (id, name, type, path) VALUES (1, 'lib', 'movie', 'E:/videos')`); err != nil {
+		t.Fatalf("insert library: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO media (id, library_id, file_id, file_path, meta_json, height) VALUES (1, 1, 'f-1', 'E:/videos/a.mkv', '{"format":{"format_name":"matroska"},"streams":[{"codec_type":"video","codec_name":"h264"},{"codec_type":"audio","codec_name":"aac"}]}', 1080)`); err != nil {
+		t.Fatalf("insert media: %v", err)
+	}
+
+	sm, err := session.NewManager("ffmpeg", "ffprobe", base)
+	if err != nil {
+		t.Fatalf("create session manager: %v", err)
+	}
+	h := &Handler{App: &app.App{DB: db}, SessionManager: sm, runningScans: map[int64]scanRuntime{}}
+
+	q := url.Values{}
+	q.Set("video_codecs", "h264")
+	q.Set("audio_codecs", "aac")
+	q.Set("max_height", "1080")
+	q.Set("qualities", "360p,480p,720p,1080p")
+	q.Set("containers", "mp4,mkv,webm")
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/media/1/hls?"+q.Encode(), nil)
+	req.Host = "example.com"
+	c.Request = req
+	c.Params = gin.Params{{Key: "id", Value: "1"}}
+
+	h.HLSInfo(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !contains(body, `"mode":"native"`) {
+		t.Fatalf("expected native for mkv/h264 when client lists mkv in containers, got: %s", body)
+	}
+}
+
+func TestHLSInfoWebmNativeWhenFfprobeMatroskaWebmAndClientListsWebm(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	base := t.TempDir()
+
+	dbPath := filepath.Join(base, "play-webm-matroska-webm-format.sqlite")
+	db, err := store.OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	if _, err := db.Exec(`INSERT INTO library (id, name, type, path) VALUES (1, 'lib', 'movie', 'E:/videos')`); err != nil {
+		t.Fatalf("insert library: %v", err)
+	}
+	meta := `{"format":{"format_name":"matroska,webm"},"streams":[{"codec_type":"video","codec_name":"vp9"},{"codec_type":"audio","codec_name":"opus"}]}`
+	if _, err := db.Exec(`INSERT INTO media (id, library_id, file_id, file_path, meta_json, height) VALUES (1, 1, 'f-1', 'E:/videos/a.webm', ?, 720)`, meta); err != nil {
+		t.Fatalf("insert media: %v", err)
+	}
+
+	sm, err := session.NewManager("ffmpeg", "ffprobe", base)
+	if err != nil {
+		t.Fatalf("create session manager: %v", err)
+	}
+	h := &Handler{App: &app.App{DB: db}, SessionManager: sm, runningScans: map[int64]scanRuntime{}}
+
+	q := url.Values{}
+	q.Set("video_codecs", "vp9")
+	q.Set("audio_codecs", "opus")
+	q.Set("max_height", "720")
+	q.Set("qualities", "360p,480p,720p")
+	q.Set("containers", "mp4,webm,ogg")
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/media/1/hls?"+q.Encode(), nil)
+	req.Host = "example.com"
+	c.Request = req
+	c.Params = gin.Params{{Key: "id", Value: "1"}}
+
+	h.HLSInfo(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !contains(body, `"mode":"native"`) {
+		t.Fatalf("expected native for matroska,webm + vp9 when client lists webm (no mkv), got: %s", body)
+	}
+}
+
+func TestHLSInfoMkvNotNativeWhenClientContainersExcludeMkv(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	base := t.TempDir()
+
+	dbPath := filepath.Join(base, "play-mkv-no-mkv-cap.sqlite")
+	db, err := store.OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	if _, err := db.Exec(`INSERT INTO library (id, name, type, path) VALUES (1, 'lib', 'movie', 'E:/videos')`); err != nil {
+		t.Fatalf("insert library: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO media (id, library_id, file_id, file_path, meta_json, height, width, duration) VALUES (1, 1, 'f-1', 'E:/videos/a.mkv', '{"format":{"format_name":"matroska"},"streams":[{"codec_type":"video","codec_name":"h264"},{"codec_type":"audio","codec_name":"aac"}]}', 1080, 1920, 300)`); err != nil {
+		t.Fatalf("insert media: %v", err)
+	}
+
+	sm, err := session.NewManager("ffmpeg", "ffprobe", base)
+	if err != nil {
+		t.Fatalf("create session manager: %v", err)
+	}
+	h := &Handler{App: &app.App{DB: db}, SessionManager: sm, runningScans: map[int64]scanRuntime{}}
+
+	q := url.Values{}
+	q.Set("video_codecs", "h264")
+	q.Set("audio_codecs", "aac")
+	q.Set("max_height", "720")
+	q.Set("qualities", "360p,480p,720p")
+	q.Set("containers", "mp4,webm")
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/media/1/hls?"+q.Encode(), nil)
+	req.Host = "example.com"
+	c.Request = req
+	c.Params = gin.Params{{Key: "id", Value: "1"}}
+
+	h.HLSInfo(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !contains(body, `"mode":"jit_hls"`) {
+		t.Fatalf("expected jit_hls when client omits mkv for matroska source, got: %s", body)
+	}
+	if contains(body, `"mode":"native"`) {
+		t.Fatalf("should not return native when client lacks mkv container support: %s", body)
+	}
+}
