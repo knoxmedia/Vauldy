@@ -286,7 +286,7 @@ func buildVideoArgs(cfg TranscodeConfig, segDuration float64) []string {
 
 	// Default to libx264 (software). HW encoder detection can be added later.
 	return append([]string{
-		"-vf", fmt.Sprintf("scale=%s:%s", wPx, hPx),
+		"-vf", fmt.Sprintf("scale=%s:%s,format=yuv420p", wPx, hPx),
 		"-c:v", "libx264",
 		"-preset", "veryfast",
 		"-b:v", cfg.Bitrate, "-maxrate", cfg.Bitrate, "-bufsize", "2M",

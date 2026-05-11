@@ -410,7 +410,34 @@ func (h *Handler) HLSInfo(c *gin.Context) {
 	caps := readClientCaps(c)
 	media := detectMediaProfile(metaJSON.String)
 
-	// New Redis-free session JIT: preferred when SessionManager is available.
+	// Check for existing optimized batch transcode output.
+	if hlsReady, _, hlsStatus, hlsTaskID := h.latestTranscodeManifestByMediaID(id); hlsReady {
+		c.JSON(http.StatusOK, h.withPlaybackPlanForMode("hls", gin.H{
+			"mode":       "hls",
+			"hls_master": fmt.Sprintf("%s/api/v1/media/%s/hls/master.m3u8", base, c.Param("id")),
+			"status":     hlsStatus,
+			"task_id":    hlsTaskID,
+			"fallback":   playURL,
+			"message":    "Use transcoded stream",
+		}))
+		return
+	}
+
+	// Check if client can decode the source directly.
+	if canDirectPlay(media, caps) {
+		c.JSON(http.StatusOK, h.withPlaybackPlanForMode("native", gin.H{
+			"mode":          "native",
+			"playUrl":       playURL,
+			"mime_type":     containerMimeType(media.Container),
+			"media_profile": media,
+			"client_caps":   caps,
+			"message":       "Client can decode source directly",
+		}))
+		return
+	}
+
+	// Fallback: JIT transcoding when client cannot play source directly.
+	// New Redis-free session JIT.
 	if h.SessionManager != nil && fileID.Valid && strings.TrimSpace(fileID.String) != "" && filePath.Valid && strings.TrimSpace(filePath.String) != "" {
 		bitrate := pickBitrate(media, int(srcWidth.Int64), int(srcHeight.Int64))
 		resolution := resolutionForBitrate(bitrate)
@@ -475,31 +502,7 @@ func (h *Handler) HLSInfo(c *gin.Context) {
 		log.Printf("JIT PrepareVideoMeta failed for media=%d file=%s, falling back", id, fileID.String)
 	}
 
-	// Fallback: check for existing batch transcode output.
-	if hlsReady, _, hlsStatus, hlsTaskID := h.latestTranscodeManifestByMediaID(id); hlsReady {
-		c.JSON(http.StatusOK, h.withPlaybackPlanForMode("hls", gin.H{
-			"mode":       "hls",
-			"hls_master": fmt.Sprintf("%s/api/v1/media/%s/hls/master.m3u8", base, c.Param("id")),
-			"status":     hlsStatus,
-			"task_id":    hlsTaskID,
-			"fallback":   playURL,
-			"message":    "Use transcoded stream",
-		}))
-		return
-	}
-
-	canDirect := canDirectPlay(media, caps)
-	if canDirect {
-		c.JSON(http.StatusOK, h.withPlaybackPlanForMode("native", gin.H{
-			"mode":          "native",
-			"playUrl":       playURL,
-			"media_profile": media,
-			"client_caps":   caps,
-			"message":       "Client can decode source directly",
-		}))
-		return
-	}
-
+	// Final fallback: trigger batch transcode.
 	playlist, status, taskID, terr := h.Worker.EnsureHLS(fileID.String, filePath.String, int(srcHeight.Int64), caps.MaxHeight, caps.Qualities)
 	if terr != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": terr.Error()})
@@ -932,6 +935,39 @@ func readClientCaps(c *gin.Context) clientCaps {
 func detectMediaProfile(metaJSON string) mediaProfile {
 	p := mediautil.CodecsFromMetaJSON(metaJSON)
 	return mediaProfile{Container: p.Container, Video: p.Video, Audio: p.Audio}
+}
+
+// containerMimeType maps container format names (from ffprobe format_name) to MIME types.
+// The input is typically a comma-separated list like "mov,mp4,m4a,3gp,3g2,mj2"; we return the
+// first recognized MIME type.
+func containerMimeType(container string) string {
+	c := strings.ToLower(strings.TrimSpace(container))
+	for _, part := range strings.Split(c, ",") {
+		p := strings.TrimSpace(part)
+		switch p {
+		case "mp4", "m4a", "m4v", "3gp", "3g2", "mov", "mj2":
+			return "video/mp4"
+		case "mpegts", "mts", "m2ts", "ts":
+			return "video/mp2t"
+		case "mpeg", "mpg", "mpe", "vob":
+			return "video/mpeg"
+		case "webm":
+			return "video/webm"
+		case "matroska", "mkv":
+			return "video/x-matroska"
+		case "ogg", "ogv":
+			return "video/ogg"
+		case "flv":
+			return "video/x-flv"
+		case "avi":
+			return "video/x-msvideo"
+		case "wmv":
+			return "video/x-ms-wmv"
+		case "asf":
+			return "video/x-ms-asf"
+		}
+	}
+	return "video/mp4" // fallback
 }
 
 // pickBitrate selects a single bitrate based on source resolution.

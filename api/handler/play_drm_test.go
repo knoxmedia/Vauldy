@@ -12,6 +12,7 @@ import (
 
 	"knox-media/internal/app"
 	"knox-media/internal/config"
+	"knox-media/internal/jit/session"
 	"knox-media/internal/store"
 )
 
@@ -414,6 +415,133 @@ func TestHLSAssetInitSegmentFallbackFromWorkingDir(t *testing.T) {
 	h.HLSAsset(c)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestHLSInfoNativeWhenClientSupportsMP4NoTranscode(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	dbPath := filepath.Join(t.TempDir(), "play-native-no-transcode.sqlite")
+	db, err := store.OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	if _, err := db.Exec(`INSERT INTO library (id, name, type, path) VALUES (1, 'lib', 'movie', 'E:/videos')`); err != nil {
+		t.Fatalf("insert library: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO media (id, library_id, file_id, file_path, meta_json, height) VALUES (1, 1, 'f-1', 'E:/videos/a.mp4', '{"format":{"format_name":"mov,mp4,m4a"},"streams":[{"codec_type":"video","codec_name":"h264"},{"codec_type":"audio","codec_name":"aac"}]}', 1080)`); err != nil {
+		t.Fatalf("insert media: %v", err)
+	}
+
+	h := &Handler{App: &app.App{DB: db}, runningScans: map[int64]scanRuntime{}}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/media/1/hls?video_codecs=h264&audio_codecs=aac&max_height=1080&qualities=360p,480p,720p,1080p", nil)
+	req.Host = "example.com"
+	c.Request = req
+	c.Params = gin.Params{{Key: "id", Value: "1"}}
+
+	h.HLSInfo(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !contains(body, `"mode":"native"`) {
+		t.Fatalf("expected native mode for mp4/h264 source supported by client, got: %s", body)
+	}
+	if !contains(body, `"mime_type":"video/mp4"`) {
+		t.Fatalf("expected mime_type video/mp4 in native response, got: %s", body)
+	}
+}
+
+func TestHLSInfoNativeSkipJITWhenClientSupportsSource(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	base := t.TempDir()
+
+	dbPath := filepath.Join(base, "play-native-skip-jit.sqlite")
+	db, err := store.OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	if _, err := db.Exec(`INSERT INTO library (id, name, type, path) VALUES (1, 'lib', 'movie', 'E:/videos')`); err != nil {
+		t.Fatalf("insert library: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO media (id, library_id, file_id, file_path, meta_json, height) VALUES (1, 1, 'f-1', 'E:/videos/a.mp4', '{"format":{"format_name":"mov,mp4,m4a"},"streams":[{"codec_type":"video","codec_name":"h264"},{"codec_type":"audio","codec_name":"aac"}]}', 1080)`); err != nil {
+		t.Fatalf("insert media: %v", err)
+	}
+
+	sm, err := session.NewManager("ffmpeg", "ffprobe", base)
+	if err != nil {
+		t.Fatalf("create session manager: %v", err)
+	}
+	h := &Handler{App: &app.App{DB: db}, SessionManager: sm, runningScans: map[int64]scanRuntime{}}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/media/1/hls?video_codecs=h264&audio_codecs=aac&max_height=1080&qualities=360p,480p,720p,1080p", nil)
+	req.Host = "example.com"
+	c.Request = req
+	c.Params = gin.Params{{Key: "id", Value: "1"}}
+
+	h.HLSInfo(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !contains(body, `"mode":"native"`) {
+		t.Fatalf("expected native mode (canDirectPlay skips JIT), got: %s", body)
+	}
+	if contains(body, `"mode":"jit_hls"`) {
+		t.Fatalf("should not create JIT session when client supports source directly: %s", body)
+	}
+}
+
+func TestHLSInfoJITWhenClientCannotPlaySource(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	base := t.TempDir()
+
+	dbPath := filepath.Join(base, "play-jit-unsupported.sqlite")
+	db, err := store.OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	if _, err := db.Exec(`INSERT INTO library (id, name, type, path) VALUES (1, 'lib', 'movie', 'E:/videos')`); err != nil {
+		t.Fatalf("insert library: %v", err)
+	}
+	// Source is mkv/vp9, client only supports h264
+	if _, err := db.Exec(`INSERT INTO media (id, library_id, file_id, file_path, meta_json, height, width, duration) VALUES (1, 1, 'f-1', 'E:/videos/a.mkv', '{"format":{"format_name":"matroska"},"streams":[{"codec_type":"video","codec_name":"vp9"},{"codec_type":"audio","codec_name":"opus"}]}', 720, 1280, 300)`); err != nil {
+		t.Fatalf("insert media: %v", err)
+	}
+
+	sm, err := session.NewManager("ffmpeg", "ffprobe", base)
+	if err != nil {
+		t.Fatalf("create session manager: %v", err)
+	}
+	h := &Handler{App: &app.App{DB: db}, SessionManager: sm, runningScans: map[int64]scanRuntime{}}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/media/1/hls?video_codecs=h264&audio_codecs=aac&max_height=720&qualities=360p,480p,720p", nil)
+	req.Host = "example.com"
+	c.Request = req
+	c.Params = gin.Params{{Key: "id", Value: "1"}}
+
+	h.HLSInfo(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !contains(body, `"mode":"jit_hls"`) {
+		t.Fatalf("expected jit_hls when client cannot decode source (mkv/vp9), got: %s", body)
+	}
+	if contains(body, `"mode":"native"`) {
+		t.Fatalf("should not return native for unsupported source: %s", body)
 	}
 }
 

@@ -58,6 +58,8 @@ type PlaybackEngineId = "powerplayer" | "shaka" | "xgplayer";
 type PlaybackPlan = {
   mode?: "native" | "hls" | "jit_hls" | "hls_drm" | "hls_aes_128" | "hls_powerdrm";
   playUrl?: string;
+  /** MIME type of the source file (e.g. "video/mp4"), returned by /hls in native mode. */
+  mime_type?: string;
   hls_master?: string;
   /** Present for Redis-free JIT; echoed on progress / playback logs for log-based session recovery. */
   session_id?: string;
@@ -842,6 +844,7 @@ export default function PlayerPage() {
       engineOrder?: string[];
       planMode?: PlaybackPlan["mode"];
       powerPlayerCfg?: PowerPlayerPlanFields | null;
+      mimeType?: string;
     };
 
     const playWithURL = async (url: string, preview?: PreviewPlan | null, opts?: PlayWithURLOptions) => {
@@ -855,6 +858,7 @@ export default function PlayerPage() {
       const drm = opts?.drm;
       const planMode = opts?.planMode;
       const powerPlayerCfg = opts?.powerPlayerCfg;
+      const mimeType = opts?.mimeType;
       const engineOrder =
         opts?.engineOrder && opts.engineOrder.length > 0
           ? opts.engineOrder
@@ -934,6 +938,7 @@ export default function PlayerPage() {
             screenshot: true,
             clientcert,
             powerdrmurl,
+            ...(mimeType ? { mimeType } : {}),
           });
           powerPlayerRef.current = pp;
           attachPowerPlayerEvents(pp);
@@ -1039,7 +1044,7 @@ export default function PlayerPage() {
       if (useXgHlsPlugin) {
         // JIT master: do not pre-fetch the same URL again — /jit/master can block on first slice for minutes,
         // which left the overlay on "正在准备播放…" with no backend error. xgplayer-hls loads the master URL directly.
-        const isJitMaster = /\/jit\/master\//i.test(url);
+        const isJitMaster = /\/jit\/(master|session)\//i.test(url);
         const definitionList = isJitMaster ? [] : await fetchHlsDefinitions(url);
         if (definitionList.length > 0) {
           options.definition = {
@@ -1275,6 +1280,7 @@ export default function PlayerPage() {
         engineOrder: coalesceEngineOrder(plan),
         planMode: plan.mode,
         powerPlayerCfg: plan.powerplayer,
+        mimeType: plan.mime_type,
       });
     };
     void resolvePlan().catch((err: unknown) => {
