@@ -1,4 +1,4 @@
-import { Dropdown, Popover, Progress, Spin, Tag, Typography } from "antd";
+import { Dropdown, Popover, Progress, Spin, Tag, Typography, message } from "antd";
 import type { MenuProps } from "antd";
 import {
   CaretRightOutlined,
@@ -20,12 +20,15 @@ import {
   Library,
   MediaItem,
   HistoryItem,
+  addPlaylistItem,
   fetchLibraries,
   fetchMedia,
   fetchUserHistory,
   mediaPosterSrc,
 } from "../api/client";
+import AddToPlaylistModal from "../components/AddToPlaylistModal";
 import { buildMediaMenuItems } from "../components/mediaMenuItems";
+import { readRecentPlaylists, rememberPlaylistAdded } from "../lib/recentPlaylists";
 import styles from "./Home.module.css";
 
 const { Title } = Typography;
@@ -64,14 +67,6 @@ function historyRowKey(h: HistoryItem): string {
   return `${h.file_id}\0${h.update_at}`;
 }
 
-function makeMediaMenu(
-  mediaId: number,
-  nav: ReturnType<typeof useNavigate>,
-  extra?: { isWatched?: boolean },
-): MenuProps {
-  return buildMediaMenuItems({ id: mediaId }, nav, extra);
-}
-
 /** 继续观看：悬停遮罩与角标逻辑对齐「最近添加的电影」；批量点选同详情页 */
 function HistoryContinueCard({
   h,
@@ -81,6 +76,7 @@ function HistoryContinueCard({
   selected,
   onToggleSelect,
   bulkSelectMode,
+  buildHomeMediaMenu,
 }: {
   h: HistoryItem;
   nav: ReturnType<typeof useNavigate>;
@@ -89,11 +85,12 @@ function HistoryContinueCard({
   selected: boolean;
   onToggleSelect: () => void;
   bulkSelectMode: boolean;
+  buildHomeMediaMenu: (mediaId: number, extra?: { isWatched?: boolean }) => MenuProps;
 }) {
   const [posterFailed, setPosterFailed] = useState(false);
   const homeMediaMenu = useMemo(
-    () => makeMediaMenu(h.media_id, nav, { isWatched: h.completed === 1 }),
-    [h.media_id, h.completed, nav],
+    () => buildHomeMediaMenu(h.media_id, { isWatched: h.completed === 1 }),
+    [h.media_id, h.completed, buildHomeMediaMenu],
   );
 
   return (
@@ -236,6 +233,7 @@ function RecentMovieShelfCard({
   selected,
   onToggleSelect,
   bulkSelectMode,
+  buildHomeMediaMenu,
 }: {
   m: MediaItem;
   nav: ReturnType<typeof useNavigate>;
@@ -243,12 +241,13 @@ function RecentMovieShelfCard({
   onToggleSelect: () => void;
   /** 已有选中项时：海报区点选切换，隐藏播放/编辑/更多 */
   bulkSelectMode: boolean;
+  buildHomeMediaMenu: (mediaId: number, extra?: { isWatched?: boolean }) => MenuProps;
 }) {
   const [posterFailed, setPosterFailed] = useState(false);
   const year = mediaReleaseYear(m);
   const homeMediaMenu = useMemo(
-    () => makeMediaMenu(m.id, nav),
-    [m.id, nav],
+    () => buildHomeMediaMenu(m.id),
+    [m.id, buildHomeMediaMenu],
   );
 
   return (
@@ -379,6 +378,7 @@ function RecentAddedRow({
   movieSelectedIds,
   onToggleMovieSelect,
   homeBulkActive,
+  buildHomeMediaMenu,
 }: {
   sectionTitle: string;
   items: MediaItem[];
@@ -389,6 +389,7 @@ function RecentAddedRow({
   onToggleMovieSelect: (id: number) => void;
   /** 继续观看或最近添加电影任一侧有选中 */
   homeBulkActive: boolean;
+  buildHomeMediaMenu: (mediaId: number, extra?: { isWatched?: boolean }) => MenuProps;
 }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [showLeft, setShowLeft] = useState(false);
@@ -466,6 +467,7 @@ function RecentAddedRow({
               selected={movieSelectedIds.has(m.id)}
               onToggleSelect={() => onToggleMovieSelect(m.id)}
               bulkSelectMode={homeBulkActive}
+              buildHomeMediaMenu={buildHomeMediaMenu}
             />
           ) : (
             <div
@@ -529,8 +531,11 @@ export default function HomePage() {
   const [historySelectedKeys, setHistorySelectedKeys] = useState<Set<string>>(() => new Set());
   const [movieSelectedIds, setMovieSelectedIds] = useState<Set<number>>(() => new Set());
   const historyScrollRef = useRef<HTMLDivElement | null>(null);
+  const libScrollRef = useRef<HTMLDivElement | null>(null);
   const [showHistoryLeft, setShowHistoryLeft] = useState(false);
   const [showHistoryRight, setShowHistoryRight] = useState(false);
+  const [showLibLeft, setShowLibLeft] = useState(false);
+  const [showLibRight, setShowLibRight] = useState(false);
 
   const toggleHistoryRow = useCallback((key: string) => {
     setHistorySelectedKeys((prev) => {
@@ -567,6 +572,24 @@ export default function HomePage() {
 
   const scrollHistoryBy = (delta: number) => {
     const el = historyScrollRef.current;
+    if (!el) return;
+    el.scrollBy({ left: delta, behavior: "smooth" });
+  };
+
+  const updateLibArrows = () => {
+    const el = libScrollRef.current;
+    if (!el) {
+      setShowLibLeft(false);
+      setShowLibRight(false);
+      return;
+    }
+    const maxLeft = el.scrollWidth - el.clientWidth;
+    setShowLibLeft(el.scrollLeft > 4);
+    setShowLibRight(maxLeft > 4 && el.scrollLeft < maxLeft - 4);
+  };
+
+  const scrollLibsBy = (delta: number) => {
+    const el = libScrollRef.current;
     if (!el) return;
     el.scrollBy({ left: delta, behavior: "smooth" });
   };
@@ -661,6 +684,41 @@ export default function HomePage() {
   }, [allRecent, libraryTypeById]);
 
   const movieShelfItems = recentBySection.get("movie") ?? [];
+
+  const [addToPlaylistMediaId, setAddToPlaylistMediaId] = useState<number | null>(null);
+  const [recentPlaylistMenu, setRecentPlaylistMenu] = useState(readRecentPlaylists);
+
+  const buildHomeMediaMenu = useCallback(
+    (mediaId: number, menuExtra?: { isWatched?: boolean }) =>
+      buildMediaMenuItems({ id: mediaId }, nav, {
+        ...menuExtra,
+        onAddToPlaylist: (mid) => setAddToPlaylistMediaId(mid),
+        recentPlaylists: recentPlaylistMenu,
+        onQuickAddToPlaylist: async (mid, pid) => {
+          try {
+            await addPlaylistItem(pid, mid);
+            const name =
+              recentPlaylistMenu.find((p) => p.id === pid)?.name ??
+              readRecentPlaylists().find((p) => p.id === pid)?.name ??
+              "播放列表";
+            message.success(`已添加到「${name}」`);
+            rememberPlaylistAdded({ id: pid, name });
+            setRecentPlaylistMenu(readRecentPlaylists());
+          } catch {
+            message.error("添加失败，可能已在列表中");
+          }
+        },
+      }),
+    [nav, recentPlaylistMenu],
+  );
+
+  const addToPlaylistDefaultTitle = useMemo(() => {
+    if (addToPlaylistMediaId == null) return "";
+    const h = history.find((x) => x.media_id === addToPlaylistMediaId);
+    if ((h?.title ?? "").trim()) return (h!.title ?? "").trim();
+    const m = allRecent.find((x) => x.id === addToPlaylistMediaId);
+    return (m?.title ?? "").trim();
+  }, [addToPlaylistMediaId, history, allRecent]);
 
   const homeBulkCount = historySelectedKeys.size + movieSelectedIds.size;
   const homeBulkActive = homeBulkCount > 0;
@@ -796,6 +854,22 @@ export default function HomePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [history.length]);
 
+  useEffect(() => {
+    if (loading) return;
+    const id = requestAnimationFrame(() => {
+      updateLibArrows();
+    });
+    const onResize = () => {
+      updateLibArrows();
+    };
+    window.addEventListener("resize", onResize);
+    return () => {
+      cancelAnimationFrame(id);
+      window.removeEventListener("resize", onResize);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [libs.length, loading]);
+
   const homeBulkAllFullySelected = useMemo(() => {
     const hk = history.map(historyRowKey);
     const mids = movieShelfItems.map((m) => m.id);
@@ -883,12 +957,41 @@ export default function HomePage() {
           <Title level={3} className={styles.title}>
             媒体库
           </Title>
+          {libs.length > 0 && (showLibLeft || showLibRight) ? (
+            <div className={styles.historyHeadControls}>
+              {showLibLeft ? (
+                <button
+                  type="button"
+                  className={`${styles.carouselArrow} ${styles.carouselArrowInline}`}
+                  onClick={() => scrollLibsBy(-340)}
+                  aria-label="向左滚动"
+                >
+                  <LeftOutlined />
+                </button>
+              ) : null}
+              {showLibRight ? (
+                <button
+                  type="button"
+                  className={`${styles.carouselArrow} ${styles.carouselArrowInline}`}
+                  onClick={() => scrollLibsBy(340)}
+                  aria-label="向右滚动"
+                >
+                  <RightOutlined />
+                </button>
+              ) : null}
+            </div>
+          ) : null}
         </div>
         {libs.length === 0 ? (
           <div className={styles.emptyHint}>暂无媒体库，请由管理员在「媒体库」中添加。</div>
         ) : (
-          <div className={styles.rowScroll}>
-            {libs.map((lib) => {
+          <div className={styles.carouselWrap}>
+            <div
+              ref={libScrollRef}
+              className={`${styles.rowScroll} ${styles.rowScrollNoBar}`}
+              onScroll={updateLibArrows}
+            >
+              {libs.map((lib) => {
               const processed = lib.scan_processed_count ?? 0;
               const total = lib.scan_total_count ?? 0;
               const percent = total > 0 ? Math.max(0, Math.min(100, Math.round((processed / total) * 100))) : 0;
@@ -936,6 +1039,7 @@ export default function HomePage() {
                 </Link>
               );
             })}
+            </div>
           </div>
         )}
       </section>
@@ -997,6 +1101,7 @@ export default function HomePage() {
                     selected={historySelectedKeys.has(rowKey)}
                     onToggleSelect={() => toggleHistoryRow(rowKey)}
                     bulkSelectMode={homeBulkActive}
+                    buildHomeMediaMenu={buildHomeMediaMenu}
                   />
                 );
               })}
@@ -1018,10 +1123,23 @@ export default function HomePage() {
               movieSelectedIds={movieSelectedIds}
               onToggleMovieSelect={toggleMovieSelect}
               homeBulkActive={homeBulkActive}
+              buildHomeMediaMenu={buildHomeMediaMenu}
             />
           </section>
         );
       })}
+      {addToPlaylistMediaId != null && (
+        <AddToPlaylistModal
+          mediaIds={[addToPlaylistMediaId]}
+          open
+          defaultNewPlaylistName={addToPlaylistDefaultTitle}
+          onClose={() => setAddToPlaylistMediaId(null)}
+          onAdded={(pl) => {
+            rememberPlaylistAdded(pl);
+            setRecentPlaylistMenu(readRecentPlaylists());
+          }}
+        />
+      )}
     </div>
   );
 }

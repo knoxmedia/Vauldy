@@ -25,11 +25,15 @@ import type { ComponentType } from "react";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { buildMediaMenuItems } from "../components/mediaMenuItems";
+import AddToPlaylistModal from "../components/AddToPlaylistModal";
 import {
   MediaItem,
+  addFavorite,
+  addPlaylistItem,
   fetchMedia,
   mediaPosterSrc,
 } from "../api/client";
+import { readRecentPlaylists, rememberPlaylistAdded } from "../lib/recentPlaylists";
 import styles from "./Browse.module.css";
 
 type ViewMode = "poster" | "thumb" | "list" | "table";
@@ -150,6 +154,8 @@ export default function BrowsePage() {
   );
   const [tablePage, setTablePage] = useState(1);
   const [colPickerOpen, setColPickerOpen] = useState(false);
+  const [playlistModalMediaIds, setPlaylistModalMediaIds] = useState<number[] | null>(null);
+  const [recentPlaylistMenu, setRecentPlaylistMenu] = useState(readRecentPlaylists);
 
   async function load() {
     setLoading(true);
@@ -359,8 +365,113 @@ export default function BrowsePage() {
   /** 任意项已选中时：隐藏播放/编辑/更多，海报区点击切换选中 */
   const browseBulkPick = browseSelectionCount > 0;
 
+  const playlistModalDefaultTitle = useMemo(() => {
+    if (playlistModalMediaIds == null || playlistModalMediaIds.length !== 1) return "";
+    const id = playlistModalMediaIds[0];
+    return rows.find((x) => x.id === id)?.title ?? "";
+  }, [playlistModalMediaIds, rows]);
+
+  async function bulkAddSelectedToCollection(ids: number[]) {
+    if (ids.length === 0) return;
+    let ok = 0;
+    let fail = 0;
+    for (const id of ids) {
+      try {
+        await addFavorite(id);
+        ok++;
+      } catch {
+        fail++;
+      }
+    }
+    if (ok > 0) {
+      message.success(`已将 ${ok} 项加入收藏集${fail > 0 ? `（${fail} 项未变更）` : ""}`);
+    } else {
+      message.warning("未能加入收藏（可能已在收藏中）");
+    }
+  }
+
+  async function bulkAddSelectedToPlaylist(ids: number[], playlistId: number) {
+    if (ids.length === 0) return;
+    let ok = 0;
+    let fail = 0;
+    for (const mid of ids) {
+      try {
+        await addPlaylistItem(playlistId, mid);
+        ok++;
+      } catch {
+        fail++;
+      }
+    }
+    const name =
+      recentPlaylistMenu.find((p) => p.id === playlistId)?.name ??
+      readRecentPlaylists().find((p) => p.id === playlistId)?.name ??
+      "播放列表";
+    if (ok > 0) {
+      rememberPlaylistAdded({ id: playlistId, name });
+      setRecentPlaylistMenu(readRecentPlaylists());
+      message.success(`已将 ${ok} 项添加到「${name}」${fail > 0 ? `（${fail} 项跳过）` : ""}`);
+    } else {
+      message.warning("未能添加到播放列表");
+    }
+  }
+
+  const browseBulkAddMenuItems = useMemo((): MenuProps["items"] => {
+    const items: MenuProps["items"] = [
+      { key: "bulkAddCollection", label: "添加到收藏集..." },
+      { type: "divider" },
+      { key: "bulkOpenPlaylist", label: "添加到播放列表..." },
+    ];
+    if (recentPlaylistMenu.length > 0) {
+      items.push({
+        type: "group",
+        label: "最近",
+        children: recentPlaylistMenu.slice(0, 3).map((pl) => ({
+          key: `recentPlaylist:${pl.id}`,
+          label: pl.name,
+        })),
+      });
+    }
+    return items;
+  }, [recentPlaylistMenu]);
+
+  function onBrowseBulkAddMenuClick(key: string) {
+    const ids = [...browseSelectedIds];
+    if (ids.length === 0) return;
+    const sk = String(key);
+    if (sk === "bulkAddCollection") {
+      void bulkAddSelectedToCollection(ids);
+      return;
+    }
+    if (sk === "bulkOpenPlaylist") {
+      setPlaylistModalMediaIds(ids);
+      return;
+    }
+    if (sk.startsWith("recentPlaylist:")) {
+      const pid = Number(sk.slice("recentPlaylist:".length));
+      if (!Number.isNaN(pid)) void bulkAddSelectedToPlaylist(ids, pid);
+    }
+  }
+
   function makeMenu(r: MediaItem, extra?: { isWatched?: boolean }): MenuProps {
-    return buildMediaMenuItems(r, nav, extra);
+    return buildMediaMenuItems(r, nav, {
+      ...extra,
+      onAddToPlaylist: (mediaId: number) => setPlaylistModalMediaIds([mediaId]),
+      recentPlaylists: recentPlaylistMenu,
+      onQuickAddToPlaylist: async (mediaId: number, playlistId: number) => {
+        try {
+          await addPlaylistItem(playlistId, mediaId);
+          const name =
+            recentPlaylistMenu.find((p) => p.id === playlistId)?.name ??
+            readRecentPlaylists().find((p) => p.id === playlistId)?.name ??
+            "播放列表";
+          message.success(`已添加到「${name}」`);
+          rememberPlaylistAdded({ id: playlistId, name });
+          setRecentPlaylistMenu(readRecentPlaylists());
+        } catch {
+          message.error("添加失败，可能已在列表中");
+        }
+      },
+    });
   }
 
   return (
@@ -448,13 +559,25 @@ export default function BrowsePage() {
                 aria-label="标记"
                 onClick={() => message.info("批量标记功能开发中")}
               />
-              <Button
-                type="text"
-                className={styles.browseSelectionActionBtn}
-                icon={<UnorderedListOutlined />}
-                aria-label="添加到列表"
-                onClick={() => message.info("添加到列表功能开发中")}
-              />
+              <Dropdown
+                menu={{
+                  items: browseBulkAddMenuItems,
+                  onClick: ({ key, domEvent }) => {
+                    domEvent.stopPropagation();
+                    onBrowseBulkAddMenuClick(String(key));
+                  },
+                }}
+                trigger={["click"]}
+                placement="bottom"
+              >
+                <Button
+                  type="text"
+                  className={styles.browseSelectionActionBtn}
+                  icon={<UnorderedListOutlined />}
+                  aria-label="添加到列表"
+                  onClick={(e) => e.stopPropagation()}
+                />
+              </Dropdown>
               <Dropdown
                 menu={{
                   items: [
@@ -916,6 +1039,18 @@ export default function BrowsePage() {
             );
           })}
         </div>
+      )}
+      {playlistModalMediaIds != null && playlistModalMediaIds.length > 0 && (
+        <AddToPlaylistModal
+          mediaIds={playlistModalMediaIds}
+          open
+          defaultNewPlaylistName={playlistModalDefaultTitle}
+          onClose={() => setPlaylistModalMediaIds(null)}
+          onAdded={(pl) => {
+            rememberPlaylistAdded(pl);
+            setRecentPlaylistMenu(readRecentPlaylists());
+          }}
+        />
       )}
     </div>
   );

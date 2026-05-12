@@ -15,7 +15,6 @@ import {
 import type { MenuProps } from "antd";
 import {
   ArrowLeftOutlined,
-  CaretRightOutlined,
   CloseOutlined,
   StarFilled,
   StarOutlined,
@@ -29,7 +28,6 @@ import {
   UnorderedListOutlined,
   FileImageOutlined,
   LeftOutlined,
-  PlayCircleOutlined,
   RightOutlined,
   SoundOutlined,
   TeamOutlined,
@@ -66,6 +64,7 @@ import {
   savePlaybackProgress,
 } from "../api/client";
 import { buildMediaMenuItems } from "../components/mediaMenuItems";
+import ToolbarPlayIcon from "../components/ToolbarPlayIcon";
 import { isAdminRole, useAuthStore } from "../store/auth";
 import styles from "./MediaDetail.module.css";
 
@@ -518,7 +517,7 @@ function RelatedMovieCard({
                   nav(`/player/${m.id}`);
                 }}
               >
-                <CaretRightOutlined />
+                <ToolbarPlayIcon className={styles.relatedOverlayPlaySvg} />
               </button>
               <button
                 type="button"
@@ -961,7 +960,12 @@ export default function MediaDetailPage() {
               <div className={styles.actions}>
                 {showResumeActions ? (
                   <>
-                    <Button type="primary" size="large" icon={<PlayCircleOutlined />} onClick={() => nav(resumeTarget)}>
+                    <Button
+                      type="primary"
+                      size="large"
+                      icon={<ToolbarPlayIcon className={styles.mediaDetailPlaySvg} />}
+                      onClick={() => nav(resumeTarget)}
+                    >
                       继续播放
                     </Button>
                     <Button size="large" type="default" style={{ opacity: 0.82 }} onClick={() => nav(playFromStartTarget)}>
@@ -969,7 +973,12 @@ export default function MediaDetailPage() {
                     </Button>
                   </>
                 ) : (
-                  <Button type="primary" size="large" icon={<PlayCircleOutlined />} onClick={() => nav(playFromStartTarget)}>
+                  <Button
+                    type="primary"
+                    size="large"
+                    icon={<ToolbarPlayIcon className={styles.mediaDetailPlaySvg} />}
+                    onClick={() => nav(playFromStartTarget)}
+                  >
                     播放
                   </Button>
                 )}
@@ -1134,7 +1143,7 @@ export default function MediaDetailPage() {
                 if (first != null) nav(`/player/${first}`);
               }}
             >
-              <PlayCircleOutlined />
+              <ToolbarPlayIcon className={styles.relatedBulkPlaySvg} />
             </button>
             <button
               type="button"
@@ -1262,7 +1271,7 @@ export default function MediaDetailPage() {
                   <Button
                     type="primary"
                     size="large"
-                    icon={<PlayCircleOutlined />}
+                    icon={<ToolbarPlayIcon className={styles.mediaDetailPlaySvg} />}
                     className={styles.playBtn}
                     onClick={() => nav(resumeTarget)}
                   >
@@ -1272,7 +1281,7 @@ export default function MediaDetailPage() {
                   <Button
                     type="primary"
                     size="large"
-                    icon={<PlayCircleOutlined />}
+                    icon={<ToolbarPlayIcon className={styles.mediaDetailPlaySvg} />}
                     className={styles.playBtn}
                     onClick={() => nav(playFromStartTarget)}
                   >

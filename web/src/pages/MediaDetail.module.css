@@ -336,6 +336,21 @@
   color: #111 !important;
 }
 
+.mediaDetailPlaySvg {
+  width: 18px;
+  height: 18px;
+  display: block;
+  flex-shrink: 0;
+}
+
+.playBtn .mediaDetailPlaySvg {
+  color: #1a1a1a;
+}
+
+.playBtn:hover .mediaDetailPlaySvg {
+  color: #111;
+}
+
 .iconAction {
   border: none !important;
   box-shadow: none !important;
@@ -877,6 +892,15 @@
   margin-left: 2px;
 }
 
+.relatedOverlayPlaySvg {
+  width: 20px;
+  height: 20px;
+  display: block;
+  flex-shrink: 0;
+  margin-left: 2px;
+  color: inherit;
+}
+
 .relatedOverlayPlay:hover {
   background: #fa8c16;
   border-color: #fa8c16;
@@ -929,6 +953,14 @@
   gap: 10px;
   flex: 1;
   min-width: 0;
+}
+
+.relatedBulkPlaySvg {
+  width: 15px;
+  height: 15px;
+  display: block;
+  flex-shrink: 0;
+  color: inherit;
 }
 
 .relatedBulkIconBtn {

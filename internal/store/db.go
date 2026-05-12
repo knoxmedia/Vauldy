@@ -286,6 +286,34 @@ CREATE TABLE IF NOT EXISTS favorite (
 CREATE INDEX IF NOT EXISTS idx_favorite_user ON favorite(user_id);
 CREATE INDEX IF NOT EXISTS idx_favorite_media ON favorite(media_id);
 
+CREATE TABLE IF NOT EXISTS playlist (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    poster_url TEXT DEFAULT '',
+    background_url TEXT DEFAULT '',
+    logo_url TEXT DEFAULT '',
+    square_art_url TEXT DEFAULT '',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES user(id)
+);
+CREATE INDEX IF NOT EXISTS idx_playlist_user ON playlist(user_id);
+
+CREATE TABLE IF NOT EXISTS playlist_item (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    playlist_id INTEGER NOT NULL,
+    media_id INTEGER NOT NULL,
+    sort_order INTEGER DEFAULT 0,
+    added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(playlist_id, media_id),
+    FOREIGN KEY (playlist_id) REFERENCES playlist(id) ON DELETE CASCADE,
+    FOREIGN KEY (media_id) REFERENCES media(id)
+);
+CREATE INDEX IF NOT EXISTS idx_playlist_item_playlist ON playlist_item(playlist_id);
+CREATE INDEX IF NOT EXISTS idx_playlist_item_media ON playlist_item(media_id);
+
 CREATE TABLE IF NOT EXISTS scrape_config (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     enabled INTEGER DEFAULT 1,
@@ -465,6 +493,11 @@ func OpenSQLite(path string) (*sql.DB, error) {
 	_, _ = db.Exec(`ALTER TABLE user ADD COLUMN allowed_time_start TEXT DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE user ADD COLUMN allowed_time_end TEXT DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE user ADD COLUMN parental_access_plan_json TEXT DEFAULT '[]'`)
+	// Playlist image columns (added later)
+	_, _ = db.Exec(`ALTER TABLE playlist ADD COLUMN poster_url TEXT DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE playlist ADD COLUMN background_url TEXT DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE playlist ADD COLUMN logo_url TEXT DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE playlist ADD COLUMN square_art_url TEXT DEFAULT ''`)
 	_, _ = db.Exec(`INSERT OR IGNORE INTO scrape_config (id) VALUES (1)`)
 	// Seed default AI provider configs.
 	seedAIProviders(db)

@@ -282,3 +282,18 @@ body {
   min-height: 0;
 }
 
+/* Modal.confirm：与主页内容区（Home.module.css .page）相同的纯黑底 */
+.ant-modal-root .ant-modal.ant-modal-confirm .ant-modal-content,
+.ant-modal-root .ant-modal.ant-modal-confirm .ant-modal-container,
+.ant-modal-root .ant-modal.ant-modal-confirm .ant-modal-body {
+  background: #000 !important;
+}
+
+.ant-modal-root .ant-modal.ant-modal-confirm .ant-modal-confirm-title {
+  color: rgba(255, 255, 255, 0.95);
+}
+
+.ant-modal-root .ant-modal.ant-modal-confirm .ant-modal-confirm-content {
+  color: rgba(255, 255, 255, 0.72);
+}
+

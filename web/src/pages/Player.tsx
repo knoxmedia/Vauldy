@@ -1,6 +1,7 @@
 import { Button, Input, Modal, Progress, Tag, message } from "antd";
 import { ArrowLeftOutlined } from "@ant-design/icons";
 import { useEffect, useId, useRef, useState } from "react";
+import type { NavigateFunction } from "react-router-dom";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import Player, { TextTrack } from "xgplayer";
 import HlsPlugin from "xgplayer-hls";
@@ -9,7 +10,32 @@ import "xgplayer/dist/index.min.css";
 import "xgplayer/es/plugins/track/index.css";
 import "xgplayer-subtitles/es/style/index.css";
 import { useAuthStore } from "../store/auth";
-import { fetchMediaSubtitles, type MediaSubtitleRow, reportPlaybackEnd, reportPlaybackStart, savePlaybackProgress } from "../api/client";
+import {
+  PLAYLIST_PLAY_SESSION_KEY,
+  fetchMediaSubtitles,
+  type MediaSubtitleRow,
+  reportPlaybackEnd,
+  reportPlaybackStart,
+  savePlaybackProgress,
+} from "../api/client";
+
+function tryNavigatePlaylistNext(nav: NavigateFunction, searchParams: URLSearchParams, currentMediaId: number) {
+  try {
+    const raw = sessionStorage.getItem(PLAYLIST_PLAY_SESSION_KEY);
+    if (!raw) return;
+    const sess = JSON.parse(raw) as { playlistId?: number; order?: number[] };
+    const order = sess.order;
+    if (!sess.playlistId || !order?.length) return;
+    const pidParam = searchParams.get("playlist_id");
+    if (!pidParam || Number(pidParam) !== Number(sess.playlistId)) return;
+    const pos = order.indexOf(currentMediaId);
+    if (pos < 0 || pos + 1 >= order.length) return;
+    const nextMid = order[pos + 1]!;
+    nav(`/player/${nextMid}?playlist_id=${sess.playlistId}&index=${pos + 1}`);
+  } catch {
+    // ignore malformed session
+  }
+}
 
 /** fetch that aborts after timeoutMs (clears hung UI when backend blocks). */
 async function fetchWithTimeout(
@@ -497,6 +523,8 @@ async function detectClientCaps(): Promise<ClientCaps> {
 export default function PlayerPage() {
   const { id } = useParams();
   const [searchParams] = useSearchParams();
+  const searchParamsRef = useRef(searchParams);
+  searchParamsRef.current = searchParams;
   const nav = useNavigate();
   const domId = useId().replace(/:/g, "");
   /** Stable mount node for players; avoids Strict Mode race where getElementById fails mid-async. */
@@ -676,6 +704,7 @@ export default function PlayerPage() {
         const endPos = lastProgressSecRef.current;
         void savePlaybackProgress(mid, withPlaybackLog({ position: endPos, completed: 1 })).catch(() => {});
         void reportPlaybackEnd(mid, withPlaybackLog({ position: endPos, completed: 1 })).catch(() => {});
+        tryNavigatePlaylistNext(nav, searchParamsRef.current, mid);
       });
 
       bind("onPause", () => {
@@ -892,6 +921,7 @@ export default function PlayerPage() {
         const cur = safeSeconds(video.currentTime) ?? 0;
         void savePlaybackProgress(mid, withPlaybackLog({ position: cur, completed: 1 })).catch(() => {});
         void reportPlaybackEnd(mid, withPlaybackLog({ position: cur, completed: 1 })).catch(() => {});
+        tryNavigatePlaylistNext(nav, searchParamsRef.current, mid);
       });
       if (isStale()) {
         await player.destroy().catch(() => {});
@@ -1206,6 +1236,7 @@ export default function PlayerPage() {
         const cur = safeSeconds((playerRef.current as any)?.currentTime || 0) ?? 0;
         reportProgress(1);
         void reportPlaybackEnd(mid, withPlaybackLog({ position: cur, completed: 1 })).catch(() => {});
+        tryNavigatePlaylistNext(nav, searchParamsRef.current, mid);
       });
       setLoadingText("");
     };

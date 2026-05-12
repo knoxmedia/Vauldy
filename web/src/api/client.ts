@@ -101,7 +101,7 @@ export type MediaItem = {
 };
 
 /** Normalize poster string from DB (some SQLite/json paths may retain JSON quotes). */
-function normalizeListPosterUrl(raw: string): string {
+export function normalizeListPosterUrl(raw: string): string {
   let s = (raw || "").trim();
   if (s.length >= 2 && s.startsWith('"') && s.endsWith('"')) {
     try {
@@ -331,6 +331,116 @@ export async function markWatched(mediaId: number) {
 
 export async function markUnwatched(mediaId: number) {
   await api.delete(`/api/v1/media/${mediaId}/watched`);
+}
+
+export interface PlaylistItem {
+  id: number;
+  media_id: number;
+  sort_order: number;
+  title: string;
+  file_type: string;
+  duration: number;
+  width: number;
+  height: number;
+  poster_url: string;
+  added_at: string;
+}
+
+/** Set by Playlists when starting playback; Player reads on `ended` for sequential auto-next. */
+export const PLAYLIST_PLAY_SESSION_KEY = "knox_playlist_session";
+
+export interface Playlist {
+  id: number;
+  name: string;
+  description: string;
+  poster_url: string;
+  background_url: string;
+  logo_url: string;
+  square_art_url: string;
+  item_count: number;
+  first_media_id: number;
+  created_at: string;
+  updated_at: string;
+  items?: PlaylistItem[];
+}
+
+export async function fetchPlaylists() {
+  const { data } = await api.get<{ items: Playlist[] }>("/api/v1/playlists");
+  return data?.items ?? [];
+}
+
+export async function fetchPlaylist(id: number) {
+  const { data } = await api.get<Playlist>(`/api/v1/playlists/${id}`);
+  return data;
+}
+
+export async function createPlaylist(
+  name: string,
+  description = "",
+  posterUrl = "",
+  backgroundUrl = "",
+  logoUrl = "",
+  squareArtUrl = ""
+) {
+  const { data } = await api.post<{ id: number }>("/api/v1/playlists", {
+    name,
+    description,
+    poster_url: posterUrl,
+    background_url: backgroundUrl,
+    logo_url: logoUrl,
+    square_art_url: squareArtUrl,
+  });
+  return data.id;
+}
+
+export async function updatePlaylist(
+  id: number,
+  name: string,
+  description = "",
+  posterUrl = "",
+  backgroundUrl = "",
+  logoUrl = "",
+  squareArtUrl = ""
+) {
+  await api.put(`/api/v1/playlists/${id}`, {
+    name,
+    description,
+    poster_url: posterUrl,
+    background_url: backgroundUrl,
+    logo_url: logoUrl,
+    square_art_url: squareArtUrl,
+  });
+}
+
+export async function deletePlaylist(id: number) {
+  await api.delete(`/api/v1/playlists/${id}`);
+}
+
+export async function addPlaylistItem(playlistId: number, mediaId: number) {
+  await api.post(`/api/v1/playlists/${playlistId}/items`, { media_id: mediaId });
+}
+
+export async function removePlaylistItem(playlistId: number, itemId: number) {
+  await api.delete(`/api/v1/playlists/${playlistId}/items/${itemId}`);
+}
+
+export async function reorderPlaylistItems(playlistId: number, items: { id: number; sort_order: number }[]) {
+  await api.put(`/api/v1/playlists/${playlistId}/reorder`, { items });
+}
+
+export async function uploadPlaylistImage(
+  playlistId: number,
+  field: "poster" | "background" | "logo" | "square_art",
+  file: File
+) {
+  const formData = new FormData();
+  formData.append("file", file);
+  const { data } = await api.post<{ ok: boolean; url: string }>(
+    `/api/v1/playlists/${playlistId}/images/${field}`,
+    formData,
+    { headers: { "Content-Type": "multipart/form-data" } }
+  );
+  return data.url;
 }
 
 export async function transcodeAsync(mediaId: number, mode = "auto") {

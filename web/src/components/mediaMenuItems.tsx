@@ -10,6 +10,7 @@ import {
   markWatched,
   transcodeAsync,
 } from "../api/client";
+import type { RecentPlaylistEntry } from "../lib/recentPlaylists";
 
 export interface MediaMenuTarget {
   id: number;
@@ -22,12 +23,47 @@ export function buildMediaMenuItems(
     isWatched?: boolean;
     atrackDone?: boolean;
     keyframeDone?: boolean;
+    onAddToPlaylist?: (mediaId: number) => void;
+    recentPlaylists?: RecentPlaylistEntry[];
+    onQuickAddToPlaylist?: (mediaId: number, playlistId: number) => void | Promise<void>;
+    /** 收藏页：菜单底部「取消收藏」 */
+    onUnfavorite?: (mediaId: number) => void;
+    /** 标记观看状态成功后刷新列表（如收藏页） */
+    afterToggleWatched?: () => void;
   },
 ): MenuProps {
   const isWatched = extra?.isWatched ?? false;
   const watchedLabel = isWatched ? "标记为未观看" : "标记为已观看";
   const atrackDone = extra?.atrackDone ?? false;
   const keyframeDone = extra?.keyframeDone ?? false;
+  const onAddToPlaylist = extra?.onAddToPlaylist;
+  const recentPlaylists = extra?.recentPlaylists ?? [];
+  const onQuickAddToPlaylist = extra?.onQuickAddToPlaylist;
+  const onUnfavorite = extra?.onUnfavorite;
+  const afterToggleWatched = extra?.afterToggleWatched;
+
+  const addToChildren: MenuProps["items"] = [
+    {
+      key: "addToCollection",
+      label: "添加到收藏集...",
+    },
+    { type: "divider" as const },
+    {
+      key: "openAddToPlaylist",
+      label: "添加到播放列表...",
+      disabled: !onAddToPlaylist,
+    },
+  ];
+  if (recentPlaylists.length > 0 && onQuickAddToPlaylist) {
+    addToChildren.push({
+      type: "group",
+      label: "最近",
+      children: recentPlaylists.slice(0, 3).map((pl) => ({
+        key: `recentPlaylist:${pl.id}`,
+        label: pl.name,
+      })),
+    });
+  }
 
   return {
     items: [
@@ -37,10 +73,7 @@ export function buildMediaMenuItems(
       {
         key: "addTo",
         label: "添加到",
-        children: [
-          { key: "addToCollection", label: "收藏集" },
-          { key: "addToPlaylist", label: "播放列表" },
-        ],
+        children: addToChildren,
       },
       { key: "toggleWatched", label: watchedLabel },
       { type: "divider" as const },
@@ -53,6 +86,12 @@ export function buildMediaMenuItems(
       { type: "divider" as const },
       { key: "viewHistory", label: "查看播放历史" },
       { key: "getInfo", label: "获取信息" },
+      ...(onUnfavorite
+        ? [
+            { type: "divider" as const },
+            { key: "unfavorite", label: "取消收藏", danger: true },
+          ]
+        : []),
     ],
     onClick: ({ key, domEvent }) => {
       domEvent.stopPropagation();
@@ -68,19 +107,32 @@ export function buildMediaMenuItems(
             .then(() => message.success("已加入收藏集"))
             .catch(() => message.error("操作失败"));
           break;
-        case "addToPlaylist":
-          message.info("播放列表功能开发中");
+        case "openAddToPlaylist":
+          if (onAddToPlaylist) {
+            onAddToPlaylist(r.id);
+          } else {
+            message.info("播放列表功能开发中");
+          }
           break;
         case "toggleWatched":
           if (isWatched) {
             markUnwatched(r.id)
-              .then(() => message.success("已标记为未观看"))
+              .then(() => {
+                message.success("已标记为未观看");
+                afterToggleWatched?.();
+              })
               .catch(() => message.error("操作失败"));
           } else {
             markWatched(r.id)
-              .then(() => message.success("已标记为已观看"))
+              .then(() => {
+                message.success("已标记为已观看");
+                afterToggleWatched?.();
+              })
               .catch(() => message.error("操作失败"));
           }
+          break;
+        case "unfavorite":
+          onUnfavorite?.(r.id);
           break;
         case "refreshMetadata":
           createScrapeTasks([r.id])
@@ -113,6 +165,16 @@ export function buildMediaMenuItems(
         case "getInfo":
           nav(`/detail/${r.id}`);
           break;
+        default: {
+          const sk = String(key);
+          if (sk.startsWith("recentPlaylist:") && onQuickAddToPlaylist) {
+            const pid = Number(sk.slice("recentPlaylist:".length));
+            if (!Number.isNaN(pid)) {
+              void Promise.resolve(onQuickAddToPlaylist(r.id, pid));
+            }
+          }
+          break;
+        }
       }
     },
   };

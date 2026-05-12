@@ -65,6 +65,16 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 			auth.GET("/media/:id/stats", h.GetMediaStats)
 			auth.GET("/media/:id/subtitles", h.ListMediaSubtitles)
 
+			auth.GET("/playlists", h.ListPlaylists)
+			auth.POST("/playlists", h.CreatePlaylist)
+			auth.GET("/playlists/:id", h.GetPlaylist)
+			auth.PUT("/playlists/:id", h.UpdatePlaylist)
+			auth.DELETE("/playlists/:id", h.DeletePlaylist)
+			auth.POST("/playlists/:id/images/:field", h.UploadPlaylistImage)
+			auth.POST("/playlists/:id/items", h.AddPlaylistItem)
+			auth.DELETE("/playlists/:id/items/:itemId", h.RemovePlaylistItem)
+			auth.PUT("/playlists/:id/reorder", h.ReorderPlaylistItems)
+
 			auth.POST("/media/:id/progress", h.SaveProgress)
 			auth.PUT("/media/:id/watched", h.ToggleWatched)
 			auth.DELETE("/media/:id/watched", h.ToggleWatched)
