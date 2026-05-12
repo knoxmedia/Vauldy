@@ -77,7 +77,12 @@ function normalizePath(raw: string) {
 }
 
 function toLibraryRelativePath(fullPath: string, libraryRoots?: string[]) {
-  const full = normalizePath(fullPath).replace(/\/+$/, "");
+  let full = normalizePath(fullPath).replace(/\/+$/, "");
+  if (full.toLowerCase().startsWith("//?/unc/")) {
+    full = "//" + full.slice("//?/unc/".length);
+  } else if (full.toLowerCase().startsWith("//?/")) {
+    full = full.slice(4);
+  }
   const roots = (libraryRoots || [])
     .map((r) => normalizePath(r || "").replace(/\/+$/, ""))
     .filter(Boolean)
@@ -92,6 +97,23 @@ function toLibraryRelativePath(fullPath: string, libraryRoots?: string[]) {
     }
   }
   return full;
+}
+
+/** Strip Windows drive segments left over when root matching fails, so the tree lists folders under the library instead of k:/ f:/ roots. */
+function stripLeadingWindowsDriveSegments(rel: string): string {
+  const parts = normalizePath(rel)
+    .replace(/^\/+/, "")
+    .split("/")
+    .filter(Boolean);
+  while (parts.length > 0 && /^[a-zA-Z]:$/.test(parts[0])) {
+    parts.shift();
+  }
+  return parts.join("/");
+}
+
+/** Relative path for tree, lists, and directory selection (never shows a leading drive letter as a fake root). */
+function toLibraryDisplayRelativePath(fullPath: string, libraryRoots?: string[]) {
+  return stripLeadingWindowsDriveSegments(toLibraryRelativePath(fullPath, libraryRoots));
 }
 
 function nodeTitle(name: string, kind: "dir" | "file") {
@@ -126,8 +148,8 @@ export default function MediaManagerPage() {
   async function loadLibraries() {
     const items = await fetchLibraries();
     setLibs(items);
-    if (!libraryId && items.length > 0) {
-      setLibraryId(items[0].id);
+    if (items.length > 0) {
+      setLibraryId((current) => (current !== undefined ? current : items[0].id));
     }
   }
 
@@ -144,7 +166,7 @@ export default function MediaManagerPage() {
         type: "file",
         key: `file:${first.id}`,
         name: first.title || first.file_id,
-        path: toLibraryRelativePath(first.file_path || "", selectedLibraryRoots),
+        path: toLibraryDisplayRelativePath(first.file_path || "", selectedLibraryRoots),
         mediaId: first.id,
       });
     }
@@ -187,6 +209,7 @@ export default function MediaManagerPage() {
   }, []);
 
   useEffect(() => {
+    if (libraryId === undefined) return;
     void loadMedia(libraryId).catch((e: unknown) => message.error((e as Error).message || "加载媒体失败"));
   }, [libraryId]);
 
@@ -220,7 +243,7 @@ export default function MediaManagerPage() {
       return node!;
     };
     rows.forEach((m) => {
-      const rel = toLibraryRelativePath(m.file_path || "", selectedLibraryRoots);
+      const rel = toLibraryDisplayRelativePath(m.file_path || "", selectedLibraryRoots);
       const parts = rel.split("/").filter(Boolean);
       const fileName = parts.length > 0 ? parts[parts.length - 1] : String(m.id);
       const dirs = parts.slice(0, -1);
@@ -273,12 +296,12 @@ export default function MediaManagerPage() {
     const prefix = selectedNode.path ? `${selectedNode.path}/` : "";
     return rows
       .filter((x) => {
-        const p = toLibraryRelativePath(x.file_path || "", selectedLibraryRoots);
+        const p = toLibraryDisplayRelativePath(x.file_path || "", selectedLibraryRoots);
         return p.startsWith(prefix) && p !== selectedNode.path;
       })
       .sort((a, b) =>
-        toLibraryRelativePath(a.file_path || "", selectedLibraryRoots).localeCompare(
-          toLibraryRelativePath(b.file_path || "", selectedLibraryRoots)
+        toLibraryDisplayRelativePath(a.file_path || "", selectedLibraryRoots).localeCompare(
+          toLibraryDisplayRelativePath(b.file_path || "", selectedLibraryRoots)
         )
       );
   }, [rows, selectedNode, selectedLibraryRoots]);
@@ -383,7 +406,7 @@ export default function MediaManagerPage() {
                 <Descriptions.Item label="目录名称">{selectedNode.name}</Descriptions.Item>
                 <Descriptions.Item label="目录路径">{selectedNode.path}</Descriptions.Item>
                 <Descriptions.Item label="包含文件数">
-                  {rows.filter((x) => toLibraryRelativePath(x.file_path || "", selectedLibraryRoots).startsWith(selectedNode.path)).length}
+                  {rows.filter((x) => toLibraryDisplayRelativePath(x.file_path || "", selectedLibraryRoots).startsWith(selectedNode.path)).length}
                 </Descriptions.Item>
               </Descriptions>
               <Collapse
@@ -416,7 +439,7 @@ export default function MediaManagerPage() {
                       type: "file",
                       key: `file:${first.id}`,
                       name: first.title || first.file_id,
-                            path: toLibraryRelativePath(first.file_path || "", selectedLibraryRoots),
+                            path: toLibraryDisplayRelativePath(first.file_path || "", selectedLibraryRoots),
                       mediaId: first.id,
                     });
                   }}
@@ -440,7 +463,7 @@ export default function MediaManagerPage() {
                             type: "file",
                             key: `file:${item.id}`,
                             name: item.title || item.file_id,
-                            path: toLibraryRelativePath(item.file_path || "", selectedLibraryRoots),
+                            path: toLibraryDisplayRelativePath(item.file_path || "", selectedLibraryRoots),
                             mediaId: item.id,
                           })
                         }
@@ -458,7 +481,7 @@ export default function MediaManagerPage() {
                             type: "file",
                             key: `file:${next.id}`,
                             name: next.title || next.file_id,
-                            path: toLibraryRelativePath(next.file_path || "", selectedLibraryRoots),
+                            path: toLibraryDisplayRelativePath(next.file_path || "", selectedLibraryRoots),
                             mediaId: next.id,
                           });
                         }}
@@ -469,7 +492,7 @@ export default function MediaManagerPage() {
                   >
                     <List.Item.Meta
                       title={item.title || item.file_id}
-                      description={toLibraryRelativePath(item.file_path || "", selectedLibraryRoots)}
+                      description={toLibraryDisplayRelativePath(item.file_path || "", selectedLibraryRoots)}
                     />
                   </List.Item>
                 )}

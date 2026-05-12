@@ -3,12 +3,13 @@ import {
   EditOutlined,
   EllipsisOutlined,
   FileAddOutlined,
+  HolderOutlined,
   LeftOutlined,
   MoreOutlined,
   PlusOutlined,
 } from "@ant-design/icons";
 import type { MenuProps } from "antd";
-import { Button, Dropdown, Empty, message, Modal, Pagination, Rate, Spin, Tooltip } from "antd";
+import { Button, Dropdown, Empty, message, Modal, Rate, Spin, Tooltip } from "antd";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
@@ -20,6 +21,7 @@ import {
   fetchPlaylists,
   mediaPosterSrc,
   removePlaylistItem,
+  reorderPlaylistItems,
 } from "../api/client";
 import AddToListIcon from "../components/AddToListIcon";
 import PlaylistFormModal from "../components/PlaylistFormModal";
@@ -29,7 +31,25 @@ import styles from "./Playlists.module.css";
 
 type PlaybackMode = "ordered" | "shuffle";
 
-const PAGE_SIZE = 20;
+function displayItemsFor(
+  items: PlaylistItem[] | undefined,
+  mode: PlaybackMode,
+  shuffleOrder: number[]
+): PlaylistItem[] {
+  const base = items ?? [];
+  if (mode !== "shuffle") return base;
+  if (shuffleOrder.length !== base.length) return base;
+  return shuffleOrder.map((i) => base[i]!);
+}
+
+function moveItemInList(list: PlaylistItem[], fromIdx: number, toIdx: number): PlaylistItem[] {
+  const next = [...list];
+  const [removed] = next.splice(fromIdx, 1);
+  let insert = toIdx;
+  if (fromIdx < toIdx) insert -= 1;
+  next.splice(insert, 0, removed);
+  return next;
+}
 
 function storePlaylistPlaySession(playlistId: number, orderedItems: PlaylistItem[]) {
   sessionStorage.setItem(
@@ -88,8 +108,9 @@ export default function PlaylistsPage() {
   const [detail, setDetail] = useState<Playlist | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [playbackMode, setPlaybackMode] = useState<PlaybackMode>("ordered");
-  const [detailPage, setDetailPage] = useState(1);
   const [shuffleOrder, setShuffleOrder] = useState<number[]>([]);
+  const [dragItemId, setDragItemId] = useState<number | null>(null);
+  const [dragOverItemId, setDragOverItemId] = useState<number | null>(null);
 
   // ——— Form modal state ———
   const [formModalOpen, setFormModalOpen] = useState(false);
@@ -116,16 +137,15 @@ export default function PlaylistsPage() {
     setShuffleOrder(idx);
   }, [playbackMode, itemsKey]);
 
-  const displayItems = useMemo(() => {
-    const base = detail?.items ?? [];
-    if (playbackMode !== "shuffle") return base;
-    if (shuffleOrder.length !== base.length) return base;
-    return shuffleOrder.map((i) => base[i]!);
-  }, [detail?.items, playbackMode, shuffleOrder]);
+  const displayItems = useMemo(
+    () => displayItemsFor(detail?.items, playbackMode, shuffleOrder),
+    [detail?.items, playbackMode, shuffleOrder]
+  );
 
   useEffect(() => {
-    setDetailPage(1);
-  }, [playbackMode, itemsKey]);
+    setDragItemId(null);
+    setDragOverItemId(null);
+  }, [itemsKey]);
 
   const loadPlaylists = useCallback(async () => {
     setListLoading(true);
@@ -148,7 +168,6 @@ export default function PlaylistsPage() {
     fetchPlaylist(id)
       .then((p) => {
         setDetail(p);
-        setDetailPage(1);
       })
       .catch((e: unknown) => message.error((e as Error).message || "加载失败"))
       .finally(() => setDetailLoading(false));
@@ -158,8 +177,6 @@ export default function PlaylistsPage() {
     setDetail(null);
     void loadPlaylists();
   }
-
-  const pagedItems = displayItems.slice((detailPage - 1) * PAGE_SIZE, detailPage * PAGE_SIZE);
 
   const detailViewHeroSrc = useMemo(() => {
     if (detail == null) return "";
@@ -253,6 +270,29 @@ export default function PlaylistsPage() {
       message.error((e as Error).message || "移除失败");
     }
   }
+
+  const handleReorderDrop = useCallback(
+    async (fromId: number, toId: number) => {
+      if (!detail || fromId === toId) return;
+      const list = displayItemsFor(detail.items, playbackMode, shuffleOrder);
+      const fromIdx = list.findIndex((i) => i.id === fromId);
+      const toIdx = list.findIndex((i) => i.id === toId);
+      if (fromIdx < 0 || toIdx < 0) return;
+      const newList = moveItemInList(list, fromIdx, toIdx);
+      const updatedWithSort = newList.map((it, i) => ({ ...it, sort_order: i }));
+      const payload = updatedWithSort.map((it, i) => ({ id: it.id, sort_order: i }));
+      const prevDetail = detail;
+      setPlaybackMode("ordered");
+      setDetail({ ...detail, items: updatedWithSort });
+      try {
+        await reorderPlaylistItems(detail.id, payload);
+      } catch (e: unknown) {
+        setDetail(prevDetail);
+        message.error((e as Error).message || "排序保存失败");
+      }
+    },
+    [detail, playbackMode, shuffleOrder]
+  );
 
   function makeItemMenu(item: PlaylistItem): MenuProps {
     return {
@@ -386,6 +426,7 @@ export default function PlaylistsPage() {
 
   // ——— Render: detail view ———
   const apiOrderedItems = detail.items ?? [];
+  const canReorderTracks = displayItems.length > 1;
 
   return (
     <div className={styles.detailPage}>
@@ -528,12 +569,13 @@ export default function PlaylistsPage() {
             <>
               <div className={styles.trackSectionHead}>{displayItems.length} 个视频</div>
               <div className={styles.trackList}>
-                {pagedItems.map((item, idx) => {
-                  const globalIdx = (detailPage - 1) * PAGE_SIZE + idx;
+                {displayItems.map((item, globalIdx) => {
                   return (
                     <div
                       key={item.id}
-                      className={styles.trackRow}
+                      className={`${styles.trackRow} ${dragItemId === item.id ? styles.trackRowDragging : ""} ${
+                        dragOverItemId === item.id && dragItemId !== item.id ? styles.trackRowDropTarget : ""
+                      }`}
                       data-playing={currentMediaId && item.media_id === Number(currentMediaId) ? "" : undefined}
                       onClick={() => playFrom(globalIdx)}
                       onKeyDown={(e) => {
@@ -542,9 +584,46 @@ export default function PlaylistsPage() {
                           playFrom(globalIdx);
                         }
                       }}
+                      onDragOver={(e) => {
+                        if (dragItemId == null) return;
+                        e.preventDefault();
+                        e.dataTransfer.dropEffect = "move";
+                        if (item.id !== dragItemId) setDragOverItemId(item.id);
+                      }}
+                      onDragLeave={(e) => {
+                        if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+                          setDragOverItemId((cur) => (cur === item.id ? null : cur));
+                        }
+                      }}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        const raw = e.dataTransfer.getData("text/plain");
+                        const from = Number.parseInt(raw, 10);
+                        if (Number.isFinite(from)) void handleReorderDrop(from, item.id);
+                        setDragItemId(null);
+                        setDragOverItemId(null);
+                      }}
                       role="button"
                       tabIndex={0}
                     >
+                      <span
+                        className={styles.trackDragHandle}
+                        draggable={canReorderTracks}
+                        onDragStart={(e) => {
+                          e.stopPropagation();
+                          e.dataTransfer.setData("text/plain", String(item.id));
+                          e.dataTransfer.effectAllowed = "move";
+                          setDragItemId(item.id);
+                        }}
+                        onDragEnd={() => {
+                          setDragItemId(null);
+                          setDragOverItemId(null);
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                        title="拖动排序"
+                      >
+                        <HolderOutlined />
+                      </span>
                       <span className={styles.trackIndex}>{globalIdx + 1}</span>
                       <span className={styles.trackTitle}>{item.title || "未命名"}</span>
                       <span className={styles.trackDuration}>{fmtDurationShort(item.duration)}</span>
@@ -569,18 +648,6 @@ export default function PlaylistsPage() {
                   );
                 })}
               </div>
-              {displayItems.length > PAGE_SIZE ? (
-                <div className={styles.detailPaginationBar}>
-                  <Pagination
-                    current={detailPage}
-                    pageSize={PAGE_SIZE}
-                    total={displayItems.length}
-                    onChange={(p) => setDetailPage(p)}
-                    showSizeChanger={false}
-                    size="small"
-                  />
-                </div>
-              ) : null}
             </>
           )}
         </>
