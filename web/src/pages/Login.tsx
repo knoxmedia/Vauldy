@@ -1,6 +1,7 @@
 import { Button, Card, Form, Input, Typography, message } from "antd";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { fetchUserInfo, login } from "../api/client";
+import { defaultPlayerPrefs, normalizePlayerPrefs } from "../lib/playerPrefs";
 import { useAuthStore, type UserRole } from "../store/auth";
 
 const { Paragraph, Title } = Typography;
@@ -47,7 +48,12 @@ export default function LoginPage() {
                 const t = await login(v.username, v.password);
                 setToken(t);
                 const u = await fetchUserInfo();
-                setProfile(u.username, u.role as UserRole, { canPlay: u.can_play !== false });
+                setProfile(u.username, u.role as UserRole, {
+                  canPlay: u.can_play !== false,
+                  avatarUrl: u.avatar_url || null,
+                  uiLocale: u.ui_locale || null,
+                  playerPrefs: u.player_prefs ? normalizePlayerPrefs(u.player_prefs) : defaultPlayerPrefs(),
+                });
                 message.success("登录成功");
                 const redir = params.get("redirect");
                 nav(redir && redir.startsWith("/") ? redir : "/", { replace: true });

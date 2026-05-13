@@ -498,6 +498,9 @@ func OpenSQLite(path string) (*sql.DB, error) {
 	_, _ = db.Exec(`ALTER TABLE playlist ADD COLUMN background_url TEXT DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE playlist ADD COLUMN logo_url TEXT DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE playlist ADD COLUMN square_art_url TEXT DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE user ADD COLUMN avatar_url TEXT DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE user ADD COLUMN ui_locale TEXT DEFAULT 'zh'`)
+	_, _ = db.Exec(`ALTER TABLE user ADD COLUMN player_prefs_json TEXT DEFAULT ''`)
 	_, _ = db.Exec(`INSERT OR IGNORE INTO scrape_config (id) VALUES (1)`)
 	// Seed default AI provider configs.
 	seedAIProviders(db)

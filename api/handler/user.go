@@ -96,7 +96,11 @@ func (h *Handler) UserInfo(c *gin.Context) {
 	}
 	var username, role string
 	var canManage, canPlay, canDownload int
-	if err := h.App.DB.QueryRow(`SELECT username, role, COALESCE(can_manage,0), COALESCE(can_play,1), COALESCE(can_download,0) FROM user WHERE id = ?`, uid).Scan(&username, &role, &canManage, &canPlay, &canDownload); err != nil {
+	var avatarURL, uiLocale, prefsJSON sql.NullString
+	if err := h.App.DB.QueryRow(`
+		SELECT username, role, COALESCE(can_manage,0), COALESCE(can_play,1), COALESCE(can_download,0),
+		       COALESCE(avatar_url,''), COALESCE(ui_locale,'zh'), COALESCE(player_prefs_json,'')
+		FROM user WHERE id = ?`, uid).Scan(&username, &role, &canManage, &canPlay, &canDownload, &avatarURL, &uiLocale, &prefsJSON); err != nil {
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 			return
@@ -109,9 +113,13 @@ func (h *Handler) UserInfo(c *gin.Context) {
 	}
 	playOK := canPlay == 1 || strings.EqualFold(role, "admin")
 	downloadOK := canDownload == 1 || strings.EqualFold(role, "admin")
+	prefs := decodePlayerPrefs(prefsJSON.String)
 	c.JSON(http.StatusOK, gin.H{
 		"id": uid, "username": username, "role": role,
 		"can_play": playOK, "can_download": downloadOK,
+		"avatar_url":    strings.TrimSpace(avatarURL.String),
+		"ui_locale":     strings.TrimSpace(uiLocale.String),
+		"player_prefs": prefs,
 	})
 }
 

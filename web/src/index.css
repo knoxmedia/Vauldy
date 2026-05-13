@@ -275,6 +275,41 @@ body {
   align-items: center;
 }
 
+/* 顶栏用户下拉：加大行距，「退出」前分割线 */
+.app-user-dropdown-menu.ant-dropdown-menu {
+  padding: 6px 0;
+  min-width: 148px;
+}
+
+.app-user-dropdown-menu.ant-dropdown-menu .ant-dropdown-menu-item {
+  padding: 12px 16px !important;
+  line-height: 1.5;
+}
+
+.app-user-dropdown-menu.ant-dropdown-menu .ant-dropdown-menu-item-disabled {
+  padding: 14px 16px 12px !important;
+  opacity: 1;
+}
+
+.app-user-dropdown-menu.ant-dropdown-menu .ant-dropdown-menu-item-divider {
+  margin: 10px 12px !important;
+  border-color: rgba(255, 255, 255, 0.12) !important;
+}
+
+/* Knox 外挂字幕外观（变量由 Player 写在 .xgplayer 根 .knox-subtitle-tuned 上） */
+.knox-subtitle-tuned xg-text-track.xg-text-track {
+  color: var(--knox-sub-fg, #fff) !important;
+}
+.knox-subtitle-tuned xg-text-track.xg-text-track xg-text-track-inner {
+  background-color: var(--knox-sub-bg, transparent) !important;
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+.knox-subtitle-tuned xg-text-track.xg-text-track xg-text-track-span {
+  font-size: var(--knox-sub-font-size, 16px) !important;
+  text-shadow: var(--knox-sub-shadow, none) !important;
+}
+
 .app-drawer-nav {
   display: flex;
   flex-direction: column;

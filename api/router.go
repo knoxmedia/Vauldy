@@ -50,6 +50,10 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 		auth.Use(middleware.RequireAuthentication(cfg, false))
 		{
 			auth.GET("/user/info", h.UserInfo)
+			auth.PUT("/user/profile", h.UpdateUserProfile)
+			auth.PUT("/user/password", h.ChangeUserPassword)
+			auth.POST("/user/avatar", h.UploadUserAvatar)
+			auth.DELETE("/user/avatar", h.DeleteUserAvatar)
 			auth.GET("/user/history", h.UserHistory)
 			auth.POST("/user/logout", h.Logout)
 			auth.POST("/user/parental/unlock", h.UnlockParental)

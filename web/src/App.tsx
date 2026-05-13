@@ -52,6 +52,7 @@ import AIProviderPage from "./pages/AIProvider";
 import RequireAuth from "./routes/RequireAuth";
 import RequireAdmin from "./routes/RequireAdmin";
 import { fetchUserInfo, logout } from "./api/client";
+import { defaultPlayerPrefs, normalizePlayerPrefs } from "./lib/playerPrefs";
 import { isAdminRole, useAuthStore } from "./store/auth";
 import MainNav from "./components/MainNav";
 
@@ -84,7 +85,14 @@ function ProfileSync() {
   useEffect(() => {
     if (!token) return;
     void fetchUserInfo()
-      .then((u) => setProfile(u.username, u.role, { canPlay: u.can_play !== false }))
+      .then((u) =>
+        setProfile(u.username, u.role, {
+          canPlay: u.can_play !== false,
+          avatarUrl: u.avatar_url || null,
+          uiLocale: u.ui_locale || null,
+          playerPrefs: u.player_prefs ? normalizePlayerPrefs(u.player_prefs) : defaultPlayerPrefs(),
+        })
+      )
       .catch(() => clearSession());
   }, [token, setProfile, clearSession]);
 
@@ -96,6 +104,7 @@ function MainShell() {
   const nav = useNavigate();
   const role = useAuthStore((s) => s.role);
   const username = useAuthStore((s) => s.username);
+  const avatarUrl = useAuthStore((s) => s.avatarUrl);
   const clearSession = useAuthStore((s) => s.clearSession);
   const admin = isAdminRole(role);
   const isPlayerRoute = loc.pathname.startsWith("/player");
@@ -134,9 +143,10 @@ function MainShell() {
     {
       key: "settings",
       icon: <SlidersOutlined />,
-      label: "应用设置",
+      label: "账号设置",
       onClick: () => nav("/settings"),
     },
+    { type: "divider" },
     {
       key: "logout",
       danger: true,
@@ -162,7 +172,7 @@ function MainShell() {
     if (p.startsWith("/search")) return "搜索";
     if (p.startsWith("/browse")) return "浏览媒体";
     if (p.startsWith("/player")) return "播放";
-    if (p.startsWith("/settings")) return "设置";
+    if (p.startsWith("/settings")) return "账号";
     if (p.startsWith("/library")) return "媒体库";
     if (p.startsWith("/upload")) return "上传";
     if (p.startsWith("/media-manager")) return "媒体资料管理";
@@ -320,13 +330,18 @@ function MainShell() {
                     />
                   </Tooltip>
                 )}
-                <Dropdown menu={{ items: userMenuItems }} placement="bottomRight" trigger={["click"]}>
+                <Dropdown
+                  menu={{ items: userMenuItems, className: "app-user-dropdown-menu" }}
+                  placement="bottomRight"
+                  trigger={["click"]}
+                >
                   <span className="app-shell-avatar-wrap" role="button" tabIndex={0}>
                     <Avatar
                       size="default"
+                      src={avatarUrl || undefined}
                       style={{ backgroundColor: "#00a4dc", cursor: "pointer" }}
                     >
-                      {(username || "?").slice(0, 1).toUpperCase()}
+                      {avatarUrl ? null : (username || "?").slice(0, 1).toUpperCase()}
                     </Avatar>
                   </span>
                 </Dropdown>

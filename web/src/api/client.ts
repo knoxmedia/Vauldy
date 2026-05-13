@@ -1,5 +1,6 @@
 import axios from "axios";
 import { message } from "antd";
+import type { PlayerPrefs } from "../lib/playerPrefs";
 import { useAuthStore, type UserRole } from "../store/auth";
 
 export const api = axios.create({
@@ -462,11 +463,42 @@ export type SessionUserInfo = {
   /** When omitted (legacy server), treated as allowed. */
   can_play?: boolean;
   can_download?: boolean;
+  avatar_url?: string;
+  ui_locale?: string;
+  player_prefs?: Partial<PlayerPrefs>;
 };
 
 export async function fetchUserInfo() {
   const { data } = await api.get<SessionUserInfo>("/api/v1/user/info");
   return { ...data, role: data.role as UserRole };
+}
+
+export async function updateUserProfile(payload: { ui_locale?: string; player_prefs?: PlayerPrefs }) {
+  const { data } = await api.put<{ ok: boolean; ui_locale: string; player_prefs: PlayerPrefs }>(
+    "/api/v1/user/profile",
+    payload
+  );
+  return data;
+}
+
+export async function changeUserPassword(newPassword: string, confirmPassword: string) {
+  await api.put("/api/v1/user/password", {
+    new_password: newPassword,
+    confirm_password: confirmPassword,
+  });
+}
+
+export async function uploadUserAvatar(file: Blob) {
+  const formData = new FormData();
+  formData.append("file", file, "avatar.png");
+  const { data } = await api.post<{ ok: boolean; url: string }>("/api/v1/user/avatar", formData, {
+    headers: { "Content-Type": "multipart/form-data" },
+  });
+  return data.url;
+}
+
+export async function deleteUserAvatar() {
+  await api.delete("/api/v1/user/avatar");
 }
 
 export type AdminUser = {

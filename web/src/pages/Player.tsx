@@ -13,11 +13,12 @@ import { useAuthStore } from "../store/auth";
 import {
   PLAYLIST_PLAY_SESSION_KEY,
   fetchMediaSubtitles,
-  type MediaSubtitleRow,
   reportPlaybackEnd,
   reportPlaybackStart,
   savePlaybackProgress,
 } from "../api/client";
+import { buildTextTrackListWithPrefs, normalizePlayerPrefs } from "../lib/playerPrefs";
+import { applyKnoxSubtitleCssVars, buildXgTexttrackStyle } from "../lib/subtitleAppearance";
 
 function tryNavigatePlaylistNext(nav: NavigateFunction, searchParams: URLSearchParams, currentMediaId: number) {
   try {
@@ -314,53 +315,6 @@ type XgDefinition = {
   text: string;
   url: string;
 };
-
-function langLabel(code: string) {
-  const c = (code || "").toLowerCase();
-  const map: Record<string, string> = {
-    zh: "中文",
-    en: "English",
-    ja: "日本語",
-    ko: "한국어",
-    fr: "Français",
-    de: "Deutsch",
-    es: "Español",
-    ru: "Русский",
-    pt: "Português",
-    it: "Italiano",
-    und: "未知语言",
-  };
-  return map[c] || (c ? c : "未知语言");
-}
-
-function kindLabel(kind: string) {
-  switch (kind) {
-    case "embedded":
-      return "内嵌";
-    case "external":
-      return "外挂";
-    case "asr":
-      return "识别";
-    default:
-      return kind || "—";
-  }
-}
-
-function buildTextTrackList(mediaId: number, token: string, rows: MediaSubtitleRow[]) {
-  const ready = rows.filter((r) => r.status === "ready");
-  return ready.map((r) => {
-    const lang = langLabel(r.lang);
-    const k = kindLabel(r.source_kind);
-    const extra = r.label ? ` · ${r.label}` : "";
-    return {
-      id: String(r.id),
-      language: r.lang || "und",
-      text: `${lang}（${k}）${extra}`,
-      url: `/api/v1/media/${mediaId}/subtitles/${r.id}/vtt?access_token=${encodeURIComponent(token)}`,
-      isDefault: false,
-    };
-  });
-}
 
 /** Maps backend `requireMediaAccess` / play handler error codes to user-readable text. */
 function playbackForbiddenMessage(code: string): string {
@@ -1147,13 +1101,18 @@ export default function PlayerPage() {
       // Clear progressive / AES-128 HLS: xgplayer (+ hls.js when needed).
       const useXgHlsPlugin =
         planMode === "hls_aes_128" || /\.m3u8(\?|#|$)/i.test(url) || /\/jit\/master\//i.test(url);
-      let textTrackList: ReturnType<typeof buildTextTrackList> = [];
+      let textTrackList: ReturnType<typeof buildTextTrackListWithPrefs>["list"] = [];
+      let textTrackDefaultOpen = false;
       if (mid) {
         try {
           const rows = await withTimeout(fetchMediaSubtitles(mid), 12_000, "subtitles");
-          textTrackList = buildTextTrackList(mid, token, rows);
+          const prefs = normalizePlayerPrefs(useAuthStore.getState().playerPrefs);
+          const built = buildTextTrackListWithPrefs(mid, token, rows, prefs);
+          textTrackList = built.list;
+          textTrackDefaultOpen = built.isDefaultOpen;
         } catch {
           textTrackList = [];
+          textTrackDefaultOpen = false;
         }
       }
       const options: any = {
@@ -1173,9 +1132,11 @@ export default function PlayerPage() {
       }
       if (textTrackList.length > 0) {
         options.plugins = [TextTrack];
+        const pp = normalizePlayerPrefs(useAuthStore.getState().playerPrefs);
         options.texttrack = {
           list: textTrackList,
-          isDefaultOpen: false,
+          isDefaultOpen: textTrackDefaultOpen,
+          style: buildXgTexttrackStyle(pp.subtitle_appearance),
         };
       }
       if (useXgHlsPlugin) {
@@ -1194,6 +1155,15 @@ export default function PlayerPage() {
       playerRef.current = new Player(options);
       const xg = playerRef.current;
       if (!xg) throw new Error("xgplayer init failed");
+      const applySubtitleLook = () => {
+        const root = (xg as { root?: HTMLElement }).root;
+        const pp = normalizePlayerPrefs(useAuthStore.getState().playerPrefs);
+        applyKnoxSubtitleCssVars(root ?? null, pp.subtitle_appearance);
+      };
+      applySubtitleLook();
+      xg.on("resize", applySubtitleLook);
+      window.setTimeout(applySubtitleLook, 80);
+      window.setTimeout(applySubtitleLook, 500);
       dbg("xgplayer init", { url, useXgHlsPlugin });
       xg.on("error", () => {
         dbgErr("xgplayer error event", { mid, url });
