@@ -49,6 +49,7 @@ import SearchPage from "./pages/Search";
 import MediaDetailPage from "./pages/MediaDetail";
 import ScrapeConfigPage from "./pages/ScrapeConfig";
 import AIProviderPage from "./pages/AIProvider";
+import SystemOptionsPage from "./pages/SystemOptions";
 import RequireAuth from "./routes/RequireAuth";
 import RequireAdmin from "./routes/RequireAdmin";
 import { fetchUserInfo, logout } from "./api/client";
@@ -182,6 +183,7 @@ function MainShell() {
     if (p.startsWith("/api-credentials")) return "API 凭证";
     if (p.startsWith("/users")) return "用户管理";
     if (p.startsWith("/console")) return "控制台";
+    if (p.startsWith("/system-options")) return "系统选项";
     if (p.startsWith("/scrape-config")) return "元数据提供者";
     if (p.startsWith("/ai-provider")) return "AI 提供商";
     return "";
@@ -439,6 +441,7 @@ export default function App() {
             <Route path="api-credentials" element={<ApiCredentialsPage />} />
             <Route path="users" element={<UsersPage />} />
             <Route path="console" element={<AdminConsolePage />} />
+            <Route path="system-options" element={<SystemOptionsPage />} />
             <Route path="scrape-config" element={<ScrapeConfigPage />} />
             <Route path="ai-provider" element={<AIProviderPage />} />
           </Route>

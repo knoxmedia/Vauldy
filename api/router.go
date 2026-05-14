@@ -185,6 +185,9 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 			adm.PUT("/schedule/task/:id", h.UpdateScheduledTask)
 			adm.DELETE("/schedule/task/:id", h.DeleteScheduledTask)
 			adm.POST("/schedule/task/:id/run", h.RunScheduledTask)
+			adm.GET("/admin/system-options", h.GetSystemOptions)
+			adm.PUT("/admin/system-options", h.PutSystemOptions)
+
 			adm.GET("/admin/overview", h.AdminOverview)
 			adm.GET("/admin/access-log", h.ListAccessLogs)
 			adm.GET("/admin/drm-license-audit", h.ListDRMLicenseAudits)

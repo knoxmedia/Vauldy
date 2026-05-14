@@ -1105,3 +1105,46 @@ export async function fetchKeyframeTasks(limit = 100) {
   const { data } = await api.get<{ items: KeyframeTask[] }>("/api/v1/keyframe/task", { params: { limit } });
   return data.items ?? [];
 }
+
+// --- System options (admin) ---
+
+export type SystemOptionsGeneral = {
+  display_language: string;
+  start_on_boot: boolean;
+  open_browser_on_first_start: boolean;
+  maintenance_mode: boolean;
+  cache_path: string;
+  auto_update_enabled: boolean;
+};
+
+export type SystemOptionsPlayback = {
+  home_stream_quality: string;
+  screen_orientation: string;
+};
+
+export type SystemOptionsTranscoder = {
+  quality: string;
+  temp_dir: string;
+  download_temp_dir: string;
+  throttle_buffer_seconds: number;
+  background_x264_preset: string;
+  disable_video_stream_transcoding: boolean;
+  max_cpu_concurrent: string;
+  max_background_concurrent: string;
+};
+
+export type SystemOptions = {
+  general: SystemOptionsGeneral;
+  playback: SystemOptionsPlayback;
+  transcoder: SystemOptionsTranscoder;
+};
+
+export async function fetchSystemOptions() {
+  const { data } = await api.get<SystemOptions>("/api/v1/admin/system-options");
+  return data;
+}
+
+export async function saveSystemOptions(payload: SystemOptions) {
+  const { data } = await api.put<{ ok: boolean; options: SystemOptions }>("/api/v1/admin/system-options", payload);
+  return data.options;
+}

@@ -436,6 +436,12 @@ CREATE TABLE IF NOT EXISTS api_client (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_api_client_client_id ON api_client(client_id);
+
+CREATE TABLE IF NOT EXISTS system_options (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    options_json TEXT NOT NULL DEFAULT '{}',
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 `
 
 func OpenSQLite(path string) (*sql.DB, error) {
@@ -502,6 +508,7 @@ func OpenSQLite(path string) (*sql.DB, error) {
 	_, _ = db.Exec(`ALTER TABLE user ADD COLUMN ui_locale TEXT DEFAULT 'zh'`)
 	_, _ = db.Exec(`ALTER TABLE user ADD COLUMN player_prefs_json TEXT DEFAULT ''`)
 	_, _ = db.Exec(`INSERT OR IGNORE INTO scrape_config (id) VALUES (1)`)
+	_, _ = db.Exec(`INSERT OR IGNORE INTO system_options (id, options_json) VALUES (1, '{}')`)
 	// Seed default AI provider configs.
 	seedAIProviders(db)
 	// Seed default scheduled tasks so scrape/subtitle/cleanup run automatically.

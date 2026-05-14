@@ -14,6 +14,7 @@ import {
   TeamOutlined,
   ScheduleOutlined,
   SearchOutlined,
+  SettingOutlined,
   StarOutlined,
   UnorderedListOutlined,
   VideoCameraOutlined,
@@ -87,6 +88,7 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
     if (path.startsWith("/api-credentials")) return ["api-credentials"];
     if (path.startsWith("/users")) return ["users"];
     if (path.startsWith("/console")) return ["console"];
+    if (path.startsWith("/system-options")) return ["system-options"];
     if (path.startsWith("/scrape-config")) return ["scrape-config"];
     if (path.startsWith("/ai-provider")) return ["ai-provider"];
     return [];
@@ -109,7 +111,8 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
         path.startsWith("/users") ||
         path.startsWith("/console") ||
         path.startsWith("/scrape-config") ||
-        path.startsWith("/ai-provider"))
+        path.startsWith("/ai-provider") ||
+        path.startsWith("/system-options"))
     ) {
       keys.push("admin-section");
     }
@@ -230,6 +233,15 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
             label: (
               <Link to="/console" onClick={onNavigate}>
                 控制台
+              </Link>
+            ),
+          },
+          {
+            key: "system-options",
+            icon: <SettingOutlined />,
+            label: (
+              <Link to="/system-options" onClick={onNavigate}>
+                系统选项
               </Link>
             ),
           },
