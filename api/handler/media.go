@@ -3,6 +3,7 @@ package handler
 import (
 	"database/sql"
 	"encoding/json"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -229,7 +230,11 @@ func (h *Handler) ScrapeMedia(c *gin.Context) {
 		return
 	}
 	var title, scraperName sql.NullString
-	if err := h.App.DB.QueryRow(`SELECT m.title, l.scraper FROM media m JOIN library l ON m.library_id = l.id WHERE m.id = ?`, id).Scan(&title, &scraperName); err != nil {
+	var libraryID int64
+	if err := h.App.DB.QueryRow(
+		`SELECT m.title, l.scraper, m.library_id FROM media m JOIN library l ON m.library_id = l.id WHERE m.id = ?`,
+		id,
+	).Scan(&title, &scraperName, &libraryID); err != nil {
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 			return
@@ -243,10 +248,25 @@ func (h *Handler) ScrapeMedia(c *gin.Context) {
 	if query == "" {
 		query = title.String
 	}
-	res, err := scraper.ScrapeWithConfig(query, scraperName.String, h.readScrapeConfig())
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	cfg := h.readLibraryScrapeConfig(libraryID)
+	res, err := scraper.ScrapeWithConfig(query, scraperName.String, cfg)
+	if res == nil {
+		res = &scraper.ScrapeResult{Title: query, Genres: []string{}, Extra: map[string]any{}}
+	}
+	var fileType string
+	_ = h.App.DB.QueryRow(`SELECT COALESCE(file_type,'') FROM media WHERE id = ?`, id).Scan(&fileType)
+	h.applyScrapeLocalImages(id, libraryID, fileType, cfg, res)
+	if !scraper.HasMeaningfulScrapeData(res) {
+		msg := scraper.NoDataFailureMessage(res)
+		if err != nil {
+			msg = scraper.FormatScrapeErrorMessage(err)
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": msg})
 		return
+	}
+	scraper.PreserveScrapeImagesFromExisting(res, existing.String)
+	if _, pErr := h.persistScrapeArtwork(id, res); pErr != nil {
+		log.Printf("scrape media artwork persist id=%d: %v", id, pErr)
 	}
 	patch := map[string]any{
 		"scrape": res,

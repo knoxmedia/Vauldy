@@ -3,13 +3,10 @@ package handler
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"math"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -255,77 +252,6 @@ func (h *Handler) enqueuePreviewTask(mediaID int64, fileType string) {
 	)
 }
 
-// capturePosterFromVideo extracts a local poster image and stores URL into media.meta_json.scrape.extra.poster.
-func (h *Handler) capturePosterFromVideo(mediaID int64, fileType string) {
-	if h == nil || h.App == nil || h.App.DB == nil || h.App.Config == nil || mediaID <= 0 || fileType != "video" {
-		return
-	}
-	ffmpegPath := strings.TrimSpace(h.App.Config.FFmpeg.FFmpegPath)
-	uploadDir := strings.TrimSpace(h.App.Config.Data.Upload)
-	if ffmpegPath == "" || uploadDir == "" {
-		return
-	}
-	var filePath sql.NullString
-	var duration sql.NullInt64
-	var metaRaw sql.NullString
-	if err := h.App.DB.QueryRow(
-		`SELECT file_path, COALESCE(duration,0), COALESCE(meta_json,'') FROM media WHERE id = ? LIMIT 1`,
-		mediaID,
-	).Scan(&filePath, &duration, &metaRaw); err != nil {
-		return
-	}
-	if strings.TrimSpace(filePath.String) == "" {
-		return
-	}
-	posterDir := filepath.Join(uploadDir, "posters")
-	if err := os.MkdirAll(posterDir, 0o755); err != nil {
-		return
-	}
-	posterFile := filepath.Join(posterDir, fmt.Sprintf("%d.jpg", mediaID))
-	posterURL := "/uploads/posters/" + fmt.Sprintf("%d.jpg", mediaID)
-
-	snapSec := 10
-	if duration.Int64 > 0 {
-		sec := int(duration.Int64 / 5) // 20% 处，通常比片头更稳
-		if sec < 10 {
-			sec = 10
-		}
-		if sec > 180 {
-			sec = 180
-		}
-		snapSec = sec
-	}
-	if out, err := exec.Command(
-		ffmpegPath, "-y", "-ss", strconv.Itoa(snapSec), "-i", filePath.String, "-frames:v", "1", "-q:v", "3", posterFile,
-	).CombinedOutput(); err != nil {
-		_ = out
-		return
-	}
-
-	var root map[string]any
-	if strings.TrimSpace(metaRaw.String) != "" {
-		_ = json.Unmarshal([]byte(metaRaw.String), &root)
-	}
-	if root == nil {
-		root = map[string]any{}
-	}
-	scrape, _ := root["scrape"].(map[string]any)
-	if scrape == nil {
-		scrape = map[string]any{}
-	}
-	extra, _ := scrape["extra"].(map[string]any)
-	if extra == nil {
-		extra = map[string]any{}
-	}
-	if strings.TrimSpace(fmt.Sprintf("%v", extra["poster"])) == "" {
-		extra["poster"] = posterURL
-	}
-	scrape["extra"] = extra
-	root["scrape"] = scrape
-	merged, _ := json.Marshal(root)
-	_, _ = h.App.DB.Exec(`UPDATE media SET meta_json = ? WHERE id = ?`, string(merged), mediaID)
-}
-
 func countScannableFiles(roots []string) int64 {
 	var total int64
 	for _, root := range roots {
@@ -343,20 +269,3 @@ func countScannableFiles(roots []string) int64 {
 	return total
 }
 
-func (h *Handler) reconcileInterruptedScanTasks() {
-	if h == nil || h.App == nil || h.App.DB == nil {
-		return
-	}
-	_, _ = h.App.DB.Exec(`
-		UPDATE scan_task
-		SET status = 'failed',
-		    cancelled = 1,
-		    error_message = CASE
-		      WHEN COALESCE(error_message,'') = '' THEN 'scan interrupted (service restarted)'
-		      ELSE error_message
-		    END,
-		    finished_at = CURRENT_TIMESTAMP,
-		    updated_at = CURRENT_TIMESTAMP
-		WHERE status = 'running'
-	`)
-}

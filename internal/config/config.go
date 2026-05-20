@@ -78,6 +78,9 @@ type DataConfig struct {
 	Chunks    string `yaml:"chunks"`
 	ATracks   string `yaml:"atracks"`
 	Keyframes string `yaml:"keyframes"`
+	// MetadataLibrary is the filesystem root for scraped posters/backdrops/logos (HTTP /metadata/library/…).
+	// Default: {dir}/metadata/library (e.g. /data/metadata/library when data.dir is /data).
+	MetadataLibrary string `yaml:"metadata_library"`
 	// Static is the filesystem root for HTTP path /static/ (e.g. PowerPlayer assets under static/powerplayer6/).
 	Static string `yaml:"static"`
 }
@@ -226,6 +229,9 @@ func Load(path string) (*Config, error) {
 	}
 	if c.Data.Static == "" {
 		c.Data.Static = filepath.Join(c.Data.Dir, "static")
+	}
+	if c.Data.MetadataLibrary == "" {
+		c.Data.MetadataLibrary = filepath.Join(c.Data.Dir, "metadata", "library")
 	}
 	if c.Security.TokenHours == 0 {
 		c.Security.TokenHours = 168
@@ -377,7 +383,7 @@ func (c *Config) Addr() string {
 }
 
 func (c *Config) EnsureDirs() error {
-	for _, d := range []string{c.Data.Dir, c.Data.Transcode, c.Data.Preview, c.Data.Subtitle, c.Data.Upload, c.Data.Chunks, c.Data.ATracks, c.Data.Keyframes, c.Data.Static} {
+	for _, d := range []string{c.Data.Dir, c.Data.Transcode, c.Data.Preview, c.Data.Subtitle, c.Data.Upload, c.Data.Chunks, c.Data.ATracks, c.Data.Keyframes, c.Data.Static, c.Data.MetadataLibrary} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return err
 		}

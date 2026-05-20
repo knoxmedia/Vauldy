@@ -15,14 +15,9 @@ import { Button, Dropdown, Empty, Pagination, Spin, message } from "antd";
 import type { ComponentType } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import {
-  MediaItem,
-  addPlaylistItem,
-  fetchFavorites,
-  mediaPosterSrc,
-  removeFavorite,
-} from "../api/client";
+import { MediaItem, addPlaylistItem, fetchFavorites, removeFavorite } from "../api/client";
 import AddToPlaylistModal from "../components/AddToPlaylistModal";
+import MediaPosterImg from "../components/MediaPosterImg";
 import { buildMediaMenuItems } from "../components/mediaMenuItems";
 import { readRecentPlaylists, rememberPlaylistAdded } from "../lib/recentPlaylists";
 import styles from "./Favorites.module.css";
@@ -428,16 +423,7 @@ export default function FavoritesPage() {
                       className={styles.listPosterInner}
                       data-selected={isListSelected ? "" : undefined}
                     >
-                      <img
-                        className={styles.listPosterImg}
-                        src={mediaPosterSrc(r)}
-                        alt=""
-                        loading="lazy"
-                        decoding="async"
-                        onError={(e) => {
-                          e.currentTarget.style.display = "none";
-                        }}
-                      />
+                      <MediaPosterImg item={r} className={styles.listPosterImg} />
                       {!bulkPick ? (
                         <button
                           type="button"
@@ -512,18 +498,14 @@ export default function FavoritesPage() {
                     }
                   }}
                 >
-                  <img
+                  <MediaPosterImg
+                    item={r}
                     className={styles.gridCoverImg}
-                    src={mediaPosterSrc(r)}
-                    alt=""
-                    loading="lazy"
-                    decoding="async"
+                    onLoadStart={(e) => {
+                      e.currentTarget.parentElement?.removeAttribute("data-cover-loaded");
+                    }}
                     onLoad={(e) => {
                       e.currentTarget.parentElement?.setAttribute("data-cover-loaded", "");
-                    }}
-                    onError={(ev) => {
-                      ev.currentTarget.style.display = "none";
-                      ev.currentTarget.parentElement?.removeAttribute("data-cover-loaded");
                     }}
                   />
                   <div className={styles.gridHoverShade} aria-hidden={bulkPick ? true : undefined}>

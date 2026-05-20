@@ -116,11 +116,21 @@ export function normalizeListPosterUrl(raw: string): string {
   return s.trim();
 }
 
+/** Server-generated frame capture when scrape poster is missing or failed to load. */
+export function localPosterSrc(id: number): string {
+  return `/uploads/posters/${id}.jpg`;
+}
+
+/** True when meta_json has a scraped poster URL (may still 404 at runtime). */
+export function hasScrapedPosterUrl(r: Pick<MediaItem, "poster_url">): boolean {
+  return Boolean(normalizeListPosterUrl(r.poster_url || ""));
+}
+
 /** Poster/thumbnail URL for grids: scraped poster or server-generated frame capture. */
 export function mediaPosterSrc(r: Pick<MediaItem, "id" | "poster_url">): string {
   const u = normalizeListPosterUrl(r.poster_url || "");
   if (u) return u;
-  return `/uploads/posters/${r.id}.jpg`;
+  return localPosterSrc(r.id);
 }
 
 export type HistoryItem = {
@@ -301,11 +311,29 @@ export async function fetchMediaStats(mediaId: number) {
   return data;
 }
 
+/** 继续观看：同一 media 只保留 update_at 最新的一条（与 API 去重一致，前端兜底）。 */
+export function dedupeUserHistory(items: HistoryItem[]): HistoryItem[] {
+  const out: HistoryItem[] = [];
+  const seenMedia = new Set<number>();
+  const seenFile = new Set<string>();
+  for (const h of items) {
+    if (h.media_id > 0) {
+      if (seenMedia.has(h.media_id)) continue;
+      seenMedia.add(h.media_id);
+    } else if (h.file_id) {
+      if (seenFile.has(h.file_id)) continue;
+      seenFile.add(h.file_id);
+    }
+    out.push(h);
+  }
+  return out;
+}
+
 export async function fetchUserHistory(limit = 24) {
   const { data } = await api.get<{ items?: HistoryItem[] }>("/api/v1/user/history", {
     params: { limit },
   });
-  return data?.items ?? [];
+  return dedupeUserHistory(data?.items ?? []);
 }
 
 export async function fetchFavorites() {
@@ -936,6 +964,11 @@ export async function saveAIProvider(
   await api.put(`/api/v1/ai-provider/${id}`, payload);
 }
 
+export async function testAIProvider(id: string) {
+  const { data } = await api.post<ScrapeProviderTestResult>(`/api/v1/ai-provider/${id}/test`);
+  return data;
+}
+
 export type ScrapeConfig = {
   enabled: number;
   providers: string[];
@@ -953,6 +986,7 @@ export type ScrapeTask = {
   year: number;
   status: string;
   progress: number;
+  fail_count?: number;
   message: string;
   created_at: string;
   started_at?: string;
@@ -982,6 +1016,18 @@ export async function saveScrapeConfig(payload: {
   api_keys: Record<string, string>;
 }) {
   await api.put("/api/v1/scrape/config", payload);
+}
+
+export type ScrapeProviderTestResult = {
+  ok: boolean;
+  message: string;
+};
+
+export async function testScrapeProvider(provider: string) {
+  const { data } = await api.post<ScrapeProviderTestResult>("/api/v1/scrape/config/test", {
+    provider,
+  });
+  return data;
 }
 
 export async function fetchScrapeTasks(limit = 100) {

@@ -27,12 +27,12 @@ type Handler struct {
 	AtrackWorker   *atrack.Worker
 	KeyframeWorker *keyframe.Worker
 	scanMu         sync.Mutex
+	scrapeRunMu    sync.Mutex
 	runningScans   map[int64]scanRuntime
 }
 
 func New(a *app.App, w *transcode.Worker, pkgw *transcode.PackageWorker, pw *preview.Worker, sub *subtitle.Service, u *upload.Service, instant *scheduler.Scheduler, sm *session.Manager, atw *atrack.Worker, kfw *keyframe.Worker) *Handler {
 	h := &Handler{App: a, Worker: w, PackageWorker: pkgw, PreviewWorker: pw, Subtitle: sub, Upload: u, Instant: instant, SessionManager: sm, AtrackWorker: atw, KeyframeWorker: kfw, runningScans: map[int64]scanRuntime{}}
-	h.reconcileInterruptedScanTasks()
 	return h
 }
 

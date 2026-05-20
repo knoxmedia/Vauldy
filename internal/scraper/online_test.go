@@ -49,6 +49,16 @@ func useMockOnlineHTTP(t *testing.T, h http.Handler) {
 func newProviderMux() *http.ServeMux {
 	mux := http.NewServeMux()
 
+	mux.HandleFunc("/3/configuration", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("api_key") == "" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"images": map[string]any{"base_url": "https://image.tmdb.org/t/p/"},
+		})
+	})
+
 	mux.HandleFunc("/3/search/multi", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"results": []map[string]any{
@@ -79,6 +89,25 @@ func newProviderMux() *http.ServeMux {
 			"Released":   "01 Jan 2020",
 			"imdbRating": "7.8",
 			"Genre":      "Drama, Mystery",
+		})
+	})
+
+	mux.HandleFunc("/search/subject/Inception", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"list": []map[string]any{
+				{
+					"name":     "Bangumi Name",
+					"name_cn":  "Bangumi CN",
+					"summary":  "bangumi summary",
+					"air_date": "2021-08-10",
+					"images": map[string]any{
+						"large": "https://bgm.test/large.jpg",
+					},
+					"rating": map[string]any{
+						"score": 7.5,
+					},
+				},
+			},
 		})
 	})
 
@@ -132,11 +161,35 @@ func newProviderMux() *http.ServeMux {
 	mux.HandleFunc("/j/subject_suggest", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode([]map[string]any{
 			{
-				"title":    "Mock Douban",
-				"year":     "2019",
-				"img":      "https://douban.test/poster.jpg",
+				"id":        "12345",
+				"title":     "Mock Douban",
+				"year":      "2019",
+				"type":      "movie",
+				"img":       "https://douban.test/poster.jpg",
 				"sub_title": "douban subtitle",
 			},
+		})
+	})
+	mux.HandleFunc("/j/subject_abstract", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"subject": map[string]any{
+				"title":      "Mock Douban",
+				"short_info": "douban overview",
+				"pic_url":    "https://douban.test/poster-large.jpg",
+				"rating":     map[string]any{"value": 8.2},
+			},
+		})
+	})
+
+	mux.HandleFunc("/v3/movies/27205", func(w http.ResponseWriter, r *http.Request) {
+		if strings.TrimSpace(r.Header.Get("api-key")) == "" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"movieposter":     []map[string]any{{"url": "https://fanart.test/poster.jpg"}},
+			"moviebackground": []map[string]any{{"url": "https://fanart.test/bg.jpg"}},
+			"hdmovielogo":     []map[string]any{{"url": "https://fanart.test/logo.png"}},
 		})
 	})
 
@@ -182,7 +235,7 @@ func TestProviderScrapers(t *testing.T) {
 	})
 
 	t.Run("douban", func(t *testing.T) {
-		res, err := scrapeDouban("TestMovie")
+		res, err := scrapeDouban("TestMovie", 0)
 		if err != nil {
 			t.Fatalf("scrapeDouban error: %v", err)
 		}
@@ -276,6 +329,49 @@ func TestClassifyProviderErrorCategories(t *testing.T) {
 	}
 }
 
+func TestScrapeOnlineImagesWhenMetadataFails(t *testing.T) {
+	useMockOnlineHTTP(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/3/search/multi"):
+			w.WriteHeader(http.StatusTooManyRequests)
+		case strings.HasPrefix(r.URL.Path, "/"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"Response":   "True",
+				"Title":      "Image Only",
+				"Plot":       "plot",
+				"Poster":     "https://ok/poster.jpg",
+				"Released":   "01 Jan 2023",
+				"imdbRating": "7.0",
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+
+	cfg := Config{
+		Providers:    []string{"tmdb"},
+		ImageSources: []string{"omdb"},
+		APIKeys: map[string]string{
+			"tmdb": "tmdb-key",
+			"omdb": "omdb-key",
+		},
+	}
+	res, err := ScrapeOnline("NoMetaMovie", "tmdb", cfg)
+	if err != nil {
+		t.Fatalf("expected success with images, got error: %v", err)
+	}
+	if res.Poster != "https://ok/poster.jpg" {
+		t.Fatalf("poster=%q want image from omdb", res.Poster)
+	}
+	if res.Overview != "" {
+		t.Fatalf("overview should be empty when metadata failed, got %q", res.Overview)
+	}
+	providerErrors, ok := res.Extra["provider_errors"].(map[string]map[string]string)
+	if !ok || providerErrors["tmdb"]["category"] != "quota_limited" {
+		t.Fatalf("expected tmdb metadata error, got %#v", res.Extra["provider_errors"])
+	}
+}
+
 func TestScrapeOnlineProviderErrorsSummary(t *testing.T) {
 	useMockOnlineHTTP(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -295,9 +391,12 @@ func TestScrapeOnlineProviderErrorsSummary(t *testing.T) {
 			"omdb": "omdb-key",
 		},
 	}
-	_, err := ScrapeOnline("NoResultMovie", "tmdb", cfg)
+	res, err := ScrapeOnline("NoResultMovie", "tmdb", cfg)
 	if err == nil {
 		t.Fatal("expected error, got nil")
+	}
+	if res == nil || res.Title != "NoResultMovie" {
+		t.Fatalf("expected partial result, got %#v", res)
 	}
 	msg := err.Error()
 	if !strings.Contains(msg, "all providers failed:") {
@@ -308,6 +407,38 @@ func TestScrapeOnlineProviderErrorsSummary(t *testing.T) {
 	}
 	if !strings.Contains(msg, "omdb:no_result") {
 		t.Fatalf("missing omdb no_result summary: %s", msg)
+	}
+}
+
+func TestScrapeOnlineManualSourceUsesConfiguredProviders(t *testing.T) {
+	useMockOnlineHTTP(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/") {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"Response":   "True",
+				"Title":      "Matched",
+				"Plot":       "plot",
+				"Poster":     "https://ok/poster.jpg",
+				"Released":   "01 Jan 2020",
+				"imdbRating": "7.0",
+				"Genre":      "Drama",
+			})
+		}
+	}))
+
+	cfg := Config{
+		Providers: []string{"omdb"},
+		APIKeys:   map[string]string{"omdb": "omdb-key"},
+	}
+	res, err := ScrapeOnline("Test Movie", "manual", cfg)
+	if err != nil {
+		t.Fatalf("ScrapeOnline(manual): %v", err)
+	}
+	if !HasMeaningfulScrapeData(res) {
+		t.Fatalf("expected data: %+v", res)
+	}
+	pe, _ := res.Extra["provider_errors"].(map[string]map[string]string)
+	if pe["manual"] != nil {
+		t.Fatalf("manual should not be treated as provider: %#v", pe)
 	}
 }
 

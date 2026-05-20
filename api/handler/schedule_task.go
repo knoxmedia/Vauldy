@@ -228,9 +228,12 @@ func (h *Handler) executeScheduledTask(taskType string, payload map[string]any) 
 		}
 		return fmt.Sprintf("已启动扫描任务 #%d", taskID), nil
 	case "scrape_run":
+		if !h.isScrapeEnabled() {
+			return "刮削已禁用，跳过执行", nil
+		}
 		limit := anyToInt(payload["limit"])
 		if limit <= 0 {
-			limit = 20
+			limit = scrapeWorkerBatchMax
 		}
 		done, failed := h.runScrapeTasksWithLimit(nil, limit)
 		return fmt.Sprintf("刮削执行完成：成功 %d，失败 %d", done, failed), nil

@@ -13,6 +13,7 @@ import (
 	"knox-media/cmd/scheduler"
 	"knox-media/internal/app"
 	"knox-media/internal/atrack"
+	"knox-media/internal/metadatalib"
 	"knox-media/internal/config"
 	"knox-media/internal/jit/session"
 	"knox-media/internal/keyframe"
@@ -32,9 +33,11 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 	r.Static("/uploads", cfg.Data.Upload)
 	r.Static("/atracks", cfg.Data.ATracks)
 	r.Static("/static", cfg.Data.Static)
+	r.Static(metadatalib.PublicURLPrefix, cfg.Data.MetadataLibrary)
 
 	h := handler.New(application, worker, packageWorker, previewWorker, sub, up, instant, sm, atw, kfw)
 	go h.StartScheduleLoop(context.Background())
+	go h.StartScrapeTaskLoop(context.Background())
 
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "knox-media"})
@@ -146,11 +149,14 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 
 			adm.GET("/scrape/config", h.GetScrapeConfig)
 			adm.PUT("/scrape/config", h.SaveScrapeConfig)
+			adm.POST("/scrape/config/test", h.TestScrapeProvider)
 			adm.GET("/ai-provider", h.ListAIProviders)
 			adm.PUT("/ai-provider/:id", h.SaveAIProvider)
+			adm.POST("/ai-provider/:id/test", h.TestAIProvider)
 			adm.GET("/scrape/task", h.ListScrapeTasks)
 			adm.POST("/scrape/task", h.CreateScrapeTasks)
 			adm.POST("/scrape/task/run", h.RunScrapeTasks)
+			adm.POST("/scrape/artwork/backfill", h.BackfillScrapeArtwork)
 			adm.GET("/scrape/history", h.ListScrapeHistory)
 			adm.GET("/scrape/tmdb/images", h.SearchTMDbImages)
 

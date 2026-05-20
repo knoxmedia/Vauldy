@@ -4,15 +4,18 @@ import {
   message,
   Modal,
   Space,
+  Spin,
   Statistic,
   Switch,
   Table,
   Tag,
+  Typography,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
+import { ApiOutlined, SettingOutlined } from "@ant-design/icons";
 import { useEffect, useState } from "react";
 import type { AIProvider as AIProviderType } from "../api/client";
-import { fetchAIProviders, saveAIProvider } from "../api/client";
+import { fetchAIProviders, saveAIProvider, testAIProvider } from "../api/client";
 
 function formatLastUsed(v?: string) {
   if (!v) return "从未使用";
@@ -32,6 +35,10 @@ interface TableRow {
   last_used_at?: string;
 }
 
+type ProviderTestState =
+  | { status: "loading" }
+  | { status: "done"; ok: boolean; message: string };
+
 export default function AIProviderPage() {
   const [rows, setRows] = useState<TableRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -41,6 +48,8 @@ export default function AIProviderPage() {
   const [editModel, setEditModel] = useState("");
   const [editEnabled, setEditEnabled] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [testResults, setTestResults] = useState<Record<string, ProviderTestState>>({});
+  const [testingId, setTestingId] = useState<string | null>(null);
 
   const load = () => {
     setLoading(true);
@@ -77,6 +86,25 @@ export default function AIProviderPage() {
     setEditEnabled(r.enabled);
   };
 
+  const runProviderTest = async (id: string) => {
+    setTestingId(id);
+    setTestResults((prev) => ({ ...prev, [id]: { status: "loading" } }));
+    try {
+      const result = await testAIProvider(id);
+      setTestResults((prev) => ({
+        ...prev,
+        [id]: { status: "done", ok: result.ok, message: result.message },
+      }));
+    } catch {
+      setTestResults((prev) => ({
+        ...prev,
+        [id]: { status: "done", ok: false, message: "测试请求失败" },
+      }));
+    } finally {
+      setTestingId(null);
+    }
+  };
+
   const handleSave = async () => {
     if (!editing) return;
     setSaving(true);
@@ -101,7 +129,28 @@ export default function AIProviderPage() {
     {
       title: "提供商",
       dataIndex: "name",
-      width: 140,
+      width: 180,
+      render: (name: string, r) => {
+        const test = testResults[r.id];
+        return (
+          <div>
+            <div>{name}</div>
+            {test?.status === "loading" ? (
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                <Spin size="small" style={{ marginRight: 6 }} />
+                测试中…
+              </Typography.Text>
+            ) : test?.status === "done" ? (
+              <Typography.Text
+                type={test.ok ? "success" : "danger"}
+                style={{ fontSize: 12, display: "block", marginTop: 4 }}
+              >
+                {test.message}
+              </Typography.Text>
+            ) : null}
+          </div>
+        );
+      },
     },
     {
       title: "状态",
@@ -113,6 +162,7 @@ export default function AIProviderPage() {
     {
       title: "API 地址",
       dataIndex: "api_url",
+      width: 240,
       ellipsis: true,
     },
     {
@@ -149,12 +199,28 @@ export default function AIProviderPage() {
     {
       title: "操作",
       key: "actions",
-      width: 100,
+      width: 180,
+      fixed: "right",
       align: "center",
+      onCell: () => ({ style: { whiteSpace: "nowrap" } }),
       render: (_, r) => (
-        <Button size="small" onClick={() => openEdit(r)}>
-          设置
-        </Button>
+        <Space size={4}>
+          <Button
+            size="small"
+            icon={<SettingOutlined />}
+            onClick={() => openEdit(r)}
+          >
+            设置
+          </Button>
+          <Button
+            size="small"
+            icon={<ApiOutlined />}
+            loading={testingId === r.id}
+            onClick={() => runProviderTest(r.id)}
+          >
+            测试
+          </Button>
+        </Space>
       ),
     },
   ];
@@ -167,6 +233,7 @@ export default function AIProviderPage() {
         dataSource={rows}
         pagination={false}
         columns={columns}
+        scroll={{ x: 1370 }}
       />
 
       <Modal

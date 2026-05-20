@@ -1,0 +1,47 @@
+package scraper
+
+import "testing"
+
+func TestParseMediaFilenameChinese(t *testing.T) {
+	cases := []struct {
+		raw         string
+		wantTitle   string
+		wantAlt     string
+		wantYear    int
+	}{
+		{"老炮儿HD中英双字", "老炮儿", "", 0},
+		{"老炮儿.HD.中英双字", "老炮儿", "", 0},
+		{"老炮儿.2015.HD.中英双字.mkv", "老炮儿", "", 2015},
+		{"[yyh3d.com]采花和尚.Satyr Monks.1994.LD_D9.x264.mkv", "采花和尚", "Satyr Monks", 1994},
+		{"01届.《翼》-《Wings》-1927-1929.mkv", "翼", "Wings", 1927},
+		{"蜡笔小新：灼热的春日部舞者.2024.1080p.mkv", "蜡笔小新: 灼热的春日部舞者", "", 2024},
+		{"[电影天堂www.dytt8899.com]爱有来生-2009_HD国语中字.mp4", "爱有来生", "", 2009},
+	}
+	for _, tc := range cases {
+		got := ParseMediaFilename(tc.raw)
+		if got.Title != tc.wantTitle || got.TitleAlt != tc.wantAlt || got.Year != tc.wantYear {
+			t.Fatalf("%q => %+v want title=%q alt=%q year=%d", tc.raw, got, tc.wantTitle, tc.wantAlt, tc.wantYear)
+		}
+	}
+}
+
+func TestParseMediaFilenameDyttSiteTag(t *testing.T) {
+	raw := "[电影天堂www.dytt8899.com]爱有来生-2009_HD国语中字.mp4"
+	got := ParseMediaFilename(raw)
+	if got.Title != "爱有来生" {
+		t.Fatalf("title=%q year=%d want 爱有来生 2009", got.Title, got.Year)
+	}
+	if got.Year != 2009 {
+		t.Fatalf("year=%d want 2009", got.Year)
+	}
+	if NormalizeTitle(raw) != "爱有来生" {
+		t.Fatalf("NormalizeTitle=%q", NormalizeTitle(raw))
+	}
+}
+
+func TestExtractSearchTermsUsesFilenameParser(t *testing.T) {
+	k, alt, y := ExtractSearchTerms("老炮儿HD中英双字")
+	if k != "老炮儿" || alt != "" || y != 0 {
+		t.Fatalf("got %q alt=%q year=%d", k, alt, y)
+	}
+}

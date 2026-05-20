@@ -42,7 +42,47 @@ type SortOrder = "asc" | "desc";
 type TableColKey = "title" | "year" | "release_date" | "duration" | "last_play" | "quality" | "bitrate" | "added" | "type";
 
 const BROWSE_PREFS_KEY = "knox.browse.prefs.v1";
+/** Per-library view mode (poster / thumb / list / table). */
+const BROWSE_VIEW_MODE_KEY = "knox.browse.viewModeByLibrary.v1";
 const TABLE_PAGE_SIZE = 20;
+
+function browseLibraryKey(libraryId: number | undefined): string {
+  return libraryId != null ? String(libraryId) : "_all";
+}
+
+function isViewMode(v: unknown): v is ViewMode {
+  return v === "poster" || v === "thumb" || v === "list" || v === "table";
+}
+
+function readViewModeStore(): Record<string, ViewMode> {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.localStorage.getItem(BROWSE_VIEW_MODE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const out: Record<string, ViewMode> = {};
+    for (const [k, v] of Object.entries(parsed)) {
+      if (isViewMode(v)) out[k] = v;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function readBrowseViewMode(libraryId: number | undefined): ViewMode {
+  const key = browseLibraryKey(libraryId);
+  const stored = readViewModeStore()[key];
+  if (stored) return stored;
+  return readBrowsePrefs()?.viewMode ?? "table";
+}
+
+function writeBrowseViewMode(libraryId: number | undefined, mode: ViewMode): void {
+  if (typeof window === "undefined") return;
+  const store = readViewModeStore();
+  store[browseLibraryKey(libraryId)] = mode;
+  window.localStorage.setItem(BROWSE_VIEW_MODE_KEY, JSON.stringify(store));
+}
 
 const TABLE_COL_SPECS: { key: TableColKey; label: string; sortField: SortField; widthPx: number }[] = [
   { key: "title", label: "标题", sortField: "title", widthPx: 0 },
@@ -90,7 +130,7 @@ function displayYear(r: MediaItem): string | number {
 }
 
 function readBrowsePrefs(): {
-  viewMode: ViewMode;
+  viewMode?: ViewMode;
   sortField: SortField;
   sortOrder: SortOrder;
   tableVisibleCols?: TableColKey[];
@@ -105,9 +145,7 @@ function readBrowsePrefs(): {
       sortOrder?: SortOrder;
       tableVisibleCols?: TableColKey[];
     };
-    const viewMode: ViewMode = ["poster", "thumb", "list", "table"].includes(String(parsed.viewMode))
-      ? (parsed.viewMode as ViewMode)
-      : "table";
+    const viewMode: ViewMode | undefined = isViewMode(parsed.viewMode) ? parsed.viewMode : undefined;
     const sortField: SortField = [
       "title",
       "added",
@@ -123,7 +161,7 @@ function readBrowsePrefs(): {
       : "added";
     const sortOrder: SortOrder = parsed.sortOrder === "asc" || parsed.sortOrder === "desc" ? parsed.sortOrder : "desc";
     const tableVisibleCols = normalizeTableVisibleCols(parsed.tableVisibleCols);
-    return { viewMode, sortField, sortOrder, tableVisibleCols };
+    return { viewMode, sortField, sortOrder, tableVisibleCols: tableVisibleCols };
   } catch {
     return null;
   }
@@ -144,7 +182,7 @@ export default function BrowsePage() {
 
   const [rows, setRows] = useState<MediaItem[]>([]);
   const [loading, setLoading] = useState(false);
-  const [viewMode, setViewMode] = useState<ViewMode>(() => readBrowsePrefs()?.viewMode ?? "table");
+  const [viewMode, setViewMode] = useState<ViewMode>(() => readBrowseViewMode(libFromUrl));
   const [sortField, setSortField] = useState<SortField>(() => readBrowsePrefs()?.sortField ?? "added");
   const [sortOrder, setSortOrder] = useState<SortOrder>(() => readBrowsePrefs()?.sortOrder ?? "desc");
   const [viewModeMenuOpen, setViewModeMenuOpen] = useState(false);
@@ -185,17 +223,26 @@ export default function BrowsePage() {
   }, [sortParam]);
 
   useEffect(() => {
+    setViewMode(readBrowseViewMode(libFromUrl));
+  }, [libFromUrl]);
+
+  useEffect(() => {
+    writeBrowseViewMode(libFromUrl, viewMode);
+    // Persist only when viewMode changes; library switch restores via the effect above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- libFromUrl is read from the render that changed viewMode
+  }, [viewMode]);
+
+  useEffect(() => {
     if (typeof window === "undefined") return;
     window.localStorage.setItem(
       BROWSE_PREFS_KEY,
       JSON.stringify({
-        viewMode,
         sortField,
         sortOrder,
         tableVisibleCols,
       })
     );
-  }, [viewMode, sortField, sortOrder, tableVisibleCols]);
+  }, [sortField, sortOrder, tableVisibleCols]);
 
   const displayRows = useMemo<MediaItem[]>(() => {
     if (!qParam) return rows;

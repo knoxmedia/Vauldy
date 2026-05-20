@@ -345,6 +345,7 @@ CREATE TABLE IF NOT EXISTS scrape_task (
     year INTEGER,
     status TEXT DEFAULT 'waiting',
     progress INTEGER DEFAULT 0,
+    fail_count INTEGER DEFAULT 0,
     message TEXT,
     created_by INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -507,6 +508,7 @@ func OpenSQLite(path string) (*sql.DB, error) {
 	_, _ = db.Exec(`ALTER TABLE user ADD COLUMN avatar_url TEXT DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE user ADD COLUMN ui_locale TEXT DEFAULT 'zh'`)
 	_, _ = db.Exec(`ALTER TABLE user ADD COLUMN player_prefs_json TEXT DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE scrape_task ADD COLUMN fail_count INTEGER DEFAULT 0`)
 	_, _ = db.Exec(`INSERT OR IGNORE INTO scrape_config (id) VALUES (1)`)
 	_, _ = db.Exec(`INSERT OR IGNORE INTO system_options (id, options_json) VALUES (1, '{}')`)
 	// Seed default AI provider configs.

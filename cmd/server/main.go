@@ -60,6 +60,7 @@ func main() {
 		log.Fatalf("db: %v", err)
 	}
 	defer db.Close()
+	store.ResetInterruptedTasks(db)
 
 	if err := seedUsers(db); err != nil {
 		log.Fatalf("seed: %v", err)
@@ -290,7 +291,7 @@ func enqueueAutoTasksOnMediaAdded(db *sql.DB, cfg *config.Config, subSvc *subtit
 
 func enqueueAutoScrapeTask(db *sql.DB, mediaID int64) {
 	var exists int
-	_ = db.QueryRow(`SELECT COUNT(1) FROM scrape_task WHERE media_id = ? AND status IN ('waiting','running')`, mediaID).Scan(&exists)
+	_ = db.QueryRow(`SELECT COUNT(1) FROM scrape_task WHERE media_id = ? AND status IN ('waiting','running','failed','abandoned')`, mediaID).Scan(&exists)
 	if exists > 0 {
 		return
 	}

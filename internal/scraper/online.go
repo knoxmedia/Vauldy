@@ -14,13 +14,15 @@ import (
 var onlineHTTP = &http.Client{Timeout: 12 * time.Second}
 
 func ScrapeOnline(title, scraperName string, cfg Config) (*ScrapeResult, error) {
-	keyword, year := ExtractSearch(title)
+	keyword, altKeyword, year := ExtractSearchTerms(title)
 	if keyword == "" {
 		keyword = title
 	}
 	providers := cfg.Providers
-	if len(providers) == 0 {
-		providers = []string{"tmdb", "omdb", "bangumi", "tvdb", "douban", "fanart"}
+	if s := strings.ToLower(strings.TrimSpace(scraperName)); s != "" && !isTaskSourceLabel(s) {
+		providers = []string{s}
+	} else {
+		providers = orderProvidersForKeyword(cfg.Providers, keyword)
 	}
 	out := &ScrapeResult{
 		Source:  "online-aggregate",
@@ -28,70 +30,208 @@ func ScrapeOnline(title, scraperName string, cfg Config) (*ScrapeResult, error) 
 		Title:   keyword,
 		Genres:  []string{},
 		Extra: map[string]any{
-			"providers":      providers,
-			"search_keyword": keyword,
-			"search_year":    year,
+			"providers":           providers,
+			"image_sources":       cfg.ImageSources,
+			"search_keyword":      keyword,
+			"search_keyword_alt":  altKeyword,
+			"search_year":         year,
+			"search_raw":          title,
 		},
 	}
-	_ = scraperName
-
 	var got bool
 	providerErrors := map[string]map[string]string{}
 	for _, p := range providers {
 		name := strings.ToLower(strings.TrimSpace(p))
-		switch name {
-		case "tmdb":
-			if r, err := scrapeTMDB(keyword, year, cfg.APIKeys["tmdb"]); err == nil && r != nil {
-				mergeResult(out, r)
-				got = true
-			} else if err != nil {
-				providerErrors[name] = classifyProviderError(name, err)
-			}
-		case "omdb":
-			if r, err := scrapeOMDb(keyword, year, cfg.APIKeys["omdb"]); err == nil && r != nil {
-				mergeResult(out, r)
-				got = true
-			} else if err != nil {
-				providerErrors[name] = classifyProviderError(name, err)
-			}
-		case "bangumi":
-			if r, err := scrapeBangumi(keyword); err == nil && r != nil {
-				mergeResult(out, r)
-				got = true
-			} else if err != nil {
-				providerErrors[name] = classifyProviderError(name, err)
-			}
-		case "tvdb":
-			if r, err := scrapeTVDB(keyword, year, cfg.APIKeys["tvdb"]); err == nil && r != nil {
-				mergeResult(out, r)
-				got = true
-			} else if err != nil {
-				providerErrors[name] = classifyProviderError(name, err)
-			}
-		case "douban":
-			if r, err := scrapeDouban(keyword); err == nil && r != nil {
-				mergeResult(out, r)
-				got = true
-			} else if err != nil {
-				providerErrors[name] = classifyProviderError(name, err)
-			}
-		case "fanart":
-			tmdbID := fmt.Sprint(out.Extra["tmdb_id"])
-			if r, err := scrapeFanart(tmdbID, cfg.APIKeys["fanart"]); err == nil && r != nil {
-				mergeResult(out, r)
-				got = true
-			} else if err != nil {
-				providerErrors[name] = classifyProviderError(name, err)
-			}
+		if !isMetadataProvider(name) {
+			continue
+		}
+		r, err := scrapeProviderMetadata(name, keyword, altKeyword, year, cfg, out)
+		if err == nil && r != nil {
+			mergeMetadataResult(out, r)
+			got = true
+		} else if err != nil {
+			providerErrors[name] = classifyProviderError(name, err)
 		}
 	}
 	if len(providerErrors) > 0 {
 		out.Extra["provider_errors"] = providerErrors
 	}
-	if !got {
-		return nil, fmt.Errorf("all providers failed: %s", summarizeProviderErrors(providerErrors))
+	applyImageSources(out, keyword, year, cfg)
+	if imgErrs, ok := out.Extra["image_provider_errors"].(map[string]map[string]string); ok && len(imgErrs) > 0 {
+		if pe, ok := out.Extra["provider_errors"].(map[string]map[string]string); ok {
+			for k, v := range imgErrs {
+				pe[k] = v
+			}
+		} else {
+			out.Extra["provider_errors"] = imgErrs
+		}
+	}
+	if !got && !hasScrapedImages(out) {
+		pe, _ := out.Extra["provider_errors"].(map[string]map[string]string)
+		return out, fmt.Errorf("all providers failed: %s", summarizeProviderErrors(pe))
 	}
 	return out, nil
+}
+
+// isTaskSourceLabel reports scrape_task.source values that are not metadata provider names.
+func isTaskSourceLabel(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "auto", "auto-scan", "manual":
+		return true
+	default:
+		return false
+	}
+}
+
+func hasScrapedImages(out *ScrapeResult) bool {
+	if out == nil {
+		return false
+	}
+	return out.Poster != "" || out.Backdrop != "" || out.Logo != ""
+}
+
+func isMetadataProvider(name string) bool {
+	switch name {
+	case "embedded", "screen_grabber":
+		return false
+	case "ai":
+		return true
+	default:
+		return true
+	}
+}
+
+func isOnlineImageProvider(name string) bool {
+	switch name {
+	case "tmdb", "omdb", "bangumi", "tvdb", "douban", "fanart":
+		return true
+	default:
+		return false
+	}
+}
+
+func scrapeProviderMetadata(name, keyword, altKeyword string, year int, cfg Config, out *ScrapeResult) (*ScrapeResult, error) {
+	keys := cfg.APIKeys
+	switch name {
+	case "tmdb":
+		return scrapeTMDBWithAlt(keyword, altKeyword, year, keys["tmdb"])
+	case "omdb":
+		return scrapeOMDbWithAlt(keyword, altKeyword, year, keys["omdb"])
+	case "bangumi":
+		return scrapeBangumi(keyword)
+	case "tvdb":
+		return scrapeTVDBWithAlt(keyword, altKeyword, year, keys["tvdb"])
+	case "douban":
+		return scrapeDouban(keyword, year)
+	case "fanart":
+		tmdbID := fmt.Sprint(out.Extra["tmdb_id"])
+		return scrapeFanart(tmdbID, keys["fanart"])
+	case "ai":
+		rawTitle := ""
+		if out != nil && out.Extra != nil {
+			if v, ok := out.Extra["search_raw"].(string); ok {
+				rawTitle = v
+			}
+		}
+		return scrapeAI(keyword, altKeyword, year, cfg.AIProviders, rawTitle)
+	default:
+		return nil, fmt.Errorf("%s: unsupported metadata provider", name)
+	}
+}
+
+func scrapeProviderImages(name, keyword string, year int, keys map[string]string, out *ScrapeResult) (*ScrapeResult, error) {
+	switch name {
+	case "tmdb":
+		return scrapeTMDB(keyword, year, keys["tmdb"])
+	case "omdb":
+		return scrapeOMDb(keyword, year, keys["omdb"])
+	case "bangumi":
+		return scrapeBangumi(keyword)
+	case "tvdb":
+		return scrapeTVDB(keyword, year, keys["tvdb"])
+	case "douban":
+		return scrapeDouban(keyword, year)
+	case "fanart":
+		tmdbID := fmt.Sprint(out.Extra["tmdb_id"])
+		return scrapeFanart(tmdbID, keys["fanart"])
+	default:
+		return nil, fmt.Errorf("%s: unsupported image provider", name)
+	}
+}
+
+func applyImageSources(out *ScrapeResult, keyword string, year int, cfg Config) {
+	sources := cfg.ImageSources
+	if len(sources) == 0 {
+		sources = []string{"tmdb", "omdb", "screen_grabber", "embedded"}
+	}
+	if out.Extra == nil {
+		out.Extra = map[string]any{}
+	}
+	out.Extra["image_sources"] = sources
+	imageErrors := map[string]map[string]string{}
+	for _, p := range sources {
+		name := strings.ToLower(strings.TrimSpace(p))
+		if !isOnlineImageProvider(name) {
+			continue
+		}
+		if out.Poster != "" && out.Backdrop != "" && out.Logo != "" {
+			break
+		}
+		r, err := scrapeProviderImages(name, keyword, year, cfg.APIKeys, out)
+		if err == nil && r != nil {
+			mergeImageResult(out, r)
+		} else if err != nil {
+			imageErrors[name] = classifyProviderError(name, err)
+		}
+	}
+	if len(imageErrors) > 0 {
+		out.Extra["image_provider_errors"] = imageErrors
+	}
+}
+
+func scrapeTMDBWithAlt(keyword, altKeyword string, year int, apiKey string) (*ScrapeResult, error) {
+	res, err := scrapeTMDB(keyword, year, apiKey)
+	if err == nil {
+		return res, nil
+	}
+	alt := strings.TrimSpace(altKeyword)
+	if alt == "" || strings.EqualFold(alt, keyword) {
+		return nil, err
+	}
+	if res, altErr := scrapeTMDB(alt, year, apiKey); altErr == nil {
+		return res, nil
+	}
+	return nil, err
+}
+
+func scrapeOMDbWithAlt(keyword, altKeyword string, year int, apiKey string) (*ScrapeResult, error) {
+	res, err := scrapeOMDb(keyword, year, apiKey)
+	if err == nil {
+		return res, nil
+	}
+	alt := strings.TrimSpace(altKeyword)
+	if alt == "" || strings.EqualFold(alt, keyword) {
+		return nil, err
+	}
+	if res, altErr := scrapeOMDb(alt, year, apiKey); altErr == nil {
+		return res, nil
+	}
+	return nil, err
+}
+
+func scrapeTVDBWithAlt(keyword, altKeyword string, year int, keyRaw string) (*ScrapeResult, error) {
+	res, err := scrapeTVDB(keyword, year, keyRaw)
+	if err == nil {
+		return res, nil
+	}
+	alt := strings.TrimSpace(altKeyword)
+	if alt == "" || strings.EqualFold(alt, keyword) {
+		return nil, err
+	}
+	if res, altErr := scrapeTVDB(alt, year, keyRaw); altErr == nil {
+		return res, nil
+	}
+	return nil, err
 }
 
 func scrapeTMDB(keyword string, year int, apiKey string) (*ScrapeResult, error) {
@@ -205,12 +345,12 @@ func scrapeBangumi(keyword string) (*ScrapeResult, error) {
 	}
 	var resp struct {
 		List []struct {
-			Name      string `json:"name"`
-			NameCN    string `json:"name_cn"`
-			Summary   string `json:"summary"`
-			AirDate   string `json:"air_date"`
-			Images    struct {
-				Large string `json:"large"`
+			Name    string `json:"name"`
+			NameCN  string `json:"name_cn"`
+			Summary string `json:"summary"`
+			AirDate string `json:"air_date"`
+			Images  struct {
+				Large  string `json:"large"`
 				Common string `json:"common"`
 			} `json:"images"`
 			Rating struct {
@@ -295,8 +435,8 @@ func scrapeTVDB(keyword string, year int, keyRaw string) (*ScrapeResult, error) 
 	}
 	var s struct {
 		Data []struct {
-			Name     string `json:"name"`
-			Overview string `json:"overview"`
+			Name       string `json:"name"`
+			Overview   string `json:"overview"`
 			FirstAired string `json:"firstAired"`
 		} `json:"data"`
 	}
@@ -312,35 +452,138 @@ func scrapeTVDB(keyword string, year int, keyRaw string) (*ScrapeResult, error) 
 	}, nil
 }
 
-func scrapeDouban(keyword string) (*ScrapeResult, error) {
-	u := "https://movie.douban.com/j/subject_suggest?q=" + url.QueryEscape(keyword)
-	b, err := httpGetJSON(u, map[string]string{
-		"User-Agent": "Mozilla/5.0",
-		"Referer":    "https://movie.douban.com/",
-	})
+func scrapeDouban(keyword string, year int) (*ScrapeResult, error) {
+	item, err := searchDoubanBest(keyword, year)
+	if err != nil {
+		return nil, err
+	}
+	overview := item.SubTitle
+	rating := item.Rating
+	if item.ID != "" {
+		if detail, dErr := fetchDoubanAbstract(item.ID); dErr == nil {
+			if detail.Overview != "" {
+				overview = detail.Overview
+			}
+			if detail.Rating > 0 {
+				rating = detail.Rating
+			}
+			if detail.Poster != "" {
+				item.Img = detail.Poster
+			}
+		}
+	}
+	return &ScrapeResult{
+		Source:      "douban",
+		Title:       item.Title,
+		Overview:    overview,
+		Poster:      item.Img,
+		ReleaseDate: strconv.Itoa(item.Year),
+		Rating:      rating,
+		Extra: map[string]any{
+			"poster":    item.Img,
+			"douban_id": item.ID,
+		},
+	}, nil
+}
+
+type doubanSuggestItem struct {
+	ID       string
+	Title    string
+	Year     int
+	Img      string
+	SubTitle string
+	Rating   float64
+}
+
+func searchDoubanBest(keyword string, year int) (*doubanSuggestItem, error) {
+	params := url.Values{}
+	params.Set("q", keyword)
+	params.Set("count", "5")
+	u := "https://movie.douban.com/j/subject_suggest?" + params.Encode()
+	b, err := httpGetJSON(u, doubanRequestHeaders())
 	if err != nil {
 		return nil, err
 	}
 	var items []struct {
-		Title   string `json:"title"`
-		Year    string `json:"year"`
-		Img     string `json:"img"`
+		ID       string `json:"id"`
+		Title    string `json:"title"`
+		Year     string `json:"year"`
+		Img      string `json:"img"`
 		SubTitle string `json:"sub_title"`
+		Type     string `json:"type"`
 	}
 	if json.Unmarshal(b, &items) != nil || len(items) == 0 {
+		if year > 0 {
+			return searchDoubanBest(keyword, 0)
+		}
 		return nil, fmt.Errorf("douban empty")
 	}
-	x := items[0]
-	return &ScrapeResult{
-		Source:      "douban",
-		Title:       x.Title,
-		Overview:    x.SubTitle,
-		Poster:      x.Img,
-		ReleaseDate: x.Year,
-		Extra: map[string]any{
-			"poster": x.Img,
-		},
+	for _, x := range items {
+		if x.Type != "" && x.Type != "movie" && x.Type != "tv" {
+			continue
+		}
+		yearInt, _ := strconv.Atoi(strings.TrimSpace(x.Year))
+		if year > 0 && yearInt > 0 && absInt(yearInt-year) > 1 {
+			continue
+		}
+		return &doubanSuggestItem{
+			ID: x.ID, Title: x.Title, Year: yearInt, Img: x.Img, SubTitle: x.SubTitle,
+		}, nil
+	}
+	if year > 0 {
+		return searchDoubanBest(keyword, 0)
+	}
+	return nil, fmt.Errorf("douban empty")
+}
+
+type doubanAbstract struct {
+	Overview string
+	Rating   float64
+	Poster   string
+}
+
+func fetchDoubanAbstract(subjectID string) (doubanAbstract, error) {
+	u := "https://movie.douban.com/j/subject_abstract?subject_id=" + url.QueryEscape(subjectID)
+	b, err := httpGetJSON(u, doubanRequestHeaders())
+	if err != nil {
+		return doubanAbstract{}, err
+	}
+	var resp struct {
+		Subject struct {
+			Title   string   `json:"title"`
+			Intro   string   `json:"short_info"`
+			Genres  []string `json:"genres"`
+			PicURL  string   `json:"pic_url"`
+			Rating  struct {
+				Value float64 `json:"value"`
+			} `json:"rating"`
+		} `json:"subject"`
+	}
+	if json.Unmarshal(b, &resp) != nil {
+		return doubanAbstract{}, fmt.Errorf("douban parse")
+	}
+	return doubanAbstract{
+		Overview: resp.Subject.Intro,
+		Rating:   resp.Subject.Rating.Value,
+		Poster:   resp.Subject.PicURL,
 	}, nil
+}
+
+func doubanRequestHeaders() map[string]string {
+	return map[string]string{
+		"User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+		"Referer":         "https://movie.douban.com/",
+		"Accept":          "application/json, text/javascript, */*; q=0.01",
+		"Accept-Language": "zh-CN,zh;q=0.9",
+		"X-Requested-With": "XMLHttpRequest",
+	}
+}
+
+func absInt(n int) int {
+	if n < 0 {
+		return -n
+	}
+	return n
 }
 
 func scrapeFanart(tmdbID, apiKey string) (*ScrapeResult, error) {
@@ -394,7 +637,7 @@ func httpGetJSON(u string, headers map[string]string) ([]byte, error) {
 	return io.ReadAll(resp.Body)
 }
 
-func mergeResult(dst *ScrapeResult, src *ScrapeResult) {
+func mergeMetadataResult(dst, src *ScrapeResult) {
 	if src == nil || dst == nil {
 		return
 	}
@@ -403,15 +646,6 @@ func mergeResult(dst *ScrapeResult, src *ScrapeResult) {
 	}
 	if src.Overview != "" && (dst.Overview == "" || len(src.Overview) > len(dst.Overview)) {
 		dst.Overview = src.Overview
-	}
-	if dst.Poster == "" && src.Poster != "" {
-		dst.Poster = src.Poster
-	}
-	if dst.Backdrop == "" && src.Backdrop != "" {
-		dst.Backdrop = src.Backdrop
-	}
-	if dst.Logo == "" && src.Logo != "" {
-		dst.Logo = src.Logo
 	}
 	if dst.ReleaseDate == "" && src.ReleaseDate != "" {
 		dst.ReleaseDate = src.ReleaseDate
@@ -430,6 +664,40 @@ func mergeResult(dst *ScrapeResult, src *ScrapeResult) {
 			dst.Extra[k] = v
 		}
 	}
+}
+
+func mergeImageResult(dst, src *ScrapeResult) {
+	if src == nil || dst == nil {
+		return
+	}
+	if dst.Poster == "" && src.Poster != "" {
+		dst.Poster = src.Poster
+	}
+	if dst.Backdrop == "" && src.Backdrop != "" {
+		dst.Backdrop = src.Backdrop
+	}
+	if dst.Logo == "" && src.Logo != "" {
+		dst.Logo = src.Logo
+	}
+	if dst.Extra == nil {
+		dst.Extra = map[string]any{}
+	}
+	for _, key := range []string{"poster", "backdrop", "logo"} {
+		if _, ok := dst.Extra[key]; ok {
+			continue
+		}
+		if v, ok := src.Extra[key]; ok {
+			dst.Extra[key] = v
+		}
+	}
+}
+
+func mergeResult(dst, src *ScrapeResult) {
+	if src == nil || dst == nil {
+		return
+	}
+	mergeMetadataResult(dst, src)
+	mergeImageResult(dst, src)
 }
 
 func splitComma(v string) []string {
@@ -513,4 +781,3 @@ func summarizeProviderErrors(errs map[string]map[string]string) string {
 	}
 	return strings.Join(parts, "; ")
 }
-

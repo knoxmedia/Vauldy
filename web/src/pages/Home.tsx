@@ -64,7 +64,7 @@ function mediaReleaseYear(m: MediaItem): string {
 }
 
 function historyRowKey(h: HistoryItem): string {
-  return `${h.file_id}\0${h.update_at}`;
+  return String(h.media_id);
 }
 
 /** 继续观看：悬停遮罩与角标逻辑对齐「最近添加的电影」；批量点选同详情页 */

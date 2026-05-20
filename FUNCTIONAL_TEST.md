@@ -12,7 +12,7 @@
   - 结果: ___
 - [ ] **1.2** 确认 `config.yml` 中 `ffmpeg`、`ffprobe` 路径有效（转码、截图、预览依赖）
   - 结果: ___
-- [ ] **1.3** **开发模式**：前端 `pnpm dev` / `npm run dev`（Vite，`http://localhost:5173`），且 `vite.config.ts` 已将 `/api`、`/health`、`/uploads` 代理到后端
+- [ ] **1.3** **开发模式**：前端 `pnpm dev` / `npm run dev`（Vite，`http://localhost:5173`），且 `vite.config.ts` 已将 `/api`、`/health`、`/uploads`、`/metadata/library` 代理到后端
   - 结果: ___
 - [ ] **1.4** **集成模式**：使用后端嵌入的 `web/dist` 同端口访问
   - 结果: ___
@@ -250,6 +250,7 @@
 - [ ] **16.1** 浏览器直接访问 `http://127.0.0.1:8200/uploads/posters/<媒体ID>.jpg` → 若已截帧则 200
   - 结果: ___
 - [ ] **16.2** 开发模式下通过 `http://localhost:5173/uploads/posters/<id>.jpg` → 代理到后端，非 404
+- [ ] **16.3** 刮削落盘海报：`http://localhost:5173/metadata/library/<shard>/<id>/poster.jpg` → 代理到后端，非 404
   - 结果: ___
 
 > 模块结果: 通过 __ / 失败 __ / 阻塞 __

@@ -140,6 +140,10 @@ func (h *Handler) UserHistory(c *gin.Context) {
 		}
 	}
 	profile, _ := h.loadUserPermissionProfile(uid)
+	scanLimit := limit * 4
+	if scanLimit > 200 {
+		scanLimit = 200
+	}
 	q := `
 		SELECT p.file_id, p.position, p.update_at, m.id, m.title, m.file_path, m.duration, m.library_id,
 		       COALESCE(p.play_start_at,''), COALESCE(p.play_end_at,''), COALESCE(p.completed,0), COALESCE(p.play_count,0)
@@ -147,7 +151,7 @@ func (h *Handler) UserHistory(c *gin.Context) {
 		LEFT JOIN media m ON m.file_id = p.file_id
 		WHERE p.user_id = ?
 		ORDER BY p.update_at DESC
-		LIMIT ` + strconv.Itoa(limit)
+		LIMIT ` + strconv.Itoa(scanLimit)
 	rows, err := h.App.DB.Query(q, uid)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -155,6 +159,8 @@ func (h *Handler) UserHistory(c *gin.Context) {
 	}
 	defer rows.Close()
 	var items []gin.H
+	seenMedia := make(map[int64]struct{})
+	seenFile := make(map[string]struct{})
 	for rows.Next() {
 		var fid, upd sql.NullString
 		var pos sql.NullInt64
@@ -174,6 +180,20 @@ func (h *Handler) UserHistory(c *gin.Context) {
 			if folders := profile.AllowedLibraryFolders[libID.Int64]; len(folders) > 0 && !pathMatchesAnyFolder(fpath.String, folders) {
 				continue
 			}
+		}
+		if mid.Valid && mid.Int64 > 0 {
+			if _, dup := seenMedia[mid.Int64]; dup {
+				continue
+			}
+			seenMedia[mid.Int64] = struct{}{}
+		} else if fid.Valid && fid.String != "" {
+			if _, dup := seenFile[fid.String]; dup {
+				continue
+			}
+			seenFile[fid.String] = struct{}{}
+		}
+		if len(items) >= limit {
+			continue
 		}
 		items = append(items, gin.H{
 			"file_id": fid.String, "position": pos.Int64, "update_at": upd.String,

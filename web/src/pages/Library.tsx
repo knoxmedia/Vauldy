@@ -1,5 +1,12 @@
 import { Button, Col, Divider, Drawer, Form, Grid, Input, Modal, Radio, Row, Select, Space, Switch, Table, Tag, message } from "antd";
 import { useEffect, useState } from "react";
+import LibraryProviderSourceTabs from "../components/LibraryProviderSourceTabs";
+import {
+  DEFAULT_IMAGE_PROVIDERS,
+  DEFAULT_METADATA_PROVIDERS,
+  normalizeProviderList,
+  providerLabel,
+} from "../lib/scrapeProviders";
 import {
   cancelScanTask,
   DRMCapabilities,
@@ -22,6 +29,7 @@ export default function LibraryPage() {
     powerdrm_enabled: true,
   });
   const [form] = Form.useForm();
+  const [providerSourceTab, setProviderSourceTab] = useState("metadata");
   const screens = Grid.useBreakpoint();
 
   function defaultEncryptionMode(caps: DRMCapabilities): "standard" | "powerdrm" | "drm" {
@@ -69,12 +77,14 @@ export default function LibraryPage() {
         .split(/\r?\n/)
         .map((x) => x.trim())
         .filter(Boolean);
+      const metadataProviders = normalizeProviderList(v.metadata_providers);
+      const imageProviders = normalizeProviderList(v.image_providers);
       const payload = {
         name: v.name,
         type: v.type,
         path: folders[0] || "",
         folders,
-        scraper: v.scraper || "tmdb",
+        scraper: metadataProviders[0] || "tmdb",
         auto_scan: v.auto_scan ? 1 : 0,
         enabled: v.enabled ? 1 : 0,
         realtime_monitor: v.realtime_monitor ? 1 : 0,
@@ -84,15 +94,9 @@ export default function LibraryPage() {
           ? normalizeEncryptionModeForCapabilities(v.encryption_mode, drmCapabilities)
           : "standard",
         cleanup_local_source_after_package: v.cleanup_local_source_after_package ? 1 : 0,
-        metadata_providers: String(v.metadata_providers || "")
-          .split(",")
-          .map((x) => x.trim())
-          .filter(Boolean),
-        image_providers: String(v.image_providers || "")
-          .split(",")
-          .map((x) => x.trim())
-          .filter(Boolean),
-        metadata_refresh_policy: v.metadata_refresh_policy || "never",
+        metadata_providers: metadataProviders,
+        image_providers: imageProviders,
+        metadata_refresh_policy: editing?.metadata_refresh_policy ?? "never",
       };
       if (editing) {
         await updateLibrary(editing.id, payload);
@@ -119,6 +123,7 @@ export default function LibraryPage() {
           type="primary"
           onClick={() => {
             setEditing(null);
+            setProviderSourceTab("metadata");
             form.resetFields();
             form.setFieldsValue({
               auto_scan: true,
@@ -128,9 +133,8 @@ export default function LibraryPage() {
               drm_enabled: false,
               encryption_mode: defaultEncryptionMode(drmCapabilities),
               cleanup_local_source_after_package: false,
-              metadata_providers: "tmdb,omdb",
-              image_providers: "tmdb,omdb,embedded,screen_grabber",
-              metadata_refresh_policy: "never",
+              metadata_providers: [...DEFAULT_METADATA_PROVIDERS],
+              image_providers: [...DEFAULT_IMAGE_PROVIDERS],
             });
             setOpen(true);
           }}
@@ -152,7 +156,15 @@ export default function LibraryPage() {
             dataIndex: "folders",
             render: (_: unknown, r) => (r.folders && r.folders.length > 0 ? r.folders.join(" | ") : r.path),
           },
-          { title: "刮削", dataIndex: "scraper", width: 90 },
+          {
+            title: "元数据源",
+            key: "metadata_providers",
+            width: 140,
+            render: (_: unknown, r) => {
+              const providers = r.metadata_providers?.length ? r.metadata_providers : [r.scraper || "tmdb"];
+              return providers.map((p) => providerLabel(p)).join(" > ");
+            },
+          },
           {
             title: "状态",
             key: "state",
@@ -180,11 +192,11 @@ export default function LibraryPage() {
                   size="small"
                   onClick={() => {
                     setEditing(r);
+                    setProviderSourceTab("metadata");
                     form.setFieldsValue({
                       name: r.name,
                       type: r.type,
                       folders: (r.folders && r.folders.length > 0 ? r.folders : [r.path]).join("\n"),
-                      scraper: r.scraper || "tmdb",
                       auto_scan: r.auto_scan === 1,
                       enabled: (r.enabled ?? 1) === 1,
                       realtime_monitor: (r.realtime_monitor ?? 0) === 1,
@@ -195,9 +207,12 @@ export default function LibraryPage() {
                         drmCapabilities
                       ),
                       cleanup_local_source_after_package: (r.cleanup_local_source_after_package ?? 0) === 1,
-                      metadata_providers: (r.metadata_providers || ["tmdb", "omdb"]).join(","),
-                      image_providers: (r.image_providers || ["tmdb", "omdb", "embedded", "screen_grabber"]).join(","),
-                      metadata_refresh_policy: r.metadata_refresh_policy || "never",
+                      metadata_providers: r.metadata_providers?.length
+                        ? [...r.metadata_providers]
+                        : [...DEFAULT_METADATA_PROVIDERS],
+                      image_providers: r.image_providers?.length
+                        ? [...r.image_providers]
+                        : [...DEFAULT_IMAGE_PROVIDERS],
                     });
                     setOpen(true);
                   }}
@@ -265,7 +280,10 @@ export default function LibraryPage() {
         title={editing ? "编辑媒体库" : "新建媒体库"}
         open={open}
         width={screens.xl ? 880 : screens.lg ? 820 : screens.md ? 760 : screens.sm ? 620 : "92%"}
-        onClose={() => setOpen(false)}
+        onClose={() => {
+          setOpen(false);
+          setProviderSourceTab("metadata");
+        }}
         footer={
           <Space>
             <Button onClick={() => setOpen(false)}>取消</Button>
@@ -385,35 +403,8 @@ export default function LibraryPage() {
 
           <Divider>元数据策略</Divider>
           <Row gutter={16}>
-            <Col xs={24} md={12}>
-              <Form.Item name="metadata_providers" label="元数据下载源优先级（逗号顺序）" initialValue="tmdb,omdb">
-                <Input placeholder="tmdb,omdb" />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={12}>
-              <Form.Item
-                name="image_providers"
-                label="图片获取源优先级（逗号顺序）"
-                initialValue="tmdb,omdb,embedded,screen_grabber"
-              >
-                <Input placeholder="tmdb,omdb,embedded,screen_grabber" />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={12}>
-              <Form.Item name="metadata_refresh_policy" label="自动从互联网刷新元数据" initialValue="never">
-                <Select
-                  options={[
-                    { value: "never", label: "从不" },
-                    { value: "on_scan", label: "扫描时" },
-                    { value: "always", label: "总是" },
-                  ]}
-                />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={12}>
-              <Form.Item name="scraper" label="刮削源" initialValue="tmdb">
-                <Input />
-              </Form.Item>
+            <Col xs={24}>
+              <LibraryProviderSourceTabs activeKey={providerSourceTab} onChange={setProviderSourceTab} />
             </Col>
           </Row>
         </Form>

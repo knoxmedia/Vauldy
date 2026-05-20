@@ -4,14 +4,23 @@ import {
   message,
   Modal,
   Space,
+  Spin,
   Table,
   Tag,
   Typography,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { InfoCircleOutlined, SettingOutlined } from "@ant-design/icons";
+import {
+  ApiOutlined,
+  InfoCircleOutlined,
+  SettingOutlined,
+} from "@ant-design/icons";
 import { useEffect, useState } from "react";
-import { fetchScrapeConfig, saveScrapeConfig } from "../api/client";
+import {
+  fetchScrapeConfig,
+  saveScrapeConfig,
+  testScrapeProvider,
+} from "../api/client";
 import type { ScrapeConfig } from "../api/client";
 
 interface ProviderInfo {
@@ -78,6 +87,21 @@ interface TableRow {
   configured: boolean;
 }
 
+type ProviderTestState =
+  | { status: "loading" }
+  | { status: "done"; ok: boolean; message: string };
+
+function apiKeyPlaceholder(provider: string) {
+  switch (provider) {
+    case "tvdb":
+      return "API Key，或 apikey:pin";
+    case "bangumi":
+      return "Access Token（可选）";
+    default:
+      return "输入 API Key";
+  }
+}
+
 export default function ScrapeConfigPage() {
   const [loading, setLoading] = useState(true);
   const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
@@ -85,6 +109,8 @@ export default function ScrapeConfigPage() {
   const [modalKey, setModalKey] = useState("");
   const [cfg, setCfg] = useState<ScrapeConfig | null>(null);
   const [infoProvider, setInfoProvider] = useState<ProviderInfo | null>(null);
+  const [testResults, setTestResults] = useState<Record<string, ProviderTestState>>({});
+  const [testingProvider, setTestingProvider] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -137,6 +163,25 @@ export default function ScrapeConfigPage() {
     setModalKey(apiKeys[provider] ?? "");
   };
 
+  const runProviderTest = async (provider: string) => {
+    setTestingProvider(provider);
+    setTestResults((prev) => ({ ...prev, [provider]: { status: "loading" } }));
+    try {
+      const result = await testScrapeProvider(provider);
+      setTestResults((prev) => ({
+        ...prev,
+        [provider]: { status: "done", ok: result.ok, message: result.message },
+      }));
+    } catch {
+      setTestResults((prev) => ({
+        ...prev,
+        [provider]: { status: "done", ok: false, message: "测试请求失败" },
+      }));
+    } finally {
+      setTestingProvider(null);
+    }
+  };
+
   const dataSource: TableRow[] = PROVIDER_OPTIONS.map((p) => ({
     key: p.value,
     value: p.value,
@@ -149,7 +194,28 @@ export default function ScrapeConfigPage() {
     {
       title: "提供者",
       dataIndex: "label",
-      width: 220,
+      width: 280,
+      render: (label: string, r) => {
+        const test = testResults[r.value];
+        return (
+          <div>
+            <div>{label}</div>
+            {test?.status === "loading" ? (
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                <Spin size="small" style={{ marginRight: 6 }} />
+                测试中…
+              </Typography.Text>
+            ) : test?.status === "done" ? (
+              <Typography.Text
+                type={test.ok ? "success" : "danger"}
+                style={{ fontSize: 12, display: "block", marginTop: 4 }}
+              >
+                {test.message}
+              </Typography.Text>
+            ) : null}
+          </div>
+        );
+      },
     },
     {
       title: "API Key",
@@ -161,10 +227,12 @@ export default function ScrapeConfigPage() {
     {
       title: "操作",
       key: "actions",
-      width: 160,
+      width: 240,
+      fixed: "right",
       align: "center",
+      onCell: () => ({ style: { whiteSpace: "nowrap" } }),
       render: (_, r) => (
-        <Space>
+        <Space size={4}>
           <Button
             size="small"
             icon={<InfoCircleOutlined />}
@@ -179,6 +247,14 @@ export default function ScrapeConfigPage() {
           >
             设置
           </Button>
+          <Button
+            size="small"
+            icon={<ApiOutlined />}
+            loading={testingProvider === r.value}
+            onClick={() => runProviderTest(r.value)}
+          >
+            测试
+          </Button>
         </Space>
       ),
     },
@@ -192,6 +268,7 @@ export default function ScrapeConfigPage() {
         dataSource={dataSource}
         pagination={false}
         columns={columns}
+        scroll={{ x: 650 }}
       />
 
       <Modal
@@ -206,7 +283,7 @@ export default function ScrapeConfigPage() {
         cancelText="取消"
       >
         <Input.Password
-          placeholder="输入 API Key"
+          placeholder={modalProvider ? apiKeyPlaceholder(modalProvider) : "输入 API Key"}
           value={modalKey}
           onChange={(e) => setModalKey(e.target.value)}
           style={{ marginTop: 8 }}

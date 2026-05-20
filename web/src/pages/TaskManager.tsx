@@ -289,9 +289,9 @@ export default function TaskManagerPage() {
     () => keyframeTasks.filter((x) => (keyframeStatusFilter === "all" ? true : x.status === keyframeStatusFilter)),
     [keyframeTasks, keyframeStatusFilter]
   );
-  const statusOptions = useMemo(() => {
+  const getStatusOptionsForTab = (tab: string) => {
     const commonAll = [{ value: "all", label: "全部状态" }];
-    if (activeTab === "scheduled") {
+    if (tab === "scheduled") {
       return [
         ...commonAll,
         { value: "none", label: "none" },
@@ -299,7 +299,7 @@ export default function TaskManagerPage() {
         { value: "failed", label: "failed" },
       ];
     }
-    if (activeTab === "transcode") {
+    if (tab === "transcode") {
       return [
         ...commonAll,
         { value: "waiting", label: "waiting" },
@@ -309,7 +309,7 @@ export default function TaskManagerPage() {
         { value: "cancelled", label: "cancelled" },
       ];
     }
-    if (activeTab === "scrape") {
+    if (tab === "scrape") {
       return [
         ...commonAll,
         { value: "waiting", label: "waiting" },
@@ -318,7 +318,7 @@ export default function TaskManagerPage() {
         { value: "failed", label: "failed" },
       ];
     }
-    if (activeTab === "scan") {
+    if (tab === "scan") {
       return [
         ...commonAll,
         { value: "running", label: "running" },
@@ -327,7 +327,7 @@ export default function TaskManagerPage() {
         { value: "cancelled", label: "cancelled" },
       ];
     }
-    if (activeTab === "subtitle") {
+    if (tab === "subtitle") {
       return [
         ...commonAll,
         { value: "pending", label: "pending" },
@@ -343,7 +343,31 @@ export default function TaskManagerPage() {
       { value: "ready", label: "ready" },
       { value: "failed", label: "failed" },
     ];
-  }, [activeTab]);
+  };
+
+  const renderListHeaderControls = (
+    tab: string,
+    statusValue: string,
+    onStatusChange: (v: string) => void,
+    onRefresh: () => void
+  ) => (
+    <>
+      <Select
+        size="small"
+        value={statusValue}
+        style={{ width: 140 }}
+        onChange={onStatusChange}
+        options={getStatusOptionsForTab(tab)}
+      />
+      <Space size={4}>
+        <span style={{ color: "#999" }}>自动刷新</span>
+        <Switch size="small" checked={autoRefresh} onChange={setAutoRefresh} />
+      </Space>
+      <Button disabled={autoRefresh} onClick={() => void onRefresh()}>
+        刷新
+      </Button>
+    </>
+  );
   const libraryOptions = useMemo(
     () => libraries.map((lib) => ({ value: lib.id, label: `${lib.name} (#${lib.id})` })),
     [libraries]
@@ -431,46 +455,6 @@ export default function TaskManagerPage() {
       <Tabs
       activeKey={activeTab}
       onChange={setActiveTab}
-      tabBarExtraContent={
-        <Space>
-          <Select
-            size="small"
-            value={
-              activeTab === "scheduled"
-                ? scheduledStatusFilter
-                : activeTab === "transcode"
-                  ? transcodeStatusFilter
-                  : activeTab === "scrape"
-                    ? scrapeStatusFilter
-                    : activeTab === "scan"
-                      ? scanStatusFilter
-                      : activeTab === "subtitle"
-                        ? subtitleStatusFilter
-                        : activeTab === "atrack"
-                          ? atrackStatusFilter
-                          : activeTab === "keyframe"
-                            ? keyframeStatusFilter
-                            : previewStatusFilter
-            }
-            style={{ width: 140 }}
-            onChange={(v) => {
-              if (activeTab === "scheduled") setScheduledStatusFilter(v);
-              if (activeTab === "transcode") setTranscodeStatusFilter(v);
-              if (activeTab === "scrape") setScrapeStatusFilter(v);
-              if (activeTab === "preview") setPreviewStatusFilter(v);
-              if (activeTab === "scan") setScanStatusFilter(v);
-              if (activeTab === "subtitle") setSubtitleStatusFilter(v);
-              if (activeTab === "atrack") setAtrackStatusFilter(v);
-              if (activeTab === "keyframe") setKeyframeStatusFilter(v);
-            }}
-            options={statusOptions}
-          />
-          <Space size={4}>
-            <span style={{ color: "#999" }}>自动刷新</span>
-            <Switch size="small" checked={autoRefresh} onChange={setAutoRefresh} />
-          </Space>
-        </Space>
-      }
       items={[
         {
           key: "scheduled",
@@ -491,6 +475,7 @@ export default function TaskManagerPage() {
                     >
                       创建定时任务
                     </Button>
+                    {renderListHeaderControls("scheduled", scheduledStatusFilter, setScheduledStatusFilter, loadScheduled)}
                   </Space>
                 )}
               >
@@ -584,6 +569,7 @@ export default function TaskManagerPage() {
                   }}>
                     <Button danger loading={cleaning}>清理失败任务</Button>
                   </Popconfirm>
+                  {renderListHeaderControls("transcode", transcodeStatusFilter, setTranscodeStatusFilter, () => void loadTranscode())}
                 </Space>
               }
             >
@@ -648,7 +634,15 @@ export default function TaskManagerPage() {
           key: "scrape",
           label: "刮削任务",
           children: (
-            <Card loading={scrapeLoading} title="刮削任务管理" extra={<Button onClick={() => void loadScrape()}>刷新</Button>}>
+            <Card
+              loading={scrapeLoading}
+              title="刮削任务管理"
+              extra={(
+                <Space>
+                  {renderListHeaderControls("scrape", scrapeStatusFilter, setScrapeStatusFilter, () => void loadScrape())}
+                </Space>
+              )}
+            >
               <Space direction="vertical" style={{ width: "100%" }}>
                 <Table
                   rowKey="id"
@@ -659,9 +653,44 @@ export default function TaskManagerPage() {
                     { title: "媒体ID", dataIndex: "media_id", width: 90 },
                     { title: "标题", dataIndex: "title", ellipsis: true },
                     { title: "来源", dataIndex: "source", width: 90 },
-                    { title: "状态", dataIndex: "status", width: 100 },
+                    {
+                      title: "状态",
+                      dataIndex: "status",
+                      width: 100,
+                      render: (v: string) => {
+                        const c =
+                          v === "done"
+                            ? "green"
+                            : v === "failed"
+                              ? "red"
+                              : v === "abandoned"
+                                ? "error"
+                                : v === "running"
+                                  ? "processing"
+                                  : "default";
+                        const label =
+                          v === "done"
+                            ? "完成"
+                            : v === "failed"
+                              ? "失败"
+                              : v === "abandoned"
+                                ? "已放弃"
+                                : v === "running"
+                                  ? "进行中"
+                                  : v === "waiting"
+                                    ? "等待"
+                                    : v;
+                        return <Tag color={c}>{label}</Tag>;
+                      },
+                    },
+                    {
+                      title: "失败次数",
+                      dataIndex: "fail_count",
+                      width: 90,
+                      render: (v: number | undefined) => (v && v > 0 ? v : "-"),
+                    },
                     { title: "进度", dataIndex: "progress", width: 90, render: (v: number) => `${v}%` },
-                    { title: "信息", dataIndex: "message", ellipsis: true },
+                    { title: "结果/原因", dataIndex: "message", ellipsis: true, render: (v?: string) => v || "-" },
                     { title: "创建时间", dataIndex: "created_at", width: 180 },
                     { title: "完成时间", dataIndex: "finished_at", width: 180, render: (v?: string) => v || "-" },
                   ]}
@@ -674,7 +703,14 @@ export default function TaskManagerPage() {
           key: "scan",
           label: "扫描任务",
           children: (
-            <Card title="媒体库扫描任务" extra={<Button onClick={() => void loadScanTasks()}>刷新</Button>}>
+            <Card
+              title="媒体库扫描任务"
+              extra={(
+                <Space>
+                  {renderListHeaderControls("scan", scanStatusFilter, setScanStatusFilter, () => void loadScanTasks())}
+                </Space>
+              )}
+            >
               <Table
                 rowKey="id"
                 loading={scanLoading}
@@ -730,7 +766,7 @@ export default function TaskManagerPage() {
               title="字幕处理任务"
               extra={(
                 <Space>
-                  <Button onClick={() => void loadSubtitleTasks()}>刷新</Button>
+                  {renderListHeaderControls("subtitle", subtitleStatusFilter, setSubtitleStatusFilter, () => void loadSubtitleTasks())}
                   <Popconfirm
                     title="删除所有失败状态的字幕任务记录？（不删除已生成的字幕文件，仅任务表）"
                     onConfirm={() => {
@@ -837,7 +873,14 @@ export default function TaskManagerPage() {
           key: "preview",
           label: "进度条预览任务",
           children: (
-            <Card title="进度条预览任务" extra={<Button onClick={() => void loadPreview()}>刷新</Button>}>
+            <Card
+              title="进度条预览任务"
+              extra={(
+                <Space>
+                  {renderListHeaderControls("preview", previewStatusFilter, setPreviewStatusFilter, () => void loadPreview())}
+                </Space>
+              )}
+            >
               <Table
                 rowKey="media_id"
                 dataSource={filteredPreview}
@@ -873,7 +916,14 @@ export default function TaskManagerPage() {
           key: "atrack",
           label: "音轨提取任务",
           children: (
-            <Card title="音轨提取任务" extra={<Button onClick={() => void loadAtrackTasks()}>刷新</Button>}>
+            <Card
+              title="音轨提取任务"
+              extra={(
+                <Space>
+                  {renderListHeaderControls("atrack", atrackStatusFilter, setAtrackStatusFilter, () => void loadAtrackTasks())}
+                </Space>
+              )}
+            >
               <Table
                 rowKey="media_id"
                 loading={atrackLoading}
@@ -920,7 +970,14 @@ export default function TaskManagerPage() {
           key: "keyframe",
           label: "关键帧提取任务",
           children: (
-            <Card title="关键帧提取任务" extra={<Button onClick={() => void loadKeyframeTasks()}>刷新</Button>}>
+            <Card
+              title="关键帧提取任务"
+              extra={(
+                <Space>
+                  {renderListHeaderControls("keyframe", keyframeStatusFilter, setKeyframeStatusFilter, () => void loadKeyframeTasks())}
+                </Space>
+              )}
+            >
               <Table
                 rowKey="media_id"
                 loading={keyframeLoading}

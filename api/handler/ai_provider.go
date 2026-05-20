@@ -2,10 +2,14 @@ package handler
 
 import (
 	"database/sql"
+	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	"knox-media/internal/scraper"
 )
 
 type aiProviderRow struct {
@@ -113,4 +117,85 @@ func (h *Handler) SaveAIProvider(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (h *Handler) TestAIProvider(c *gin.Context) {
+	id := strings.TrimSpace(c.Param("id"))
+	if id == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "id required"})
+		return
+	}
+	c.JSON(http.StatusOK, h.testSingleAIProvider(id))
+}
+
+func (h *Handler) testSingleAIProvider(id string) scraper.ProviderTestResult {
+	var name, apiURL, apiKey, model string
+	var enabled int
+	err := h.App.DB.QueryRow(
+		`SELECT name, api_url, api_key, model, enabled FROM ai_provider_config WHERE id = ?`,
+		id,
+	).Scan(&name, &apiURL, &apiKey, &model, &enabled)
+	if err == sql.ErrNoRows {
+		return scraper.ProviderTestResult{OK: false, Message: "提供商不存在"}
+	}
+	if err != nil {
+		return scraper.ProviderTestResult{OK: false, Message: "无法读取配置"}
+	}
+	if strings.TrimSpace(apiURL) == "" {
+		return scraper.ProviderTestResult{OK: false, Message: "API 地址未设置"}
+	}
+	if strings.TrimSpace(apiKey) == "" && !isLocalAIURL(apiURL) {
+		return scraper.ProviderTestResult{OK: false, Message: "API Key 未设置"}
+	}
+	if strings.TrimSpace(model) == "" && !isLocalAIURL(apiURL) {
+		return scraper.ProviderTestResult{OK: false, Message: "模型未设置"}
+	}
+	if err := pingOpenAICompatible(apiURL, apiKey); err != nil {
+		return scraper.ProviderTestResult{OK: false, Message: err.Error()}
+	}
+	msg := "连接成功"
+	if enabled != 1 {
+		msg += "（当前为停用状态）"
+	}
+	return scraper.ProviderTestResult{OK: true, Message: msg}
+}
+
+func isLocalAIURL(apiURL string) bool {
+	lower := strings.ToLower(strings.TrimSpace(apiURL))
+	return strings.Contains(lower, "localhost") || strings.Contains(lower, "127.0.0.1")
+}
+
+func pingOpenAICompatible(apiURL, apiKey string) error {
+	base := strings.TrimRight(strings.TrimSpace(apiURL), "/")
+	u := base + "/models"
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(apiKey) != "" {
+		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(apiKey))
+	}
+	client := &http.Client{Timeout: 12 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("网络连接失败")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return fmt.Errorf("API Key 无效")
+	}
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return nil
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		req2, _ := http.NewRequest(http.MethodGet, base+"/api/tags", nil)
+		resp2, err2 := client.Do(req2)
+		if err2 == nil {
+			defer resp2.Body.Close()
+			if resp2.StatusCode >= 200 && resp2.StatusCode < 300 {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("请求失败 (HTTP %d)", resp.StatusCode)
 }

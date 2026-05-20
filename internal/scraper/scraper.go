@@ -4,9 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"regexp"
-	"strconv"
-	"strings"
 )
 
 // ScrapeResult is a minimal stub; production would call TMDB/豆瓣/Bangumi APIs.
@@ -24,35 +21,20 @@ type ScrapeResult struct {
 	Extra       map[string]any `json:"extra"`
 }
 
+// AIProviderConfig is an enabled OpenAI-compatible LLM used for metadata fallback scraping.
+type AIProviderConfig struct {
+	ID     string
+	Name   string
+	APIURL string
+	APIKey string
+	Model  string
+}
+
 type Config struct {
 	Providers    []string
 	ImageSources []string
 	APIKeys      map[string]string
-}
-
-var noisyTags = regexp.MustCompile(`(?i)\b(bluray|bdrip|webrip|web-dl|x264|x265|h264|h265|hevc|aac|dts|hdr|dv|remux|1080p|2160p|720p|10bit)\b`)
-var yearPattern = regexp.MustCompile(`\b(19|20)\d{2}\b`)
-var splitNoise = regexp.MustCompile(`[._-]+`)
-
-func NormalizeTitle(raw string) string {
-	v := strings.TrimSpace(raw)
-	v = splitNoise.ReplaceAllString(v, " ")
-	v = noisyTags.ReplaceAllString(v, " ")
-	v = strings.Join(strings.Fields(v), " ")
-	return strings.TrimSpace(v)
-}
-
-func ExtractSearch(raw string) (keyword string, year int) {
-	clean := NormalizeTitle(raw)
-	m := yearPattern.FindString(clean)
-	if m != "" {
-		if y, err := strconv.Atoi(m); err == nil {
-			year = y
-		}
-		clean = strings.Replace(clean, m, "", 1)
-	}
-	clean = strings.Join(strings.Fields(clean), " ")
-	return strings.TrimSpace(clean), year
+	AIProviders  []AIProviderConfig
 }
 
 func Scrape(title, scraperName string) (*ScrapeResult, error) {
@@ -92,10 +74,20 @@ func ScrapeWithConfig(title, scraperName string, cfg Config) (*ScrapeResult, err
 		return nil, fmt.Errorf("empty title")
 	}
 	res, err := ScrapeOnline(title, scraperName, cfg)
-	if err == nil && res != nil {
-		return res, nil
+	if err != nil {
+		// Return partial result so the handler can still run local image capture (screen_grabber).
+		if res != nil {
+			return res, err
+		}
+		return nil, err
 	}
-	return Scrape(title, scraperName)
+	if !HasMeaningfulScrapeData(res) {
+		if pe := providerErrorsFromResult(res); len(pe) > 0 {
+			return res, fmt.Errorf("all providers failed: %s", summarizeProviderErrors(pe))
+		}
+		return res, fmt.Errorf("no scrape data")
+	}
+	return res, nil
 }
 
 func MergeMetaJSON(existing string, patch map[string]any) (string, error) {
