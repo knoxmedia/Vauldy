@@ -146,6 +146,8 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 			adm.PATCH("/media/:id/meta", h.UpdateMediaMetadata)
 			adm.PATCH("/media/:id/images", h.UpdateMediaImages)
 			adm.PUT("/media/:id", h.UpdateMediaAdmin)
+			adm.GET("/media/:id/deletion-plan", h.GetMediaDeletionPlan)
+			adm.DELETE("/media/:id", h.DeleteMedia)
 
 			adm.GET("/scrape/config", h.GetScrapeConfig)
 			adm.PUT("/scrape/config", h.SaveScrapeConfig)

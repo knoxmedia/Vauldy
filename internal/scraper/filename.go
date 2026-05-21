@@ -1,7 +1,6 @@
 package scraper
 
 import (
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -27,6 +26,11 @@ var (
 	yearInNameRE        = regexp.MustCompile(`(?:^|[^0-9])((?:19|20)\d{2})(?:[^0-9]|$)`)
 	latinTitleRunRE     = regexp.MustCompile(`[A-Za-z][A-Za-z0-9 '&:,\.\-]*[A-Za-z0-9]`)
 	episodeMarkerRE     = regexp.MustCompile(`(?i)\bS\d{1,2}E\d{1,3}\b`)
+	// 489155.com@ style release-site prefixes before the actual title.
+	siteAtPrefixRE = regexp.MustCompile(`(?i)^\s*\d+(?:\.[a-z0-9][-a-z0-9]*)*@`)
+	// Leading 【ai增强】 / [tag] release metadata before title.
+	leadingReleaseBracketRE = regexp.MustCompile(`^(?:\s*[【\[（(][^【】()\[\]（）]{0,60}[】\]\)）]\s*)+`)
+	knownMediaExtRE = regexp.MustCompile(`(?i)\.(mkv|mp4|avi|mov|wmv|flv|webm|m4v|ts|m2ts|mp3|flac|aac|wav|mka|ogg|oga|wma|ape|alac)$`)
 )
 
 // ParseMediaFilename extracts search title/year from release filenames (nowen-video style).
@@ -37,7 +41,10 @@ func ParseMediaFilename(filename string) ParsedMediaTitle {
 	}
 
 	name := strings.TrimSpace(filename)
-	name = strings.TrimSuffix(name, filepath.Ext(name))
+	// Strip release-site prefix before extension detection — dots in 489155.com@ are not file extensions.
+	siteStripped := siteAtPrefixRE.ReplaceAllString(name, "")
+	hadSiteAtPrefix := siteStripped != name
+	name = stripMediaExtension(siteStripped)
 	name = episodeMarkerRE.ReplaceAllString(name, " ")
 
 	name = siteBracketRE.ReplaceAllString(name, " ")
@@ -46,6 +53,10 @@ func ParseMediaFilename(filename string) ParsedMediaTitle {
 	name = chineseAdRE.ReplaceAllString(name, " ")
 	name = strings.ReplaceAll(name, "。", ".")
 	name = strings.ReplaceAll(name, "　", " ")
+
+	bracketStripped := leadingReleaseBracketRE.ReplaceAllString(name, "")
+	hadReleaseBracket := bracketStripped != name
+	name = bracketStripped
 
 	if m := chineseYearRangeRE.FindStringSubmatch(name); len(m) >= 2 {
 		if y, err := strconv.Atoi(m[1]); err == nil && y >= 1900 && y <= 2099 {
@@ -69,6 +80,12 @@ func ParseMediaFilename(filename string) ParsedMediaTitle {
 			}
 		}
 		name = chineseBookTitleRE.ReplaceAllString(name, " ")
+	}
+
+	if out.Title == "" && (hadSiteAtPrefix || hadReleaseBracket) {
+		if cn := extractPrimaryChineseTitle(name); cn != "" {
+			out.Title = cn
+		}
 	}
 
 	name = bracketCharsRE.ReplaceAllString(name, " ")
@@ -140,12 +157,25 @@ func pickBestChineseTitleSegment(s string) string {
 			best = run
 		}
 	}
+	if first := pickFirstChineseSegment(s); first != "" {
+		if len([]rune(first)) > len([]rune(best)) {
+			best = first
+		}
+	}
 	if best != "" {
 		best = strings.ReplaceAll(best, "：", ": ")
 		best = strings.Join(strings.Fields(best), " ")
 		return strings.Trim(best, " -·・:")
 	}
 	return pickFirstChineseSegment(s)
+}
+
+func extractPrimaryChineseTitle(name string) string {
+	probe := bracketCharsRE.ReplaceAllString(name, "")
+	probe = strings.ReplaceAll(probe, "@", " ")
+	probe = insertScriptBoundaries(probe)
+	probe = strings.Join(strings.Fields(probe), " ")
+	return pickFirstChineseSegment(probe)
 }
 
 var knownSiteNameMarkers = []string{
@@ -256,6 +286,10 @@ func pickLongestLatinSegment(s string) string {
 		}
 	}
 	return best
+}
+
+func stripMediaExtension(name string) string {
+	return knownMediaExtRE.ReplaceAllString(strings.TrimSpace(name), "")
 }
 
 func ExtractSearchTerms(raw string) (keyword, alt string, year int) {

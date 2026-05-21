@@ -1,11 +1,13 @@
 import type { MenuProps } from "antd";
-import { message } from "antd";
+import { Modal, message } from "antd";
 import type { NavigateFunction } from "react-router-dom";
 import {
   addFavorite,
   createScrapeTasks,
+  deleteMedia,
   extractAudioTrack,
   extractKeyframes,
+  fetchMediaDeletionPlan,
   markUnwatched,
   markWatched,
   transcodeAsync,
@@ -14,6 +16,60 @@ import type { RecentPlaylistEntry } from "../lib/recentPlaylists";
 
 export interface MediaMenuTarget {
   id: number;
+  file_path?: string;
+  title?: string;
+}
+
+export function confirmDeleteMedia(
+  target: MediaMenuTarget,
+  afterDelete?: () => void | Promise<void>,
+): void {
+  void (async () => {
+    let files: string[] = [];
+    try {
+      files = await fetchMediaDeletionPlan(target.id);
+    } catch {
+      files = target.file_path ? [target.file_path] : [];
+    }
+    if (files.length === 0 && target.file_path) {
+      files = [target.file_path];
+    }
+
+    Modal.confirm({
+      title: "删除媒体",
+      centered: true,
+      okText: "确定",
+      cancelText: "取消",
+      okButtonProps: { danger: true },
+      content: (
+        <div>
+          <p style={{ marginBottom: 8 }}>
+            删除此项目将从文件系统和媒体库同时删除，将删除以下文件：
+          </p>
+          {files.length > 0 ? (
+            <ul style={{ margin: "0 0 12px", paddingLeft: 20, wordBreak: "break-all" }}>
+              {files.map((f) => (
+                <li key={f}>{f}</li>
+              ))}
+            </ul>
+          ) : (
+            <p style={{ margin: "0 0 12px", color: "#8c8c8c" }}>（无可用文件路径）</p>
+          )}
+          <p style={{ marginBottom: 0 }}>您确定要继续吗？</p>
+        </div>
+      ),
+      onOk: async () => {
+        try {
+          await deleteMedia(target.id);
+          message.success("已删除");
+          await afterDelete?.();
+        } catch (err: unknown) {
+          message.error((err as Error).message || "删除失败");
+          throw err;
+        }
+      },
+    });
+  })();
 }
 
 export function buildMediaMenuItems(
@@ -30,6 +86,10 @@ export function buildMediaMenuItems(
     onUnfavorite?: (mediaId: number) => void;
     /** 标记观看状态成功后刷新列表（如收藏页） */
     afterToggleWatched?: () => void;
+    /** 删除成功后刷新列表 */
+    afterDelete?: () => void | Promise<void>;
+    /** 隐藏删除项（默认显示） */
+    hideDelete?: boolean;
   },
 ): MenuProps {
   const isWatched = extra?.isWatched ?? false;
@@ -41,6 +101,8 @@ export function buildMediaMenuItems(
   const onQuickAddToPlaylist = extra?.onQuickAddToPlaylist;
   const onUnfavorite = extra?.onUnfavorite;
   const afterToggleWatched = extra?.afterToggleWatched;
+  const afterDelete = extra?.afterDelete;
+  const hideDelete = extra?.hideDelete ?? false;
 
   const addToChildren: MenuProps["items"] = [
     {
@@ -92,6 +154,12 @@ export function buildMediaMenuItems(
             { key: "unfavorite", label: "取消收藏", danger: true },
           ]
         : []),
+      ...(!hideDelete
+        ? [
+            { type: "divider" as const },
+            { key: "delete", label: "删除", danger: true },
+          ]
+        : []),
     ],
     onClick: ({ key, domEvent }) => {
       domEvent.stopPropagation();
@@ -133,6 +201,9 @@ export function buildMediaMenuItems(
           break;
         case "unfavorite":
           onUnfavorite?.(r.id);
+          break;
+        case "delete":
+          confirmDeleteMedia(r, afterDelete);
           break;
         case "refreshMetadata":
           createScrapeTasks([r.id])

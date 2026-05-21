@@ -362,6 +362,15 @@ export async function markUnwatched(mediaId: number) {
   await api.delete(`/api/v1/media/${mediaId}/watched`);
 }
 
+export async function fetchMediaDeletionPlan(mediaId: number) {
+  const { data } = await api.get<{ files: string[] }>(`/api/v1/media/${mediaId}/deletion-plan`);
+  return data?.files ?? [];
+}
+
+export async function deleteMedia(mediaId: number) {
+  await api.delete(`/api/v1/media/${mediaId}`);
+}
+
 export interface PlaylistItem {
   id: number;
   media_id: number;

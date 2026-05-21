@@ -502,6 +502,15 @@ export default function BrowsePage() {
   function makeMenu(r: MediaItem, extra?: { isWatched?: boolean }): MenuProps {
     return buildMediaMenuItems(r, nav, {
       ...extra,
+      afterDelete: () => {
+        setBrowseSelectedIds((prev) => {
+          if (!prev.has(r.id)) return prev;
+          const next = new Set(prev);
+          next.delete(r.id);
+          return next;
+        });
+        return load();
+      },
       onAddToPlaylist: (mediaId: number) => setPlaylistModalMediaIds([mediaId]),
       recentPlaylists: recentPlaylistMenu,
       onQuickAddToPlaylist: async (mediaId: number, playlistId: number) => {
@@ -776,7 +785,7 @@ export default function BrowsePage() {
                         ) : null}
                         <span
                           className={styles.browseTitleText}
-                          data-browse-table-detail=""
+                          data-browse-table-detail={browseBulkPick ? "" : undefined}
                           role={browseBulkPick ? "link" : undefined}
                           tabIndex={browseBulkPick ? 0 : undefined}
                           onClick={

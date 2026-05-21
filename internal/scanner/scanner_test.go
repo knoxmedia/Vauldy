@@ -8,7 +8,11 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/google/uuid"
+
 	_ "modernc.org/sqlite"
+
+	"knox-media/pkg/hashutil"
 )
 
 func newScannerTestDB(t *testing.T) *sql.DB {
@@ -158,6 +162,212 @@ func TestScanLibraryFoldersDedupOverlappingRoots(t *testing.T) {
 	}
 	if mediaCount != 1 {
 		t.Fatalf("media count after first scan=%d want 1", mediaCount)
+	}
+}
+
+func TestScanLibraryFoldersUpdatesPathWhenMD5Matches(t *testing.T) {
+	t.Parallel()
+
+	db := newScannerTestDB(t)
+	root := t.TempDir()
+	oldRel := "movies/old-name.mp4"
+	newRel := "movies/renamed.mp4"
+	content := []byte("same video content for md5 match")
+	oldPath := filepath.Join(root, filepath.FromSlash(oldRel))
+	newPath := filepath.Join(root, filepath.FromSlash(newRel))
+	if err := os.MkdirAll(filepath.Dir(newPath), 0o755); err != nil {
+		t.Fatalf("mkdir movies: %v", err)
+	}
+	if err := os.WriteFile(newPath, content, 0o644); err != nil {
+		t.Fatalf("write renamed file: %v", err)
+	}
+	md5, err := hashutil.MD5File(newPath)
+	if err != nil {
+		t.Fatalf("md5 file: %v", err)
+	}
+	_, err = db.Exec(`
+		INSERT INTO media (library_id, file_id, title, file_path, file_type, md5, status, file_mtime)
+		VALUES (?, ?, ?, ?, 'video', ?, 'active', 0)
+	`, 3, uuid.NewString(), "Old Name", oldPath, md5)
+	if err != nil {
+		t.Fatalf("insert existing media: %v", err)
+	}
+
+	addedCalls := 0
+	s := &Scanner{
+		DB:       db,
+		SkipHash: false,
+		OnMediaAdded: func(int64, string, string) {
+			addedCalls++
+		},
+	}
+
+	added, err := s.ScanLibraryFoldersWithContext(context.Background(), 3, []string{root})
+	if err != nil {
+		t.Fatalf("scan error: %v", err)
+	}
+	if added != 0 {
+		t.Fatalf("added=%d want 0", added)
+	}
+	if addedCalls != 0 {
+		t.Fatalf("OnMediaAdded calls=%d want 0", addedCalls)
+	}
+
+	var mediaCount int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM media WHERE library_id = ?`, 3).Scan(&mediaCount); err != nil {
+		t.Fatalf("query media count: %v", err)
+	}
+	if mediaCount != 1 {
+		t.Fatalf("media count=%d want 1", mediaCount)
+	}
+
+	var storedPath string
+	if err := db.QueryRow(`SELECT file_path FROM media WHERE library_id = ? LIMIT 1`, 3).Scan(&storedPath); err != nil {
+		t.Fatalf("query file_path: %v", err)
+	}
+	if normalizeMediaPath(storedPath) != normalizeMediaPath(newPath) {
+		t.Fatalf("file_path=%q want %q", storedPath, newPath)
+	}
+
+	var linkedMediaID sql.NullInt64
+	if err := db.QueryRow(`
+		SELECT media_id FROM library_node
+		WHERE library_id = ? AND node_type = 'file' AND node_name = 'renamed.mp4'
+		LIMIT 1
+	`, 3).Scan(&linkedMediaID); err != nil {
+		t.Fatalf("query library_node media_id: %v", err)
+	}
+	if !linkedMediaID.Valid || linkedMediaID.Int64 <= 0 {
+		t.Fatalf("library_node media_id not linked")
+	}
+}
+
+func TestScanLibraryFoldersInsertsDuplicateWhenMD5MatchesAndOldPathExists(t *testing.T) {
+	t.Parallel()
+
+	db := newScannerTestDB(t)
+	root := t.TempDir()
+	content := []byte("duplicate video content")
+	pathA := filepath.Join(root, "copy-a.mp4")
+	pathB := filepath.Join(root, "subdir", "copy-b.mp4")
+	if err := os.MkdirAll(filepath.Dir(pathB), 0o755); err != nil {
+		t.Fatalf("mkdir subdir: %v", err)
+	}
+	if err := os.WriteFile(pathA, content, 0o644); err != nil {
+		t.Fatalf("write copy-a: %v", err)
+	}
+	if err := os.WriteFile(pathB, content, 0o644); err != nil {
+		t.Fatalf("write copy-b: %v", err)
+	}
+	md5, err := hashutil.MD5File(pathA)
+	if err != nil {
+		t.Fatalf("md5 file: %v", err)
+	}
+	_, err = db.Exec(`
+		INSERT INTO media (library_id, file_id, title, file_path, file_type, md5, status, file_mtime)
+		VALUES (?, ?, ?, ?, 'video', ?, 'active', 0)
+	`, 4, uuid.NewString(), "Copy A", pathA, md5)
+	if err != nil {
+		t.Fatalf("insert existing media: %v", err)
+	}
+
+	addedCalls := 0
+	s := &Scanner{
+		DB:       db,
+		SkipHash: false,
+		OnMediaAdded: func(int64, string, string) {
+			addedCalls++
+		},
+	}
+
+	added, err := s.ScanLibraryFoldersWithContext(context.Background(), 4, []string{root})
+	if err != nil {
+		t.Fatalf("scan error: %v", err)
+	}
+	if added != 1 {
+		t.Fatalf("added=%d want 1", added)
+	}
+	if addedCalls != 1 {
+		t.Fatalf("OnMediaAdded calls=%d want 1", addedCalls)
+	}
+
+	var mediaCount int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM media WHERE library_id = ?`, 4).Scan(&mediaCount); err != nil {
+		t.Fatalf("query media count: %v", err)
+	}
+	if mediaCount != 2 {
+		t.Fatalf("media count=%d want 2", mediaCount)
+	}
+
+	var pathCount int
+	if err := db.QueryRow(`SELECT COUNT(DISTINCT lower(file_path)) FROM media WHERE library_id = ?`, 4).Scan(&pathCount); err != nil {
+		t.Fatalf("query distinct paths: %v", err)
+	}
+	if pathCount != 2 {
+		t.Fatalf("distinct paths=%d want 2", pathCount)
+	}
+}
+
+func TestScanLibraryFoldersSamePathDifferentLibraries(t *testing.T) {
+	t.Parallel()
+
+	db := newScannerTestDB(t)
+	root := t.TempDir()
+	moviePath := filepath.Join(root, "shared.mp4")
+	if err := os.WriteFile(moviePath, []byte("shared video"), 0o644); err != nil {
+		t.Fatalf("write movie: %v", err)
+	}
+
+	s := &Scanner{DB: db, SkipHash: true}
+
+	addedA, err := s.ScanLibraryFoldersWithContext(context.Background(), 1, []string{root})
+	if err != nil {
+		t.Fatalf("scan library A: %v", err)
+	}
+	if addedA != 1 {
+		t.Fatalf("library A added=%d want 1", addedA)
+	}
+
+	addedB, err := s.ScanLibraryFoldersWithContext(context.Background(), 2, []string{root})
+	if err != nil {
+		t.Fatalf("scan library B: %v", err)
+	}
+	if addedB != 1 {
+		t.Fatalf("library B added=%d want 1", addedB)
+	}
+
+	var countA, countB int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM media WHERE library_id = 1`).Scan(&countA); err != nil {
+		t.Fatalf("count library A: %v", err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(1) FROM media WHERE library_id = 2`).Scan(&countB); err != nil {
+		t.Fatalf("count library B: %v", err)
+	}
+	if countA != 1 || countB != 1 {
+		t.Fatalf("media count A=%d B=%d want 1 each", countA, countB)
+	}
+
+	var mediaIDA, mediaIDB int64
+	if err := db.QueryRow(`SELECT id FROM media WHERE library_id = 1 LIMIT 1`).Scan(&mediaIDA); err != nil {
+		t.Fatalf("query media A: %v", err)
+	}
+	if err := db.QueryRow(`SELECT id FROM media WHERE library_id = 2 LIMIT 1`).Scan(&mediaIDB); err != nil {
+		t.Fatalf("query media B: %v", err)
+	}
+	if mediaIDA == mediaIDB {
+		t.Fatalf("libraries should have distinct media records, got same id=%d", mediaIDA)
+	}
+
+	var linkedB sql.NullInt64
+	if err := db.QueryRow(`
+		SELECT media_id FROM library_node
+		WHERE library_id = 2 AND node_type = 'file' AND node_name = 'shared.mp4'
+		LIMIT 1
+	`).Scan(&linkedB); err != nil {
+		t.Fatalf("query library B node: %v", err)
+	}
+	if !linkedB.Valid || linkedB.Int64 != mediaIDB {
+		t.Fatalf("library B node media_id=%v want %d", linkedB, mediaIDB)
 	}
 }
 

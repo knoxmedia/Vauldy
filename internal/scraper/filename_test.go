@@ -1,6 +1,9 @@
 package scraper
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseMediaFilenameChinese(t *testing.T) {
 	cases := []struct {
@@ -36,6 +39,18 @@ func TestParseMediaFilenameDyttSiteTag(t *testing.T) {
 	}
 	if NormalizeTitle(raw) != "爱有来生" {
 		t.Fatalf("NormalizeTitle=%q", NormalizeTitle(raw))
+	}
+}
+
+func TestParseMediaFilenameSiteAtPrefix(t *testing.T) {
+	raw := "489155.com@【ai增强】午夜寻花经典作之奶茶妹第7部0306第二场强制高潮喷不停依然内射可真行听译字幕4k增强版.mp4"
+	want := "午夜寻花经典作之奶茶妹第7部0306第二场强制高潮喷不停依然内射可真行听译字幕4k增强版"
+	got := ParseMediaFilename(raw)
+	if got.Title != want {
+		t.Fatalf("title=%q want %q", got.Title, want)
+	}
+	if NormalizeTitle(strings.TrimSuffix(raw, ".mp4")) != want {
+		t.Fatalf("NormalizeTitle=%q want %q", NormalizeTitle(strings.TrimSuffix(raw, ".mp4")), want)
 	}
 }
 

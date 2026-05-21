@@ -78,14 +78,93 @@ func insertScriptBoundaries(s string) string {
 		if i > 0 {
 			prev := runes[i-1]
 			if isLatinOrDigit(prev) && isCJK(r) {
-				b.WriteRune(' ')
-			} else if isCJK(prev) && isLatinOrDigit(r) && !isNumericSequelSuffix(runes, i) {
+				if !followsEmbeddedDateDigits(runes, i) && !isCompactTechTokenBeforeCJK(runes, i) && !isChineseOrdinalSuffix(runes, i-1) {
+					b.WriteRune(' ')
+				}
+			} else if isCJK(prev) && isLatinOrDigit(r) && !isNumericSequelSuffix(runes, i) && !isEmbeddedDateDigits(runes, i) {
 				b.WriteRune(' ')
 			}
 		}
 		b.WriteRune(r)
 	}
 	return b.String()
+}
+
+// followsEmbeddedDateDigits keeps MMDD-style ids glued to the next CJK chunk (e.g. 0306第二场).
+func followsEmbeddedDateDigits(runes []rune, cjkIdx int) bool {
+	if cjkIdx < 3 {
+		return false
+	}
+	n := 0
+	for j := cjkIdx - 1; j >= 0; j-- {
+		r := runes[j]
+		if r < '0' || r > '9' {
+			break
+		}
+		n++
+		if n > 4 {
+			return false
+		}
+	}
+	return n >= 3 && n <= 4
+}
+
+// isCompactTechTokenBeforeCJK keeps tokens like 4k/8k attached to the next CJK chunk (e.g. 4k增强版).
+func isCompactTechTokenBeforeCJK(runes []rune, cjkIdx int) bool {
+	if cjkIdx < 2 {
+		return false
+	}
+	start := cjkIdx - 1
+	for start >= 0 && isLatinOrDigit(runes[start]) {
+		start--
+	}
+	token := strings.ToLower(string(runes[start+1 : cjkIdx]))
+	switch token {
+	case "4k", "8k", "3d", "10bit", "8bit":
+		return true
+	}
+	hasLetter := false
+	hasDigit := false
+	for _, r := range runes[start+1 : cjkIdx] {
+		if r >= '0' && r <= '9' {
+			hasDigit = true
+		}
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+			hasLetter = true
+		}
+	}
+	return hasLetter && hasDigit && len(runes[start+1:cjkIdx]) <= 4
+}
+
+// isChineseOrdinalSuffix keeps 第7部 / 第3集 style markers intact (do not split digit from 部/集).
+func isChineseOrdinalSuffix(runes []rune, digitIdx int) bool {
+	if digitIdx < 1 || digitIdx+1 >= len(runes) {
+		return false
+	}
+	if runes[digitIdx-1] != '第' {
+		return false
+	}
+	switch runes[digitIdx+1] {
+	case '部', '集', '季', '话', '场', '辑', '卷', '章', '期', '回', '版', '弹':
+		return true
+	}
+	return false
+}
+
+// isEmbeddedDateDigits matches 3–4 digit date/id chunks glued to CJK (e.g. 0306 in 奶茶妹第7部0306第二场).
+func isEmbeddedDateDigits(runes []rune, start int) bool {
+	n := 0
+	for j := start; j < len(runes); j++ {
+		r := runes[j]
+		if r < '0' || r > '9' {
+			return n >= 3 && n <= 4
+		}
+		n++
+		if n > 4 {
+			return false
+		}
+	}
+	return n >= 3 && n <= 4
 }
 
 // isNumericSequelSuffix matches 1–2 trailing digits after CJK (e.g. 流浪地球2, 速度与激情10).

@@ -120,7 +120,7 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 			}
 			var existingMediaID int64
 			var existingMtime sql.NullInt64
-			if e := s.DB.QueryRow(`SELECT id, file_mtime FROM media WHERE lower(file_path) = lower(?) LIMIT 1`, normPath).Scan(&existingMediaID, &existingMtime); e == nil && existingMediaID > 0 {
+			if e := s.DB.QueryRow(`SELECT id, file_mtime FROM media WHERE library_id = ? AND lower(file_path) = lower(?) LIMIT 1`, libraryID, normPath).Scan(&existingMediaID, &existingMtime); e == nil && existingMediaID > 0 {
 				if existingMtime.Valid && existingMtime.Int64 == curMtime {
 					_ = s.upsertNode(libraryID, parentPath, nodePath, nodeName, "file", &existingMediaID)
 					if s.OnFile != nil {
@@ -151,13 +151,22 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 			if !s.SkipHash {
 				if h, e := hashutil.MD5File(path); e == nil {
 					md5sum = sql.NullString{String: h, Valid: true}
-					var existing string
-					e2 := s.DB.QueryRow(`SELECT file_id FROM media WHERE md5 = ? LIMIT 1`, h).Scan(&existing)
-					if e2 == nil && existing != "" {
-						if s.OnFile != nil {
-							s.OnFile(path, nil)
+					var dupMediaID int64
+					var dupPath sql.NullString
+					e2 := s.DB.QueryRow(`SELECT id, file_path FROM media WHERE md5 = ? AND library_id = ? LIMIT 1`, h, libraryID).Scan(&dupMediaID, &dupPath)
+					if e2 == nil && dupMediaID > 0 && dupPath.Valid && strings.TrimSpace(dupPath.String) != "" {
+						oldPath := dupPath.String
+						if normalizeMediaPath(oldPath) != normPath {
+							if _, statErr := os.Stat(oldPath); statErr != nil && os.IsNotExist(statErr) {
+								_, _ = s.DB.Exec(`UPDATE media SET file_path = ?, file_mtime = ?, status = 'active' WHERE id = ?`, normPath, curMtime, dupMediaID)
+								_ = s.upsertNode(libraryID, parentPath, nodePath, nodeName, "file", &dupMediaID)
+								if s.OnFile != nil {
+									s.OnFile(path, nil)
+								}
+								return nil
+							}
+							// Same content on disk at another path: keep existing record and insert this path as new media.
 						}
-						return nil
 					}
 				}
 			}
