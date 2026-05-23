@@ -111,9 +111,14 @@ type scrapeConfigBody struct {
 }
 
 type manualMatchBody struct {
-	Query  string `json:"query" binding:"required"`
-	Year   int    `json:"year"`
-	Source string `json:"source"`
+	Query      string `json:"query"`
+	Year       int    `json:"year"`
+	Source     string `json:"source"`
+	ExternalID string `json:"external_id"`
+	MediaType  string `json:"media_type"`
+	Language   string `json:"language"`
+	Poster     string `json:"poster"`
+	Overview   string `json:"overview"`
 }
 
 type updateMetaBody struct {
@@ -475,14 +480,36 @@ func (h *Handler) ManualMatchMedia(c *gin.Context) {
 		return
 	}
 	cfg := h.readScrapeConfig()
-	res, sErr := scraper.ScrapeWithConfig(body.Query, body.Source, cfg)
+	if q := strings.TrimSpace(body.Query); q != "" {
+		if normalized, parsedYear := scraper.NormalizeSearchInput(q); normalized != "" {
+			body.Query = normalized
+			if body.Year <= 0 && parsedYear > 0 {
+				body.Year = parsedYear
+			}
+		}
+	}
+	var res *scraper.ScrapeResult
+	var sErr error
+	if strings.TrimSpace(body.ExternalID) != "" && strings.TrimSpace(body.Source) != "" {
+		res, sErr = scraper.FetchMatchByExternalID(body.Source, body.ExternalID, body.MediaType, body.Language, cfg)
+	} else if strings.TrimSpace(body.Query) != "" {
+		res, sErr = scraper.ScrapeWithConfig(body.Query, body.Source, cfg)
+	} else {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "query or external_id required"})
+		return
+	}
 	if res == nil {
 		res = &scraper.ScrapeResult{Title: body.Query, Genres: []string{}, Extra: map[string]any{}}
 	}
+	scraper.ApplyMatchCandidateFields(res, body.Poster, body.Overview)
 	var libraryID int64
 	var fileType string
 	_ = h.App.DB.QueryRow(`SELECT library_id, COALESCE(file_type,'') FROM media WHERE id = ?`, id).Scan(&libraryID, &fileType)
-	h.applyScrapeLocalImages(id, libraryID, fileType, cfg, res)
+	// Manual selection from a metadata provider should not fall back to local ffmpeg capture
+	// when the media file is missing or remote artwork is already available.
+	if strings.TrimSpace(body.ExternalID) == "" {
+		h.applyScrapeLocalImages(id, libraryID, fileType, cfg, res)
+	}
 	if !scraper.HasMeaningfulScrapeData(res) {
 		msg := scraper.NoDataFailureMessage(res)
 		if sErr != nil {
@@ -497,9 +524,102 @@ func (h *Handler) ManualMatchMedia(c *gin.Context) {
 	if _, pErr := h.persistScrapeArtwork(id, res); pErr != nil {
 		log.Printf("manual match artwork persist media=%d: %v", id, pErr)
 	}
-	merged, _ := scraper.MergeMetaJSON(existing.String, map[string]any{"scrape": res})
-	_, _ = h.App.DB.Exec(`UPDATE media SET title = ?, meta_json = ? WHERE id = ?`, res.Title, merged, id)
+	merged, mErr := scraper.MergeMetaJSON(existing.String, map[string]any{"scrape": res})
+	if mErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存元数据失败: " + mErr.Error()})
+		return
+	}
+	if _, err := h.App.DB.Exec(`UPDATE media SET title = ?, meta_json = ? WHERE id = ?`, res.Title, merged, id); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	scraper.SanitizeScrapeResult(res)
 	c.JSON(http.StatusOK, gin.H{"ok": true, "scrape": res})
+}
+
+func (h *Handler) SearchScrapeMatches(c *gin.Context) {
+	query := strings.TrimSpace(c.Query("query"))
+	if query == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "query required"})
+		return
+	}
+	year := 0
+	if ys := strings.TrimSpace(c.Query("year")); ys != "" {
+		if n, err := strconv.Atoi(ys); err == nil && n > 0 {
+			year = n
+		}
+	}
+	if normalized, parsedYear := scraper.NormalizeSearchInput(query); normalized != "" {
+		query = normalized
+		if year == 0 && parsedYear > 0 {
+			year = parsedYear
+		}
+	}
+	source := strings.TrimSpace(c.Query("source"))
+	language := strings.TrimSpace(c.Query("language"))
+	limit := 20
+	if ls := strings.TrimSpace(c.Query("limit")); ls != "" {
+		if n, err := strconv.Atoi(ls); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	cfg := h.readScrapeConfig()
+	items, err := scraper.SearchMatchCandidates(query, year, source, language, cfg, limit)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"items": []any{}, "message": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items})
+}
+
+func (h *Handler) ParseScrapeTitle(c *gin.Context) {
+	raw := strings.TrimSpace(c.Query("raw"))
+	if raw == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "raw required"})
+		return
+	}
+	title, titleAlt, year := scraper.ExtractSearchTerms(raw)
+	if title == "" {
+		title = strings.TrimSpace(raw)
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"title":     title,
+		"title_alt": titleAlt,
+		"year":      year,
+	})
+}
+
+func (h *Handler) UnmatchMedia(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	var title, orig, meta sql.NullString
+	if err := h.App.DB.QueryRow(`SELECT title, original_title, meta_json FROM media WHERE id = ?`, id).Scan(&title, &orig, &meta); err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	var raw map[string]any
+	_ = json.Unmarshal([]byte(meta.String), &raw)
+	if raw == nil {
+		raw = map[string]any{}
+	}
+	delete(raw, "scrape")
+	newTitle := title.String
+	if strings.TrimSpace(orig.String) != "" {
+		newTitle = orig.String
+	}
+	js, _ := json.Marshal(raw)
+	if _, err := h.App.DB.Exec(`UPDATE media SET title = ?, meta_json = ? WHERE id = ?`, newTitle, string(js), id); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
 func (h *Handler) readScrapeConfig() scraper.Config {

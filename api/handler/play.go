@@ -1320,6 +1320,40 @@ func (h *Handler) SaveProgress(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
+func (h *Handler) ClearProgress(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	if _, ok := h.requireMediaAccess(c, id, true); !ok {
+		return
+	}
+	if middleware.IsAPIClient(c) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "API client credentials cannot sync user progress"})
+		return
+	}
+	uid := middleware.UserID(c)
+	if uid <= 0 {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "login required for progress sync"})
+		return
+	}
+	var fileID string
+	if err := h.App.DB.QueryRow(`SELECT file_id FROM media WHERE id = ?`, id).Scan(&fileID); err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if _, err := h.App.DB.Exec(`DELETE FROM play_progress WHERE user_id = ? AND file_id = ?`, uid, fileID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
 func (h *Handler) touchPlayProgressOnStart(userID int64, fileID string) error {
 	var n int
 	if err := h.App.DB.QueryRow(`SELECT COUNT(1) FROM play_progress WHERE user_id = ? AND file_id = ?`, userID, fileID).Scan(&n); err != nil {

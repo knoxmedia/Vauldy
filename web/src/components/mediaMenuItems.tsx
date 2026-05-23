@@ -11,6 +11,7 @@ import {
   markUnwatched,
   markWatched,
   transcodeAsync,
+  unmatchMedia,
 } from "../api/client";
 import type { RecentPlaylistEntry } from "../lib/recentPlaylists";
 
@@ -90,6 +91,14 @@ export function buildMediaMenuItems(
     afterDelete?: () => void | Promise<void>;
     /** 隐藏删除项（默认显示） */
     hideDelete?: boolean;
+    /** 继续观看：从列表移除（不删除媒体） */
+    onRemoveFromContinueWatching?: (mediaId: number) => void | Promise<void>;
+    /** 媒体库：是否已成功刮削 */
+    scraped?: boolean;
+    /** 媒体库：打开匹配对话框 */
+    onOpenMatch?: (mediaId: number) => void;
+    /** 媒体库：取消匹配后刷新 */
+    afterUnmatch?: () => void | Promise<void>;
   },
 ): MenuProps {
   const isWatched = extra?.isWatched ?? false;
@@ -103,6 +112,10 @@ export function buildMediaMenuItems(
   const afterToggleWatched = extra?.afterToggleWatched;
   const afterDelete = extra?.afterDelete;
   const hideDelete = extra?.hideDelete ?? false;
+  const onRemoveFromContinueWatching = extra?.onRemoveFromContinueWatching;
+  const scraped = extra?.scraped ?? false;
+  const onOpenMatch = extra?.onOpenMatch;
+  const afterUnmatch = extra?.afterUnmatch;
 
   const addToChildren: MenuProps["items"] = [
     {
@@ -138,6 +151,16 @@ export function buildMediaMenuItems(
         children: addToChildren,
       },
       { key: "toggleWatched", label: watchedLabel },
+      ...(onRemoveFromContinueWatching
+        ? [{ key: "removeFromContinueWatching", label: "从继续观看移除" }]
+        : []),
+      ...(onOpenMatch && !scraped ? [{ key: "match", label: "匹配" }] : []),
+      ...(onOpenMatch && scraped
+        ? [
+            { key: "fixMatch", label: "修改匹配" },
+            { key: "unmatch", label: "取消匹配" },
+          ]
+        : []),
       { type: "divider" as const },
       { key: "refreshMetadata", label: "刷新元数据" },
       { key: "analyze", label: "分析" },
@@ -198,6 +221,34 @@ export function buildMediaMenuItems(
               })
               .catch(() => message.error("操作失败"));
           }
+          break;
+        case "removeFromContinueWatching":
+          void Promise.resolve(onRemoveFromContinueWatching?.(r.id)).catch(() =>
+            message.error("操作失败"),
+          );
+          break;
+        case "match":
+        case "fixMatch":
+          onOpenMatch?.(r.id);
+          break;
+        case "unmatch":
+          Modal.confirm({
+            title: "取消匹配",
+            centered: true,
+            okText: "确定",
+            cancelText: "取消",
+            content: "将清除该媒体的刮削元数据，标题将恢复为原始文件名。",
+            onOk: async () => {
+              try {
+                await unmatchMedia(r.id);
+                message.success("已取消匹配");
+                await afterUnmatch?.();
+              } catch (err: unknown) {
+                message.error((err as Error).message || "操作失败");
+                throw err;
+              }
+            },
+          });
           break;
         case "unfavorite":
           onUnfavorite?.(r.id);

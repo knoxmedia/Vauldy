@@ -217,11 +217,11 @@ func downloadToFile(rawURL, dest string) error {
 func setImageReferer(req *http.Request, u *url.URL) {
 	host := strings.ToLower(u.Host)
 	switch {
-	case strings.Contains(host, "douban.com"):
+	case strings.Contains(host, "douban.com"), strings.Contains(host, "doubanio.com"):
 		req.Header.Set("Referer", "https://movie.douban.com/")
 	case strings.Contains(host, "tmdb.org"), strings.Contains(host, "themoviedb.org"):
 		req.Header.Set("Referer", "https://www.themoviedb.org/")
-	case strings.Contains(host, "bangumi.tv"):
+	case strings.Contains(host, "bangumi.tv"), strings.Contains(host, "bgm.tv"):
 		req.Header.Set("Referer", "https://bangumi.tv/")
 	case strings.Contains(host, "fanart.tv"):
 		req.Header.Set("Referer", "https://fanart.tv/")

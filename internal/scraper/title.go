@@ -11,13 +11,13 @@ var (
 	splitNoise       = regexp.MustCompile(`[._\-+]+`)
 	bracketCharsRE = regexp.MustCompile(`[\[【(（\]】)）]`)
 	yearPattern      = regexp.MustCompile(`(?:^|[\s._-])((?:19|20)\d{2})(?:$|[\s._-])`)
-	englishNoiseRE   = regexp.MustCompile(`(?i)\b(?:bluray|bdrip|brrip|webrip|web-?dl|hdrip|dvdrip|hdtv|uhd|hd|4k|8k|3d|x264|x265|h\.?264|h\.?265|hevc|avc|aac|ac3|dts|truehd|atmos|hdr10|hdr10\+|dv|dovi|remux|repack|proper|extended|unrated|director'?s?\.?cut|imax|10bit|8bit|1080p|2160p|1440p|720p|480p|576p|540p|cd\d|disc\d|disk\d|vol\d|chs|cht|gb|cn|eng|english|chinese|mandarin|cantonese|dual|audio|subs?|subbed|dubbed|complete|limited|special|edition|collectors?)\b`)
+	englishNoiseRE   = regexp.MustCompile(`(?i)\b(?:bluray|bdrip|brrip|webrip|web-?dl|hdrip|dvdrip|hdtv|uhd|hd|bd|br|4k|8k|3d|x264|x265|h\.?264|h\.?265|hevc|avc|aac|ac3|dts|truehd|atmos|hdr10|hdr10\+|dv|dovi|remux|repack|proper|extended|unrated|director'?s?\.?cut|imax|10bit|8bit|1080p|2160p|1440p|720p|480p|576p|540p|cd\d|disc\d|disk\d|vol\d|chs|cht|gb|cn|eng|english|chinese|mandarin|cantonese|dual|audio|subs?|subbed|dubbed|complete|limited|special|edition|collectors?)\b`)
 )
 
 // Chinese release / source tags often glued to titles without separators.
 var chineseNoiseSubstrings = []string{
-	"中英双字", "国英双语", "国粤双语", "粤英双语", "中日双语", "中韩双语",
-	"简体中字", "繁体中字", "中英字幕", "中日字幕", "双语字幕",
+	"中英双字", "国英双语", "国粤双语", "国印双语", "粤英双语", "中日双语", "中韩双语",
+	"简体中字", "繁体中字", "国语中字", "中英字幕", "中日字幕", "双语字幕",
 	"国英双音", "国粤双音", "双音轨", "双字幕",
 	"中英", "中字", "双语", "双字", "字幕",
 	"国英", "国粤", "粤英", "国语", "粤语", "台配", "港版", "韩版", "美版", "日版",
@@ -31,7 +31,7 @@ var techNoiseWordRE = regexp.MustCompile(`(?i)^(ld|xt|yyh3d|d\d+)$`)
 
 var noiseTokenSet = func() map[string]struct{} {
 	tokens := []string{
-		"hd", "uhd", "4k", "8k", "3d", "hdr", "dv", "aac", "ac3", "dts",
+		"hd", "bd", "br", "uhd", "4k", "8k", "3d", "hdr", "dv", "aac", "ac3", "dts",
 		"chs", "cht", "gb", "cn", "eng", "sub", "subs", "audio", "dual",
 		"repack", "proper", "remux", "webdl", "webrip", "bdrip", "dvdrip",
 		"bluray", "hdtv", "x264", "x265", "hevc", "avc", "imax", "ld", "d9",

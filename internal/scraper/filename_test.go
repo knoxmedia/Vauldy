@@ -19,6 +19,11 @@ func TestParseMediaFilenameChinese(t *testing.T) {
 		{"01届.《翼》-《Wings》-1927-1929.mkv", "翼", "Wings", 1927},
 		{"蜡笔小新：灼热的春日部舞者.2024.1080p.mkv", "蜡笔小新: 灼热的春日部舞者", "", 2024},
 		{"[电影天堂www.dytt8899.com]爱有来生-2009_HD国语中字.mp4", "爱有来生", "", 2009},
+		{"我的姐姐 HD国语中字", "我的姐姐", "", 0},
+		{"厕所英雄hd国印双语.mkv", "厕所英雄", "", 0},
+		{"厕所英雄hd国英双语.mkv", "厕所英雄", "", 0},
+		{"碟中谍6：全面瓦解bd中英双字.mp4", "碟中谍6: 全面瓦解", "", 0},
+		{"碟中谍6:全面瓦解.BD.中英双字.2018.mp4", "碟中谍6:全面瓦解", "", 2018},
 	}
 	for _, tc := range cases {
 		got := ParseMediaFilename(tc.raw)
@@ -58,5 +63,23 @@ func TestExtractSearchTermsUsesFilenameParser(t *testing.T) {
 	k, alt, y := ExtractSearchTerms("老炮儿HD中英双字")
 	if k != "老炮儿" || alt != "" || y != 0 {
 		t.Fatalf("got %q alt=%q year=%d", k, alt, y)
+	}
+}
+
+func TestNormalizeSearchInputUserExamples(t *testing.T) {
+	cases := []struct {
+		raw       string
+		wantTitle string
+		wantYear  int
+	}{
+		{"我的姐姐 HD国语中字", "我的姐姐", 0},
+		{"厕所英雄hd国印双语.mkv", "厕所英雄", 0},
+		{"碟中谍6：全面瓦解bd中英双字.mp4", "碟中谍6: 全面瓦解", 0},
+	}
+	for _, tc := range cases {
+		title, year := NormalizeSearchInput(tc.raw)
+		if title != tc.wantTitle || year != tc.wantYear {
+			t.Fatalf("%q => title=%q year=%d want title=%q year=%d", tc.raw, title, year, tc.wantTitle, tc.wantYear)
+		}
 	}
 }

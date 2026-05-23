@@ -103,8 +103,10 @@ func (h *Handler) mediaVideoPath(mediaID, libraryID int64) (absPath string, dura
 		return "", 0, fmt.Errorf("empty file path")
 	}
 	if _, statErr := os.Stat(absPath); statErr != nil {
-		log.Printf("poster capture media=%d: file not accessible %q: %v", mediaID, absPath, statErr)
-		return "", 0, statErr
+		if !os.IsNotExist(statErr) {
+			log.Printf("poster capture media=%d: file not accessible %q: %v", mediaID, absPath, statErr)
+		}
+		return "", 0, nil
 	}
 	return absPath, duration.Int64, nil
 }

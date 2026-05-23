@@ -99,6 +99,8 @@ export type MediaItem = {
   year?: number;
   /** From scrape or empty; UI may fall back to `/uploads/posters/{id}.jpg`. */
   poster_url?: string;
+  /** True when meaningful scrape metadata exists. */
+  scraped?: boolean;
 };
 
 /** Normalize poster string from DB (some SQLite/json paths may retain JSON quotes). */
@@ -131,6 +133,61 @@ export function mediaPosterSrc(r: Pick<MediaItem, "id" | "poster_url">): string 
   const u = normalizeListPosterUrl(r.poster_url || "");
   if (u) return u;
   return localPosterSrc(r.id);
+}
+
+export type ManualMatchResponse = {
+  ok?: boolean;
+  scrape?: {
+    title?: string;
+    overview?: string;
+    poster?: string;
+    release_date?: string;
+    source?: string;
+    extra?: Record<string, unknown>;
+  };
+};
+
+/** Fields to patch a browse/list row after manual match without reloading the page. */
+export type MediaMatchListUpdate = {
+  id: number;
+  title: string;
+  poster_url?: string;
+  year?: number;
+  release_date?: string;
+  scraped: boolean;
+};
+
+function yearFromReleaseDate(releaseDate: string): number | undefined {
+  const y = Number(releaseDate.trim().slice(0, 4));
+  return y >= 1800 && y <= 2100 ? y : undefined;
+}
+
+export function mediaMatchListUpdate(
+  mediaId: number,
+  response: ManualMatchResponse,
+  fallback?: Pick<ScrapeMatchCandidate, "title" | "poster" | "year" | "release_date">,
+): MediaMatchListUpdate {
+  const scrape = response.scrape ?? {};
+  const extra = scrape.extra ?? {};
+  const poster = normalizeListPosterUrl(
+    String(scrape.poster ?? extra.poster ?? fallback?.poster ?? ""),
+  );
+  const title = (scrape.title || fallback?.title || "").trim();
+  const releaseDate = String(
+    scrape.release_date ?? extra.release_date ?? fallback?.release_date ?? "",
+  ).trim();
+  let year = fallback?.year;
+  if (year == null || year <= 0) {
+    year = yearFromReleaseDate(releaseDate);
+  }
+  return {
+    id: mediaId,
+    title,
+    poster_url: poster || undefined,
+    year: year && year > 0 ? year : undefined,
+    release_date: releaseDate || undefined,
+    scraped: true,
+  };
 }
 
 export type HistoryItem = {
@@ -681,6 +738,10 @@ export async function savePlaybackProgress(
   await api.post(`/api/v1/media/${mediaId}/progress`, payload);
 }
 
+export async function removePlayProgress(mediaId: number) {
+  await api.delete(`/api/v1/media/${mediaId}/progress`);
+}
+
 export type AccessLogItem = {
   id: number;
   username: string;
@@ -1059,9 +1120,62 @@ export async function fetchScrapeHistory(limit = 100) {
   return data.items ?? [];
 }
 
-export async function manualMatchMedia(mediaId: number, payload: { query: string; year?: number; source?: string }) {
-  const { data } = await api.post(`/api/v1/media/${mediaId}/manual-match`, payload);
+export async function manualMatchMedia(
+  mediaId: number,
+  payload: {
+    query?: string;
+    year?: number;
+    source?: string;
+    external_id?: string;
+    media_type?: string;
+    language?: string;
+    poster?: string;
+    overview?: string;
+  },
+) {
+  const { data } = await api.post<ManualMatchResponse>(`/api/v1/media/${mediaId}/manual-match`, payload);
   return data;
+}
+
+export type ScrapeMatchCandidate = {
+  source: string;
+  external_id: string;
+  media_type?: string;
+  title: string;
+  overview?: string;
+  poster?: string;
+  year?: number;
+  release_date?: string;
+};
+
+export async function parseScrapeTitle(raw: string) {
+  const { data } = await api.get<{ title?: string; title_alt?: string; year?: number }>(
+    "/api/v1/scrape/parse-title",
+    { params: { raw } },
+  );
+  return {
+    title: (data.title ?? "").trim(),
+    titleAlt: (data.title_alt ?? "").trim(),
+    year: typeof data.year === "number" && data.year > 0 ? data.year : undefined,
+  };
+}
+
+export async function searchScrapeMatches(params: {
+  query: string;
+  year?: number;
+  source?: string;
+  language?: string;
+  limit?: number;
+}) {
+  const { data } = await api.get<{ items?: ScrapeMatchCandidate[]; message?: string }>(
+    "/api/v1/scrape/search",
+    { params },
+  );
+  return { items: data?.items ?? [], message: data?.message };
+}
+
+export async function unmatchMedia(mediaId: number) {
+  await api.delete(`/api/v1/media/${mediaId}/match`);
 }
 
 export async function updateMediaMetadata(

@@ -26,12 +26,15 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { buildMediaMenuItems } from "../components/mediaMenuItems";
 import AddToPlaylistModal from "../components/AddToPlaylistModal";
+import MediaMatchModal from "../components/MediaMatchModal";
 import {
   MediaItem,
   addFavorite,
   addPlaylistItem,
   fetchMedia,
   mediaPosterSrc,
+  normalizeListPosterUrl,
+  type MediaMatchListUpdate,
 } from "../api/client";
 import { readRecentPlaylists, rememberPlaylistAdded } from "../lib/recentPlaylists";
 import styles from "./Browse.module.css";
@@ -193,6 +196,7 @@ export default function BrowsePage() {
   const [tablePage, setTablePage] = useState(1);
   const [colPickerOpen, setColPickerOpen] = useState(false);
   const [playlistModalMediaIds, setPlaylistModalMediaIds] = useState<number[] | null>(null);
+  const [matchMedia, setMatchMedia] = useState<MediaItem | null>(null);
   const [recentPlaylistMenu, setRecentPlaylistMenu] = useState(readRecentPlaylists);
 
   async function load() {
@@ -208,6 +212,27 @@ export default function BrowsePage() {
     } finally {
       setLoading(false);
     }
+  }
+
+  function applyMediaMatchUpdate(update: MediaMatchListUpdate) {
+    setRows((prev) =>
+      prev.map((r) =>
+        r.id === update.id
+          ? {
+              ...r,
+              title: update.title || r.title,
+              poster_url: update.poster_url ?? r.poster_url,
+              year: update.year ?? r.year,
+              release_date: update.release_date ?? r.release_date,
+              scraped: update.scraped,
+            }
+          : r,
+      ),
+    );
+  }
+
+  function posterImgKey(r: MediaItem): string {
+    return `${r.id}:${normalizeListPosterUrl(r.poster_url || "")}`;
   }
 
   useEffect(() => {
@@ -502,6 +527,12 @@ export default function BrowsePage() {
   function makeMenu(r: MediaItem, extra?: { isWatched?: boolean }): MenuProps {
     return buildMediaMenuItems(r, nav, {
       ...extra,
+      scraped: r.scraped,
+      onOpenMatch: (mediaId) => {
+        const item = rows.find((x) => x.id === mediaId) ?? r;
+        setMatchMedia(item);
+      },
+      afterUnmatch: () => load(),
       afterDelete: () => {
         setBrowseSelectedIds((prev) => {
           if (!prev.has(r.id)) return prev;
@@ -914,6 +945,7 @@ export default function BrowsePage() {
                       data-selected={isListSelected ? "" : undefined}
                     >
                       <img
+                        key={posterImgKey(r)}
                         className={styles.listPosterImg}
                         src={mediaPosterSrc(r)}
                         alt=""
@@ -1007,6 +1039,7 @@ export default function BrowsePage() {
                   }}
                 >
                   <img
+                    key={posterImgKey(r)}
                     className={styles.gridCoverImg}
                     src={mediaPosterSrc(r)}
                     alt=""
@@ -1108,6 +1141,13 @@ export default function BrowsePage() {
           }}
         />
       )}
+      <MediaMatchModal
+        media={matchMedia}
+        fixMatch={Boolean(matchMedia?.scraped)}
+        open={matchMedia != null}
+        onClose={() => setMatchMedia(null)}
+        onMatched={applyMediaMatchUpdate}
+      />
     </div>
   );
 }

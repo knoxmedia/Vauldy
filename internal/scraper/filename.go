@@ -31,6 +31,9 @@ var (
 	// Leading 【ai增强】 / [tag] release metadata before title.
 	leadingReleaseBracketRE = regexp.MustCompile(`^(?:\s*[【\[（(][^【】()\[\]（）]{0,60}[】\]\)）]\s*)+`)
 	knownMediaExtRE = regexp.MustCompile(`(?i)\.(mkv|mp4|avi|mov|wmv|flv|webm|m4v|ts|m2ts|mp3|flac|aac|wav|mka|ogg|oga|wma|ape|alac)$`)
+	trailingVideoTagRE = regexp.MustCompile(`(?i)[\s._\-]+(?:hd|bd|uhd|br|dvd|webrip|web-?dl|bluray|remux|tc|cam|ts|scr|rip|4k|8k|1080p|2160p|1440p|720p|480p|576p|540p|x264|x265|hevc|h\.?264|h\.?265|aac|dts|ac3|truehd|atmos|10bit|8bit)(?:[\s._\-]*[\p{Han}a-z0-9]+)*$`)
+	trailingCNReleaseRE = regexp.MustCompile(`[\s._\-]+(?:国[英粤印韩日]双[语字]|中[英日韩]双[字语]|国[语粤]中字|[简繁]体中字|双语字幕|中文字幕|双字幕|双音轨|内封中字|内嵌中字|外挂字幕|听译字幕)(?:[\s._\-]*(?:国[英粤印韩日]双[语字]|中[英日韩]双[字语]|国[语粤]中字|[简繁]体中字|双语字幕|中文字幕|双字幕|双音轨))*$`)
+	trailingCNEditionRE = regexp.MustCompile(`[\s._\-]+(?:高清|超清|蓝光|原盘|未删减|完整|修复|导演剪辑|加长|抢先|枪版|剧场|典藏|纪念|特效|终极|收藏)(?:版)?$`)
 )
 
 // ParseMediaFilename extracts search title/year from release filenames (nowen-video style).
@@ -53,6 +56,7 @@ func ParseMediaFilename(filename string) ParsedMediaTitle {
 	name = chineseAdRE.ReplaceAllString(name, " ")
 	name = strings.ReplaceAll(name, "。", ".")
 	name = strings.ReplaceAll(name, "　", " ")
+	name = stripGluedReleaseSuffix(name)
 
 	bracketStripped := leadingReleaseBracketRE.ReplaceAllString(name, "")
 	hadReleaseBracket := bracketStripped != name
@@ -133,6 +137,22 @@ func ParseMediaFilename(filename string) ParsedMediaTitle {
 		out.Year = extractYear(normalizeRawTitle(filename))
 	}
 	return out
+}
+
+func stripGluedReleaseSuffix(s string) string {
+	v := strings.TrimSpace(s)
+	for i := 0; i < 8; i++ {
+		prev := v
+		v = insertScriptBoundaries(v)
+		v = trailingVideoTagRE.ReplaceAllString(v, "")
+		v = trailingCNReleaseRE.ReplaceAllString(v, "")
+		v = trailingCNEditionRE.ReplaceAllString(v, "")
+		v = strings.TrimSpace(v)
+		if v == prev {
+			break
+		}
+	}
+	return v
 }
 
 func containsLatin(s string) bool {
@@ -303,6 +323,15 @@ func ExtractSearchTerms(raw string) (keyword, alt string, year int) {
 	}
 	keyword, year = extractSearchLegacy(probe)
 	return keyword, "", year
+}
+
+// NormalizeSearchInput parses a release filename or dirty title into a scrape query and year.
+func NormalizeSearchInput(raw string) (query string, year int) {
+	query, _, year = ExtractSearchTerms(raw)
+	if query != "" {
+		return query, year
+	}
+	return strings.TrimSpace(raw), extractYear(normalizeRawTitle(raw))
 }
 
 func extractSearchLegacy(raw string) (keyword string, year int) {

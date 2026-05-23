@@ -59,7 +59,19 @@ func (h *Handler) ListMedia(c *gin.Context) {
 		COALESCE(
 			NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.poster')), ''),
 			NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.extra.poster')), '')
-		) AS poster_url
+		) AS poster_url,
+		CASE WHEN COALESCE(json_extract(m.meta_json, '$.scrape.source'), '') NOT IN ('', 'aggregated-stub')
+			AND COALESCE(json_extract(m.meta_json, '$.scrape.extra.note'), '') != 'stub'
+			AND (
+				NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.overview')), '') IS NOT NULL
+				OR NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.poster')), '') IS NOT NULL
+				OR NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.extra.poster')), '') IS NOT NULL
+				OR CAST(NULLIF(json_extract(m.meta_json, '$.scrape.rating'), '') AS REAL) > 0
+				OR NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.release_date')), '') IS NOT NULL
+				OR NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.extra.tmdb_id')), '') IS NOT NULL
+				OR NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.extra.imdb_id')), '') IS NOT NULL
+			)
+		THEN 1 ELSE 0 END AS scraped
 	FROM media m WHERE 1=1`
 	args := []any{}
 	if lib != "" {
@@ -90,8 +102,8 @@ func (h *Handler) ListMedia(c *gin.Context) {
 		var mid int64
 		var libID sql.NullInt64
 		var fileID, title, orig, path, ftype, format, status, created, lastPlayAt, releaseDate, posterURL sql.NullString
-		var dur, w, h, br, releaseYear sql.NullInt64
-		if err := rows.Scan(&mid, &libID, &fileID, &title, &orig, &path, &ftype, &dur, &w, &h, &br, &format, &status, &created, &lastPlayAt, &releaseDate, &releaseYear, &posterURL); err != nil {
+		var dur, w, h, br, releaseYear, scraped sql.NullInt64
+		if err := rows.Scan(&mid, &libID, &fileID, &title, &orig, &path, &ftype, &dur, &w, &h, &br, &format, &status, &created, &lastPlayAt, &releaseDate, &releaseYear, &posterURL, &scraped); err != nil {
 			continue
 		}
 		if strings.EqualFold(profile.LibraryScope, "selected") {
@@ -108,7 +120,7 @@ func (h *Handler) ListMedia(c *gin.Context) {
 			"file_type": ftype.String, "duration": dur.Int64, "width": w.Int64, "height": h.Int64,
 			"bitrate": br.Int64, "format": format.String, "status": status.String, "created_at": created.String,
 			"last_play_at": lastPlayAt.String, "release_date": releaseDate.String, "year": releaseYear.Int64,
-			"poster_url": posterURL.String,
+			"poster_url": posterURL.String, "scraped": scraped.Int64 == 1,
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"items": items})

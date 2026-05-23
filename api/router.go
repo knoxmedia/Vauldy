@@ -83,6 +83,7 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 			auth.PUT("/playlists/:id/reorder", h.ReorderPlaylistItems)
 
 			auth.POST("/media/:id/progress", h.SaveProgress)
+			auth.DELETE("/media/:id/progress", h.ClearProgress)
 			auth.PUT("/media/:id/watched", h.ToggleWatched)
 			auth.DELETE("/media/:id/watched", h.ToggleWatched)
 		}
@@ -91,6 +92,7 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 		play := v1.Group("")
 		play.Use(middleware.RequireAuthentication(cfg, true))
 		{
+			play.GET("/proxy/image", h.ProxyRemoteImage)
 			play.GET("/media/:id/play", h.PlayMedia)
 			play.POST("/media/:id/playback/start", h.PlaybackStart)
 			play.POST("/media/:id/playback/end", h.PlaybackEnd)
@@ -143,6 +145,7 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 			adm.POST("/media/:id/scrape", h.ScrapeMedia)
 			adm.POST("/media/:id/subtitle/process", h.ProcessMediaSubtitles)
 			adm.POST("/media/:id/manual-match", h.ManualMatchMedia)
+			adm.DELETE("/media/:id/match", h.UnmatchMedia)
 			adm.PATCH("/media/:id/meta", h.UpdateMediaMetadata)
 			adm.PATCH("/media/:id/images", h.UpdateMediaImages)
 			adm.PUT("/media/:id", h.UpdateMediaAdmin)
@@ -160,6 +163,8 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 			adm.POST("/scrape/task/run", h.RunScrapeTasks)
 			adm.POST("/scrape/artwork/backfill", h.BackfillScrapeArtwork)
 			adm.GET("/scrape/history", h.ListScrapeHistory)
+			adm.GET("/scrape/search", h.SearchScrapeMatches)
+			adm.GET("/scrape/parse-title", h.ParseScrapeTitle)
 			adm.GET("/scrape/tmdb/images", h.SearchTMDbImages)
 
 			adm.POST("/upload", h.UploadSingle)

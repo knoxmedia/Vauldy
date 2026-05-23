@@ -25,6 +25,7 @@ import {
   fetchMedia,
   fetchUserHistory,
   mediaPosterSrc,
+  removePlayProgress,
 } from "../api/client";
 import AddToPlaylistModal from "../components/AddToPlaylistModal";
 import { buildMediaMenuItems } from "../components/mediaMenuItems";
@@ -85,11 +86,15 @@ function HistoryContinueCard({
   selected: boolean;
   onToggleSelect: () => void;
   bulkSelectMode: boolean;
-  buildHomeMediaMenu: (mediaId: number, extra?: { isWatched?: boolean }) => MenuProps;
+  buildHomeMediaMenu: (mediaId: number, extra?: { isWatched?: boolean; fromContinueWatching?: boolean }) => MenuProps;
 }) {
   const [posterFailed, setPosterFailed] = useState(false);
   const homeMediaMenu = useMemo(
-    () => buildHomeMediaMenu(h.media_id, { isWatched: h.completed === 1 }),
+    () =>
+      buildHomeMediaMenu(h.media_id, {
+        isWatched: h.completed === 1,
+        fromContinueWatching: true,
+      }),
     [h.media_id, h.completed, buildHomeMediaMenu],
   );
 
@@ -241,7 +246,7 @@ function RecentMovieShelfCard({
   onToggleSelect: () => void;
   /** 已有选中项时：海报区点选切换，隐藏播放/编辑/更多 */
   bulkSelectMode: boolean;
-  buildHomeMediaMenu: (mediaId: number, extra?: { isWatched?: boolean }) => MenuProps;
+  buildHomeMediaMenu: (mediaId: number, extra?: { isWatched?: boolean; fromContinueWatching?: boolean }) => MenuProps;
 }) {
   const [posterFailed, setPosterFailed] = useState(false);
   const year = mediaReleaseYear(m);
@@ -389,7 +394,7 @@ function RecentAddedRow({
   onToggleMovieSelect: (id: number) => void;
   /** 继续观看或最近添加电影任一侧有选中 */
   homeBulkActive: boolean;
-  buildHomeMediaMenu: (mediaId: number, extra?: { isWatched?: boolean }) => MenuProps;
+  buildHomeMediaMenu: (mediaId: number, extra?: { isWatched?: boolean; fromContinueWatching?: boolean }) => MenuProps;
 }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [showLeft, setShowLeft] = useState(false);
@@ -689,7 +694,7 @@ export default function HomePage() {
   const [recentPlaylistMenu, setRecentPlaylistMenu] = useState(readRecentPlaylists);
 
   const buildHomeMediaMenu = useCallback(
-    (mediaId: number, menuExtra?: { isWatched?: boolean }) =>
+    (mediaId: number, menuExtra?: { isWatched?: boolean; fromContinueWatching?: boolean }) =>
       buildMediaMenuItems({ id: mediaId }, nav, {
         ...menuExtra,
         onAddToPlaylist: (mid) => setAddToPlaylistMediaId(mid),
@@ -708,6 +713,18 @@ export default function HomePage() {
             message.error("添加失败，可能已在列表中");
           }
         },
+        onRemoveFromContinueWatching: menuExtra?.fromContinueWatching
+          ? async () => {
+              await removePlayProgress(mediaId);
+              setHistory((prev) => prev.filter((h) => h.media_id !== mediaId));
+              setHistorySelectedKeys((sel) => {
+                const next = new Set(sel);
+                next.delete(String(mediaId));
+                return next;
+              });
+              message.success("已从继续观看移除");
+            }
+          : undefined,
       }),
     [nav, recentPlaylistMenu],
   );
