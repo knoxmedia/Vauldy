@@ -273,11 +273,13 @@ func (h *Handler) DeleteMedia(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	libraryID := info.LibraryID
 	if err := h.deleteMediaRecords(info.ID, info.FileID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	h.purgeMediaFiles(info)
+	h.scheduleLibraryPreviewRefresh(libraryID)
 	mid := info.ID
 	h.logActivity(middleware.UserID(c), middleware.Username(c), "media.delete", &mid, info.FilePath)
 	c.JSON(http.StatusOK, gin.H{"ok": true})

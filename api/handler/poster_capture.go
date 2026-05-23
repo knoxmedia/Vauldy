@@ -253,4 +253,5 @@ func (h *Handler) capturePosterFromVideo(mediaID int64, fileType string) {
 	root["scrape"] = scrape
 	merged, _ := json.Marshal(root)
 	_, _ = h.App.DB.Exec(`UPDATE media SET meta_json = ? WHERE id = ?`, string(merged), mediaID)
+	h.scheduleLibraryPreviewRefresh(libraryID)
 }

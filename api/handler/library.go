@@ -81,7 +81,7 @@ func (h *Handler) ListLibraries(c *gin.Context) {
 		if !isAdmin && !middleware.IsAPIClient(c) && enabled != 1 {
 			continue
 		}
-		list = append(list, gin.H{
+		item := gin.H{
 			"id": id, "name": name, "type": typ, "path": path,
 			"folders":   folders,
 			"auto_scan": auto, "enabled": enabled, "realtime_monitor": realtime, "preview_extract": preview, "drm_enabled": drmEnabled, "encryption_mode": h.normalizeEncryptionMode(encryptionMode), "cleanup_local_source_after_package": cleanupLocal, "jit_prepare_on_ingest": jitIngest,
@@ -94,7 +94,13 @@ func (h *Handler) ListLibraries(c *gin.Context) {
 			"scan_total_count":     scanTotal.Int64,
 			"scan_added_count":     scanAdded.Int64,
 			"scan_started_at":      scanStarted.String,
-		})
+		}
+		if previewURL := h.libraryPreviewPublicURL(int64(id)); previewURL != "" {
+			item["preview_url"] = previewURL
+		} else if cnt > 0 {
+			h.scheduleLibraryPreviewRefresh(int64(id))
+		}
+		list = append(list, item)
 	}
 	if err := rows.Err(); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})

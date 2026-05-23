@@ -188,6 +188,9 @@ func (h *Handler) runLibraryScanTask(ctx context.Context, taskID, libraryID int6
 	h.scanMu.Lock()
 	delete(h.runningScans, libraryID)
 	h.scanMu.Unlock()
+	if status == "done" {
+		h.scheduleLibraryPreviewRefresh(libraryID)
+	}
 }
 
 // EnqueuePostIngestForNewMedia matches library-scan ingest: auto scrape, preview sprites (if enabled), local poster frame, optional subtitles.

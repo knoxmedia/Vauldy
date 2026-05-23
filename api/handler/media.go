@@ -292,6 +292,7 @@ func (h *Handler) ScrapeMedia(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	h.scheduleLibraryPreviewRefresh(libraryID)
 	c.JSON(http.StatusOK, gin.H{"scrape": res})
 }
 

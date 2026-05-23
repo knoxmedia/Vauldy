@@ -980,7 +980,7 @@ export default function HomePage() {
                 <button
                   type="button"
                   className={`${styles.carouselArrow} ${styles.carouselArrowInline}`}
-                  onClick={() => scrollLibsBy(-340)}
+                  onClick={() => scrollLibsBy(-320)}
                   aria-label="向左滚动"
                 >
                   <LeftOutlined />
@@ -990,7 +990,7 @@ export default function HomePage() {
                 <button
                   type="button"
                   className={`${styles.carouselArrow} ${styles.carouselArrowInline}`}
-                  onClick={() => scrollLibsBy(340)}
+                  onClick={() => scrollLibsBy(320)}
                   aria-label="向右滚动"
                 >
                   <RightOutlined />
@@ -1013,45 +1013,59 @@ export default function HomePage() {
               const total = lib.scan_total_count ?? 0;
               const percent = total > 0 ? Math.max(0, Math.min(100, Math.round((processed / total) * 100))) : 0;
               const progressColor = percent < 50 ? "#13b6ff" : percent < 90 ? "#faad14" : "#52c41a";
+              const typeLabel =
+                lib.type === "movie"
+                  ? "电影"
+                  : lib.type === "tv"
+                    ? "剧集"
+                    : lib.type === "anime"
+                      ? "动漫"
+                      : lib.type === "video"
+                        ? "其他影片"
+                        : lib.type;
               return (
                 <Link
                   key={lib.id}
                   to={`/browse?library_id=${lib.id}`}
                   className={styles.libCard}
-                  style={{ background: libGradient(lib.id, lib.type) }}
                 >
-                  {lib.scan_status === "running" ? (
-                    <div className={styles.libScanOverlay}>
-                      <Progress
-                        type="circle"
-                        size={48}
-                        percent={percent}
-                        strokeColor={progressColor}
-                        railColor="rgba(255,255,255,0.2)"
-                        className={styles.libScanCircle}
+                  <div className={styles.libPreviewWrap}>
+                    {lib.preview_url ? (
+                      <img
+                        className={styles.libPreviewImg}
+                        src={lib.preview_url}
+                        alt=""
+                        loading="lazy"
+                        decoding="async"
                       />
-                      <div className={styles.libScanInfo}>
-                        <div className={styles.libScanTitle}>扫描中</div>
-                        <div className={styles.libScanMeta}>
-                          {total > 0 ? `${processed}/${total}` : `已处理 ${processed}`} · 新增 {lib.scan_added_count ?? 0}
+                    ) : (
+                      <div
+                        className={styles.libPreviewFallback}
+                        style={{ background: libGradient(lib.id, lib.type) }}
+                      />
+                    )}
+                    {lib.scan_status === "running" ? (
+                      <div className={styles.libScanOverlay}>
+                        <Progress
+                          type="circle"
+                          size={48}
+                          percent={percent}
+                          strokeColor={progressColor}
+                          railColor="rgba(255,255,255,0.2)"
+                          className={styles.libScanCircle}
+                        />
+                        <div className={styles.libScanInfo}>
+                          <div className={styles.libScanTitle}>扫描中</div>
+                          <div className={styles.libScanMeta}>
+                            {total > 0 ? `${processed}/${total}` : `已处理 ${processed}`} · 新增 {lib.scan_added_count ?? 0}
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  ) : null}
-                  <div className={styles.libCardInner}>
-                    <div className={styles.libName}>{lib.name}</div>
-                    <div className={styles.libMeta}>
-                      {lib.type === "movie"
-                        ? "电影"
-                        : lib.type === "tv"
-                          ? "剧集"
-                          : lib.type === "anime"
-                            ? "动漫"
-                            : lib.type === "video"
-                              ? "其他影片"
-                              : lib.type}{" "}
-                      · {lib.media_count ?? 0} 项
-                    </div>
+                    ) : null}
+                  </div>
+                  <div className={styles.libCardLabel}>{lib.name}</div>
+                  <div className={styles.libCardMeta}>
+                    {typeLabel} · {lib.media_count ?? 0} 项
                   </div>
                 </Link>
               );

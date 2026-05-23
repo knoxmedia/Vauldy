@@ -435,6 +435,7 @@ func (h *Handler) runScrapeTasksWithLimit(ids []int64, limit int) (int, int) {
 		}
 		_, _ = h.App.DB.Exec(`UPDATE scrape_task SET status='done', progress=100, fail_count=0, finished_at=CURRENT_TIMESTAMP, message=? WHERE id = ?`, okMsg, taskID)
 		_, _ = h.App.DB.Exec(`INSERT INTO scrape_history (task_id, media_id, source, query, status, message, result_json) VALUES (?, ?, ?, ?, 'done', ?, ?)`, taskID, mediaID, source, query, okMsg, string(js))
+		h.scheduleLibraryPreviewRefresh(libraryID)
 		done++
 	}
 	return done, failed
@@ -534,6 +535,7 @@ func (h *Handler) ManualMatchMedia(c *gin.Context) {
 		return
 	}
 	scraper.SanitizeScrapeResult(res)
+	h.scheduleLibraryPreviewRefresh(libraryID)
 	c.JSON(http.StatusOK, gin.H{"ok": true, "scrape": res})
 }
 
