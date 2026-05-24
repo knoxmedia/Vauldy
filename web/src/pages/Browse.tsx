@@ -591,6 +591,9 @@ export default function BrowsePage() {
           )}
         </Space>
         <Space wrap className={styles.topRightTools}>
+          <Button type="link" size="small" onClick={() => nav("/playback-history")} style={{ color: "rgba(255,255,255,0.65)" }}>
+            播放历史
+          </Button>
           <div className={styles.viewModePicker}>
             <span className={styles.viewModeCurrentIcon} title={currentViewLabel} aria-label={currentViewLabel}>
               <CurrentViewIcon />

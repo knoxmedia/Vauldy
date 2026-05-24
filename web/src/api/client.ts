@@ -744,6 +744,44 @@ export async function removePlayProgress(mediaId: number) {
   await api.delete(`/api/v1/media/${mediaId}/progress`);
 }
 
+export type PlaybackHistoryItem = {
+  id: number;
+  user_id: number;
+  username: string;
+  media_id: number;
+  title: string;
+  file_type: string;
+  library_id: number;
+  library_type: string;
+  player: string;
+  platform: string;
+  played_at: string;
+};
+
+export type PlaybackHistoryRange = "7d" | "30d" | "90d" | "1y" | "all";
+
+export async function fetchPlaybackHistory(params?: {
+  limit?: number;
+  media_id?: number;
+  library_id?: number;
+  user_id?: number;
+  range?: PlaybackHistoryRange;
+}) {
+  const { data } = await api.get<{ items: PlaybackHistoryItem[]; total: number }>(
+    "/api/v1/playback-history",
+    {
+      params: {
+        limit: params?.limit ?? 200,
+        media_id: params?.media_id,
+        library_id: params?.library_id,
+        user_id: params?.user_id,
+        range: params?.range ?? "all",
+      },
+    },
+  );
+  return data.items ?? [];
+}
+
 export type AccessLogItem = {
   id: number;
   username: string;

@@ -58,6 +58,7 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 			auth.POST("/user/avatar", h.UploadUserAvatar)
 			auth.DELETE("/user/avatar", h.DeleteUserAvatar)
 			auth.GET("/user/history", h.UserHistory)
+			auth.GET("/playback-history", h.ListPlaybackHistory)
 			auth.POST("/user/logout", h.Logout)
 			auth.POST("/user/parental/unlock", h.UnlockParental)
 

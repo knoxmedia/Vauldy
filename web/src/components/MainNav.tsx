@@ -77,6 +77,7 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
       if (lid && !Number.isNaN(Number(lid))) return [`lib-${lid}`];
       return ["my-media"];
     }
+    if (path.startsWith("/playback-history")) return ["playback-history"];
     if (path.startsWith("/player")) return ["player"];
     if (path.startsWith("/settings")) return ["settings"];
     if (path.startsWith("/library")) return ["library"];
@@ -209,6 +210,15 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
         label: (
           <Link to="/playlists" onClick={onNavigate}>
             播放列表
+          </Link>
+        ),
+      },
+      {
+        key: "playback-history",
+        icon: <HistoryOutlined />,
+        label: (
+          <Link to="/playback-history" onClick={onNavigate}>
+            播放历史
           </Link>
         ),
       },

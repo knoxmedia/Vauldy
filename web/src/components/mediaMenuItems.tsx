@@ -73,10 +73,14 @@ export function confirmDeleteMedia(
   })();
 }
 
+export type MediaMenuPreset = "full" | "detailMore";
+
 export function buildMediaMenuItems(
   r: MediaMenuTarget,
   nav: NavigateFunction,
   extra?: {
+    /** 详情页「更多」菜单：仅显示管理类子项 */
+    preset?: MediaMenuPreset;
     isWatched?: boolean;
     atrackDone?: boolean;
     keyframeDone?: boolean;
@@ -99,8 +103,11 @@ export function buildMediaMenuItems(
     onOpenMatch?: (mediaId: number) => void;
     /** 媒体库：取消匹配后刷新 */
     afterUnmatch?: () => void | Promise<void>;
+    /** 详情页「查看信息」：滚动到信息区而非跳转 */
+    onGetInfo?: () => void;
   },
 ): MenuProps {
+  const preset = extra?.preset ?? "full";
   const isWatched = extra?.isWatched ?? false;
   const watchedLabel = isWatched ? "标记为未观看" : "标记为已观看";
   const atrackDone = extra?.atrackDone ?? false;
@@ -116,6 +123,7 @@ export function buildMediaMenuItems(
   const scraped = extra?.scraped ?? false;
   const onOpenMatch = extra?.onOpenMatch;
   const afterUnmatch = extra?.afterUnmatch;
+  const onGetInfo = extra?.onGetInfo;
 
   const addToChildren: MenuProps["items"] = [
     {
@@ -140,8 +148,7 @@ export function buildMediaMenuItems(
     });
   }
 
-  return {
-    items: [
+  const fullItems: MenuProps["items"] = [
       { key: "play", label: "播放" },
       { key: "detail", label: "详情" },
       { type: "divider" as const },
@@ -170,7 +177,7 @@ export function buildMediaMenuItems(
       { key: "extractKeyframes", label: keyframeDone ? "重新提取关键帧" : "提取关键帧" },
       { type: "divider" as const },
       { key: "viewHistory", label: "查看播放历史" },
-      { key: "getInfo", label: "获取信息" },
+      { key: "getInfo", label: preset === "detailMore" ? "查看信息" : "获取信息" },
       ...(onUnfavorite
         ? [
             { type: "divider" as const },
@@ -183,7 +190,32 @@ export function buildMediaMenuItems(
             { key: "delete", label: "删除", danger: true },
           ]
         : []),
-    ],
+    ];
+
+  const detailMoreItems: MenuProps["items"] = [
+    {
+      key: "addTo",
+      label: "添加到",
+      children: addToChildren,
+    },
+    { type: "divider" as const },
+    { key: "refreshMetadata", label: "刷新元数据" },
+    { key: "analyze", label: "分析" },
+    ...(onOpenMatch && !scraped ? [{ key: "match", label: "匹配" }] : []),
+    ...(onOpenMatch && scraped
+      ? [
+          { key: "fixMatch", label: "修改匹配" },
+          { key: "unmatch", label: "取消匹配" },
+        ]
+      : []),
+    { key: "optimize", label: "优化" },
+    { type: "divider" as const },
+    { key: "viewHistory", label: "查看播放历史" },
+    { key: "getInfo", label: "查看信息" },
+  ];
+
+  return {
+    items: preset === "detailMore" ? detailMoreItems : fullItems,
     onClick: ({ key, domEvent }) => {
       domEvent.stopPropagation();
       switch (key) {
@@ -282,10 +314,14 @@ export function buildMediaMenuItems(
             .catch(() => message.error("操作失败"));
           break;
         case "viewHistory":
-          nav(`/detail/${r.id}`);
+          nav(`/playback-history?media_id=${r.id}`);
           break;
         case "getInfo":
-          nav(`/detail/${r.id}`);
+          if (onGetInfo) {
+            onGetInfo();
+          } else {
+            nav(`/detail/${r.id}`);
+          }
           break;
         default: {
           const sk = String(key);

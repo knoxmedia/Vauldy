@@ -47,6 +47,7 @@ import UsersPage from "./pages/Users";
 import PlaylistsPage from "./pages/Playlists";
 import SearchPage from "./pages/Search";
 import MediaDetailPage from "./pages/MediaDetail";
+import PlaybackHistoryPage from "./pages/PlaybackHistory";
 import ScrapeConfigPage from "./pages/ScrapeConfig";
 import AIProviderPage from "./pages/AIProvider";
 import SystemOptionsPage from "./pages/SystemOptions";
@@ -172,6 +173,7 @@ function MainShell() {
     if (p.startsWith("/playlists")) return "播放列表";
     if (p.startsWith("/search")) return "搜索";
     if (p.startsWith("/browse")) return "浏览媒体";
+    if (p.startsWith("/playback-history")) return "播放历史";
     if (p.startsWith("/player")) return "播放";
     if (p.startsWith("/settings")) return "账号";
     if (p.startsWith("/library")) return "媒体库";
@@ -425,6 +427,7 @@ export default function App() {
           <Route index element={<HomePage />} />
           <Route path="favorites" element={<FavoritesPage />} />
           <Route path="browse" element={<BrowsePage />} />
+          <Route path="playback-history" element={<PlaybackHistoryPage />} />
           <Route path="search" element={<SearchPage />} />
           <Route path="detail/:id" element={<MediaDetailPage />} />
           <Route path="playlists" element={<PlaylistsPage />} />

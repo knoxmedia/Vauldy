@@ -52,6 +52,7 @@ import {
   MediaStats,
   MediaSubtitleRow,
   addFavorite,
+  addPlaylistItem,
   fetchFavoriteStatus,
   fetchMedia,
   fetchLibraries,
@@ -62,8 +63,12 @@ import {
   mediaPosterSrc,
   removeFavorite,
   savePlaybackProgress,
+  type MediaMatchListUpdate,
 } from "../api/client";
+import AddToPlaylistModal from "../components/AddToPlaylistModal";
+import MediaMatchModal from "../components/MediaMatchModal";
 import { buildMediaMenuItems } from "../components/mediaMenuItems";
+import { readRecentPlaylists, rememberPlaylistAdded } from "../lib/recentPlaylists";
 import ToolbarPlayIcon from "../components/ToolbarPlayIcon";
 import { isAdminRole, useAuthStore } from "../store/auth";
 import styles from "./MediaDetail.module.css";
@@ -574,6 +579,10 @@ export default function MediaDetailPage() {
   const [relatedSelectedIds, setRelatedSelectedIds] = useState<number[]>([]);
   /** 固定工具条与主内容列对齐（.app-main-centered 的视口 left/width） */
   const [relatedBulkDock, setRelatedBulkDock] = useState({ left: 0, width: 0 });
+  const [playlistModalOpen, setPlaylistModalOpen] = useState(false);
+  const [matchModalOpen, setMatchModalOpen] = useState(false);
+  const [recentPlaylistMenu, setRecentPlaylistMenu] = useState(readRecentPlaylists);
+  const fileInfoRef = useRef<HTMLElement | null>(null);
 
   const measureRelatedBulkDock = useCallback(() => {
     const shell = document.querySelector(".app-main-centered");
@@ -853,24 +862,65 @@ export default function MediaDetailPage() {
     }
   }
 
-  function copyPageLink() {
-    const url = `${window.location.origin}/detail/${mediaId}`;
-    void navigator.clipboard.writeText(url).then(
-      () => message.success("链接已复制"),
-      () => message.error("复制失败")
-    );
-  }
+  const reloadDetail = useCallback(async () => {
+    if (!mediaId || Number.isNaN(mediaId)) return;
+    try {
+      const d = await fetchMediaDetail(mediaId);
+      setDetail(d);
+    } catch {
+      message.error("刷新媒体信息失败");
+    }
+  }, [mediaId]);
 
-  const moreMenu: MenuProps["items"] = [
-    { key: "lib", label: "返回媒体库", onClick: () => nav(`/browse?library_id=${detail?.library_id}`) },
-    { key: "copy", label: "复制页面链接", onClick: () => copyPageLink() },
-    ...(showResumeActions
-      ? [
-          { key: "resume", label: "继续播放", onClick: () => nav(resumeTarget) },
-          { key: "start", label: "从头播放", onClick: () => nav(playFromStartTarget) },
-        ]
-      : [{ key: "play", label: "播放", onClick: () => nav(playFromStartTarget) }]),
-  ];
+  const applyMatchUpdate = useCallback((update: MediaMatchListUpdate) => {
+    setDetail((prev) =>
+      prev && prev.id === update.id
+        ? {
+            ...prev,
+            title: update.title || prev.title,
+            poster_url: update.poster_url ?? prev.poster_url,
+            year: update.year ?? prev.year,
+            release_date: update.release_date ?? prev.release_date,
+            scraped: update.scraped,
+          }
+        : prev,
+    );
+  }, []);
+
+  const scrollToFileInfo = useCallback(() => {
+    fileInfoRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, []);
+
+  const mediaActionMenu = useMemo((): MenuProps => {
+    if (!detail) return { items: [] };
+    return buildMediaMenuItems(
+      { id: detail.id, file_path: detail.file_path, title: detail.title },
+      nav,
+      {
+        preset: "detailMore",
+        scraped: detail.scraped,
+        onOpenMatch: () => setMatchModalOpen(true),
+        afterUnmatch: () => void reloadDetail(),
+        onAddToPlaylist: () => setPlaylistModalOpen(true),
+        recentPlaylists: recentPlaylistMenu,
+        onQuickAddToPlaylist: async (_mediaId, playlistId) => {
+          try {
+            await addPlaylistItem(playlistId, detail.id);
+            const name =
+              recentPlaylistMenu.find((p) => p.id === playlistId)?.name ??
+              readRecentPlaylists().find((p) => p.id === playlistId)?.name ??
+              "播放列表";
+            message.success(`已添加到「${name}」`);
+            rememberPlaylistAdded({ id: playlistId, name });
+            setRecentPlaylistMenu(readRecentPlaylists());
+          } catch {
+            message.error("添加失败，可能已在列表中");
+          }
+        },
+        onGetInfo: scrollToFileInfo,
+      },
+    );
+  }, [detail, nav, recentPlaylistMenu, reloadDetail, scrollToFileInfo]);
 
   if (loading) {
     return (
@@ -1328,7 +1378,7 @@ export default function MediaDetailPage() {
                     className={`${styles.iconAction} ${styles.iconActionCircle}`}
                   />
                 </Tooltip>
-                <Dropdown menu={{ items: moreMenu }} trigger={["click"]}>
+                <Dropdown menu={mediaActionMenu} trigger={["click"]}>
                   <Button
                     shape="circle"
                     size="large"
@@ -1418,7 +1468,7 @@ export default function MediaDetailPage() {
       </section>
 
       {/* 2. 播放统计 */}
-      <section className={styles.block}>
+      <section className={styles.block} ref={fileInfoRef}>
         <Typography.Title level={4} className={styles.blockTitle}>
           播放统计
         </Typography.Title>
@@ -1492,6 +1542,27 @@ export default function MediaDetailPage() {
           />
         ))}
       </MediaHorizontalShelf>
+
+      {detail && playlistModalOpen ? (
+        <AddToPlaylistModal
+          mediaIds={[detail.id]}
+          open
+          onClose={() => setPlaylistModalOpen(false)}
+          onAdded={(pl) => {
+            rememberPlaylistAdded(pl);
+            setRecentPlaylistMenu(readRecentPlaylists());
+          }}
+        />
+      ) : null}
+      {detail ? (
+        <MediaMatchModal
+          media={detail}
+          fixMatch={Boolean(detail.scraped)}
+          open={matchModalOpen}
+          onClose={() => setMatchModalOpen(false)}
+          onMatched={applyMatchUpdate}
+        />
+      ) : null}
     </div>
   );
 }

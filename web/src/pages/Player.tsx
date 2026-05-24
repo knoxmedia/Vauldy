@@ -639,16 +639,16 @@ export default function PlayerPage() {
         if (pos === null) return;
         const cur = safeSeconds(pos);
         if (cur === null || cur <= 0) return;
+        if (!playbackStartedRef.current) {
+          playbackStartedRef.current = true;
+          void reportPlaybackStart(mid, withPlaybackLog({ position: cur, completed: 0 })).catch(() => {});
+        }
         const now = Date.now();
         if (cur <= lastProgressSecRef.current && now - lastProgressAtRef.current < 9000) return;
         if (now - lastProgressAtRef.current < 9000) return;
         lastProgressSecRef.current = cur;
         lastProgressAtRef.current = now;
         void savePlaybackProgress(mid, withPlaybackLog({ position: cur, completed: 0 })).catch(() => {});
-        if (!playbackStartedRef.current) {
-          playbackStartedRef.current = true;
-          void reportPlaybackStart(mid, withPlaybackLog({ position: cur, completed: 0 })).catch(() => {});
-        }
       });
 
       bind("onComplete", () => {
