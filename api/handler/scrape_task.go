@@ -548,6 +548,7 @@ func (h *Handler) ManualMatchMedia(c *gin.Context) {
 		return
 	}
 	scraper.SanitizeScrapeResult(res)
+	h.syncSeriesCollectionMeta(libraryID, id, res)
 	h.scheduleLibraryPreviewRefresh(libraryID)
 	c.JSON(http.StatusOK, gin.H{"ok": true, "scrape": res})
 }

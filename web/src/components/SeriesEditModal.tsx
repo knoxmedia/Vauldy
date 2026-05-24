@@ -23,7 +23,7 @@ export interface SeriesEditModalProps {
   series: SeriesSummary | null;
   open: boolean;
   onClose: () => void;
-  onSaved?: (update: Partial<SeriesSummary> & { id: number }) => void;
+  onSaved?: (update: Partial<SeriesSummary> & { id: number; overview?: string }) => void;
 }
 
 export default function SeriesEditModal({ series, open, onClose, onSaved }: SeriesEditModalProps) {
@@ -81,6 +81,7 @@ export default function SeriesEditModal({ series, open, onClose, onSaved }: Seri
         year: data.year ?? year ?? undefined,
         poster: data.poster || poster.trim() || undefined,
         poster_url: data.poster || poster.trim() || undefined,
+        overview: data.overview ?? overview.trim(),
       });
       onClose();
     } catch (e: unknown) {

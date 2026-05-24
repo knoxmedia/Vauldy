@@ -1,120 +1,40 @@
-.page {
-  padding: 8px 0 40px;
-  width: 100%;
-  max-width: 100%;
-  margin: 0;
-  box-sizing: border-box;
-  min-height: calc(100vh - 64px);
-  color: #fff;
-}
-
-.topBar {
-  margin-bottom: 12px;
-}
-
-.backBtn {
-  color: rgba(255, 255, 255, 0.88) !important;
-}
-
-.backBtn:global(.ant-btn.ant-btn-text) {
-  padding-inline-start: 0 !important;
-  padding-inline-end: 10px !important;
-}
-
-.backBtn :global(.ant-btn-icon) {
-  margin-inline-start: 0 !important;
-  padding-inline-start: 0 !important;
-}
-
-.loadingWrap,
 .epLoading {
   display: flex;
   align-items: center;
   justify-content: center;
-  min-height: 240px;
+  min-height: 160px;
 }
 
-.hero {
-  position: relative;
-  padding: 0 0 32px;
-  background: linear-gradient(145deg, #12202e 0%, #06080c 100%);
-  background-size: cover;
-  background-position: center top;
-}
-
-.heroBody {
-  display: flex;
-  gap: 24px;
-  align-items: flex-start;
-}
-
-.heroPoster {
-  width: 180px;
-  flex-shrink: 0;
-  aspect-ratio: 2 / 3;
-  border-radius: 8px;
-  overflow: hidden;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
-}
-
-.heroPoster img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-}
-
-.heroPosterFallback {
-  width: 100%;
-  height: 100%;
-  background: linear-gradient(145deg, #1a2a3a, #0d1520);
-}
-
-.heroInfo {
-  flex: 1;
-  min-width: 0;
-}
-
-.heroTitle {
-  margin: 0 0 12px;
-  font-size: 2rem;
-  line-height: 1.2;
-  font-weight: 700;
-}
-
-.heroTags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+.seasonTabs {
   margin-bottom: 16px;
 }
 
-.heroOverview {
-  margin: 0;
-  max-width: 720px;
-  color: rgba(255, 255, 255, 0.78);
-  line-height: 1.65;
-  display: -webkit-box;
-  -webkit-line-clamp: 5;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
+.seasonTabs :global(.ant-tabs-nav) {
+  margin-bottom: 0 !important;
 }
 
-.folderHint {
-  margin-top: 12px;
-  font-size: 12px;
-  color: rgba(255, 255, 255, 0.45);
+.seasonTabs :global(.ant-tabs-tab) {
+  color: rgba(255, 255, 255, 0.55) !important;
 }
 
-.content {
-  padding: 0;
+.seasonTabs :global(.ant-tabs-tab:hover) {
+  color: rgba(255, 255, 255, 0.88) !important;
+}
+
+.seasonTabs :global(.ant-tabs-tab-active .ant-tabs-tab-btn) {
+  color: #e5a00d !important;
+}
+
+.seasonTabs :global(.ant-tabs-ink-bar) {
+  background: #e5a00d !important;
 }
 
 .episodeList {
   display: flex;
   flex-direction: column;
   gap: 1px;
-  background: #111;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 8px;
   overflow: hidden;
 }
@@ -125,12 +45,16 @@
   gap: 16px;
   align-items: center;
   padding: 14px 16px;
-  background: #0a0a0a;
-  border-bottom: 1px solid #1a1a1a;
+  background: rgba(255, 255, 255, 0.02);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 .episodeRow:last-child {
   border-bottom: none;
+}
+
+.episodeRow:hover {
+  background: rgba(255, 255, 255, 0.04);
 }
 
 .episodeNum {
@@ -140,7 +64,8 @@
   text-align: center;
 }
 
-.episodeTitle {
+.episodeTitle,
+.episodeTitleStatic {
   display: block;
   width: 100%;
   padding: 0;
@@ -150,13 +75,16 @@
   font: inherit;
   font-size: 15px;
   font-weight: 600;
-  color: #fff;
+  color: #e6edf3;
   text-align: left;
+}
+
+.episodeTitle {
   cursor: pointer;
 }
 
 .episodeTitle:hover {
-  color: #00a4dc;
+  color: #e5a00d;
 }
 
 .episodeMeta {
@@ -177,32 +105,11 @@
   gap: 12px;
 }
 
-.playBtn {
-  background: #e5a00d !important;
-  border-color: #e5a00d !important;
-  color: #1a1a1a !important;
-  font-weight: 600 !important;
-}
-
-.playBtn:hover {
-  background: #f0b429 !important;
-  border-color: #f0b429 !important;
-  color: #111 !important;
-}
-
 .episodePlaySvg {
   width: 18px;
   height: 18px;
   display: block;
   flex-shrink: 0;
-}
-
-.playBtn .episodePlaySvg {
-  color: #1a1a1a;
-}
-
-.playBtn:hover .episodePlaySvg {
-  color: #111;
 }
 
 .noMedia {
@@ -211,14 +118,6 @@
 }
 
 @media (max-width: 768px) {
-  .heroBody {
-    flex-direction: column;
-  }
-
-  .heroPoster {
-    width: 140px;
-  }
-
   .episodeRow {
     grid-template-columns: 48px 1fr;
     grid-template-rows: auto auto;
