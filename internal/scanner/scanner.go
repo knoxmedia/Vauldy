@@ -13,6 +13,8 @@ import (
 	"github.com/google/uuid"
 
 	"knox-media/internal/scraper"
+	"knox-media/internal/tvparse"
+	"knox-media/internal/tvstore"
 	"knox-media/pkg/ffprobe"
 	"knox-media/pkg/fileutil"
 	"knox-media/pkg/hashutil"
@@ -55,6 +57,8 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 	if len(cleanRoots) == 0 {
 		return 0, os.ErrNotExist
 	}
+	libraryType := s.loadLibraryType(libraryID)
+	tvLibrary := tvparse.IsTVLibraryType(libraryType)
 	if _, err := s.DB.Exec(`DELETE FROM library_node WHERE library_id = ?`, libraryID); err != nil {
 		return 0, err
 	}
@@ -123,6 +127,9 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 			if e := s.DB.QueryRow(`SELECT id, file_mtime FROM media WHERE library_id = ? AND lower(file_path) = lower(?) LIMIT 1`, libraryID, normPath).Scan(&existingMediaID, &existingMtime); e == nil && existingMediaID > 0 {
 				if existingMtime.Valid && existingMtime.Int64 == curMtime {
 					_ = s.upsertNode(libraryID, parentPath, nodePath, nodeName, "file", &existingMediaID)
+					if tvLibrary && ft == "video" {
+						s.linkTVIfEpisode(libraryID, existingMediaID, path)
+					}
 					if s.OnFile != nil {
 						s.OnFile(path, nil)
 					}
@@ -133,6 +140,15 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 			title := scraper.NormalizeTitle(rawTitle)
 			if title == "" {
 				title = rawTitle
+			}
+			var tvInfo *tvparse.EpisodeInfo
+			if tvLibrary && ft == "video" {
+				if info, ok := tvparse.ParseVideoPath(path); ok {
+					tvInfo = &info
+					if strings.TrimSpace(info.SeriesTitle) != "" {
+						title = tvparse.FormatEpisodeLabel(info)
+					}
+				}
 			}
 			fileID := uuid.NewString()
 			var dur, w, h, br int
@@ -175,6 +191,9 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 				b, _ := json.Marshal(map[string]string{"title": title})
 				metaJSON = string(b)
 			}
+			if tvInfo != nil {
+				metaJSON = mergeTVMetaJSON(metaJSON, *tvInfo)
+			}
 			var res sql.Result
 			var e error
 			if existingMediaID > 0 {
@@ -211,6 +230,9 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 			}
 			if mediaID > 0 {
 				_ = s.upsertNode(libraryID, parentPath, nodePath, nodeName, "file", &mediaID)
+				if tvInfo != nil {
+					_ = tvstore.LinkEpisode(s.DB, libraryID, mediaID, *tvInfo)
+				}
 				if existingMediaID == 0 && s.OnMediaAdded != nil {
 					s.OnMediaAdded(mediaID, title, ft)
 				}
@@ -234,9 +256,17 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 				continue
 			}
 			if _, ok := seenMedia[normalizeMediaPath(p.String)]; !ok {
+				var mid int64
+				if s.DB.QueryRow(`SELECT id FROM media WHERE library_id = ? AND file_path = ?`, libraryID, p.String).Scan(&mid) == nil && mid > 0 {
+					tvstore.CleanupMedia(s.DB, mid)
+				}
 				_, _ = s.DB.Exec(`DELETE FROM media WHERE library_id = ? AND file_path = ?`, libraryID, p.String)
 			}
 		}
+	}
+	if tvLibrary {
+		_, _ = tvstore.BackfillLibraryTV(s.DB, libraryID)
+		tvstore.PruneOrphansForLibrary(s.DB, libraryID)
 	}
 	return added, nil
 }
@@ -289,4 +319,75 @@ func (s *Scanner) upsertNode(libraryID int64, parentPath, nodePath, nodeName, no
 			END
 	`, libraryID, nullStringVal(parentPath), nodePath, nodeName, nodeType, mid)
 	return err
+}
+
+func (s *Scanner) loadLibraryType(libraryID int64) string {
+	if s == nil || s.DB == nil || libraryID <= 0 {
+		return ""
+	}
+	var t sql.NullString
+	if err := s.DB.QueryRow(`SELECT type FROM library WHERE id = ?`, libraryID).Scan(&t); err != nil {
+		return ""
+	}
+	return t.String
+}
+
+func (s *Scanner) linkTVIfEpisode(libraryID, mediaID int64, path string) {
+	var meta sql.NullString
+	_ = s.DB.QueryRow(`SELECT COALESCE(meta_json,'') FROM media WHERE id = ?`, mediaID).Scan(&meta)
+	info, ok := tvparse.ParseEpisodeFromMedia(path, meta.String)
+	if ok {
+		_ = tvstore.LinkEpisode(s.DB, libraryID, mediaID, info)
+	}
+}
+
+func mergeTVMetaJSON(raw string, info tvparse.EpisodeInfo) string {
+	var root map[string]any
+	if strings.TrimSpace(raw) != "" {
+		_ = json.Unmarshal([]byte(raw), &root)
+	}
+	if root == nil {
+		root = map[string]any{}
+	}
+	tv := map[string]any{
+		"series_title": info.SeriesTitle,
+		"season":       info.SeasonNum,
+		"episode":      info.EpisodeNum,
+		"is_special":   info.IsSpecial,
+	}
+	if info.Year > 0 {
+		tv["year"] = info.Year
+	}
+	if info.TMDBID != "" {
+		tv["tmdb_id"] = info.TMDBID
+	}
+	if info.TVDBID != "" {
+		tv["tvdb_id"] = info.TVDBID
+	}
+	if info.EpisodeTitle != "" {
+		tv["episode_title"] = info.EpisodeTitle
+	}
+	if info.SourceFolder != "" {
+		tv["source_folder"] = info.SourceFolder
+	}
+	root["tv"] = tv
+	b, err := json.Marshal(root)
+	if err != nil {
+		return raw
+	}
+	return string(b)
+}
+
+func pad2(n int) string {
+	if n < 10 {
+		return fmt.Sprintf("0%d", n)
+	}
+	return fmt.Sprintf("%d", n)
+}
+
+func padEp(n int) string {
+	if n < 10 {
+		return fmt.Sprintf("0%d", n)
+	}
+	return fmt.Sprintf("%d", n)
 }

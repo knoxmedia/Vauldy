@@ -33,6 +33,7 @@ import HomePage from "./pages/Home";
 import LibraryPage from "./pages/Library";
 import BrowsePage from "./pages/Browse";
 import FavoritesPage from "./pages/Favorites";
+import SeriesDetailPage from "./pages/SeriesDetail";
 import PlayerPage from "./pages/Player";
 import UploadPage from "./pages/Upload";
 import SettingsPage from "./pages/Settings";
@@ -173,6 +174,7 @@ function MainShell() {
     if (p.startsWith("/playlists")) return "播放列表";
     if (p.startsWith("/search")) return "搜索";
     if (p.startsWith("/browse")) return "浏览媒体";
+    if (p.startsWith("/series")) return "剧集详情";
     if (p.startsWith("/playback-history")) return "播放历史";
     if (p.startsWith("/player")) return "播放";
     if (p.startsWith("/settings")) return "账号";
@@ -427,6 +429,7 @@ export default function App() {
           <Route index element={<HomePage />} />
           <Route path="favorites" element={<FavoritesPage />} />
           <Route path="browse" element={<BrowsePage />} />
+          <Route path="series/:id" element={<SeriesDetailPage />} />
           <Route path="playback-history" element={<PlaybackHistoryPage />} />
           <Route path="search" element={<SearchPage />} />
           <Route path="detail/:id" element={<MediaDetailPage />} />

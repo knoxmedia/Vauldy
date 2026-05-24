@@ -31,11 +31,14 @@ import {
   MediaItem,
   addFavorite,
   addPlaylistItem,
+  fetchLibraries,
   fetchMedia,
+  isTVLibraryType,
   mediaPosterSrc,
   normalizeListPosterUrl,
   type MediaMatchListUpdate,
 } from "../api/client";
+import SeriesBrowse from "./SeriesBrowse";
 import { readRecentPlaylists, rememberPlaylistAdded } from "../lib/recentPlaylists";
 import styles from "./Browse.module.css";
 
@@ -198,6 +201,38 @@ export default function BrowsePage() {
   const [playlistModalMediaIds, setPlaylistModalMediaIds] = useState<number[] | null>(null);
   const [matchMedia, setMatchMedia] = useState<MediaItem | null>(null);
   const [recentPlaylistMenu, setRecentPlaylistMenu] = useState(readRecentPlaylists);
+  const [libraryType, setLibraryType] = useState<string>("");
+  const [libraryName, setLibraryName] = useState<string>("");
+  const [libraryResolved, setLibraryResolved] = useState(() => libFromUrl == null);
+  const [tvUseFlatFiles, setTvUseFlatFiles] = useState(false);
+
+  useEffect(() => {
+    setTvUseFlatFiles(false);
+  }, [libFromUrl]);
+
+  useEffect(() => {
+    if (libFromUrl == null) {
+      setLibraryType("");
+      setLibraryName("");
+      setLibraryResolved(true);
+      return;
+    }
+    let cancelled = false;
+    setLibraryResolved(false);
+    void fetchLibraries()
+      .then((libs) => {
+        if (cancelled) return;
+        const lib = libs.find((l) => l.id === libFromUrl);
+        setLibraryType(lib?.type || "");
+        setLibraryName(lib?.name || "");
+      })
+      .finally(() => {
+        if (!cancelled) setLibraryResolved(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [libFromUrl]);
 
   async function load() {
     setLoading(true);
@@ -236,9 +271,10 @@ export default function BrowsePage() {
   }
 
   useEffect(() => {
+    if (libFromUrl != null && isTVLibraryType(libraryType) && !tvUseFlatFiles) return;
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [libFromUrl, sortParam]);
+  }, [libFromUrl, sortParam, libraryType, tvUseFlatFiles]);
 
   useEffect(() => {
     if (sortParam === "recent") {
@@ -559,6 +595,23 @@ export default function BrowsePage() {
         }
       },
     });
+  }
+
+  if (libFromUrl != null && !libraryResolved) {
+    return (
+      <div className={styles.loadingWrap}>
+        <Spin />
+      </div>
+    );
+  }
+  if (libFromUrl != null && isTVLibraryType(libraryType) && !tvUseFlatFiles) {
+    return (
+      <SeriesBrowse
+        libraryId={libFromUrl}
+        libraryName={libraryName}
+        onEmpty={() => setTvUseFlatFiles(true)}
+      />
+    );
   }
 
   return (

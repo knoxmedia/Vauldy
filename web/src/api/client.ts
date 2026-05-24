@@ -310,6 +310,121 @@ export async function fetchMedia(
   return data?.items ?? [];
 }
 
+export type SeriesSummary = {
+  id: number;
+  library_id: number;
+  title: string;
+  title_norm?: string;
+  year?: number;
+  tmdb_id?: string;
+  tvdb_id?: string;
+  poster?: string;
+  poster_url?: string;
+  folder_paths?: string[];
+  season_count?: number;
+  episode_count?: number;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type SeasonSummary = {
+  id: number;
+  season_num: number;
+  name: string;
+  poster?: string;
+  episode_count?: number;
+};
+
+export type EpisodeMediaVersion = {
+  media_id: number;
+  file_id?: string;
+  title?: string;
+  file_path?: string;
+  duration?: number;
+  width?: number;
+  height?: number;
+  bitrate?: number;
+  format?: string;
+  sort_order?: number;
+  poster_url?: string;
+};
+
+export type EpisodeRow = {
+  id: number;
+  episode_num: number;
+  title?: string;
+  duration?: number;
+  versions?: EpisodeMediaVersion[];
+};
+
+export type SeriesDetail = {
+  id: number;
+  library_id: number;
+  title: string;
+  title_norm?: string;
+  year?: number;
+  tmdb_id?: string;
+  tvdb_id?: string;
+  poster?: string;
+  poster_url?: string;
+  folder_paths?: string[];
+  meta_json?: string;
+  seasons?: SeasonSummary[];
+  created_at?: string;
+  updated_at?: string;
+};
+
+export function isTVLibraryType(type?: string): boolean {
+  const t = (type || "").trim().toLowerCase();
+  return t === "tv" || t === "anime" || t === "television" || t === "series";
+}
+
+export function seriesPosterSrc(s: Pick<SeriesSummary, "id" | "poster_url" | "poster">): string {
+  const u = normalizeListPosterUrl(s.poster_url || s.poster || "");
+  if (u) return u;
+  return "";
+}
+
+export async function fetchLibrarySeries(libraryId: number) {
+  const { data } = await api.get<{ items?: SeriesSummary[] }>(`/api/v1/library/${libraryId}/series`);
+  return data?.items ?? [];
+}
+
+export async function fetchSeries(seriesId: number) {
+  const { data } = await api.get<SeriesDetail>(`/api/v1/series/${seriesId}`);
+  return data;
+}
+
+export type SeriesPlayTarget = {
+  media_id: number;
+  position: number;
+};
+
+export async function fetchSeriesPlayTarget(seriesId: number) {
+  const { data } = await api.get<SeriesPlayTarget>(`/api/v1/series/${seriesId}/play-target`);
+  return data;
+}
+
+export async function updateSeries(
+  seriesId: number,
+  payload: { title?: string; year?: number; poster?: string; overview?: string },
+) {
+  const { data } = await api.patch<{
+    ok: boolean;
+    id: number;
+    title: string;
+    year?: number;
+    poster?: string;
+    overview?: string;
+  }>(`/api/v1/series/${seriesId}`, payload);
+  return data;
+}
+
+export async function fetchSeasonEpisodes(seasonId: number) {
+  const { data } = await api.get<{ items?: EpisodeRow[] }>(`/api/v1/season/${seasonId}/episodes`);
+  return data?.items ?? [];
+}
+
 export type MediaDetail = MediaItem & {
   md5?: string;
   meta_json?: string;

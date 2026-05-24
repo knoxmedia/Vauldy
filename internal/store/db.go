@@ -70,13 +70,35 @@ CREATE TABLE IF NOT EXISTS library_node (
     FOREIGN KEY (media_id) REFERENCES media(id)
 );
 
+CREATE TABLE IF NOT EXISTS series (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    library_id INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    title_norm TEXT NOT NULL,
+    year INTEGER,
+    tmdb_id TEXT,
+    tvdb_id TEXT,
+    poster TEXT,
+    folder_paths TEXT DEFAULT '[]',
+    meta_json TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (library_id) REFERENCES library(id)
+);
+CREATE INDEX IF NOT EXISTS idx_series_library ON series(library_id);
+CREATE INDEX IF NOT EXISTS idx_series_title_norm ON series(library_id, title_norm);
+CREATE INDEX IF NOT EXISTS idx_series_tmdb ON series(library_id, tmdb_id);
+CREATE INDEX IF NOT EXISTS idx_series_tvdb ON series(library_id, tvdb_id);
+
 CREATE TABLE IF NOT EXISTS season (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     tv_id INTEGER,
     season_num INTEGER,
     name TEXT,
-    poster TEXT
+    poster TEXT,
+    FOREIGN KEY (tv_id) REFERENCES series(id)
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_season_series_num ON season(tv_id, season_num);
 
 CREATE TABLE IF NOT EXISTS episode (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -87,6 +109,17 @@ CREATE TABLE IF NOT EXISTS episode (
     file_path TEXT,
     FOREIGN KEY (season_id) REFERENCES season(id)
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_episode_season_num ON episode(season_id, episode_num);
+
+CREATE TABLE IF NOT EXISTS episode_media (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    episode_id INTEGER NOT NULL,
+    media_id INTEGER NOT NULL UNIQUE,
+    sort_order INTEGER DEFAULT 0,
+    FOREIGN KEY (episode_id) REFERENCES episode(id),
+    FOREIGN KEY (media_id) REFERENCES media(id)
+);
+CREATE INDEX IF NOT EXISTS idx_episode_media_episode ON episode_media(episode_id);
 
 CREATE TABLE IF NOT EXISTS transcode_task (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -509,6 +542,39 @@ func OpenSQLite(path string) (*sql.DB, error) {
 	_, _ = db.Exec(`ALTER TABLE user ADD COLUMN ui_locale TEXT DEFAULT 'zh'`)
 	_, _ = db.Exec(`ALTER TABLE user ADD COLUMN player_prefs_json TEXT DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE scrape_task ADD COLUMN fail_count INTEGER DEFAULT 0`)
+	// TV series / episode linking (added for hierarchical TV library scan).
+	_, _ = db.Exec(`
+		CREATE TABLE IF NOT EXISTS series (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			library_id INTEGER NOT NULL,
+			title TEXT NOT NULL,
+			title_norm TEXT NOT NULL,
+			year INTEGER,
+			tmdb_id TEXT,
+			tvdb_id TEXT,
+			poster TEXT,
+			folder_paths TEXT DEFAULT '[]',
+			meta_json TEXT,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (library_id) REFERENCES library(id)
+		)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_series_library ON series(library_id)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_series_title_norm ON series(library_id, title_norm)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_series_tmdb ON series(library_id, tmdb_id)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_series_tvdb ON series(library_id, tvdb_id)`)
+	_, _ = db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_season_series_num ON season(tv_id, season_num)`)
+	_, _ = db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_episode_season_num ON episode(season_id, episode_num)`)
+	_, _ = db.Exec(`
+		CREATE TABLE IF NOT EXISTS episode_media (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			episode_id INTEGER NOT NULL,
+			media_id INTEGER NOT NULL UNIQUE,
+			sort_order INTEGER DEFAULT 0,
+			FOREIGN KEY (episode_id) REFERENCES episode(id),
+			FOREIGN KEY (media_id) REFERENCES media(id)
+		)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_episode_media_episode ON episode_media(episode_id)`)
 	_, _ = db.Exec(`INSERT OR IGNORE INTO scrape_config (id) VALUES (1)`)
 	_, _ = db.Exec(`INSERT OR IGNORE INTO system_options (id, options_json) VALUES (1, '{}')`)
 	// Seed default AI provider configs.

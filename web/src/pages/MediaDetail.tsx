@@ -60,6 +60,7 @@ import {
   fetchMediaStats,
   fetchMediaSubtitles,
   fetchUserHistory,
+  isTVLibraryType,
   mediaPosterSrc,
   removeFavorite,
   savePlaybackProgress,
@@ -320,8 +321,9 @@ function fmtBitrate(v?: number) {
   return `${kb} kbps`;
 }
 
-function isMovieLibraryType(t?: string) {
-  return (t || "").trim().toLowerCase() === "movie";
+function usesModernDetailLayout(t?: string) {
+  const type = (t || "").trim().toLowerCase();
+  return type === "movie" || isTVLibraryType(type);
 }
 
 function MediaHorizontalShelf({
@@ -576,6 +578,7 @@ export default function MediaDetailPage() {
   const [selectedSubId, setSelectedSubId] = useState<string>("off");
   const [userStars, setUserStars] = useState(0);
   const [isMovieLibrary, setIsMovieLibrary] = useState(false);
+  const [libraryType, setLibraryType] = useState("");
   const [relatedSelectedIds, setRelatedSelectedIds] = useState<number[]>([]);
   /** 固定工具条与主内容列对齐（.app-main-centered 的视口 left/width） */
   const [relatedBulkDock, setRelatedBulkDock] = useState({ left: 0, width: 0 });
@@ -680,8 +683,10 @@ export default function MediaDetailPage() {
         try {
           const libs = await fetchLibraries();
           const lib = libs.find((x) => x.id === d.value.library_id);
-          movieLib = isMovieLibraryType(lib?.type);
+          setLibraryType(lib?.type ?? "");
+          movieLib = usesModernDetailLayout(lib?.type);
         } catch {
+          setLibraryType("");
           movieLib = false;
         }
         setIsMovieLibrary(movieLib);
@@ -693,6 +698,7 @@ export default function MediaDetailPage() {
         }
       } else {
         message.error("加载影片信息失败");
+        setLibraryType("");
         setIsMovieLibrary(false);
       }
       if (s.status === "fulfilled") {
@@ -1523,7 +1529,7 @@ export default function MediaDetailPage() {
       </MediaHorizontalShelf>
 
       <MediaHorizontalShelf
-        title="相关电影"
+        title={isTVLibraryType(libraryType) ? "相关视频" : "相关电影"}
         empty={<div className={styles.empty}>暂无相关推荐</div>}
         trackClassName={styles.relatedRow}
         hasContent={related.length > 0}

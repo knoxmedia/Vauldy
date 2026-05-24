@@ -63,6 +63,11 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 			auth.POST("/user/parental/unlock", h.UnlockParental)
 
 			auth.GET("/library", h.ListLibraries)
+			auth.GET("/library/:id/series", h.ListLibrarySeries)
+			auth.GET("/series/:id", h.GetSeries)
+			auth.GET("/series/:id/play-target", h.GetSeriesPlayTarget)
+			auth.PATCH("/series/:id", h.UpdateSeries)
+			auth.GET("/season/:id/episodes", h.ListSeasonEpisodes)
 			auth.GET("/favorites", h.ListFavorites)
 			auth.GET("/media", h.ListMedia)
 			auth.GET("/media/:id/favorite", h.FavoriteStatus)
