@@ -858,6 +858,25 @@
   color: #faad14;
 }
 
+.trackPlayingIcon {
+  width: 14px;
+  height: 14px;
+  display: block;
+  color: #faad14;
+}
+
+.trackRow[data-playing] .trackIndex {
+  color: #faad14;
+}
+
+.trackPlayingLabel {
+  margin-left: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #faad14;
+  opacity: 0.9;
+}
+
 .trackIndex {
   flex-shrink: 0;
   width: 28px;

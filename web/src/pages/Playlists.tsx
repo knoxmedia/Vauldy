@@ -10,7 +10,7 @@ import {
 } from "@ant-design/icons";
 import type { MenuProps } from "antd";
 import { Button, Dropdown, Empty, message, Modal, Rate, Spin, Tooltip } from "antd";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   PLAYLIST_PLAY_SESSION_KEY,
@@ -51,10 +51,18 @@ function moveItemInList(list: PlaylistItem[], fromIdx: number, toIdx: number): P
   return next;
 }
 
-function storePlaylistPlaySession(playlistId: number, orderedItems: PlaylistItem[]) {
+function storePlaylistPlaySession(
+  playlistId: number,
+  orderedItems: PlaylistItem[],
+  mode: PlaybackMode
+) {
   sessionStorage.setItem(
     PLAYLIST_PLAY_SESSION_KEY,
-    JSON.stringify({ playlistId, order: orderedItems.map((i) => i.media_id) })
+    JSON.stringify({
+      playlistId,
+      order: orderedItems.map((i) => i.media_id),
+      mode,
+    })
   );
 }
 
@@ -99,6 +107,8 @@ export default function PlaylistsPage() {
   const nav = useNavigate();
   const [searchParams] = useSearchParams();
   const currentMediaId = searchParams.get("current_media_id");
+  const playingMediaId = currentMediaId ? Number(currentMediaId) : NaN;
+  const playingRowRef = useRef<HTMLDivElement | null>(null);
 
   // ——— List view state ———
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
@@ -162,6 +172,21 @@ export default function PlaylistsPage() {
     void loadPlaylists();
   }, [loadPlaylists]);
 
+  const playlistIdParam = searchParams.get("playlist_id");
+
+  useEffect(() => {
+    if (!playlistIdParam || detailLoading) return;
+    const pid = Number(playlistIdParam);
+    if (!Number.isFinite(pid) || pid <= 0) return;
+    if (detail?.id === pid) return;
+    openDetail(pid);
+  }, [playlistIdParam, detail?.id, detailLoading]);
+
+  useEffect(() => {
+    if (!Number.isFinite(playingMediaId) || playingMediaId <= 0) return;
+    playingRowRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [playingMediaId, displayItems]);
+
   function openDetail(id: number) {
     setDetailLoading(true);
     setDetail(null);
@@ -194,7 +219,7 @@ export default function PlaylistsPage() {
     if (items.length === 0 || !detail) return;
     const item = items[index];
     if (!item) return;
-    storePlaylistPlaySession(detail.id, items);
+    storePlaylistPlaySession(detail.id, items, playbackMode);
     nav(`/player/${item.media_id}?playlist_id=${detail.id}&index=${index}`);
   }
 
@@ -208,7 +233,7 @@ export default function PlaylistsPage() {
     }
     const nextIdx = idx + 1;
     const next = displayItems[nextIdx]!;
-    storePlaylistPlaySession(detail.id, displayItems);
+    storePlaylistPlaySession(detail.id, displayItems, playbackMode);
     nav(`/player/${next.media_id}?playlist_id=${detail.id}&index=${nextIdx}`);
   }
 
@@ -570,13 +595,16 @@ export default function PlaylistsPage() {
               <div className={styles.trackSectionHead}>{displayItems.length} 个视频</div>
               <div className={styles.trackList}>
                 {displayItems.map((item, globalIdx) => {
+                  const isPlaying =
+                    Number.isFinite(playingMediaId) && playingMediaId > 0 && item.media_id === playingMediaId;
                   return (
                     <div
                       key={item.id}
+                      ref={isPlaying ? playingRowRef : undefined}
                       className={`${styles.trackRow} ${dragItemId === item.id ? styles.trackRowDragging : ""} ${
                         dragOverItemId === item.id && dragItemId !== item.id ? styles.trackRowDropTarget : ""
                       }`}
-                      data-playing={currentMediaId && item.media_id === Number(currentMediaId) ? "" : undefined}
+                      data-playing={isPlaying ? "" : undefined}
                       onClick={() => playFrom(globalIdx)}
                       onKeyDown={(e) => {
                         if (e.key === "Enter" || e.key === " ") {
@@ -624,8 +652,13 @@ export default function PlaylistsPage() {
                       >
                         <HolderOutlined />
                       </span>
-                      <span className={styles.trackIndex}>{globalIdx + 1}</span>
-                      <span className={styles.trackTitle}>{item.title || "未命名"}</span>
+                      <span className={styles.trackIndex}>
+                        {isPlaying ? <ToolbarPlayIcon className={styles.trackPlayingIcon} /> : globalIdx + 1}
+                      </span>
+                      <span className={styles.trackTitle}>
+                        {item.title || "未命名"}
+                        {isPlaying ? <span className={styles.trackPlayingLabel}>正在播放</span> : null}
+                      </span>
                       <span className={styles.trackDuration}>{fmtDurationShort(item.duration)}</span>
                       <span
                         className={styles.trackMore}

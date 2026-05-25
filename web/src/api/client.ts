@@ -558,8 +558,11 @@ export interface PlaylistItem {
   added_at: string;
 }
 
-/** Set by Playlists when starting playback; Player reads on `ended` for sequential auto-next. */
+/** Set by Playlists when starting playback; Player reads on PowerPlayer `onComplete` / xgplayer `ended`. */
 export const PLAYLIST_PLAY_SESSION_KEY = "knox_playlist_session";
+
+/** Set by SeriesDetail when starting episode playback; Player auto-advances on episode end. */
+export const SERIES_PLAY_SESSION_KEY = "knox_series_session";
 
 export interface Playlist {
   id: number;

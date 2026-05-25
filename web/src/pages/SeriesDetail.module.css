@@ -57,6 +57,14 @@
   background: rgba(255, 255, 255, 0.04);
 }
 
+.episodeRow[data-playing] {
+  background: rgba(229, 160, 13, 0.12);
+}
+
+.episodeRow[data-playing]:hover {
+  background: rgba(229, 160, 13, 0.12);
+}
+
 .episodeNum {
   font-size: 18px;
   font-weight: 700;
@@ -85,6 +93,26 @@
 
 .episodeTitle:hover {
   color: #e5a00d;
+}
+
+.episodeRow[data-playing] .episodeTitle,
+.episodeRow[data-playing] .episodeTitleStatic {
+  color: #faad14;
+}
+
+.episodePlayingIcon {
+  width: 18px;
+  height: 18px;
+  display: block;
+  margin: 0 auto;
+  color: #faad14;
+}
+
+.episodePlayingLabel {
+  margin-left: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #faad14;
 }
 
 .episodeMeta {

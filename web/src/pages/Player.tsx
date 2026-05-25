@@ -1,7 +1,6 @@
 import { Button, Input, Modal, Progress, Tag, message } from "antd";
 import { ArrowLeftOutlined } from "@ant-design/icons";
 import { useEffect, useId, useRef, useState } from "react";
-import type { NavigateFunction } from "react-router-dom";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import Player, { TextTrack } from "xgplayer";
 import HlsPlugin from "xgplayer-hls";
@@ -11,32 +10,26 @@ import "xgplayer/es/plugins/track/index.css";
 import "xgplayer-subtitles/es/style/index.css";
 import { useAuthStore } from "../store/auth";
 import {
-  PLAYLIST_PLAY_SESSION_KEY,
   fetchMediaSubtitles,
   reportPlaybackEnd,
   reportPlaybackStart,
   savePlaybackProgress,
 } from "../api/client";
+import {
+  clearPlaylistPlaySession,
+  isPlaylistPlaybackFinished,
+  navigatePlaylistNext,
+  buildPlaylistPageUrl,
+} from "../lib/playlistPlayback";
+import { isLikelyNaturalPlaybackEnd } from "../lib/playbackComplete";
+import {
+  clearSeriesPlaySession,
+  isSeriesPlaybackFinished,
+  navigateSeriesNext,
+  buildSeriesPageUrl,
+} from "../lib/seriesPlayback";
 import { buildTextTrackListWithPrefs, normalizePlayerPrefs } from "../lib/playerPrefs";
 import { applyKnoxSubtitleCssVars, buildXgTexttrackStyle } from "../lib/subtitleAppearance";
-
-function tryNavigatePlaylistNext(nav: NavigateFunction, searchParams: URLSearchParams, currentMediaId: number) {
-  try {
-    const raw = sessionStorage.getItem(PLAYLIST_PLAY_SESSION_KEY);
-    if (!raw) return;
-    const sess = JSON.parse(raw) as { playlistId?: number; order?: number[] };
-    const order = sess.order;
-    if (!sess.playlistId || !order?.length) return;
-    const pidParam = searchParams.get("playlist_id");
-    if (!pidParam || Number(pidParam) !== Number(sess.playlistId)) return;
-    const pos = order.indexOf(currentMediaId);
-    if (pos < 0 || pos + 1 >= order.length) return;
-    const nextMid = order[pos + 1]!;
-    nav(`/player/${nextMid}?playlist_id=${sess.playlistId}&index=${pos + 1}`);
-  } catch {
-    // ignore malformed session
-  }
-}
 
 /** fetch that aborts after timeoutMs (clears hung UI when backend blocks). */
 async function fetchWithTimeout(
@@ -181,6 +174,19 @@ type PowerPlayerLike = {
   onPause?: (cb: () => void) => void;
   onError?: (cb: (error: unknown) => void) => void;
 };
+
+/** Best-effort parse of duration from player time payloads. */
+function readMediaDurationPayload(arg: unknown): number | null {
+  if (typeof arg === "number" && Number.isFinite(arg) && arg > 0) return arg;
+  if (arg && typeof arg === "object") {
+    const o = arg as Record<string, unknown>;
+    for (const k of ["duration", "totalTime", "length", "total"]) {
+      const v = o[k];
+      if (typeof v === "number" && Number.isFinite(v) && v > 0) return v;
+    }
+  }
+  return null;
+}
 
 /** Best-effort parse of `onTime` / `onSeek` payload (SDK varies: number vs { position }). */
 function readPowerPlayerTimePayload(arg: unknown): number | null {
@@ -504,10 +510,14 @@ export default function PlayerPage() {
   const [parentalUnlockToken, setParentalUnlockToken] = useState<string>("");
   const [transcodeProgress, setTranscodeProgress] = useState<number>(0);
   const [transcodeStatus, setTranscodeStatus] = useState<"waiting" | "running" | null>(null);
+  const [playlistFinished, setPlaylistFinished] = useState(false);
+  const [seriesFinished, setSeriesFinished] = useState(false);
   const playbackStartedRef = useRef(false);
   const playbackEndedRef = useRef(false);
   const lastProgressSecRef = useRef(0);
   const lastProgressAtRef = useRef(0);
+  const lastProgressSaveAtRef = useRef(0);
+  const mediaDurationSecRef = useRef(0);
   const sourceFallbackTriedRef = useRef(false);
   const noAudioRetryTriedRef = useRef(false);
   const noAudioRetryInFlightRef = useRef(false);
@@ -533,6 +543,11 @@ export default function PlayerPage() {
   }, [id]);
 
   useEffect(() => {
+    setPlaylistFinished(false);
+    setSeriesFinished(false);
+  }, [mid]);
+
+  useEffect(() => {
     if (!mid || Number.isNaN(mid)) {
       setLoadingText("缺少媒体 ID，无法播放。");
       return;
@@ -551,7 +566,15 @@ export default function PlayerPage() {
     }
     const sessionGen = ++playbackGenerationRef.current;
     const isStale = () => playbackGenerationRef.current !== sessionGen;
+    playbackStartedRef.current = false;
+    playbackEndedRef.current = false;
+    lastProgressSecRef.current = 0;
+    lastProgressAtRef.current = 0;
+    lastProgressSaveAtRef.current = 0;
+    mediaDurationSecRef.current = 0;
     jitPlaybackSessionIdRef.current = null;
+    const hostEl = playerMountRef.current ?? document.getElementById(domId);
+    if (hostEl) hostEl.innerHTML = "";
     const capsPromise = detectClientCaps();
     let timer: number | null = null;
     const withPlaybackLog = <T extends Record<string, unknown>>(p: T): T & { session_id?: string } => {
@@ -608,6 +631,113 @@ export default function PlayerPage() {
       return Math.floor(v);
     };
 
+    const readLivePlaybackSnapshot = () => {
+      let position = lastProgressSecRef.current;
+      let duration = mediaDurationSecRef.current;
+      let mediaEnded = false;
+      const started = playbackStartedRef.current;
+
+      if (!started) {
+        return { position, duration, started, mediaEnded };
+      }
+
+      const xg = playerRef.current as { currentTime?: number; duration?: number; ended?: boolean } | null;
+      if (xg) {
+        const cur = safeSeconds(Number(xg.currentTime || 0));
+        const dur = safeSeconds(Number(xg.duration || 0));
+        if (cur !== null) position = Math.max(position, cur);
+        if (dur !== null && dur > 0) duration = dur;
+        if (xg.ended) mediaEnded = true;
+      }
+      const video = drmVideoRef.current;
+      if (video) {
+        const cur = safeSeconds(video.currentTime);
+        const dur = safeSeconds(video.duration);
+        if (cur !== null) position = Math.max(position, cur);
+        if (dur !== null && dur > 0) duration = dur;
+        if (video.ended) mediaEnded = true;
+      }
+      const pp = powerPlayerRef.current as Record<string, unknown> | null;
+      if (pp) {
+        for (const method of ["getPosition", "getCurrentTime", "getPlayTime", "getTime"]) {
+          const fn = pp[method];
+          if (typeof fn !== "function") continue;
+          try {
+            const raw = (fn as () => unknown).call(pp);
+            const parsed = readPowerPlayerTimePayload(raw);
+            const sec = parsed !== null ? safeSeconds(parsed) : safeSeconds(Number(raw));
+            if (sec !== null && sec > 0) {
+              position = Math.max(position, sec);
+              break;
+            }
+          } catch {
+            // ignore unsupported getter
+          }
+        }
+        for (const method of ["getDuration", "getTotalTime", "getLength"]) {
+          const fn = pp[method];
+          if (typeof fn !== "function") continue;
+          try {
+            const raw = (fn as () => unknown).call(pp);
+            const parsed = readMediaDurationPayload(raw);
+            const sec = parsed !== null ? safeSeconds(parsed) : safeSeconds(Number(raw));
+            if (sec !== null && sec > 0) {
+              duration = sec;
+              break;
+            }
+          } catch {
+            // ignore unsupported getter
+          }
+        }
+      }
+      const host = playerMountRef.current ?? document.getElementById(domId);
+      const htmlVideo = host?.querySelector("video");
+      if (htmlVideo) {
+        const cur = safeSeconds(htmlVideo.currentTime);
+        const dur = safeSeconds(htmlVideo.duration);
+        if (cur !== null) position = Math.max(position, cur);
+        if (dur !== null && dur > 0) duration = dur;
+        if (htmlVideo.ended) mediaEnded = true;
+      }
+      return { position, duration, started, mediaEnded };
+    };
+
+    const handleMediaPlaybackComplete = () => {
+      if (isStale() || !mid || playbackEndedRef.current) return;
+      const live = readLivePlaybackSnapshot();
+      if (
+        !isLikelyNaturalPlaybackEnd(
+          live.started,
+          live.position,
+          live.duration,
+          live.mediaEnded
+        )
+      ) {
+        dbg("ignore premature playback complete", live);
+        return;
+      }
+      playbackEndedRef.current = true;
+      lastProgressSecRef.current = live.position;
+      if (live.duration > 0) mediaDurationSecRef.current = live.duration;
+      const endPos = live.position;
+      void savePlaybackProgress(mid, withPlaybackLog({ position: endPos, completed: 1 })).catch(() => {});
+      void reportPlaybackEnd(mid, withPlaybackLog({ position: endPos, completed: 1 })).catch(() => {});
+      const params = searchParamsRef.current;
+      const advanced =
+        navigatePlaylistNext(nav, params, mid) || navigateSeriesNext(nav, params, mid);
+      if (!advanced && isPlaylistPlaybackFinished(params, mid)) {
+        clearPlaylistPlaySession();
+        setPlaylistFinished(true);
+        setShowBack(true);
+        message.info("播放列表已播放完毕");
+      } else if (!advanced && isSeriesPlaybackFinished(params, mid)) {
+        clearSeriesPlaySession();
+        setSeriesFinished(true);
+        setShowBack(true);
+        message.info("已播放完所有可用集数");
+      }
+    };
+
     const attachPowerPlayerEvents = (pp: PowerPlayerLike) => {
       const bind = (method: keyof PowerPlayerLike, fn: (...args: any[]) => void) => {
         const m = pp[method];
@@ -635,6 +765,8 @@ export default function PlayerPage() {
 
       bind("onTime", (event: unknown) => {
         if (isStale() || !mid) return;
+        const dur = readMediaDurationPayload(event);
+        if (dur !== null) mediaDurationSecRef.current = Math.floor(dur);
         const pos = readPowerPlayerTimePayload(event);
         if (pos === null) return;
         const cur = safeSeconds(pos);
@@ -643,23 +775,27 @@ export default function PlayerPage() {
           playbackStartedRef.current = true;
           void reportPlaybackStart(mid, withPlaybackLog({ position: cur, completed: 0 })).catch(() => {});
         }
-        const now = Date.now();
-        if (cur <= lastProgressSecRef.current && now - lastProgressAtRef.current < 9000) return;
-        if (now - lastProgressAtRef.current < 9000) return;
         lastProgressSecRef.current = cur;
-        lastProgressAtRef.current = now;
+        lastProgressAtRef.current = Date.now();
+        const now = Date.now();
+        if (now - lastProgressSaveAtRef.current < 9000) return;
+        lastProgressSaveAtRef.current = now;
         void savePlaybackProgress(mid, withPlaybackLog({ position: cur, completed: 0 })).catch(() => {});
       });
 
-      bind("onComplete", () => {
-        if (isStale() || !mid || playbackEndedRef.current) return;
-        playbackEndedRef.current = true;
+      const onPowerPlayerComplete = (event?: unknown) => {
+        if (isStale()) return;
+        const pos = readPowerPlayerTimePayload(event);
+        if (pos !== null) {
+          const cur = safeSeconds(pos);
+          if (cur !== null && cur > 0) lastProgressSecRef.current = cur;
+        }
+        const dur = readMediaDurationPayload(event);
+        if (dur !== null) mediaDurationSecRef.current = Math.floor(dur);
         dbg("powerplayer onComplete");
-        const endPos = lastProgressSecRef.current;
-        void savePlaybackProgress(mid, withPlaybackLog({ position: endPos, completed: 1 })).catch(() => {});
-        void reportPlaybackEnd(mid, withPlaybackLog({ position: endPos, completed: 1 })).catch(() => {});
-        tryNavigatePlaylistNext(nav, searchParamsRef.current, mid);
-      });
+        handleMediaPlaybackComplete();
+      };
+      bind("onComplete", onPowerPlayerComplete);
 
       bind("onPause", () => {
         if (isStale() || !mid) return;
@@ -859,23 +995,20 @@ export default function PlayerPage() {
       });
       video.addEventListener("timeupdate", () => {
         if (!mid) return;
-        const now = Date.now();
+        const dur = safeSeconds(video.duration);
+        if (dur !== null && dur > 0) mediaDurationSecRef.current = dur;
         const cur = safeSeconds(video.currentTime);
-        if (cur === null) return;
-        if (cur <= 0) return;
-        if (cur <= lastProgressSecRef.current && now - lastProgressAtRef.current < 9000) return;
-        if (now - lastProgressAtRef.current < 9000) return;
+        if (cur === null || cur <= 0) return;
         lastProgressSecRef.current = cur;
-        lastProgressAtRef.current = now;
+        lastProgressAtRef.current = Date.now();
+        const now = Date.now();
+        if (now - lastProgressSaveAtRef.current < 9000) return;
+        lastProgressSaveAtRef.current = now;
         void savePlaybackProgress(mid, withPlaybackLog({ position: cur, completed: 0 })).catch(() => {});
       });
       video.addEventListener("ended", () => {
-        if (playbackEndedRef.current || !mid) return;
-        playbackEndedRef.current = true;
-        const cur = safeSeconds(video.currentTime) ?? 0;
-        void savePlaybackProgress(mid, withPlaybackLog({ position: cur, completed: 1 })).catch(() => {});
-        void reportPlaybackEnd(mid, withPlaybackLog({ position: cur, completed: 1 })).catch(() => {});
-        tryNavigatePlaylistNext(nav, searchParamsRef.current, mid);
+        if (isStale() || playbackEndedRef.current || !mid) return;
+        handleMediaPlaybackComplete();
       });
       if (isStale()) {
         await player.destroy().catch(() => {});
@@ -945,6 +1078,8 @@ export default function PlayerPage() {
       await destroyPowerPlayer();
       playbackStartedRef.current = false;
       playbackEndedRef.current = false;
+      lastProgressSaveAtRef.current = 0;
+      mediaDurationSecRef.current = 0;
 
       const drm = opts?.drm;
       const planMode = opts?.planMode;
@@ -1178,16 +1313,21 @@ export default function PlayerPage() {
       });
       const reportProgress = (completed = 0) => {
         if (!mid || !playerRef.current) return;
-        const now = Date.now();
-        const cur = safeSeconds((playerRef.current as any).currentTime || 0);
+        const player = playerRef.current as any;
+        const dur = safeSeconds(player.duration || 0);
+        if (dur !== null && dur > 0) mediaDurationSecRef.current = dur;
+        const cur = safeSeconds(player.currentTime || 0);
         if (cur === null) return;
         if (!completed && cur <= 0) return;
-        if (!completed) {
-          if (cur <= lastProgressSecRef.current && now - lastProgressAtRef.current < 9000) return;
-          if (now - lastProgressAtRef.current < 9000) return;
-        }
         lastProgressSecRef.current = cur;
-        lastProgressAtRef.current = now;
+        lastProgressAtRef.current = Date.now();
+        if (completed) {
+          void savePlaybackProgress(mid, withPlaybackLog({ position: cur, completed })).catch(() => {});
+          return;
+        }
+        const now = Date.now();
+        if (now - lastProgressSaveAtRef.current < 9000) return;
+        lastProgressSaveAtRef.current = now;
         void savePlaybackProgress(mid, withPlaybackLog({ position: cur, completed })).catch(() => {});
       };
       xg.on("play", () => {
@@ -1200,13 +1340,9 @@ export default function PlayerPage() {
       });
       xg.on("timeupdate", () => reportProgress(0));
       xg.on("ended", () => {
-        if (playbackEndedRef.current) return;
-        playbackEndedRef.current = true;
-        if (!mid) return;
-        const cur = safeSeconds((playerRef.current as any)?.currentTime || 0) ?? 0;
+        if (isStale() || playbackEndedRef.current || !mid) return;
         reportProgress(1);
-        void reportPlaybackEnd(mid, withPlaybackLog({ position: cur, completed: 1 })).catch(() => {});
-        tryNavigatePlaylistNext(nav, searchParamsRef.current, mid);
+        handleMediaPlaybackComplete();
       });
       setLoadingText("");
     };
@@ -1447,6 +1583,20 @@ export default function PlayerPage() {
     hideTimerRef.current = window.setTimeout(() => setShowBack(false), 1800);
   };
 
+  const goBackFromPlayer = () => {
+    const pid = searchParams.get("playlist_id");
+    if (pid && mid && !Number.isNaN(mid)) {
+      nav(buildPlaylistPageUrl(Number(pid), mid));
+      return;
+    }
+    const sid = searchParams.get("series_id");
+    if (sid && mid && !Number.isNaN(mid)) {
+      nav(buildSeriesPageUrl(Number(sid), mid));
+      return;
+    }
+    nav(-1);
+  };
+
   return (
     <div
       style={{ width: "100%", height: "100%", position: "relative", background: "#000", overflow: "hidden" }}
@@ -1457,7 +1607,7 @@ export default function PlayerPage() {
           <Button
             type="text"
             icon={<ArrowLeftOutlined style={{ fontSize: 18, color: "#fff" }} />}
-            onClick={() => nav(-1)}
+            onClick={() => goBackFromPlayer()}
             aria-label="返回上一页"
             style={{
               width: 40,
@@ -1515,6 +1665,88 @@ export default function PlayerPage() {
               ) : (
                 loadingText
               )}
+            </div>
+          ) : null}
+          {playlistFinished ? (
+            <div
+              style={{
+                position: "absolute",
+                inset: 0,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                background: "rgba(0,0,0,0.55)",
+                zIndex: 10,
+              }}
+            >
+              <div
+                style={{
+                  width: "min(420px, 88vw)",
+                  borderRadius: 12,
+                  background: "rgba(15,15,15,0.92)",
+                  border: "1px solid rgba(255,255,255,0.12)",
+                  padding: "28px 24px 22px",
+                  textAlign: "center",
+                  boxShadow: "0 10px 28px rgba(0,0,0,0.45)",
+                }}
+              >
+                <div style={{ color: "#fff", fontSize: 18, fontWeight: 600, marginBottom: 8 }}>播放列表已播放完毕</div>
+                <div style={{ color: "#aaa", fontSize: 13, marginBottom: 20 }}>当前列表中的所有项目均已播放完成</div>
+                <Button
+                  type="primary"
+                  onClick={() => {
+                    const pid = searchParams.get("playlist_id");
+                    if (pid && mid && !Number.isNaN(mid)) {
+                      nav(buildPlaylistPageUrl(Number(pid), mid));
+                      return;
+                    }
+                    nav(-1);
+                  }}
+                >
+                  返回播放列表
+                </Button>
+              </div>
+            </div>
+          ) : null}
+          {seriesFinished ? (
+            <div
+              style={{
+                position: "absolute",
+                inset: 0,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                background: "rgba(0,0,0,0.55)",
+                zIndex: 10,
+              }}
+            >
+              <div
+                style={{
+                  width: "min(420px, 88vw)",
+                  borderRadius: 12,
+                  background: "rgba(15,15,15,0.92)",
+                  border: "1px solid rgba(255,255,255,0.12)",
+                  padding: "28px 24px 22px",
+                  textAlign: "center",
+                  boxShadow: "0 10px 28px rgba(0,0,0,0.45)",
+                }}
+              >
+                <div style={{ color: "#fff", fontSize: 18, fontWeight: 600, marginBottom: 8 }}>已播放完所有可用集数</div>
+                <div style={{ color: "#aaa", fontSize: 13, marginBottom: 20 }}>当前剧集中没有更多可播放的分集</div>
+                <Button
+                  type="primary"
+                  onClick={() => {
+                    const sid = searchParams.get("series_id");
+                    if (sid && mid && !Number.isNaN(mid)) {
+                      nav(buildSeriesPageUrl(Number(sid), mid));
+                      return;
+                    }
+                    nav(-1);
+                  }}
+                >
+                  返回剧集详情
+                </Button>
+              </div>
             </div>
           ) : null}
         </>

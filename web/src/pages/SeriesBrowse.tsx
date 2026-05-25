@@ -5,10 +5,13 @@ import { useNavigate } from "react-router-dom";
 import {
   SeriesSummary,
   fetchLibrarySeries,
+  fetchSeries,
   fetchSeriesPlayTarget,
   seriesPosterSrc,
 } from "../api/client";
 import SeriesEditModal from "../components/SeriesEditModal";
+import { fetchSeriesEpisodeMediaOrder } from "../lib/seriesEpisodeOrder";
+import { storeSeriesPlaySession } from "../lib/seriesPlayback";
 import styles from "./Browse.module.css";
 
 type Props = {
@@ -79,9 +82,16 @@ export default function SeriesBrowse({ libraryId, libraryName, onEmpty }: Props)
     if (playingId != null) return;
     setPlayingId(seriesId);
     try {
-      const target = await fetchSeriesPlayTarget(seriesId);
-      const pos = target.position > 0 ? `?t=${target.position}` : "";
-      nav(`/player/${target.media_id}${pos}`);
+      const [target, series] = await Promise.all([
+        fetchSeriesPlayTarget(seriesId),
+        fetchSeries(seriesId),
+      ]);
+      const order = await fetchSeriesEpisodeMediaOrder(series.seasons ?? []);
+      storeSeriesPlaySession(seriesId, order);
+      const index = order.indexOf(target.media_id);
+      const idx = index >= 0 ? index : 0;
+      const pos = target.position > 0 ? `&t=${target.position}` : "";
+      nav(`/player/${target.media_id}?series_id=${seriesId}&index=${idx}${pos}`);
     } catch (e: unknown) {
       message.error((e as Error).message || "无法播放该剧集");
     } finally {

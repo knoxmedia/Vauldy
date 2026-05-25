@@ -9,8 +9,8 @@ import {
 } from "@ant-design/icons";
 import type { MenuProps } from "antd";
 import { Button, Dropdown, Empty, Spin, Tabs, Tag, Tooltip, Typography, message } from "antd";
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   EpisodeRow,
   MediaDetail,
@@ -35,6 +35,11 @@ import { buildSeriesMenuItems } from "../components/seriesMenuItems";
 import SeriesEditModal from "../components/SeriesEditModal";
 import ToolbarPlayIcon from "../components/ToolbarPlayIcon";
 import { readRecentPlaylists, rememberPlaylistAdded } from "../lib/recentPlaylists";
+import {
+  fetchSeriesEpisodeMediaOrder,
+  pickPrimaryEpisodeMediaId,
+} from "../lib/seriesEpisodeOrder";
+import { storeSeriesPlaySession } from "../lib/seriesPlayback";
 import md from "./MediaDetail.module.css";
 import styles from "./SeriesDetail.module.css";
 
@@ -143,10 +148,11 @@ function parseSeriesMeta(metaJSON?: string): {
 }
 
 function pickPrimaryMediaId(ep: EpisodeRow): number | null {
-  const versions = ep.versions ?? [];
-  if (versions.length === 0) return null;
-  const sorted = [...versions].sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
-  return sorted[0]?.media_id ?? null;
+  return pickPrimaryEpisodeMediaId(ep);
+}
+
+function episodeContainsMedia(ep: EpisodeRow, mediaId: number): boolean {
+  return (ep.versions ?? []).some((v) => v.media_id === mediaId);
 }
 
 function pickBestVersion(ep: EpisodeRow) {
@@ -162,6 +168,9 @@ export default function SeriesDetailPage() {
   const { id } = useParams();
   const seriesId = Number(id);
   const nav = useNavigate();
+  const [searchParams] = useSearchParams();
+  const playingMediaId = Number(searchParams.get("current_media_id"));
+  const playingRowRef = useRef<HTMLDivElement | null>(null);
   const [detail, setDetail] = useState<SeriesDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [activeSeasonId, setActiveSeasonId] = useState<number | null>(null);
@@ -174,6 +183,7 @@ export default function SeriesDetailPage() {
   const [editOpen, setEditOpen] = useState(false);
   const [favorited, setFavorited] = useState(false);
   const [allMediaIds, setAllMediaIds] = useState<number[]>([]);
+  const [episodeOrder, setEpisodeOrder] = useState<number[]>([]);
   const [representativeMedia, setRepresentativeMedia] = useState<MediaDetail | null>(null);
   const [matchModalOpen, setMatchModalOpen] = useState(false);
   const [playlistModalOpen, setPlaylistModalOpen] = useState(false);
@@ -235,24 +245,16 @@ export default function SeriesDetailPage() {
     const seasons = detail?.seasons ?? [];
     if (seasons.length === 0) {
       setAllMediaIds([]);
+      setEpisodeOrder([]);
       return;
     }
     let cancelled = false;
     void (async () => {
-      const ids: number[] = [];
-      for (const s of seasons) {
-        try {
-          const items = await fetchSeasonEpisodes(s.id);
-          for (const ep of items) {
-            for (const v of ep.versions ?? []) {
-              if (v.media_id > 0) ids.push(v.media_id);
-            }
-          }
-        } catch {
-          /* ignore season load errors */
-        }
+      const order = await fetchSeriesEpisodeMediaOrder(seasons);
+      if (!cancelled) {
+        setEpisodeOrder(order);
+        setAllMediaIds(order);
       }
-      if (!cancelled) setAllMediaIds([...new Set(ids)]);
     })();
     return () => {
       cancelled = true;
@@ -299,6 +301,33 @@ export default function SeriesDetailPage() {
     };
   }, [activeSeasonId]);
 
+  useEffect(() => {
+    const seasons = detail?.seasons ?? [];
+    if (!Number.isFinite(playingMediaId) || playingMediaId <= 0 || seasons.length === 0) return;
+    let cancelled = false;
+    void (async () => {
+      for (const season of seasons) {
+        try {
+          const items = await fetchSeasonEpisodes(season.id);
+          if (items.some((ep) => episodeContainsMedia(ep, playingMediaId))) {
+            if (!cancelled) setActiveSeasonId(season.id);
+            break;
+          }
+        } catch {
+          /* ignore season load errors */
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [playingMediaId, detail?.seasons]);
+
+  useEffect(() => {
+    if (!Number.isFinite(playingMediaId) || playingMediaId <= 0) return;
+    playingRowRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [playingMediaId, episodes, activeSeasonId]);
+
   const meta = useMemo(() => parseSeriesMeta(detail?.meta_json), [detail?.meta_json]);
   const heroPoster = useMemo(() => {
     if (!detail) return "";
@@ -333,14 +362,34 @@ export default function SeriesDetailPage() {
         ? meta.releaseDate.slice(0, 4)
         : "—";
 
+  function playEpisode(mediaId: number, orderOverride?: number[]) {
+    const order = orderOverride ?? episodeOrder;
+    if (order.length === 0 || !seriesId || Number.isNaN(seriesId)) {
+      nav(`/player/${mediaId}`);
+      return;
+    }
+    const index = order.indexOf(mediaId);
+    storeSeriesPlaySession(seriesId, order);
+    const idx = index >= 0 ? index : 0;
+    nav(`/player/${mediaId}?series_id=${seriesId}&index=${idx}`);
+  }
+
   async function handleSeriesPlay() {
     if (playBusy) return;
     setPlayBusy(true);
     try {
       const target = playTarget ?? (await fetchSeriesPlayTarget(seriesId));
       setPlayTarget(target);
-      const pos = target.position > 0 ? `?t=${target.position}` : "";
-      nav(`/player/${target.media_id}${pos}`);
+      const order =
+        episodeOrder.length > 0
+          ? [...episodeOrder]
+          : await fetchSeriesEpisodeMediaOrder(detail?.seasons ?? []);
+      if (order.length > 0) setEpisodeOrder(order);
+      const index = order.indexOf(target.media_id);
+      storeSeriesPlaySession(seriesId, order);
+      const pos = target.position > 0 ? `&t=${target.position}` : "";
+      const idx = index >= 0 ? index : 0;
+      nav(`/player/${target.media_id}?series_id=${seriesId}&index=${idx}${pos}`);
     } catch (e: unknown) {
       message.error((e as Error).message || "无法播放该剧集");
     } finally {
@@ -669,11 +718,22 @@ export default function SeriesDetailPage() {
                 {episodes.map((ep) => {
                   const best = pickBestVersion(ep);
                   const mediaId = pickPrimaryMediaId(ep);
+                  const isPlaying =
+                    Number.isFinite(playingMediaId) &&
+                    playingMediaId > 0 &&
+                    episodeContainsMedia(ep, playingMediaId);
                   const epLabel = `E${String(ep.episode_num).padStart(2, "0")}`;
                   const versionCount = ep.versions?.length ?? 0;
                   return (
-                    <div key={ep.id} className={styles.episodeRow}>
-                      <div className={styles.episodeNum}>{epLabel}</div>
+                    <div
+                      key={ep.id}
+                      ref={isPlaying ? playingRowRef : undefined}
+                      className={styles.episodeRow}
+                      data-playing={isPlaying ? "" : undefined}
+                    >
+                      <div className={styles.episodeNum}>
+                        {isPlaying ? <ToolbarPlayIcon className={styles.episodePlayingIcon} /> : epLabel}
+                      </div>
                       <div className={styles.episodeMain}>
                         {mediaId ? (
                           <button
@@ -682,6 +742,7 @@ export default function SeriesDetailPage() {
                             onClick={() => nav(`/detail/${mediaId}`)}
                           >
                             {ep.title || `第 ${ep.episode_num} 集`}
+                            {isPlaying ? <span className={styles.episodePlayingLabel}>正在播放</span> : null}
                           </button>
                         ) : (
                           <div className={styles.episodeTitleStatic}>
@@ -700,7 +761,15 @@ export default function SeriesDetailPage() {
                                 key={v.media_id}
                                 size="small"
                                 type="link"
-                                onClick={() => nav(`/player/${v.media_id}`)}
+                                onClick={() => {
+                                  const primaryId = pickPrimaryMediaId(ep);
+                                  const slot = primaryId != null ? episodeOrder.indexOf(primaryId) : -1;
+                                  const order =
+                                    slot >= 0
+                                      ? episodeOrder.map((id, i) => (i === slot ? v.media_id : id))
+                                      : episodeOrder;
+                                  playEpisode(v.media_id, order);
+                                }}
                               >
                                 {v.height ? `${v.height}p` : v.format || "播放"}
                                 {v.bitrate ? ` · ${Math.round(v.bitrate / 1000)}k` : ""}
@@ -716,7 +785,7 @@ export default function SeriesDetailPage() {
                             size="large"
                             icon={<ToolbarPlayIcon className={styles.episodePlaySvg} />}
                             className={md.playBtn}
-                            onClick={() => nav(`/player/${mediaId}`)}
+                            onClick={() => playEpisode(mediaId)}
                           >
                             播放
                           </Button>
