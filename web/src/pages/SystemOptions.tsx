@@ -12,7 +12,7 @@ import {
   Typography,
   message,
 } from "antd";
-import { SearchOutlined } from "@ant-design/icons";
+import { SearchOutlined, ApiOutlined, CloudDownloadOutlined } from "@ant-design/icons";
 import {
   useCallback,
   useEffect,
@@ -24,7 +24,12 @@ import {
 import {
   fetchSystemOptions,
   saveSystemOptions,
+  testSystemOptionsASR,
+  testSystemOptionsOCR,
+  installSystemOptionsASR,
+  installSystemOptionsOCR,
   type SystemOptions,
+  type RecognitionTestResult,
 } from "../api/client";
 
 function defaultSystemOptions(): SystemOptions {
@@ -50,6 +55,43 @@ function defaultSystemOptions(): SystemOptions {
       disable_video_stream_transcoding: false,
       max_cpu_concurrent: "unlimited",
       max_background_concurrent: "1",
+    },
+    recognition: {
+      asr: {
+        provider: "none",
+        whisper_path: "whisper",
+        extra_args: [],
+        shell: "",
+      },
+      ocr: {
+        enabled: false,
+        tesseract_path: "tesseract",
+        tessdata_prefix: "",
+        languages: "chi_sim+eng",
+        python_path: "",
+        script_path: "",
+        pgsrip_path: "",
+        mkvextract_path: "",
+        mkvmerge_path: "",
+      },
+    },
+  };
+}
+
+/** Merge API payload with defaults so partial/null fields never crash the form. */
+function mergeSystemOptions(data: Partial<SystemOptions> | null | undefined): SystemOptions {
+  const base = defaultSystemOptions();
+  if (!data) return base;
+  const asr = { ...base.recognition.asr, ...(data.recognition?.asr ?? {}) };
+  const extraRaw = data.recognition?.asr?.extra_args;
+  asr.extra_args = Array.isArray(extraRaw) ? extraRaw : base.recognition.asr.extra_args;
+  return {
+    general: { ...base.general, ...(data.general ?? {}) },
+    playback: { ...base.playback, ...(data.playback ?? {}) },
+    transcoder: { ...base.transcoder, ...(data.transcoder ?? {}) },
+    recognition: {
+      asr,
+      ocr: { ...base.recognition.ocr, ...(data.recognition?.ocr ?? {}) },
     },
   };
 }
@@ -150,18 +192,32 @@ function SettingRow(props: {
   );
 }
 
+const ASR_PROVIDER_OPTIONS = [
+  { value: "none", label: "关闭" },
+  { value: "whisper_cli", label: "Whisper CLI" },
+  { value: "shell", label: "Shell 脚本" },
+];
+
 export default function SystemOptionsPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [opts, setOpts] = useState<SystemOptions>(() => defaultSystemOptions());
   const [baseline, setBaseline] = useState<SystemOptions>(() => defaultSystemOptions());
+  const [asrTesting, setAsrTesting] = useState(false);
+  const [ocrTesting, setOcrTesting] = useState(false);
+  const [asrInstalling, setAsrInstalling] = useState(false);
+  const [ocrInstalling, setOcrInstalling] = useState(false);
+  const [asrTestResult, setAsrTestResult] = useState<RecognitionTestResult | null>(null);
+  const [ocrTestResult, setOcrTestResult] = useState<RecognitionTestResult | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await fetchSystemOptions();
-      setOpts(data);
-      setBaseline(data);
+      const merged = mergeSystemOptions(await fetchSystemOptions());
+      setOpts(merged);
+      setBaseline(merged);
+      setAsrTestResult(null);
+      setOcrTestResult(null);
     } catch {
       message.error("加载系统选项失败");
     } finally {
@@ -179,8 +235,9 @@ export default function SystemOptionsPage() {
     setSaving(true);
     try {
       const saved = await saveSystemOptions(opts);
-      setOpts(saved);
-      setBaseline(saved);
+      const merged = mergeSystemOptions(saved);
+      setOpts(merged);
+      setBaseline(merged);
       message.success("已保存");
     } catch {
       message.error("保存失败");
@@ -191,7 +248,84 @@ export default function SystemOptionsPage() {
 
   const reset = () => {
     setOpts(baseline);
+    setAsrTestResult(null);
+    setOcrTestResult(null);
     message.info("已恢复为上次加载的值");
+  };
+
+  const runAsrTest = async () => {
+    setAsrTesting(true);
+    setAsrTestResult(null);
+    try {
+      const result = await testSystemOptionsASR(opts.recognition.asr);
+      setAsrTestResult(result);
+    } catch {
+      setAsrTestResult({ ok: false, message: "测试请求失败" });
+    } finally {
+      setAsrTesting(false);
+    }
+  };
+
+  const runOcrTest = async () => {
+    setOcrTesting(true);
+    setOcrTestResult(null);
+    try {
+      const result = await testSystemOptionsOCR(opts.recognition.ocr);
+      setOcrTestResult(result);
+    } catch {
+      setOcrTestResult({ ok: false, message: "测试请求失败" });
+    } finally {
+      setOcrTesting(false);
+    }
+  };
+
+  const applyInstalledRecognition = (recognition: Partial<SystemOptions["recognition"]> | undefined) => {
+    if (!recognition) return;
+    const patch = mergeSystemOptions({ recognition: recognition as SystemOptions["recognition"] });
+    setOpts((p) => ({ ...p, recognition: patch.recognition }));
+    setBaseline((p) => ({ ...p, recognition: patch.recognition }));
+  };
+
+  const runAsrInstall = async () => {
+    setAsrInstalling(true);
+    setAsrTestResult(null);
+    try {
+      const result = await installSystemOptionsASR();
+      if (result.recognition) {
+        applyInstalledRecognition(result.recognition);
+      }
+      setAsrTestResult({ ok: result.ok, message: result.message });
+      if (result.ok) {
+        message.success(result.message);
+      } else {
+        message.error(result.message);
+      }
+    } catch {
+      message.error("ASR 安装请求失败（可能超时，请查看服务器日志）");
+    } finally {
+      setAsrInstalling(false);
+    }
+  };
+
+  const runOcrInstall = async () => {
+    setOcrInstalling(true);
+    setOcrTestResult(null);
+    try {
+      const result = await installSystemOptionsOCR();
+      if (result.recognition) {
+        applyInstalledRecognition(result.recognition);
+      }
+      setOcrTestResult({ ok: result.ok, message: result.message });
+      if (result.ok) {
+        message.success(result.message);
+      } else {
+        message.error(result.message);
+      }
+    } catch {
+      message.error("OCR 安装请求失败（可能超时，请查看服务器日志）");
+    } finally {
+      setOcrInstalling(false);
+    }
   };
 
   const tabGeneral = (
@@ -481,6 +615,231 @@ export default function SystemOptionsPage() {
     </Space>
   );
 
+  const tabASR = (
+    <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+      <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
+        语音识别（ASR）配置保存在 config.yml 的 subtitle.asr 段。若未安装依赖，可使用「一键安装」自动部署到
+        tools/recognition/（Python 虚拟环境）。
+      </Typography.Paragraph>
+
+      <Flex justify="flex-end" wrap="wrap" gap={8}>
+        <Space wrap>
+          <Button icon={<CloudDownloadOutlined />} loading={asrInstalling} onClick={() => void runAsrInstall()}>
+            一键安装
+          </Button>
+          <Button icon={<ApiOutlined />} loading={asrTesting} onClick={() => void runAsrTest()}>
+            连接测试
+          </Button>
+        </Space>
+      </Flex>
+      {asrTestResult ? (
+        <Typography.Text type={asrTestResult.ok ? "success" : "danger"} style={{ fontSize: 13 }}>
+          {asrTestResult.message}
+        </Typography.Text>
+      ) : null}
+      <SettingRow
+        title="Provider"
+        description="无字幕时可选自动语音识别。Whisper CLI 直接调用 whisper 命令；Shell 使用自定义脚本（支持 {input}、{output_dir}、{output_vtt} 占位符）。"
+      >
+        <Select
+          style={{ minWidth: 220 }}
+          options={ASR_PROVIDER_OPTIONS}
+          value={opts.recognition.asr.provider}
+          onChange={(v) =>
+            setOpts((p) => ({
+              ...p,
+              recognition: { ...p.recognition, asr: { ...p.recognition.asr, provider: v } },
+            }))
+          }
+        />
+      </SettingRow>
+      <SettingRow title="Whisper 路径" description="provider 为 whisper_cli 时使用；留空默认为 whisper。">
+        <Input
+          style={{ width: 480, maxWidth: "100%" }}
+          value={opts.recognition.asr.whisper_path}
+          onChange={(e) =>
+            setOpts((p) => ({
+              ...p,
+              recognition: { ...p.recognition, asr: { ...p.recognition.asr, whisper_path: e.target.value } },
+            }))
+          }
+          placeholder="whisper"
+        />
+      </SettingRow>
+      <SettingRow title="额外参数" description="Whisper CLI 附加参数，空格分隔（例如 --model small --language zh）。">
+        <Input
+          style={{ width: 480, maxWidth: "100%" }}
+          value={(opts.recognition.asr.extra_args ?? []).join(" ")}
+          onChange={(e) =>
+            setOpts((p) => ({
+              ...p,
+              recognition: {
+                ...p.recognition,
+                asr: {
+                  ...p.recognition.asr,
+                  extra_args: e.target.value.trim() ? e.target.value.trim().split(/\s+/) : [],
+                },
+              },
+            }))
+          }
+          placeholder="--model small --language zh"
+        />
+      </SettingRow>
+      <SettingRow title="Shell 命令" description="provider 为 shell 时使用；可引用 tools/asr/asr_to_vtt.py 等脚本。" controlLayout="full">
+        <Input.TextArea
+          rows={4}
+          value={opts.recognition.asr.shell}
+          onChange={(e) =>
+            setOpts((p) => ({
+              ...p,
+              recognition: { ...p.recognition, asr: { ...p.recognition.asr, shell: e.target.value } },
+            }))
+          }
+          placeholder={'cd /d "{output_dir}" && python tools/asr/asr_to_vtt.py --engine whisper --input "{input}" --output-vtt "{output_vtt}"'}
+        />
+      </SettingRow>
+    </Space>
+  );
+
+  const tabOCR = (
+    <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+      <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
+        字符识别（OCR）配置保存在 config.yml 的 subtitle.graphical_ocr 段。若未安装依赖，可使用「一键安装」自动部署 Python 包及
+        tools/tesseract/（Windows）。
+      </Typography.Paragraph>
+
+      <Flex justify="flex-end" wrap="wrap" gap={8}>
+        <Space wrap>
+          <Button icon={<CloudDownloadOutlined />} loading={ocrInstalling} onClick={() => void runOcrInstall()}>
+            一键安装
+          </Button>
+          <Button icon={<ApiOutlined />} loading={ocrTesting} onClick={() => void runOcrTest()}>
+            连接测试
+          </Button>
+        </Space>
+      </Flex>
+      {ocrTestResult ? (
+        <Typography.Text type={ocrTestResult.ok ? "success" : "danger"} style={{ fontSize: 13 }}>
+          {ocrTestResult.message}
+        </Typography.Text>
+      ) : null}
+      <SettingRow title="启用 OCR" description="对 PGS、VobSub 等位图字幕进行 Tesseract OCR 提取。">
+        <Switch
+          checked={opts.recognition.ocr.enabled}
+          onChange={(v) =>
+            setOpts((p) => ({
+              ...p,
+              recognition: { ...p.recognition, ocr: { ...p.recognition.ocr, enabled: v } },
+            }))
+          }
+        />
+      </SettingRow>
+      <SettingRow title="Tesseract 路径">
+        <Input
+          style={{ width: 480, maxWidth: "100%" }}
+          value={opts.recognition.ocr.tesseract_path}
+          onChange={(e) =>
+            setOpts((p) => ({
+              ...p,
+              recognition: { ...p.recognition, ocr: { ...p.recognition.ocr, tesseract_path: e.target.value } },
+            }))
+          }
+          placeholder="tesseract"
+        />
+      </SettingRow>
+      <SettingRow title="Tessdata 目录" description="TESSDATA_PREFIX，可选。">
+        <Input
+          style={{ width: 480, maxWidth: "100%" }}
+          value={opts.recognition.ocr.tessdata_prefix}
+          onChange={(e) =>
+            setOpts((p) => ({
+              ...p,
+              recognition: { ...p.recognition, ocr: { ...p.recognition.ocr, tessdata_prefix: e.target.value } },
+            }))
+          }
+          placeholder="留空使用系统默认"
+        />
+      </SettingRow>
+      <SettingRow title="识别语言" description="Tesseract 语言包，多个用 + 连接。">
+        <Input
+          style={{ width: 480, maxWidth: "100%" }}
+          value={opts.recognition.ocr.languages}
+          onChange={(e) =>
+            setOpts((p) => ({
+              ...p,
+              recognition: { ...p.recognition, ocr: { ...p.recognition.ocr, languages: e.target.value } },
+            }))
+          }
+          placeholder="chi_sim+eng"
+        />
+      </SettingRow>
+      <SettingRow title="Python 路径" description="运行 OCR 脚本的解释器；留空在 Windows 用 python，其他平台用 python3。">
+        <Input
+          style={{ width: 480, maxWidth: "100%" }}
+          value={opts.recognition.ocr.python_path}
+          onChange={(e) =>
+            setOpts((p) => ({
+              ...p,
+              recognition: { ...p.recognition, ocr: { ...p.recognition.ocr, python_path: e.target.value } },
+            }))
+          }
+          placeholder="python"
+        />
+      </SettingRow>
+      <SettingRow title="OCR 脚本路径" description="bitmap_subtitle_ocr.py 的绝对或相对路径。" controlLayout="full">
+        <Input
+          style={{ width: 480, maxWidth: "100%" }}
+          value={opts.recognition.ocr.script_path}
+          onChange={(e) =>
+            setOpts((p) => ({
+              ...p,
+              recognition: { ...p.recognition, ocr: { ...p.recognition.ocr, script_path: e.target.value } },
+            }))
+          }
+          placeholder="tools/subtitle_ocr/bitmap_subtitle_ocr.py"
+        />
+      </SettingRow>
+      <SettingRow title="pgsrip 路径" description="可选，PGS 字幕预处理工具。">
+        <Input
+          style={{ width: 480, maxWidth: "100%" }}
+          value={opts.recognition.ocr.pgsrip_path}
+          onChange={(e) =>
+            setOpts((p) => ({
+              ...p,
+              recognition: { ...p.recognition, ocr: { ...p.recognition.ocr, pgsrip_path: e.target.value } },
+            }))
+          }
+        />
+      </SettingRow>
+      <SettingRow title="mkvextract 路径" description="可选，Matroska 轨道提取。">
+        <Input
+          style={{ width: 480, maxWidth: "100%" }}
+          value={opts.recognition.ocr.mkvextract_path}
+          onChange={(e) =>
+            setOpts((p) =>
+              ({
+                ...p,
+                recognition: { ...p.recognition, ocr: { ...p.recognition.ocr, mkvextract_path: e.target.value } },
+              })
+            )
+          }
+        />
+      </SettingRow>
+      <SettingRow title="mkvmerge 路径" description="可选，Matroska 工具。">
+        <Input
+          style={{ width: 480, maxWidth: "100%" }}
+          value={opts.recognition.ocr.mkvmerge_path}
+          onChange={(e) =>
+            setOpts((p) => ({
+              ...p,
+              recognition: { ...p.recognition, ocr: { ...p.recognition.ocr, mkvmerge_path: e.target.value } },
+            }))
+          }
+        />
+      </SettingRow>
+    </Space>
+  );
+
   return (
     <Card loading={loading}>
       <Flex justify="flex-end" style={{ marginBottom: 16 }}>
@@ -499,6 +858,8 @@ export default function SystemOptionsPage() {
           { key: "general", label: "通用", children: tabGeneral },
           { key: "playback", label: "播放", children: tabPlayback },
           { key: "transcoder", label: "转码器", children: tabTranscoder },
+          { key: "asr", label: "语音识别", children: tabASR },
+          { key: "ocr", label: "字符识别", children: tabOCR },
         ]}
       />
     </Card>

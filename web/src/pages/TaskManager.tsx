@@ -15,7 +15,16 @@ import {
   Tooltip,
   message,
 } from "antd";
-import { useEffect, useMemo, useState } from "react";
+import {
+  DeleteOutlined,
+  EditOutlined,
+  RedoOutlined,
+  RollbackOutlined,
+  ThunderboltOutlined,
+  StopOutlined,
+  SyncOutlined,
+} from "@ant-design/icons";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   cancelScanTask,
   cancelTranscodeTask,
@@ -63,6 +72,73 @@ type ScheduledTaskForm = {
   limit?: number;
   days?: number;
 };
+
+function ActionIconButton({
+  title,
+  icon,
+  onClick,
+  loading,
+  disabled,
+  danger,
+  type = "text",
+}: {
+  title: string;
+  icon: ReactNode;
+  onClick?: () => void;
+  loading?: boolean;
+  disabled?: boolean;
+  danger?: boolean;
+  type?: "primary" | "text" | "link" | "default";
+}) {
+  const button = (
+    <Button
+      type={type}
+      size="small"
+      icon={icon}
+      onClick={onClick}
+      loading={loading}
+      disabled={disabled}
+      danger={danger}
+      aria-label={title}
+    />
+  );
+  return (
+    <Tooltip title={title}>
+      {disabled ? <span>{button}</span> : button}
+    </Tooltip>
+  );
+}
+
+function ActionIconConfirmButton({
+  title,
+  confirmTitle,
+  icon,
+  onConfirm,
+  loading,
+  danger,
+}: {
+  title: string;
+  confirmTitle: string;
+  icon: ReactNode;
+  onConfirm: () => void;
+  loading?: boolean;
+  danger?: boolean;
+}) {
+  return (
+    <Popconfirm title={confirmTitle} onConfirm={onConfirm}>
+      <Tooltip title={title}>
+        <Button
+          type="text"
+          size="small"
+          icon={icon}
+          loading={loading}
+          danger={danger}
+          aria-label={title}
+        />
+      </Tooltip>
+    </Popconfirm>
+  );
+}
 
 export default function TaskManagerPage() {
   const [transcodeTasks, setTranscodeTasks] = useState<TranscodeTask[]>([]);
@@ -519,21 +595,35 @@ export default function TaskManagerPage() {
                     {
                       title: "操作",
                       key: "actions",
-                      width: 180,
+                      width: 120,
+                      align: "center",
                       fixed: "right",
                       render: (_: unknown, r: ScheduledTask) => (
-                        <Space>
-                          <Button size="small" loading={runningScheduledId === r.id} onClick={() => {
-                            setRunningScheduledId(r.id);
-                            void runScheduledTask(r.id).then(() => message.success("任务已执行")).catch(() => message.error("任务执行失败")).finally(async () => {
-                              setRunningScheduledId(null);
-                              await loadScheduled();
-                            });
-                          }}>立即执行</Button>
-                          <Button size="small" onClick={() => fillEditForm(r)}>编辑</Button>
-                          <Popconfirm title="确认删除该任务？" onConfirm={() => void deleteScheduledTask(r.id).then(loadScheduled)}>
-                            <Button size="small" danger>删除</Button>
-                          </Popconfirm>
+                        <Space size={4}>
+                          <ActionIconButton
+                            title="立即执行"
+                            icon={<ThunderboltOutlined />}
+                            loading={runningScheduledId === r.id}
+                            onClick={() => {
+                              setRunningScheduledId(r.id);
+                              void runScheduledTask(r.id).then(() => message.success("任务已执行")).catch(() => message.error("任务执行失败")).finally(async () => {
+                                setRunningScheduledId(null);
+                                await loadScheduled();
+                              });
+                            }}
+                          />
+                          <ActionIconButton
+                            title="编辑"
+                            icon={<EditOutlined />}
+                            onClick={() => fillEditForm(r)}
+                          />
+                          <ActionIconConfirmButton
+                            title="删除"
+                            confirmTitle="确认删除该任务？"
+                            icon={<DeleteOutlined />}
+                            danger
+                            onConfirm={() => void deleteScheduledTask(r.id).then(loadScheduled)}
+                          />
                         </Space>
                       ),
                     },
@@ -592,25 +682,26 @@ export default function TaskManagerPage() {
                   {
                     title: "操作",
                     key: "ops",
-                    width: 160,
+                    width: 90,
+                    align: "center",
                     render: (_: unknown, r: TranscodeTask) => (
-                      <Space>
+                      <Space size={4}>
                         {(r.status === "waiting" || r.status === "running") ? (
-                          <Button
-                            size="small"
+                          <ActionIconButton
+                            title="取消任务"
+                            icon={<StopOutlined />}
                             onClick={() => {
                               void cancelTranscodeTask(r.id)
                                 .then(() => message.success("已取消任务"))
                                 .then(loadTranscode)
                                 .catch(() => message.error("取消失败"));
                             }}
-                          >
-                            取消
-                          </Button>
+                          />
                         ) : null}
                         {(r.status === "failed" || r.status === "cancelled") ? (
-                          <Button
-                            size="small"
+                          <ActionIconButton
+                            title="重试"
+                            icon={<RedoOutlined />}
                             type="primary"
                             onClick={() => {
                               void retryTranscodeTask(r.id)
@@ -618,9 +709,7 @@ export default function TaskManagerPage() {
                                 .then(loadTranscode)
                                 .catch(() => message.error("重试失败"));
                             }}
-                          >
-                            重试
-                          </Button>
+                          />
                         ) : null}
                       </Space>
                     ),
@@ -728,14 +817,15 @@ export default function TaskManagerPage() {
                   { title: "结束时间", dataIndex: "finished_at", width: 180, render: (v?: string) => v || "-" },
                   { title: "错误信息", dataIndex: "error_message", ellipsis: true, render: (v?: string) => v || "-" },
                   {
-                    title: <div style={{ textAlign: "center" }}>操作</div>,
+                    title: "操作",
                     key: "actions",
-                    width: 110,
+                    width: 80,
                     align: "center",
                     fixed: "right",
                     render: (_: unknown, r: ScanTask) => (
-                      <Button
-                        size="small"
+                      <ActionIconButton
+                        title="取消扫描"
+                        icon={<StopOutlined />}
                         disabled={r.status !== "running"}
                         loading={cancellingScanId === r.id}
                         onClick={() => {
@@ -748,9 +838,7 @@ export default function TaskManagerPage() {
                               await loadScanTasks();
                             });
                         }}
-                      >
-                        取消
-                      </Button>
+                      />
                     ),
                   },
                 ]}
@@ -822,15 +910,18 @@ export default function TaskManagerPage() {
                   { title: "开始时间", dataIndex: "started_at", width: 170, render: (v?: string) => v || "-" },
                   { title: "完成时间", dataIndex: "finished_at", width: 170, render: (v?: string) => v || "-" },
                   {
-                    title: <div style={{ textAlign: "center" }}>操作</div>,
+                    title: "操作",
                     key: "subactions",
-                    width: 200,
+                    width: 90,
                     align: "center",
                     fixed: "right",
                     render: (_: unknown, r: SubtitleTask) => (
-                      <Space>
-                        <Popconfirm
-                          title="将清除该媒体的字幕缓存与数据库记录，并标记为待处理。确定？"
+                      <Space size={4}>
+                        <ActionIconConfirmButton
+                          title="重置"
+                          confirmTitle="将清除该媒体的字幕缓存与数据库记录，并标记为待处理。确定？"
+                          icon={<RollbackOutlined />}
+                          loading={resettingSubtitleId === r.media_id}
                           onConfirm={() => {
                             setResettingSubtitleId(r.media_id);
                             void resetSubtitleTask(r.media_id)
@@ -841,11 +932,10 @@ export default function TaskManagerPage() {
                                 await loadSubtitleTasks();
                               });
                           }}
-                        >
-                          <Button size="small" loading={resettingSubtitleId === r.media_id}>重置</Button>
-                        </Popconfirm>
-                        <Button
-                          size="small"
+                        />
+                        <ActionIconButton
+                          title="重新处理"
+                          icon={<SyncOutlined />}
                           type="primary"
                           loading={retryingSubtitleId === r.media_id}
                           onClick={() => {
@@ -858,9 +948,7 @@ export default function TaskManagerPage() {
                                 await loadSubtitleTasks();
                               });
                           }}
-                        >
-                          重新处理
-                        </Button>
+                        />
                       </Space>
                     ),
                   },
@@ -897,14 +985,18 @@ export default function TaskManagerPage() {
                   {
                     title: "操作",
                     key: "actions",
-                    width: 110,
+                    width: 70,
+                    align: "center",
                     render: (_: unknown, r: PreviewTask) => (
-                      <Button size="small" loading={retryingPreview === r.media_id} onClick={() => {
-                        setRetryingPreview(r.media_id);
-                        void retryPreviewTask(r.media_id).then(() => message.success("已触发重试")).then(loadPreview).catch(() => message.error("重试失败")).finally(() => setRetryingPreview(null));
-                      }}>
-                        重试
-                      </Button>
+                      <ActionIconButton
+                        title="重试"
+                        icon={<RedoOutlined />}
+                        loading={retryingPreview === r.media_id}
+                        onClick={() => {
+                          setRetryingPreview(r.media_id);
+                          void retryPreviewTask(r.media_id).then(() => message.success("已触发重试")).then(loadPreview).catch(() => message.error("重试失败")).finally(() => setRetryingPreview(null));
+                        }}
+                      />
                     ),
                   },
                 ]}
@@ -939,10 +1031,12 @@ export default function TaskManagerPage() {
                   {
                     title: "操作",
                     key: "actions",
-                    width: 110,
+                    width: 70,
+                    align: "center",
                     render: (_: unknown, r: AtrackTask) => (
-                      <Button
-                        size="small"
+                      <ActionIconButton
+                        title="重试"
+                        icon={<RedoOutlined />}
                         loading={retryingAtrackId === r.media_id}
                         onClick={async () => {
                           setRetryingAtrackId(r.media_id);
@@ -956,9 +1050,7 @@ export default function TaskManagerPage() {
                             setRetryingAtrackId(null);
                           }
                         }}
-                      >
-                        重试
-                      </Button>
+                      />
                     ),
                   },
                 ]}
@@ -994,10 +1086,12 @@ export default function TaskManagerPage() {
                   {
                     title: "操作",
                     key: "actions",
-                    width: 110,
+                    width: 70,
+                    align: "center",
                     render: (_: unknown, r: KeyframeTask) => (
-                      <Button
-                        size="small"
+                      <ActionIconButton
+                        title="重试"
+                        icon={<RedoOutlined />}
                         loading={retryingKeyframeId === r.media_id}
                         onClick={async () => {
                           setRetryingKeyframeId(r.media_id);
@@ -1011,9 +1105,7 @@ export default function TaskManagerPage() {
                             setRetryingKeyframeId(null);
                           }
                         }}
-                      >
-                        重试
-                      </Button>
+                      />
                     ),
                   },
                 ]}

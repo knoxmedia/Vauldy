@@ -7,6 +7,7 @@ import (
 )
 
 type App struct {
-	Config *config.Config
-	DB     *sql.DB
+	Config     *config.Config
+	ConfigPath string
+	DB         *sql.DB
 }

@@ -10,6 +10,7 @@ import {
   fetchMediaDeletionPlan,
   markUnwatched,
   markWatched,
+  recognizeMediaSubtitles,
   transcodeAsync,
   unmatchMedia,
 } from "../api/client";
@@ -173,6 +174,7 @@ export function buildMediaMenuItems(
       { key: "analyze", label: "分析" },
       { key: "optimize", label: "优化" },
       { type: "divider" as const },
+      { key: "recognizeSubtitles", label: "识别字幕" },
       { key: "extractAudio", label: atrackDone ? "重新分离音轨" : "分离音轨" },
       { key: "extractKeyframes", label: keyframeDone ? "重新提取关键帧" : "提取关键帧" },
       { type: "divider" as const },
@@ -302,6 +304,14 @@ export function buildMediaMenuItems(
           transcodeAsync(r.id, "optimize")
             .then(() => message.success("已创建优化任务"))
             .catch(() => message.error("操作失败"));
+          break;
+        case "recognizeSubtitles":
+          recognizeMediaSubtitles(r.id)
+            .then(() => message.success("已加入字幕识别任务"))
+            .catch((err: unknown) => {
+              const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error;
+              message.error(msg || "操作失败");
+            });
           break;
         case "extractAudio":
           extractAudioTrack(r.id)

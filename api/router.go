@@ -150,6 +150,7 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 
 			adm.POST("/media/:id/scrape", h.ScrapeMedia)
 			adm.POST("/media/:id/subtitle/process", h.ProcessMediaSubtitles)
+			adm.POST("/media/:id/subtitle", h.EnqueueSubtitleProcessing)
 			adm.POST("/media/:id/manual-match", h.ManualMatchMedia)
 			adm.DELETE("/media/:id/match", h.UnmatchMedia)
 			adm.PATCH("/media/:id/meta", h.UpdateMediaMetadata)
@@ -206,6 +207,10 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 			adm.POST("/schedule/task/:id/run", h.RunScheduledTask)
 			adm.GET("/admin/system-options", h.GetSystemOptions)
 			adm.PUT("/admin/system-options", h.PutSystemOptions)
+			adm.POST("/admin/system-options/test/asr", h.TestSystemOptionsASR)
+			adm.POST("/admin/system-options/test/ocr", h.TestSystemOptionsOCR)
+			adm.POST("/admin/system-options/install/asr", h.InstallSystemOptionsASR)
+			adm.POST("/admin/system-options/install/ocr", h.InstallSystemOptionsOCR)
 
 			adm.GET("/admin/overview", h.AdminOverview)
 			adm.GET("/admin/access-log", h.ListAccessLogs)

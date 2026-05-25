@@ -8,13 +8,42 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+
+	"knox-media/internal/config"
+	"knox-media/internal/subtitle"
 )
 
 // SystemOptionsJSON is persisted in system_options.options_json (single row id=1).
+// Recognition (ASR/OCR) is stored in config.yml under subtitle.*.
 type SystemOptionsJSON struct {
-	General    SystemOptionsGeneral    `json:"general"`
-	Playback   SystemOptionsPlayback   `json:"playback"`
-	Transcoder SystemOptionsTranscoder `json:"transcoder"`
+	General      SystemOptionsGeneral      `json:"general"`
+	Playback     SystemOptionsPlayback     `json:"playback"`
+	Transcoder   SystemOptionsTranscoder   `json:"transcoder"`
+	Recognition  SystemOptionsRecognition  `json:"recognition"`
+}
+
+type SystemOptionsRecognition struct {
+	ASR SystemOptionsASR `json:"asr"`
+	OCR SystemOptionsOCR `json:"ocr"`
+}
+
+type SystemOptionsASR struct {
+	Provider    string   `json:"provider"`
+	WhisperPath string   `json:"whisper_path"`
+	ExtraArgs   []string `json:"extra_args"`
+	Shell       string   `json:"shell"`
+}
+
+type SystemOptionsOCR struct {
+	Enabled        bool   `json:"enabled"`
+	TesseractPath  string `json:"tesseract_path"`
+	TessdataPrefix string `json:"tessdata_prefix"`
+	Languages      string `json:"languages"`
+	PythonPath     string `json:"python_path"`
+	ScriptPath     string `json:"script_path"`
+	PgsripPath     string `json:"pgsrip_path"`
+	MkvextractPath string `json:"mkvextract_path"`
+	MkvmergePath   string `json:"mkvmerge_path"`
 }
 
 type SystemOptionsGeneral struct {
@@ -66,6 +95,29 @@ func defaultSystemOptions() SystemOptionsJSON {
 			MaxCPUConcurrent:              "unlimited",
 			MaxBackgroundConcurrent:       "1",
 		},
+		Recognition: defaultRecognitionOptions(),
+	}
+}
+
+func defaultRecognitionOptions() SystemOptionsRecognition {
+	return SystemOptionsRecognition{
+		ASR: SystemOptionsASR{
+			Provider:    "none",
+			WhisperPath: "whisper",
+			ExtraArgs:   nil,
+			Shell:       "",
+		},
+		OCR: SystemOptionsOCR{
+			Enabled:        false,
+			TesseractPath:  "tesseract",
+			TessdataPrefix: "",
+			Languages:      "chi_sim+eng",
+			PythonPath:     "",
+			ScriptPath:     "",
+			PgsripPath:     "",
+			MkvextractPath: "",
+			MkvmergePath:   "",
+		},
 	}
 }
 
@@ -96,6 +148,25 @@ func fillSystemOptionsDefaults(o *SystemOptionsJSON, def SystemOptionsJSON) {
 	}
 	if strings.TrimSpace(o.Transcoder.MaxBackgroundConcurrent) == "" {
 		o.Transcoder.MaxBackgroundConcurrent = def.Transcoder.MaxBackgroundConcurrent
+	}
+	fillRecognitionDefaults(&o.Recognition, def.Recognition)
+}
+
+func fillRecognitionDefaults(o *SystemOptionsRecognition, def SystemOptionsRecognition) {
+	if o == nil {
+		return
+	}
+	if strings.TrimSpace(o.ASR.Provider) == "" {
+		o.ASR.Provider = def.ASR.Provider
+	}
+	if strings.TrimSpace(o.ASR.WhisperPath) == "" {
+		o.ASR.WhisperPath = def.ASR.WhisperPath
+	}
+	if strings.TrimSpace(o.OCR.TesseractPath) == "" {
+		o.OCR.TesseractPath = def.OCR.TesseractPath
+	}
+	if strings.TrimSpace(o.OCR.Languages) == "" {
+		o.OCR.Languages = def.OCR.Languages
 	}
 }
 
@@ -182,7 +253,132 @@ func normalizeSystemOptions(o SystemOptionsJSON) SystemOptionsJSON {
 			o.Transcoder.MaxBackgroundConcurrent = "1"
 		}
 	}
+	o.Recognition = normalizeRecognitionOptions(o.Recognition)
 	return o
+}
+
+func normalizeRecognitionOptions(r SystemOptionsRecognition) SystemOptionsRecognition {
+	switch strings.ToLower(strings.TrimSpace(r.ASR.Provider)) {
+	case "none", "whisper_cli", "shell":
+		r.ASR.Provider = strings.ToLower(strings.TrimSpace(r.ASR.Provider))
+	default:
+		r.ASR.Provider = "none"
+	}
+	r.ASR.WhisperPath = strings.TrimSpace(r.ASR.WhisperPath)
+	if r.ASR.WhisperPath == "" {
+		r.ASR.WhisperPath = "whisper"
+	}
+	r.ASR.Shell = strings.TrimSpace(r.ASR.Shell)
+	if r.ASR.ExtraArgs == nil {
+		r.ASR.ExtraArgs = []string{}
+	}
+	cleanArgs := make([]string, 0, len(r.ASR.ExtraArgs))
+	for _, a := range r.ASR.ExtraArgs {
+		a = strings.TrimSpace(a)
+		if a != "" {
+			cleanArgs = append(cleanArgs, a)
+		}
+	}
+	r.ASR.ExtraArgs = cleanArgs
+
+	r.OCR.TesseractPath = strings.TrimSpace(r.OCR.TesseractPath)
+	if r.OCR.TesseractPath == "" {
+		r.OCR.TesseractPath = "tesseract"
+	}
+	r.OCR.TessdataPrefix = strings.TrimSpace(r.OCR.TessdataPrefix)
+	r.OCR.Languages = strings.TrimSpace(r.OCR.Languages)
+	if r.OCR.Languages == "" {
+		r.OCR.Languages = "chi_sim+eng"
+	}
+	r.OCR.PythonPath = strings.TrimSpace(r.OCR.PythonPath)
+	r.OCR.ScriptPath = strings.TrimSpace(r.OCR.ScriptPath)
+	r.OCR.PgsripPath = strings.TrimSpace(r.OCR.PgsripPath)
+	r.OCR.MkvextractPath = strings.TrimSpace(r.OCR.MkvextractPath)
+	r.OCR.MkvmergePath = strings.TrimSpace(r.OCR.MkvmergePath)
+	return r
+}
+
+func recognitionFromConfig(cfg *config.Config) SystemOptionsRecognition {
+	def := defaultRecognitionOptions()
+	if cfg == nil {
+		return def
+	}
+	return SystemOptionsRecognition{
+		ASR: SystemOptionsASR{
+			Provider:    cfg.Subtitle.ASR.Provider,
+			WhisperPath: cfg.Subtitle.ASR.WhisperPath,
+			ExtraArgs:   append([]string(nil), cfg.Subtitle.ASR.ExtraArgs...),
+			Shell:       cfg.Subtitle.ASR.Shell,
+		},
+		OCR: SystemOptionsOCR{
+			Enabled:        cfg.Subtitle.GraphicalOCR.Enabled,
+			TesseractPath:  cfg.Subtitle.GraphicalOCR.TesseractPath,
+			TessdataPrefix: cfg.Subtitle.GraphicalOCR.TessdataPrefix,
+			Languages:      cfg.Subtitle.GraphicalOCR.Languages,
+			PythonPath:     cfg.Subtitle.GraphicalOCR.PythonPath,
+			ScriptPath:     cfg.Subtitle.GraphicalOCR.ScriptPath,
+			PgsripPath:     cfg.Subtitle.GraphicalOCR.PgsripPath,
+			MkvextractPath: cfg.Subtitle.GraphicalOCR.MkvextractPath,
+			MkvmergePath:   cfg.Subtitle.GraphicalOCR.MkvmergePath,
+		},
+	}
+}
+
+func recognitionToConfig(r SystemOptionsRecognition) (config.ASRConfig, config.GraphicalOCRConfig) {
+	r = normalizeRecognitionOptions(r)
+	asr := config.ASRConfig{
+		Provider:    r.ASR.Provider,
+		WhisperPath: r.ASR.WhisperPath,
+		ExtraArgs:   append([]string(nil), r.ASR.ExtraArgs...),
+		Shell:       r.ASR.Shell,
+	}
+	ocr := config.GraphicalOCRConfig{
+		Enabled:        r.OCR.Enabled,
+		TesseractPath:  r.OCR.TesseractPath,
+		TessdataPrefix: r.OCR.TessdataPrefix,
+		Languages:      r.OCR.Languages,
+		PythonPath:     r.OCR.PythonPath,
+		ScriptPath:     r.OCR.ScriptPath,
+		PgsripPath:     r.OCR.PgsripPath,
+		MkvextractPath: r.OCR.MkvextractPath,
+		MkvmergePath:   r.OCR.MkvmergePath,
+	}
+	return asr, ocr
+}
+
+func (h *Handler) applyRecognitionConfig(r SystemOptionsRecognition) error {
+	if h == nil || h.App == nil || h.App.Config == nil {
+		return fmt.Errorf("config unavailable")
+	}
+	asr, ocr := recognitionToConfig(r)
+	cfgPath := strings.TrimSpace(h.App.ConfigPath)
+	if cfgPath == "" {
+		return fmt.Errorf("config path not set")
+	}
+	if err := config.SaveSubtitleRecognition(cfgPath, asr, ocr); err != nil {
+		return err
+	}
+	h.App.Config.Subtitle.ASR = asr
+	h.App.Config.Subtitle.GraphicalOCR = ocr
+	if h.Subtitle != nil {
+		h.Subtitle.ApplyRecognition(subtitle.ASRConfig{
+			Provider:    asr.Provider,
+			WhisperPath: asr.WhisperPath,
+			ExtraArgs:   append([]string(nil), asr.ExtraArgs...),
+			Shell:       asr.Shell,
+		}, subtitle.OCRConfig{
+			Enabled:        ocr.Enabled,
+			TesseractPath:  ocr.TesseractPath,
+			TessdataPrefix: ocr.TessdataPrefix,
+			Languages:      ocr.Languages,
+			PythonPath:     ocr.PythonPath,
+			ScriptPath:     ocr.ScriptPath,
+			PgsripPath:     ocr.PgsripPath,
+			MkvextractPath: ocr.MkvextractPath,
+			MkvmergePath:   ocr.MkvmergePath,
+		})
+	}
+	return nil
 }
 
 func decodeSystemOptions(raw string) SystemOptionsJSON {
@@ -211,6 +407,9 @@ func (h *Handler) GetSystemOptions(c *gin.Context) {
 		return
 	}
 	opts := decodeSystemOptions(raw.String)
+	if h.App != nil && h.App.Config != nil {
+		opts.Recognition = normalizeRecognitionOptions(recognitionFromConfig(h.App.Config))
+	}
 	c.JSON(http.StatusOK, opts)
 }
 
@@ -227,6 +426,13 @@ func (h *Handler) PutSystemOptions(c *gin.Context) {
 	}
 	fillSystemOptionsDefaults(&body, defaultSystemOptions())
 	merged := normalizeSystemOptions(body)
+	if err := h.applyRecognitionConfig(merged.Recognition); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存识别配置失败: " + err.Error()})
+		return
+	}
+	if h.App != nil && h.App.Config != nil {
+		merged.Recognition = normalizeRecognitionOptions(recognitionFromConfig(h.App.Config))
+	}
 	out, err := json.Marshal(merged)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -240,4 +446,79 @@ func (h *Handler) PutSystemOptions(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true, "options": merged})
+}
+
+type recognitionTestBody struct {
+	ASR *SystemOptionsASR `json:"asr"`
+	OCR *SystemOptionsOCR `json:"ocr"`
+}
+
+func (h *Handler) resolveASRForTest(body *recognitionTestBody) subtitle.ASRConfig {
+	if body != nil && body.ASR != nil {
+		r := normalizeRecognitionOptions(SystemOptionsRecognition{ASR: *body.ASR})
+		return subtitle.ASRConfig{
+			Provider:    r.ASR.Provider,
+			WhisperPath: r.ASR.WhisperPath,
+			ExtraArgs:   append([]string(nil), r.ASR.ExtraArgs...),
+			Shell:       r.ASR.Shell,
+		}
+	}
+	if h != nil && h.App != nil && h.App.Config != nil {
+		a := h.App.Config.Subtitle.ASR
+		return subtitle.ASRConfig{
+			Provider:    a.Provider,
+			WhisperPath: a.WhisperPath,
+			ExtraArgs:   append([]string(nil), a.ExtraArgs...),
+			Shell:       a.Shell,
+		}
+	}
+	return subtitle.ASRConfig{Provider: "none"}
+}
+
+func (h *Handler) resolveOCRForTest(body *recognitionTestBody) subtitle.OCRConfig {
+	if body != nil && body.OCR != nil {
+		r := normalizeRecognitionOptions(SystemOptionsRecognition{OCR: *body.OCR})
+		return subtitle.OCRConfig{
+			Enabled:        r.OCR.Enabled,
+			TesseractPath:  r.OCR.TesseractPath,
+			TessdataPrefix: r.OCR.TessdataPrefix,
+			Languages:      r.OCR.Languages,
+			PythonPath:     r.OCR.PythonPath,
+			ScriptPath:     r.OCR.ScriptPath,
+			PgsripPath:     r.OCR.PgsripPath,
+			MkvextractPath: r.OCR.MkvextractPath,
+			MkvmergePath:   r.OCR.MkvmergePath,
+		}
+	}
+	if h != nil && h.App != nil && h.App.Config != nil {
+		o := h.App.Config.Subtitle.GraphicalOCR
+		return subtitle.OCRConfig{
+			Enabled:        o.Enabled,
+			TesseractPath:  o.TesseractPath,
+			TessdataPrefix: o.TessdataPrefix,
+			Languages:      o.Languages,
+			PythonPath:     o.PythonPath,
+			ScriptPath:     o.ScriptPath,
+			PgsripPath:     o.PgsripPath,
+			MkvextractPath: o.MkvextractPath,
+			MkvmergePath:   o.MkvmergePath,
+		}
+	}
+	return subtitle.OCRConfig{}
+}
+
+// TestSystemOptionsASR checks ASR connectivity (optional body overrides saved config).
+func (h *Handler) TestSystemOptionsASR(c *gin.Context) {
+	var body recognitionTestBody
+	_ = c.ShouldBindJSON(&body)
+	result := subtitle.CheckASRConfig(c.Request.Context(), h.resolveASRForTest(&body))
+	c.JSON(http.StatusOK, result)
+}
+
+// TestSystemOptionsOCR checks OCR tool chain (optional body overrides saved config).
+func (h *Handler) TestSystemOptionsOCR(c *gin.Context) {
+	var body recognitionTestBody
+	_ = c.ShouldBindJSON(&body)
+	result := subtitle.CheckOCRConfig(c.Request.Context(), h.resolveOCRForTest(&body))
+	c.JSON(http.StatusOK, result)
 }

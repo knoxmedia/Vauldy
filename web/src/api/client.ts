@@ -1099,6 +1099,11 @@ export async function retrySubtitleTask(mediaId: number) {
   await api.post(`/api/v1/subtitle/task/${mediaId}/retry`);
 }
 
+/** Reset subtitle output and re-run sidecar / embedded / ASR / OCR processing. */
+export async function recognizeMediaSubtitles(mediaId: number) {
+  await api.post(`/api/v1/media/${mediaId}/subtitle`);
+}
+
 export async function cleanupFailedSubtitleTasks() {
   const { data } = await api.post<{ deleted: number }>("/api/v1/subtitle/task/cleanup-failed");
   return data.deleted;
@@ -1457,10 +1462,35 @@ export type SystemOptionsTranscoder = {
   max_background_concurrent: string;
 };
 
+export type SystemOptionsASR = {
+  provider: string;
+  whisper_path: string;
+  extra_args: string[];
+  shell: string;
+};
+
+export type SystemOptionsOCR = {
+  enabled: boolean;
+  tesseract_path: string;
+  tessdata_prefix: string;
+  languages: string;
+  python_path: string;
+  script_path: string;
+  pgsrip_path: string;
+  mkvextract_path: string;
+  mkvmerge_path: string;
+};
+
+export type SystemOptionsRecognition = {
+  asr: SystemOptionsASR;
+  ocr: SystemOptionsOCR;
+};
+
 export type SystemOptions = {
   general: SystemOptionsGeneral;
   playback: SystemOptionsPlayback;
   transcoder: SystemOptionsTranscoder;
+  recognition: SystemOptionsRecognition;
 };
 
 export async function fetchSystemOptions() {
@@ -1469,6 +1499,48 @@ export async function fetchSystemOptions() {
 }
 
 export async function saveSystemOptions(payload: SystemOptions) {
-  const { data } = await api.put<{ ok: boolean; options: SystemOptions }>("/api/v1/admin/system-options", payload);
+  const { data } = await api.put<{ ok: boolean; options?: SystemOptions }>("/api/v1/admin/system-options", payload);
+  if (!data?.options) {
+    throw new Error("保存响应无效");
+  }
   return data.options;
+}
+
+export type RecognitionTestResult = {
+  ok: boolean;
+  message: string;
+};
+
+export async function testSystemOptionsASR(asr?: SystemOptionsASR) {
+  const { data } = await api.post<RecognitionTestResult>("/api/v1/admin/system-options/test/asr", asr ? { asr } : {});
+  return data;
+}
+
+export async function testSystemOptionsOCR(ocr?: SystemOptionsOCR) {
+  const { data } = await api.post<RecognitionTestResult>("/api/v1/admin/system-options/test/ocr", ocr ? { ocr } : {});
+  return data;
+}
+
+export type RecognitionInstallResult = {
+  ok: boolean;
+  message: string;
+  recognition?: SystemOptionsRecognition;
+};
+
+export async function installSystemOptionsASR() {
+  const { data } = await api.post<RecognitionInstallResult>(
+    "/api/v1/admin/system-options/install/asr",
+    {},
+    { timeout: 45 * 60 * 1000 },
+  );
+  return data;
+}
+
+export async function installSystemOptionsOCR() {
+  const { data } = await api.post<RecognitionInstallResult>(
+    "/api/v1/admin/system-options/install/ocr",
+    {},
+    { timeout: 45 * 60 * 1000 },
+  );
+  return data;
 }

@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -33,6 +32,7 @@ type ASRConfig struct {
 // Service scans sidecar subtitles, probes embedded tracks, extracts WebVTT, and optionally runs ASR.
 type Service struct {
 	DB          *sql.DB
+	MediaRoot   string // directory containing config.yml; resolves tools/ paths in ASR shell
 	FFmpegPath  string
 	FFprobePath string
 	SubtitleDir string
@@ -42,14 +42,33 @@ type Service struct {
 	mu sync.Mutex
 }
 
-func NewService(db *sql.DB, ffmpegPath, ffprobePath, subtitleDir string, asr ASRConfig, ocr OCRConfig) *Service {
+// ApplyRecognition updates in-memory ASR/OCR settings (e.g. after config.yml save).
+func (s *Service) ApplyRecognition(asr ASRConfig, ocr OCRConfig) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.ASR = asr
+	s.OCR = ocr
+	s.mu.Unlock()
+}
+
+func NewService(db *sql.DB, mediaRoot, ffmpegPath, ffprobePath, subtitleDir string, asr ASRConfig, ocr OCRConfig) *Service {
 	if strings.TrimSpace(ffmpegPath) == "" {
 		ffmpegPath = "ffmpeg"
 	}
 	if strings.TrimSpace(ffprobePath) == "" {
 		ffprobePath = "ffprobe"
 	}
-	return &Service{DB: db, FFmpegPath: ffmpegPath, FFprobePath: ffprobePath, SubtitleDir: subtitleDir, ASR: asr, OCR: ocr}
+	return &Service{
+		DB:          db,
+		MediaRoot:   strings.TrimSpace(mediaRoot),
+		FFmpegPath:  ffmpegPath,
+		FFprobePath: ffprobePath,
+		SubtitleDir: subtitleDir,
+		ASR:         asr,
+		OCR:         ocr,
+	}
 }
 
 // RunBatch processes up to limit video items that have file_path set.
@@ -125,6 +144,9 @@ func (s *Service) ProcessMedia(ctx context.Context, mediaID int64) (err error) {
 	}
 
 	outDir := filepath.Join(s.SubtitleDir, strconv.FormatInt(mediaID, 10))
+	if root := s.toolWorkDir(); root != "" && !filepath.IsAbs(outDir) {
+		outDir = filepath.Clean(filepath.Join(root, outDir))
+	}
 	if err = os.MkdirAll(outDir, 0o755); err != nil {
 		return err
 	}
@@ -141,8 +163,16 @@ func (s *Service) ProcessMedia(ctx context.Context, mediaID int64) (err error) {
 		return errSub
 	}
 	if !hasAny && s.shouldRunASR() {
-		if errASR := s.runASR(ctx, mediaID, videoPath, outDir); errASR != nil {
+		errASR := s.runASR(ctx, mediaID, videoPath, outDir)
+		if errASR != nil {
 			log.Printf("subtitle asr media=%d err=%v", mediaID, errASR)
+		}
+		hasAny, errSub = s.hasAnySubtitle(mediaID)
+		if errSub != nil {
+			return errSub
+		}
+		if !hasAny && errASR != nil {
+			return fmt.Errorf("asr failed: %w", errASR)
 		}
 	}
 	return nil
@@ -387,13 +417,17 @@ func (s *Service) runASR(ctx context.Context, mediaID int64, videoPath, outDir s
 
 	switch strings.ToLower(strings.TrimSpace(s.ASR.Provider)) {
 	case "whisper_cli":
-		wp := strings.TrimSpace(s.ASR.WhisperPath)
+		wp := s.resolveMediaPath(strings.TrimSpace(s.ASR.WhisperPath))
 		if wp == "" {
 			wp = "whisper"
 		}
 		args := []string{videoPath, "--output_format", "vtt", "--output_dir", outDir}
 		args = append(args, s.ASR.ExtraArgs...)
 		cmd := exec.CommandContext(ctx, wp, args...)
+		s.applyToolEnv(cmd)
+		if root := s.toolWorkDir(); root != "" {
+			cmd.Dir = root
+		}
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			_, _ = s.DB.Exec(`UPDATE media_subtitle SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`, trimBytes(out), mediaID, dedupe)
@@ -419,18 +453,13 @@ func (s *Service) runASR(ctx context.Context, mediaID int64, videoPath, outDir s
 		sh = strings.ReplaceAll(sh, "{input}", videoPath)
 		sh = strings.ReplaceAll(sh, "{output_dir}", outDir)
 		sh = strings.ReplaceAll(sh, "{output_vtt}", outPath)
-		var cmd *exec.Cmd
-		if runtime.GOOS == "windows" {
-			cmd = exec.CommandContext(ctx, "cmd", "/C", sh)
-		} else {
-			cmd = exec.CommandContext(ctx, "sh", "-c", sh)
-		}
-		cmd.Dir = outDir
-		out, err := cmd.CombinedOutput()
+		sh = resolveShellMediaPaths(sh, s.MediaRoot)
+		out, err := s.runShellCommand(ctx, sh)
 		if err != nil {
-			_, _ = s.DB.Exec(`UPDATE media_subtitle SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`, trimBytes(out), mediaID, dedupe)
+			_, _ = s.DB.Exec(`UPDATE media_subtitle SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`, trimErr(err), mediaID, dedupe)
 			return err
 		}
+		_ = out
 	default:
 		return nil
 	}

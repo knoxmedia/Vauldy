@@ -3,11 +3,13 @@ server:
   port: 8200
   mode: "release" # debug | release
   # When true, JIT master playlist may emit EXT-X-MEDIA TYPE=AUDIO for pre-extracted audio tracks.
+
   # This saves transcode cost (video TS is video-only) but requires the player to support multi-audio HLS.
+
   # Safari supports this natively; Chromium/Firefox need xgplayer-hls (which may have partial support).
+
   # Default: true.
   hls_multi_audio_enabled: false
-
 data:
   dir: "./data"
   db: "./data/knox-media.db"
@@ -17,17 +19,15 @@ data:
   upload: "./data/upload"
   chunks: "./data/upload/chunks"
   static: "./data/static"
-
 security:
   jwt_secret: "change-me-in-production-use-long-random-string"
   token_hours: 168
-
 # Bundled binaries under media/tools/ (Windows .exe). Run server with cwd = media/, or use absolute paths.
+
 # Re-fetch after clone: pwsh -File tools/download_media_tools.ps1
 ffmpeg:
   ffprobe_path: "tools/ffmpeg/bin/ffprobe.exe"
   ffmpeg_path: "tools/ffmpeg/bin/ffmpeg.exe"
-
 # CENC fMP4 HLS: Shaka first, then ffmpeg fallback. Empty shaka path skips Shaka.
 drm_packaging:
   engine_order:
@@ -35,65 +35,62 @@ drm_packaging:
     - ffmpeg
   shaka_packager_path: "tools/shaka-packager/packager.exe"
   segment_seconds: 4
-
 drm:
   widevine:
     enabled: false
     # When true with private_module_url set, playback plan includes widevine_service_cert_url (Shaka serverCertificateUri).
+
     # Default false: omit URL so CDM negotiates cert in-band via LICENSE POST (0x08 0x04).
     emit_service_cert_url: false
     # Private compliant WV module endpoint (local/private deployment)
+
     # Example: "http://127.0.0.1:9001/widevine/license"
     private_module_url: "http://127.0.0.1:8080/license"
     private_module_token: ""
     private_module_timeout_seconds: 8
   powerdrm:
     enabled: true
-
 # Web playback plan: player_engine_order (powerplayer | shaka | xgplayer). Omitted entries use server defaults.
 playback:
   engines:
     progressive_hls: ["powerplayer", "xgplayer"] # native + clear HLS (hls, jit_hls, hls_aes_128)
     hls_powerdrm: ["powerplayer"]
     drm: ["powerplayer", "shaka", "xgplayer"] # Widevine/FairPlay HLS or DASH
-
 # Library scan: default skips full-file MD5 (very slow) and uses shorter ffprobe analysis.
 scan:
   file_hash_on_scan: false
   fast_ffprobe: true
-
 # Sidecar scan (srt/ass/ssa/vtt/sub), embedded extract to WebVTT, optional ASR.
 subtitle:
   # When true, a new video discovered by library scan gets a pending subtitle_task (default: true).
   auto_on_scan: true
   asr:
-    provider: "none"
-    whisper_path: "whisper"
+    provider: shell
+    whisper_path: tools/recognition/.venv/Scripts/whisper.exe
     extra_args: []
-    shell: ""
+    shell: cd /d "{output_dir}" && "tools/recognition/.venv/Scripts/python.exe" "tools/asr/asr_to_vtt.py" --engine whisper --input "{input}" --output-vtt "{output_vtt}" --whisper-model base --whisper-language zh
   graphical_ocr:
-    enabled: false
-    tesseract_path: "tesseract"
+    enabled: true
+    tesseract_path: tesseract
     tessdata_prefix: ""
-    languages: "chi_sim+eng"
+    languages: chi_sim+eng
     python_path: ""
     script_path: ""
     pgsrip_path: ""
     mkvextract_path: ""
     mkvmerge_path: ""
-
 # Audio track extraction: separate audio from video on library scan.
 atrack:
   # When true, a new video discovered by library scan gets a waiting atrack_task (default: true).
   auto_on_scan: false
-
 # Just-in-time transcode options.
 jit:
   # When true, use a single long-running ffmpeg process that outputs HLS segments
+
   # via -f segment muxer (instead of one ffmpeg per segment). Reduces overhead and
+
   # avoids keyframe bursts at segment boundaries. Default: true.
   continuous_hls_enabled: true
-
 cors:
   allow_origins:
     - "*"

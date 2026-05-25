@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 )
@@ -125,4 +126,34 @@ func (h *Handler) CleanupSubtitleTasksBefore(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"deleted": n, "days": days})
+}
+
+// EnqueueSubtitleProcessing clears prior subtitle output and re-runs subtitle processing (sidecar, embedded, ASR/OCR).
+func (h *Handler) EnqueueSubtitleProcessing(c *gin.Context) {
+	if h.Subtitle == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "subtitle service disabled"})
+		return
+	}
+	mediaID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || mediaID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid media id"})
+		return
+	}
+	var fileType string
+	if err := h.App.DB.QueryRow(`SELECT file_type FROM media WHERE id = ? LIMIT 1`, mediaID).Scan(&fileType); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "media not found"})
+		return
+	}
+	if strings.TrimSpace(fileType) != "video" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "not a video"})
+		return
+	}
+	if err := h.Subtitle.ResetSubtitleJob(mediaID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	go func() {
+		_ = h.Subtitle.ProcessMedia(context.Background(), mediaID)
+	}()
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }

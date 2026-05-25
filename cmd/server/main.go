@@ -66,7 +66,7 @@ func main() {
 		log.Fatalf("seed: %v", err)
 	}
 
-	application := &app.App{Config: cfg, DB: db}
+	application := &app.App{Config: cfg, ConfigPath: cfgPath, DB: db}
 	worker := transcode.NewWorker(db, cfg.FFmpeg.FFmpegPath, cfg.Data.Transcode)
 	packageWorker := transcode.NewPackageWorker(db, cfg)
 	go func() {
@@ -88,7 +88,7 @@ func main() {
 			ocrScript = abs
 		}
 	}
-	subSvc := subtitle.NewService(db, cfg.FFmpeg.FFmpegPath, cfg.FFmpeg.FFprobePath, cfg.Data.Subtitle, subtitle.ASRConfig{
+	subSvc := subtitle.NewService(db, filepath.Dir(cfgPath), cfg.FFmpeg.FFmpegPath, cfg.FFmpeg.FFprobePath, cfg.Data.Subtitle, subtitle.ASRConfig{
 		Provider:    cfg.Subtitle.ASR.Provider,
 		WhisperPath: cfg.Subtitle.ASR.WhisperPath,
 		ExtraArgs:   cfg.Subtitle.ASR.ExtraArgs,
