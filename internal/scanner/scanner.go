@@ -12,6 +12,8 @@ import (
 
 	"github.com/google/uuid"
 
+	"knox-media/internal/musicparse"
+	"knox-media/internal/musicstore"
 	"knox-media/internal/scraper"
 	"knox-media/internal/tvparse"
 	"knox-media/internal/tvstore"
@@ -59,6 +61,7 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 	}
 	libraryType := s.loadLibraryType(libraryID)
 	tvLibrary := tvparse.IsTVLibraryType(libraryType)
+	musicLibrary := musicparse.IsMusicLibraryType(libraryType)
 	if _, err := s.DB.Exec(`DELETE FROM library_node WHERE library_id = ?`, libraryID); err != nil {
 		return 0, err
 	}
@@ -130,6 +133,9 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 					if tvLibrary && ft == "video" {
 						s.linkTVIfEpisode(libraryID, existingMediaID, path)
 					}
+					if musicLibrary && ft == "audio" {
+						s.linkMusicIfTrack(libraryID, existingMediaID, path, "")
+					}
 					if s.OnFile != nil {
 						s.OnFile(path, nil)
 					}
@@ -191,6 +197,14 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 				b, _ := json.Marshal(map[string]string{"title": title})
 				metaJSON = string(b)
 			}
+			var musicMeta musicparse.TrackMeta
+			if musicLibrary && ft == "audio" {
+				musicMeta = musicparse.ParseFromSources(path, meta, dur, br)
+				if strings.TrimSpace(musicMeta.Title) != "" {
+					title = musicMeta.Title
+				}
+				metaJSON = musicstore.MergeMusicMetaJSON(metaJSON, musicMeta)
+			}
 			if tvInfo != nil {
 				metaJSON = mergeTVMetaJSON(metaJSON, *tvInfo)
 			}
@@ -233,6 +247,9 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 				if tvInfo != nil {
 					_ = tvstore.LinkEpisode(s.DB, libraryID, mediaID, *tvInfo)
 				}
+				if musicLibrary && ft == "audio" {
+					_ = musicstore.LinkTrack(s.DB, libraryID, mediaID, musicMeta)
+				}
 				if existingMediaID == 0 && s.OnMediaAdded != nil {
 					s.OnMediaAdded(mediaID, title, ft)
 				}
@@ -259,6 +276,7 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 				var mid int64
 				if s.DB.QueryRow(`SELECT id FROM media WHERE library_id = ? AND file_path = ?`, libraryID, p.String).Scan(&mid) == nil && mid > 0 {
 					tvstore.CleanupMedia(s.DB, mid)
+					musicstore.CleanupMedia(s.DB, mid)
 				}
 				_, _ = s.DB.Exec(`DELETE FROM media WHERE library_id = ? AND file_path = ?`, libraryID, p.String)
 			}
@@ -267,6 +285,11 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 	if tvLibrary {
 		_, _ = tvstore.BackfillLibraryTV(s.DB, libraryID)
 		tvstore.PruneOrphansForLibrary(s.DB, libraryID)
+	}
+	if musicLibrary {
+		_ = musicstore.MergeUnknownAlbums(s.DB, libraryID)
+		_, _ = musicstore.BackfillLibraryMusic(s.DB, libraryID)
+		musicstore.PruneOrphansForLibrary(s.DB, libraryID)
 	}
 	return added, nil
 }
@@ -330,6 +353,17 @@ func (s *Scanner) loadLibraryType(libraryID int64) string {
 		return ""
 	}
 	return t.String
+}
+
+func (s *Scanner) linkMusicIfTrack(libraryID, mediaID int64, path, ffprobeJSON string) {
+	var metaJSON sql.NullString
+	_ = s.DB.QueryRow(`SELECT COALESCE(meta_json,'') FROM media WHERE id = ?`, mediaID).Scan(&metaJSON)
+	raw := strings.TrimSpace(ffprobeJSON)
+	if raw == "" && metaJSON.Valid {
+		raw = metaJSON.String
+	}
+	meta := musicstore.DecodeMusicMeta(raw, path)
+	_ = musicstore.LinkTrack(s.DB, libraryID, mediaID, meta)
 }
 
 func (s *Scanner) linkTVIfEpisode(libraryID, mediaID int64, path string) {

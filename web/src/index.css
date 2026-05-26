@@ -8,6 +8,15 @@ body,
 :root {
   /* 全宽布局下左右留白，随视口变化 */
   --app-page-gutter: clamp(16px, 4vw, 48px);
+
+  /* 自定义滚动条（竖向 / 横向统一） */
+  --knox-scrollbar-size: 14px;
+  --knox-scrollbar-track: #141414;
+  --knox-scrollbar-thumb: #5a5a5a;
+  --knox-scrollbar-thumb-hover: #707070;
+  --knox-scrollbar-thumb-active: #858585;
+  --knox-scrollbar-inset: 3px;
+  --knox-scrollbar-arrow: #666666;
 }
 
 body {
@@ -21,6 +30,85 @@ body {
     sans-serif;
   background: #0f1419;
   color: #e6edf3;
+}
+
+/* 全局自定义滚动条（列表、表格、侧栏等） */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--knox-scrollbar-thumb) var(--knox-scrollbar-track);
+}
+
+*::-webkit-scrollbar {
+  width: var(--knox-scrollbar-size);
+  height: var(--knox-scrollbar-size);
+  background: var(--knox-scrollbar-track);
+}
+
+*::-webkit-scrollbar-track {
+  background: var(--knox-scrollbar-track);
+}
+
+*::-webkit-scrollbar-thumb {
+  background-color: var(--knox-scrollbar-thumb);
+  border-radius: 999px;
+  border: var(--knox-scrollbar-inset) solid transparent;
+  background-clip: padding-box;
+  min-width: 32px;
+  min-height: 32px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background-color: var(--knox-scrollbar-thumb-hover);
+}
+
+*::-webkit-scrollbar-thumb:active {
+  background-color: var(--knox-scrollbar-thumb-active);
+}
+
+*::-webkit-scrollbar-corner {
+  background: var(--knox-scrollbar-track);
+}
+
+*::-webkit-scrollbar-button {
+  display: block;
+  width: var(--knox-scrollbar-size);
+  height: var(--knox-scrollbar-size);
+  background-color: var(--knox-scrollbar-track);
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 6px 6px;
+}
+
+*::-webkit-scrollbar-button:single-button:vertical:decrement {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8'%3E%3Cpath fill='%23666666' d='M4 1.5 1 5.5h6z'/%3E%3C/svg%3E");
+}
+
+*::-webkit-scrollbar-button:single-button:vertical:increment {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8'%3E%3Cpath fill='%23666666' d='M4 6.5 1 2.5h6z'/%3E%3C/svg%3E");
+}
+
+*::-webkit-scrollbar-button:single-button:horizontal:decrement {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8'%3E%3Cpath fill='%23666666' d='M1.5 4 5.5 1v6z'/%3E%3C/svg%3E");
+}
+
+*::-webkit-scrollbar-button:single-button:horizontal:increment {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8'%3E%3Cpath fill='%23666666' d='M6.5 4 2.5 1v6z'/%3E%3C/svg%3E");
+}
+
+*::-webkit-scrollbar-button:hover {
+  background-color: #1c1c1c;
+}
+
+/* 刻意隐藏滚动条的区域 */
+.knox-scrollbar-hidden {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.knox-scrollbar-hidden::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 /* 覆盖 antd Header 默认左右内边距，保证贴边 */
@@ -79,6 +167,10 @@ body {
   padding: 0;
   height: 100vh;
   overflow: hidden;
+}
+
+.app-shell-content-music-player {
+  padding-bottom: 72px;
 }
 
 .app-shell-content-player {

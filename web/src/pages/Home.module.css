@@ -44,15 +44,6 @@
   -webkit-overflow-scrolling: touch;
 }
 
-.rowScroll::-webkit-scrollbar {
-  height: 8px;
-}
-
-.rowScroll::-webkit-scrollbar-thumb {
-  background: #333;
-  border-radius: 4px;
-}
-
 .carouselWrap {
   position: relative;
 }

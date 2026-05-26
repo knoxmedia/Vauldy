@@ -22,7 +22,7 @@ import {
 import type { MenuProps } from "antd";
 import { Button, Checkbox, Dropdown, Empty, Popover, Select, Space, Spin, Pagination, message } from "antd";
 import type { ComponentType } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { buildMediaMenuItems } from "../components/mediaMenuItems";
 import AddToPlaylistModal from "../components/AddToPlaylistModal";
@@ -34,11 +34,13 @@ import {
   fetchLibraries,
   fetchMedia,
   isTVLibraryType,
+  isMusicLibraryType,
   mediaPosterSrc,
   normalizeListPosterUrl,
   type MediaMatchListUpdate,
 } from "../api/client";
 import SeriesBrowse from "./SeriesBrowse";
+import MusicBrowse from "./MusicBrowse";
 import { readRecentPlaylists, rememberPlaylistAdded } from "../lib/recentPlaylists";
 import styles from "./Browse.module.css";
 
@@ -177,7 +179,7 @@ function readBrowsePrefs(): {
 export default function BrowsePage() {
   const nav = useNavigate();
   const [searchParams] = useSearchParams();
-  const libraryIdParam = searchParams.get("library_id");
+  const libraryIdParam = searchParams.get("library_id") ?? searchParams.get("library");
   const sortParam = searchParams.get("sort");
   const qParam = searchParams.get("q")?.trim() ?? "";
 
@@ -205,10 +207,15 @@ export default function BrowsePage() {
   const [libraryName, setLibraryName] = useState<string>("");
   const [libraryResolved, setLibraryResolved] = useState(() => libFromUrl == null);
   const [tvUseFlatFiles, setTvUseFlatFiles] = useState(false);
+  const [musicUseFlatFiles, setMusicUseFlatFiles] = useState(false);
 
   useEffect(() => {
     setTvUseFlatFiles(false);
+    setMusicUseFlatFiles(false);
   }, [libFromUrl]);
+
+  const handleTvBrowseEmpty = useCallback(() => setTvUseFlatFiles(true), []);
+  const handleMusicBrowseEmpty = useCallback(() => setMusicUseFlatFiles(true), []);
 
   useEffect(() => {
     if (libFromUrl == null) {
@@ -272,9 +279,10 @@ export default function BrowsePage() {
 
   useEffect(() => {
     if (libFromUrl != null && isTVLibraryType(libraryType) && !tvUseFlatFiles) return;
+    if (libFromUrl != null && isMusicLibraryType(libraryType) && !musicUseFlatFiles) return;
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [libFromUrl, sortParam, libraryType, tvUseFlatFiles]);
+  }, [libFromUrl, sortParam, libraryType, tvUseFlatFiles, musicUseFlatFiles]);
 
   useEffect(() => {
     if (sortParam === "recent") {
@@ -609,7 +617,16 @@ export default function BrowsePage() {
       <SeriesBrowse
         libraryId={libFromUrl}
         libraryName={libraryName}
-        onEmpty={() => setTvUseFlatFiles(true)}
+        onEmpty={handleTvBrowseEmpty}
+      />
+    );
+  }
+  if (libFromUrl != null && isMusicLibraryType(libraryType) && !musicUseFlatFiles) {
+    return (
+      <MusicBrowse
+        libraryId={libFromUrl}
+        libraryName={libraryName}
+        onEmpty={handleMusicBrowseEmpty}
       />
     );
   }

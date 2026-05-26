@@ -379,6 +379,128 @@ export function isTVLibraryType(type?: string): boolean {
   return t === "tv" || t === "anime" || t === "television" || t === "series";
 }
 
+export function isMusicLibraryType(type?: string): boolean {
+  return (type || "").trim().toLowerCase() === "music";
+}
+
+export type AlbumSummary = {
+  id: number;
+  library_id: number;
+  title: string;
+  title_norm?: string;
+  year?: number;
+  genre?: string;
+  artwork_path?: string;
+  album_artist?: string;
+  album_artist_id?: number;
+  track_count?: number;
+  total_duration?: number;
+  is_unknown?: boolean;
+  rating?: number;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type MusicTrackRow = {
+  id: number;
+  media_id: number;
+  track_number?: number;
+  title: string;
+  artist?: string;
+  duration?: number;
+  bitrate?: number;
+  format?: string;
+  album_id?: number;
+  album_title?: string;
+  album_artist?: string;
+  artist_id?: number;
+  year?: number;
+  artwork_path?: string;
+  file_path?: string;
+  created_at?: string;
+};
+
+export type AlbumDetail = AlbumSummary & {
+  tracks?: MusicTrackRow[];
+  meta_json?: string;
+};
+
+export type ArtistSummary = {
+  id: number;
+  library_id: number;
+  name: string;
+  name_norm?: string;
+  artwork_path?: string;
+  album_count?: number;
+  track_count?: number;
+};
+
+export type GenreSummary = {
+  genre: string;
+  album_count?: number;
+  track_count?: number;
+};
+
+export function albumArtworkSrc(albumId: number): string {
+  const token = useAuthStore.getState().token;
+  const q = token ? `?access_token=${encodeURIComponent(token)}` : "";
+  return `/api/v1/album/${albumId}/artwork${q}`;
+}
+
+export async function fetchLibraryAlbums(libraryId: number) {
+  const { data } = await api.get<{ items?: AlbumSummary[] }>(`/api/v1/library/${libraryId}/albums`);
+  return data?.items ?? [];
+}
+
+export async function fetchLibraryArtists(libraryId: number) {
+  const { data } = await api.get<{ items?: ArtistSummary[] }>(`/api/v1/library/${libraryId}/artists`);
+  return data?.items ?? [];
+}
+
+export async function fetchLibraryGenres(libraryId: number) {
+  const { data } = await api.get<{ items?: GenreSummary[] }>(`/api/v1/library/${libraryId}/genres`);
+  return data?.items ?? [];
+}
+
+export async function fetchLibraryTracks(libraryId: number) {
+  const { data } = await api.get<{ items?: MusicTrackRow[] }>(`/api/v1/library/${libraryId}/tracks`);
+  return data?.items ?? [];
+}
+
+export async function fetchAlbum(albumId: number) {
+  const { data } = await api.get<AlbumDetail>(`/api/v1/album/${albumId}`);
+  return data;
+}
+
+export type AlbumPlayTarget = {
+  media_id: number;
+  position: number;
+};
+
+export async function fetchAlbumPlayTarget(albumId: number) {
+  const { data } = await api.get<AlbumPlayTarget>(`/api/v1/album/${albumId}/play-target`);
+  return data;
+}
+
+export type ArtistAlbumsResponse = {
+  items?: AlbumSummary[];
+  artist_id?: number;
+  artist_name?: string;
+};
+
+export async function fetchGenreAlbums(libraryId: number, genre: string) {
+  const { data } = await api.get<{ items?: AlbumSummary[]; library_id?: number; genre?: string }>(
+    `/api/v1/library/${libraryId}/genre/albums`,
+    { params: { genre } },
+  );
+  return data;
+}
+
+export async function fetchArtistAlbums(artistId: number) {
+  const { data } = await api.get<ArtistAlbumsResponse>(`/api/v1/artist/${artistId}/albums`);
+  return data;
+}
+
 export function seriesPosterSrc(s: Pick<SeriesSummary, "id" | "poster_url" | "poster">): string {
   const u = normalizeListPosterUrl(s.poster_url || s.poster || "");
   if (u) return u;
@@ -563,6 +685,26 @@ export const PLAYLIST_PLAY_SESSION_KEY = "knox_playlist_session";
 
 /** Set by SeriesDetail when starting episode playback; Player auto-advances on episode end. */
 export const SERIES_PLAY_SESSION_KEY = "knox_series_session";
+
+/** Set when playing an album; MusicPlayerBar / Player auto-advances on track end. */
+export const ALBUM_PLAY_SESSION_KEY = "knox_album_session";
+
+/** Direct file stream URL for audio/video native playback. */
+export function mediaPlaySrc(mediaId: number): string {
+  const token = useAuthStore.getState().token;
+  const q = token ? `?access_token=${encodeURIComponent(token)}` : "";
+  return `/api/v1/media/${mediaId}/play${q}`;
+}
+
+export interface MediaLyricsResponse {
+  lrc: string;
+  source: string;
+}
+
+export async function fetchMediaLyrics(mediaId: number): Promise<MediaLyricsResponse> {
+  const { data } = await api.get<MediaLyricsResponse>(`/api/v1/media/${mediaId}/lyrics`);
+  return data ?? { lrc: "", source: "" };
+}
 
 export interface Playlist {
   id: number;
@@ -1114,6 +1256,44 @@ export async function cleanupFailedSubtitleTasks() {
 
 export async function cleanupSubtitleTasksBefore(days: number) {
   const { data } = await api.post<{ deleted: number; days: number }>("/api/v1/subtitle/task/cleanup-before", { days });
+  return data.deleted;
+}
+
+export type LyricTask = {
+  id: number;
+  media_id: number;
+  title: string;
+  status: string;
+  message?: string;
+  vtt_path?: string;
+  lrc_path?: string;
+  created_at: string;
+  started_at?: string;
+  finished_at?: string;
+  updated_at: string;
+};
+
+export async function fetchLyricTasks(limit = 200) {
+  const { data } = await api.get<{ items: LyricTask[] }>("/api/v1/lyric/task", { params: { limit } });
+  return data.items ?? [];
+}
+
+/** Enqueue ASR lyric recognition for an audio track (VTT → sidecar LRC). */
+export async function enqueueLyricRecognition(mediaId: number) {
+  await api.post(`/api/v1/media/${mediaId}/lyrics/recognize`);
+}
+
+export async function retryLyricTask(mediaId: number) {
+  await api.post(`/api/v1/lyric/task/${mediaId}/retry`);
+}
+
+export async function cleanupFailedLyricTasks() {
+  const { data } = await api.post<{ deleted: number }>("/api/v1/lyric/task/cleanup-failed");
+  return data.deleted;
+}
+
+export async function cleanupLyricTasksBefore(days: number) {
+  const { data } = await api.post<{ deleted: number; days: number }>("/api/v1/lyric/task/cleanup-before", { days });
   return data.deleted;
 }
 

@@ -17,13 +17,14 @@ import (
 	"knox-media/internal/config"
 	"knox-media/internal/jit/session"
 	"knox-media/internal/keyframe"
+	"knox-media/internal/lyrictask"
 	"knox-media/internal/preview"
 	"knox-media/internal/subtitle"
 	"knox-media/internal/transcode"
 	"knox-media/internal/upload"
 )
 
-func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worker, packageWorker *transcode.PackageWorker, previewWorker *preview.Worker, sub *subtitle.Service, up *upload.Service, instant *scheduler.Scheduler, sm *session.Manager, atw *atrack.Worker, kfw *keyframe.Worker) *gin.Engine {
+func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worker, packageWorker *transcode.PackageWorker, previewWorker *preview.Worker, sub *subtitle.Service, up *upload.Service, instant *scheduler.Scheduler, sm *session.Manager, atw *atrack.Worker, kfw *keyframe.Worker, lw *lyrictask.Worker) *gin.Engine {
 	if cfg.Server.Mode == "release" {
 		gin.SetMode(gin.ReleaseMode)
 	}
@@ -35,9 +36,10 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 	r.Static("/static", cfg.Data.Static)
 	r.Static(metadatalib.PublicURLPrefix, cfg.Data.MetadataLibrary)
 
-	h := handler.New(application, worker, packageWorker, previewWorker, sub, up, instant, sm, atw, kfw)
+	h := handler.New(application, worker, packageWorker, previewWorker, sub, up, instant, sm, atw, kfw, lw)
 	go h.StartScheduleLoop(context.Background())
 	go h.StartScrapeTaskLoop(context.Background())
+	go h.StartLyricTaskLoop(context.Background())
 
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "knox-media"})
@@ -64,6 +66,15 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 
 			auth.GET("/library", h.ListLibraries)
 			auth.GET("/library/:id/series", h.ListLibrarySeries)
+			auth.GET("/library/:id/albums", h.ListLibraryAlbums)
+			auth.GET("/library/:id/artists", h.ListLibraryArtists)
+			auth.GET("/library/:id/genres", h.ListLibraryGenres)
+			auth.GET("/library/:id/genre/albums", h.ListGenreAlbums)
+			auth.GET("/library/:id/tracks", h.ListLibraryTracks)
+			auth.GET("/album/:id", h.GetAlbum)
+			auth.GET("/album/:id/play-target", h.GetAlbumPlayTarget)
+			auth.GET("/album/:id/artwork", h.ServeAlbumArtwork)
+			auth.GET("/artist/:id/albums", h.ListArtistAlbums)
 			auth.GET("/series/:id", h.GetSeries)
 			auth.GET("/series/:id/play-target", h.GetSeriesPlayTarget)
 			auth.PATCH("/series/:id", h.UpdateSeries)
@@ -77,6 +88,7 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 			auth.GET("/media/:id/meta", h.GetMediaMeta)
 			auth.GET("/media/:id/stats", h.GetMediaStats)
 			auth.GET("/media/:id/subtitles", h.ListMediaSubtitles)
+			auth.GET("/media/:id/lyrics", h.GetMediaLyrics)
 
 			auth.GET("/playlists", h.ListPlaylists)
 			auth.POST("/playlists", h.CreatePlaylist)
@@ -151,6 +163,7 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 			adm.POST("/media/:id/scrape", h.ScrapeMedia)
 			adm.POST("/media/:id/subtitle/process", h.ProcessMediaSubtitles)
 			adm.POST("/media/:id/subtitle", h.EnqueueSubtitleProcessing)
+			adm.POST("/media/:id/lyrics/recognize", h.EnqueueLyricRecognition)
 			adm.POST("/media/:id/manual-match", h.ManualMatchMedia)
 			adm.DELETE("/media/:id/match", h.UnmatchMedia)
 			adm.PATCH("/media/:id/meta", h.UpdateMediaMetadata)
@@ -194,6 +207,10 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 			adm.POST("/subtitle/task/:mediaId/retry", h.RetrySubtitleTask)
 			adm.POST("/subtitle/task/cleanup-failed", h.CleanupSubtitleTasksFailed)
 			adm.POST("/subtitle/task/cleanup-before", h.CleanupSubtitleTasksBefore)
+			adm.GET("/lyric/task", h.ListLyricTasks)
+			adm.POST("/lyric/task/:mediaId/retry", h.RetryLyricTask)
+			adm.POST("/lyric/task/cleanup-failed", h.CleanupLyricTasksFailed)
+			adm.POST("/lyric/task/cleanup-before", h.CleanupLyricTasksBefore)
 			adm.POST("/media/:id/atrack", h.EnqueueAudioTrackExtraction)
 			adm.GET("/atrack/task", h.ListAudioTrackTasks)
 			adm.POST("/atrack/task/:mediaId/retry", h.RetryAudioTrackTask)

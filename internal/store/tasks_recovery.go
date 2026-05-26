@@ -60,6 +60,11 @@ func ResetInterruptedTasks(db *sql.DB) {
 		SET status = 'pending', message = ?, started_at = NULL, finished_at = NULL, updated_at = CURRENT_TIMESTAMP
 		WHERE status = 'running'`, restartResetMessage)
 
+	reset("lyric_task", `
+		UPDATE lyric_task
+		SET status = 'pending', message = ?, started_at = NULL, finished_at = NULL, updated_at = CURRENT_TIMESTAMP
+		WHERE status = 'running'`, restartResetMessage)
+
 	reset("atrack_task", `
 		UPDATE atrack_task
 		SET status = 'waiting', error_message = ?, updated_at = CURRENT_TIMESTAMP

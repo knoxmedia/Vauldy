@@ -435,6 +435,21 @@ CREATE TABLE IF NOT EXISTS subtitle_task (
 );
 CREATE INDEX IF NOT EXISTS idx_subtitle_task_status ON subtitle_task(status, updated_at);
 
+CREATE TABLE IF NOT EXISTS lyric_task (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    media_id INTEGER NOT NULL UNIQUE,
+    status TEXT NOT NULL DEFAULT 'pending',
+    message TEXT,
+    vtt_path TEXT,
+    lrc_path TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    started_at TIMESTAMP,
+    finished_at TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (media_id) REFERENCES media(id)
+);
+CREATE INDEX IF NOT EXISTS idx_lyric_task_status ON lyric_task(status, updated_at);
+
 CREATE TABLE IF NOT EXISTS atrack_task (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     media_id INTEGER NOT NULL UNIQUE,
@@ -575,6 +590,61 @@ func OpenSQLite(path string) (*sql.DB, error) {
 			FOREIGN KEY (media_id) REFERENCES media(id)
 		)`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_episode_media_episode ON episode_media(episode_id)`)
+	// Music library: artists, albums, tracks (linked to media rows).
+	_, _ = db.Exec(`
+		CREATE TABLE IF NOT EXISTS music_artist (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			library_id INTEGER NOT NULL,
+			name TEXT NOT NULL,
+			name_norm TEXT NOT NULL,
+			artwork_path TEXT,
+			meta_json TEXT,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (library_id) REFERENCES library(id)
+		)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_music_artist_library ON music_artist(library_id)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_music_artist_name_norm ON music_artist(library_id, name_norm)`)
+	_, _ = db.Exec(`
+		CREATE TABLE IF NOT EXISTS music_album (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			library_id INTEGER NOT NULL,
+			title TEXT NOT NULL,
+			title_norm TEXT NOT NULL,
+			album_artist_id INTEGER,
+			year INTEGER,
+			genre TEXT,
+			artwork_path TEXT,
+			is_compilation INTEGER DEFAULT 0,
+			is_unknown INTEGER DEFAULT 0,
+			rating INTEGER DEFAULT 0,
+			is_favorite INTEGER DEFAULT 0,
+			folder_paths TEXT DEFAULT '[]',
+			meta_json TEXT,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (library_id) REFERENCES library(id),
+			FOREIGN KEY (album_artist_id) REFERENCES music_artist(id)
+		)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_music_album_library ON music_album(library_id)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_music_album_title_norm ON music_album(library_id, title_norm)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_music_album_artist ON music_album(album_artist_id)`)
+	_, _ = db.Exec(`
+		CREATE TABLE IF NOT EXISTS music_track (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			album_id INTEGER NOT NULL,
+			media_id INTEGER NOT NULL UNIQUE,
+			track_number INTEGER DEFAULT 0,
+			disc_number INTEGER DEFAULT 1,
+			title TEXT NOT NULL,
+			artist_display TEXT DEFAULT '',
+			sort_order INTEGER DEFAULT 0,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (album_id) REFERENCES music_album(id),
+			FOREIGN KEY (media_id) REFERENCES media(id)
+		)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_music_track_album ON music_track(album_id, sort_order)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_music_track_media ON music_track(media_id)`)
 	_, _ = db.Exec(`INSERT OR IGNORE INTO scrape_config (id) VALUES (1)`)
 	_, _ = db.Exec(`INSERT OR IGNORE INTO system_options (id, options_json) VALUES (1, '{}')`)
 	// Seed default AI provider configs.

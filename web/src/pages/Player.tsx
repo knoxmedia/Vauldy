@@ -21,6 +21,12 @@ import {
   navigatePlaylistNext,
   buildPlaylistPageUrl,
 } from "../lib/playlistPlayback";
+import {
+  clearAlbumPlaySession,
+  isAlbumPlaybackFinished,
+  navigateAlbumNext,
+  buildAlbumPageUrl,
+} from "../lib/albumPlayback";
 import { isLikelyNaturalPlaybackEnd } from "../lib/playbackComplete";
 import {
   clearSeriesPlaySession,
@@ -724,7 +730,9 @@ export default function PlayerPage() {
       void reportPlaybackEnd(mid, withPlaybackLog({ position: endPos, completed: 1 })).catch(() => {});
       const params = searchParamsRef.current;
       const advanced =
-        navigatePlaylistNext(nav, params, mid) || navigateSeriesNext(nav, params, mid);
+        navigatePlaylistNext(nav, params, mid) ||
+        navigateSeriesNext(nav, params, mid) ||
+        navigateAlbumNext(nav, params, mid);
       if (!advanced && isPlaylistPlaybackFinished(params, mid)) {
         clearPlaylistPlaySession();
         setPlaylistFinished(true);
@@ -735,6 +743,10 @@ export default function PlayerPage() {
         setSeriesFinished(true);
         setShowBack(true);
         message.info("已播放完所有可用集数");
+      } else if (!advanced && isAlbumPlaybackFinished(params, mid)) {
+        clearAlbumPlaySession();
+        setShowBack(true);
+        message.info("专辑已播放完毕");
       }
     };
 
@@ -1592,6 +1604,11 @@ export default function PlayerPage() {
     const sid = searchParams.get("series_id");
     if (sid && mid && !Number.isNaN(mid)) {
       nav(buildSeriesPageUrl(Number(sid), mid));
+      return;
+    }
+    const aid = searchParams.get("album_id");
+    if (aid && mid && !Number.isNaN(mid)) {
+      nav(buildAlbumPageUrl(Number(aid)));
       return;
     }
     nav(-1);

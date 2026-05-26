@@ -302,6 +302,16 @@ func (h *Handler) executeScheduledTask(taskType string, payload map[string]any) 
 		}
 		done, failed := h.KeyframeWorker.RunBatch(limit)
 		return fmt.Sprintf("关键帧提取完成：成功 %d，失败 %d", done, failed), nil
+	case "lyric_process":
+		if h.LyricWorker == nil {
+			return "", fmt.Errorf("lyric worker disabled")
+		}
+		limit := anyToInt(payload["limit"])
+		if limit <= 0 {
+			limit = 20
+		}
+		done, failed := h.LyricWorker.RunBatch(context.Background(), limit)
+		return fmt.Sprintf("歌词识别完成：成功 %d，失败 %d", done, failed), nil
 	default:
 		return "", fmt.Errorf("unsupported task_type: %s", taskType)
 	}

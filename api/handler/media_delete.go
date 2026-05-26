@@ -206,6 +206,7 @@ func (h *Handler) deleteMediaRecords(id int64, fileID string) error {
 		{`DELETE FROM scrape_history WHERE media_id = ?`, []any{id}},
 		{`DELETE FROM media_subtitle WHERE media_id = ?`, []any{id}},
 		{`DELETE FROM subtitle_task WHERE media_id = ?`, []any{id}},
+		{`DELETE FROM lyric_task WHERE media_id = ?`, []any{id}},
 		{`DELETE FROM atrack_task WHERE media_id = ?`, []any{id}},
 		{`DELETE FROM keyframe_task WHERE media_id = ?`, []any{id}},
 		{`DELETE FROM preview_task WHERE media_id = ?`, []any{id}},

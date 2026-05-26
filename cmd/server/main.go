@@ -29,6 +29,7 @@ import (
 	"knox-media/internal/jit/ingestprepare"
 	jitmetrics "knox-media/internal/jit/metrics"
 	"knox-media/internal/keyframe"
+	"knox-media/internal/lyrictask"
 	"knox-media/internal/monitor"
 	"knox-media/internal/preview"
 	"knox-media/internal/scanner"
@@ -107,6 +108,8 @@ func main() {
 	up := &upload.Service{UploadDir: cfg.Data.Upload, ChunksDir: cfg.Data.Chunks}
 	atrackWorker := atrack.NewWorker(db, cfg.FFmpeg.FFmpegPath, cfg.FFmpeg.FFprobePath, cfg.Data.ATracks)
 	keyframeWorker := keyframe.NewWorker(db, cfg.FFmpeg.FFprobePath, cfg.Data.Keyframes)
+	lyricWorkDir := filepath.Join(cfg.Data.Dir, "lyrics")
+	lyricWorker := lyrictask.NewWorker(db, lyricWorkDir, cfg.FFmpeg.FFprobePath, subSvc)
 
 	redisAddr := strings.TrimSpace(os.Getenv("KNOX_MEDIA_REDIS_ADDR"))
 	if redisAddr == "" {
@@ -167,7 +170,7 @@ func main() {
 		FFprobeExtra: ffprobeExtra,
 	}
 	sc.OnMediaAdded = func(mediaID int64, _ string, ft string) {
-		go enqueueAutoTasksOnMediaAdded(db, cfg, subSvc, atrackWorker, keyframeWorker, mediaID, ft)
+		go enqueueAutoTasksOnMediaAdded(db, cfg, subSvc, atrackWorker, keyframeWorker, lyricWorker, mediaID, ft)
 		if ft == "video" {
 			go func(id int64) {
 				_, _ = packageWorker.EnqueueForMedia(id)
@@ -178,7 +181,7 @@ func main() {
 	mon := monitor.NewService(db, sc, 15*time.Second)
 	go mon.Start(context.Background())
 
-	engine := api.NewEngine(cfg, application, worker, packageWorker, previewWorker, subSvc, up, instantScheduler, sessionMgr, atrackWorker, keyframeWorker)
+	engine := api.NewEngine(cfg, application, worker, packageWorker, previewWorker, subSvc, up, instantScheduler, sessionMgr, atrackWorker, keyframeWorker, lyricWorker)
 	log.Printf("knox-media listening on http://%s", cfg.Addr())
 	if err := engine.Run(cfg.Addr()); err != nil {
 		log.Fatal(err)
@@ -267,7 +270,7 @@ func resolveConfigPath() string {
 	return "config.yml"
 }
 
-func enqueueAutoTasksOnMediaAdded(db *sql.DB, cfg *config.Config, subSvc *subtitle.Service, atw *atrack.Worker, kfw *keyframe.Worker, mediaID int64, fileType string) {
+func enqueueAutoTasksOnMediaAdded(db *sql.DB, cfg *config.Config, subSvc *subtitle.Service, atw *atrack.Worker, kfw *keyframe.Worker, lw *lyrictask.Worker, mediaID int64, fileType string) {
 	if db == nil || cfg == nil || mediaID <= 0 {
 		return
 	}
@@ -278,6 +281,9 @@ func enqueueAutoTasksOnMediaAdded(db *sql.DB, cfg *config.Config, subSvc *subtit
 	enqueueAutoScrapeTask(db, mediaID)
 	if subSvc != nil && cfg.SubtitleAutoOnScan() && fileType == "video" {
 		_ = subSvc.EnsurePendingSubtitleTask(mediaID)
+	}
+	if lw != nil && cfg.LyricAutoOnScan() {
+		_ = lw.EnsurePendingIfNoLyrics(mediaID, fileType)
 	}
 	if fileType == "video" {
 		if atw != nil && cfg.ATrackAutoOnScan() {

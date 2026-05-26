@@ -19,6 +19,7 @@ type Config struct {
 	Scan         ScanConfig               `yaml:"scan"`
 	Subtitle     SubtitleProcessingConfig `yaml:"subtitle"`
 	ATrack       ATrackConfig             `yaml:"atrack"`
+	Lyric        LyricConfig              `yaml:"lyric"`
 	JIT          JITConfig                `yaml:"jit"`
 	CORS         CORSConfig               `yaml:"cors"`
 	// PowerPlayer is included in GET /media/:id/hls playback plans for the web player (PowerPlayer 6 setup).
@@ -97,6 +98,12 @@ type SubtitleProcessingConfig struct {
 // ATrackConfig controls audio track extraction behavior.
 type ATrackConfig struct {
 	// AutoOnScan inserts a waiting atrack_task when library scan discovers a new video.
+	AutoOnScan *bool `yaml:"auto_on_scan"`
+}
+
+// LyricConfig controls automatic lyric recognition on music library scan.
+type LyricConfig struct {
+	// AutoOnScan inserts a pending lyric_task when scan discovers a new audio track without lyrics.
 	AutoOnScan *bool `yaml:"auto_on_scan"`
 }
 
@@ -259,6 +266,10 @@ func Load(path string) (*Config, error) {
 		t := true
 		c.ATrack.AutoOnScan = &t
 	}
+	if c.Lyric.AutoOnScan == nil {
+		t := true
+		c.Lyric.AutoOnScan = &t
+	}
 	if c.JIT.ContinuousHLSEnabled == nil {
 		t := true
 		c.JIT.ContinuousHLSEnabled = &t
@@ -354,6 +365,17 @@ func (c *Config) ATrackAutoOnScan() bool {
 		return true
 	}
 	return *c.ATrack.AutoOnScan
+}
+
+// LyricAutoOnScan reports whether scan should enqueue lyric tasks for new audio in music libraries.
+func (c *Config) LyricAutoOnScan() bool {
+	if c == nil {
+		return false
+	}
+	if c.Lyric.AutoOnScan == nil {
+		return true
+	}
+	return *c.Lyric.AutoOnScan
 }
 
 // HLSMultiAudioEnabled reports whether JIT master playlist may emit separate audio groups.

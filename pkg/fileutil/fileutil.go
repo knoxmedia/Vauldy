@@ -11,6 +11,7 @@ var videoExts = map[string]struct{}{
 
 var audioExts = map[string]struct{}{
 	".mp3": {}, ".flac": {}, ".wav": {}, ".aac": {}, ".ogg": {}, ".m4a": {}, ".wma": {},
+	".aiff": {}, ".aif": {}, ".ape": {},
 }
 
 var imageExts = map[string]struct{}{

@@ -83,6 +83,10 @@ subtitle:
 atrack:
   # When true, a new video discovered by library scan gets a waiting atrack_task (default: true).
   auto_on_scan: false
+# Lyric recognition: ASR → VTT → LRC for music library audio tracks.
+lyric:
+  # When true, a new audio track in a music library without lyrics gets a pending lyric_task (default: true).
+  auto_on_scan: true
 # Just-in-time transcode options.
 jit:
   # When true, use a single long-running ffmpeg process that outputs HLS segments

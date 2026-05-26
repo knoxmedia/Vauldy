@@ -34,6 +34,9 @@ import LibraryPage from "./pages/Library";
 import BrowsePage from "./pages/Browse";
 import FavoritesPage from "./pages/Favorites";
 import SeriesDetailPage from "./pages/SeriesDetail";
+import AlbumDetailPage from "./pages/AlbumDetail";
+import ArtistDetailPage from "./pages/ArtistDetail";
+import GenreDetailPage from "./pages/GenreDetail";
 import PlayerPage from "./pages/Player";
 import UploadPage from "./pages/Upload";
 import SettingsPage from "./pages/Settings";
@@ -58,6 +61,8 @@ import { fetchUserInfo, logout } from "./api/client";
 import { defaultPlayerPrefs, normalizePlayerPrefs } from "./lib/playerPrefs";
 import { isAdminRole, useAuthStore } from "./store/auth";
 import MainNav from "./components/MainNav";
+import MusicPlayerBar from "./components/MusicPlayerBar";
+import { useMusicPlayerStore } from "./store/musicPlayer";
 
 const { Header, Content, Sider } = Layout;
 
@@ -112,6 +117,7 @@ function MainShell() {
   const admin = isAdminRole(role);
   const isPlayerRoute = loc.pathname.startsWith("/player");
   const isHomeRoute = loc.pathname === "/" || loc.pathname === "";
+  const musicPlayerActive = useMusicPlayerStore((s) => s.active);
 
   const [mode, setModeState] = useState<SidebarMode>(() => readSidebarMode());
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -175,6 +181,9 @@ function MainShell() {
     if (p.startsWith("/search")) return "搜索";
     if (p.startsWith("/browse")) return "浏览媒体";
     if (p.startsWith("/series")) return "剧集详情";
+    if (p.startsWith("/album")) return "专辑详情";
+    if (p.startsWith("/artist")) return "艺人详情";
+    if (p.startsWith("/genre")) return "流派详情";
     if (p.startsWith("/playback-history")) return "播放历史";
     if (p.startsWith("/player")) return "播放";
     if (p.startsWith("/settings")) return "账号";
@@ -399,7 +408,7 @@ function MainShell() {
         )}
 
         <Content
-          className={`app-shell-content${isPlayerRoute ? " app-shell-content-player" : ""}`}
+          className={`app-shell-content${isPlayerRoute ? " app-shell-content-player" : ""}${musicPlayerActive && !isPlayerRoute ? " app-shell-content-music-player" : ""}`}
           style={{
             background: "#000",
             minHeight: isPlayerRoute ? "100vh" : "calc(100vh - 64px)",
@@ -410,6 +419,7 @@ function MainShell() {
             <Outlet />
           </div>
         </Content>
+        {!isPlayerRoute ? <MusicPlayerBar /> : null}
       </Layout>
     </Layout>
   );
@@ -430,6 +440,9 @@ export default function App() {
           <Route path="favorites" element={<FavoritesPage />} />
           <Route path="browse" element={<BrowsePage />} />
           <Route path="series/:id" element={<SeriesDetailPage />} />
+          <Route path="album/:id" element={<AlbumDetailPage />} />
+          <Route path="artist/:id" element={<ArtistDetailPage />} />
+          <Route path="genre" element={<GenreDetailPage />} />
           <Route path="playback-history" element={<PlaybackHistoryPage />} />
           <Route path="search" element={<SearchPage />} />
           <Route path="detail/:id" element={<MediaDetailPage />} />

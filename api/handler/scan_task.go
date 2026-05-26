@@ -206,6 +206,9 @@ func (h *Handler) EnqueuePostIngestForNewMedia(mediaID int64, fileType string) {
 		if h.Subtitle != nil && h.App.Config != nil && h.App.Config.SubtitleAutoOnScan() && ft == "video" {
 			_ = h.Subtitle.EnsurePendingSubtitleTask(mid)
 		}
+		if h.LyricWorker != nil && h.App.Config != nil && h.App.Config.LyricAutoOnScan() {
+			_ = h.LyricWorker.EnsurePendingIfNoLyrics(mid, ft)
+		}
 	}(mediaID, fileType)
 }
 

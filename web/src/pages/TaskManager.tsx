@@ -32,11 +32,14 @@ import {
   cleanupFailedTranscodeTasksBefore,
   cleanupFailedSubtitleTasks,
   cleanupSubtitleTasksBefore,
+  cleanupFailedLyricTasks,
+  cleanupLyricTasksBefore,
   createScheduledTask,
   deleteScheduledTask,
   fetchAtrackTasks,
   fetchKeyframeTasks,
   fetchLibraries,
+  fetchLyricTasks,
   fetchPreviewTasks,
   fetchScheduledTasks,
   fetchScanTasks,
@@ -47,12 +50,14 @@ import {
   retryAudioTrackExtraction,
   retryKeyframeExtraction,
   retryPreviewTask,
+  retryLyricTask,
   retryTranscodeTask,
   retrySubtitleTask,
   runScheduledTask,
   type AtrackTask,
   type KeyframeTask,
   type Library,
+  type LyricTask,
   updateScheduledTask,
   type PreviewTask,
   type ScheduledTask,
@@ -182,6 +187,12 @@ export default function TaskManagerPage() {
   const [keyframeLoading, setKeyframeLoading] = useState(false);
   const [keyframeStatusFilter, setKeyframeStatusFilter] = useState("all");
   const [retryingKeyframeId, setRetryingKeyframeId] = useState<number | null>(null);
+  const [lyricTasks, setLyricTasks] = useState<LyricTask[]>([]);
+  const [lyricLoading, setLyricLoading] = useState(false);
+  const [lyricStatusFilter, setLyricStatusFilter] = useState("all");
+  const [retryingLyricId, setRetryingLyricId] = useState<number | null>(null);
+  const [cleaningLyricFailed, setCleaningLyricFailed] = useState(false);
+  const [cleaningLyricOld, setCleaningLyricOld] = useState(false);
   const [form] = Form.useForm<ScheduledTaskForm>();
   const [editForm] = Form.useForm<ScheduledTaskForm>();
   const createTaskType = Form.useWatch("task_type", form);
@@ -274,6 +285,17 @@ export default function TaskManagerPage() {
     }
   };
 
+  const loadLyricTasks = async (silent = false) => {
+    if (!silent) setLyricLoading(true);
+    try {
+      setLyricTasks(await fetchLyricTasks(200));
+    } catch {
+      if (!silent) setLyricTasks([]);
+    } finally {
+      if (!silent) setLyricLoading(false);
+    }
+  };
+
   const loadLibraries = async () => {
     try {
       setLibraries(await fetchLibraries());
@@ -291,6 +313,7 @@ export default function TaskManagerPage() {
     void loadSubtitleTasks();
     void loadAtrackTasks();
     void loadKeyframeTasks();
+    void loadLyricTasks();
     void loadLibraries();
   }, []);
 
@@ -305,6 +328,7 @@ export default function TaskManagerPage() {
       if (activeTab === "subtitle") void loadSubtitleTasks(true);
       if (activeTab === "atrack") void loadAtrackTasks(true);
       if (activeTab === "keyframe") void loadKeyframeTasks(true);
+      if (activeTab === "lyric") void loadLyricTasks(true);
     }, 10000);
     return () => window.clearInterval(timer);
   }, [autoRefresh, activeTab]);
@@ -313,7 +337,7 @@ export default function TaskManagerPage() {
     if (createTaskType !== "library_scan" && createTaskType !== "subtitle_process") {
       form.setFieldValue("library_id", undefined);
     }
-    if (createTaskType !== "scrape_run" && createTaskType !== "subtitle_process") {
+    if (createTaskType !== "scrape_run" && createTaskType !== "subtitle_process" && createTaskType !== "lyric_process") {
       form.setFieldValue("limit", undefined);
     }
     if (createTaskType !== "transcode_cleanup_failed_before" && createTaskType !== "activity_cleanup") {
@@ -325,7 +349,7 @@ export default function TaskManagerPage() {
     if (editTaskType !== "library_scan" && editTaskType !== "subtitle_process") {
       editForm.setFieldValue("library_id", undefined);
     }
-    if (editTaskType !== "scrape_run" && editTaskType !== "subtitle_process") {
+    if (editTaskType !== "scrape_run" && editTaskType !== "subtitle_process" && editTaskType !== "lyric_process") {
       editForm.setFieldValue("limit", undefined);
     }
     if (editTaskType !== "transcode_cleanup_failed_before" && editTaskType !== "activity_cleanup") {
@@ -365,6 +389,10 @@ export default function TaskManagerPage() {
     () => keyframeTasks.filter((x) => (keyframeStatusFilter === "all" ? true : x.status === keyframeStatusFilter)),
     [keyframeTasks, keyframeStatusFilter]
   );
+  const filteredLyric = useMemo(
+    () => lyricTasks.filter((x) => (lyricStatusFilter === "all" ? true : x.status === lyricStatusFilter)),
+    [lyricTasks, lyricStatusFilter]
+  );
   const getStatusOptionsForTab = (tab: string) => {
     const commonAll = [{ value: "all", label: "全部状态" }];
     if (tab === "scheduled") {
@@ -403,7 +431,7 @@ export default function TaskManagerPage() {
         { value: "cancelled", label: "cancelled" },
       ];
     }
-    if (tab === "subtitle") {
+    if (tab === "subtitle" || tab === "lyric") {
       return [
         ...commonAll,
         { value: "pending", label: "pending" },
@@ -459,6 +487,7 @@ export default function TaskManagerPage() {
         if (v.library_id != null && Number(v.library_id) > 0) payload.library_id = Number(v.library_id);
         if (v.limit) payload.limit = v.limit;
       }
+      if (v.task_type === "lyric_process" && v.limit) payload.limit = v.limit;
       if ((v.task_type === "transcode_cleanup_failed_before" || v.task_type === "activity_cleanup") && v.days) payload.days = v.days;
       setCreatingSchedule(true);
       await createScheduledTask({
@@ -506,6 +535,7 @@ export default function TaskManagerPage() {
         if (v.library_id != null && Number(v.library_id) > 0) payload.library_id = Number(v.library_id);
         if (v.limit) payload.limit = v.limit;
       }
+      if (v.task_type === "lyric_process" && v.limit) payload.limit = v.limit;
       if ((v.task_type === "transcode_cleanup_failed_before" || v.task_type === "activity_cleanup") && v.days) payload.days = v.days;
       setUpdatingSchedule(true);
       await updateScheduledTask(editingTask.id, {
@@ -958,6 +988,102 @@ export default function TaskManagerPage() {
           ),
         },
         {
+          key: "lyric",
+          label: "歌词识别",
+          children: (
+            <Card
+              title="歌词识别任务"
+              extra={(
+                <Space>
+                  {renderListHeaderControls("lyric", lyricStatusFilter, setLyricStatusFilter, () => void loadLyricTasks())}
+                  <Popconfirm
+                    title="删除所有失败状态的歌词识别任务记录？"
+                    onConfirm={() => {
+                      setCleaningLyricFailed(true);
+                      void cleanupFailedLyricTasks()
+                        .then((n) => message.success(`已清理 ${n} 条`))
+                        .catch(() => message.error("清理失败"))
+                        .finally(async () => {
+                          setCleaningLyricFailed(false);
+                          await loadLyricTasks();
+                        });
+                    }}
+                  >
+                    <Button loading={cleaningLyricFailed}>清理失败记录</Button>
+                  </Popconfirm>
+                  <Popconfirm
+                    title="删除 30 天前已完成或失败的任务记录？"
+                    onConfirm={() => {
+                      setCleaningLyricOld(true);
+                      void cleanupLyricTasksBefore(30)
+                        .then((n) => message.success(`已清理 ${n} 条`))
+                        .catch(() => message.error("清理失败"))
+                        .finally(async () => {
+                          setCleaningLyricOld(false);
+                          await loadLyricTasks();
+                        });
+                    }}
+                  >
+                    <Button loading={cleaningLyricOld}>清理 30 天前记录</Button>
+                  </Popconfirm>
+                </Space>
+              )}
+            >
+              <div style={{ marginBottom: 12, color: "rgba(0,0,0,0.55)", fontSize: 13 }}>
+                每个音频一条记录。在曲目列表「识别歌词」加入任务后，后台使用 ASR 生成 WebVTT 并转换为同目录 LRC 文件。
+              </div>
+              <Table
+                rowKey="id"
+                loading={lyricLoading}
+                dataSource={filteredLyric}
+                pagination={{ pageSize: 12 }}
+                scroll={{ x: 1200 }}
+                columns={[
+                  { title: "任务ID", dataIndex: "id", width: 80 },
+                  { title: "媒体ID", dataIndex: "media_id", width: 90 },
+                  { title: "曲目标题", dataIndex: "title", ellipsis: true },
+                  { title: "状态", dataIndex: "status", width: 100, render: (v: string) => {
+                    const c = v === "done" ? "green" : v === "failed" ? "red" : v === "running" ? "processing" : "default";
+                    return <Tag color={c}>{v}</Tag>;
+                  } },
+                  { title: "备注", dataIndex: "message", ellipsis: true, render: (v?: string) => v || "-" },
+                  { title: "VTT", dataIndex: "vtt_path", ellipsis: true, render: (v?: string) => v || "-" },
+                  { title: "LRC", dataIndex: "lrc_path", ellipsis: true, render: (v?: string) => v || "-" },
+                  { title: "创建时间", dataIndex: "created_at", width: 170 },
+                  { title: "开始时间", dataIndex: "started_at", width: 170, render: (v?: string) => v || "-" },
+                  { title: "完成时间", dataIndex: "finished_at", width: 170, render: (v?: string) => v || "-" },
+                  {
+                    title: "操作",
+                    key: "lyricactions",
+                    width: 70,
+                    align: "center",
+                    fixed: "right",
+                    render: (_: unknown, r: LyricTask) => (
+                      <ActionIconButton
+                        title="重试"
+                        icon={<RedoOutlined />}
+                        loading={retryingLyricId === r.media_id}
+                        onClick={async () => {
+                          setRetryingLyricId(r.media_id);
+                          try {
+                            await retryLyricTask(r.media_id);
+                            message.success("已提交重新识别");
+                            await loadLyricTasks();
+                          } catch {
+                            message.error("提交失败");
+                          } finally {
+                            setRetryingLyricId(null);
+                          }
+                        }}
+                      />
+                    ),
+                  },
+                ]}
+              />
+            </Card>
+          ),
+        },
+        {
           key: "preview",
           label: "进度条预览任务",
           children: (
@@ -1135,6 +1261,7 @@ export default function TaskManagerPage() {
               options={[
                 { value: "library_scan", label: "定时扫描媒体库" },
                 { value: "subtitle_process", label: "定时字幕处理（批量）" },
+                { value: "lyric_process", label: "定时歌词识别（批量）" },
                 { value: "scrape_run", label: "定时执行刮削任务" },
                 { value: "transcode_cleanup_failed_before", label: "清理历史转码失败任务" },
                 { value: "activity_cleanup", label: "清理活动日志" },
@@ -1168,6 +1295,9 @@ export default function TaskManagerPage() {
                 <Form.Item name="limit" label="每轮处理视频数量"><InputNumber min={1} max={500} placeholder="默认 50" style={{ width: 200 }} /></Form.Item>
               </>
             ) : null}
+            {createTaskType === "lyric_process" ? (
+              <Form.Item name="limit" label="每轮处理音频数量"><InputNumber min={1} max={200} placeholder="默认 20" style={{ width: 200 }} /></Form.Item>
+            ) : null}
             {createTaskType === "transcode_cleanup_failed_before" || createTaskType === "activity_cleanup" ? (
               <Form.Item name="days" label="保留天数（清理任务）"><InputNumber min={1} max={3650} /></Form.Item>
             ) : null}
@@ -1191,6 +1321,7 @@ export default function TaskManagerPage() {
               options={[
                 { value: "library_scan", label: "定时扫描媒体库" },
                 { value: "subtitle_process", label: "定时字幕处理（批量）" },
+                { value: "lyric_process", label: "定时歌词识别（批量）" },
                 { value: "scrape_run", label: "定时执行刮削任务" },
                 { value: "transcode_cleanup_failed_before", label: "清理历史转码失败任务" },
                 { value: "activity_cleanup", label: "清理活动日志" },
@@ -1223,6 +1354,9 @@ export default function TaskManagerPage() {
                 </Form.Item>
                 <Form.Item name="limit" label="每轮处理视频数量"><InputNumber min={1} max={500} placeholder="默认 50" style={{ width: 200 }} /></Form.Item>
               </>
+            ) : null}
+            {editTaskType === "lyric_process" ? (
+              <Form.Item name="limit" label="每轮处理音频数量"><InputNumber min={1} max={200} placeholder="默认 20" style={{ width: 200 }} /></Form.Item>
             ) : null}
             {editTaskType === "transcode_cleanup_failed_before" || editTaskType === "activity_cleanup" ? (
               <Form.Item name="days" label="保留天数（清理任务）"><InputNumber min={1} max={3650} /></Form.Item>
