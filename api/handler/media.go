@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"knox-media/api/middleware"
+	"knox-media/internal/photoclass"
 	"knox-media/internal/scraper"
 )
 
@@ -38,6 +39,14 @@ func (h *Handler) ListMedia(c *gin.Context) {
 		}
 	}
 	lib := strings.TrimSpace(c.Query("library_id"))
+	fileType := strings.TrimSpace(c.Query("file_type"))
+	photoTagID := strings.TrimSpace(c.Query("photo_tag"))
+	photoPlaceID := strings.TrimSpace(c.Query("photo_place"))
+	if lib != "" && fileType == "image" {
+		if libID, err := strconv.ParseInt(lib, 10, 64); err == nil && libID > 0 {
+			_, _ = photoclass.RepairLibraryPhotoTags(h.App.DB, libID)
+		}
+	}
 	if lib != "" && strings.EqualFold(profile.LibraryScope, "selected") {
 		if libID, perr := strconv.ParseInt(lib, 10, 64); perr == nil && libID > 0 {
 			if _, ok := profile.AllowedLibraryIDs[libID]; !ok {
@@ -60,6 +69,8 @@ func (h *Handler) ListMedia(c *gin.Context) {
 			NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.poster')), ''),
 			NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.extra.poster')), '')
 		) AS poster_url,
+		NULLIF(json_extract(m.meta_json, '$.photo.taken_at'), '') AS photo_taken_at,
+		COALESCE(json_extract(m.meta_json, '$.photo.tags'), '[]') AS photo_tags,
 		CASE WHEN COALESCE(json_extract(m.meta_json, '$.scrape.source'), '') NOT IN ('', 'aggregated-stub')
 			AND COALESCE(json_extract(m.meta_json, '$.scrape.extra.note'), '') != 'stub'
 			AND (
@@ -78,19 +89,32 @@ func (h *Handler) ListMedia(c *gin.Context) {
 		q += ` AND library_id = ?`
 		args = append(args, lib)
 	}
-	limit := 500
+	if fileType != "" {
+		q += ` AND m.file_type = ?`
+		args = append(args, fileType)
+	}
+	if photoPlaceID != "" {
+		q += ` AND json_extract(m.meta_json, '$.photo.place_id') = ?`
+		args = append(args, photoPlaceID)
+	}
+	maxLimit := 500
+	if fileType == "image" {
+		maxLimit = 5000
+	}
+	limit := maxLimit
 	if ls := c.Query("limit"); ls != "" {
-		if n, err := strconv.Atoi(ls); err == nil && n > 0 && n <= 500 {
+		if n, err := strconv.Atoi(ls); err == nil && n > 0 && n <= maxLimit {
 			limit = n
 		}
 	}
 	switch c.DefaultQuery("sort", "id_desc") {
 	case "created_desc":
 		q += ` ORDER BY datetime(created_at) DESC`
+	case "taken_desc":
+		q += ` ORDER BY datetime(COALESCE(NULLIF(json_extract(m.meta_json, '$.photo.taken_at'), ''), created_at)) DESC`
 	default:
 		q += ` ORDER BY id DESC`
 	}
-	q += ` LIMIT ` + strconv.Itoa(limit)
 	rows, err := h.App.DB.Query(q, args...)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -101,9 +125,9 @@ func (h *Handler) ListMedia(c *gin.Context) {
 	for rows.Next() {
 		var mid int64
 		var libID sql.NullInt64
-		var fileID, title, orig, path, ftype, format, status, created, lastPlayAt, releaseDate, posterURL sql.NullString
+		var fileID, title, orig, path, ftype, format, status, created, lastPlayAt, releaseDate, posterURL, photoTakenAt, photoTagsRaw sql.NullString
 		var dur, w, h, br, releaseYear, scraped sql.NullInt64
-		if err := rows.Scan(&mid, &libID, &fileID, &title, &orig, &path, &ftype, &dur, &w, &h, &br, &format, &status, &created, &lastPlayAt, &releaseDate, &releaseYear, &posterURL, &scraped); err != nil {
+		if err := rows.Scan(&mid, &libID, &fileID, &title, &orig, &path, &ftype, &dur, &w, &h, &br, &format, &status, &created, &lastPlayAt, &releaseDate, &releaseYear, &posterURL, &photoTakenAt, &photoTagsRaw, &scraped); err != nil {
 			continue
 		}
 		if strings.EqualFold(profile.LibraryScope, "selected") {
@@ -114,6 +138,11 @@ func (h *Handler) ListMedia(c *gin.Context) {
 				continue
 			}
 		}
+		photoTags := parseJSONStringArray(photoTagsRaw.String)
+		photoTagIDs := photoclass.TagIDs(photoTags)
+		if photoTagID != "" && photoTagID != "all" && !photoTagIDMatches(photoTagID, photoTags, photoTagIDs) {
+			continue
+		}
 		items = append(items, gin.H{
 			"id": mid, "library_id": libID.Int64, "file_id": fileID.String,
 			"title": title.String, "original_title": orig.String, "file_path": path.String,
@@ -121,9 +150,35 @@ func (h *Handler) ListMedia(c *gin.Context) {
 			"bitrate": br.Int64, "format": format.String, "status": status.String, "created_at": created.String,
 			"last_play_at": lastPlayAt.String, "release_date": releaseDate.String, "year": releaseYear.Int64,
 			"poster_url": posterURL.String, "scraped": scraped.Int64 == 1,
+			"photo_taken_at": photoTakenAt.String,
+			"photo_tags":     photoTags,
+			"photo_tag_ids":  photoTagIDs,
 		})
+		if len(items) >= limit {
+			break
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{"items": items})
+}
+
+func photoTagIDMatches(filterID string, tags, tagIDs []string) bool {
+	if filterID == "" || filterID == "all" {
+		return true
+	}
+	for _, id := range tagIDs {
+		if id == filterID {
+			return true
+		}
+	}
+	if strings.HasPrefix(filterID, "custom:") {
+		name := strings.TrimPrefix(filterID, "custom:")
+		for _, tag := range tags {
+			if tag == name {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (h *Handler) GetMedia(c *gin.Context) {

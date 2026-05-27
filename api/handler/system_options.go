@@ -14,12 +14,13 @@ import (
 )
 
 // SystemOptionsJSON is persisted in system_options.options_json (single row id=1).
-// Recognition (ASR/OCR) is stored in config.yml under subtitle.*.
+// Recognition (ASR/OCR) and photo_classify are stored in config.yml.
 type SystemOptionsJSON struct {
-	General      SystemOptionsGeneral      `json:"general"`
-	Playback     SystemOptionsPlayback     `json:"playback"`
-	Transcoder   SystemOptionsTranscoder   `json:"transcoder"`
-	Recognition  SystemOptionsRecognition  `json:"recognition"`
+	General       SystemOptionsGeneral       `json:"general"`
+	Playback      SystemOptionsPlayback      `json:"playback"`
+	Transcoder    SystemOptionsTranscoder    `json:"transcoder"`
+	Recognition   SystemOptionsRecognition   `json:"recognition"`
+	PhotoClassify SystemOptionsPhotoClassify `json:"photo_classify"`
 }
 
 type SystemOptionsRecognition struct {
@@ -96,6 +97,7 @@ func defaultSystemOptions() SystemOptionsJSON {
 			MaxBackgroundConcurrent:       "1",
 		},
 		Recognition: defaultRecognitionOptions(),
+		PhotoClassify: defaultPhotoClassifyOptions(),
 	}
 }
 
@@ -150,6 +152,7 @@ func fillSystemOptionsDefaults(o *SystemOptionsJSON, def SystemOptionsJSON) {
 		o.Transcoder.MaxBackgroundConcurrent = def.Transcoder.MaxBackgroundConcurrent
 	}
 	fillRecognitionDefaults(&o.Recognition, def.Recognition)
+	fillPhotoClassifyDefaults(&o.PhotoClassify, def.PhotoClassify)
 }
 
 func fillRecognitionDefaults(o *SystemOptionsRecognition, def SystemOptionsRecognition) {
@@ -254,6 +257,7 @@ func normalizeSystemOptions(o SystemOptionsJSON) SystemOptionsJSON {
 		}
 	}
 	o.Recognition = normalizeRecognitionOptions(o.Recognition)
+	o.PhotoClassify = normalizePhotoClassifyOptions(o.PhotoClassify)
 	return o
 }
 
@@ -409,6 +413,7 @@ func (h *Handler) GetSystemOptions(c *gin.Context) {
 	opts := decodeSystemOptions(raw.String)
 	if h.App != nil && h.App.Config != nil {
 		opts.Recognition = normalizeRecognitionOptions(recognitionFromConfig(h.App.Config))
+		opts.PhotoClassify = photoClassifyFromConfig(h.App.Config)
 	}
 	c.JSON(http.StatusOK, opts)
 }
@@ -430,8 +435,13 @@ func (h *Handler) PutSystemOptions(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存识别配置失败: " + err.Error()})
 		return
 	}
+	if err := h.applyPhotoClassifyConfig(merged.PhotoClassify); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存智能分类配置失败: " + err.Error()})
+		return
+	}
 	if h.App != nil && h.App.Config != nil {
 		merged.Recognition = normalizeRecognitionOptions(recognitionFromConfig(h.App.Config))
+		merged.PhotoClassify = photoClassifyFromConfig(h.App.Config)
 	}
 	out, err := json.Marshal(merged)
 	if err != nil {

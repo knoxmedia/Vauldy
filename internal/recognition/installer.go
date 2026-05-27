@@ -300,6 +300,11 @@ func ensureRepoScript(mediaRoot, rel string) error {
 }
 
 func downloadFile(ctx context.Context, url, dest string) error {
+	return DownloadFile(ctx, url, dest)
+}
+
+// DownloadFile fetches url to dest (atomic via .part rename).
+func DownloadFile(ctx context.Context, url, dest string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err

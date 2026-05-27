@@ -101,6 +101,12 @@ export type MediaItem = {
   year?: number;
   /** From scrape or empty; UI may fall back to `/uploads/posters/{id}.jpg`. */
   poster_url?: string;
+  /** EXIF or file mtime for photo libraries. */
+  photo_taken_at?: string;
+  /** AI / manual classification tags. */
+  photo_tags?: string[];
+  /** Stable catalog ids for photo_tags (builtin categories). */
+  photo_tag_ids?: string[];
   /** True when meaningful scrape metadata exists. */
   scraped?: boolean;
 };
@@ -131,10 +137,34 @@ export function hasScrapedPosterUrl(r: Pick<MediaItem, "poster_url">): boolean {
 }
 
 /** Poster/thumbnail URL for grids: scraped poster or server-generated frame capture. */
-export function mediaPosterSrc(r: Pick<MediaItem, "id" | "poster_url">): string {
+export function mediaPosterSrc(r: Pick<MediaItem, "id" | "poster_url"> & { file_type?: string }): string {
+  if (r.file_type === "image") {
+    return photoThumbSrc(r.id);
+  }
   const u = normalizeListPosterUrl(r.poster_url || "");
   if (u) return u;
   return localPosterSrc(r.id);
+}
+
+/** Cached photo thumbnail (480px max edge). */
+export function photoThumbSrc(id: number): string {
+  const token = useAuthStore.getState().token;
+  const q = token ? `?access_token=${encodeURIComponent(token)}` : "";
+  return `/api/v1/media/${id}/photo/thumb.jpg${q}`;
+}
+
+/** Cached photo medium preview (1920px max edge). */
+export function photoMediumSrc(id: number): string {
+  const token = useAuthStore.getState().token;
+  const q = token ? `?access_token=${encodeURIComponent(token)}` : "";
+  return `/api/v1/media/${id}/photo/medium.jpg${q}`;
+}
+
+/** Original image file for download / full-screen view. */
+export function photoOriginalSrc(id: number): string {
+  const token = useAuthStore.getState().token;
+  const q = token ? `?access_token=${encodeURIComponent(token)}` : "";
+  return `/api/v1/media/${id}/play${q}`;
 }
 
 export type ManualMatchResponse = {
@@ -300,12 +330,21 @@ export async function cancelScanTask(id: number) {
 
 export async function fetchMedia(
   libraryId?: number,
-  opts?: { sort?: "id_desc" | "created_desc"; limit?: number }
+  opts?: {
+    sort?: "id_desc" | "created_desc" | "taken_desc";
+    limit?: number;
+    file_type?: string;
+    photo_tag?: string;
+    photo_place?: string;
+  },
 ) {
   const params: Record<string, string | number> = {};
   if (libraryId !== undefined) params.library_id = libraryId;
   if (opts?.sort) params.sort = opts.sort;
   if (opts?.limit !== undefined) params.limit = opts.limit;
+  if (opts?.file_type) params.file_type = opts.file_type;
+  if (opts?.photo_tag) params.photo_tag = opts.photo_tag;
+  if (opts?.photo_place) params.photo_place = opts.photo_place;
   const { data } = await api.get<{ items?: MediaItem[] }>("/api/v1/media", { params });
   return data?.items ?? [];
 }
@@ -381,6 +420,82 @@ export function isTVLibraryType(type?: string): boolean {
 
 export function isMusicLibraryType(type?: string): boolean {
   return (type || "").trim().toLowerCase() === "music";
+}
+
+export function isPhotoLibraryType(type?: string): boolean {
+  return (type || "").trim().toLowerCase() === "photo";
+}
+
+export type PhotoCategory = {
+  id: string;
+  name: string;
+  type: string;
+  count: number;
+};
+
+export type PhotoPlace = {
+  id: string;
+  name: string;
+  type: string;
+  count: number;
+  cover_id?: number;
+};
+
+export async function fetchPhotoCategories(libraryId: number): Promise<PhotoCategory[]> {
+  const { data } = await api.get<{ items?: PhotoCategory[] }>(`/api/v1/library/${libraryId}/photo/categories`);
+  return data?.items ?? [];
+}
+
+export async function fetchPhotoPlaces(libraryId: number): Promise<PhotoPlace[]> {
+  const { data } = await api.get<{ items?: PhotoPlace[] }>(`/api/v1/library/${libraryId}/photo/places`);
+  return data?.items ?? [];
+}
+
+export async function backfillPhotoLocations(libraryId: number): Promise<{ ok: boolean; queued: number }> {
+  const { data } = await api.post<{ ok: boolean; queued: number }>(
+    `/api/v1/library/${libraryId}/photo/locations/backfill`,
+  );
+  return data ?? { ok: false, queued: 0 };
+}
+
+export async function fetchPhotoLocationProgress(libraryId: number): Promise<{
+  total: number;
+  located: number;
+  pending: number;
+  percent: number;
+}> {
+  const { data } = await api.get<{ total: number; located: number; pending: number; percent: number }>(
+    `/api/v1/library/${libraryId}/photo/locations/progress`,
+  );
+  return data ?? { total: 0, located: 0, pending: 0, percent: 0 };
+}
+
+export async function fetchPhotoClassifyProgress(libraryId: number): Promise<{
+  total: number;
+  classified: number;
+  pending: number;
+  percent: number;
+}> {
+  const { data } = await api.get<{ total: number; classified: number; pending: number; percent: number }>(
+    `/api/v1/library/${libraryId}/photo/classify/progress`,
+  );
+  return data ?? { total: 0, classified: 0, pending: 0, percent: 0 };
+}
+
+export async function enqueuePhotoLibraryClassify(
+  libraryId: number,
+  force = false,
+): Promise<{ ok: boolean; queued: number }> {
+  const { data } = await api.post<{ ok: boolean; queued: number }>(
+    `/api/v1/library/${libraryId}/photo/classify`,
+    {},
+    { params: force ? { force: "1" } : undefined },
+  );
+  return data ?? { ok: false, queued: 0 };
+}
+
+export async function updatePhotoTags(mediaId: number, tags: string[]): Promise<void> {
+  await api.patch(`/api/v1/media/${mediaId}/photo/tags`, { tags });
 }
 
 export type AlbumSummary = {
@@ -1669,11 +1784,21 @@ export type SystemOptionsRecognition = {
   ocr: SystemOptionsOCR;
 };
 
+export type SystemOptionsPhotoClassify = {
+  auto_on_scan: boolean;
+  engine: string;
+  python_path: string;
+  script_path: string;
+  model_path: string;
+  labels_path: string;
+};
+
 export type SystemOptions = {
   general: SystemOptionsGeneral;
   playback: SystemOptionsPlayback;
   transcoder: SystemOptionsTranscoder;
   recognition: SystemOptionsRecognition;
+  photo_classify: SystemOptionsPhotoClassify;
 };
 
 export async function fetchSystemOptions() {
@@ -1722,6 +1847,29 @@ export async function installSystemOptionsASR() {
 export async function installSystemOptionsOCR() {
   const { data } = await api.post<RecognitionInstallResult>(
     "/api/v1/admin/system-options/install/ocr",
+    {},
+    { timeout: 45 * 60 * 1000 },
+  );
+  return data;
+}
+
+export type PhotoClassifyInstallResult = {
+  ok: boolean;
+  message: string;
+  photo_classify?: SystemOptionsPhotoClassify;
+};
+
+export async function testSystemOptionsPhotoClassify(photoClassify?: SystemOptionsPhotoClassify) {
+  const { data } = await api.post<RecognitionTestResult>(
+    "/api/v1/admin/system-options/test/photo-classify",
+    photoClassify ? { photo_classify: photoClassify } : {},
+  );
+  return data;
+}
+
+export async function installSystemOptionsPhotoClassify() {
+  const { data } = await api.post<PhotoClassifyInstallResult>(
+    "/api/v1/admin/system-options/install/photo-classify",
     {},
     { timeout: 45 * 60 * 1000 },
   );

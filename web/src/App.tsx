@@ -28,7 +28,7 @@ import {
   useLocation,
   useNavigate,
 } from "react-router-dom";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import HomePage from "./pages/Home";
 import LibraryPage from "./pages/Library";
 import BrowsePage from "./pages/Browse";
@@ -62,6 +62,7 @@ import { defaultPlayerPrefs, normalizePlayerPrefs } from "./lib/playerPrefs";
 import { isAdminRole, useAuthStore } from "./store/auth";
 import MainNav from "./components/MainNav";
 import MusicPlayerBar from "./components/MusicPlayerBar";
+import ScrollToTopFab from "./components/ScrollToTopFab";
 import { useMusicPlayerStore } from "./store/musicPlayer";
 
 const { Header, Content, Sider } = Layout;
@@ -118,6 +119,7 @@ function MainShell() {
   const isPlayerRoute = loc.pathname.startsWith("/player");
   const isHomeRoute = loc.pathname === "/" || loc.pathname === "";
   const musicPlayerActive = useMusicPlayerStore((s) => s.active);
+  const contentRef = useRef<HTMLElement>(null);
 
   const [mode, setModeState] = useState<SidebarMode>(() => readSidebarMode());
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -408,6 +410,7 @@ function MainShell() {
         )}
 
         <Content
+          ref={contentRef}
           className={`app-shell-content${isPlayerRoute ? " app-shell-content-player" : ""}${musicPlayerActive && !isPlayerRoute ? " app-shell-content-music-player" : ""}`}
           style={{
             background: "#000",
@@ -420,6 +423,7 @@ function MainShell() {
           </div>
         </Content>
         {!isPlayerRoute ? <MusicPlayerBar /> : null}
+        {!isPlayerRoute ? <ScrollToTopFab scrollRootRef={contentRef} bottomOffset={musicPlayerActive ? 96 : 24} /> : null}
       </Layout>
     </Layout>
   );

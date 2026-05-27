@@ -20,6 +20,7 @@ type Config struct {
 	Subtitle     SubtitleProcessingConfig `yaml:"subtitle"`
 	ATrack       ATrackConfig             `yaml:"atrack"`
 	Lyric        LyricConfig              `yaml:"lyric"`
+	PhotoClassify PhotoClassifyConfig     `yaml:"photo_classify"`
 	JIT          JITConfig                `yaml:"jit"`
 	CORS         CORSConfig               `yaml:"cors"`
 	// PowerPlayer is included in GET /media/:id/hls playback plans for the web player (PowerPlayer 6 setup).
@@ -105,6 +106,36 @@ type ATrackConfig struct {
 type LyricConfig struct {
 	// AutoOnScan inserts a pending lyric_task when scan discovers a new audio track without lyrics.
 	AutoOnScan *bool `yaml:"auto_on_scan"`
+}
+
+// PhotoClassifyConfig controls AI photo tagging for photo libraries.
+type PhotoClassifyConfig struct {
+	// AutoOnScan enqueues photo_classify_task when scan discovers a new image in a photo library.
+	AutoOnScan *bool `yaml:"auto_on_scan"`
+	// Engine: auto (onnx if model exists else heuristic), heuristic, onnx.
+	Engine     string `yaml:"engine"`
+	PythonPath string `yaml:"python_path"`
+	ScriptPath string `yaml:"script_path"`
+	ModelPath  string `yaml:"model_path"`
+	LabelsPath string `yaml:"labels_path"`
+}
+
+func (c *Config) PhotoClassifyAutoOnScan() bool {
+	if c == nil || c.PhotoClassify.AutoOnScan == nil {
+		return true
+	}
+	return *c.PhotoClassify.AutoOnScan
+}
+
+func (c *Config) PhotoClassifyEngine() string {
+	if c == nil {
+		return "auto"
+	}
+	e := strings.TrimSpace(c.PhotoClassify.Engine)
+	if e == "" {
+		return "auto"
+	}
+	return e
 }
 
 // JITConfig controls just-in-time transcode behavior.
@@ -405,7 +436,7 @@ func (c *Config) Addr() string {
 }
 
 func (c *Config) EnsureDirs() error {
-	for _, d := range []string{c.Data.Dir, c.Data.Transcode, c.Data.Preview, c.Data.Subtitle, c.Data.Upload, c.Data.Chunks, c.Data.ATracks, c.Data.Keyframes, c.Data.Static, c.Data.MetadataLibrary} {
+	for _, d := range []string{c.Data.Dir, c.Data.Transcode, c.Data.Preview, filepath.Join(c.Data.Preview, "photos"), c.Data.Subtitle, c.Data.Upload, c.Data.Chunks, c.Data.ATracks, c.Data.Keyframes, c.Data.Static, c.Data.MetadataLibrary} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return err
 		}

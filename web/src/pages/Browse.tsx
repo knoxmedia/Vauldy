@@ -35,12 +35,14 @@ import {
   fetchMedia,
   isTVLibraryType,
   isMusicLibraryType,
+  isPhotoLibraryType,
   mediaPosterSrc,
   normalizeListPosterUrl,
   type MediaMatchListUpdate,
 } from "../api/client";
 import SeriesBrowse from "./SeriesBrowse";
 import MusicBrowse from "./MusicBrowse";
+import PhotoBrowse from "./PhotoBrowse";
 import { readRecentPlaylists, rememberPlaylistAdded } from "../lib/recentPlaylists";
 import styles from "./Browse.module.css";
 
@@ -208,14 +210,17 @@ export default function BrowsePage() {
   const [libraryResolved, setLibraryResolved] = useState(() => libFromUrl == null);
   const [tvUseFlatFiles, setTvUseFlatFiles] = useState(false);
   const [musicUseFlatFiles, setMusicUseFlatFiles] = useState(false);
+  const [photoUseFlatFiles, setPhotoUseFlatFiles] = useState(false);
 
   useEffect(() => {
     setTvUseFlatFiles(false);
     setMusicUseFlatFiles(false);
+    setPhotoUseFlatFiles(false);
   }, [libFromUrl]);
 
   const handleTvBrowseEmpty = useCallback(() => setTvUseFlatFiles(true), []);
   const handleMusicBrowseEmpty = useCallback(() => setMusicUseFlatFiles(true), []);
+  const handlePhotoBrowseEmpty = useCallback(() => setPhotoUseFlatFiles(true), []);
 
   useEffect(() => {
     if (libFromUrl == null) {
@@ -280,9 +285,10 @@ export default function BrowsePage() {
   useEffect(() => {
     if (libFromUrl != null && isTVLibraryType(libraryType) && !tvUseFlatFiles) return;
     if (libFromUrl != null && isMusicLibraryType(libraryType) && !musicUseFlatFiles) return;
+    if (libFromUrl != null && isPhotoLibraryType(libraryType) && !photoUseFlatFiles) return;
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [libFromUrl, sortParam, libraryType, tvUseFlatFiles, musicUseFlatFiles]);
+  }, [libFromUrl, sortParam, libraryType, tvUseFlatFiles, musicUseFlatFiles, photoUseFlatFiles]);
 
   useEffect(() => {
     if (sortParam === "recent") {
@@ -627,6 +633,15 @@ export default function BrowsePage() {
         libraryId={libFromUrl}
         libraryName={libraryName}
         onEmpty={handleMusicBrowseEmpty}
+      />
+    );
+  }
+  if (libFromUrl != null && isPhotoLibraryType(libraryType) && !photoUseFlatFiles) {
+    return (
+      <PhotoBrowse
+        libraryId={libFromUrl}
+        libraryName={libraryName}
+        onEmpty={handlePhotoBrowseEmpty}
       />
     );
   }

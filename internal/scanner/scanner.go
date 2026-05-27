@@ -14,6 +14,8 @@ import (
 
 	"knox-media/internal/musicparse"
 	"knox-media/internal/musicstore"
+	"knox-media/internal/photoparse"
+	"knox-media/internal/photogeocode"
 	"knox-media/internal/scraper"
 	"knox-media/internal/tvparse"
 	"knox-media/internal/tvstore"
@@ -26,6 +28,7 @@ type Scanner struct {
 	DB           *sql.DB
 	FFprobePath  string
 	SkipHash     bool
+	PhotoGeocode *photogeocode.Service
 	// FFprobeExtra optional args before the input path (e.g. analyzeduration/probesize for faster scans).
 	FFprobeExtra []string
 	OnFile       func(path string, err error)
@@ -62,6 +65,7 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 	libraryType := s.loadLibraryType(libraryID)
 	tvLibrary := tvparse.IsTVLibraryType(libraryType)
 	musicLibrary := musicparse.IsMusicLibraryType(libraryType)
+	photoLibrary := photoparse.IsPhotoLibraryType(libraryType)
 	if _, err := s.DB.Exec(`DELETE FROM library_node WHERE library_id = ?`, libraryID); err != nil {
 		return 0, err
 	}
@@ -111,7 +115,7 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 			}
 			_ = s.upsertNode(libraryID, parentPath, nodePath, nodeName, "file", nil)
 			ft := fileutil.GuessFileType(path)
-			if ft != "video" && ft != "audio" {
+			if !photoparse.ShouldScanFile(libraryType, ft) {
 				return nil
 			}
 			normPath := normalizeMediaPath(path)
@@ -136,6 +140,9 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 					if musicLibrary && ft == "audio" {
 						s.linkMusicIfTrack(libraryID, existingMediaID, path, "")
 					}
+					if photoLibrary && ft == "image" {
+						s.refreshPhotoMeta(existingMediaID, path)
+					}
 					if s.OnFile != nil {
 						s.OnFile(path, nil)
 					}
@@ -159,6 +166,7 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 			fileID := uuid.NewString()
 			var dur, w, h, br int
 			var format, meta string
+			var photoMeta photoparse.PhotoMeta
 			if ft == "video" || ft == "audio" {
 				if pr, e := ffprobe.ProbeOptions(s.FFprobePath, path, s.FFprobeExtra); e == nil {
 					dur = pr.DurationSec
@@ -167,6 +175,17 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 					br = pr.Bitrate
 					format = pr.Format
 					meta = pr.RawJSON
+				}
+			} else if ft == "image" {
+				photoMeta = photoparse.ParseFromFile(path)
+				if s.PhotoGeocode != nil {
+					s.PhotoGeocode.EnrichMeta(&photoMeta)
+				}
+				w = photoMeta.Width
+				h = photoMeta.Height
+				format = strings.TrimPrefix(photoMeta.MimeType, "image/")
+				if strings.TrimSpace(photoMeta.Title) != "" {
+					title = photoMeta.Title
 				}
 			}
 			var md5sum sql.NullString
@@ -207,6 +226,9 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 			}
 			if tvInfo != nil {
 				metaJSON = mergeTVMetaJSON(metaJSON, *tvInfo)
+			}
+			if photoLibrary && ft == "image" {
+				metaJSON = photoparse.MergePhotoMetaJSON(metaJSON, photoMeta)
 			}
 			var res sql.Result
 			var e error
@@ -364,6 +386,21 @@ func (s *Scanner) linkMusicIfTrack(libraryID, mediaID int64, path, ffprobeJSON s
 	}
 	meta := musicstore.DecodeMusicMeta(raw, path)
 	_ = musicstore.LinkTrack(s.DB, libraryID, mediaID, meta)
+}
+
+func (s *Scanner) refreshPhotoMeta(mediaID int64, path string) {
+	var metaJSON sql.NullString
+	_ = s.DB.QueryRow(`SELECT COALESCE(meta_json,'') FROM media WHERE id = ?`, mediaID).Scan(&metaJSON)
+	photoMeta := photoparse.ParseFromFile(path)
+	if s.PhotoGeocode != nil {
+		s.PhotoGeocode.EnrichMeta(&photoMeta)
+	}
+	merged := photoparse.MergePhotoMetaJSON(metaJSON.String, photoMeta)
+	_, _ = s.DB.Exec(`
+		UPDATE media SET width = ?, height = ?, meta_json = ?, format = ?
+		WHERE id = ?`,
+		nullInt(photoMeta.Width), nullInt(photoMeta.Height), merged, nullStringVal(strings.TrimPrefix(photoMeta.MimeType, "image/")), mediaID,
+	)
 }
 
 func (s *Scanner) linkTVIfEpisode(libraryID, mediaID int64, path string) {

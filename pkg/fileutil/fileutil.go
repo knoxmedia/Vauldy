@@ -15,7 +15,9 @@ var audioExts = map[string]struct{}{
 }
 
 var imageExts = map[string]struct{}{
-	".jpg": {}, ".jpeg": {}, ".png": {}, ".gif": {}, ".webp": {}, ".bmp": {}, ".heic": {},
+	".jpg": {}, ".jpeg": {}, ".png": {}, ".gif": {}, ".webp": {}, ".bmp": {}, ".heic": {}, ".heif": {},
+	".tif": {}, ".tiff": {}, ".svg": {},
+	".cr2": {}, ".nef": {}, ".arw": {}, ".dng": {}, ".raf": {}, ".orf": {}, ".rw2": {},
 }
 
 var docExts = map[string]struct{}{

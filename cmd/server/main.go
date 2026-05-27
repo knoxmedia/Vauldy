@@ -25,12 +25,14 @@ import (
 	"knox-media/internal/app"
 	"knox-media/internal/atrack"
 	"knox-media/internal/config"
+	"knox-media/internal/imagethumb"
 	jitsession "knox-media/internal/jit/session"
 	"knox-media/internal/jit/ingestprepare"
 	jitmetrics "knox-media/internal/jit/metrics"
 	"knox-media/internal/keyframe"
 	"knox-media/internal/lyrictask"
 	"knox-media/internal/monitor"
+	"knox-media/internal/photoclass"
 	"knox-media/internal/preview"
 	"knox-media/internal/scanner"
 	"knox-media/internal/store"
@@ -110,6 +112,9 @@ func main() {
 	keyframeWorker := keyframe.NewWorker(db, cfg.FFmpeg.FFprobePath, cfg.Data.Keyframes)
 	lyricWorkDir := filepath.Join(cfg.Data.Dir, "lyrics")
 	lyricWorker := lyrictask.NewWorker(db, lyricWorkDir, cfg.FFmpeg.FFprobePath, subSvc)
+	photoClassifyWorker := photoclass.NewWorker(db, filepath.Dir(cfgPath), cfg.FFmpeg.FFmpegPath, cfg.Data.Preview, func() config.PhotoClassifyConfig {
+		return cfg.PhotoClassify
+	})
 
 	redisAddr := strings.TrimSpace(os.Getenv("KNOX_MEDIA_REDIS_ADDR"))
 	if redisAddr == "" {
@@ -170,7 +175,7 @@ func main() {
 		FFprobeExtra: ffprobeExtra,
 	}
 	sc.OnMediaAdded = func(mediaID int64, _ string, ft string) {
-		go enqueueAutoTasksOnMediaAdded(db, cfg, subSvc, atrackWorker, keyframeWorker, lyricWorker, mediaID, ft)
+		go enqueueAutoTasksOnMediaAdded(db, cfg, subSvc, atrackWorker, keyframeWorker, lyricWorker, photoClassifyWorker, mediaID, ft)
 		if ft == "video" {
 			go func(id int64) {
 				_, _ = packageWorker.EnqueueForMedia(id)
@@ -181,7 +186,7 @@ func main() {
 	mon := monitor.NewService(db, sc, 15*time.Second)
 	go mon.Start(context.Background())
 
-	engine := api.NewEngine(cfg, application, worker, packageWorker, previewWorker, subSvc, up, instantScheduler, sessionMgr, atrackWorker, keyframeWorker, lyricWorker)
+	engine := api.NewEngine(cfg, application, worker, packageWorker, previewWorker, subSvc, up, instantScheduler, sessionMgr, atrackWorker, keyframeWorker, lyricWorker, photoClassifyWorker)
 	log.Printf("knox-media listening on http://%s", cfg.Addr())
 	if err := engine.Run(cfg.Addr()); err != nil {
 		log.Fatal(err)
@@ -270,7 +275,7 @@ func resolveConfigPath() string {
 	return "config.yml"
 }
 
-func enqueueAutoTasksOnMediaAdded(db *sql.DB, cfg *config.Config, subSvc *subtitle.Service, atw *atrack.Worker, kfw *keyframe.Worker, lw *lyrictask.Worker, mediaID int64, fileType string) {
+func enqueueAutoTasksOnMediaAdded(db *sql.DB, cfg *config.Config, subSvc *subtitle.Service, atw *atrack.Worker, kfw *keyframe.Worker, lw *lyrictask.Worker, pcw *photoclass.Worker, mediaID int64, fileType string) {
 	if db == nil || cfg == nil || mediaID <= 0 {
 		return
 	}
@@ -278,12 +283,18 @@ func enqueueAutoTasksOnMediaAdded(db *sql.DB, cfg *config.Config, subSvc *subtit
 	// JIT 关键帧索引与预编码：库级 jit_prepare_on_ingest 或 drm_enabled 时在 scanner/upload 路径由 ingestprepare.Kick 触发；否则仍在首次 JIT 点播时触发。
 	enqueueAutoPreviewTask(db, mediaID, fileType)
 	capturePosterOnScan(db, cfg, mediaID, fileType)
-	enqueueAutoScrapeTask(db, mediaID)
+	generatePhotoVariantsOnScan(db, cfg, mediaID, fileType)
+	if fileType != "image" {
+		enqueueAutoScrapeTask(db, mediaID)
+	}
 	if subSvc != nil && cfg.SubtitleAutoOnScan() && fileType == "video" {
 		_ = subSvc.EnsurePendingSubtitleTask(mediaID)
 	}
 	if lw != nil && cfg.LyricAutoOnScan() {
 		_ = lw.EnsurePendingIfNoLyrics(mediaID, fileType)
+	}
+	if pcw != nil && cfg.PhotoClassifyAutoOnScan() && fileType == "image" {
+		_ = pcw.EnsurePendingIfPhoto(mediaID, fileType)
 	}
 	if fileType == "video" {
 		if atw != nil && cfg.ATrackAutoOnScan() {
@@ -408,6 +419,46 @@ func capturePosterOnScan(db *sql.DB, cfg *config.Config, mediaID int64, fileType
 	}
 	scrape["extra"] = extra
 	root["scrape"] = scrape
+	merged, _ := json.Marshal(root)
+	_, _ = db.Exec(`UPDATE media SET meta_json = ? WHERE id = ?`, string(merged), mediaID)
+}
+
+func generatePhotoVariantsOnScan(db *sql.DB, cfg *config.Config, mediaID int64, fileType string) {
+	if fileType != "image" || db == nil || cfg == nil || mediaID <= 0 {
+		return
+	}
+	ffmpegPath := strings.TrimSpace(cfg.FFmpeg.FFmpegPath)
+	if ffmpegPath == "" {
+		return
+	}
+	var filePath sql.NullString
+	var metaRaw sql.NullString
+	if err := db.QueryRow(`SELECT file_path, COALESCE(meta_json,'') FROM media WHERE id = ? LIMIT 1`, mediaID).
+		Scan(&filePath, &metaRaw); err != nil {
+		return
+	}
+	if strings.TrimSpace(filePath.String) == "" {
+		return
+	}
+	cacheDir := filepath.Join(cfg.Data.Preview, "photos")
+	paths, err := imagethumb.Ensure(ffmpegPath, filePath.String, cacheDir, mediaID)
+	if err != nil {
+		return
+	}
+	var root map[string]any
+	if strings.TrimSpace(metaRaw.String) != "" {
+		_ = json.Unmarshal([]byte(metaRaw.String), &root)
+	}
+	if root == nil {
+		root = map[string]any{}
+	}
+	photo, _ := root["photo"].(map[string]any)
+	if photo == nil {
+		photo = map[string]any{}
+	}
+	photo["thumb_path"] = paths.Thumb
+	photo["medium_path"] = paths.Medium
+	root["photo"] = photo
 	merged, _ := json.Marshal(root)
 	_, _ = db.Exec(`UPDATE media SET meta_json = ? WHERE id = ?`, string(merged), mediaID)
 }

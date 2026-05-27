@@ -14,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"knox-media/internal/photoparse"
 	"knox-media/internal/scanner"
 	"knox-media/pkg/ffprobe"
 	"knox-media/pkg/fileutil"
@@ -142,7 +143,8 @@ func (h *Handler) startLibraryScanTask(libraryID int64, source string) (taskID i
 func (h *Handler) runLibraryScanTask(ctx context.Context, taskID, libraryID int64, folders []string) {
 	var processedCount int64
 	var addedCount int64
-	totalCount := countScannableFiles(folders)
+	libraryType := h.loadLibraryType(libraryID)
+	totalCount := countScannableFiles(folders, libraryType)
 	_, _ = h.App.DB.Exec(`UPDATE scan_task SET total_count = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, totalCount, taskID)
 	var ffprobeExtra []string
 	if h.App.Config.LibraryScanFastFFprobe() {
@@ -152,6 +154,7 @@ func (h *Handler) runLibraryScanTask(ctx context.Context, taskID, libraryID int6
 		DB:           h.App.DB,
 		FFprobePath:  h.App.Config.FFmpeg.FFprobePath,
 		SkipHash:     !h.App.Config.LibraryScanFileHash(),
+		PhotoGeocode: h.PhotoGeocode,
 		FFprobeExtra: ffprobeExtra,
 		OnFile: func(_ string, _ error) {
 			n := atomic.AddInt64(&processedCount, 1)
@@ -200,14 +203,22 @@ func (h *Handler) EnqueuePostIngestForNewMedia(mediaID int64, fileType string) {
 		return
 	}
 	go func(mid int64, ft string) {
-		h.enqueueScrapeTask(mid, 0, "auto-scan")
+		if ft != "image" {
+			h.enqueueScrapeTask(mid, 0, "auto-scan")
+		}
 		h.enqueuePreviewTask(mid, ft)
 		h.capturePosterFromVideo(mid, ft)
+		if ft == "image" {
+			h.GeneratePhotoVariants(mid)
+		}
 		if h.Subtitle != nil && h.App.Config != nil && h.App.Config.SubtitleAutoOnScan() && ft == "video" {
 			_ = h.Subtitle.EnsurePendingSubtitleTask(mid)
 		}
 		if h.LyricWorker != nil && h.App.Config != nil && h.App.Config.LyricAutoOnScan() {
 			_ = h.LyricWorker.EnsurePendingIfNoLyrics(mid, ft)
+		}
+		if h.PhotoClassifyWorker != nil && h.App.Config != nil && h.App.Config.PhotoClassifyAutoOnScan() && ft == "image" {
+			_ = h.PhotoClassifyWorker.EnsurePendingIfPhoto(mid, ft)
 		}
 	}(mediaID, fileType)
 }
@@ -258,7 +269,7 @@ func (h *Handler) enqueuePreviewTask(mediaID int64, fileType string) {
 	)
 }
 
-func countScannableFiles(roots []string) int64 {
+func countScannableFiles(roots []string, libraryType string) int64 {
 	var total int64
 	for _, root := range roots {
 		_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
@@ -266,12 +277,23 @@ func countScannableFiles(roots []string) int64 {
 				return nil
 			}
 			ft := fileutil.GuessFileType(path)
-			if ft == "video" || ft == "audio" {
+			if photoparse.ShouldScanFile(libraryType, ft) {
 				total++
 			}
 			return nil
 		})
 	}
 	return total
+}
+
+func (h *Handler) loadLibraryType(libraryID int64) string {
+	if h == nil || h.App == nil || h.App.DB == nil || libraryID <= 0 {
+		return ""
+	}
+	var t sql.NullString
+	if err := h.App.DB.QueryRow(`SELECT type FROM library WHERE id = ?`, libraryID).Scan(&t); err != nil {
+		return ""
+	}
+	return t.String
 }
 

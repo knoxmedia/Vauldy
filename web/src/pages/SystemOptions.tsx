@@ -28,6 +28,8 @@ import {
   testSystemOptionsOCR,
   installSystemOptionsASR,
   installSystemOptionsOCR,
+  testSystemOptionsPhotoClassify,
+  installSystemOptionsPhotoClassify,
   type SystemOptions,
   type RecognitionTestResult,
 } from "../api/client";
@@ -75,6 +77,14 @@ function defaultSystemOptions(): SystemOptions {
         mkvmerge_path: "",
       },
     },
+    photo_classify: {
+      auto_on_scan: true,
+      engine: "auto",
+      python_path: "",
+      script_path: "tools/photo_classify/classify.py",
+      model_path: "tools/photo_classify/models/mobilenetv2-7.onnx",
+      labels_path: "tools/photo_classify/imagenet_labels.txt",
+    },
   };
 }
 
@@ -93,6 +103,7 @@ function mergeSystemOptions(data: Partial<SystemOptions> | null | undefined): Sy
       asr,
       ocr: { ...base.recognition.ocr, ...(data.recognition?.ocr ?? {}) },
     },
+    photo_classify: { ...base.photo_classify, ...(data.photo_classify ?? {}) },
   };
 }
 
@@ -198,6 +209,12 @@ const ASR_PROVIDER_OPTIONS = [
   { value: "shell", label: "Shell 脚本" },
 ];
 
+const PHOTO_CLASSIFY_ENGINE_OPTIONS = [
+  { value: "auto", label: "自动（有 ONNX 模型时用 ONNX，否则启发式）" },
+  { value: "heuristic", label: "启发式（Go + 颜色/构图，无需 Python）" },
+  { value: "onnx", label: "ONNX（MobileNet + Python）" },
+];
+
 export default function SystemOptionsPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -209,6 +226,9 @@ export default function SystemOptionsPage() {
   const [ocrInstalling, setOcrInstalling] = useState(false);
   const [asrTestResult, setAsrTestResult] = useState<RecognitionTestResult | null>(null);
   const [ocrTestResult, setOcrTestResult] = useState<RecognitionTestResult | null>(null);
+  const [classifyTesting, setClassifyTesting] = useState(false);
+  const [classifyInstalling, setClassifyInstalling] = useState(false);
+  const [classifyTestResult, setClassifyTestResult] = useState<RecognitionTestResult | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -218,6 +238,7 @@ export default function SystemOptionsPage() {
       setBaseline(merged);
       setAsrTestResult(null);
       setOcrTestResult(null);
+      setClassifyTestResult(null);
     } catch {
       message.error("加载系统选项失败");
     } finally {
@@ -250,6 +271,7 @@ export default function SystemOptionsPage() {
     setOpts(baseline);
     setAsrTestResult(null);
     setOcrTestResult(null);
+    setClassifyTestResult(null);
     message.info("已恢复为上次加载的值");
   };
 
@@ -325,6 +347,47 @@ export default function SystemOptionsPage() {
       message.error("OCR 安装请求失败（可能超时，请查看服务器日志）");
     } finally {
       setOcrInstalling(false);
+    }
+  };
+
+  const applyInstalledPhotoClassify = (photoClassify: SystemOptions["photo_classify"] | undefined) => {
+    if (!photoClassify) return;
+    const patch = mergeSystemOptions({ photo_classify: photoClassify });
+    setOpts((p) => ({ ...p, photo_classify: patch.photo_classify }));
+    setBaseline((p) => ({ ...p, photo_classify: patch.photo_classify }));
+  };
+
+  const runClassifyTest = async () => {
+    setClassifyTesting(true);
+    setClassifyTestResult(null);
+    try {
+      const result = await testSystemOptionsPhotoClassify(opts.photo_classify);
+      setClassifyTestResult(result);
+    } catch {
+      setClassifyTestResult({ ok: false, message: "测试请求失败" });
+    } finally {
+      setClassifyTesting(false);
+    }
+  };
+
+  const runClassifyInstall = async () => {
+    setClassifyInstalling(true);
+    setClassifyTestResult(null);
+    try {
+      const result = await installSystemOptionsPhotoClassify();
+      if (result.photo_classify) {
+        applyInstalledPhotoClassify(result.photo_classify);
+      }
+      setClassifyTestResult({ ok: result.ok, message: result.message });
+      if (result.ok) {
+        message.success(result.message);
+      } else {
+        message.error(result.message);
+      }
+    } catch {
+      message.error("智能分类安装请求失败（可能超时，请查看服务器日志）");
+    } finally {
+      setClassifyInstalling(false);
     }
   };
 
@@ -840,6 +903,114 @@ export default function SystemOptionsPage() {
     </Space>
   );
 
+  const tabPhotoClassify = (
+    <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+      <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
+        图片库 AI 智能分类配置保存在 config.yml 的 photo_classify 段。启发式引擎由 Go 内置；ONNX 引擎需 Python 依赖与
+        MobileNet 模型。可使用「一键安装」自动部署到 tools/photo_classify/（共用 tools/recognition/.venv）。
+      </Typography.Paragraph>
+
+      <Flex justify="flex-end" wrap="wrap" gap={8}>
+        <Space wrap>
+          <Button icon={<CloudDownloadOutlined />} loading={classifyInstalling} onClick={() => void runClassifyInstall()}>
+            一键安装
+          </Button>
+          <Button icon={<ApiOutlined />} loading={classifyTesting} onClick={() => void runClassifyTest()}>
+            连接测试
+          </Button>
+        </Space>
+      </Flex>
+      {classifyTestResult ? (
+        <Typography.Text type={classifyTestResult.ok ? "success" : "danger"} style={{ fontSize: 13 }}>
+          {classifyTestResult.message}
+        </Typography.Text>
+      ) : null}
+
+      <SettingRow
+        title="扫描时自动分类"
+        description="导入或扫描图片库时，为新图片自动加入 photo_classify_task 队列。"
+      >
+        <Switch
+          checked={opts.photo_classify.auto_on_scan}
+          onChange={(v) =>
+            setOpts((p) => ({
+              ...p,
+              photo_classify: { ...p.photo_classify, auto_on_scan: v },
+            }))
+          }
+        />
+      </SettingRow>
+      <SettingRow
+        title="分类引擎"
+        description="auto：检测到 ONNX 模型时使用深度学习增强；heuristic：仅使用内置启发式；onnx：强制使用 ONNX。"
+      >
+        <Select
+          style={{ minWidth: 320 }}
+          options={PHOTO_CLASSIFY_ENGINE_OPTIONS}
+          value={opts.photo_classify.engine}
+          onChange={(v) =>
+            setOpts((p) => ({
+              ...p,
+              photo_classify: { ...p.photo_classify, engine: v },
+            }))
+          }
+        />
+      </SettingRow>
+      <SettingRow title="Python 路径" description="运行 classify.py 的解释器；留空在 Windows 用 python，其他平台用 python3。">
+        <Input
+          style={{ width: 480, maxWidth: "100%" }}
+          value={opts.photo_classify.python_path}
+          onChange={(e) =>
+            setOpts((p) => ({
+              ...p,
+              photo_classify: { ...p.photo_classify, python_path: e.target.value },
+            }))
+          }
+          placeholder="tools/recognition/.venv/Scripts/python.exe"
+        />
+      </SettingRow>
+      <SettingRow title="分类脚本路径" description="classify.py 的相对或绝对路径。" controlLayout="full">
+        <Input
+          style={{ width: 480, maxWidth: "100%" }}
+          value={opts.photo_classify.script_path}
+          onChange={(e) =>
+            setOpts((p) => ({
+              ...p,
+              photo_classify: { ...p.photo_classify, script_path: e.target.value },
+            }))
+          }
+          placeholder="tools/photo_classify/classify.py"
+        />
+      </SettingRow>
+      <SettingRow title="ONNX 模型路径" description="MobileNetV2 ONNX 模型；auto/onnx 引擎需要。">
+        <Input
+          style={{ width: 480, maxWidth: "100%" }}
+          value={opts.photo_classify.model_path}
+          onChange={(e) =>
+            setOpts((p) => ({
+              ...p,
+              photo_classify: { ...p.photo_classify, model_path: e.target.value },
+            }))
+          }
+          placeholder="tools/photo_classify/models/mobilenetv2-7.onnx"
+        />
+      </SettingRow>
+      <SettingRow title="ImageNet 标签文件" description="每行一个类别名，与模型输出索引对应。">
+        <Input
+          style={{ width: 480, maxWidth: "100%" }}
+          value={opts.photo_classify.labels_path}
+          onChange={(e) =>
+            setOpts((p) => ({
+              ...p,
+              photo_classify: { ...p.photo_classify, labels_path: e.target.value },
+            }))
+          }
+          placeholder="tools/photo_classify/imagenet_labels.txt"
+        />
+      </SettingRow>
+    </Space>
+  );
+
   return (
     <Card loading={loading}>
       <Flex justify="flex-end" style={{ marginBottom: 16 }}>
@@ -860,6 +1031,7 @@ export default function SystemOptionsPage() {
           { key: "transcoder", label: "转码器", children: tabTranscoder },
           { key: "asr", label: "语音识别", children: tabASR },
           { key: "ocr", label: "字符识别", children: tabOCR },
+          { key: "photo-classify", label: "智能分类", children: tabPhotoClassify },
         ]}
       />
     </Card>

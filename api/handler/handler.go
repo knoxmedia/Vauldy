@@ -10,6 +10,8 @@ import (
 	"knox-media/internal/jit/session"
 	"knox-media/internal/keyframe"
 	"knox-media/internal/lyrictask"
+	"knox-media/internal/photoclass"
+	"knox-media/internal/photogeocode"
 	"knox-media/internal/preview"
 	"knox-media/internal/subtitle"
 	"knox-media/internal/transcode"
@@ -27,14 +29,19 @@ type Handler struct {
 	SessionManager *session.Manager
 	AtrackWorker   *atrack.Worker
 	KeyframeWorker *keyframe.Worker
-	LyricWorker    *lyrictask.Worker
-	scanMu         sync.Mutex
+	LyricWorker         *lyrictask.Worker
+	PhotoClassifyWorker *photoclass.Worker
+	PhotoGeocode        *photogeocode.Service
+	PhotoLocationWorker *photogeocode.Worker
+	scanMu              sync.Mutex
 	scrapeRunMu    sync.Mutex
 	runningScans   map[int64]scanRuntime
 }
 
-func New(a *app.App, w *transcode.Worker, pkgw *transcode.PackageWorker, pw *preview.Worker, sub *subtitle.Service, u *upload.Service, instant *scheduler.Scheduler, sm *session.Manager, atw *atrack.Worker, kfw *keyframe.Worker, lw *lyrictask.Worker) *Handler {
-	h := &Handler{App: a, Worker: w, PackageWorker: pkgw, PreviewWorker: pw, Subtitle: sub, Upload: u, Instant: instant, SessionManager: sm, AtrackWorker: atw, KeyframeWorker: kfw, LyricWorker: lw, runningScans: map[int64]scanRuntime{}}
+func New(a *app.App, w *transcode.Worker, pkgw *transcode.PackageWorker, pw *preview.Worker, sub *subtitle.Service, u *upload.Service, instant *scheduler.Scheduler, sm *session.Manager, atw *atrack.Worker, kfw *keyframe.Worker, lw *lyrictask.Worker, pcw *photoclass.Worker) *Handler {
+	h := &Handler{App: a, Worker: w, PackageWorker: pkgw, PreviewWorker: pw, Subtitle: sub, Upload: u, Instant: instant, SessionManager: sm, AtrackWorker: atw, KeyframeWorker: kfw, LyricWorker: lw, PhotoClassifyWorker: pcw, PhotoGeocode: photogeocode.New(a.DB), runningScans: map[int64]scanRuntime{}}
+	_ = h.PhotoGeocode.EnsureSchema()
+	h.PhotoLocationWorker = photogeocode.NewWorker(a.DB, h.PhotoGeocode)
 	return h
 }
 

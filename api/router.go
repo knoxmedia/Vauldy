@@ -18,13 +18,14 @@ import (
 	"knox-media/internal/jit/session"
 	"knox-media/internal/keyframe"
 	"knox-media/internal/lyrictask"
+	"knox-media/internal/photoclass"
 	"knox-media/internal/preview"
 	"knox-media/internal/subtitle"
 	"knox-media/internal/transcode"
 	"knox-media/internal/upload"
 )
 
-func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worker, packageWorker *transcode.PackageWorker, previewWorker *preview.Worker, sub *subtitle.Service, up *upload.Service, instant *scheduler.Scheduler, sm *session.Manager, atw *atrack.Worker, kfw *keyframe.Worker, lw *lyrictask.Worker) *gin.Engine {
+func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worker, packageWorker *transcode.PackageWorker, previewWorker *preview.Worker, sub *subtitle.Service, up *upload.Service, instant *scheduler.Scheduler, sm *session.Manager, atw *atrack.Worker, kfw *keyframe.Worker, lw *lyrictask.Worker, pcw *photoclass.Worker) *gin.Engine {
 	if cfg.Server.Mode == "release" {
 		gin.SetMode(gin.ReleaseMode)
 	}
@@ -36,10 +37,12 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 	r.Static("/static", cfg.Data.Static)
 	r.Static(metadatalib.PublicURLPrefix, cfg.Data.MetadataLibrary)
 
-	h := handler.New(application, worker, packageWorker, previewWorker, sub, up, instant, sm, atw, kfw, lw)
+	h := handler.New(application, worker, packageWorker, previewWorker, sub, up, instant, sm, atw, kfw, lw, pcw)
 	go h.StartScheduleLoop(context.Background())
 	go h.StartScrapeTaskLoop(context.Background())
 	go h.StartLyricTaskLoop(context.Background())
+	go h.StartPhotoClassifyLoop(context.Background())
+	go h.StartPhotoLocationLoop(context.Background())
 
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "knox-media"})
@@ -71,6 +74,12 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 			auth.GET("/library/:id/genres", h.ListLibraryGenres)
 			auth.GET("/library/:id/genre/albums", h.ListGenreAlbums)
 			auth.GET("/library/:id/tracks", h.ListLibraryTracks)
+			auth.GET("/library/:id/photo/categories", h.ListPhotoCategories)
+			auth.GET("/library/:id/photo/places", h.ListPhotoPlaces)
+			auth.POST("/library/:id/photo/locations/backfill", h.BackfillPhotoLocations)
+			auth.GET("/library/:id/photo/locations/progress", h.PhotoLocationProgress)
+			auth.GET("/library/:id/photo/classify/progress", h.PhotoClassifyProgress)
+			auth.PATCH("/media/:id/photo/tags", h.UpdatePhotoTags)
 			auth.GET("/album/:id", h.GetAlbum)
 			auth.GET("/album/:id/play-target", h.GetAlbumPlayTarget)
 			auth.GET("/album/:id/artwork", h.ServeAlbumArtwork)
@@ -120,6 +129,9 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 			play.GET("/media/:id/preview", h.PreviewInfo)
 			play.GET("/media/:id/preview/sprite.jpg", h.PreviewSprite)
 			play.GET("/media/:id/preview/thumbs.vtt", h.PreviewVTT)
+			play.GET("/media/:id/photo", h.PhotoPreviewInfo)
+			play.GET("/media/:id/photo/thumb.jpg", h.ServePhotoThumb)
+			play.GET("/media/:id/photo/medium.jpg", h.ServePhotoMedium)
 			play.GET("/media/:id/subtitles/:sid/vtt", h.SubtitleVTT)
 			play.GET("/transcode/task/:id/status", h.GetTranscodeTaskStatus)
 			play.GET("/drm/widevine/service-cert", h.WidevineServiceCert)
@@ -157,6 +169,7 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 			adm.PUT("/library/:id", h.UpdateLibrary)
 			adm.DELETE("/library/:id", h.DeleteLibrary)
 			adm.POST("/library/:id/scan", h.ScanLibrary)
+			adm.POST("/library/:id/photo/classify", h.EnqueuePhotoLibraryClassify)
 			adm.GET("/scan/task", h.ListScanTasks)
 			adm.POST("/scan/task/:id/cancel", h.CancelScanTask)
 
@@ -228,6 +241,8 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 			adm.POST("/admin/system-options/test/ocr", h.TestSystemOptionsOCR)
 			adm.POST("/admin/system-options/install/asr", h.InstallSystemOptionsASR)
 			adm.POST("/admin/system-options/install/ocr", h.InstallSystemOptionsOCR)
+			adm.POST("/admin/system-options/test/photo-classify", h.TestSystemOptionsPhotoClassify)
+			adm.POST("/admin/system-options/install/photo-classify", h.InstallSystemOptionsPhotoClassify)
 
 			adm.GET("/admin/overview", h.AdminOverview)
 			adm.GET("/admin/access-log", h.ListAccessLogs)
