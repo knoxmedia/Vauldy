@@ -101,6 +101,20 @@ photo_face:
   python_path: tools/recognition/.venv/Scripts/python.exe
   script_path: tools/photo_face/detect.py
   similarity_threshold: 0.45
+# Office document preview via LibreOffice headless (DOC/DOCX/XLS/XLSX/PPT/PPTX -> PDF).
+doc_trans:
+  enabled: true
+  engine_order:
+    - office
+    - wps
+    - libreoffice
+  libreoffice_path: tools/doctran/LibreOfficePortable/App/libreoffice/program/soffice.exe
+  soffice_path: tools/doctran/LibreOfficePortable/App/libreoffice/program/soffice.exe
+  office_path: ""
+  wps_path: C:\Program Files (x86)\WPS Office\12.1.0.18276\office6
+  cache_dir: ""
+  cache_ttl_days: 30
+  timeout_seconds: 600
 # Just-in-time transcode options.
 jit:
   # When true, use a single long-running ffmpeg process that outputs HLS segments

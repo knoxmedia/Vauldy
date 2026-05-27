@@ -47,6 +47,8 @@ func ShouldScanFile(libraryType, fileType string) bool {
 		return fileType == "image"
 	case "music":
 		return fileType == "audio"
+	case "document":
+		return fileType == "document"
 	default:
 		return fileType == "video" || fileType == "audio"
 	}

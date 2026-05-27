@@ -1,0 +1,211 @@
+.docBrowse {
+  display: flex;
+  gap: 16px;
+  min-height: calc(100vh - 120px);
+  padding: 16px 0 32px;
+}
+
+.sidebar {
+  width: 240px;
+  flex-shrink: 0;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 8px;
+  padding: 12px;
+  overflow: auto;
+  max-height: calc(100vh - 140px);
+}
+
+.main {
+  flex: 1;
+  min-width: 0;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.breadcrumb {
+  margin-bottom: 12px;
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 13px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 16px;
+}
+
+.card {
+  cursor: pointer;
+  border-radius: 0 0 8px 8px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.04);
+  transition: transform 0.15s, box-shadow 0.15s;
+  position: relative;
+}
+
+.card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+}
+
+.cover {
+  aspect-ratio: 3 / 4;
+  background: #1a2030;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 0;
+}
+
+.cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 0;
+}
+
+.cardBody {
+  padding: 8px 10px 10px;
+}
+
+.cardTitle {
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  min-height: 2.7em;
+}
+
+.cardMeta {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.5);
+  margin-top: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.formatBadge {
+  display: inline-block;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(100, 140, 220, 0.25);
+  color: #9eb8f0;
+  margin-top: 4px;
+  text-transform: uppercase;
+}
+
+.listRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.listRow:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.listThumb {
+  width: 36px;
+  height: 48px;
+  border-radius: 0 0 4px 4px;
+  object-fit: cover;
+  background: #1a2030;
+  flex-shrink: 0;
+}
+
+.facetItem {
+  display: flex;
+  justify-content: space-between;
+  padding: 6px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.facetItem:hover,
+.facetItemActive {
+  background: rgba(100, 140, 220, 0.15);
+}
+
+.treeItem {
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.treeItem:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.folderTree {
+  margin-top: 4px;
+}
+
+.folderTree :global(.ant-tree) {
+  background: transparent;
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.folderTree :global(.ant-tree-node-content-wrapper) {
+  min-height: 28px;
+  line-height: 28px;
+  border-radius: 4px;
+}
+
+.folderTree :global(.ant-tree-node-content-wrapper:hover),
+.folderTree :global(.ant-tree-node-content-wrapper.ant-tree-node-selected) {
+  background: rgba(100, 140, 220, 0.18) !important;
+}
+
+.folderTree :global(.ant-tree-switcher),
+.folderTree :global(.ant-tree-iconEle) {
+  color: rgba(255, 255, 255, 0.65);
+}
+
+.treeLoading {
+  display: flex;
+  justify-content: center;
+  padding: 24px 0;
+}
+
+.treeEmpty {
+  margin-top: 24px;
+}
+
+.treeEmpty :global(.ant-empty-description) {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.emptyWrap {
+  padding: 48px 0;
+  text-align: center;
+}
+
+@media (max-width: 768px) {
+  .docBrowse {
+    flex-direction: column;
+  }
+  .sidebar {
+    width: 100%;
+    max-height: 200px;
+  }
+}

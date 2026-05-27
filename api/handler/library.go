@@ -28,6 +28,7 @@ type libraryBody struct {
 	MetadataRefreshPolicy string   `json:"metadata_refresh_policy"`
 	Scraper               string   `json:"scraper"`
 	JITPrepareOnIngest    *int     `json:"jit_prepare_on_ingest"`
+	ScanExcludePatterns   string   `json:"scan_exclude_patterns"`
 }
 
 func (h *Handler) ListLibraries(c *gin.Context) {
@@ -235,8 +236,8 @@ func (h *Handler) UpdateLibrary(c *gin.Context) {
 		jitIngest = *body.JITPrepareOnIngest
 	}
 	_, err = h.App.DB.Exec(
-		`UPDATE library SET name = ?, type = ?, path = ?, auto_scan = ?, enabled = ?, realtime_monitor = ?, preview_extract = ?, drm_enabled = ?, encryption_mode = ?, cleanup_local_source_after_package = ?, jit_prepare_on_ingest = ?, metadata_providers = ?, image_providers = ?, metadata_refresh_policy = ?, scraper = ? WHERE id = ?`,
-		body.Name, body.Type, folders[0], auto, enabled, realtime, preview, drmEnabled, encryptionMode, cleanupLocal, jitIngest, metadataProviders, imageProviders, refreshPolicy, scraper, id,
+		`UPDATE library SET name = ?, type = ?, path = ?, auto_scan = ?, enabled = ?, realtime_monitor = ?, preview_extract = ?, drm_enabled = ?, encryption_mode = ?, cleanup_local_source_after_package = ?, jit_prepare_on_ingest = ?, metadata_providers = ?, image_providers = ?, metadata_refresh_policy = ?, scraper = ?, scan_exclude_patterns = COALESCE(NULLIF(?, ''), scan_exclude_patterns) WHERE id = ?`,
+		body.Name, body.Type, folders[0], auto, enabled, realtime, preview, drmEnabled, encryptionMode, cleanupLocal, jitIngest, metadataProviders, imageProviders, refreshPolicy, scraper, strings.TrimSpace(body.ScanExcludePatterns), id,
 	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})

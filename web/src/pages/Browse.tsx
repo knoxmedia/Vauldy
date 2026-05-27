@@ -36,6 +36,7 @@ import {
   isTVLibraryType,
   isMusicLibraryType,
   isPhotoLibraryType,
+  isDocumentLibraryType,
   mediaPosterSrc,
   normalizeListPosterUrl,
   type MediaMatchListUpdate,
@@ -43,6 +44,7 @@ import {
 import SeriesBrowse from "./SeriesBrowse";
 import MusicBrowse from "./MusicBrowse";
 import PhotoBrowse from "./PhotoBrowse";
+import DocumentBrowse from "./DocumentBrowse";
 import { readRecentPlaylists, rememberPlaylistAdded } from "../lib/recentPlaylists";
 import styles from "./Browse.module.css";
 
@@ -642,6 +644,14 @@ export default function BrowsePage() {
         libraryId={libFromUrl}
         libraryName={libraryName}
         onEmpty={handlePhotoBrowseEmpty}
+      />
+    );
+  }
+  if (libFromUrl != null && isDocumentLibraryType(libraryType)) {
+    return (
+      <DocumentBrowse
+        libraryId={libFromUrl}
+        libraryName={libraryName}
       />
     );
   }

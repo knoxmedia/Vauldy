@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -111,5 +113,72 @@ func TestHLSInfo_DRM_DoesNotExposeWidevineProxyFlag(t *testing.T) {
 	}
 	if got := drm["fairplay_license_url"]; got != "http://example.com/api/v1/drm/fairplay/license" {
 		t.Fatalf("unexpected fairplay_license_url: %v", got)
+	}
+}
+
+func TestSanitizeContentFilenameRejectsGarbledTitle(t *testing.T) {
+	garbled := "\ufffd\ufffdV\ufffd[\ufffdN:N\ufffdNHO\u001aY1\ufffd%"
+	if got := sanitizeContentFilename(garbled); got != "" {
+		t.Fatalf("expected empty for garbled title, got %q", got)
+	}
+	if got := sanitizeContentFilename("国家为什么会失败"); got != "国家为什么会失败" {
+		t.Fatalf("unexpected sanitized title: %q", got)
+	}
+}
+
+func TestContentDispositionFilenameUnicode(t *testing.T) {
+	got := contentDispositionFilename("国家为什么会失败.pdf")
+	if !strings.Contains(got, `filename*=UTF-8''`) {
+		t.Fatalf("expected RFC5987 encoding, got %q", got)
+	}
+	if strings.Contains(got, "\u001a") {
+		t.Fatalf("control chars must not appear in header: %q", got)
+	}
+}
+
+func TestPlayMediaUsesPathBasenameWhenTitleGarbled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	dbPath := filepath.Join(t.TempDir(), "play-garbled.sqlite")
+	db, err := store.OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	if _, err := db.Exec(`INSERT INTO library (id, name, type, path) VALUES (9, 'docs', 'document', 'E:/books')`); err != nil {
+		t.Fatalf("insert library: %v", err)
+	}
+
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "国家为什么会失败.pdf")
+	if err := os.WriteFile(filePath, []byte("%PDF-1.4 test"), 0644); err != nil {
+		t.Fatalf("write pdf: %v", err)
+	}
+	garbled := "\ufffd\ufffdV\ufffd[\ufffdN:N\ufffdNHO\u001aY1\ufffd%"
+	if _, err := db.Exec(
+		`INSERT INTO media (id, library_id, file_id, file_path, title, file_type) VALUES (3375, 9, 'f-3375', ?, ?, 'document')`,
+		filePath, garbled,
+	); err != nil {
+		t.Fatalf("insert media: %v", err)
+	}
+
+	h := &Handler{App: &app.App{DB: db}, runningScans: map[int64]scanRuntime{}}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/media/3375/play", nil)
+	c.Params = gin.Params{{Key: "id", Value: "3375"}}
+
+	h.PlayMedia(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	cd := w.Header().Get("Content-Disposition")
+	if strings.Contains(cd, "\u001a") || strings.ContainsRune(cd, '\uFFFD') {
+		t.Fatalf("Content-Disposition must not contain invalid chars: %q", cd)
+	}
+	if !strings.Contains(cd, "filename*=UTF-8''") {
+		t.Fatalf("expected RFC5987 filename, got %q", cd)
 	}
 }

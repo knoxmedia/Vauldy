@@ -22,6 +22,7 @@ type SystemOptionsJSON struct {
 	Recognition   SystemOptionsRecognition   `json:"recognition"`
 	PhotoClassify SystemOptionsPhotoClassify `json:"photo_classify"`
 	PhotoFace     SystemOptionsPhotoFace     `json:"photo_face"`
+	DocTrans      SystemOptionsDocTrans      `json:"doc_trans"`
 }
 
 type SystemOptionsRecognition struct {
@@ -100,6 +101,7 @@ func defaultSystemOptions() SystemOptionsJSON {
 		Recognition: defaultRecognitionOptions(),
 		PhotoClassify: defaultPhotoClassifyOptions(),
 		PhotoFace:     defaultPhotoFaceOptions(),
+		DocTrans:      defaultDocTransOptions(),
 	}
 }
 
@@ -156,6 +158,7 @@ func fillSystemOptionsDefaults(o *SystemOptionsJSON, def SystemOptionsJSON) {
 	fillRecognitionDefaults(&o.Recognition, def.Recognition)
 	fillPhotoClassifyDefaults(&o.PhotoClassify, def.PhotoClassify)
 	fillPhotoFaceDefaults(&o.PhotoFace, def.PhotoFace)
+	fillDocTransDefaults(&o.DocTrans, def.DocTrans)
 }
 
 func fillRecognitionDefaults(o *SystemOptionsRecognition, def SystemOptionsRecognition) {
@@ -262,6 +265,7 @@ func normalizeSystemOptions(o SystemOptionsJSON) SystemOptionsJSON {
 	o.Recognition = normalizeRecognitionOptions(o.Recognition)
 	o.PhotoClassify = normalizePhotoClassifyOptions(o.PhotoClassify)
 	o.PhotoFace = normalizePhotoFaceOptions(o.PhotoFace)
+	o.DocTrans = normalizeDocTransOptions(o.DocTrans)
 	return o
 }
 
@@ -419,6 +423,7 @@ func (h *Handler) GetSystemOptions(c *gin.Context) {
 		opts.Recognition = normalizeRecognitionOptions(recognitionFromConfig(h.App.Config))
 		opts.PhotoClassify = photoClassifyFromConfig(h.App.Config)
 		opts.PhotoFace = photoFaceFromConfig(h.App.Config)
+		opts.DocTrans = docTransFromConfig(h.App.Config)
 	}
 	c.JSON(http.StatusOK, opts)
 }
@@ -448,10 +453,15 @@ func (h *Handler) PutSystemOptions(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存人脸检测配置失败: " + err.Error()})
 		return
 	}
+	if err := h.applyDocTransConfig(merged.DocTrans); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存文档转换配置失败: " + err.Error()})
+		return
+	}
 	if h.App != nil && h.App.Config != nil {
 		merged.Recognition = normalizeRecognitionOptions(recognitionFromConfig(h.App.Config))
 		merged.PhotoClassify = photoClassifyFromConfig(h.App.Config)
 		merged.PhotoFace = photoFaceFromConfig(h.App.Config)
+		merged.DocTrans = docTransFromConfig(h.App.Config)
 	}
 	out, err := json.Marshal(merged)
 	if err != nil {

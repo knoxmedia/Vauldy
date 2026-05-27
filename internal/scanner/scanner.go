@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"knox-media/internal/docparse"
 	"knox-media/internal/musicparse"
 	"knox-media/internal/musicstore"
 	"knox-media/internal/photoparse"
@@ -33,6 +34,8 @@ type Scanner struct {
 	FFprobeExtra []string
 	OnFile       func(path string, err error)
 	OnMediaAdded func(mediaID int64, title string, fileType string)
+	// OnDocumentScanned is invoked after a document is inserted or updated during scan.
+	OnDocumentScanned func(mediaID int64)
 }
 
 func (s *Scanner) ScanLibrary(libraryID int64, rootPath string) (added int, err error) {
@@ -66,6 +69,8 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 	tvLibrary := tvparse.IsTVLibraryType(libraryType)
 	musicLibrary := musicparse.IsMusicLibraryType(libraryType)
 	photoLibrary := photoparse.IsPhotoLibraryType(libraryType)
+	documentLibrary := docparse.IsDocumentLibraryType(libraryType)
+	excludePatterns := s.loadScanExcludePatterns(libraryID)
 	if _, err := s.DB.Exec(`DELETE FROM library_node WHERE library_id = ?`, libraryID); err != nil {
 		return 0, err
 	}
@@ -113,6 +118,14 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 				}
 				return nil
 			}
+			st, stErr := os.Stat(path)
+			fileSize := int64(0)
+			if stErr == nil && st != nil {
+				fileSize = st.Size()
+			}
+			if documentLibrary && docparse.ShouldSkipPath(rel, fileSize, excludePatterns) {
+				return nil
+			}
 			_ = s.upsertNode(libraryID, parentPath, nodePath, nodeName, "file", nil)
 			ft := fileutil.GuessFileType(path)
 			if !photoparse.ShouldScanFile(libraryType, ft) {
@@ -124,7 +137,6 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 				return nil
 			}
 			seenMedia[normPath] = struct{}{}
-			st, _ := os.Stat(path)
 			curMtime := int64(0)
 			if st != nil {
 				curMtime = st.ModTime().UTC().Unix()
@@ -142,6 +154,12 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 					}
 					if photoLibrary && ft == "image" {
 						s.refreshPhotoMeta(existingMediaID, path)
+					}
+					if documentLibrary && ft == "document" {
+						s.refreshDocumentMeta(existingMediaID, path)
+						if s.OnDocumentScanned != nil {
+							s.OnDocumentScanned(existingMediaID)
+						}
 					}
 					if s.OnFile != nil {
 						s.OnFile(path, nil)
@@ -167,6 +185,7 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 			var dur, w, h, br int
 			var format, meta string
 			var photoMeta photoparse.PhotoMeta
+			var docMeta docparse.DocumentMeta
 			if ft == "video" || ft == "audio" {
 				if pr, e := ffprobe.ProbeOptions(s.FFprobePath, path, s.FFprobeExtra); e == nil {
 					dur = pr.DurationSec
@@ -186,6 +205,12 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 				format = strings.TrimPrefix(photoMeta.MimeType, "image/")
 				if strings.TrimSpace(photoMeta.Title) != "" {
 					title = photoMeta.Title
+				}
+			} else if ft == "document" {
+				docMeta = docparse.ParseFromFile(path)
+				format = docMeta.Format
+				if strings.TrimSpace(docMeta.Title) != "" {
+					title = docMeta.Title
 				}
 			}
 			var md5sum sql.NullString
@@ -230,6 +255,9 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 			if photoLibrary && ft == "image" {
 				metaJSON = photoparse.MergePhotoMetaJSON(metaJSON, photoMeta)
 			}
+			if documentLibrary && ft == "document" {
+				metaJSON = docparse.MergeDocumentMetaJSON(metaJSON, docMeta)
+			}
 			var res sql.Result
 			var e error
 			if existingMediaID > 0 {
@@ -271,6 +299,9 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 				}
 				if musicLibrary && ft == "audio" {
 					_ = musicstore.LinkTrack(s.DB, libraryID, mediaID, musicMeta)
+				}
+				if documentLibrary && ft == "document" && s.OnDocumentScanned != nil {
+					s.OnDocumentScanned(mediaID)
 				}
 				if existingMediaID == 0 && s.OnMediaAdded != nil {
 					s.OnMediaAdded(mediaID, title, ft)
@@ -362,7 +393,7 @@ func (s *Scanner) upsertNode(libraryID int64, parentPath, nodePath, nodeName, no
 				WHEN excluded.media_id IS NOT NULL THEN excluded.media_id
 				ELSE library_node.media_id
 			END
-	`, libraryID, nullStringVal(parentPath), nodePath, nodeName, nodeType, mid)
+	`, libraryID, parentPath, nodePath, nodeName, nodeType, mid)
 	return err
 }
 
@@ -401,6 +432,30 @@ func (s *Scanner) refreshPhotoMeta(mediaID int64, path string) {
 		WHERE id = ?`,
 		nullInt(photoMeta.Width), nullInt(photoMeta.Height), merged, nullStringVal(strings.TrimPrefix(photoMeta.MimeType, "image/")), mediaID,
 	)
+}
+
+func (s *Scanner) refreshDocumentMeta(mediaID int64, path string) {
+	var metaJSON sql.NullString
+	_ = s.DB.QueryRow(`SELECT COALESCE(meta_json,'') FROM media WHERE id = ?`, mediaID).Scan(&metaJSON)
+	docMeta := docparse.ParseFromFile(path)
+	merged := docparse.MergeDocumentMetaJSON(metaJSON.String, docMeta)
+	title := docparse.PickDocumentTitle(path, docMeta.Title)
+	_, _ = s.DB.Exec(`
+		UPDATE media SET meta_json = ?, format = ?, title = ?
+		WHERE id = ?`,
+		merged, nullStringVal(docMeta.Format), title, mediaID,
+	)
+}
+
+func (s *Scanner) loadScanExcludePatterns(libraryID int64) []string {
+	if s == nil || s.DB == nil || libraryID <= 0 {
+		return nil
+	}
+	var raw sql.NullString
+	if err := s.DB.QueryRow(`SELECT COALESCE(scan_exclude_patterns, '') FROM library WHERE id = ?`, libraryID).Scan(&raw); err != nil {
+		return nil
+	}
+	return docparse.ParseExcludePatterns(raw.String)
 }
 
 func (s *Scanner) linkTVIfEpisode(libraryID, mediaID int64, path string) {

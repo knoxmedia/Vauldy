@@ -25,6 +25,7 @@ import (
 	"knox-media/internal/app"
 	"knox-media/internal/atrack"
 	"knox-media/internal/config"
+	"knox-media/internal/doccover"
 	"knox-media/internal/imagethumb"
 	jitsession "knox-media/internal/jit/session"
 	"knox-media/internal/jit/ingestprepare"
@@ -179,14 +180,26 @@ func main() {
 	if cfg.LibraryScanFastFFprobe() {
 		ffprobeExtra = ffprobe.ScanProbeExtraFast()
 	}
+	mediaRoot := filepath.Dir(cfgPath)
+	docCoverWorker := doccover.NewWorker(doccover.WorkerConfig{
+		DB:         db,
+		MediaRoot:  mediaRoot,
+		PreviewDir: cfg.Data.Preview,
+		FFmpegPath: cfg.FFmpeg.FFmpegPath,
+		DocTrans:   cfg.DocTrans,
+		TimeoutSec: cfg.DocTransTimeoutSeconds,
+	})
 	sc := &scanner.Scanner{
 		DB:           db,
 		FFprobePath:  cfg.FFmpeg.FFprobePath,
 		SkipHash:     !cfg.LibraryScanFileHash(),
 		FFprobeExtra: ffprobeExtra,
 	}
+	sc.OnDocumentScanned = func(mediaID int64) {
+		docCoverWorker.Enqueue(mediaID)
+	}
 	sc.OnMediaAdded = func(mediaID int64, _ string, ft string) {
-		go enqueueAutoTasksOnMediaAdded(db, cfg, subSvc, atrackWorker, keyframeWorker, lyricWorker, photoClassifyWorker, photoFaceWorker, mediaID, ft)
+		go enqueueAutoTasksOnMediaAdded(db, cfg, docCoverWorker, subSvc, atrackWorker, keyframeWorker, lyricWorker, photoClassifyWorker, photoFaceWorker, mediaID, ft)
 		if ft == "video" {
 			go func(id int64) {
 				_, _ = packageWorker.EnqueueForMedia(id)
@@ -197,7 +210,7 @@ func main() {
 	mon := monitor.NewService(db, sc, 15*time.Second)
 	go mon.Start(context.Background())
 
-	engine := api.NewEngine(cfg, application, worker, packageWorker, previewWorker, subSvc, up, instantScheduler, sessionMgr, atrackWorker, keyframeWorker, lyricWorker, photoClassifyWorker)
+	engine := api.NewEngine(cfg, application, worker, packageWorker, previewWorker, subSvc, up, instantScheduler, sessionMgr, atrackWorker, keyframeWorker, lyricWorker, photoClassifyWorker, docCoverWorker)
 	log.Printf("knox-media listening on http://%s", cfg.Addr())
 	if err := engine.Run(cfg.Addr()); err != nil {
 		log.Fatal(err)
@@ -286,7 +299,7 @@ func resolveConfigPath() string {
 	return "config.yml"
 }
 
-func enqueueAutoTasksOnMediaAdded(db *sql.DB, cfg *config.Config, subSvc *subtitle.Service, atw *atrack.Worker, kfw *keyframe.Worker, lw *lyrictask.Worker, pcw *photoclass.Worker, pfw *photoface.Worker, mediaID int64, fileType string) {
+func enqueueAutoTasksOnMediaAdded(db *sql.DB, cfg *config.Config, dcw *doccover.Worker, subSvc *subtitle.Service, atw *atrack.Worker, kfw *keyframe.Worker, lw *lyrictask.Worker, pcw *photoclass.Worker, pfw *photoface.Worker, mediaID int64, fileType string) {
 	if db == nil || cfg == nil || mediaID <= 0 {
 		return
 	}
@@ -295,6 +308,9 @@ func enqueueAutoTasksOnMediaAdded(db *sql.DB, cfg *config.Config, subSvc *subtit
 	enqueueAutoPreviewTask(db, mediaID, fileType)
 	capturePosterOnScan(db, cfg, mediaID, fileType)
 	generatePhotoVariantsOnScan(db, cfg, mediaID, fileType)
+	if fileType == "document" && dcw != nil {
+		dcw.Enqueue(mediaID)
+	}
 	if fileType != "image" {
 		enqueueAutoScrapeTask(db, mediaID)
 	}

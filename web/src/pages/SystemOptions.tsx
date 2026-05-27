@@ -32,8 +32,12 @@ import {
   installSystemOptionsPhotoClassify,
   testSystemOptionsPhotoFace,
   installSystemOptionsPhotoFace,
+  testSystemOptionsDocTrans,
+  installSystemOptionsDocTrans,
+  installLibreOfficeDocTrans,
   type SystemOptions,
   type RecognitionTestResult,
+  type DocTransTestResult,
 } from "../api/client";
 
 function defaultSystemOptions(): SystemOptions {
@@ -93,6 +97,17 @@ function defaultSystemOptions(): SystemOptions {
       script_path: "tools/photo_face/detect.py",
       similarity_threshold: 0.45,
     },
+    doc_trans: {
+      enabled: true,
+      engine_order: ["office", "wps", "libreoffice"],
+      libreoffice_path: "tools/doctran/LibreOffice/program/soffice.exe",
+      soffice_path: "tools/doctran/LibreOffice/program/soffice.exe",
+      office_path: "",
+      wps_path: "",
+      cache_dir: "",
+      cache_ttl_days: 30,
+      timeout_seconds: 180,
+    },
   };
 }
 
@@ -113,6 +128,7 @@ function mergeSystemOptions(data: Partial<SystemOptions> | null | undefined): Sy
     },
     photo_classify: { ...base.photo_classify, ...(data.photo_classify ?? {}) },
     photo_face: { ...base.photo_face, ...(data.photo_face ?? {}) },
+    doc_trans: { ...base.doc_trans, ...(data.doc_trans ?? {}) },
   };
 }
 
@@ -241,6 +257,10 @@ export default function SystemOptionsPage() {
   const [faceTesting, setFaceTesting] = useState(false);
   const [faceInstalling, setFaceInstalling] = useState(false);
   const [faceTestResult, setFaceTestResult] = useState<RecognitionTestResult | null>(null);
+  const [docTransTesting, setDocTransTesting] = useState(false);
+  const [docTransInstalling, setDocTransInstalling] = useState(false);
+  const [docTransInstallingLO, setDocTransInstallingLO] = useState(false);
+  const [docTransTestResult, setDocTransTestResult] = useState<DocTransTestResult | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -441,6 +461,95 @@ export default function SystemOptionsPage() {
       message.error("人脸检测安装请求失败（可能超时，请查看服务器日志）");
     } finally {
       setFaceInstalling(false);
+    }
+  };
+
+  const applyInstalledDocTrans = (docTrans: SystemOptions["doc_trans"] | undefined) => {
+    if (!docTrans) return;
+    const patch = mergeSystemOptions({ doc_trans: docTrans });
+    setOpts((p) => ({ ...p, doc_trans: patch.doc_trans }));
+    setBaseline((p) => ({ ...p, doc_trans: patch.doc_trans }));
+  };
+
+  const runDocTransTest = async () => {
+    setDocTransTesting(true);
+    setDocTransTestResult(null);
+    try {
+      const result = await testSystemOptionsDocTrans(opts.doc_trans);
+      setDocTransTestResult(result);
+    } catch {
+      setDocTransTestResult({ ok: false, message: "测试请求失败" });
+    } finally {
+      setDocTransTesting(false);
+    }
+  };
+
+  const runDocTransInstall = async () => {
+    setDocTransInstalling(true);
+    setDocTransTestResult(null);
+    try {
+      const result = await installSystemOptionsDocTrans();
+      if (result.doc_trans) {
+        applyInstalledDocTrans(result.doc_trans);
+      }
+      setDocTransTestResult({
+        ok: result.ok,
+        message: result.message,
+        engines: result.engines,
+      });
+      if (result.ok) {
+        message.success(result.message);
+      } else {
+        message.warning(result.message);
+      }
+    } catch {
+      message.error("引擎检测失败");
+    } finally {
+      setDocTransInstalling(false);
+    }
+  };
+
+  const runLibreOfficeInstall = async () => {
+    setDocTransInstallingLO(true);
+    setDocTransTestResult(null);
+    try {
+      const result = await installLibreOfficeDocTrans();
+      if (result.doc_trans) {
+        applyInstalledDocTrans(result.doc_trans);
+      }
+      setDocTransTestResult({
+        ok: result.ok,
+        message: result.message,
+        engines: result.engines,
+      });
+      if (result.ok) {
+        message.success(result.message);
+      } else {
+        message.error(result.message);
+      }
+    } catch {
+      message.error("LibreOffice 安装失败");
+    } finally {
+      setDocTransInstallingLO(false);
+    }
+  };
+
+  const moveEngine = (idx: number, dir: -1 | 1) => {
+    setOpts((p) => {
+      const order = [...p.doc_trans.engine_order];
+      const j = idx + dir;
+      if (j < 0 || j >= order.length) return p;
+      [order[idx], order[j]] = [order[j], order[idx]];
+      return { ...p, doc_trans: { ...p.doc_trans, engine_order: order } };
+    });
+  };
+
+  const engineLabel = (k: string) => {
+    switch (k) {
+      case "office": return "Microsoft Office";
+      case "wps": return "WPS Office";
+      case "libreoffice": return "LibreOffice";
+      default: return k;
     }
   };
 
@@ -1147,6 +1256,125 @@ export default function SystemOptionsPage() {
     </Space>
   );
 
+  const tabDocTrans = (
+    <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+      <Typography.Paragraph type="secondary">
+        Office 文档在线预览按引擎优先级依次尝试：Microsoft Office、WPS、LibreOffice。
+        LibreOffice 默认部署在 <Typography.Text code>tools/doctran</Typography.Text>。
+      </Typography.Paragraph>
+      <Flex gap="small" wrap="wrap">
+        <Button icon={<SearchOutlined />} loading={docTransTesting} onClick={() => void runDocTransTest()}>
+          检测引擎
+        </Button>
+        <Button icon={<ApiOutlined />} loading={docTransInstalling} onClick={() => void runDocTransInstall()}>
+          自动检测并写入配置
+        </Button>
+        <Button icon={<CloudDownloadOutlined />} loading={docTransInstallingLO} onClick={() => void runLibreOfficeInstall()}>
+          一键安装 LibreOffice
+        </Button>
+      </Flex>
+      {docTransTestResult && (
+        <>
+          <Typography.Paragraph type={docTransTestResult.ok ? "success" : "warning"}>
+            {docTransTestResult.message}
+            {docTransTestResult.active_engine ? `（当前首选: ${engineLabel(docTransTestResult.active_engine)}）` : ""}
+          </Typography.Paragraph>
+          {docTransTestResult.engines && docTransTestResult.engines.length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {docTransTestResult.engines.map((e) => (
+                <Flex key={e.kind} justify="space-between" style={{ padding: "6px 10px", background: "rgba(255,255,255,0.04)", borderRadius: 6 }}>
+                  <span>{e.label}</span>
+                  <span style={{ color: e.available ? "#52c41a" : "rgba(255,255,255,0.45)" }}>
+                    {e.available ? "可用" : e.message || "不可用"}
+                  </span>
+                </Flex>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+      <SettingRow title="引擎优先级" description="从上到下依次尝试；仅使用已安装且可用的引擎。">
+        <Space direction="vertical" style={{ width: "100%" }}>
+          {opts.doc_trans.engine_order.map((k, i) => (
+            <Flex key={k} gap={8} align="center">
+              <span style={{ width: 24, opacity: 0.5 }}>{i + 1}.</span>
+              <span style={{ flex: 1 }}>{engineLabel(k)}</span>
+              <Button size="small" disabled={i === 0} onClick={() => moveEngine(i, -1)}>↑</Button>
+              <Button size="small" disabled={i === opts.doc_trans.engine_order.length - 1} onClick={() => moveEngine(i, 1)}>↓</Button>
+            </Flex>
+          ))}
+        </Space>
+      </SettingRow>
+      <SettingRow title="启用文档转换" description="关闭后 Office 格式仅支持下载。">
+        <Switch
+          checked={opts.doc_trans.enabled}
+          onChange={(v) => setOpts((p) => ({ ...p, doc_trans: { ...p.doc_trans, enabled: v } }))}
+        />
+      </SettingRow>
+      <SettingRow title="LibreOffice 路径" description="soffice 可执行文件。">
+        <Input
+          value={opts.doc_trans.libreoffice_path}
+          onChange={(e) =>
+            setOpts((p) => ({
+              ...p,
+              doc_trans: { ...p.doc_trans, libreoffice_path: e.target.value, soffice_path: e.target.value },
+            }))
+          }
+          placeholder="tools/doctran/LibreOffice/program/soffice.exe"
+        />
+      </SettingRow>
+      <SettingRow title="Office 路径（可选）" description="留空则自动检测 WINWORD.EXE 所在目录。">
+        <Input
+          value={opts.doc_trans.office_path}
+          onChange={(e) => setOpts((p) => ({ ...p, doc_trans: { ...p.doc_trans, office_path: e.target.value } }))}
+          placeholder=""
+        />
+      </SettingRow>
+      <SettingRow title="WPS 路径（可选）" description="WPS office6 目录，留空则自动检测。">
+        <Input
+          value={opts.doc_trans.wps_path}
+          onChange={(e) => setOpts((p) => ({ ...p, doc_trans: { ...p.doc_trans, wps_path: e.target.value } }))}
+          placeholder=""
+        />
+      </SettingRow>
+      <SettingRow title="转换缓存目录" description="留空则使用 data/preview/documents/convert。">
+        <Input
+          value={opts.doc_trans.cache_dir}
+          onChange={(e) =>
+            setOpts((p) => ({ ...p, doc_trans: { ...p.doc_trans, cache_dir: e.target.value } }))
+          }
+          placeholder=""
+        />
+      </SettingRow>
+      <SettingRow title="缓存有效期（天）" description="超过此时间的转换缓存将被忽略并重新转换。">
+        <InputNumber
+          min={1}
+          max={365}
+          value={opts.doc_trans.cache_ttl_days}
+          onChange={(v) =>
+            setOpts((p) => ({
+              ...p,
+              doc_trans: { ...p.doc_trans, cache_ttl_days: typeof v === "number" ? v : 30 },
+            }))
+          }
+        />
+      </SettingRow>
+      <SettingRow title="转换超时（秒）" description="单次 LibreOffice 转换的最长等待时间。">
+        <InputNumber
+          min={30}
+          max={600}
+          value={opts.doc_trans.timeout_seconds}
+          onChange={(v) =>
+            setOpts((p) => ({
+              ...p,
+              doc_trans: { ...p.doc_trans, timeout_seconds: typeof v === "number" ? v : 180 },
+            }))
+          }
+        />
+      </SettingRow>
+    </Space>
+  );
+
   return (
     <Card loading={loading}>
       <Flex justify="flex-end" style={{ marginBottom: 16 }}>
@@ -1169,6 +1397,7 @@ export default function SystemOptionsPage() {
           { key: "ocr", label: "字符识别", children: tabOCR },
           { key: "photo-classify", label: "智能分类", children: tabPhotoClassify },
           { key: "photo-face", label: "人脸聚类", children: tabPhotoFace },
+          { key: "doc-trans", label: "文档转换", children: tabDocTrans },
         ]}
       />
     </Card>

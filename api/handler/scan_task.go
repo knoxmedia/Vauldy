@@ -156,14 +156,27 @@ func (h *Handler) runLibraryScanTask(ctx context.Context, taskID, libraryID int6
 		SkipHash:     !h.App.Config.LibraryScanFileHash(),
 		PhotoGeocode: h.PhotoGeocode,
 		FFprobeExtra: ffprobeExtra,
-		OnFile: func(_ string, _ error) {
+		OnFile: func(path string, fileErr error) {
 			n := atomic.AddInt64(&processedCount, 1)
 			_, _ = h.App.DB.Exec(`UPDATE scan_task SET processed_count = ?, total_count = ?, added_count = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, n, totalCount, atomic.LoadInt64(&addedCount), taskID)
+			action := "processed"
+			msg := ""
+			if fileErr != nil {
+				action = "failed"
+				msg = fileErr.Error()
+			}
+			_, _ = h.App.DB.Exec(`INSERT INTO scan_log (scan_task_id, library_id, file_path, action, message) VALUES (?, ?, ?, ?, ?)`, taskID, libraryID, path, action, msg)
 		},
-		OnMediaAdded: func(mediaID int64, _ string, ft string) {
+		OnMediaAdded: func(mediaID int64, title string, ft string) {
 			_ = atomic.AddInt64(&addedCount, 1)
 			_, _ = h.App.DB.Exec(`UPDATE scan_task SET processed_count = ?, total_count = ?, added_count = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, atomic.LoadInt64(&processedCount), totalCount, atomic.LoadInt64(&addedCount), taskID)
+			var filePath sql.NullString
+			_ = h.App.DB.QueryRow(`SELECT file_path FROM media WHERE id = ?`, mediaID).Scan(&filePath)
+			_, _ = h.App.DB.Exec(`INSERT INTO scan_log (scan_task_id, library_id, file_path, action, message) VALUES (?, ?, ?, 'added', ?)`, taskID, libraryID, filePath.String, title)
 			h.EnqueuePostIngestForNewMedia(mediaID, ft)
+		},
+		OnDocumentScanned: func(mediaID int64) {
+			h.GenerateDocumentCover(mediaID)
 		},
 	}
 	added, err := s.ScanLibraryFoldersWithContext(ctx, libraryID, folders)
@@ -193,6 +206,7 @@ func (h *Handler) runLibraryScanTask(ctx context.Context, taskID, libraryID int6
 	h.scanMu.Unlock()
 	if status == "done" {
 		h.scheduleLibraryPreviewRefresh(libraryID)
+		h.scheduleDocumentCoverBackfill(libraryID)
 	}
 }
 
@@ -222,6 +236,9 @@ func (h *Handler) EnqueuePostIngestForNewMedia(mediaID int64, fileType string) {
 		}
 		if h.PhotoFaceWorker != nil && h.App.Config != nil && h.App.Config.PhotoFaceAutoOnScan() && ft == "image" {
 			_ = h.PhotoFaceWorker.EnsurePendingIfPhoto(mid, ft)
+		}
+		if ft == "document" {
+			h.GenerateDocumentCover(mid)
 		}
 	}(mediaID, fileType)
 }

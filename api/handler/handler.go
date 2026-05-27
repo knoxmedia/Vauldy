@@ -10,6 +10,7 @@ import (
 	"knox-media/internal/app"
 	"knox-media/internal/atrack"
 	"knox-media/internal/config"
+	"knox-media/internal/doccover"
 	"knox-media/internal/jit/session"
 	"knox-media/internal/keyframe"
 	"knox-media/internal/lyrictask"
@@ -38,13 +39,14 @@ type Handler struct {
 	PhotoGeocode        *photogeocode.Service
 	PhotoLocationWorker *photogeocode.Worker
 	PhotoFaceWorker     *photoface.Worker
+	DocCoverWorker      *doccover.Worker
 	scanMu              sync.Mutex
 	scrapeRunMu    sync.Mutex
 	runningScans   map[int64]scanRuntime
 }
 
-func New(a *app.App, w *transcode.Worker, pkgw *transcode.PackageWorker, pw *preview.Worker, sub *subtitle.Service, u *upload.Service, instant *scheduler.Scheduler, sm *session.Manager, atw *atrack.Worker, kfw *keyframe.Worker, lw *lyrictask.Worker, pcw *photoclass.Worker) *Handler {
-	h := &Handler{App: a, Worker: w, PackageWorker: pkgw, PreviewWorker: pw, Subtitle: sub, Upload: u, Instant: instant, SessionManager: sm, AtrackWorker: atw, KeyframeWorker: kfw, LyricWorker: lw, PhotoClassifyWorker: pcw, PhotoGeocode: photogeocode.New(a.DB), runningScans: map[int64]scanRuntime{}}
+func New(a *app.App, w *transcode.Worker, pkgw *transcode.PackageWorker, pw *preview.Worker, sub *subtitle.Service, u *upload.Service, instant *scheduler.Scheduler, sm *session.Manager, atw *atrack.Worker, kfw *keyframe.Worker, lw *lyrictask.Worker, pcw *photoclass.Worker, dcw *doccover.Worker) *Handler {
+	h := &Handler{App: a, Worker: w, PackageWorker: pkgw, PreviewWorker: pw, Subtitle: sub, Upload: u, Instant: instant, SessionManager: sm, AtrackWorker: atw, KeyframeWorker: kfw, LyricWorker: lw, PhotoClassifyWorker: pcw, DocCoverWorker: dcw, PhotoGeocode: photogeocode.New(a.DB), runningScans: map[int64]scanRuntime{}}
 	_ = h.PhotoGeocode.EnsureSchema()
 	h.PhotoLocationWorker = photogeocode.NewWorker(a.DB, h.PhotoGeocode)
 	h.PhotoFaceWorker = photoface.NewWorker(a.DB, filepath.Dir(a.ConfigPath), a.Config.FFmpeg.FFmpegPath, a.Config.Data.Preview, func() config.PhotoFaceConfig {

@@ -100,6 +100,35 @@ func SavePhotoFace(path string, pf PhotoFaceConfig) error {
 	return os.WriteFile(path, buf.Bytes(), 0o644)
 }
 
+// SaveDocTrans updates doc_trans in config.yml, preserving other keys.
+func SaveDocTrans(path string, dt DocTransConfig) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+	root, err := documentRoot(&doc)
+	if err != nil {
+		return err
+	}
+	if err := setStructKey(root, "doc_trans", dt); err != nil {
+		return fmt.Errorf("patch doc_trans: %w", err)
+	}
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(&doc); err != nil {
+		return fmt.Errorf("encode config: %w", err)
+	}
+	if err := enc.Close(); err != nil {
+		return err
+	}
+	return os.WriteFile(path, buf.Bytes(), 0o644)
+}
+
 func documentRoot(doc *yaml.Node) (*yaml.Node, error) {
 	if doc == nil || len(doc.Content) == 0 {
 		return nil, fmt.Errorf("empty yaml document")

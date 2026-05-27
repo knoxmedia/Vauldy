@@ -725,6 +725,45 @@ func OpenSQLite(path string) (*sql.DB, error) {
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_music_track_media ON music_track(media_id)`)
 	_, _ = db.Exec(`INSERT OR IGNORE INTO scrape_config (id) VALUES (1)`)
 	_, _ = db.Exec(`INSERT OR IGNORE INTO system_options (id, options_json) VALUES (1, '{}')`)
+	// Document library support
+	_, _ = db.Exec(`ALTER TABLE library ADD COLUMN scan_exclude_patterns TEXT DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE library ADD COLUMN scan_recursive INTEGER DEFAULT 1`)
+	_, _ = db.Exec(`UPDATE library_node SET parent_path = '' WHERE parent_path IS NULL`)
+	_, _ = db.Exec(`
+		CREATE TABLE IF NOT EXISTS read_progress (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL,
+			media_id INTEGER NOT NULL,
+			position TEXT NOT NULL DEFAULT '',
+			percent REAL DEFAULT 0,
+			update_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(user_id, media_id),
+			FOREIGN KEY (user_id) REFERENCES user(id) ON DELETE CASCADE,
+			FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
+		)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_read_progress_user ON read_progress(user_id, update_at DESC)`)
+	_, _ = db.Exec(`
+		CREATE TABLE IF NOT EXISTS document_tag (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			media_id INTEGER NOT NULL,
+			tag TEXT NOT NULL,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(media_id, tag),
+			FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
+		)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_document_tag_tag ON document_tag(tag)`)
+	_, _ = db.Exec(`
+		CREATE TABLE IF NOT EXISTS scan_log (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			scan_task_id INTEGER,
+			library_id INTEGER NOT NULL,
+			file_path TEXT NOT NULL,
+			action TEXT NOT NULL,
+			message TEXT DEFAULT '',
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (library_id) REFERENCES library(id) ON DELETE CASCADE
+		)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_scan_log_task ON scan_log(scan_task_id)`)
 	// Seed default AI provider configs.
 	seedAIProviders(db)
 	// Seed default scheduled tasks so scrape/subtitle/cleanup run automatically.

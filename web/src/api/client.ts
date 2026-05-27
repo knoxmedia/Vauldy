@@ -428,6 +428,130 @@ export function isPhotoLibraryType(type?: string): boolean {
   return (type || "").trim().toLowerCase() === "photo";
 }
 
+export function isDocumentLibraryType(type?: string): boolean {
+  return (type || "").trim().toLowerCase() === "document";
+}
+
+export type DocumentItem = {
+  id: number;
+  file_id?: string;
+  title: string;
+  file_path?: string;
+  format: string;
+  author?: string;
+  publisher?: string;
+  year?: number;
+  file_size?: number;
+  modified_at?: string;
+  description?: string;
+  page_count?: number;
+  created_at?: string;
+  last_read_at?: string;
+  tags?: string[];
+  cover_url?: string;
+};
+
+export type DocumentFacet = {
+  name: string;
+  count: number;
+};
+
+export type DocumentNode = {
+  path: string;
+  name: string;
+  node_type: "dir" | "file";
+  media_id?: number;
+};
+
+export async function fetchDocuments(
+  libraryId: number,
+  params?: Record<string, string | number | boolean | undefined>,
+): Promise<DocumentItem[]> {
+  const { data } = await api.get<{ items?: DocumentItem[] }>(`/api/v1/library/${libraryId}/documents`, { params });
+  return data?.items ?? [];
+}
+
+export async function fetchDocumentNodes(libraryId: number, parent = ""): Promise<DocumentNode[]> {
+  const { data } = await api.get<{ items?: DocumentNode[] }>(`/api/v1/library/${libraryId}/document/nodes`, {
+    params: { parent },
+  });
+  return data?.items ?? [];
+}
+
+export async function fetchDocumentFacets(libraryId: number, kind: string): Promise<DocumentFacet[]> {
+  const { data } = await api.get<{ items?: DocumentFacet[] }>(`/api/v1/library/${libraryId}/document/facets`, {
+    params: { kind },
+  });
+  return data?.items ?? [];
+}
+
+export async function fetchRecentDocuments(libraryId?: number): Promise<DocumentItem[]> {
+  const { data } = await api.get<{ items?: DocumentItem[] }>(`/api/v1/library/${libraryId ?? 0}/documents/recent`, {
+    params: libraryId ? { library_id: libraryId } : undefined,
+  });
+  return data?.items ?? [];
+}
+
+export async function fetchDocumentDetail(id: number) {
+  const { data } = await api.get(`/api/v1/media/${id}/document`);
+  return data;
+}
+
+export async function saveReadProgress(id: number, position: string, percent?: number) {
+  const { data } = await api.post(`/api/v1/media/${id}/read-progress`, { position, percent });
+  return data;
+}
+
+export async function fetchReadProgress(id: number): Promise<{ position: string; percent: number }> {
+  const { data } = await api.get<{ position?: string; percent?: number }>(`/api/v1/media/${id}/read-progress`);
+  return { position: data?.position ?? "", percent: data?.percent ?? 0 };
+}
+
+export async function updateDocumentMeta(
+  id: number,
+  patch: { title?: string; author?: string; publisher?: string; year?: number; description?: string; tags?: string[] },
+) {
+  const { data } = await api.patch(`/api/v1/media/${id}/document`, patch);
+  return data;
+}
+
+export function documentCoverSrc(id: number, token?: string | null): string {
+  const base = `/api/v1/media/${id}/document/cover.jpg`;
+  const t = token ?? useAuthStore.getState().token;
+  if (t) return `${base}?access_token=${encodeURIComponent(t)}`;
+  return base;
+}
+
+export function documentStreamSrc(id: number, token?: string | null): string {
+  const base = `/api/v1/media/${id}/play`;
+  const t = token ?? useAuthStore.getState().token;
+  if (t) return `${base}?access_token=${encodeURIComponent(t)}`;
+  return base;
+}
+
+export function documentDownloadSrc(id: number, token?: string | null): string {
+  const base = documentStreamSrc(id, token);
+  return `${base}${base.includes("?") ? "&" : "?"}download=1`;
+}
+
+export function documentPreviewSrc(id: number, token?: string | null): string {
+  const base = `/api/v1/media/${id}/document/preview.pdf`;
+  const t = token ?? useAuthStore.getState().token;
+  if (t) return `${base}?access_token=${encodeURIComponent(t)}`;
+  return base;
+}
+
+export const OFFICE_DOCUMENT_FORMATS = new Set(["doc", "docx", "xls", "xlsx", "ppt", "pptx"]);
+
+export function isOfficeDocumentFormat(format?: string): boolean {
+  return OFFICE_DOCUMENT_FORMATS.has((format || "").trim().toLowerCase());
+}
+
+export async function batchDownloadDocuments(mediaIds: number[]): Promise<Blob> {
+  const { data } = await api.post("/api/v1/documents/download", { media_ids: mediaIds }, { responseType: "blob" });
+  return data as Blob;
+}
+
 export type PhotoCategory = {
   id: string;
   name: string;
@@ -1853,6 +1977,36 @@ export type SystemOptionsPhotoFace = {
   similarity_threshold: number;
 };
 
+export type SystemOptionsDocTrans = {
+  enabled: boolean;
+  engine_order: string[];
+  libreoffice_path: string;
+  soffice_path: string;
+  office_path: string;
+  wps_path: string;
+  cache_dir: string;
+  cache_ttl_days: number;
+  timeout_seconds: number;
+};
+
+export type DocTransEngineStatus = {
+  kind: string;
+  label: string;
+  available: boolean;
+  path?: string;
+  version?: string;
+  message?: string;
+};
+
+export type DocTransTestResult = {
+  ok: boolean;
+  message: string;
+  active_engine?: string;
+  engines?: DocTransEngineStatus[];
+  soffice_path?: string;
+  version?: string;
+};
+
 export type SystemOptions = {
   general: SystemOptionsGeneral;
   playback: SystemOptionsPlayback;
@@ -1860,6 +2014,7 @@ export type SystemOptions = {
   recognition: SystemOptionsRecognition;
   photo_classify: SystemOptionsPhotoClassify;
   photo_face: SystemOptionsPhotoFace;
+  doc_trans: SystemOptionsDocTrans;
 };
 
 export async function fetchSystemOptions() {
@@ -1957,6 +2112,40 @@ export async function installSystemOptionsPhotoFace() {
     "/api/v1/admin/system-options/install/photo-face",
     {},
     { timeout: 45 * 60 * 1000 },
+  );
+  return data;
+}
+
+export type DocTransInstallResult = {
+  ok: boolean;
+  message: string;
+  doc_trans?: SystemOptionsDocTrans;
+  engines?: DocTransEngineStatus[];
+};
+
+export async function testSystemOptionsDocTrans(docTrans?: SystemOptionsDocTrans) {
+  const { data } = await api.post<DocTransTestResult>(
+    "/api/v1/admin/system-options/test/doc-trans",
+    docTrans ? { doc_trans: docTrans } : {},
+    { timeout: 5 * 60 * 1000 },
+  );
+  return data;
+}
+
+export async function installSystemOptionsDocTrans() {
+  const { data } = await api.post<DocTransInstallResult>(
+    "/api/v1/admin/system-options/install/doc-trans",
+    {},
+    { timeout: 5 * 60 * 1000 },
+  );
+  return data;
+}
+
+export async function installLibreOfficeDocTrans() {
+  const { data } = await api.post<DocTransInstallResult>(
+    "/api/v1/admin/system-options/install/libreoffice",
+    {},
+    { timeout: 30 * 60 * 1000 },
   );
   return data;
 }

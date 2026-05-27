@@ -6,3 +6,6 @@
 *.pyc
 web/node_modules/
 web/dist/
+tools/doctran/LibreOfficePortable/
+tools/doctran/fixtures/
+

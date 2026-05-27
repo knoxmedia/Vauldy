@@ -22,6 +22,7 @@ type Config struct {
 	Lyric        LyricConfig              `yaml:"lyric"`
 	PhotoClassify PhotoClassifyConfig     `yaml:"photo_classify"`
 	PhotoFace     PhotoFaceConfig         `yaml:"photo_face"`
+	DocTrans      DocTransConfig          `yaml:"doc_trans"`
 	JIT          JITConfig                `yaml:"jit"`
 	CORS         CORSConfig               `yaml:"cors"`
 	// PowerPlayer is included in GET /media/:id/hls playback plans for the web player (PowerPlayer 6 setup).
@@ -159,6 +160,40 @@ func (c *Config) PhotoFaceSimilarityThreshold() float32 {
 		return 0.45
 	}
 	return c.PhotoFace.SimilarityThreshold
+}
+
+// DocTransConfig controls document conversion for Office preview.
+type DocTransConfig struct {
+	Enabled         *bool    `yaml:"enabled"`
+	EngineOrder     []string `yaml:"engine_order"`
+	LibreOfficePath string   `yaml:"libreoffice_path"`
+	SofficePath     string   `yaml:"soffice_path"`
+	OfficePath      string   `yaml:"office_path"`
+	WPSPath         string   `yaml:"wps_path"`
+	CacheDir        string   `yaml:"cache_dir"`
+	CacheTTLDays    int      `yaml:"cache_ttl_days"`
+	TimeoutSeconds  int      `yaml:"timeout_seconds"`
+}
+
+func (c *Config) DocTransEnabled() bool {
+	if c == nil || c.DocTrans.Enabled == nil {
+		return true
+	}
+	return *c.DocTrans.Enabled
+}
+
+func (c *Config) DocTransCacheTTLDays() int {
+	if c == nil || c.DocTrans.CacheTTLDays <= 0 {
+		return 30
+	}
+	return c.DocTrans.CacheTTLDays
+}
+
+func (c *Config) DocTransTimeoutSeconds() int {
+	if c == nil || c.DocTrans.TimeoutSeconds <= 0 {
+		return 180
+	}
+	return c.DocTrans.TimeoutSeconds
 }
 
 // JITConfig controls just-in-time transcode behavior.
@@ -474,9 +509,28 @@ func (c *Config) ResolveExecutablePaths(baseDir string) {
 	if c == nil || strings.TrimSpace(baseDir) == "" {
 		return
 	}
+	c.ResolveDataPaths(baseDir)
 	c.FFmpeg.FFmpegPath = resolveMaybeRelativePath(c.FFmpeg.FFmpegPath, baseDir)
 	c.FFmpeg.FFprobePath = resolveMaybeRelativePath(c.FFmpeg.FFprobePath, baseDir)
 	c.DRMPackaging.ShakaPackagerPath = resolveMaybeRelativePath(c.DRMPackaging.ShakaPackagerPath, baseDir)
+}
+
+// ResolveDataPaths makes data directory settings absolute relative to baseDir.
+func (c *Config) ResolveDataPaths(baseDir string) {
+	if c == nil || strings.TrimSpace(baseDir) == "" {
+		return
+	}
+	c.Data.Dir = resolveMaybeRelativePath(c.Data.Dir, baseDir)
+	c.Data.DB = resolveMaybeRelativePath(c.Data.DB, baseDir)
+	c.Data.Transcode = resolveMaybeRelativePath(c.Data.Transcode, baseDir)
+	c.Data.Preview = resolveMaybeRelativePath(c.Data.Preview, baseDir)
+	c.Data.Subtitle = resolveMaybeRelativePath(c.Data.Subtitle, baseDir)
+	c.Data.Upload = resolveMaybeRelativePath(c.Data.Upload, baseDir)
+	c.Data.Chunks = resolveMaybeRelativePath(c.Data.Chunks, baseDir)
+	c.Data.ATracks = resolveMaybeRelativePath(c.Data.ATracks, baseDir)
+	c.Data.Keyframes = resolveMaybeRelativePath(c.Data.Keyframes, baseDir)
+	c.Data.Static = resolveMaybeRelativePath(c.Data.Static, baseDir)
+	c.Data.MetadataLibrary = resolveMaybeRelativePath(c.Data.MetadataLibrary, baseDir)
 }
 
 func resolveMaybeRelativePath(p string, baseDir string) string {

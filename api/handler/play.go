@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 
@@ -46,7 +47,8 @@ func (h *Handler) PlayMedia(c *gin.Context) {
 	}
 	var p string
 	var title sql.NullString
-	if err := h.App.DB.QueryRow(`SELECT file_path, title FROM media WHERE id = ?`, id).Scan(&p, &title); err != nil {
+	var fileType sql.NullString
+	if err := h.App.DB.QueryRow(`SELECT file_path, title, file_type FROM media WHERE id = ?`, id).Scan(&p, &title, &fileType); err != nil {
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 			return
@@ -55,27 +57,29 @@ func (h *Handler) PlayMedia(c *gin.Context) {
 		return
 	}
 	preferSource := strings.TrimSpace(c.Query("prefer_source")) == "1"
-	if ready, _, _ := h.latestEncryptedManifest(id); ready {
-		if preferSource {
-			goto serveSource
+	if fileType.String != "document" {
+		if ready, _, _ := h.latestEncryptedManifest(id); ready {
+			if preferSource {
+				goto serveSource
+			}
+			target := "/api/v1/media/" + c.Param("id") + "/hls/master.m3u8"
+			if q := strings.TrimSpace(c.Request.URL.RawQuery); q != "" {
+				target += "?" + q
+			}
+			c.Redirect(http.StatusTemporaryRedirect, target)
+			return
 		}
-		target := "/api/v1/media/" + c.Param("id") + "/hls/master.m3u8"
-		if q := strings.TrimSpace(c.Request.URL.RawQuery); q != "" {
-			target += "?" + q
+		if ready, _, _, _ := h.latestTranscodeManifestByMediaID(id); ready {
+			if preferSource {
+				goto serveSource
+			}
+			target := "/api/v1/media/" + c.Param("id") + "/hls/master.m3u8"
+			if q := strings.TrimSpace(c.Request.URL.RawQuery); q != "" {
+				target += "?" + q
+			}
+			c.Redirect(http.StatusTemporaryRedirect, target)
+			return
 		}
-		c.Redirect(http.StatusTemporaryRedirect, target)
-		return
-	}
-	if ready, _, _, _ := h.latestTranscodeManifestByMediaID(id); ready {
-		if preferSource {
-			goto serveSource
-		}
-		target := "/api/v1/media/" + c.Param("id") + "/hls/master.m3u8"
-		if q := strings.TrimSpace(c.Request.URL.RawQuery); q != "" {
-			target += "?" + q
-		}
-		c.Redirect(http.StatusTemporaryRedirect, target)
-		return
 	}
 serveSource:
 	p = filepath.Clean(p)
@@ -84,15 +88,73 @@ serveSource:
 		return
 	}
 	name := filepath.Base(p)
-	if title.Valid && title.String != "" {
-		name = title.String + filepath.Ext(p)
+	if title.Valid {
+		if t := sanitizeContentFilename(title.String); t != "" {
+			ext := filepath.Ext(p)
+			if strings.EqualFold(filepath.Ext(t), ext) {
+				name = t
+			} else {
+				name = t + ext
+			}
+		}
 	}
 	disposition := "inline"
 	if strings.TrimSpace(c.Query("download")) == "1" {
 		disposition = "attachment"
 	}
-	c.Header("Content-Disposition", disposition+`; filename="`+strings.ReplaceAll(name, `"`, ``)+`"`)
+	c.Header("Content-Disposition", disposition+"; "+contentDispositionFilename(name))
 	http.ServeFile(c.Writer, c.Request, p)
+}
+
+// sanitizeContentFilename drops titles that are empty, invalid UTF-8, or contain
+// replacement/control characters (common when metadata was decoded with the wrong charset).
+func sanitizeContentFilename(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" || !utf8.ValidString(s) || strings.ContainsRune(s, '\uFFFD') {
+		return ""
+	}
+	cleaned := strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s)
+	return strings.TrimSpace(cleaned)
+}
+
+// contentDispositionFilename builds a safe RFC 6266 filename parameter for HTTP headers.
+func contentDispositionFilename(name string) string {
+	const fallback = "download"
+	cleaned := strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f || r == '"' || r == '\\' {
+			return -1
+		}
+		return r
+	}, strings.TrimSpace(name))
+	if cleaned == "" {
+		cleaned = fallback
+	}
+	asciiOnly := true
+	for _, r := range cleaned {
+		if r > 0x7e {
+			asciiOnly = false
+			break
+		}
+	}
+	if asciiOnly {
+		return `filename="` + strings.ReplaceAll(cleaned, `"`, ``) + `"`
+	}
+	ascii := strings.Map(func(r rune) rune {
+		if r > 0x7e || r < 0x20 {
+			return '_'
+		}
+		return r
+	}, cleaned)
+	ascii = strings.Trim(ascii, "._- ")
+	if ascii == "" {
+		ascii = fallback
+	}
+	return fmt.Sprintf(`filename="%s"; filename*=UTF-8''%s`, strings.ReplaceAll(ascii, `"`, ``), url.PathEscape(cleaned))
 }
 
 func (h *Handler) PlaybackStart(c *gin.Context) {

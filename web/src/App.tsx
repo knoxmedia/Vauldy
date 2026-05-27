@@ -51,6 +51,7 @@ import UsersPage from "./pages/Users";
 import PlaylistsPage from "./pages/Playlists";
 import SearchPage from "./pages/Search";
 import MediaDetailPage from "./pages/MediaDetail";
+import DocumentReaderPage from "./pages/DocumentReader";
 import PlaybackHistoryPage from "./pages/PlaybackHistory";
 import ScrapeConfigPage from "./pages/ScrapeConfig";
 import AIProviderPage from "./pages/AIProvider";
@@ -117,6 +118,8 @@ function MainShell() {
   const clearSession = useAuthStore((s) => s.clearSession);
   const admin = isAdminRole(role);
   const isPlayerRoute = loc.pathname.startsWith("/player");
+  const isReaderRoute = loc.pathname.startsWith("/reader");
+  const isImmersiveRoute = isPlayerRoute || isReaderRoute;
   const isHomeRoute = loc.pathname === "/" || loc.pathname === "";
   const musicPlayerActive = useMusicPlayerStore((s) => s.active);
   const contentRef = useRef<HTMLElement>(null);
@@ -188,6 +191,7 @@ function MainShell() {
     if (p.startsWith("/genre")) return "流派详情";
     if (p.startsWith("/playback-history")) return "播放历史";
     if (p.startsWith("/player")) return "播放";
+    if (p.startsWith("/reader")) return "阅读";
     if (p.startsWith("/settings")) return "账号";
     if (p.startsWith("/library")) return "媒体库";
     if (p.startsWith("/upload")) return "上传";
@@ -207,7 +211,7 @@ function MainShell() {
   return (
     <Layout className="app-shell" style={{ minHeight: "100vh", background: "#000" }}>
       <ProfileSync />
-      {!isPlayerRoute && mode !== "hidden" && (
+      {!isImmersiveRoute && mode !== "hidden" && (
         <Sider
           className="app-shell-sider"
           width={260}
@@ -285,7 +289,7 @@ function MainShell() {
       )}
 
       <Layout className="app-shell-inner">
-        {!isPlayerRoute && (
+        {!isImmersiveRoute && (
         <Header
           className="app-top-header app-shell-header"
           style={{
@@ -368,7 +372,7 @@ function MainShell() {
         </Header>
         )}
 
-        {!isPlayerRoute && (
+        {!isImmersiveRoute && (
         <Drawer
           title={
             <span style={{ color: "#fff", display: "inline-flex", alignItems: "center", gap: 8 }}>
@@ -411,19 +415,19 @@ function MainShell() {
 
         <Content
           ref={contentRef}
-          className={`app-shell-content${isPlayerRoute ? " app-shell-content-player" : ""}${musicPlayerActive && !isPlayerRoute ? " app-shell-content-music-player" : ""}`}
+          className={`app-shell-content${isImmersiveRoute ? " app-shell-content-player" : ""}${musicPlayerActive && !isImmersiveRoute ? " app-shell-content-music-player" : ""}`}
           style={{
             background: "#000",
-            minHeight: isPlayerRoute ? "100vh" : "calc(100vh - 64px)",
-            overflow: isPlayerRoute ? "hidden" : "auto",
+            minHeight: isImmersiveRoute ? "100vh" : "calc(100vh - 64px)",
+            overflow: isImmersiveRoute ? "hidden" : "auto",
           }}
         >
-          <div className={`app-main-centered${isPlayerRoute ? " app-main-centered-player" : ""}`}>
+          <div className={`app-main-centered${isImmersiveRoute ? " app-main-centered-player" : ""}`}>
             <Outlet />
           </div>
         </Content>
-        {!isPlayerRoute ? <MusicPlayerBar /> : null}
-        {!isPlayerRoute ? <ScrollToTopFab scrollRootRef={contentRef} bottomOffset={musicPlayerActive ? 96 : 24} /> : null}
+        {!isImmersiveRoute ? <MusicPlayerBar /> : null}
+        {!isImmersiveRoute ? <ScrollToTopFab scrollRootRef={contentRef} bottomOffset={musicPlayerActive ? 96 : 24} /> : null}
       </Layout>
     </Layout>
   );
@@ -453,6 +457,7 @@ export default function App() {
           <Route path="playlists" element={<PlaylistsPage />} />
           <Route path="media" element={<LegacyMediaToBrowse />} />
           <Route path="player/:id?" element={<PlayerPage />} />
+          <Route path="reader/:id" element={<DocumentReaderPage />} />
           <Route path="settings" element={<SettingsPage />} />
           <Route element={<RequireAdmin />}>
             <Route path="library" element={<LibraryPage />} />
