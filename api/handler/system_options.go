@@ -21,6 +21,7 @@ type SystemOptionsJSON struct {
 	Transcoder    SystemOptionsTranscoder    `json:"transcoder"`
 	Recognition   SystemOptionsRecognition   `json:"recognition"`
 	PhotoClassify SystemOptionsPhotoClassify `json:"photo_classify"`
+	PhotoFace     SystemOptionsPhotoFace     `json:"photo_face"`
 }
 
 type SystemOptionsRecognition struct {
@@ -98,6 +99,7 @@ func defaultSystemOptions() SystemOptionsJSON {
 		},
 		Recognition: defaultRecognitionOptions(),
 		PhotoClassify: defaultPhotoClassifyOptions(),
+		PhotoFace:     defaultPhotoFaceOptions(),
 	}
 }
 
@@ -153,6 +155,7 @@ func fillSystemOptionsDefaults(o *SystemOptionsJSON, def SystemOptionsJSON) {
 	}
 	fillRecognitionDefaults(&o.Recognition, def.Recognition)
 	fillPhotoClassifyDefaults(&o.PhotoClassify, def.PhotoClassify)
+	fillPhotoFaceDefaults(&o.PhotoFace, def.PhotoFace)
 }
 
 func fillRecognitionDefaults(o *SystemOptionsRecognition, def SystemOptionsRecognition) {
@@ -258,6 +261,7 @@ func normalizeSystemOptions(o SystemOptionsJSON) SystemOptionsJSON {
 	}
 	o.Recognition = normalizeRecognitionOptions(o.Recognition)
 	o.PhotoClassify = normalizePhotoClassifyOptions(o.PhotoClassify)
+	o.PhotoFace = normalizePhotoFaceOptions(o.PhotoFace)
 	return o
 }
 
@@ -414,6 +418,7 @@ func (h *Handler) GetSystemOptions(c *gin.Context) {
 	if h.App != nil && h.App.Config != nil {
 		opts.Recognition = normalizeRecognitionOptions(recognitionFromConfig(h.App.Config))
 		opts.PhotoClassify = photoClassifyFromConfig(h.App.Config)
+		opts.PhotoFace = photoFaceFromConfig(h.App.Config)
 	}
 	c.JSON(http.StatusOK, opts)
 }
@@ -439,9 +444,14 @@ func (h *Handler) PutSystemOptions(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存智能分类配置失败: " + err.Error()})
 		return
 	}
+	if err := h.applyPhotoFaceConfig(merged.PhotoFace); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存人脸检测配置失败: " + err.Error()})
+		return
+	}
 	if h.App != nil && h.App.Config != nil {
 		merged.Recognition = normalizeRecognitionOptions(recognitionFromConfig(h.App.Config))
 		merged.PhotoClassify = photoClassifyFromConfig(h.App.Config)
+		merged.PhotoFace = photoFaceFromConfig(h.App.Config)
 	}
 	out, err := json.Marshal(merged)
 	if err != nil {

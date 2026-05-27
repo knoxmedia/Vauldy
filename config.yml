@@ -95,6 +95,12 @@ photo_classify:
   script_path: tools/photo_classify/classify.py
   model_path: tools/photo_classify/models/mobilenetv2-7.onnx
   labels_path: tools/photo_classify/imagenet_labels.txt
+# Face detection and person clustering for photo libraries (InsightFace).
+photo_face:
+  auto_on_scan: true
+  python_path: tools/recognition/.venv/Scripts/python.exe
+  script_path: tools/photo_face/detect.py
+  similarity_threshold: 0.45
 # Just-in-time transcode options.
 jit:
   # When true, use a single long-running ffmpeg process that outputs HLS segments

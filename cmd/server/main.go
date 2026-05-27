@@ -33,6 +33,7 @@ import (
 	"knox-media/internal/lyrictask"
 	"knox-media/internal/monitor"
 	"knox-media/internal/photoclass"
+	"knox-media/internal/photoface"
 	"knox-media/internal/preview"
 	"knox-media/internal/scanner"
 	"knox-media/internal/store"
@@ -115,6 +116,16 @@ func main() {
 	photoClassifyWorker := photoclass.NewWorker(db, filepath.Dir(cfgPath), cfg.FFmpeg.FFmpegPath, cfg.Data.Preview, func() config.PhotoClassifyConfig {
 		return cfg.PhotoClassify
 	})
+	photoFaceWorker := photoface.NewWorker(db, filepath.Dir(cfgPath), cfg.FFmpeg.FFmpegPath, cfg.Data.Preview, func() config.PhotoFaceConfig {
+		faceCfg := cfg.PhotoFace
+		if strings.TrimSpace(faceCfg.PythonPath) == "" {
+			faceCfg.PythonPath = cfg.PhotoClassify.PythonPath
+		}
+		if strings.TrimSpace(faceCfg.ScriptPath) == "" {
+			faceCfg.ScriptPath = "tools/photo_face/detect.py"
+		}
+		return faceCfg
+	})
 
 	redisAddr := strings.TrimSpace(os.Getenv("KNOX_MEDIA_REDIS_ADDR"))
 	if redisAddr == "" {
@@ -175,7 +186,7 @@ func main() {
 		FFprobeExtra: ffprobeExtra,
 	}
 	sc.OnMediaAdded = func(mediaID int64, _ string, ft string) {
-		go enqueueAutoTasksOnMediaAdded(db, cfg, subSvc, atrackWorker, keyframeWorker, lyricWorker, photoClassifyWorker, mediaID, ft)
+		go enqueueAutoTasksOnMediaAdded(db, cfg, subSvc, atrackWorker, keyframeWorker, lyricWorker, photoClassifyWorker, photoFaceWorker, mediaID, ft)
 		if ft == "video" {
 			go func(id int64) {
 				_, _ = packageWorker.EnqueueForMedia(id)
@@ -275,7 +286,7 @@ func resolveConfigPath() string {
 	return "config.yml"
 }
 
-func enqueueAutoTasksOnMediaAdded(db *sql.DB, cfg *config.Config, subSvc *subtitle.Service, atw *atrack.Worker, kfw *keyframe.Worker, lw *lyrictask.Worker, pcw *photoclass.Worker, mediaID int64, fileType string) {
+func enqueueAutoTasksOnMediaAdded(db *sql.DB, cfg *config.Config, subSvc *subtitle.Service, atw *atrack.Worker, kfw *keyframe.Worker, lw *lyrictask.Worker, pcw *photoclass.Worker, pfw *photoface.Worker, mediaID int64, fileType string) {
 	if db == nil || cfg == nil || mediaID <= 0 {
 		return
 	}
@@ -295,6 +306,9 @@ func enqueueAutoTasksOnMediaAdded(db *sql.DB, cfg *config.Config, subSvc *subtit
 	}
 	if pcw != nil && cfg.PhotoClassifyAutoOnScan() && fileType == "image" {
 		_ = pcw.EnsurePendingIfPhoto(mediaID, fileType)
+	}
+	if pfw != nil && cfg.PhotoFaceAutoOnScan() && fileType == "image" {
+		_ = pfw.EnsurePendingIfPhoto(mediaID, fileType)
 	}
 	if fileType == "video" {
 		if atw != nil && cfg.ATrackAutoOnScan() {

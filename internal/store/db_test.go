@@ -33,3 +33,50 @@ func TestOpenSQLiteAddsDRMColumns(t *testing.T) {
 	assertColumn("drm_license_audit", "drm_type")
 	assertColumn("drm_key_material", "key_hex")
 }
+
+func TestRecoverStalePhotoTasksResetsRunning(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "db.sqlite")
+	db, err := OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatalf("OpenSQLite err: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	_, err = db.Exec(`
+		INSERT INTO library (name, type, path) VALUES ('photos', 'photo', '/tmp/p')
+	`)
+	if err != nil {
+		t.Fatalf("insert library: %v", err)
+	}
+	var libraryID int64
+	if err := db.QueryRow(`SELECT id FROM library LIMIT 1`).Scan(&libraryID); err != nil {
+		t.Fatalf("library id: %v", err)
+	}
+	_, err = db.Exec(`
+		INSERT INTO media (library_id, file_path, file_type, status) VALUES (?, '/a.jpg', 'image', 'active')
+	`, libraryID)
+	if err != nil {
+		t.Fatalf("insert media: %v", err)
+	}
+	var mediaID int64
+	if err := db.QueryRow(`SELECT id FROM media LIMIT 1`).Scan(&mediaID); err != nil {
+		t.Fatalf("media id: %v", err)
+	}
+	_, err = db.Exec(`
+		INSERT INTO photo_face_task (media_id, library_id, status, started_at)
+		VALUES (?, ?, 'running', CURRENT_TIMESTAMP)
+	`, mediaID, libraryID)
+	if err != nil {
+		t.Fatalf("insert task: %v", err)
+	}
+
+	recoverStalePhotoTasks(db)
+
+	var status string
+	if err := db.QueryRow(`SELECT status FROM photo_face_task WHERE media_id = ?`, mediaID).Scan(&status); err != nil {
+		t.Fatalf("select status: %v", err)
+	}
+	if status != "pending" {
+		t.Fatalf("status = %q, want pending", status)
+	}
+}

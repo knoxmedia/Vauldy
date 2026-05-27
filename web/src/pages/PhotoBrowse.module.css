@@ -1,6 +1,8 @@
 .photoLightbox {
   position: fixed;
   inset: 0;
+  width: 100vw;
+  height: 100vh;
   z-index: 1200;
   background: #000;
   display: flex;
@@ -47,6 +49,7 @@
   position: relative;
   min-height: 0;
   padding: 56px 72px 24px;
+  overflow: hidden;
 }
 
 .imageWrap {
@@ -55,7 +58,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  overflow: hidden;
+  overflow: visible;
   cursor: grab;
 }
 
@@ -64,10 +67,11 @@
 }
 
 .image {
-  max-width: 100%;
-  max-height: calc(100vh - 120px);
+  max-width: none;
+  max-height: none;
   object-fit: contain;
   user-select: none;
+  transform-origin: center center;
   transition: transform 0.1s ease-out;
 }
 
@@ -217,6 +221,24 @@
   font-size: 16px;
   font-weight: 600;
   color: rgba(255, 255, 255, 0.9);
+}
+
+.drillTitleEditable {
+  border: none;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+}
+
+.drillTitleEditable:hover {
+  color: #fff;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.drillTitleInput {
+  width: min(280px, 50vw);
 }
 
 .timelineLayout {

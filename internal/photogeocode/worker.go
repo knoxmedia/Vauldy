@@ -93,7 +93,7 @@ func (w *Worker) RunBatch(ctx context.Context, limit int) (done, failed int) {
 	}
 	rows, err := w.DB.Query(`
 		SELECT media_id FROM photo_location_task
-		WHERE status IN ('pending', 'failed')
+		WHERE status IN ('pending', 'failed', 'running')
 		ORDER BY updated_at ASC
 		LIMIT ?
 	`, limit)

@@ -476,6 +476,51 @@ CREATE TABLE IF NOT EXISTS photo_location_task (
 );
 CREATE INDEX IF NOT EXISTS idx_photo_location_task_status ON photo_location_task(library_id, status, updated_at);
 
+CREATE TABLE IF NOT EXISTS photo_person (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    library_id INTEGER NOT NULL,
+    label TEXT NOT NULL DEFAULT '',
+    cover_face_id INTEGER,
+    face_count INTEGER NOT NULL DEFAULT 0,
+    media_count INTEGER NOT NULL DEFAULT 0,
+    embedding BLOB,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_photo_person_library ON photo_person(library_id);
+
+CREATE TABLE IF NOT EXISTS photo_face (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    media_id INTEGER NOT NULL,
+    library_id INTEGER NOT NULL,
+    person_id INTEGER,
+    bbox_x REAL NOT NULL DEFAULT 0,
+    bbox_y REAL NOT NULL DEFAULT 0,
+    bbox_w REAL NOT NULL DEFAULT 0,
+    bbox_h REAL NOT NULL DEFAULT 0,
+    embedding BLOB,
+    quality REAL,
+    match_score REAL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (media_id) REFERENCES media(id),
+    FOREIGN KEY (person_id) REFERENCES photo_person(id)
+);
+CREATE INDEX IF NOT EXISTS idx_photo_face_media ON photo_face(media_id);
+CREATE INDEX IF NOT EXISTS idx_photo_face_person ON photo_face(library_id, person_id);
+CREATE INDEX IF NOT EXISTS idx_photo_face_person_media ON photo_face(person_id, media_id);
+
+CREATE TABLE IF NOT EXISTS photo_face_task (
+    media_id INTEGER PRIMARY KEY,
+    library_id INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    message TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    started_at TIMESTAMP,
+    finished_at TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (media_id) REFERENCES media(id)
+);
+CREATE INDEX IF NOT EXISTS idx_photo_face_task_status ON photo_face_task(library_id, status, updated_at);
+
 CREATE TABLE IF NOT EXISTS atrack_task (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     media_id INTEGER NOT NULL UNIQUE,
@@ -583,6 +628,13 @@ func OpenSQLite(path string) (*sql.DB, error) {
 	_, _ = db.Exec(`ALTER TABLE user ADD COLUMN ui_locale TEXT DEFAULT 'zh'`)
 	_, _ = db.Exec(`ALTER TABLE user ADD COLUMN player_prefs_json TEXT DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE scrape_task ADD COLUMN fail_count INTEGER DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE photo_person ADD COLUMN media_count INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`
+		UPDATE photo_person
+		SET media_count = (
+			SELECT COUNT(DISTINCT media_id) FROM photo_face WHERE photo_face.person_id = photo_person.id
+		)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_photo_face_person_media ON photo_face(person_id, media_id)`)
 	// TV series / episode linking (added for hierarchical TV library scan).
 	_, _ = db.Exec(`
 		CREATE TABLE IF NOT EXISTS series (
@@ -679,6 +731,7 @@ func OpenSQLite(path string) (*sql.DB, error) {
 	seedScheduledTasks(db)
 	// Clean up stale transcode tasks that failed due to transient issues (path not found, context canceled).
 	cleanupStaleTranscodeTasks(db)
+	recoverStalePhotoTasks(db)
 	return db, nil
 }
 
@@ -744,4 +797,18 @@ func cleanupStaleTranscodeTasks(db *sql.DB) {
 		WHERE status = 'failed'
 		  AND error_message LIKE '%The system cannot find the path specified%'
 	`)
+}
+
+// recoverStalePhotoTasks resets orphaned "running" rows left by process restarts
+// so workers resume and progress bars can clear.
+func recoverStalePhotoTasks(db *sql.DB) {
+	if db == nil {
+		return
+	}
+	for _, table := range []string{"photo_face_task", "photo_location_task", "photo_classify_task"} {
+		_, _ = db.Exec(`
+			UPDATE ` + table + `
+			SET status = 'pending', started_at = NULL, updated_at = CURRENT_TIMESTAMP
+			WHERE status = 'running'`)
+	}
 }

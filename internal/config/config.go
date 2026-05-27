@@ -21,6 +21,7 @@ type Config struct {
 	ATrack       ATrackConfig             `yaml:"atrack"`
 	Lyric        LyricConfig              `yaml:"lyric"`
 	PhotoClassify PhotoClassifyConfig     `yaml:"photo_classify"`
+	PhotoFace     PhotoFaceConfig         `yaml:"photo_face"`
 	JIT          JITConfig                `yaml:"jit"`
 	CORS         CORSConfig               `yaml:"cors"`
 	// PowerPlayer is included in GET /media/:id/hls playback plans for the web player (PowerPlayer 6 setup).
@@ -136,6 +137,28 @@ func (c *Config) PhotoClassifyEngine() string {
 		return "auto"
 	}
 	return e
+}
+
+// PhotoFaceConfig controls face detection and clustering for photo libraries.
+type PhotoFaceConfig struct {
+	AutoOnScan            *bool   `yaml:"auto_on_scan"`
+	PythonPath            string  `yaml:"python_path"`
+	ScriptPath            string  `yaml:"script_path"`
+	SimilarityThreshold   float32 `yaml:"similarity_threshold"`
+}
+
+func (c *Config) PhotoFaceAutoOnScan() bool {
+	if c == nil || c.PhotoFace.AutoOnScan == nil {
+		return true
+	}
+	return *c.PhotoFace.AutoOnScan
+}
+
+func (c *Config) PhotoFaceSimilarityThreshold() float32 {
+	if c == nil || c.PhotoFace.SimilarityThreshold <= 0 {
+		return 0.45
+	}
+	return c.PhotoFace.SimilarityThreshold
 }
 
 // JITConfig controls just-in-time transcode behavior.

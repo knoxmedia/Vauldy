@@ -2,15 +2,19 @@ package handler
 
 import (
 	"database/sql"
+	"path/filepath"
+	"strings"
 	"sync"
 
 	"knox-media/cmd/scheduler"
 	"knox-media/internal/app"
 	"knox-media/internal/atrack"
+	"knox-media/internal/config"
 	"knox-media/internal/jit/session"
 	"knox-media/internal/keyframe"
 	"knox-media/internal/lyrictask"
 	"knox-media/internal/photoclass"
+	"knox-media/internal/photoface"
 	"knox-media/internal/photogeocode"
 	"knox-media/internal/preview"
 	"knox-media/internal/subtitle"
@@ -33,6 +37,7 @@ type Handler struct {
 	PhotoClassifyWorker *photoclass.Worker
 	PhotoGeocode        *photogeocode.Service
 	PhotoLocationWorker *photogeocode.Worker
+	PhotoFaceWorker     *photoface.Worker
 	scanMu              sync.Mutex
 	scrapeRunMu    sync.Mutex
 	runningScans   map[int64]scanRuntime
@@ -42,6 +47,16 @@ func New(a *app.App, w *transcode.Worker, pkgw *transcode.PackageWorker, pw *pre
 	h := &Handler{App: a, Worker: w, PackageWorker: pkgw, PreviewWorker: pw, Subtitle: sub, Upload: u, Instant: instant, SessionManager: sm, AtrackWorker: atw, KeyframeWorker: kfw, LyricWorker: lw, PhotoClassifyWorker: pcw, PhotoGeocode: photogeocode.New(a.DB), runningScans: map[int64]scanRuntime{}}
 	_ = h.PhotoGeocode.EnsureSchema()
 	h.PhotoLocationWorker = photogeocode.NewWorker(a.DB, h.PhotoGeocode)
+	h.PhotoFaceWorker = photoface.NewWorker(a.DB, filepath.Dir(a.ConfigPath), a.Config.FFmpeg.FFmpegPath, a.Config.Data.Preview, func() config.PhotoFaceConfig {
+		cfg := a.Config.PhotoFace
+		if strings.TrimSpace(cfg.PythonPath) == "" {
+			cfg.PythonPath = a.Config.PhotoClassify.PythonPath
+		}
+		if strings.TrimSpace(cfg.ScriptPath) == "" {
+			cfg.ScriptPath = "tools/photo_face/detect.py"
+		}
+		return cfg
+	})
 	return h
 }
 

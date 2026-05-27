@@ -220,6 +220,9 @@ func (h *Handler) EnqueuePostIngestForNewMedia(mediaID int64, fileType string) {
 		if h.PhotoClassifyWorker != nil && h.App.Config != nil && h.App.Config.PhotoClassifyAutoOnScan() && ft == "image" {
 			_ = h.PhotoClassifyWorker.EnsurePendingIfPhoto(mid, ft)
 		}
+		if h.PhotoFaceWorker != nil && h.App.Config != nil && h.App.Config.PhotoFaceAutoOnScan() && ft == "image" {
+			_ = h.PhotoFaceWorker.EnsurePendingIfPhoto(mid, ft)
+		}
 	}(mediaID, fileType)
 }
 

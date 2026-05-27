@@ -3,11 +3,14 @@ import {
   DownloadOutlined,
   LeftOutlined,
   RightOutlined,
+  RotateLeftOutlined,
+  RotateRightOutlined,
   ZoomInOutlined,
   ZoomOutOutlined,
 } from "@ant-design/icons";
 import { Button, Space, Spin, Tag, message } from "antd";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { MediaItem, photoMediumSrc, photoOriginalSrc, updatePhotoTags } from "../api/client";
 import styles from "../pages/PhotoBrowse.module.css";
 
@@ -24,10 +27,23 @@ function fmtTakenAt(v?: string): string {
   return v.replace("T", " ").slice(0, 19);
 }
 
+function computeFitScale(imgW: number, imgH: number, stageW: number, stageH: number, rotation: number): number {
+  if (imgW <= 0 || imgH <= 0 || stageW <= 0 || stageH <= 0) return 1;
+  const rot = ((rotation % 360) + 360) % 360;
+  const boundsW = rot === 90 || rot === 270 ? imgH : imgW;
+  const boundsH = rot === 90 || rot === 270 ? imgW : imgH;
+  return Math.min(stageW / boundsW, stageH / boundsH);
+}
+
 export default function PhotoLightbox({ items, index, onClose, onChangeIndex, onTagsUpdated }: Props) {
   const item = items[index];
-  const [scale, setScale] = useState(1);
+  const stageRef = useRef<HTMLDivElement>(null);
+  const [userZoom, setUserZoom] = useState(1);
+  const [fitScale, setFitScale] = useState(1);
+  const [rotation, setRotation] = useState(0);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const [imageSize, setImageSize] = useState({ w: 0, h: 0 });
+  const [stageSize, setStageSize] = useState({ w: 0, h: 0 });
   const [dragging, setDragging] = useState(false);
   const dragStart = useRef({ x: 0, y: 0, ox: 0, oy: 0 });
   const [loading, setLoading] = useState(true);
@@ -39,13 +55,39 @@ export default function PhotoLightbox({ items, index, onClose, onChangeIndex, on
 
   const hasPrev = index > 0;
   const hasNext = index < items.length - 1;
+  const displayScale = fitScale * userZoom;
 
   const resetView = useCallback(() => {
-    setScale(1);
+    setUserZoom(1);
+    setRotation(0);
     setOffset({ x: 0, y: 0 });
     setUseOriginal(false);
     setLoading(true);
+    setImageSize({ w: 0, h: 0 });
   }, []);
+
+  useEffect(() => {
+    setFitScale(computeFitScale(imageSize.w, imageSize.h, stageSize.w, stageSize.h, rotation));
+  }, [imageSize, stageSize, rotation]);
+
+  useEffect(() => {
+    const el = stageRef.current;
+    if (!el) return;
+    const update = () => {
+      const rect = el.getBoundingClientRect();
+      setStageSize({ w: rect.width, h: rect.height });
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  function rotateBy(delta: number) {
+    setRotation((r) => (r + delta + 360) % 360);
+    setOffset({ x: 0, y: 0 });
+    setUserZoom(1);
+  }
 
   useEffect(() => {
     resetView();
@@ -53,6 +95,11 @@ export default function PhotoLightbox({ items, index, onClose, onChangeIndex, on
     setEditingTags(false);
     setTagDraft("");
   }, [index, resetView, item?.photo_tags]);
+
+  useEffect(() => {
+    setLoading(true);
+    setImageSize({ w: 0, h: 0 });
+  }, [item?.id, useOriginal]);
 
   const cancelTagEdit = useCallback(() => {
     setEditingTags(false);
@@ -72,12 +119,19 @@ export default function PhotoLightbox({ items, index, onClose, onChangeIndex, on
   }, [editingTags, cancelTagEdit]);
 
   useEffect(() => {
+    document.body.classList.add("photo-lightbox-open");
+    return () => {
+      document.body.classList.remove("photo-lightbox-open");
+    };
+  }, []);
+
+  useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape") onClose();
       if (e.key === "ArrowLeft" && hasPrev) onChangeIndex(index - 1);
       if (e.key === "ArrowRight" && hasNext) onChangeIndex(index + 1);
-      if (e.key === "+" || e.key === "=") setScale((s) => Math.min(4, s + 0.25));
-      if (e.key === "-") setScale((s) => Math.max(0.25, s - 0.25));
+      if (e.key === "+" || e.key === "=") setUserZoom((s) => Math.min(4, s + 0.25));
+      if (e.key === "-") setUserZoom((s) => Math.max(0.25, s - 0.25));
       if (e.key === "0" && e.ctrlKey) resetView();
       if (e.key === "i" || e.key === "I") setEditingTags((v) => !v);
     }
@@ -105,7 +159,7 @@ export default function PhotoLightbox({ items, index, onClose, onChangeIndex, on
   const src = useOriginal ? photoOriginalSrc(item.id) : photoMediumSrc(item.id);
 
   function onPointerDown(e: React.PointerEvent) {
-    if (scale <= 1) return;
+    if (userZoom <= 1) return;
     setDragging(true);
     dragStart.current = { x: e.clientX, y: e.clientY, ox: offset.x, oy: offset.y };
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
@@ -126,7 +180,7 @@ export default function PhotoLightbox({ items, index, onClose, onChangeIndex, on
   function onWheel(e: React.WheelEvent) {
     e.preventDefault();
     const delta = e.deltaY > 0 ? -0.1 : 0.1;
-    setScale((s) => Math.min(4, Math.max(0.25, s + delta)));
+    setUserZoom((s) => Math.min(4, Math.max(0.25, s + delta)));
   }
 
   async function saveTags() {
@@ -145,7 +199,7 @@ export default function PhotoLightbox({ items, index, onClose, onChangeIndex, on
     }
   }
 
-  return (
+  return createPortal(
     <div className={styles.photoLightbox} role="dialog" aria-modal="true" aria-label="照片预览">
       <div className={styles.toolbar}>
         <span className={styles.title}>{item.title || "未命名"}</span>
@@ -154,14 +208,28 @@ export default function PhotoLightbox({ items, index, onClose, onChangeIndex, on
             type="text"
             icon={<ZoomOutOutlined />}
             aria-label="缩小"
-            onClick={() => setScale((s) => Math.max(0.25, s - 0.25))}
+            onClick={() => setUserZoom((s) => Math.max(0.25, s - 0.25))}
             style={{ color: "#fff" }}
           />
           <Button
             type="text"
             icon={<ZoomInOutlined />}
             aria-label="放大"
-            onClick={() => setScale((s) => Math.min(4, s + 0.25))}
+            onClick={() => setUserZoom((s) => Math.min(4, s + 0.25))}
+            style={{ color: "#fff" }}
+          />
+          <Button
+            type="text"
+            icon={<RotateLeftOutlined />}
+            aria-label="向左旋转"
+            onClick={() => rotateBy(-90)}
+            style={{ color: "#fff" }}
+          />
+          <Button
+            type="text"
+            icon={<RotateRightOutlined />}
+            aria-label="向右旋转"
+            onClick={() => rotateBy(90)}
             style={{ color: "#fff" }}
           />
           <Button
@@ -188,7 +256,7 @@ export default function PhotoLightbox({ items, index, onClose, onChangeIndex, on
         </button>
       ) : null}
 
-      <div className={styles.stage} onWheel={onWheel}>
+      <div ref={stageRef} className={styles.stage} onWheel={onWheel}>
         <div
           className={`${styles.imageWrap} ${dragging ? styles.imageWrapDragging : ""}`}
           onPointerDown={onPointerDown}
@@ -203,11 +271,17 @@ export default function PhotoLightbox({ items, index, onClose, onChangeIndex, on
             className={styles.image}
             src={src}
             alt={item.title || ""}
+            width={imageSize.w || undefined}
+            height={imageSize.h || undefined}
             style={{
-              transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})`,
+              transform: `translate(${offset.x}px, ${offset.y}px) rotate(${rotation}deg) scale(${displayScale})`,
               opacity: loading ? 0 : 1,
             }}
-            onLoad={() => setLoading(false)}
+            onLoad={(e) => {
+              const img = e.currentTarget;
+              setImageSize({ w: img.naturalWidth, h: img.naturalHeight });
+              setLoading(false);
+            }}
             onDoubleClick={() => {
               if (useOriginal) resetView();
               else setUseOriginal(true);
@@ -255,6 +329,7 @@ export default function PhotoLightbox({ items, index, onClose, onChangeIndex, on
           </span>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

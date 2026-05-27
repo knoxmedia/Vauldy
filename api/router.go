@@ -43,6 +43,7 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 	go h.StartLyricTaskLoop(context.Background())
 	go h.StartPhotoClassifyLoop(context.Background())
 	go h.StartPhotoLocationLoop(context.Background())
+	go h.StartPhotoFaceLoop(context.Background())
 
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "knox-media"})
@@ -78,6 +79,10 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 			auth.GET("/library/:id/photo/places", h.ListPhotoPlaces)
 			auth.POST("/library/:id/photo/locations/backfill", h.BackfillPhotoLocations)
 			auth.GET("/library/:id/photo/locations/progress", h.PhotoLocationProgress)
+			auth.GET("/library/:id/photo/persons", h.ListPhotoPersons)
+			auth.PATCH("/library/:id/photo/persons/:personId", h.UpdatePhotoPerson)
+			auth.POST("/library/:id/photo/faces/backfill", h.BackfillPhotoFaces)
+			auth.GET("/library/:id/photo/faces/progress", h.PhotoFaceProgress)
 			auth.GET("/library/:id/photo/classify/progress", h.PhotoClassifyProgress)
 			auth.PATCH("/media/:id/photo/tags", h.UpdatePhotoTags)
 			auth.GET("/album/:id", h.GetAlbum)
@@ -132,6 +137,7 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 			play.GET("/media/:id/photo", h.PhotoPreviewInfo)
 			play.GET("/media/:id/photo/thumb.jpg", h.ServePhotoThumb)
 			play.GET("/media/:id/photo/medium.jpg", h.ServePhotoMedium)
+			play.GET("/photo/face/:id/thumb.jpg", h.ServePhotoFaceThumb)
 			play.GET("/media/:id/subtitles/:sid/vtt", h.SubtitleVTT)
 			play.GET("/transcode/task/:id/status", h.GetTranscodeTaskStatus)
 			play.GET("/drm/widevine/service-cert", h.WidevineServiceCert)
@@ -243,6 +249,8 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 			adm.POST("/admin/system-options/install/ocr", h.InstallSystemOptionsOCR)
 			adm.POST("/admin/system-options/test/photo-classify", h.TestSystemOptionsPhotoClassify)
 			adm.POST("/admin/system-options/install/photo-classify", h.InstallSystemOptionsPhotoClassify)
+			adm.POST("/admin/system-options/test/photo-face", h.TestSystemOptionsPhotoFace)
+			adm.POST("/admin/system-options/install/photo-face", h.InstallSystemOptionsPhotoFace)
 
 			adm.GET("/admin/overview", h.AdminOverview)
 			adm.GET("/admin/access-log", h.ListAccessLogs)

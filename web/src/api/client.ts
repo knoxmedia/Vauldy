@@ -336,6 +336,7 @@ export async function fetchMedia(
     file_type?: string;
     photo_tag?: string;
     photo_place?: string;
+    photo_person?: string;
   },
 ) {
   const params: Record<string, string | number> = {};
@@ -345,6 +346,7 @@ export async function fetchMedia(
   if (opts?.file_type) params.file_type = opts.file_type;
   if (opts?.photo_tag) params.photo_tag = opts.photo_tag;
   if (opts?.photo_place) params.photo_place = opts.photo_place;
+  if (opts?.photo_person) params.photo_person = opts.photo_person;
   const { data } = await api.get<{ items?: MediaItem[] }>("/api/v1/media", { params });
   return data?.items ?? [];
 }
@@ -441,6 +443,13 @@ export type PhotoPlace = {
   cover_id?: number;
 };
 
+export type PhotoPerson = {
+  id: number;
+  name: string;
+  count: number;
+  cover_face_id?: number;
+};
+
 export async function fetchPhotoCategories(libraryId: number): Promise<PhotoCategory[]> {
   const { data } = await api.get<{ items?: PhotoCategory[] }>(`/api/v1/library/${libraryId}/photo/categories`);
   return data?.items ?? [];
@@ -449,6 +458,50 @@ export async function fetchPhotoCategories(libraryId: number): Promise<PhotoCate
 export async function fetchPhotoPlaces(libraryId: number): Promise<PhotoPlace[]> {
   const { data } = await api.get<{ items?: PhotoPlace[] }>(`/api/v1/library/${libraryId}/photo/places`);
   return data?.items ?? [];
+}
+
+export async function fetchPhotoPersons(libraryId: number): Promise<PhotoPerson[]> {
+  const { data } = await api.get<{ items?: PhotoPerson[] }>(`/api/v1/library/${libraryId}/photo/persons`);
+  return data?.items ?? [];
+}
+
+export async function updatePhotoPersonName(
+  libraryId: number,
+  personId: number,
+  name: string,
+): Promise<{ ok: boolean; name: string }> {
+  const { data } = await api.patch<{ ok: boolean; name: string }>(
+    `/api/v1/library/${libraryId}/photo/persons/${personId}`,
+    { name },
+  );
+  return data ?? { ok: false, name };
+}
+
+export function photoFaceThumbSrc(faceId: number): string {
+  const token = useAuthStore.getState().token;
+  const params = new URLSearchParams({ v: "2" });
+  if (token) params.set("access_token", token);
+  return `/api/v1/photo/face/${faceId}/thumb.jpg?${params.toString()}`;
+}
+
+export async function backfillPhotoFaces(libraryId: number): Promise<{ ok: boolean; queued: number }> {
+  const { data } = await api.post<{ ok: boolean; queued: number }>(
+    `/api/v1/library/${libraryId}/photo/faces/backfill`,
+  );
+  return data ?? { ok: false, queued: 0 };
+}
+
+export async function fetchPhotoFaceProgress(libraryId: number): Promise<{
+  total: number;
+  processed: number;
+  detected: number;
+  pending: number;
+  percent: number;
+}> {
+  const { data } = await api.get<{ total: number; processed: number; detected: number; pending: number; percent: number }>(
+    `/api/v1/library/${libraryId}/photo/faces/progress`,
+  );
+  return data ?? { total: 0, processed: 0, detected: 0, pending: 0, percent: 0 };
 }
 
 export async function backfillPhotoLocations(libraryId: number): Promise<{ ok: boolean; queued: number }> {
@@ -1793,12 +1846,20 @@ export type SystemOptionsPhotoClassify = {
   labels_path: string;
 };
 
+export type SystemOptionsPhotoFace = {
+  auto_on_scan: boolean;
+  python_path: string;
+  script_path: string;
+  similarity_threshold: number;
+};
+
 export type SystemOptions = {
   general: SystemOptionsGeneral;
   playback: SystemOptionsPlayback;
   transcoder: SystemOptionsTranscoder;
   recognition: SystemOptionsRecognition;
   photo_classify: SystemOptionsPhotoClassify;
+  photo_face: SystemOptionsPhotoFace;
 };
 
 export async function fetchSystemOptions() {
@@ -1870,6 +1931,30 @@ export async function testSystemOptionsPhotoClassify(photoClassify?: SystemOptio
 export async function installSystemOptionsPhotoClassify() {
   const { data } = await api.post<PhotoClassifyInstallResult>(
     "/api/v1/admin/system-options/install/photo-classify",
+    {},
+    { timeout: 45 * 60 * 1000 },
+  );
+  return data;
+}
+
+export type PhotoFaceInstallResult = {
+  ok: boolean;
+  message: string;
+  photo_face?: SystemOptionsPhotoFace;
+};
+
+export async function testSystemOptionsPhotoFace(photoFace?: SystemOptionsPhotoFace) {
+  const { data } = await api.post<RecognitionTestResult>(
+    "/api/v1/admin/system-options/test/photo-face",
+    photoFace ? { photo_face: photoFace } : {},
+    { timeout: 10 * 60 * 1000 },
+  );
+  return data;
+}
+
+export async function installSystemOptionsPhotoFace() {
+  const { data } = await api.post<PhotoFaceInstallResult>(
+    "/api/v1/admin/system-options/install/photo-face",
     {},
     { timeout: 45 * 60 * 1000 },
   );

@@ -12,9 +12,21 @@
 .row {
   display: flex;
   gap: 12px;
+  align-items: flex-start;
   overflow-x: auto;
   padding-bottom: 4px;
   scrollbar-width: thin;
+}
+
+.rowFit {
+  overflow: hidden;
+  flex-wrap: nowrap;
+  padding-bottom: 0;
+  scrollbar-width: none;
+}
+
+.rowFit::-webkit-scrollbar {
+  display: none;
 }
 
 .rowWrap {
@@ -24,6 +36,9 @@
 
 .tile {
   flex: 0 0 120px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
   border: none;
   background: transparent;
   cursor: pointer;
@@ -45,6 +60,15 @@
   height: 100%;
   object-fit: cover;
   display: block;
+}
+
+.faceCover {
+  border-radius: 10px;
+}
+
+.faceCover img {
+  object-fit: cover;
+  object-position: center center;
 }
 
 .placeholder {
@@ -80,6 +104,13 @@
 
 .moreTile .cover {
   position: relative;
+  flex-shrink: 0;
+}
+
+.tileMetaHidden {
+  visibility: hidden;
+  pointer-events: none;
+  user-select: none;
 }
 
 .moreTile .cover::after {

@@ -177,6 +177,14 @@ body {
   overflow: hidden !important;
 }
 
+body.photo-lightbox-open {
+  overflow: hidden;
+}
+
+body.photo-lightbox-open .app-shell-content {
+  overflow: hidden !important;
+}
+
 /* 窄表单页在居中容器内再水平居中 */
 .app-narrow-block {
   max-width: 560px;

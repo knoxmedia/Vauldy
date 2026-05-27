@@ -35,7 +35,7 @@ func (h *Handler) runPhotoLocationOnce() {
 		return
 	}
 	var n int
-	_ = h.App.DB.QueryRow(`SELECT COUNT(1) FROM photo_location_task WHERE status IN ('pending', 'failed')`).Scan(&n)
+	_ = h.App.DB.QueryRow(`SELECT COUNT(1) FROM photo_location_task WHERE status IN ('pending', 'failed', 'running')`).Scan(&n)
 	if n == 0 {
 		return
 	}

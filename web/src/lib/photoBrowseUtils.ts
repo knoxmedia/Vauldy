@@ -5,10 +5,28 @@ export type MainTab = "timeline" | "smart";
 export type LayoutMode = "grid" | "masonry";
 
 export type DrillDown = {
-  section: "people" | "place" | "thing";
+  section: "people" | "place" | "thing" | "person";
   categoryId: string;
   title: string;
 };
+
+/** Drill-down id for the full person shelf (all clustered faces). */
+export const PERSON_ALL_ID = "__all__";
+
+/** Drill-down id for the full place shelf (all GPS locations). */
+export const PLACE_ALL_ID = "__all__";
+
+export function isPersonAllDrill(drill: DrillDown | null | undefined): boolean {
+  return drill?.section === "person" && drill.categoryId === PERSON_ALL_ID;
+}
+
+export function isPlaceAllDrill(drill: DrillDown | null | undefined): boolean {
+  return drill?.section === "place" && drill.categoryId === PLACE_ALL_ID;
+}
+
+export function isShelfAllDrill(drill: DrillDown | null | undefined): boolean {
+  return isPersonAllDrill(drill) || isPlaceAllDrill(drill);
+}
 
 export type MonthBucket = {
   key: string;

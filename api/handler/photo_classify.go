@@ -40,7 +40,7 @@ func (h *Handler) runPhotoClassifyOnce() {
 		return
 	}
 	var n int
-	_ = h.App.DB.QueryRow(`SELECT COUNT(1) FROM photo_classify_task WHERE status IN ('pending', 'failed')`).Scan(&n)
+	_ = h.App.DB.QueryRow(`SELECT COUNT(1) FROM photo_classify_task WHERE status IN ('pending', 'failed', 'running')`).Scan(&n)
 	if n == 0 {
 		return
 	}

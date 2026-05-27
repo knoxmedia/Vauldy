@@ -22,39 +22,43 @@ function GridCard({ item, onOpen }: { item: MediaItem; onOpen: (id: number) => v
 }
 
 export default function PhotoListView({ items, layout, months, onOpen, showDateGroups = true }: Props) {
-  if (layout === "masonry") {
-    return <PhotoMasonry items={items} onOpen={onOpen} />;
-  }
-
   if (showDateGroups && months && months.length > 0) {
     return (
       <div>
-            {months.map((month, monthIdx) => {
-              const prevYear = monthIdx > 0 ? months[monthIdx - 1].year : -1;
-              const showYearAnchor = month.year > 0 && month.year !== prevYear;
-              return (
-                <section key={month.key} className={styles.monthGroup}>
-                  <div id={`photo-month-${month.key}`} className={styles.monthAnchor} aria-hidden />
-                  {showYearAnchor ? (
-                    <div id={`photo-year-${month.year}`} className={styles.monthAnchor} aria-hidden />
-                  ) : null}
-            {month.days.map(({ day, label, items: dayItems }) => (
-              <div key={day} className={styles.dateGroup}>
-                <h3 className={styles.dateHeading}>
-                  {label} · {dayItems.length} 张
-                </h3>
-                <div className={styles.grid}>
-                  {dayItems.map((item) => (
-                    <GridCard key={item.id} item={item} onOpen={onOpen} />
-                  ))}
+        {months.map((month, monthIdx) => {
+          const prevYear = monthIdx > 0 ? months[monthIdx - 1].year : -1;
+          const showYearAnchor = month.year > 0 && month.year !== prevYear;
+          return (
+            <section key={month.key} className={styles.monthGroup}>
+              <div id={`photo-month-${month.key}`} className={styles.monthAnchor} aria-hidden />
+              {showYearAnchor ? (
+                <div id={`photo-year-${month.year}`} className={styles.monthAnchor} aria-hidden />
+              ) : null}
+              {month.days.map(({ day, label, items: dayItems }) => (
+                <div key={day} className={styles.dateGroup}>
+                  <h3 className={styles.dateHeading}>
+                    {label} · {dayItems.length} 张
+                  </h3>
+                  {layout === "masonry" ? (
+                    <PhotoMasonry items={dayItems} onOpen={onOpen} />
+                  ) : (
+                    <div className={styles.grid}>
+                      {dayItems.map((item) => (
+                        <GridCard key={item.id} item={item} onOpen={onOpen} />
+                      ))}
+                    </div>
+                  )}
                 </div>
-              </div>
-            ))}
-                </section>
-              );
-            })}
+              ))}
+            </section>
+          );
+        })}
       </div>
     );
+  }
+
+  if (layout === "masonry") {
+    return <PhotoMasonry items={items} onOpen={onOpen} />;
   }
 
   return (

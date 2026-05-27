@@ -30,6 +30,8 @@ import {
   installSystemOptionsOCR,
   testSystemOptionsPhotoClassify,
   installSystemOptionsPhotoClassify,
+  testSystemOptionsPhotoFace,
+  installSystemOptionsPhotoFace,
   type SystemOptions,
   type RecognitionTestResult,
 } from "../api/client";
@@ -85,6 +87,12 @@ function defaultSystemOptions(): SystemOptions {
       model_path: "tools/photo_classify/models/mobilenetv2-7.onnx",
       labels_path: "tools/photo_classify/imagenet_labels.txt",
     },
+    photo_face: {
+      auto_on_scan: true,
+      python_path: "",
+      script_path: "tools/photo_face/detect.py",
+      similarity_threshold: 0.45,
+    },
   };
 }
 
@@ -104,6 +112,7 @@ function mergeSystemOptions(data: Partial<SystemOptions> | null | undefined): Sy
       ocr: { ...base.recognition.ocr, ...(data.recognition?.ocr ?? {}) },
     },
     photo_classify: { ...base.photo_classify, ...(data.photo_classify ?? {}) },
+    photo_face: { ...base.photo_face, ...(data.photo_face ?? {}) },
   };
 }
 
@@ -229,6 +238,9 @@ export default function SystemOptionsPage() {
   const [classifyTesting, setClassifyTesting] = useState(false);
   const [classifyInstalling, setClassifyInstalling] = useState(false);
   const [classifyTestResult, setClassifyTestResult] = useState<RecognitionTestResult | null>(null);
+  const [faceTesting, setFaceTesting] = useState(false);
+  const [faceInstalling, setFaceInstalling] = useState(false);
+  const [faceTestResult, setFaceTestResult] = useState<RecognitionTestResult | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -388,6 +400,47 @@ export default function SystemOptionsPage() {
       message.error("智能分类安装请求失败（可能超时，请查看服务器日志）");
     } finally {
       setClassifyInstalling(false);
+    }
+  };
+
+  const applyInstalledPhotoFace = (photoFace: SystemOptions["photo_face"] | undefined) => {
+    if (!photoFace) return;
+    const patch = mergeSystemOptions({ photo_face: photoFace });
+    setOpts((p) => ({ ...p, photo_face: patch.photo_face }));
+    setBaseline((p) => ({ ...p, photo_face: patch.photo_face }));
+  };
+
+  const runFaceTest = async () => {
+    setFaceTesting(true);
+    setFaceTestResult(null);
+    try {
+      const result = await testSystemOptionsPhotoFace(opts.photo_face);
+      setFaceTestResult(result);
+    } catch {
+      setFaceTestResult({ ok: false, message: "测试请求失败" });
+    } finally {
+      setFaceTesting(false);
+    }
+  };
+
+  const runFaceInstall = async () => {
+    setFaceInstalling(true);
+    setFaceTestResult(null);
+    try {
+      const result = await installSystemOptionsPhotoFace();
+      if (result.photo_face) {
+        applyInstalledPhotoFace(result.photo_face);
+      }
+      setFaceTestResult({ ok: result.ok, message: result.message });
+      if (result.ok) {
+        message.success(result.message);
+      } else {
+        message.error(result.message);
+      }
+    } catch {
+      message.error("人脸检测安装请求失败（可能超时，请查看服务器日志）");
+    } finally {
+      setFaceInstalling(false);
     }
   };
 
@@ -1011,6 +1064,89 @@ export default function SystemOptionsPage() {
     </Space>
   );
 
+  const tabPhotoFace = (
+    <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+      <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
+        人脸检测与聚类配置保存在 config.yml 的 photo_face 段，使用 InsightFace 检测人脸并自动聚类为「人物」（共用
+        tools/recognition/.venv）。
+      </Typography.Paragraph>
+
+      <Flex justify="flex-end" wrap="wrap" gap={8}>
+        <Space wrap>
+          <Button icon={<CloudDownloadOutlined />} loading={faceInstalling} onClick={() => void runFaceInstall()}>
+            一键安装
+          </Button>
+          <Button icon={<ApiOutlined />} loading={faceTesting} onClick={() => void runFaceTest()}>
+            连接测试
+          </Button>
+        </Space>
+      </Flex>
+      {faceTestResult ? (
+        <Typography.Text type={faceTestResult.ok ? "success" : "danger"} style={{ fontSize: 13 }}>
+          {faceTestResult.message}
+        </Typography.Text>
+      ) : null}
+
+      <SettingRow
+        title="扫描时自动人脸检测"
+        description="导入或扫描图片库时，为新图片自动加入 photo_face_task 队列。"
+      >
+        <Switch
+          checked={opts.photo_face.auto_on_scan}
+          onChange={(v) =>
+            setOpts((p) => ({
+              ...p,
+              photo_face: { ...p.photo_face, auto_on_scan: v },
+            }))
+          }
+        />
+      </SettingRow>
+      <SettingRow
+        title="聚类相似度阈值"
+        description="人脸特征余弦相似度达到该值时视为同一人，范围 0.3–0.6，默认 0.45。"
+      >
+        <InputNumber
+          min={0.3}
+          max={0.6}
+          step={0.01}
+          value={opts.photo_face.similarity_threshold}
+          onChange={(v) =>
+            setOpts((p) => ({
+              ...p,
+              photo_face: { ...p.photo_face, similarity_threshold: typeof v === "number" ? v : 0.45 },
+            }))
+          }
+        />
+      </SettingRow>
+      <SettingRow title="Python 路径" description="运行 detect.py 的解释器；留空则使用智能分类中的 Python 路径。">
+        <Input
+          style={{ width: 480, maxWidth: "100%" }}
+          value={opts.photo_face.python_path}
+          onChange={(e) =>
+            setOpts((p) => ({
+              ...p,
+              photo_face: { ...p.photo_face, python_path: e.target.value },
+            }))
+          }
+          placeholder="tools/recognition/.venv/Scripts/python.exe"
+        />
+      </SettingRow>
+      <SettingRow title="人脸检测脚本路径" description="detect.py 的相对或绝对路径。" controlLayout="full">
+        <Input
+          style={{ width: 480, maxWidth: "100%" }}
+          value={opts.photo_face.script_path}
+          onChange={(e) =>
+            setOpts((p) => ({
+              ...p,
+              photo_face: { ...p.photo_face, script_path: e.target.value },
+            }))
+          }
+          placeholder="tools/photo_face/detect.py"
+        />
+      </SettingRow>
+    </Space>
+  );
+
   return (
     <Card loading={loading}>
       <Flex justify="flex-end" style={{ marginBottom: 16 }}>
@@ -1032,6 +1168,7 @@ export default function SystemOptionsPage() {
           { key: "asr", label: "语音识别", children: tabASR },
           { key: "ocr", label: "字符识别", children: tabOCR },
           { key: "photo-classify", label: "智能分类", children: tabPhotoClassify },
+          { key: "photo-face", label: "人脸聚类", children: tabPhotoFace },
         ]}
       />
     </Card>

@@ -42,6 +42,7 @@ func (h *Handler) ListMedia(c *gin.Context) {
 	fileType := strings.TrimSpace(c.Query("file_type"))
 	photoTagID := strings.TrimSpace(c.Query("photo_tag"))
 	photoPlaceID := strings.TrimSpace(c.Query("photo_place"))
+	photoPersonID := strings.TrimSpace(c.Query("photo_person"))
 	if lib != "" && fileType == "image" {
 		if libID, err := strconv.ParseInt(lib, 10, 64); err == nil && libID > 0 {
 			_, _ = photoclass.RepairLibraryPhotoTags(h.App.DB, libID)
@@ -96,6 +97,10 @@ func (h *Handler) ListMedia(c *gin.Context) {
 	if photoPlaceID != "" {
 		q += ` AND json_extract(m.meta_json, '$.photo.place_id') = ?`
 		args = append(args, photoPlaceID)
+	}
+	if photoPersonID != "" {
+		q += ` AND EXISTS (SELECT 1 FROM photo_face pf WHERE pf.media_id = m.id AND pf.person_id = ?)`
+		args = append(args, photoPersonID)
 	}
 	maxLimit := 500
 	if fileType == "image" {
