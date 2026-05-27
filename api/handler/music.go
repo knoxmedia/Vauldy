@@ -11,6 +11,7 @@ import (
 
 	"knox-media/internal/musicparse"
 	"knox-media/internal/musicstore"
+	"knox-media/internal/textencoding"
 )
 
 // ListLibraryAlbums returns albums grouped for a music library.
@@ -117,9 +118,9 @@ func (h *Handler) queryLibraryAlbums(libID int64, artistFilter, genreFilter stri
 			continue
 		}
 		items = append(items, gin.H{
-			"id": id, "library_id": libID, "title": title.String, "title_norm": titleNorm.String,
-			"year": year, "genre": genre.String, "artwork_path": artwork.String,
-			"album_artist": artistName.String, "album_artist_id": artistID,
+			"id": id, "library_id": libID, "title": textencoding.FixMetadataString(title.String), "title_norm": titleNorm.String,
+			"year": year, "genre": textencoding.FixMetadataString(genre.String), "artwork_path": artwork.String,
+			"album_artist": textencoding.FixMetadataString(artistName.String), "album_artist_id": artistID,
 			"track_count": trackCount, "total_duration": totalDur,
 			"is_unknown": isUnknown > 0, "rating": rating,
 			"created_at": created.String, "updated_at": updated.String,
@@ -265,10 +266,10 @@ func (h *Handler) queryLibraryTracks(libID, albumID, artistID int64, genre strin
 		}
 		items = append(items, gin.H{
 			"id": trackID, "media_id": mediaID, "track_number": trackNum,
-			"title": title.String, "artist": artist.String,
+			"title": textencoding.FixMetadataString(title.String), "artist": textencoding.FixMetadataString(artist.String),
 			"duration": duration, "bitrate": bitrate, "format": format.String,
-			"album_id": albumIDVal, "album_title": albumTitle.String,
-			"album_artist": albumArtist.String, "artist_id": artistIDVal, "year": year,
+			"album_id": albumIDVal, "album_title": textencoding.FixMetadataString(albumTitle.String),
+			"album_artist": textencoding.FixMetadataString(albumArtist.String), "artist_id": artistIDVal, "year": year,
 			"artwork_path": artwork.String, "file_path": filePath.String,
 			"created_at": created.String,
 		})
@@ -305,6 +306,7 @@ func (h *Handler) GetAlbum(c *gin.Context) {
 	if !h.requireLibraryAccess(c, libID) {
 		return
 	}
+	musicstore.RefreshAlbumEncoding(h.App.DB, albumID)
 	_, _ = h.App.DB.Exec(`UPDATE music_track SET track_number = 0 WHERE track_number IS NULL`)
 	_, _ = musicstore.SyncAlbumTracks(h.App.DB, albumID)
 	tracks, err := h.queryLibraryTracks(libID, albumID, 0, "")
@@ -329,9 +331,9 @@ func (h *Handler) GetAlbum(c *gin.Context) {
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"id": id, "library_id": libID, "title": title.String, "title_norm": titleNorm.String,
-		"year": year, "genre": genre.String, "artwork_path": artwork.String,
-		"album_artist": artistName.String, "album_artist_id": artistID,
+		"id": id, "library_id": libID, "title": textencoding.FixMetadataString(title.String), "title_norm": titleNorm.String,
+		"year": year, "genre": textencoding.FixMetadataString(genre.String), "artwork_path": artwork.String,
+		"album_artist": textencoding.FixMetadataString(artistName.String), "album_artist_id": artistID,
 		"is_unknown": isUnknown > 0, "rating": rating, "meta_json": metaJSON.String,
 		"track_count": len(tracks), "total_duration": totalDur,
 		"tracks": tracks, "created_at": created.String, "updated_at": updated.String,

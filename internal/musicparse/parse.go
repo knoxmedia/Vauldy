@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"knox-media/internal/scraper"
+	"knox-media/internal/textencoding"
 )
 
 const UnknownAlbum = "[Unknown Album]"
@@ -86,11 +87,10 @@ func ParseFromSources(filePath, ffprobeJSON string, durationSec, bitrate int) Tr
 		meta.AlbumArtist = VariousArtists
 	}
 
-	meta.Title = scraper.NormalizeTitle(meta.Title)
 	if meta.Title == "" {
 		meta.Title = base
 	}
-	return meta
+	return RepairTrackMeta(meta)
 }
 
 func pickAlbumArtist(trackArtist, album string) string {
@@ -209,11 +209,11 @@ func parseFFprobeTags(rawJSON string) TrackMeta {
 		return meta
 	}
 	tags := root.Format.Tags
-	meta.Title = tagValue(tags, "title", "TIT2", "TITLE")
-	meta.Artist = tagValue(tags, "artist", "TPE1", "ARTIST")
-	meta.AlbumArtist = tagValue(tags, "album_artist", "TPE2", "ALBUM_ARTIST", "album artist")
-	meta.Album = tagValue(tags, "album", "TALB", "ALBUM")
-	meta.Genre = tagValue(tags, "genre", "TCON", "GENRE")
+	meta.Title = textencoding.FixMetadataString(tagValue(tags, "title", "TIT2", "TITLE"))
+	meta.Artist = textencoding.FixMetadataString(tagValue(tags, "artist", "TPE1", "ARTIST"))
+	meta.AlbumArtist = textencoding.FixMetadataString(tagValue(tags, "album_artist", "TPE2", "ALBUM_ARTIST", "album artist"))
+	meta.Album = textencoding.FixMetadataString(tagValue(tags, "album", "TALB", "ALBUM"))
+	meta.Genre = textencoding.FixMetadataString(tagValue(tags, "genre", "TCON", "GENRE"))
 	meta.Year = parseYear(tagValue(tags, "date", "TDRC", "YEAR", "DATE", "TYER"))
 	meta.TrackNumber = parseTrackNumber(tagValue(tags, "track", "TRCK", "TRACK"))
 	meta.DiscNumber = parseTrackNumber(tagValue(tags, "disc", "TPOS", "DISC"))

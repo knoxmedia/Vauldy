@@ -282,7 +282,7 @@ func DecodeMusicMeta(metaJSON, filePath string) musicparse.TrackMeta {
 		_ = json.Unmarshal([]byte(metaJSON), &root)
 	}
 	if storedMusicMeta(root.Music) {
-		return root.Music
+		return musicparse.RepairTrackMeta(root.Music)
 	}
 	ffprobeRaw := metaJSON
 	if strings.TrimSpace(ffprobeRaw) == "" {
@@ -292,7 +292,7 @@ func DecodeMusicMeta(metaJSON, filePath string) musicparse.TrackMeta {
 	if strings.TrimSpace(root.Title) != "" && meta.Title == "" {
 		meta.Title = root.Title
 	}
-	return meta
+	return musicparse.RepairTrackMeta(meta)
 }
 
 // CleanupMedia removes music track rows for a deleted media item.
