@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type RefObject } from "react";
 import type { MediaItem, PhotoCategory, PhotoPerson, PhotoPlace } from "../api/client";
 import { photoFaceThumbSrc, photoThumbSrc } from "../api/client";
 import { categoriesForSection, PERSON_ALL_ID, PLACE_ALL_ID, sampleCover, type DrillDown } from "../lib/photoBrowseUtils";
+import { tGlobal as t } from "../i18n";
 import styles from "./PhotoSmartClassify.module.css";
 
 const TILE_WIDTH = 120;
@@ -50,15 +51,15 @@ function PersonMoreTile({
         {coverFaceId ? (
           <img src={photoFaceThumbSrc(coverFaceId)} alt="" loading="lazy" decoding="async" />
         ) : (
-          <div className={styles.placeholder}>人</div>
+          <div className={styles.placeholder}>{t("components.photo_smart_classify.person_placeholder")}</div>
         )}
-        <span className={styles.moreLabel}>查看更多</span>
+        <span className={styles.moreLabel}>{t("components.photo_smart_classify.view_more")}</span>
       </div>
       <div className={`${styles.tileLabel} ${styles.tileMetaHidden}`} aria-hidden="true">
-        未命名人物
+        {t("components.photo_smart_classify.unnamed_person")}
       </div>
       <div className={`${styles.tileCount} ${styles.tileMetaHidden}`} aria-hidden="true">
-        0 张
+        {t("components.photo_smart_classify.count_photos", { count: 0 })}
       </div>
     </button>
   );
@@ -79,7 +80,7 @@ function PersonTile({
         onOpen({
           section: "person",
           categoryId: String(person.id),
-          title: person.name || `人物 ${person.id}`,
+          title: person.name || t("components.photo_smart_classify.person_fallback", { id: person.id }),
         })
       }
     >
@@ -87,11 +88,11 @@ function PersonTile({
         {person.cover_face_id ? (
           <img src={photoFaceThumbSrc(person.cover_face_id)} alt="" loading="lazy" decoding="async" />
         ) : (
-          <div className={styles.placeholder}>人</div>
+          <div className={styles.placeholder}>{t("components.photo_smart_classify.person_placeholder")}</div>
         )}
       </div>
-      <div className={styles.tileLabel}>{person.name || "未命名人物"}</div>
-      <div className={styles.tileCount}>{person.count} 张</div>
+      <div className={styles.tileLabel}>{person.name || t("components.photo_smart_classify.unnamed_person")}</div>
+      <div className={styles.tileCount}>{t("components.photo_smart_classify.count_photos", { count: person.count })}</div>
     </button>
   );
 }
@@ -103,7 +104,7 @@ function CategorySectionRow({
   section,
   onOpen,
   showAll = false,
-  emptyHint = "暂无分类结果，请先完成 AI 智能分类。",
+  emptyHint,
 }: {
   title: string;
   categories: PhotoCategory[];
@@ -116,11 +117,13 @@ function CategorySectionRow({
   const visible = showAll ? categories : categories.slice(0, 8);
   const rest = showAll ? 0 : categories.length - visible.length;
 
+  const emptyText = emptyHint ?? t("components.photo_smart_classify.empty_hint_default");
+
   if (categories.length === 0) {
     return (
       <section className={styles.section}>
         <h3 className={styles.sectionTitle}>{title}</h3>
-        <p className={styles.emptyHint}>{emptyHint}</p>
+        <p className={styles.emptyHint}>{emptyText}</p>
       </section>
     );
   }
@@ -142,11 +145,11 @@ function CategorySectionRow({
                 {coverId != null ? (
                   <img src={photoThumbSrc(coverId)} alt="" loading="lazy" decoding="async" />
                 ) : (
-                  <div className={styles.placeholder}>图</div>
+                  <div className={styles.placeholder}>{t("components.photo_smart_classify.img_placeholder")}</div>
                 )}
               </div>
               <div className={styles.tileLabel}>{cat.name}</div>
-              <div className={styles.tileCount}>{cat.count} 张</div>
+              <div className={styles.tileCount}>{t("components.photo_smart_classify.count_photos", { count: cat.count })}</div>
             </button>
           );
         })}
@@ -162,16 +165,16 @@ function CategorySectionRow({
                 return coverId != null ? (
                   <img src={photoThumbSrc(coverId)} alt="" loading="lazy" decoding="async" />
                 ) : (
-                  <div className={styles.placeholder}>图</div>
+                  <div className={styles.placeholder}>{t("components.photo_smart_classify.img_placeholder")}</div>
                 );
               })()}
-              <span className={styles.moreLabel}>查看更多</span>
+              <span className={styles.moreLabel}>{t("components.photo_smart_classify.view_more")}</span>
             </div>
             <div className={`${styles.tileLabel} ${styles.tileMetaHidden}`} aria-hidden="true">
-              占位
+              {t("components.photo_smart_classify.placeholder_label")}
             </div>
             <div className={`${styles.tileCount} ${styles.tileMetaHidden}`} aria-hidden="true">
-              0 张
+              {t("components.photo_smart_classify.count_photos", { count: 0 })}
             </div>
           </button>
         ) : null}
@@ -197,9 +200,9 @@ function PersonSectionRow({
   if (persons.length === 0) {
     return (
       <section className={styles.section}>
-        <h3 className={styles.sectionTitle}>人物</h3>
+        <h3 className={styles.sectionTitle}>{t("components.photo_smart_classify.section_people")}</h3>
         <p className={styles.emptyHint}>
-          暂无人脸聚类结果。请由管理员执行「人脸检测」或重新扫描图片库；首次运行需安装 InsightFace 依赖。
+          {t("components.photo_smart_classify.no_people_hint")}
         </p>
       </section>
     );
@@ -207,7 +210,7 @@ function PersonSectionRow({
 
   return (
     <section className={styles.section}>
-      <h3 className={styles.sectionTitle}>人物</h3>
+      <h3 className={styles.sectionTitle}>{t("components.photo_smart_classify.section_people")}</h3>
       <div ref={rowRef} className={`${styles.row} ${styles.rowFit}`}>
         {visible.map((person) => (
           <PersonTile key={person.id} person={person} onOpen={onOpen} />
@@ -215,7 +218,7 @@ function PersonSectionRow({
         {hasMore && coverPerson ? (
           <PersonMoreTile
             coverFaceId={coverPerson.cover_face_id}
-            onClick={() => onOpen({ section: "person", categoryId: PERSON_ALL_ID, title: "人物" })}
+            onClick={() => onOpen({ section: "person", categoryId: PERSON_ALL_ID, title: t("components.photo_smart_classify.section_people") })}
           />
         ) : null}
       </div>
@@ -233,7 +236,7 @@ export function PhotoPersonAllGrid({
   if (persons.length === 0) {
     return (
       <p className={styles.emptyHint}>
-        暂无人脸聚类结果。请由管理员执行「人脸检测」或重新扫描图片库；首次运行需安装 InsightFace 依赖。
+        {t("components.photo_smart_classify.no_people_hint")}
       </p>
     );
   }
@@ -260,15 +263,15 @@ function PlaceMoreTile({
         {coverId ? (
           <img src={photoThumbSrc(coverId)} alt="" loading="lazy" decoding="async" />
         ) : (
-          <div className={styles.placeholder}>图</div>
+          <div className={styles.placeholder}>{t("components.photo_smart_classify.img_placeholder")}</div>
         )}
-        <span className={styles.moreLabel}>查看更多</span>
+        <span className={styles.moreLabel}>{t("components.photo_smart_classify.view_more")}</span>
       </div>
       <div className={`${styles.tileLabel} ${styles.tileMetaHidden}`} aria-hidden="true">
-        未知地点
+        {t("components.photo_smart_classify.unknown_place")}
       </div>
       <div className={`${styles.tileCount} ${styles.tileMetaHidden}`} aria-hidden="true">
-        0 张
+        {t("components.photo_smart_classify.count_photos", { count: 0 })}
       </div>
     </button>
   );
@@ -291,11 +294,11 @@ function PlaceTile({
         {place.cover_id ? (
           <img src={photoThumbSrc(place.cover_id)} alt="" loading="lazy" decoding="async" />
         ) : (
-          <div className={styles.placeholder}>图</div>
+          <div className={styles.placeholder}>{t("components.photo_smart_classify.img_placeholder")}</div>
         )}
       </div>
-      <div className={styles.tileLabel}>{place.name || "未知地点"}</div>
-      <div className={styles.tileCount}>{place.count} 张</div>
+      <div className={styles.tileLabel}>{place.name || t("components.photo_smart_classify.unknown_place")}</div>
+      <div className={styles.tileCount}>{t("components.photo_smart_classify.count_photos", { count: place.count })}</div>
     </button>
   );
 }
@@ -317,9 +320,9 @@ function PlaceSectionRow({
   if (places.length === 0) {
     return (
       <section className={styles.section}>
-        <h3 className={styles.sectionTitle}>地点</h3>
+        <h3 className={styles.sectionTitle}>{t("components.photo_smart_classify.section_places")}</h3>
         <p className={styles.emptyHint}>
-          暂无地点数据。请确认照片 EXIF 含 GPS 信息，并由管理员执行「解析 GPS 地点」或重新扫描图片库。
+          {t("components.photo_smart_classify.no_places_hint")}
         </p>
       </section>
     );
@@ -327,7 +330,7 @@ function PlaceSectionRow({
 
   return (
     <section className={styles.section}>
-      <h3 className={styles.sectionTitle}>地点</h3>
+      <h3 className={styles.sectionTitle}>{t("components.photo_smart_classify.section_places")}</h3>
       <div ref={rowRef} className={`${styles.row} ${styles.rowFit}`}>
         {visible.map((place) => (
           <PlaceTile key={place.id} place={place} onOpen={onOpen} />
@@ -335,7 +338,7 @@ function PlaceSectionRow({
         {hasMore && coverPlace ? (
           <PlaceMoreTile
             coverId={coverPlace.cover_id}
-            onClick={() => onOpen({ section: "place", categoryId: PLACE_ALL_ID, title: "地点" })}
+            onClick={() => onOpen({ section: "place", categoryId: PLACE_ALL_ID, title: t("components.photo_smart_classify.section_places") })}
           />
         ) : null}
       </div>
@@ -353,7 +356,7 @@ export function PhotoPlaceAllGrid({
   if (places.length === 0) {
     return (
       <p className={styles.emptyHint}>
-        暂无地点数据。请确认照片 EXIF 含 GPS 信息，并由管理员执行「解析 GPS 地点」或重新扫描图片库。
+        {t("components.photo_smart_classify.no_places_hint")}
       </p>
     );
   }
@@ -373,7 +376,7 @@ export default function PhotoSmartClassify({ categories, places, persons, items,
       <PersonSectionRow persons={persons} onOpen={onOpen} />
       <PlaceSectionRow places={places} onOpen={onOpen} />
       <CategorySectionRow
-        title="事物"
+        title={t("components.photo_smart_classify.section_things")}
         categories={categoriesForSection(categories, "thing")}
         items={items}
         section="thing"

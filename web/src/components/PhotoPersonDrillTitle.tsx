@@ -2,6 +2,7 @@ import { Input, message } from "antd";
 import type { InputRef } from "antd";
 import { useEffect, useRef, useState } from "react";
 import { updatePhotoPersonName } from "../api/client";
+import { useT } from "../i18n";
 import styles from "../pages/PhotoBrowse.module.css";
 
 type Props = {
@@ -12,6 +13,7 @@ type Props = {
 };
 
 export default function PhotoPersonDrillTitle({ libraryId, personId, name, onRenamed }: Props) {
+  const t = useT();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(name);
   const [saving, setSaving] = useState(false);
@@ -28,7 +30,7 @@ export default function PhotoPersonDrillTitle({ libraryId, personId, name, onRen
 
   async function save() {
     if (saving) return;
-    const next = draft.trim() || "未命名人物";
+    const next = draft.trim() || t("components.photo_person_drill_title.default_name");
     setEditing(false);
     if (next === name) {
       setDraft(name);
@@ -38,10 +40,10 @@ export default function PhotoPersonDrillTitle({ libraryId, personId, name, onRen
     try {
       const res = await updatePhotoPersonName(libraryId, Number(personId), next);
       onRenamed(res.name || next);
-      message.success("人物名称已更新");
+      message.success(t("components.photo_person_drill_title.rename_success"));
     } catch (e: unknown) {
       setDraft(name);
-      message.error((e as Error).message || "保存失败");
+      message.error((e as Error).message || t("components.photo_person_drill_title.rename_failed"));
     } finally {
       setSaving(false);
     }
@@ -79,7 +81,7 @@ export default function PhotoPersonDrillTitle({ libraryId, personId, name, onRen
       type="button"
       className={`${styles.drillTitle} ${styles.drillTitleEditable}`}
       onClick={() => setEditing(true)}
-      title="点击编辑人物名称"
+      title={t("components.photo_person_drill_title.tooltip_edit")}
     >
       {name}
     </button>

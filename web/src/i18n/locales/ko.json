@@ -1019,6 +1019,31 @@
     }
   },
   "components": {
+    "photo_person_drill_title": {
+      "default_name": "이름 없는 인물",
+      "rename_success": "인물 이름이 업데이트되었습니다",
+      "rename_failed": "저장 실패",
+      "tooltip_edit": "클릭하여 인물 이름 편집"
+    },
+    "photo_timeline_rail": {
+      "aria_nav": "타임라인 탐색"
+    },
+    "photo_smart_classify": {
+      "person_placeholder": "사람",
+      "view_more": "더 보기",
+      "unnamed_person": "이름 없는 인물",
+      "count_photos": "{count}장",
+      "person_fallback": "인물 {id}",
+      "empty_hint_default": "분류 결과가 없습니다. 먼저 AI 분류를 실행하세요.",
+      "img_placeholder": "이미지",
+      "placeholder_label": "자리표시자",
+      "section_people": "인물",
+      "section_places": "장소",
+      "no_people_hint": "얼굴 클러스터 결과가 없습니다. 관리자가 「얼굴 감지」를 실행하거나 사진 라이브러리를 다시 스캔해야 합니다. 첫 실행 시 InsightFace 의존성이 필요합니다.",
+      "no_places_hint": "위치 데이터가 없습니다. 사진 EXIF에 GPS 정보가 있는지 확인하고 관리자가 「GPS 위치 해석」을 실행하거나 라이브러리를 다시 스캔하세요.",
+      "unknown_place": "알 수 없는 장소",
+      "section_things": "사물"
+    },
     "music_track_list": {
       "col_aria": "열 표시",
       "actions_aria": "작업",

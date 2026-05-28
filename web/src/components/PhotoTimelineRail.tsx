@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { TimelineMark } from "../lib/photoBrowseUtils";
+import { useT } from "../i18n";
 import styles from "./PhotoTimelineRail.module.css";
 
 type Props = {
@@ -11,6 +12,7 @@ function anchorId(mark: TimelineMark): string {
 }
 
 export default function PhotoTimelineRail({ marks }: Props) {
+  const t = useT();
   const [activeKey, setActiveKey] = useState<string | null>(marks[0]?.key ?? null);
 
   const monthMarks = useMemo(() => marks.filter((m) => m.kind === "month"), [marks]);
@@ -50,7 +52,7 @@ export default function PhotoTimelineRail({ marks }: Props) {
   }
 
   return (
-    <aside className={styles.rail} aria-label="时间轴导航">
+    <aside className={styles.rail} aria-label={t("components.photo_timeline_rail.aria_nav")}>
       <div className={styles.track}>
         {marks.map((mark) => (
           <button

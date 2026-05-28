@@ -1019,6 +1019,31 @@
     }
   },
   "components": {
+    "photo_person_drill_title": {
+      "default_name": "未命名人物",
+      "rename_success": "人物名稱已更新",
+      "rename_failed": "儲存失敗",
+      "tooltip_edit": "點擊編輯人物名稱"
+    },
+    "photo_timeline_rail": {
+      "aria_nav": "時間軸導覽"
+    },
+    "photo_smart_classify": {
+      "person_placeholder": "人",
+      "view_more": "檢視更多",
+      "unnamed_person": "未命名人物",
+      "count_photos": "{count} 張",
+      "person_fallback": "人物 {id}",
+      "empty_hint_default": "暫無分類結果，請先完成 AI 智慧分類。",
+      "img_placeholder": "圖",
+      "placeholder_label": "佔位",
+      "section_people": "人物",
+      "section_places": "地點",
+      "no_people_hint": "暫無人臉聚類結果。請由管理員執行「人臉偵測」或重新掃描圖片庫；首次執行需安裝 InsightFace 相依套件。",
+      "no_places_hint": "暫無地點資料。請確認照片 EXIF 含 GPS 資訊，並由管理員執行「解析 GPS 地點」或重新掃描圖片庫。",
+      "unknown_place": "未知地點",
+      "section_things": "事物"
+    },
     "music_track_list": {
       "col_aria": "欄位顯示",
       "actions_aria": "操作",

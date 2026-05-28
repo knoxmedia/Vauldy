@@ -1019,6 +1019,31 @@
     }
   },
   "components": {
+    "photo_person_drill_title": {
+      "default_name": "Unnamed person",
+      "rename_success": "Person name updated",
+      "rename_failed": "Save failed",
+      "tooltip_edit": "Click to edit person name"
+    },
+    "photo_timeline_rail": {
+      "aria_nav": "Timeline navigation"
+    },
+    "photo_smart_classify": {
+      "person_placeholder": "P",
+      "view_more": "View more",
+      "unnamed_person": "Unnamed person",
+      "count_photos": "{count} photos",
+      "person_fallback": "Person {id}",
+      "empty_hint_default": "No classification results. Run AI classification first.",
+      "img_placeholder": "Img",
+      "placeholder_label": "Placeholder",
+      "section_people": "People",
+      "section_places": "Places",
+      "no_people_hint": "No face clusters. Have an administrator run Face detection or rescan the photo library. Initial run requires InsightFace.",
+      "no_places_hint": "No location data. Make sure photos have EXIF GPS and have an administrator run Resolve GPS locations or rescan the library.",
+      "unknown_place": "Unknown place",
+      "section_things": "Things"
+    },
     "music_track_list": {
       "col_aria": "Show columns",
       "actions_aria": "Actions",

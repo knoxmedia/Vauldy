@@ -1019,6 +1019,31 @@
     }
   },
   "components": {
+    "photo_person_drill_title": {
+      "default_name": "名前のない人物",
+      "rename_success": "人物名を更新しました",
+      "rename_failed": "保存に失敗しました",
+      "tooltip_edit": "クリックして人物名を編集"
+    },
+    "photo_timeline_rail": {
+      "aria_nav": "タイムラインナビ"
+    },
+    "photo_smart_classify": {
+      "person_placeholder": "人",
+      "view_more": "もっと見る",
+      "unnamed_person": "名前のない人物",
+      "count_photos": "{count} 枚",
+      "person_fallback": "人物 {id}",
+      "empty_hint_default": "分類結果がありません。先に AI 分類を実行してください。",
+      "img_placeholder": "画",
+      "placeholder_label": "プレースホルダー",
+      "section_people": "人物",
+      "section_places": "場所",
+      "no_people_hint": "顔クラスタの結果がありません。管理者に「顔検出」を実行してもらうか、写真ライブラリを再スキャンしてください。初回は InsightFace の依存関係のインストールが必要です。",
+      "no_places_hint": "場所データがありません。写真の EXIF に GPS 情報があることを確認し、管理者に「GPS 位置を解決」を実行してもらうかライブラリを再スキャンしてください。",
+      "unknown_place": "未知の場所",
+      "section_things": "もの"
+    },
     "music_track_list": {
       "col_aria": "列を表示",
       "actions_aria": "操作",
