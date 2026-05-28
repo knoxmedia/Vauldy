@@ -1,9 +1,11 @@
 import { Button, Card, DatePicker, Select, Space, Switch, Table, Tag } from "antd";
 import { useEffect, useState } from "react";
 import { fetchAccessLogs, type AccessLogItem } from "../api/client";
+import { useT } from "../i18n";
 import { type Dayjs } from "dayjs";
 
 export default function AccessLogsPage() {
+  const t = useT();
   const [rows, setRows] = useState<AccessLogItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [action, setAction] = useState("all");
@@ -46,11 +48,12 @@ export default function AccessLogsPage() {
 
   useEffect(() => {
     void load("all", "7d");
+     
   }, []);
 
   return (
     <Card
-      title="访问日志"
+      title={t("pages.access_logs.title")}
       extra={
         <Space>
           <Select
@@ -61,15 +64,15 @@ export default function AccessLogsPage() {
               void load(v, rangePreset);
             }}
             options={[
-              { value: "all", label: "全部事件" },
-              { value: "login", label: "登录" },
-              { value: "logout", label: "退出" },
-              { value: "playback_start", label: "播放开始" },
-              { value: "playback_end", label: "播放结束" },
+              { value: "all", label: t("pages.access_logs.filter_all_events") },
+              { value: "login", label: t("pages.access_logs.filter_login") },
+              { value: "logout", label: t("pages.access_logs.filter_logout") },
+              { value: "playback_start", label: t("pages.access_logs.filter_playback_start") },
+              { value: "playback_end", label: t("pages.access_logs.filter_playback_end") },
             ]}
           />
           <Space size={4}>
-            <span style={{ color: "#999" }}>仅看播放事件</span>
+            <span style={{ color: "#999" }}>{t("pages.access_logs.only_playback")}</span>
             <Switch
               size="small"
               checked={playOnly}
@@ -87,10 +90,10 @@ export default function AccessLogsPage() {
               void load(action, v);
             }}
             options={[
-              { value: "today", label: "今天" },
-              { value: "7d", label: "近7天" },
-              { value: "30d", label: "近30天" },
-              { value: "custom", label: "自定义" },
+              { value: "today", label: t("pages.access_logs.range_today") },
+              { value: "7d", label: t("pages.access_logs.range_7d") },
+              { value: "30d", label: t("pages.access_logs.range_30d") },
+              { value: "custom", label: t("pages.access_logs.range_custom") },
             ]}
           />
           {rangePreset === "custom" ? (
@@ -100,7 +103,7 @@ export default function AccessLogsPage() {
               onChange={(v) => setRangeValue((v as [Dayjs | null, Dayjs | null]) || null)}
             />
           ) : null}
-          <Button onClick={() => void load(action, rangePreset)}>刷新</Button>
+          <Button onClick={() => void load(action, rangePreset)}>{t("pages.access_logs.refresh")}</Button>
         </Space>
       }
     >
@@ -110,47 +113,47 @@ export default function AccessLogsPage() {
         dataSource={rows}
         pagination={{ pageSize: 20 }}
         columns={[
-          { title: "时间", dataIndex: "created_at", width: 180 },
-          { title: "用户", dataIndex: "username", width: 120, render: (v?: string) => v || "-" },
+          { title: t("pages.access_logs.col_time"), dataIndex: "created_at", width: 180 },
+          { title: t("pages.access_logs.col_user"), dataIndex: "username", width: 120, render: (v?: string) => v || "-" },
           {
-            title: "事件",
+            title: t("pages.access_logs.col_event"),
             dataIndex: "action",
             width: 130,
             render: (v: string) => {
               const color = v === "login" ? "green" : v === "logout" ? "orange" : v === "playback_start" ? "blue" : "purple";
               const label =
                 v === "login"
-                  ? "登录"
+                  ? t("pages.access_logs.filter_login")
                   : v === "logout"
-                    ? "退出"
+                    ? t("pages.access_logs.filter_logout")
                     : v === "playback_start"
-                      ? "播放开始"
+                      ? t("pages.access_logs.filter_playback_start")
                       : v === "playback_end"
-                        ? "播放结束"
+                        ? t("pages.access_logs.filter_playback_end")
                         : v;
               return <Tag color={color}>{label}</Tag>;
             },
           },
-          { title: "媒体ID", dataIndex: "media_id", width: 100, render: (v: number) => (v > 0 ? v : "-") },
+          { title: t("pages.access_logs.col_media_id"), dataIndex: "media_id", width: 100, render: (v: number) => (v > 0 ? v : "-") },
           {
-            title: "观看进度",
+            title: t("pages.access_logs.col_play_progress"),
             key: "play-pos",
             width: 100,
             render: (_: unknown, r: AccessLogItem) => (r.action.startsWith("playback_") ? `${parsePlayback(r.message).pos}s` : "-"),
           },
           {
-            title: "完播",
+            title: t("pages.access_logs.col_completed"),
             key: "play-completed",
             width: 80,
             render: (_: unknown, r: AccessLogItem) => {
               if (!r.action.startsWith("playback_")) return "-";
-              return parsePlayback(r.message).completed === 1 ? <Tag color="green">是</Tag> : <Tag>否</Tag>;
+              return parsePlayback(r.message).completed === 1 ? <Tag color="green">{t("pages.access_logs.completed_yes")}</Tag> : <Tag>{t("pages.access_logs.completed_no")}</Tag>;
             },
           },
-          { title: "浏览器", key: "browser", width: 100, render: (_: unknown, r: AccessLogItem) => parseDevice(r.message).browser },
-          { title: "系统", key: "os", width: 100, render: (_: unknown, r: AccessLogItem) => parseDevice(r.message).os },
-          { title: "设备信息", key: "ua", width: 240, ellipsis: true, render: (_: unknown, r: AccessLogItem) => parseDevice(r.message).ua },
-          { title: "详细信息", dataIndex: "message", ellipsis: true },
+          { title: t("pages.access_logs.col_browser"), key: "browser", width: 100, render: (_: unknown, r: AccessLogItem) => parseDevice(r.message).browser },
+          { title: t("pages.access_logs.col_os"), key: "os", width: 100, render: (_: unknown, r: AccessLogItem) => parseDevice(r.message).os },
+          { title: t("pages.access_logs.col_device"), key: "ua", width: 240, ellipsis: true, render: (_: unknown, r: AccessLogItem) => parseDevice(r.message).ua },
+          { title: t("pages.access_logs.col_detail"), dataIndex: "message", ellipsis: true },
         ]}
       />
     </Card>

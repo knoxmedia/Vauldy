@@ -13,29 +13,32 @@ import {
   type PlaybackHistoryItem,
   type PlaybackHistoryRange,
 } from "../api/client";
+import { useT, type TranslateFn } from "../i18n";
 import { isAdminRole, useAuthStore } from "../store/auth";
 import styles from "./PlaybackHistory.module.css";
 
 type TimeRangeOption = { value: PlaybackHistoryRange; label: string };
 
-const TIME_RANGE_OPTIONS: TimeRangeOption[] = [
-  { value: "7d", label: "之前7天" },
-  { value: "30d", label: "之前30天" },
-  { value: "90d", label: "之前90天" },
-  { value: "1y", label: "1年以内" },
-  { value: "all", label: "所有时间" },
-];
+function buildTimeRangeOptions(t: TranslateFn): TimeRangeOption[] {
+  return [
+    { value: "7d", label: t("pages.playback_history.range_7d") },
+    { value: "30d", label: t("pages.playback_history.range_30d") },
+    { value: "90d", label: t("pages.playback_history.range_90d") },
+    { value: "1y", label: t("pages.playback_history.range_1y") },
+    { value: "all", label: t("pages.playback_history.range_all") },
+  ];
+}
 
-function libraryTypeLabel(libType: string, fileType: string): string {
+function libraryTypeLabel(libType: string, fileType: string, t: TranslateFn): string {
   switch (libType) {
     case "movie":
-      return "电影";
+      return t("pages.playback_history.type_movie");
     case "tv":
-      return "电视节目";
+      return t("pages.playback_history.type_tv");
     case "anime":
-      return "动漫";
+      return t("pages.playback_history.type_anime");
     case "music":
-      return "音乐";
+      return t("pages.playback_history.type_music");
     default:
       break;
   }
@@ -83,6 +86,8 @@ export default function PlaybackHistoryPage() {
   const [searchParams] = useSearchParams();
   const role = useAuthStore((s) => s.role);
   const admin = isAdminRole(role);
+  const t = useT();
+  const TIME_RANGE_OPTIONS = useMemo(() => buildTimeRangeOptions(t), [t]);
 
   const mediaIdParam = searchParams.get("media_id");
   const mediaId =
@@ -156,21 +161,21 @@ export default function PlaybackHistoryPage() {
   }, [rows, sortDesc]);
 
   const libraryLabel = libraryId
-    ? libs.find((l) => l.id === libraryId)?.name ?? "资料库"
-    : "所有资料库";
+    ? libs.find((l) => l.id === libraryId)?.name ?? t("pages.playback_history.library_fallback")
+    : t("pages.playback_history.all_libraries");
 
   const userLabel = userId
-    ? users.find((u) => u.id === userId)?.username ?? "用户"
-    : "所有用户";
+    ? users.find((u) => u.id === userId)?.username ?? t("pages.playback_history.user_fallback")
+    : t("pages.playback_history.all_users");
 
-  const timeLabel = TIME_RANGE_OPTIONS.find((o) => o.value === timeRange)?.label ?? "所有时间";
+  const timeLabel = TIME_RANGE_OPTIONS.find((o) => o.value === timeRange)?.label ?? t("pages.playback_history.all_time");
 
   const libraryMenu: MenuProps = {
     selectedKeys: [libraryId ? String(libraryId) : "all"],
     items: [
       {
         key: "all",
-        label: "所有资料库",
+        label: t("pages.playback_history.all_libraries"),
         onClick: () => setLibraryId(undefined),
       },
       ...libs.map((l) => ({
@@ -186,7 +191,7 @@ export default function PlaybackHistoryPage() {
     items: [
       {
         key: "all",
-        label: "所有用户",
+        label: t("pages.playback_history.all_users"),
         onClick: () => setUserId(undefined),
       },
       ...users.map((u) => ({
@@ -221,10 +226,10 @@ export default function PlaybackHistoryPage() {
               if (e.key === "Enter" || e.key === " ") nav("/playback-history");
             }}
           >
-            播放历史
+            {t("pages.playback_history.title")}
           </span>
         ) : (
-          <h1 className={styles.pageTitle}>播放历史</h1>
+          <h1 className={styles.pageTitle}>{t("pages.playback_history.title")}</h1>
         )}
         {mediaId && mediaTitle ? (
           <span className={styles.mediaTitle} title={mediaTitle}>
@@ -235,12 +240,12 @@ export default function PlaybackHistoryPage() {
 
         <div className={styles.filters}>
           {!mediaId ? (
-            <FilterDropdown label="所有资料库" valueLabel={libraryLabel} menu={libraryMenu} />
+            <FilterDropdown label={t("pages.playback_history.all_libraries")} valueLabel={libraryLabel} menu={libraryMenu} />
           ) : null}
           {admin && !mediaId ? (
-            <FilterDropdown label="所有用户" valueLabel={userLabel} menu={userMenu} />
+            <FilterDropdown label={t("pages.playback_history.all_users")} valueLabel={userLabel} menu={userMenu} />
           ) : null}
-          <FilterDropdown label="所有时间" valueLabel={timeLabel} menu={timeMenu} />
+          <FilterDropdown label={t("pages.playback_history.all_time")} valueLabel={timeLabel} menu={timeMenu} />
         </div>
       </div>
 
@@ -249,23 +254,23 @@ export default function PlaybackHistoryPage() {
           <Spin indicator={<LoadingOutlined spin />} />
         </div>
       ) : sortedRows.length === 0 ? (
-        <div className={styles.emptyWrap}>暂无播放记录</div>
+        <div className={styles.emptyWrap}>{t("pages.playback_history.no_history")}</div>
       ) : (
         <div className={styles.tableWrap}>
           <table className={styles.table}>
             <thead>
               <tr>
-                <th>用户</th>
-                {showGlobalColumns ? <th>类型</th> : null}
-                {showGlobalColumns ? <th>标题</th> : null}
-                <th>播放器</th>
-                <th>平台</th>
+                <th>{t("pages.playback_history.col_user")}</th>
+                {showGlobalColumns ? <th>{t("pages.playback_history.col_type")}</th> : null}
+                {showGlobalColumns ? <th>{t("pages.playback_history.col_title")}</th> : null}
+                <th>{t("pages.playback_history.col_player")}</th>
+                <th>{t("pages.playback_history.col_platform")}</th>
                 <th
                   className={styles.sortable}
                   onClick={() => setSortDesc((s) => !s)}
                   aria-sort={sortDesc ? "descending" : "ascending"}
                 >
-                  已播放
+                  {t("pages.playback_history.col_played_at")}
                   <span className={styles.sortIcon}>
                     {sortDesc ? <CaretDownOutlined /> : <CaretUpOutlined />}
                   </span>
@@ -277,7 +282,7 @@ export default function PlaybackHistoryPage() {
                 <tr key={r.id}>
                   <td>{r.username || "—"}</td>
                   {showGlobalColumns ? (
-                    <td>{libraryTypeLabel(r.library_type, r.file_type)}</td>
+                    <td>{libraryTypeLabel(r.library_type, r.file_type, t)}</td>
                   ) : null}
                   {showGlobalColumns ? (
                     <td className={styles.titleCell}>

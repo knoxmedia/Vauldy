@@ -3,9 +3,11 @@ import { SearchOutlined } from "@ant-design/icons";
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { MediaItem, fetchMedia } from "../api/client";
+import { useT } from "../i18n";
 
 export default function SearchPage() {
   const nav = useNavigate();
+  const t = useT();
   const [searchParams] = useSearchParams();
   const qParam = searchParams.get("q")?.trim() ?? "";
   const [keyword, setKeyword] = useState(qParam);
@@ -21,11 +23,11 @@ export default function SearchPage() {
     void fetchMedia(undefined, { limit: 500 })
       .then((items) => setRows(items))
       .catch((e: unknown) => {
-        message.error((e as Error).message || "加载失败");
+        message.error((e as Error).message || t("pages.search.load_failed"));
         setRows([]);
       })
       .finally(() => setLoading(false));
-  }, []);
+  }, [t]);
 
   const displayRows = useMemo(() => {
     const q = qParam.toLowerCase();
@@ -41,7 +43,7 @@ export default function SearchPage() {
   return (
     <div style={{ padding: "16px 0 32px" }}>
       <Typography.Title level={3} style={{ color: "#fff", marginTop: 0 }}>
-        搜索
+        {t("pages.search.title")}
       </Typography.Title>
       <Space wrap style={{ marginBottom: 16 }}>
         <Input
@@ -50,17 +52,17 @@ export default function SearchPage() {
           onChange={(e) => setKeyword(e.target.value)}
           onPressEnter={doSearch}
           prefix={<SearchOutlined style={{ color: "#666" }} />}
-          placeholder="输入标题关键字"
+          placeholder={t("pages.search.keyword_placeholder")}
           style={{ width: 320 }}
         />
         <Button type="primary" onClick={doSearch}>
-          搜索
+          {t("pages.search.search_btn")}
         </Button>
-        <Button onClick={() => nav("/search")}>清空</Button>
+        <Button onClick={() => nav("/search")}>{t("pages.search.clear_btn")}</Button>
       </Space>
 
       <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
-        {qParam ? `当前关键字：${qParam}` : "请输入关键字进行搜索"}
+        {qParam ? t("pages.search.current_keyword", { q: qParam }) : t("pages.search.empty_hint")}
       </Typography.Paragraph>
 
       <Table
@@ -68,27 +70,27 @@ export default function SearchPage() {
         loading={loading}
         dataSource={displayRows}
         pagination={{ pageSize: 20 }}
-        locale={{ emptyText: qParam ? "没有匹配结果" : "输入关键字后开始搜索" }}
+        locale={{ emptyText: qParam ? t("pages.search.no_match") : t("pages.search.start_hint") }}
         columns={[
-          { title: "ID", dataIndex: "id", width: 70 },
-          { title: "标题", dataIndex: "title" },
-          { title: "类型", dataIndex: "file_type", width: 90 },
+          { title: t("pages.search.col_id"), dataIndex: "id", width: 70 },
+          { title: t("pages.search.col_title"), dataIndex: "title" },
+          { title: t("pages.search.col_type"), dataIndex: "file_type", width: 90 },
           {
-            title: "时长(s)",
+            title: t("pages.search.col_duration_s"),
             dataIndex: "duration",
             width: 90,
             render: (v: number) => v || "—",
           },
           {
-            title: "分辨率",
+            title: t("pages.search.col_resolution"),
             width: 120,
             render: (_, r) => (r.width && r.height ? `${r.width}x${r.height}` : "—"),
           },
           {
-            title: "操作",
+            title: t("pages.search.col_op"),
             key: "op",
             width: 120,
-            render: (_, r) => <Link to={`/player/${r.id}`}>播放</Link>,
+            render: (_, r) => <Link to={`/player/${r.id}`}>{t("pages.search.play")}</Link>,
           },
         ]}
       />
