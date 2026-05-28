@@ -16,9 +16,10 @@ import { ApiOutlined, SettingOutlined } from "@ant-design/icons";
 import { useEffect, useState } from "react";
 import type { AIProvider as AIProviderType } from "../api/client";
 import { fetchAIProviders, saveAIProvider, testAIProvider } from "../api/client";
+import { useT, type TranslateFn } from "../i18n";
 
-function formatLastUsed(v?: string) {
-  if (!v) return "从未使用";
+function formatLastUsed(v: string | undefined, t: TranslateFn) {
+  if (!v) return t("pages.ai_provider.never_used");
   return new Date(v).toLocaleString();
 }
 
@@ -40,6 +41,7 @@ type ProviderTestState =
   | { status: "done"; ok: boolean; message: string };
 
 export default function AIProviderPage() {
+  const t = useT();
   const [rows, setRows] = useState<TableRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<TableRow | null>(null);
@@ -70,12 +72,13 @@ export default function AIProviderPage() {
           })),
         );
       })
-      .catch(() => message.error("加载 AI 提供商失败"))
+      .catch(() => message.error(t("pages.ai_provider.load_failed")))
       .finally(() => setLoading(false));
   };
 
   useEffect(() => {
     load();
+     
   }, []);
 
   const openEdit = (r: TableRow) => {
@@ -98,7 +101,7 @@ export default function AIProviderPage() {
     } catch {
       setTestResults((prev) => ({
         ...prev,
-        [id]: { status: "done", ok: false, message: "测试请求失败" },
+        [id]: { status: "done", ok: false, message: t("pages.ai_provider.test_request_failed") },
       }));
     } finally {
       setTestingId(null);
@@ -115,11 +118,11 @@ export default function AIProviderPage() {
         model: editModel,
         enabled: editEnabled ? 1 : 0,
       });
-      message.success(`${editing.name} 已保存`);
+      message.success(t("pages.ai_provider.saved_template", { name: editing.name }));
       setEditing(null);
       load();
     } catch {
-      message.error("保存失败");
+      message.error(t("pages.ai_provider.save_failed"));
     } finally {
       setSaving(false);
     }
@@ -127,7 +130,7 @@ export default function AIProviderPage() {
 
   const columns: ColumnsType<TableRow> = [
     {
-      title: "提供商",
+      title: t("pages.ai_provider.col_provider"),
       dataIndex: "name",
       width: 180,
       render: (name: string, r) => {
@@ -138,7 +141,7 @@ export default function AIProviderPage() {
             {test?.status === "loading" ? (
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                 <Spin size="small" style={{ marginRight: 6 }} />
-                测试中…
+                {t("pages.ai_provider.testing")}
               </Typography.Text>
             ) : test?.status === "done" ? (
               <Typography.Text
@@ -153,51 +156,51 @@ export default function AIProviderPage() {
       },
     },
     {
-      title: "状态",
+      title: t("pages.ai_provider.col_status"),
       key: "status",
       width: 100,
       render: (_, r) =>
-        r.enabled ? <Tag color="green">已启用</Tag> : <Tag>已停用</Tag>,
+        r.enabled ? <Tag color="green">{t("pages.ai_provider.status_enabled")}</Tag> : <Tag>{t("pages.ai_provider.status_disabled")}</Tag>,
     },
     {
-      title: "API 地址",
+      title: t("pages.ai_provider.col_api_url"),
       dataIndex: "api_url",
       width: 240,
       ellipsis: true,
     },
     {
-      title: "API Key",
+      title: t("pages.ai_provider.col_api_key"),
       key: "keyStatus",
       width: 110,
       render: (_, r) =>
-        r.api_key ? <Tag color="blue">已设置</Tag> : <Tag>未设置</Tag>,
+        r.api_key ? <Tag color="blue">{t("pages.ai_provider.key_set")}</Tag> : <Tag>{t("pages.ai_provider.key_unset")}</Tag>,
     },
     {
-      title: "模型",
+      title: t("pages.ai_provider.col_model"),
       dataIndex: "model",
       width: 160,
       render: (v) => v || "-",
     },
     {
-      title: "请求次数",
+      title: t("pages.ai_provider.col_request_count"),
       dataIndex: "request_count",
       width: 110,
       align: "right",
     },
     {
-      title: "Token 消耗",
+      title: t("pages.ai_provider.col_token_count"),
       dataIndex: "token_count",
       width: 110,
       align: "right",
     },
     {
-      title: "最近使用",
+      title: t("pages.ai_provider.col_last_used"),
       dataIndex: "last_used_at",
       width: 180,
-      render: (v) => formatLastUsed(v),
+      render: (v) => formatLastUsed(v, t),
     },
     {
-      title: "操作",
+      title: t("pages.ai_provider.col_actions"),
       key: "actions",
       width: 180,
       fixed: "right",
@@ -210,7 +213,7 @@ export default function AIProviderPage() {
             icon={<SettingOutlined />}
             onClick={() => openEdit(r)}
           >
-            设置
+            {t("pages.ai_provider.btn_settings")}
           </Button>
           <Button
             size="small"
@@ -218,7 +221,7 @@ export default function AIProviderPage() {
             loading={testingId === r.id}
             onClick={() => runProviderTest(r.id)}
           >
-            测试
+            {t("pages.ai_provider.btn_test")}
           </Button>
         </Space>
       ),
@@ -237,51 +240,51 @@ export default function AIProviderPage() {
       />
 
       <Modal
-        title={editing ? `设置 — ${editing.name}` : ""}
+        title={editing ? t("pages.ai_provider.modal_title", { name: editing.name }) : ""}
         open={editing !== null}
         onOk={handleSave}
         onCancel={() => setEditing(null)}
-        okText="保存"
-        cancelText="取消"
+        okText={t("pages.ai_provider.modal_save")}
+        cancelText={t("pages.ai_provider.modal_cancel")}
         confirmLoading={saving}
       >
         <div style={{ display: "flex", flexDirection: "column", gap: 16, marginTop: 8 }}>
           <div>
-            <div style={{ marginBottom: 4 }}>API 地址</div>
+            <div style={{ marginBottom: 4 }}>{t("pages.ai_provider.field_api_url")}</div>
             <Input
-              placeholder="https://api.example.com/v1"
+              placeholder={t("pages.ai_provider.field_api_url_placeholder")}
               value={editUrl}
               onChange={(e) => setEditUrl(e.target.value)}
             />
           </div>
           <div>
-            <div style={{ marginBottom: 4 }}>API 密钥</div>
+            <div style={{ marginBottom: 4 }}>{t("pages.ai_provider.field_api_key")}</div>
             <Input.Password
-              placeholder={editing?.api_key ? "留空则不修改" : "输入 API Key"}
+              placeholder={editing?.api_key ? t("pages.ai_provider.field_api_key_placeholder_keep") : t("pages.ai_provider.field_api_key_placeholder_enter")}
               value={editKey}
               onChange={(e) => setEditKey(e.target.value)}
             />
           </div>
           <div>
-            <div style={{ marginBottom: 4 }}>模型</div>
+            <div style={{ marginBottom: 4 }}>{t("pages.ai_provider.field_model")}</div>
             <Input
-              placeholder="模型标识，如 gpt-4o"
+              placeholder={t("pages.ai_provider.field_model_placeholder")}
               value={editModel}
               onChange={(e) => setEditModel(e.target.value)}
             />
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span>启用该提供者</span>
+            <span>{t("pages.ai_provider.field_enable")}</span>
             <Switch checked={editEnabled} onChange={setEditEnabled} />
           </div>
 
           {editing && (
             <Space size="large" style={{ paddingTop: 8, borderTop: "1px solid #303030" }}>
-              <Statistic title="请求次数" value={editing.request_count} />
-              <Statistic title="Token 消耗" value={editing.token_count} />
+              <Statistic title={t("pages.ai_provider.stat_request_count")} value={editing.request_count} />
+              <Statistic title={t("pages.ai_provider.stat_token_count")} value={editing.token_count} />
               <Statistic
-                title="最近使用"
-                value={formatLastUsed(editing.last_used_at)}
+                title={t("pages.ai_provider.stat_last_used")}
+                value={formatLastUsed(editing.last_used_at, t)}
               />
             </Space>
           )}

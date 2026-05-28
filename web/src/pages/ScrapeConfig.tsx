@@ -15,13 +15,14 @@ import {
   InfoCircleOutlined,
   SettingOutlined,
 } from "@ant-design/icons";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   fetchScrapeConfig,
   saveScrapeConfig,
   testScrapeProvider,
 } from "../api/client";
 import type { ScrapeConfig } from "../api/client";
+import { useT, type TranslateFn } from "../i18n";
 
 interface ProviderInfo {
   label: string;
@@ -29,53 +30,20 @@ interface ProviderInfo {
   description: string;
 }
 
-const PROVIDER_OPTIONS: ProviderInfo[] = [
-  {
-    label: "TMDb",
-    value: "tmdb",
-    description:
-      "The Movie Database (TMDb) 是一个由社区维护的电影和电视剧数据库，提供丰富的元数据，包括海报、背景图、演员信息、评分等。支持多语言，是 Kodi、Plex、Jellyfin 等媒体中心的首选元数据源。",
-  },
-  {
-    label: "OMDb",
-    value: "omdb",
-    description:
-      "The Open Movie Database (OMDb) 是一个 RESTful Web 服务，用于获取电影和电视剧的元数据信息。基于 IMDb 数据，提供标题、年份、评分、演员、剧情简介等。需要 API Key 使用。",
-  },
-  {
-    label: "Bangumi (番组计划)",
-    value: "bangumi",
-    description:
-      "Bangumi 番组计划是一个专注于 ACGN（动画、漫画、游戏、小说）领域的中文数据库和社区。提供详细的动画剧集信息、角色、制作人员等元数据，特别适合日本动画的刮削。",
-  },
-  {
-    label: "TVDB",
-    value: "tvdb",
-    description:
-      "TheTVDB.com 是一个开放的电视剧数据库，提供完整的剧集指南、季信息、演员、海报、横幅等。是电视剧媒体管理的权威源，支持多语言剧集信息。需 API Key（订阅制）。",
-  },
-  {
-    label: "Douban (豆瓣)",
-    value: "douban",
-    description:
-      "豆瓣是一个中文社区网站，提供电影、电视剧、书籍、音乐等文化产品的信息和用户评论。豆瓣电影数据库包含丰富的中文元数据、评分、影评，特别适合华语内容的刮削。",
-  },
-  {
-    label: "Fanart.tv",
-    value: "fanart",
-    description:
-      "Fanart.tv 是一个高质量的艺术作品数据库，专注于提供电影和电视剧的粉丝艺术作品，包括高清海报、背景图、Logo、缩略图等图像资源。可与其他元数据提供者配合使用。",
-  },
-  {
-    label: "AI",
-    value: "ai",
-    description:
-      "AI 智能识别使用大语言模型和计算机视觉技术，自动从视频文件名、画面内容中推断元数据。无需外部 API，支持模糊名称匹配和未知媒体的智能归类。适合无法被传统提供者识别的媒体。",
-  },
-];
+function buildProviderOptions(t: TranslateFn): ProviderInfo[] {
+  return [
+    { label: "TMDb", value: "tmdb", description: t("pages.scrape_config.provider_desc_tmdb") },
+    { label: "OMDb", value: "omdb", description: t("pages.scrape_config.provider_desc_omdb") },
+    { label: "Bangumi (番组计划)", value: "bangumi", description: t("pages.scrape_config.provider_desc_bangumi") },
+    { label: "TVDB", value: "tvdb", description: t("pages.scrape_config.provider_desc_tvdb") },
+    { label: "Douban (豆瓣)", value: "douban", description: t("pages.scrape_config.provider_desc_douban") },
+    { label: "Fanart.tv", value: "fanart", description: t("pages.scrape_config.provider_desc_fanart") },
+    { label: "AI", value: "ai", description: t("pages.scrape_config.provider_desc_ai") },
+  ];
+}
 
-function providerLabel(value: string) {
-  const found = PROVIDER_OPTIONS.find((o) => o.value === value);
+function providerLabelOf(options: ProviderInfo[], value: string) {
+  const found = options.find((o) => o.value === value);
   return found ? found.label : value;
 }
 
@@ -91,18 +59,20 @@ type ProviderTestState =
   | { status: "loading" }
   | { status: "done"; ok: boolean; message: string };
 
-function apiKeyPlaceholder(provider: string) {
+function apiKeyPlaceholder(provider: string, t: TranslateFn) {
   switch (provider) {
     case "tvdb":
-      return "API Key，或 apikey:pin";
+      return t("pages.scrape_config.apikey_placeholder_tvdb");
     case "bangumi":
-      return "Access Token（可选）";
+      return t("pages.scrape_config.apikey_placeholder_bangumi");
     default:
-      return "输入 API Key";
+      return t("pages.scrape_config.apikey_placeholder_default");
   }
 }
 
 export default function ScrapeConfigPage() {
+  const t = useT();
+  const PROVIDER_OPTIONS = useMemo(() => buildProviderOptions(t), [t]);
   const [loading, setLoading] = useState(true);
   const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
   const [modalProvider, setModalProvider] = useState<string | null>(null);
@@ -122,7 +92,7 @@ export default function ScrapeConfigPage() {
         setApiKeys(c.api_keys ?? {});
       })
       .catch(() => {
-        if (!cancelled) message.error("加载配置失败");
+        if (!cancelled) message.error(t("pages.scrape_config.load_failed"));
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -130,6 +100,7 @@ export default function ScrapeConfigPage() {
     return () => {
       cancelled = true;
     };
+     
   }, []);
 
   const saveApiKey = async () => {
@@ -149,9 +120,9 @@ export default function ScrapeConfigPage() {
         api_keys: next,
       });
       setApiKeys(next);
-      message.success(`${providerLabel(modalProvider)} API Key 已保存`);
+      message.success(t("pages.scrape_config.save_success_key", { name: providerLabelOf(PROVIDER_OPTIONS, modalProvider) }));
     } catch {
-      message.error("保存失败");
+      message.error(t("pages.scrape_config.save_failed"));
     } finally {
       setModalProvider(null);
       setModalKey("");
@@ -175,7 +146,7 @@ export default function ScrapeConfigPage() {
     } catch {
       setTestResults((prev) => ({
         ...prev,
-        [provider]: { status: "done", ok: false, message: "测试请求失败" },
+        [provider]: { status: "done", ok: false, message: t("pages.scrape_config.test_request_failed") },
       }));
     } finally {
       setTestingProvider(null);
@@ -192,7 +163,7 @@ export default function ScrapeConfigPage() {
 
   const columns: ColumnsType<TableRow> = [
     {
-      title: "提供者",
+      title: t("pages.scrape_config.col_provider"),
       dataIndex: "label",
       width: 280,
       render: (label: string, r) => {
@@ -203,7 +174,7 @@ export default function ScrapeConfigPage() {
             {test?.status === "loading" ? (
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                 <Spin size="small" style={{ marginRight: 6 }} />
-                测试中…
+                {t("pages.scrape_config.testing")}
               </Typography.Text>
             ) : test?.status === "done" ? (
               <Typography.Text
@@ -218,14 +189,14 @@ export default function ScrapeConfigPage() {
       },
     },
     {
-      title: "API Key",
+      title: t("pages.scrape_config.col_api_key"),
       key: "status",
       width: 130,
       render: (_, r) =>
-        r.configured ? <Tag color="blue">已设置</Tag> : <Tag>未设置</Tag>,
+        r.configured ? <Tag color="blue">{t("pages.scrape_config.key_set")}</Tag> : <Tag>{t("pages.scrape_config.key_unset")}</Tag>,
     },
     {
-      title: "操作",
+      title: t("pages.scrape_config.col_actions"),
       key: "actions",
       width: 240,
       fixed: "right",
@@ -238,14 +209,14 @@ export default function ScrapeConfigPage() {
             icon={<InfoCircleOutlined />}
             onClick={() => setInfoProvider(r)}
           >
-            查看
+            {t("pages.scrape_config.btn_view")}
           </Button>
           <Button
             size="small"
             icon={<SettingOutlined />}
             onClick={() => openApiKeyModal(r.value)}
           >
-            设置
+            {t("pages.scrape_config.btn_settings")}
           </Button>
           <Button
             size="small"
@@ -253,7 +224,7 @@ export default function ScrapeConfigPage() {
             loading={testingProvider === r.value}
             onClick={() => runProviderTest(r.value)}
           >
-            测试
+            {t("pages.scrape_config.btn_test")}
           </Button>
         </Space>
       ),
@@ -272,18 +243,20 @@ export default function ScrapeConfigPage() {
       />
 
       <Modal
-        title={`API Key — ${modalProvider ? providerLabel(modalProvider) : ""}`}
+        title={t("pages.scrape_config.modal_apikey_title", {
+          name: modalProvider ? providerLabelOf(PROVIDER_OPTIONS, modalProvider) : "",
+        })}
         open={modalProvider !== null}
         onOk={saveApiKey}
         onCancel={() => {
           setModalProvider(null);
           setModalKey("");
         }}
-        okText="确定"
-        cancelText="取消"
+        okText={t("pages.scrape_config.modal_ok")}
+        cancelText={t("pages.scrape_config.modal_cancel")}
       >
         <Input.Password
-          placeholder={modalProvider ? apiKeyPlaceholder(modalProvider) : "输入 API Key"}
+          placeholder={modalProvider ? apiKeyPlaceholder(modalProvider, t) : t("pages.scrape_config.apikey_placeholder_default")}
           value={modalKey}
           onChange={(e) => setModalKey(e.target.value)}
           style={{ marginTop: 8 }}
