@@ -1019,6 +1019,25 @@
     }
   },
   "components": {
+    "photo_lightbox": {
+      "tags_updated": "タグを更新しました",
+      "save_failed": "保存に失敗しました",
+      "aria_dialog": "写真プレビュー",
+      "untitled": "無題",
+      "aria_zoom_out": "縮小",
+      "aria_zoom_in": "拡大",
+      "aria_rotate_left": "左に回転",
+      "aria_rotate_right": "右に回転",
+      "aria_download": "ダウンロード",
+      "aria_close": "閉じる",
+      "aria_prev": "前へ",
+      "aria_next": "次へ",
+      "edit_tags": "タグを編集 (I)",
+      "tags_placeholder": "人物・風景（カンマ区切り）",
+      "save": "保存",
+      "original_label": " · オリジナル",
+      "load_original_hint": " · ダブルクリックでオリジナル読み込み"
+    },
     "series_edit_modal": {
       "load_failed": "シリーズ情報の読み込みに失敗しました",
       "title_required": "タイトルを入力してください",

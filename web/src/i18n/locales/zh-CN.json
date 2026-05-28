@@ -1019,6 +1019,25 @@
     }
   },
   "components": {
+    "photo_lightbox": {
+      "tags_updated": "分类已更新",
+      "save_failed": "保存失败",
+      "aria_dialog": "照片预览",
+      "untitled": "未命名",
+      "aria_zoom_out": "缩小",
+      "aria_zoom_in": "放大",
+      "aria_rotate_left": "向左旋转",
+      "aria_rotate_right": "向右旋转",
+      "aria_download": "下载",
+      "aria_close": "关闭",
+      "aria_prev": "上一张",
+      "aria_next": "下一张",
+      "edit_tags": "编辑分类 (I)",
+      "tags_placeholder": "人物、风景（逗号分隔）",
+      "save": "保存",
+      "original_label": " · 原图",
+      "load_original_hint": " · 双击加载原图"
+    },
     "series_edit_modal": {
       "load_failed": "加载剧集信息失败",
       "title_required": "请填写标题",

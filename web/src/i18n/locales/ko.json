@@ -1019,6 +1019,25 @@
     }
   },
   "components": {
+    "photo_lightbox": {
+      "tags_updated": "태그가 업데이트되었습니다",
+      "save_failed": "저장 실패",
+      "aria_dialog": "사진 미리보기",
+      "untitled": "제목 없음",
+      "aria_zoom_out": "축소",
+      "aria_zoom_in": "확대",
+      "aria_rotate_left": "왼쪽으로 회전",
+      "aria_rotate_right": "오른쪽으로 회전",
+      "aria_download": "다운로드",
+      "aria_close": "닫기",
+      "aria_prev": "이전",
+      "aria_next": "다음",
+      "edit_tags": "태그 편집 (I)",
+      "tags_placeholder": "인물, 풍경 (쉼표로 구분)",
+      "save": "저장",
+      "original_label": " · 원본",
+      "load_original_hint": " · 더블 클릭하여 원본 로드"
+    },
     "series_edit_modal": {
       "load_failed": "시리즈 정보 불러오기 실패",
       "title_required": "제목을 입력하세요",

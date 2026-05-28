@@ -1019,6 +1019,25 @@
     }
   },
   "components": {
+    "photo_lightbox": {
+      "tags_updated": "Tags updated",
+      "save_failed": "Save failed",
+      "aria_dialog": "Photo preview",
+      "untitled": "Untitled",
+      "aria_zoom_out": "Zoom out",
+      "aria_zoom_in": "Zoom in",
+      "aria_rotate_left": "Rotate left",
+      "aria_rotate_right": "Rotate right",
+      "aria_download": "Download",
+      "aria_close": "Close",
+      "aria_prev": "Previous",
+      "aria_next": "Next",
+      "edit_tags": "Edit tags (I)",
+      "tags_placeholder": "People, scenery (comma-separated)",
+      "save": "Save",
+      "original_label": " · Original",
+      "load_original_hint": " · Double-click to load original"
+    },
     "series_edit_modal": {
       "load_failed": "Failed to load series",
       "title_required": "Please enter a title",
