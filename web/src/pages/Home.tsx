@@ -30,6 +30,7 @@ import {
 import AddToPlaylistModal from "../components/AddToPlaylistModal";
 import { buildMediaMenuItems } from "../components/mediaMenuItems";
 import { readRecentPlaylists, rememberPlaylistAdded } from "../lib/recentPlaylists";
+import { useT, type TranslateFn } from "../i18n";
 import styles from "./Home.module.css";
 
 const { Title } = Typography;
@@ -78,6 +79,7 @@ function HistoryContinueCard({
   onToggleSelect,
   bulkSelectMode,
   buildHomeMediaMenu,
+  t,
 }: {
   h: HistoryItem;
   nav: ReturnType<typeof useNavigate>;
@@ -87,6 +89,7 @@ function HistoryContinueCard({
   onToggleSelect: () => void;
   bulkSelectMode: boolean;
   buildHomeMediaMenu: (mediaId: number, extra?: { isWatched?: boolean; fromContinueWatching?: boolean }) => MenuProps;
+  t: TranslateFn;
 }) {
   const [posterFailed, setPosterFailed] = useState(false);
   const homeMediaMenu = useMemo(
@@ -152,7 +155,7 @@ function HistoryContinueCard({
             type="button"
             data-home-history-action
             className={`${styles.posterOverlayIconBtn} ${styles.posterOverlaySelect}`}
-            aria-label={selected ? "取消选中" : "选中"}
+            aria-label={selected ? t("pages.home.aria_deselect") : t("pages.home.aria_select")}
             onClick={(e) => {
               e.stopPropagation();
               onToggleSelect();
@@ -165,7 +168,7 @@ function HistoryContinueCard({
               <button
                 type="button"
                 className={styles.posterPlayFab}
-                aria-label={`播放 ${h.title || "影片"}`}
+                aria-label={t("pages.home.aria_play_video", { title: h.title || t("pages.home.movie_fallback") })}
                 onClick={(e) => {
                   e.stopPropagation();
                   nav(`/player/${h.media_id}?t=${h.position}`);
@@ -176,7 +179,7 @@ function HistoryContinueCard({
               <button
                 type="button"
                 className={`${styles.posterOverlayIconBtn} ${styles.posterOverlayEdit}`}
-                aria-label="编辑"
+                aria-label={t("pages.home.aria_edit")}
                 onClick={(e) => {
                   e.stopPropagation();
                   nav(`/detail/${h.media_id}`);
@@ -188,7 +191,7 @@ function HistoryContinueCard({
                 <button
                   type="button"
                   className={`${styles.posterOverlayIconBtn} ${styles.posterOverlayMore}`}
-                  aria-label="更多"
+                  aria-label={t("pages.home.aria_more")}
                   onClick={(e) => e.stopPropagation()}
                 >
                   <EllipsisOutlined style={{ transform: "rotate(90deg)" }} />
@@ -209,28 +212,31 @@ function HistoryContinueCard({
           nav(`/detail/${h.media_id}`);
         }}
       >
-        <div className={styles.thumb169Title}>{h.title || "未命名"}</div>
+        <div className={styles.thumb169Title}>{h.title || t("pages.home.untitled")}</div>
         <div className={styles.thumb169Sub}>
           {pct}% · {formatYear(h.file_path)}
         </div>
         <div className={styles.thumb169Tags}>
-          {h.completed === 1 ? <Tag color="green" style={{ marginInlineEnd: 0, flexShrink: 0 }}>已看完</Tag> : null}
-          <Tag color="blue" style={{ marginInlineEnd: 0, flexShrink: 0 }}>播放 {h.play_count ?? 0} 次</Tag>
+          {h.completed === 1 ? <Tag color="green" style={{ marginInlineEnd: 0, flexShrink: 0 }}>{t("pages.home.completed")}</Tag> : null}
+          <Tag color="blue" style={{ marginInlineEnd: 0, flexShrink: 0 }}>{t("pages.home.play_times", { count: h.play_count ?? 0 })}</Tag>
         </div>
       </div>
     </div>
   );
 }
 
-/** 首页「最近添加」分区：与后台媒体库 type 对应；动漫归入「其他影片」横版预览。 */
-const RECENT_SECTIONS: { key: string; title: string; libTypes: string[]; landscape: boolean }[] = [
-  { key: "movie", title: "电影", libTypes: ["movie"], landscape: false },
-  { key: "tv", title: "电视节目", libTypes: ["tv"], landscape: false },
-  { key: "music", title: "音乐", libTypes: ["music"], landscape: false },
-  { key: "photo", title: "图片", libTypes: ["photo"], landscape: false },
-  { key: "document", title: "文档", libTypes: ["document"], landscape: false },
-  { key: "other_video", title: "其他影片", libTypes: ["video", "anime"], landscape: true },
-];
+type RecentSection = { key: string; title: string; libTypes: string[]; landscape: boolean };
+
+function buildRecentSections(t: TranslateFn): RecentSection[] {
+  return [
+    { key: "movie", title: t("pages.home.section_movie"), libTypes: ["movie"], landscape: false },
+    { key: "tv", title: t("pages.home.section_tv"), libTypes: ["tv"], landscape: false },
+    { key: "music", title: t("pages.home.section_music"), libTypes: ["music"], landscape: false },
+    { key: "photo", title: t("pages.home.section_photo"), libTypes: ["photo"], landscape: false },
+    { key: "document", title: t("pages.home.section_document"), libTypes: ["document"], landscape: false },
+    { key: "other_video", title: t("pages.home.section_other_video"), libTypes: ["video", "anime"], landscape: true },
+  ];
+}
 
 function RecentMovieShelfCard({
   m,
@@ -239,14 +245,15 @@ function RecentMovieShelfCard({
   onToggleSelect,
   bulkSelectMode,
   buildHomeMediaMenu,
+  t,
 }: {
   m: MediaItem;
   nav: ReturnType<typeof useNavigate>;
   selected: boolean;
   onToggleSelect: () => void;
-  /** 已有选中项时：海报区点选切换，隐藏播放/编辑/更多 */
   bulkSelectMode: boolean;
   buildHomeMediaMenu: (mediaId: number, extra?: { isWatched?: boolean; fromContinueWatching?: boolean }) => MenuProps;
+  t: TranslateFn;
 }) {
   const [posterFailed, setPosterFailed] = useState(false);
   const year = mediaReleaseYear(m);
@@ -312,7 +319,7 @@ function RecentMovieShelfCard({
               type="button"
               data-home-shelf-action
               className={`${styles.posterOverlayIconBtn} ${styles.posterOverlaySelect}`}
-              aria-label={selected ? "取消选中" : "选中"}
+              aria-label={selected ? t("pages.home.aria_deselect") : t("pages.home.aria_select")}
               onClick={(e) => {
                 e.stopPropagation();
                 onToggleSelect();
@@ -325,7 +332,7 @@ function RecentMovieShelfCard({
                 <button
                   type="button"
                   className={styles.posterPlayFab}
-                  aria-label={`播放 ${m.title || "影片"}`}
+                  aria-label={t("pages.home.aria_play_video", { title: m.title || t("pages.home.movie_fallback") })}
                   onClick={(e) => {
                     e.stopPropagation();
                     nav(`/player/${m.id}`);
@@ -336,7 +343,7 @@ function RecentMovieShelfCard({
                 <button
                   type="button"
                   className={`${styles.posterOverlayIconBtn} ${styles.posterOverlayEdit}`}
-                  aria-label="编辑"
+                  aria-label={t("pages.home.aria_edit")}
                   onClick={(e) => {
                     e.stopPropagation();
                     nav(`/detail/${m.id}`);
@@ -348,7 +355,7 @@ function RecentMovieShelfCard({
                   <button
                     type="button"
                     className={`${styles.posterOverlayIconBtn} ${styles.posterOverlayMore}`}
-                    aria-label="更多"
+                    aria-label={t("pages.home.aria_more")}
                     onClick={(e) => e.stopPropagation()}
                   >
                     <EllipsisOutlined style={{ transform: "rotate(90deg)" }} />
@@ -367,7 +374,7 @@ function RecentMovieShelfCard({
           nav(`/detail/${m.id}`);
         }}
       >
-        <div className={styles.posterTitleOneLine}>{m.title || "未命名"}</div>
+        <div className={styles.posterTitleOneLine}>{m.title || t("pages.home.untitled")}</div>
         {year ? <div className={styles.posterYearLine}>{year}</div> : null}
       </div>
     </div>
@@ -384,6 +391,7 @@ function RecentAddedRow({
   onToggleMovieSelect,
   homeBulkActive,
   buildHomeMediaMenu,
+  t,
 }: {
   sectionTitle: string;
   items: MediaItem[];
@@ -392,9 +400,9 @@ function RecentAddedRow({
   nav: ReturnType<typeof useNavigate>;
   movieSelectedIds: Set<number>;
   onToggleMovieSelect: (id: number) => void;
-  /** 继续观看或最近添加电影任一侧有选中 */
   homeBulkActive: boolean;
   buildHomeMediaMenu: (mediaId: number, extra?: { isWatched?: boolean; fromContinueWatching?: boolean }) => MenuProps;
+  t: TranslateFn;
 }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [showLeft, setShowLeft] = useState(false);
@@ -439,7 +447,7 @@ function RecentAddedRow({
                 type="button"
                 className={`${styles.carouselArrow} ${styles.carouselArrowInline}`}
                 onClick={() => scrollBy(-340)}
-                aria-label="向左滚动"
+                aria-label={t("pages.home.scroll_left")}
               >
                 <LeftOutlined />
               </button>
@@ -449,7 +457,7 @@ function RecentAddedRow({
                 type="button"
                 className={`${styles.carouselArrow} ${styles.carouselArrowInline}`}
                 onClick={() => scrollBy(340)}
-                aria-label="向右滚动"
+                aria-label={t("pages.home.scroll_right")}
               >
                 <RightOutlined />
               </button>
@@ -473,6 +481,7 @@ function RecentAddedRow({
               onToggleSelect={() => onToggleMovieSelect(m.id)}
               bulkSelectMode={homeBulkActive}
               buildHomeMediaMenu={buildHomeMediaMenu}
+              t={t}
             />
           ) : (
             <div
@@ -501,7 +510,7 @@ function RecentAddedRow({
                 />
                 <div className={styles.posterEmpty}>
                   <FileImageOutlined />
-                  <span>暂无海报</span>
+                  <span>{t("pages.home.no_poster")}</span>
                 </div>
               </div>
               <button
@@ -511,12 +520,12 @@ function RecentAddedRow({
                   e.stopPropagation();
                   nav(`/player/${m.id}`);
                 }}
-                aria-label={`播放 ${m.title || "影片"}`}
+                aria-label={t("pages.home.aria_play_video", { title: m.title || t("pages.home.movie_fallback") })}
               >
                 <PlayCircleOutlined />
               </button>
               <div className={styles.posterCap}>
-                <div className={styles.posterTitle}>{m.title || "未命名"}</div>
+                <div className={styles.posterTitle}>{m.title || t("pages.home.untitled")}</div>
               </div>
             </div>
           )
@@ -529,6 +538,8 @@ function RecentAddedRow({
 
 export default function HomePage() {
   const nav = useNavigate();
+  const t = useT();
+  const RECENT_SECTIONS = useMemo(() => buildRecentSections(t), [t]);
   const [loading, setLoading] = useState(true);
   const [libs, setLibs] = useState<Library[]>([]);
   const [history, setHistory] = useState<HistoryItem[]>([]);
@@ -705,12 +716,12 @@ export default function HomePage() {
             const name =
               recentPlaylistMenu.find((p) => p.id === pid)?.name ??
               readRecentPlaylists().find((p) => p.id === pid)?.name ??
-              "播放列表";
-            message.success(`已添加到「${name}」`);
+              t("pages.home.playlist_fallback");
+            message.success(t("pages.home.added_to_playlist", { name }));
             rememberPlaylistAdded({ id: pid, name });
             setRecentPlaylistMenu(readRecentPlaylists());
           } catch {
-            message.error("添加失败，可能已在列表中");
+            message.error(t("pages.home.add_failed"));
           }
         },
         onRemoveFromContinueWatching: menuExtra?.fromContinueWatching
@@ -722,11 +733,11 @@ export default function HomePage() {
                 next.delete(String(mediaId));
                 return next;
               });
-              message.success("已从继续观看移除");
+              message.success(t("pages.home.removed_from_continue"));
             }
           : undefined,
       }),
-    [nav, recentPlaylistMenu],
+    [nav, recentPlaylistMenu, t],
   );
 
   const addToPlaylistDefaultTitle = useMemo(() => {
@@ -797,12 +808,12 @@ export default function HomePage() {
   const homeBulkListContent = useMemo(() => {
     const histLines = history
       .filter((h) => historySelectedKeys.has(historyRowKey(h)))
-      .map((h) => ({ key: historyRowKey(h), text: `继续观看 · ${h.title || "未命名"}` }));
+      .map((h) => ({ key: historyRowKey(h), text: t("pages.home.continue_label", { title: h.title || t("pages.home.untitled") }) }));
     const movLines = movieShelfItems
       .filter((m) => movieSelectedIds.has(m.id))
-      .map((m) => ({ key: `m-${m.id}`, text: `最近添加 · ${m.title || "未命名"}` }));
+      .map((m) => ({ key: `m-${m.id}`, text: t("pages.home.recent_label", { title: m.title || t("pages.home.untitled") }) }));
     const lines = [...histLines, ...movLines];
-    if (lines.length === 0) return <span className={styles.homeShelfBulkPopoverEmpty}>无</span>;
+    if (lines.length === 0) return <span className={styles.homeShelfBulkPopoverEmpty}>{t("pages.home.empty_bulk_list")}</span>;
     return (
       <ul className={styles.homeShelfBulkPopoverList}>
         {lines.map((row) => (
@@ -818,7 +829,7 @@ export default function HomePage() {
     return [
       {
         key: "play1",
-        label: "播放第一个",
+        label: t("pages.home.menu_play_first"),
         onClick: () => {
           if (p == null) return;
           if (p.kind === "history") nav(`/player/${p.h.media_id}?t=${p.h.position}`);
@@ -827,13 +838,13 @@ export default function HomePage() {
       },
       {
         key: "detail1",
-        label: "查看第一个详情",
+        label: t("pages.home.menu_view_first_detail"),
         onClick: () => {
           if (detailId != null) nav(`/detail/${detailId}`);
         },
       },
     ];
-  }, [firstBulkPlayTarget, firstBulkDetailMediaId, nav]);
+  }, [firstBulkPlayTarget, firstBulkDetailMediaId, nav, t]);
 
   useLayoutEffect(() => {
     if (!homeBulkActive) return;
@@ -913,7 +924,7 @@ export default function HomePage() {
         <div
           className={styles.homeShelfBulkBar}
           role="toolbar"
-          aria-label="首页批量操作"
+          aria-label={t("pages.home.aria_bulk_actions")}
           style={{
             top: 72,
             zIndex: 1000,
@@ -926,13 +937,13 @@ export default function HomePage() {
         >
           <div className={styles.homeShelfBulkLeft}>
             <CheckOutlined className={styles.homeShelfBulkOrangeMark} aria-hidden />
-            <span className={styles.homeShelfBulkOrangeText}>已选择 {homeBulkCount} 个项目</span>
+            <span className={styles.homeShelfBulkOrangeText}>{t("pages.home.selected_count", { count: homeBulkCount })}</span>
           </div>
           <div className={styles.homeShelfBulkCenter}>
             <button
               type="button"
               className={styles.homeShelfBulkIconBtn}
-              aria-label="播放第一个"
+              aria-label={t("pages.home.aria_play_first")}
               disabled={firstBulkPlayTarget == null}
               onClick={() => {
                 const p = firstBulkPlayTarget;
@@ -946,33 +957,33 @@ export default function HomePage() {
             <button
               type="button"
               className={styles.homeShelfBulkIconBtn}
-              aria-label={homeBulkAllFullySelected ? "取消全选继续观看与最近电影" : "全选继续观看与最近电影"}
+              aria-label={homeBulkAllFullySelected ? t("pages.home.aria_deselect_all_recent") : t("pages.home.aria_select_all_recent")}
               disabled={homeBulkSelectAllDisabled}
               onClick={selectAllHomeBulkOrClear}
             >
               <CheckCircleOutlined />
             </button>
             <Popover content={homeBulkListContent} trigger="click" placement="bottom">
-              <button type="button" className={styles.homeShelfBulkIconBtn} aria-label="已选列表">
+              <button type="button" className={styles.homeShelfBulkIconBtn} aria-label={t("pages.home.aria_selected_list")}>
                 <UnorderedListOutlined />
               </button>
             </Popover>
             <Dropdown menu={{ items: homeBulkMoreItems }} trigger={["click"]} placement="bottomRight">
-              <button type="button" className={styles.homeShelfBulkIconBtn} aria-label="更多">
+              <button type="button" className={styles.homeShelfBulkIconBtn} aria-label={t("pages.home.aria_more_short")}>
                 <MoreOutlined />
               </button>
             </Dropdown>
           </div>
           <button type="button" className={styles.homeShelfBulkCancel} onClick={clearHomeBulkSelection}>
             <CloseOutlined aria-hidden />
-            <span>取消全选</span>
+            <span>{t("pages.home.deselect_all")}</span>
           </button>
         </div>
       ) : null}
       <section className={styles.section}>
         <div className={styles.sectionHead}>
           <Title level={3} className={styles.title}>
-            媒体库
+            {t("pages.home.section_libraries")}
           </Title>
           {libs.length > 0 && (showLibLeft || showLibRight) ? (
             <div className={styles.historyHeadControls}>
@@ -981,7 +992,7 @@ export default function HomePage() {
                   type="button"
                   className={`${styles.carouselArrow} ${styles.carouselArrowInline}`}
                   onClick={() => scrollLibsBy(-320)}
-                  aria-label="向左滚动"
+                  aria-label={t("pages.home.scroll_left")}
                 >
                   <LeftOutlined />
                 </button>
@@ -991,7 +1002,7 @@ export default function HomePage() {
                   type="button"
                   className={`${styles.carouselArrow} ${styles.carouselArrowInline}`}
                   onClick={() => scrollLibsBy(320)}
-                  aria-label="向右滚动"
+                  aria-label={t("pages.home.scroll_right")}
                 >
                   <RightOutlined />
                 </button>
@@ -1000,7 +1011,7 @@ export default function HomePage() {
           ) : null}
         </div>
         {libs.length === 0 ? (
-          <div className={styles.emptyHint}>暂无媒体库，请由管理员在「媒体库」中添加。</div>
+          <div className={styles.emptyHint}>{t("pages.home.no_libraries_hint")}</div>
         ) : (
           <div className={styles.carouselWrap}>
             <div
@@ -1015,13 +1026,13 @@ export default function HomePage() {
               const progressColor = percent < 50 ? "#13b6ff" : percent < 90 ? "#faad14" : "#52c41a";
               const typeLabel =
                 lib.type === "movie"
-                  ? "电影"
+                  ? t("pages.home.lib_type_movie")
                   : lib.type === "tv"
-                    ? "剧集"
+                    ? t("pages.home.lib_type_tv")
                     : lib.type === "anime"
-                      ? "动漫"
+                      ? t("pages.home.lib_type_anime")
                       : lib.type === "video"
-                        ? "其他影片"
+                        ? t("pages.home.lib_type_other_video")
                         : lib.type;
               return (
                 <Link
@@ -1055,9 +1066,11 @@ export default function HomePage() {
                           className={styles.libScanCircle}
                         />
                         <div className={styles.libScanInfo}>
-                          <div className={styles.libScanTitle}>扫描中</div>
+                          <div className={styles.libScanTitle}>{t("pages.home.lib_scanning")}</div>
                           <div className={styles.libScanMeta}>
-                            {total > 0 ? `${processed}/${total}` : `已处理 ${processed}`} · 新增 {lib.scan_added_count ?? 0}
+                            {total > 0
+                              ? t("pages.home.lib_scan_progress", { processed, total, added: lib.scan_added_count ?? 0 })
+                              : t("pages.home.lib_scan_processed", { processed, added: lib.scan_added_count ?? 0 })}
                           </div>
                         </div>
                       </div>
@@ -1065,7 +1078,7 @@ export default function HomePage() {
                   </div>
                   <div className={styles.libCardLabel}>{lib.name}</div>
                   <div className={styles.libCardMeta}>
-                    {typeLabel} · {lib.media_count ?? 0} 项
+                    {t("pages.home.lib_meta", { type: typeLabel, count: lib.media_count ?? 0 })}
                   </div>
                 </Link>
               );
@@ -1078,7 +1091,7 @@ export default function HomePage() {
       <section className={styles.section}>
         <div className={styles.sectionHead}>
           <Title level={3} className={styles.title}>
-            继续观看
+            {t("pages.home.section_continue")}
           </Title>
           {history.length > 0 && (showHistoryLeft || showHistoryRight) ? (
             <div className={styles.historyHeadControls}>
@@ -1087,7 +1100,7 @@ export default function HomePage() {
                   type="button"
                   className={`${styles.carouselArrow} ${styles.carouselArrowInline}`}
                   onClick={() => scrollHistoryBy(-340)}
-                  aria-label="向左滚动"
+                  aria-label={t("pages.home.scroll_left")}
                 >
                   <LeftOutlined />
                 </button>
@@ -1097,7 +1110,7 @@ export default function HomePage() {
                   type="button"
                   className={`${styles.carouselArrow} ${styles.carouselArrowInline}`}
                   onClick={() => scrollHistoryBy(340)}
-                  aria-label="向右滚动"
+                  aria-label={t("pages.home.scroll_right")}
                 >
                   <RightOutlined />
                 </button>
@@ -1106,7 +1119,7 @@ export default function HomePage() {
           ) : null}
         </div>
         {history.length === 0 ? (
-          <div className={styles.emptyHint}>暂无播放记录，去「浏览媒体」中选一部开始观看吧。</div>
+          <div className={styles.emptyHint}>{t("pages.home.no_continue_hint")}</div>
         ) : (
           <div className={styles.carouselWrap}>
             <div
@@ -1133,6 +1146,7 @@ export default function HomePage() {
                     onToggleSelect={() => toggleHistoryRow(rowKey)}
                     bulkSelectMode={homeBulkActive}
                     buildHomeMediaMenu={buildHomeMediaMenu}
+                    t={t}
                   />
                 );
               })}
@@ -1146,11 +1160,12 @@ export default function HomePage() {
         return (
           <section key={sec.key} className={styles.section}>
             <RecentAddedRow
-              sectionTitle={`最近添加的${sec.title}`}
+              sectionTitle={t("pages.home.section_recent_added", { title: sec.title })}
               items={items}
               landscape={sec.landscape}
               sectionKey={sec.key}
               nav={nav}
+              t={t}
               movieSelectedIds={movieSelectedIds}
               onToggleMovieSelect={toggleMovieSelect}
               homeBulkActive={homeBulkActive}
