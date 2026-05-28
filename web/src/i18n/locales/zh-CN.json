@@ -1077,27 +1077,30 @@
       "btn_save": "保存修改",
       "btn_create": "创建"
     },
+    "music_play_mode": {
+      "sequential": "顺序播放",
+      "repeat-all": "列表循环",
+      "shuffle": "随机播放",
+      "repeat-one": "单曲循环"
+    },
+    "music_fullscreen_player": {
+      "aria_dialog": "全屏音乐播放",
+      "aria_collapse": "收起"
+    },
     "music_player_bar": {
-      "play": "播放",
-      "pause": "暂停",
-      "prev": "上一首",
-      "next": "下一首",
-      "shuffle": "随机",
-      "repeat_none": "不重复",
-      "repeat_one": "单曲循环",
-      "repeat_all": "列表循环",
-      "queue": "播放队列",
-      "lyrics": "歌词",
-      "fullscreen": "全屏播放",
-      "exit_fullscreen": "退出全屏",
-      "close": "关闭",
-      "volume": "音量",
-      "mute": "静音",
-      "unmute": "取消静音",
-      "favorite": "收藏",
-      "unfavorite": "取消收藏",
-      "no_lyrics": "暂无歌词",
-      "loading": "加载中…"
+      "aria_region": "音乐播放器",
+      "aria_progress": "播放进度",
+      "aria_fullscreen": "展开全屏播放",
+      "tooltip_prev": "上一首",
+      "aria_prev": "上一首",
+      "aria_pause": "暂停",
+      "aria_play": "播放",
+      "tooltip_next": "下一首",
+      "aria_next": "下一首",
+      "tooltip_stop": "停止",
+      "aria_stop": "停止",
+      "aria_unmute": "取消静音",
+      "aria_mute": "静音"
     },
     "now_playing": "正在播放",
     "playlist": {

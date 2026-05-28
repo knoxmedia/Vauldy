@@ -1077,27 +1077,30 @@
       "btn_save": "Save changes",
       "btn_create": "Create"
     },
-    "music_player_bar": {
-      "play": "Play",
-      "pause": "Pause",
-      "prev": "Previous",
-      "next": "Next",
+    "music_play_mode": {
+      "sequential": "Sequential",
+      "repeat-all": "Repeat all",
       "shuffle": "Shuffle",
-      "repeat_none": "No repeat",
-      "repeat_one": "Repeat one",
-      "repeat_all": "Repeat all",
-      "queue": "Queue",
-      "lyrics": "Lyrics",
-      "fullscreen": "Full screen",
-      "exit_fullscreen": "Exit full screen",
-      "close": "Close",
-      "volume": "Volume",
-      "mute": "Mute",
-      "unmute": "Unmute",
-      "favorite": "Favorite",
-      "unfavorite": "Unfavorite",
-      "no_lyrics": "No lyrics",
-      "loading": "Loading…"
+      "repeat-one": "Repeat one"
+    },
+    "music_fullscreen_player": {
+      "aria_dialog": "Full screen music player",
+      "aria_collapse": "Collapse"
+    },
+    "music_player_bar": {
+      "aria_region": "Music player",
+      "aria_progress": "Playback progress",
+      "aria_fullscreen": "Open full screen player",
+      "tooltip_prev": "Previous",
+      "aria_prev": "Previous",
+      "aria_pause": "Pause",
+      "aria_play": "Play",
+      "tooltip_next": "Next",
+      "aria_next": "Next",
+      "tooltip_stop": "Stop",
+      "aria_stop": "Stop",
+      "aria_unmute": "Unmute",
+      "aria_mute": "Mute"
     },
     "now_playing": "Now playing",
     "playlist": {

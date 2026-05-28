@@ -1077,27 +1077,30 @@
       "btn_save": "변경 사항 저장",
       "btn_create": "만들기"
     },
+    "music_play_mode": {
+      "sequential": "순차 재생",
+      "repeat-all": "전체 반복",
+      "shuffle": "셔플 재생",
+      "repeat-one": "한 곡 반복"
+    },
+    "music_fullscreen_player": {
+      "aria_dialog": "전체 화면 음악 플레이어",
+      "aria_collapse": "접기"
+    },
     "music_player_bar": {
-      "play": "재생",
-      "pause": "일시정지",
-      "prev": "이전",
-      "next": "다음",
-      "shuffle": "셔플",
-      "repeat_none": "반복 안 함",
-      "repeat_one": "한 곡 반복",
-      "repeat_all": "전체 반복",
-      "queue": "재생 대기열",
-      "lyrics": "가사",
-      "fullscreen": "전체 화면 재생",
-      "exit_fullscreen": "전체 화면 종료",
-      "close": "닫기",
-      "volume": "볼륨",
-      "mute": "음소거",
-      "unmute": "음소거 해제",
-      "favorite": "즐겨찾기",
-      "unfavorite": "즐겨찾기 해제",
-      "no_lyrics": "가사 없음",
-      "loading": "불러오는 중…"
+      "aria_region": "음악 플레이어",
+      "aria_progress": "재생 진행률",
+      "aria_fullscreen": "전체 화면 플레이어 열기",
+      "tooltip_prev": "이전",
+      "aria_prev": "이전",
+      "aria_pause": "일시정지",
+      "aria_play": "재생",
+      "tooltip_next": "다음",
+      "aria_next": "다음",
+      "tooltip_stop": "정지",
+      "aria_stop": "정지",
+      "aria_unmute": "음소거 해제",
+      "aria_mute": "음소거"
     },
     "now_playing": "재생 중",
     "playlist": {

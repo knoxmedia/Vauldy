@@ -1077,27 +1077,30 @@
       "btn_save": "変更を保存",
       "btn_create": "作成"
     },
+    "music_play_mode": {
+      "sequential": "順番再生",
+      "repeat-all": "全曲リピート",
+      "shuffle": "シャッフル再生",
+      "repeat-one": "1曲リピート"
+    },
+    "music_fullscreen_player": {
+      "aria_dialog": "全画面音楽プレーヤー",
+      "aria_collapse": "閉じる"
+    },
     "music_player_bar": {
-      "play": "再生",
-      "pause": "一時停止",
-      "prev": "前へ",
-      "next": "次へ",
-      "shuffle": "シャッフル",
-      "repeat_none": "リピートなし",
-      "repeat_one": "1曲リピート",
-      "repeat_all": "全曲リピート",
-      "queue": "再生キュー",
-      "lyrics": "歌詞",
-      "fullscreen": "全画面再生",
-      "exit_fullscreen": "全画面を終了",
-      "close": "閉じる",
-      "volume": "音量",
-      "mute": "ミュート",
-      "unmute": "ミュート解除",
-      "favorite": "お気に入り",
-      "unfavorite": "お気に入り解除",
-      "no_lyrics": "歌詞がありません",
-      "loading": "読み込み中…"
+      "aria_region": "音楽プレーヤー",
+      "aria_progress": "再生進行状況",
+      "aria_fullscreen": "全画面プレーヤーを開く",
+      "tooltip_prev": "前へ",
+      "aria_prev": "前へ",
+      "aria_pause": "一時停止",
+      "aria_play": "再生",
+      "tooltip_next": "次へ",
+      "aria_next": "次へ",
+      "tooltip_stop": "停止",
+      "aria_stop": "停止",
+      "aria_unmute": "ミュート解除",
+      "aria_mute": "ミュート"
     },
     "now_playing": "再生中",
     "playlist": {
