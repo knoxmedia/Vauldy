@@ -19,18 +19,21 @@ import {
   updatePlaylist,
   uploadPlaylistImage,
 } from "../api/client";
+import { useT, tGlobal, type TranslateFn } from "../i18n";
 import styles from "./PlaylistFormModal.module.css";
 
 type TabKey = "general" | "poster" | "background" | "logo" | "square_art";
 type ImageField = "poster" | "background" | "logo" | "square_art";
 
-const TABS: { key: TabKey; label: string; icon: ReactNode }[] = [
-  { key: "general", label: "常规", icon: <UnorderedListOutlined /> },
-  { key: "poster", label: "海报", icon: <PictureOutlined /> },
-  { key: "background", label: "背景", icon: <LayoutOutlined /> },
-  { key: "logo", label: "Logo", icon: <TrademarkCircleOutlined /> },
-  { key: "square_art", label: "Square Art", icon: <AppstoreOutlined /> },
-];
+function buildTabs(t: TranslateFn): { key: TabKey; label: string; icon: ReactNode }[] {
+  return [
+    { key: "general", label: t("components.playlist_form_modal.tab_general"), icon: <UnorderedListOutlined /> },
+    { key: "poster", label: t("components.playlist_form_modal.tab_poster"), icon: <PictureOutlined /> },
+    { key: "background", label: t("components.playlist_form_modal.tab_background"), icon: <LayoutOutlined /> },
+    { key: "logo", label: "Logo", icon: <TrademarkCircleOutlined /> },
+    { key: "square_art", label: "Square Art", icon: <AppstoreOutlined /> },
+  ];
+}
 
 interface ImagePreviewProps {
   url: string;
@@ -98,7 +101,7 @@ function ImagePreview({ url, onUpload, label, ratio, maxWidth }: ImagePreviewPro
             }}
           >
             <PlusOutlined style={{ fontSize: 22, marginBottom: 6 }} />
-            <span style={{ fontSize: 12 }}>上传</span>
+            <span style={{ fontSize: 12 }}>{tGlobal("components.playlist_form_modal.upload")}</span>
           </div>
         )}
       </Upload.Dragger>
@@ -114,6 +117,8 @@ interface PlaylistFormModalProps {
 }
 
 export default function PlaylistFormModal({ open, playlist, onClose, onSaved }: PlaylistFormModalProps) {
+  const t = useT();
+  const TABS = buildTabs(t);
   const [activeTab, setActiveTab] = useState<TabKey>("general");
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -146,7 +151,7 @@ export default function PlaylistFormModal({ open, playlist, onClose, onSaved }: 
       if (!plId) {
         setSaving(true);
         try {
-          plId = await createPlaylist(name.trim() || "未命名播放列表", description, "", "", "", "");
+          plId = await createPlaylist(name.trim() || t("components.playlist_form_modal.default_playlist_name"), description, "", "", "", "");
           setDraftPlaylistId(plId);
         } finally {
           setSaving(false);
@@ -158,7 +163,7 @@ export default function PlaylistFormModal({ open, playlist, onClose, onSaved }: 
       else if (field === "logo") setLogoUrl(url);
       else setSquareArtUrl(url);
     } catch (e: unknown) {
-      message.error((e as Error).message || "上传失败");
+      message.error((e as Error).message || t("components.playlist_form_modal.upload_failed"));
     } finally {
       setUploading((prev) => {
         const next = new Set(prev);
@@ -170,7 +175,7 @@ export default function PlaylistFormModal({ open, playlist, onClose, onSaved }: 
 
   async function handleSave() {
     if (!name.trim()) {
-      message.error("请输入标题");
+      message.error(t("components.playlist_form_modal.title_required"));
       return;
     }
     setSaving(true);
@@ -196,7 +201,7 @@ export default function PlaylistFormModal({ open, playlist, onClose, onSaved }: 
         };
         onSaved(updated);
         onClose();
-        message.success("已更新");
+        message.success(t("components.playlist_form_modal.updated"));
       } else if (draftPlaylistId) {
         await updatePlaylist(
           draftPlaylistId,
@@ -222,7 +227,7 @@ export default function PlaylistFormModal({ open, playlist, onClose, onSaved }: 
         };
         onSaved(newPlaylist);
         onClose();
-        message.success("已创建");
+        message.success(t("components.playlist_form_modal.created"));
       } else {
         const id = await createPlaylist(
           name.trim(),
@@ -247,18 +252,18 @@ export default function PlaylistFormModal({ open, playlist, onClose, onSaved }: 
         };
         onSaved(newPlaylist);
         onClose();
-        message.success("已创建");
+        message.success(t("components.playlist_form_modal.created"));
       }
     } catch (e: unknown) {
-      message.error((e as Error).message || "操作失败");
+      message.error((e as Error).message || t("components.playlist_form_modal.operation_failed"));
     } finally {
       setSaving(false);
     }
   }
 
   const headerText = playlist?.id
-    ? `编辑 ${name.trim() || playlist.name || "播放列表"}`
-    : "新建播放列表";
+    ? t("components.playlist_form_modal.edit_title_prefix", { name: name.trim() || playlist.name || t("components.playlist_form_modal.playlist_fallback") })
+    : t("components.playlist_form_modal.new_title");
 
   return (
     <Modal
@@ -277,20 +282,20 @@ export default function PlaylistFormModal({ open, playlist, onClose, onSaved }: 
             {playlist?.id ? <EditOutlined style={{ color: "#faad14" }} /> : <EditOutlined style={{ opacity: 0.65 }} />}
             <span>{headerText}</span>
           </div>
-          <Button type="text" icon={<CloseOutlined />} onClick={onClose} className={styles.closeBtn} aria-label="关闭" />
+          <Button type="text" icon={<CloseOutlined />} onClick={onClose} className={styles.closeBtn} aria-label={t("components.playlist_form_modal.close")} />
         </header>
 
         <div className={styles.body}>
-          <nav className={styles.sidebar} aria-label="播放列表表单分区">
-            {TABS.map((t) => (
+          <nav className={styles.sidebar} aria-label={t("components.playlist_form_modal.aria_sections")}>
+            {TABS.map((tab) => (
               <button
-                key={t.key}
+                key={tab.key}
                 type="button"
-                className={`${styles.tab} ${activeTab === t.key ? styles.tabActive : ""}`}
-                onClick={() => setActiveTab(t.key)}
+                className={`${styles.tab} ${activeTab === tab.key ? styles.tabActive : ""}`}
+                onClick={() => setActiveTab(tab.key)}
               >
-                {t.icon}
-                {t.label}
+                {tab.icon}
+                {tab.label}
               </button>
             ))}
           </nav>
@@ -300,26 +305,26 @@ export default function PlaylistFormModal({ open, playlist, onClose, onSaved }: 
               <div className={styles.panel}>
                 <div className={styles.fieldGap}>
                   <label className={styles.fieldLabel} htmlFor="pl-title">
-                    标题
+                    {t("components.playlist_form_modal.field_title")}
                   </label>
                   <Input
                     id="pl-title"
                     value={name}
                     onChange={(e) => setName(e.target.value)}
-                    placeholder="播放列表标题"
+                    placeholder={t("components.playlist_form_modal.title_placeholder")}
                     maxLength={100}
                     className={styles.darkInput}
                   />
                 </div>
                 <div className={styles.fieldGap}>
                   <label className={styles.fieldLabel} htmlFor="pl-overview">
-                    总览
+                    {t("components.playlist_form_modal.field_overview")}
                   </label>
                   <Input.TextArea
                     id="pl-overview"
                     value={description}
                     onChange={(e) => setDescription(e.target.value)}
-                    placeholder="简介（可选）"
+                    placeholder={t("components.playlist_form_modal.overview_placeholder")}
                     rows={6}
                     maxLength={2000}
                     className={styles.darkInput}
@@ -333,7 +338,7 @@ export default function PlaylistFormModal({ open, playlist, onClose, onSaved }: 
                 <ImagePreview
                   url={posterUrl}
                   onUpload={(file) => handleImageUpload("poster", file)}
-                  label="海报"
+                  label={t("components.playlist_form_modal.field_poster")}
                   ratio="2/3"
                   maxWidth={200}
                 />
@@ -343,7 +348,7 @@ export default function PlaylistFormModal({ open, playlist, onClose, onSaved }: 
             {activeTab === "background" && (
               <div className={styles.panel}>
                 <div className={styles.fieldGap}>
-                  <div className={styles.uploadLabel}>背景图片</div>
+                  <div className={styles.uploadLabel}>{t("components.playlist_form_modal.field_background")}</div>
                   <Upload.Dragger
                     accept="image/*"
                     showUploadList={false}
@@ -362,7 +367,7 @@ export default function PlaylistFormModal({ open, playlist, onClose, onSaved }: 
                     ) : backgroundUrl ? (
                       <img
                         src={backgroundUrl}
-                        alt="背景"
+                        alt={t("components.playlist_form_modal.background_alt")}
                         style={{ width: "100%", height: "100%", objectFit: "cover", display: "block", minHeight: 140 }}
                       />
                     ) : (
@@ -377,7 +382,7 @@ export default function PlaylistFormModal({ open, playlist, onClose, onSaved }: 
                         }}
                       >
                         <InboxOutlined style={{ fontSize: 32, marginBottom: 10 }} />
-                        <span style={{ fontSize: 13 }}>点击或拖拽上传背景图</span>
+                        <span style={{ fontSize: 13 }}>{t("components.playlist_form_modal.drag_background_hint")}</span>
                       </div>
                     )}
                   </Upload.Dragger>
@@ -413,10 +418,10 @@ export default function PlaylistFormModal({ open, playlist, onClose, onSaved }: 
 
         <footer className={styles.footer}>
           <Button className={styles.btnCancel} onClick={onClose} disabled={saving}>
-            取消
+            {t("components.playlist_form_modal.cancel")}
           </Button>
           <Button className={styles.btnPrimary} loading={saving} onClick={handleSave}>
-            {playlist?.id ? "保存修改" : "创建"}
+            {playlist?.id ? t("components.playlist_form_modal.btn_save") : t("components.playlist_form_modal.btn_create")}
           </Button>
         </footer>
       </div>
