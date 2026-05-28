@@ -18,6 +18,7 @@ import {
   fetchPhotoPlaces,
 } from "../api/client";
 import { isAdminRole, useAuthStore } from "../store/auth";
+import { useT } from "../i18n";
 import PhotoLightbox from "../components/PhotoLightbox";
 import PhotoListView from "../components/PhotoListView";
 import PhotoPersonDrillTitle from "../components/PhotoPersonDrillTitle";
@@ -44,6 +45,7 @@ type Props = {
 };
 
 export default function PhotoBrowse({ libraryId, libraryName, onEmpty }: Props) {
+  const t = useT();
   const [rows, setRows] = useState<MediaItem[]>([]);
   const [categories, setCategories] = useState<PhotoCategory[]>([]);
   const [places, setPlaces] = useState<PhotoPlace[]>([]);
@@ -144,11 +146,11 @@ export default function PhotoBrowse({ libraryId, libraryName, onEmpty }: Props) 
       }
       await refreshMeta();
     } catch (e: unknown) {
-      message.error((e as Error).message || "加载失败");
+      message.error((e as Error).message || t("pages.photo_browse.load_failed"));
     } finally {
       setLoading(false);
     }
-  }, [libraryId, sortMode, drillDown, refreshMeta]);
+  }, [libraryId, sortMode, drillDown, refreshMeta, t]);
 
   useEffect(() => {
     void load();
@@ -181,13 +183,13 @@ export default function PhotoBrowse({ libraryId, libraryName, onEmpty }: Props) 
     try {
       const { queued } = await backfillPhotoFaces(libraryId);
       if (queued > 0) {
-        message.success(`已加入 ${queued} 张待人脸检测`);
+        message.success(t("pages.photo_browse.queued_faces", { count: queued }));
       } else {
-        message.info("当前没有可检测的图片");
+        message.info(t("pages.photo_browse.no_faces"));
       }
       await refreshProgress();
     } catch (e: unknown) {
-      message.error((e as Error).message || "人脸检测失败");
+      message.error((e as Error).message || t("pages.photo_browse.face_failed"));
     } finally {
       setBackfillingFaces(false);
     }
@@ -198,13 +200,13 @@ export default function PhotoBrowse({ libraryId, libraryName, onEmpty }: Props) 
     try {
       const { queued } = await backfillPhotoLocations(libraryId);
       if (queued > 0) {
-        message.success(`已加入 ${queued} 张待解析 GPS 地点`);
+        message.success(t("pages.photo_browse.queued_places", { count: queued }));
       } else {
-        message.info("当前没有可解析的图片");
+        message.info(t("pages.photo_browse.no_places"));
       }
       await refreshProgress();
     } catch (e: unknown) {
-      message.error((e as Error).message || "解析地点失败");
+      message.error((e as Error).message || t("pages.photo_browse.geo_failed"));
     } finally {
       setBackfillingPlaces(false);
     }
@@ -215,13 +217,13 @@ export default function PhotoBrowse({ libraryId, libraryName, onEmpty }: Props) 
     try {
       const { queued } = await enqueuePhotoLibraryClassify(libraryId, true);
       if (queued > 0) {
-        message.success(`已加入 ${queued} 张待重新分类`);
+        message.success(t("pages.photo_browse.queued_classify", { count: queued }));
       } else {
-        message.info("当前没有可分类的图片");
+        message.info(t("pages.photo_browse.no_classify"));
       }
       await refreshProgress();
     } catch (e: unknown) {
-      message.error((e as Error).message || "提交分类任务失败");
+      message.error((e as Error).message || t("pages.photo_browse.classify_failed"));
     } finally {
       setReclassifying(false);
     }
@@ -247,13 +249,13 @@ export default function PhotoBrowse({ libraryId, libraryName, onEmpty }: Props) 
       {drillDown ? (
         <div className={styles.drillHeader}>
           <Button type="text" icon={<ArrowLeftOutlined />} onClick={onDrillBack}>
-            返回
+            {t("pages.photo_browse.back")}
           </Button>
           {drillDown.section === "person" && !isPersonAllDrill(drillDown) ? (
             <PhotoPersonDrillTitle
               libraryId={libraryId}
               personId={drillDown.categoryId}
-              name={listTitle || "未命名人物"}
+              name={listTitle || t("pages.photo_browse.unnamed_person")}
               onRenamed={(name) => {
                 setDrillDown({ ...drillDown, title: name });
                 setPersons((prev) =>
@@ -271,8 +273,8 @@ export default function PhotoBrowse({ libraryId, libraryName, onEmpty }: Props) 
           onChange={(k) => setMainTab(k as MainTab)}
           className={styles.mainTabs}
           items={[
-            { key: "timeline", label: "时光轴" },
-            { key: "smart", label: "智能分类" },
+            { key: "timeline", label: t("pages.photo_browse.tab_timeline") },
+            { key: "smart", label: t("pages.photo_browse.tab_smart") },
           ]}
         />
       )}
@@ -280,39 +282,39 @@ export default function PhotoBrowse({ libraryId, libraryName, onEmpty }: Props) 
       <div className={styles.topBar}>
         <Space wrap>
           <PictureOutlined style={{ color: "rgba(255,255,255,0.65)" }} />
-          <span className={styles.libraryName}>{libraryName || "图片库"}</span>
-          <span className={styles.count}>{filtered.length} 张</span>
+          <span className={styles.libraryName}>{libraryName || t("pages.photo_browse.library_fallback")}</span>
+          <span className={styles.count}>{t("pages.photo_browse.count_photos", { count: filtered.length })}</span>
         </Space>
         <Space wrap>
           {isAdmin && mainTab !== "timeline" ? (
             <>
-              <Tooltip title="人脸检测与聚类">
+              <Tooltip title={t("pages.photo_browse.tooltip_face_detect")}>
                 <Button
                   type="text"
                   className={styles.reclassifyBtn}
                   icon={<UserOutlined />}
                   loading={backfillingFaces}
-                  aria-label="人脸检测"
+                  aria-label={t("pages.photo_browse.aria_face_detect")}
                   onClick={() => void onBackfillFaces()}
                 />
               </Tooltip>
-              <Tooltip title="解析 GPS 地点">
+              <Tooltip title={t("pages.photo_browse.tooltip_geo")}>
                 <Button
                   type="text"
                   className={styles.reclassifyBtn}
                   icon={<EnvironmentOutlined />}
                   loading={backfillingPlaces}
-                  aria-label="解析 GPS 地点"
+                  aria-label={t("pages.photo_browse.aria_geo")}
                   onClick={() => void onBackfillPlaces()}
                 />
               </Tooltip>
-              <Tooltip title="全库重新分类">
+              <Tooltip title={t("pages.photo_browse.tooltip_reclassify")}>
                 <Button
                   type="text"
                   className={styles.reclassifyBtn}
                   icon={<SyncOutlined />}
                   loading={reclassifying}
-                  aria-label="全库重新分类"
+                  aria-label={t("pages.photo_browse.aria_reclassify")}
                   onClick={() => void onReclassifyAll()}
                 />
               </Tooltip>
@@ -320,7 +322,7 @@ export default function PhotoBrowse({ libraryId, libraryName, onEmpty }: Props) 
           ) : null}
           <Input.Search
             allowClear
-            placeholder="搜索文件名或标签"
+            placeholder={t("pages.photo_browse.search_placeholder")}
             value={q}
             onChange={(e) => setQ(e.target.value)}
             style={{ width: 240 }}
@@ -332,8 +334,8 @@ export default function PhotoBrowse({ libraryId, libraryName, onEmpty }: Props) 
                 value={layoutMode}
                 onChange={setLayoutMode}
                 options={[
-                  { value: "grid", label: "网格" },
-                  { value: "masonry", label: "瀑布流" },
+                  { value: "grid", label: t("pages.photo_browse.layout_grid") },
+                  { value: "masonry", label: t("pages.photo_browse.layout_masonry") },
                 ]}
                 style={{ width: 100 }}
               />
@@ -342,8 +344,8 @@ export default function PhotoBrowse({ libraryId, libraryName, onEmpty }: Props) 
                 value={sortMode}
                 onChange={setSortMode}
                 options={[
-                  { value: "taken_desc", label: "按拍摄日期" },
-                  { value: "created_desc", label: "按导入日期" },
+                  { value: "taken_desc", label: t("pages.photo_browse.sort_taken") },
+                  { value: "created_desc", label: t("pages.photo_browse.sort_created") },
                 ]}
                 style={{ width: 130 }}
               />
@@ -355,27 +357,27 @@ export default function PhotoBrowse({ libraryId, libraryName, onEmpty }: Props) 
       {classifyProgress != null && classifyProgress.pending > 0 ? (
         <div className={styles.progressBar}>
           <TagOutlined style={{ marginRight: 8 }} />
-          <span>AI 分类进行中</span>
+          <span>{t("pages.photo_browse.ai_classify_in_progress")}</span>
           <Progress percent={classifyProgress.percent} size="small" style={{ flex: 1, margin: "0 12px" }} />
-          <span className={styles.progressHint}>剩余 {classifyProgress.pending} 张</span>
+          <span className={styles.progressHint}>{t("pages.photo_browse.remaining_photos", { count: classifyProgress.pending })}</span>
         </div>
       ) : null}
 
       {locationProgress != null && locationProgress.pending > 0 ? (
         <div className={styles.progressBar}>
           <EnvironmentOutlined style={{ marginRight: 8 }} />
-          <span>GPS 地点解析进行中</span>
+          <span>{t("pages.photo_browse.geo_in_progress")}</span>
           <Progress percent={locationProgress.percent} size="small" style={{ flex: 1, margin: "0 12px" }} />
-          <span className={styles.progressHint}>剩余 {locationProgress.pending} 张</span>
+          <span className={styles.progressHint}>{t("pages.photo_browse.remaining_photos", { count: locationProgress.pending })}</span>
         </div>
       ) : null}
 
       {faceProgress != null && faceProgress.pending > 0 ? (
         <div className={styles.progressBar}>
           <UserOutlined style={{ marginRight: 8 }} />
-          <span>人脸检测进行中</span>
+          <span>{t("pages.photo_browse.face_in_progress")}</span>
           <Progress percent={faceProgress.percent} size="small" style={{ flex: 1, margin: "0 12px" }} />
-          <span className={styles.progressHint}>剩余 {faceProgress.pending} 张</span>
+          <span className={styles.progressHint}>{t("pages.photo_browse.remaining_photos", { count: faceProgress.pending })}</span>
         </div>
       ) : null}
 
@@ -390,7 +392,7 @@ export default function PhotoBrowse({ libraryId, libraryName, onEmpty }: Props) 
       ) : mainTab === "smart" && !drillDown ? (
         <PhotoSmartClassify categories={categories} places={places} persons={persons} items={rows} onOpen={onSmartOpen} />
       ) : filtered.length === 0 ? (
-        <Empty description={drillDown ? "该分类下暂无图片" : "暂无图片，请先扫描媒体库"} />
+        <Empty description={drillDown ? t("pages.photo_browse.no_photos_in_category") : t("pages.photo_browse.no_photos_scan_first")} />
       ) : (
         <div className={styles.timelineLayout}>
           <div className={styles.timelineMain}>
