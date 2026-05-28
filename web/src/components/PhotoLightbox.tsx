@@ -12,6 +12,7 @@ import { Button, Space, Spin, Tag, message } from "antd";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { MediaItem, photoMediumSrc, photoOriginalSrc, updatePhotoTags } from "../api/client";
+import { useT } from "../i18n";
 import styles from "../pages/PhotoBrowse.module.css";
 
 type Props = {
@@ -36,6 +37,7 @@ function computeFitScale(imgW: number, imgH: number, stageW: number, stageH: num
 }
 
 export default function PhotoLightbox({ items, index, onClose, onChangeIndex, onTagsUpdated }: Props) {
+  const t = useT();
   const item = items[index];
   const stageRef = useRef<HTMLDivElement>(null);
   const [userZoom, setUserZoom] = useState(1);
@@ -192,66 +194,66 @@ export default function PhotoLightbox({ items, index, onClose, onChangeIndex, on
       await updatePhotoTags(item.id, tags);
       setLocalTags(tags);
       onTagsUpdated?.(item.id, tags);
-      message.success("分类已更新");
+      message.success(t("components.photo_lightbox.tags_updated"));
       setEditingTags(false);
     } catch (e: unknown) {
-      message.error((e as Error).message || "保存失败");
+      message.error((e as Error).message || t("components.photo_lightbox.save_failed"));
     }
   }
 
   return createPortal(
-    <div className={styles.photoLightbox} role="dialog" aria-modal="true" aria-label="照片预览">
+    <div className={styles.photoLightbox} role="dialog" aria-modal="true" aria-label={t("components.photo_lightbox.aria_dialog")}>
       <div className={styles.toolbar}>
-        <span className={styles.title}>{item.title || "未命名"}</span>
+        <span className={styles.title}>{item.title || t("components.photo_lightbox.untitled")}</span>
         <Space>
           <Button
             type="text"
             icon={<ZoomOutOutlined />}
-            aria-label="缩小"
+            aria-label={t("components.photo_lightbox.aria_zoom_out")}
             onClick={() => setUserZoom((s) => Math.max(0.25, s - 0.25))}
             style={{ color: "#fff" }}
           />
           <Button
             type="text"
             icon={<ZoomInOutlined />}
-            aria-label="放大"
+            aria-label={t("components.photo_lightbox.aria_zoom_in")}
             onClick={() => setUserZoom((s) => Math.min(4, s + 0.25))}
             style={{ color: "#fff" }}
           />
           <Button
             type="text"
             icon={<RotateLeftOutlined />}
-            aria-label="向左旋转"
+            aria-label={t("components.photo_lightbox.aria_rotate_left")}
             onClick={() => rotateBy(-90)}
             style={{ color: "#fff" }}
           />
           <Button
             type="text"
             icon={<RotateRightOutlined />}
-            aria-label="向右旋转"
+            aria-label={t("components.photo_lightbox.aria_rotate_right")}
             onClick={() => rotateBy(90)}
             style={{ color: "#fff" }}
           />
           <Button
             type="text"
             icon={<DownloadOutlined />}
-            aria-label="下载"
+            aria-label={t("components.photo_lightbox.aria_download")}
             style={{ color: "#fff" }}
             href={downloadUrl}
             target="_blank"
             rel="noreferrer"
           />
-          <Button type="text" icon={<CloseOutlined />} aria-label="关闭" onClick={onClose} style={{ color: "#fff" }} />
+          <Button type="text" icon={<CloseOutlined />} aria-label={t("components.photo_lightbox.aria_close")} onClick={onClose} style={{ color: "#fff" }} />
         </Space>
       </div>
 
       {hasPrev ? (
-        <button type="button" className={`${styles.navBtn} ${styles.navPrev}`} aria-label="上一张" onClick={() => onChangeIndex(index - 1)}>
+        <button type="button" className={`${styles.navBtn} ${styles.navPrev}`} aria-label={t("components.photo_lightbox.aria_prev")} onClick={() => onChangeIndex(index - 1)}>
           <LeftOutlined />
         </button>
       ) : null}
       {hasNext ? (
-        <button type="button" className={`${styles.navBtn} ${styles.navNext}`} aria-label="下一张" onClick={() => onChangeIndex(index + 1)}>
+        <button type="button" className={`${styles.navBtn} ${styles.navNext}`} aria-label={t("components.photo_lightbox.aria_next")} onClick={() => onChangeIndex(index + 1)}>
           <RightOutlined />
         </button>
       ) : null}
@@ -298,14 +300,14 @@ export default function PhotoLightbox({ items, index, onClose, onChangeIndex, on
             {item.photo_taken_at ? ` · ${fmtTakenAt(item.photo_taken_at)}` : ""}
           </span>
           <div className={styles.footerTagRow}>
-            {localTags.map((t) => (
-              <Tag key={t} color="blue">
-                {t}
+            {localTags.map((tg) => (
+              <Tag key={tg} color="blue">
+                {tg}
               </Tag>
             ))}
             {!editingTags ? (
               <Button type="link" size="small" onClick={() => { setEditingTags(true); setTagDraft(localTags.join("、")); }} style={{ padding: 0, height: "auto" }}>
-                编辑分类 (I)
+                {t("components.photo_lightbox.edit_tags")}
               </Button>
             ) : (
               <div ref={tagEditRef}>
@@ -314,10 +316,10 @@ export default function PhotoLightbox({ items, index, onClose, onChangeIndex, on
                     className={styles.tagInput}
                     value={tagDraft}
                     onChange={(e) => setTagDraft(e.target.value)}
-                    placeholder="人物、风景（逗号分隔）"
+                    placeholder={t("components.photo_lightbox.tags_placeholder")}
                   />
                   <Button size="small" type="primary" onClick={() => void saveTags()}>
-                    保存
+                    {t("components.photo_lightbox.save")}
                   </Button>
                 </Space.Compact>
               </div>
@@ -325,7 +327,7 @@ export default function PhotoLightbox({ items, index, onClose, onChangeIndex, on
           </div>
           <span className={styles.counter}>
             {index + 1} / {items.length}
-            {useOriginal ? " · 原图" : " · 双击加载原图"}
+            {useOriginal ? t("components.photo_lightbox.original_label") : t("components.photo_lightbox.load_original_hint")}
           </span>
         </div>
       </div>

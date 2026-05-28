@@ -21,20 +21,22 @@ import { buildMusicTrackMenuItems } from "../components/musicTrackMenuItems";
 import { albumTracksToQueue } from "../lib/albumPlayback";
 import { readRecentPlaylists, rememberPlaylistAdded, type RecentPlaylistEntry } from "../lib/recentPlaylists";
 import { useMusicPlayerStore } from "../store/musicPlayer";
+import { useT, type TranslateFn } from "../i18n";
 import musicStyles from "./MusicBrowse.module.css";
 import md from "./MediaDetail.module.css";
 
-function fmtTotalDuration(sec?: number): string {
+function fmtTotalDuration(sec: number | undefined, t: TranslateFn): string {
   if (!sec || sec <= 0) return "";
   const h = Math.floor(sec / 3600);
   const m = Math.floor((sec % 3600) / 60);
-  if (h > 0) return `${h} 小时 ${m} 分钟`;
-  return `${m} 分钟`;
+  if (h > 0) return t("pages.album_detail.fmt_duration_h_m", { h, m });
+  return t("pages.album_detail.fmt_duration_m", { m });
 }
 
 export default function AlbumDetailPage() {
   const { id } = useParams();
   const nav = useNavigate();
+  const t = useT();
   const albumId = Number(id);
   const [album, setAlbum] = useState<AlbumDetailType | null>(null);
   const [loading, setLoading] = useState(true);
@@ -50,9 +52,9 @@ export default function AlbumDetailPage() {
       setAlbum(data);
       setCoverFailed(false);
     } catch (e: unknown) {
-      message.error((e as Error).message || "加载专辑失败");
+      message.error((e as Error).message || t("pages.album_detail.load_failed"));
     }
-  }, [albumId]);
+  }, [albumId, t]);
 
   useEffect(() => {
     if (!Number.isFinite(albumId) || albumId <= 0) return;
@@ -66,7 +68,7 @@ export default function AlbumDetailPage() {
           setCoverFailed(false);
         }
       } catch (e: unknown) {
-        if (!cancelled) message.error((e as Error).message || "加载专辑失败");
+        if (!cancelled) message.error((e as Error).message || t("pages.album_detail.load_failed"));
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -74,7 +76,7 @@ export default function AlbumDetailPage() {
     return () => {
       cancelled = true;
     };
-  }, [albumId]);
+  }, [albumId, t]);
 
   const tracks = album?.tracks ?? [];
   const totalDuration = useMemo(
@@ -88,7 +90,7 @@ export default function AlbumDetailPage() {
     const queue = albumTracksToQueue({ ...album, tracks: source });
     const idx = queue.findIndex((q) => q.mediaId === mediaId);
     if (idx < 0 || queue.length === 0) {
-      message.warning("无法播放该曲目");
+      message.warning(t("pages.album_detail.cannot_play_track"));
       return;
     }
     useMusicPlayerStore.getState().playTrack(queue[idx]!, queue, idx);
@@ -118,18 +120,18 @@ export default function AlbumDetailPage() {
               const name =
                 recentPlaylistMenu.find((p) => p.id === playlistId)?.name ??
                 readRecentPlaylists().find((p) => p.id === playlistId)?.name ??
-                "播放列表";
-              message.success(`已添加到「${name}」`);
+                t("pages.album_detail.playlist_fallback");
+              message.success(t("pages.album_detail.added_to_playlist", { name }));
               rememberPlaylistAdded({ id: playlistId, name });
               setRecentPlaylistMenu(readRecentPlaylists());
             } catch {
-              message.error("添加失败，可能已在列表中");
+              message.error(t("pages.album_detail.add_failed_duplicate"));
             }
           },
           afterDelete: reloadAlbum,
         },
       ),
-    [nav, recentPlaylistMenu, reloadAlbum],
+    [nav, recentPlaylistMenu, reloadAlbum, t],
   );
 
   async function startPlayback(startMediaId?: number) {
@@ -144,17 +146,17 @@ export default function AlbumDetailPage() {
         queue = albumTracksToQueue(detail);
       }
       if (queue.length === 0) {
-        message.warning("专辑暂无可用音轨，请在管理控制台重新扫描该音乐库");
+        message.warning(t("pages.album_detail.no_tracks_rescan"));
         return;
       }
       if (startMediaId) {
         playTrackFromList(startMediaId);
       } else {
         const ok = useMusicPlayerStore.getState().loadAlbum(albumId, queue, 0, { sequential: true });
-        if (!ok) message.warning("无法开始播放，请重新扫描音乐库");
+        if (!ok) message.warning(t("pages.album_detail.cannot_play_rescan"));
       }
     } catch (e: unknown) {
-      message.error((e as Error).message || "无法播放");
+      message.error((e as Error).message || t("pages.album_detail.cannot_play"));
     } finally {
       setPlaying(false);
     }
@@ -171,7 +173,7 @@ export default function AlbumDetailPage() {
   if (!album) {
     return (
       <div className={musicStyles.wrap}>
-        <Empty description="专辑不存在" />
+        <Empty description={t("pages.album_detail.not_found")} />
       </div>
     );
   }
@@ -184,7 +186,7 @@ export default function AlbumDetailPage() {
         onClick={() => nav(`/browse?library_id=${album.library_id}`)}
         style={{ color: "rgba(255,255,255,0.65)", marginBottom: 16 }}
       >
-        返回资料库
+        {t("pages.album_detail.back_to_library")}
       </Button>
 
       <div className={md.hero}>
@@ -204,7 +206,7 @@ export default function AlbumDetailPage() {
             )}
           </div>
           <Typography.Text type="secondary" className={musicStyles.albumHeroKind}>
-            专辑
+            {t("pages.album_detail.kind_album")}
           </Typography.Text>
           <div className={musicStyles.albumHeroMain}>
             <Typography.Title level={2} style={{ color: "#fff", margin: 0 }}>
@@ -218,16 +220,16 @@ export default function AlbumDetailPage() {
                   style={{ font: "inherit", fontSize: "inherit", fontWeight: "inherit" }}
                   onClick={() => nav(`/artist/${album.album_artist_id}`)}
                 >
-                  {album.album_artist || "Various Artists"}
+                  {album.album_artist || t("pages.album_detail.various_artists")}
                 </button>
               ) : (
-                album.album_artist || "Various Artists"
+                album.album_artist || t("pages.album_detail.various_artists")
               )}
             </Typography.Title>
             <div className={musicStyles.albumMetaRow}>
               {album.year ? <span>{album.year}</span> : null}
-              {tracks.length > 0 ? <span>{tracks.length} 音轨</span> : null}
-              {totalDuration > 0 ? <span>{fmtTotalDuration(totalDuration)}</span> : null}
+              {tracks.length > 0 ? <span>{t("pages.album_detail.tracks_count", { count: tracks.length })}</span> : null}
+              {totalDuration > 0 ? <span>{fmtTotalDuration(totalDuration, t)}</span> : null}
               {album.genre ? <span>{album.genre}</span> : null}
             </div>
             <div style={{ marginTop: 4 }}>
@@ -244,16 +246,16 @@ export default function AlbumDetailPage() {
                 loading={playing}
                 onClick={() => startPlayback()}
               >
-                播放
+                {t("pages.album_detail.play")}
               </Button>
-              <Button type="text" icon={<MoreOutlined />} style={{ color: "rgba(255,255,255,0.65)" }} aria-label="更多" />
+              <Button type="text" icon={<MoreOutlined />} style={{ color: "rgba(255,255,255,0.65)" }} aria-label={t("pages.album_detail.more_aria")} />
             </div>
           </div>
         </div>
       </div>
 
       <Typography.Title level={5} style={{ color: "#fff", margin: "24px 0 12px" }}>
-        {tracks.length} 音轨
+        {t("pages.album_detail.tracks_count", { count: tracks.length })}
       </Typography.Title>
 
       <MusicTrackList

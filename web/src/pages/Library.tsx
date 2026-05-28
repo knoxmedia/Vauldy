@@ -17,8 +17,10 @@ import {
   scanLibrary,
   updateLibrary,
 } from "../api/client";
+import { useT } from "../i18n";
 
 export default function LibraryPage() {
+  const t = useT();
   const [rows, setRows] = useState<Library[]>([]);
   const [loading, setLoading] = useState(false);
   const [open, setOpen] = useState(false);
@@ -55,7 +57,7 @@ export default function LibraryPage() {
       setRows(data.items);
       setDrmCapabilities(data.drmCapabilities);
     } catch (e: unknown) {
-      message.error((e as Error).message || "加载失败");
+      message.error((e as Error).message || t("pages.library.load_failed"));
     } finally {
       if (!silent) setLoading(false);
     }
@@ -67,6 +69,7 @@ export default function LibraryPage() {
       void load(true);
     }, 3000);
     return () => window.clearInterval(timer);
+     
   }, []);
 
   async function handleSubmit() {
@@ -100,17 +103,17 @@ export default function LibraryPage() {
       };
       if (editing) {
         await updateLibrary(editing.id, payload);
-        message.success("已更新");
+        message.success(t("pages.library.updated"));
       } else {
         await createLibrary(payload);
-        message.success("已创建");
+        message.success(t("pages.library.created"));
       }
       setOpen(false);
       setEditing(null);
       form.resetFields();
       await load();
     } catch (e: unknown) {
-      message.error((e as Error).message || "保存失败");
+      message.error((e as Error).message || t("pages.library.save_failed"));
     } finally {
       setSubmitting(false);
     }
@@ -139,7 +142,7 @@ export default function LibraryPage() {
             setOpen(true);
           }}
         >
-          新建媒体库
+          {t("pages.library.create_btn")}
         </Button>
       </Space>
       <Table
@@ -148,16 +151,16 @@ export default function LibraryPage() {
         dataSource={rows}
         pagination={false}
         columns={[
-          { title: "ID", dataIndex: "id", width: 70 },
-          { title: "名称", dataIndex: "name" },
-          { title: "类型", dataIndex: "type", width: 100 },
+          { title: t("pages.library.col_id"), dataIndex: "id", width: 70 },
+          { title: t("pages.library.col_name"), dataIndex: "name" },
+          { title: t("pages.library.col_type"), dataIndex: "type", width: 100 },
           {
-            title: "文件夹",
+            title: t("pages.library.col_folders"),
             dataIndex: "folders",
             render: (_: unknown, r) => (r.folders && r.folders.length > 0 ? r.folders.join(" | ") : r.path),
           },
           {
-            title: "元数据源",
+            title: t("pages.library.col_metadata_providers"),
             key: "metadata_providers",
             width: 140,
             render: (_: unknown, r) => {
@@ -166,23 +169,23 @@ export default function LibraryPage() {
             },
           },
           {
-            title: "状态",
+            title: t("pages.library.col_state"),
             key: "state",
             width: 300,
             render: (_, r) => (
               <Space size={4} wrap>
-                <Tag color={r.enabled === 1 ? "green" : "default"}>{r.enabled === 1 ? "启用" : "停用"}</Tag>
-                <Tag color={r.realtime_monitor === 1 ? "blue" : "default"}>{r.realtime_monitor === 1 ? "实时监控" : "手动同步"}</Tag>
+                <Tag color={r.enabled === 1 ? "green" : "default"}>{r.enabled === 1 ? t("pages.library.state_enabled") : t("pages.library.state_disabled")}</Tag>
+                <Tag color={r.realtime_monitor === 1 ? "blue" : "default"}>{r.realtime_monitor === 1 ? t("pages.library.state_realtime") : t("pages.library.state_manual")}</Tag>
                 {r.scan_status === "running" ? (
                   <Tag color="processing">
-                    扫描中 {r.scan_processed_count ?? 0} / 新增 {r.scan_added_count ?? 0}
+                    {t("pages.library.scanning", { processed: r.scan_processed_count ?? 0, added: r.scan_added_count ?? 0 })}
                   </Tag>
                 ) : null}
               </Space>
             ),
           },
           {
-            title: "操作",
+            title: t("pages.library.col_actions"),
             key: "actions",
             width: 300,
             align: "center",
@@ -217,7 +220,7 @@ export default function LibraryPage() {
                     setOpen(true);
                   }}
                 >
-                  编辑
+                  {t("pages.library.edit")}
                 </Button>
                 <Button
                   size="small"
@@ -225,17 +228,17 @@ export default function LibraryPage() {
                     try {
                       const res = await scanLibrary(r.id);
                       if (res.running) {
-                        message.warning(`该媒体库已有扫描任务在运行（任务 #${res.task_id}）`);
+                        message.warning(t("pages.library.scan_already_running", { task_id: res.task_id }));
                       } else {
-                        message.success(`已启动扫描任务 #${res.task_id}`);
+                        message.success(t("pages.library.scan_started", { task_id: res.task_id }));
                       }
                       await load(true);
                     } catch (e: unknown) {
-                      message.error((e as Error).message || "扫描失败");
+                      message.error((e as Error).message || t("pages.library.scan_failed"));
                     }
                   }}
                 >
-                  扫描
+                  {t("pages.library.scan")}
                 </Button>
                 {r.scan_status === "running" && (r.scan_task_id ?? 0) > 0 ? (
                   <Button
@@ -243,14 +246,14 @@ export default function LibraryPage() {
                     onClick={async () => {
                       try {
                         await cancelScanTask(r.scan_task_id!);
-                        message.success("已请求取消扫描");
+                        message.success(t("pages.library.cancel_scan_requested"));
                         await load(true);
                       } catch (e: unknown) {
-                        message.error((e as Error).message || "取消失败");
+                        message.error((e as Error).message || t("pages.library.cancel_failed"));
                       }
                     }}
                   >
-                    取消扫描
+                    {t("pages.library.cancel_scan")}
                   </Button>
                 ) : null}
                 <Button
@@ -258,17 +261,17 @@ export default function LibraryPage() {
                   danger
                   onClick={() => {
                     Modal.confirm({
-                      title: "删除媒体库？",
-                      content: "将删除库内索引的媒体记录。",
+                      title: t("pages.library.delete_title"),
+                      content: t("pages.library.delete_content"),
                       onOk: async () => {
                         await deleteLibrary(r.id);
-                        message.success("已删除");
+                        message.success(t("pages.library.deleted"));
                         await load();
                       },
                     });
                   }}
                 >
-                  删除
+                  {t("pages.library.delete")}
                 </Button>
               </Space>
             ),
@@ -277,7 +280,7 @@ export default function LibraryPage() {
       />
 
       <Drawer
-        title={editing ? "编辑媒体库" : "新建媒体库"}
+        title={editing ? t("pages.library.drawer_edit_title") : t("pages.library.drawer_create_title")}
         open={open}
         width={screens.xl ? 880 : screens.lg ? 820 : screens.md ? 760 : screens.sm ? 620 : "92%"}
         onClose={() => {
@@ -286,61 +289,61 @@ export default function LibraryPage() {
         }}
         footer={
           <Space>
-            <Button onClick={() => setOpen(false)}>取消</Button>
+            <Button onClick={() => setOpen(false)}>{t("pages.library.drawer_cancel")}</Button>
             <Button type="primary" loading={submitting} onClick={() => void handleSubmit()}>
-              保存
+              {t("pages.library.drawer_save")}
             </Button>
           </Space>
         }
       >
         <Form form={form} layout="vertical">
           <Divider style={{ marginTop: 0 }}>
-            基础信息
+            {t("pages.library.section_basic")}
           </Divider>
           <Row gutter={16}>
             <Col xs={24} md={12}>
-              <Form.Item name="name" label="名称" rules={[{ required: true }]}>
+              <Form.Item name="name" label={t("pages.library.field_name")} rules={[{ required: true }]}>
                 <Input />
               </Form.Item>
             </Col>
             <Col xs={24} md={12}>
-              <Form.Item name="type" label="类型" rules={[{ required: true }]} initialValue="movie">
+              <Form.Item name="type" label={t("pages.library.field_type")} rules={[{ required: true }]} initialValue="movie">
                 <Select
                   options={[
-                    { value: "movie", label: "电影" },
-                    { value: "tv", label: "剧集" },
-                    { value: "anime", label: "动漫" },
-                    { value: "video", label: "其他影片" },
-                    { value: "music", label: "音乐" },
-                    { value: "photo", label: "图片" },
-                    { value: "document", label: "文档" },
+                    { value: "movie", label: t("pages.library.type_movie") },
+                    { value: "tv", label: t("pages.library.type_tv") },
+                    { value: "anime", label: t("pages.library.type_anime") },
+                    { value: "video", label: t("pages.library.type_video") },
+                    { value: "music", label: t("pages.library.type_music") },
+                    { value: "photo", label: t("pages.library.type_photo") },
+                    { value: "document", label: t("pages.library.type_document") },
                   ]}
                 />
               </Form.Item>
             </Col>
             <Col xs={24}>
-              <Form.Item name="folders" label="文件夹（每行一个）" rules={[{ required: true }]}>
-                <Input.TextArea rows={4} placeholder={"例如\nD:\\Videos\nE:\\Movies"} />
+              <Form.Item name="folders" label={t("pages.library.field_folders")} rules={[{ required: true }]}>
+                <Input.TextArea rows={4} placeholder={t("pages.library.field_folders_placeholder")} />
               </Form.Item>
             </Col>
           </Row>
 
-          <Divider>功能开关</Divider>
+          <Divider>{t("pages.library.section_switches")}</Divider>
           <Row gutter={16}>
             <Col xs={24} sm={12} md={8}>
-              <Form.Item name="enabled" label="启用媒体库" valuePropName="checked" initialValue>
+              <Form.Item name="enabled" label={t("pages.library.field_enabled")} valuePropName="checked" initialValue>
                 <Switch />
               </Form.Item>
             </Col>
             <Col xs={24} sm={12} md={8}>
-              <Form.Item name="auto_scan" label="自动扫描" valuePropName="checked" initialValue>
+              <Form.Item name="auto_scan" label={t("pages.library.field_auto_scan")} valuePropName="checked" initialValue>
                 <Switch />
               </Form.Item>
             </Col>
             <Col xs={24} sm={12} md={8}>
               <Form.Item
                 name="realtime_monitor"
-                label="实时监控（自动同步新增/修改/删除）"
+                label={t("pages.library.field_realtime_monitor")}
                 valuePropName="checked"
                 initialValue={false}
               >
@@ -350,7 +353,7 @@ export default function LibraryPage() {
             <Col xs={24} sm={12} md={8}>
               <Form.Item
                 name="preview_extract"
-                label="启用进度条预览图提取"
+                label={t("pages.library.field_preview_extract")}
                 valuePropName="checked"
                 initialValue={false}
               >
@@ -358,7 +361,7 @@ export default function LibraryPage() {
               </Form.Item>
             </Col>
             <Col xs={24} sm={12} md={8}>
-              <Form.Item name="drm_enabled" label="视频加密" valuePropName="checked" initialValue={false}>
+              <Form.Item name="drm_enabled" label={t("pages.library.field_drm_enabled")} valuePropName="checked" initialValue={false}>
                 <Switch />
               </Form.Item>
             </Col>
@@ -368,14 +371,14 @@ export default function LibraryPage() {
                   <Col xs={24} sm={12} md={8}>
                     <Form.Item
                       name="encryption_mode"
-                      label="加密方式"
+                      label={t("pages.library.field_encryption_mode")}
                       initialValue={defaultEncryptionMode(drmCapabilities)}
                     >
                       <Radio.Group
                         options={[
-                          { label: "标准加密", value: "standard" },
-                          ...(drmCapabilities.powerdrm_enabled ? [{ label: "私有加密", value: "powerdrm" }] : []),
-                          ...(drmCapabilities.widevine_enabled ? [{ label: "DRM加密", value: "drm" }] : []),
+                          { label: t("pages.library.encryption_standard"), value: "standard" },
+                          ...(drmCapabilities.powerdrm_enabled ? [{ label: t("pages.library.encryption_powerdrm"), value: "powerdrm" }] : []),
+                          ...(drmCapabilities.widevine_enabled ? [{ label: t("pages.library.encryption_drm"), value: "drm" }] : []),
                         ]}
                       />
                     </Form.Item>
@@ -389,7 +392,7 @@ export default function LibraryPage() {
                   <Col xs={24} sm={12} md={8}>
                     <Form.Item
                       name="cleanup_local_source_after_package"
-                      label="视频加密后清理源视频"
+                      label={t("pages.library.field_cleanup_after_package")}
                       valuePropName="checked"
                       initialValue={true}
                     >
@@ -401,7 +404,7 @@ export default function LibraryPage() {
             </Form.Item>
           </Row>
 
-          <Divider>元数据策略</Divider>
+          <Divider>{t("pages.library.section_metadata_policy")}</Divider>
           <Row gutter={16}>
             <Col xs={24}>
               <LibraryProviderSourceTabs activeKey={providerSourceTab} onChange={setProviderSourceTab} />

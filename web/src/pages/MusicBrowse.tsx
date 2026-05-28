@@ -29,6 +29,7 @@ import { buildMusicTrackMenuItems } from "../components/musicTrackMenuItems";
 import { albumTracksToQueue, libraryTracksToQueue } from "../lib/albumPlayback";
 import { readRecentPlaylists, rememberPlaylistAdded, type RecentPlaylistEntry } from "../lib/recentPlaylists";
 import { useMusicPlayerStore } from "../store/musicPlayer";
+import { useT } from "../i18n";
 import styles from "./Browse.module.css";
 import musicStyles from "./MusicBrowse.module.css";
 
@@ -57,6 +58,7 @@ function readViewMode(): ViewMode {
 
 export default function MusicBrowse({ libraryId, libraryName, onEmpty }: Props) {
   const nav = useNavigate();
+  const t = useT();
   const [tab, setTab] = useState<MusicTab>("albums");
   const [viewMode, setViewMode] = useState<ViewMode>(() => readViewMode());
   const [loading, setLoading] = useState(false);
@@ -97,11 +99,11 @@ export default function MusicBrowse({ libraryId, libraryName, onEmpty }: Props) 
       setGenres(genreRows);
       setTracks(trackRows);
     } catch (e: unknown) {
-      message.error((e as Error).message || "加载音乐库失败");
+      message.error((e as Error).message || t("pages.music_browse.load_failed"));
     } finally {
       setLoading(false);
     }
-  }, [libraryId]);
+  }, [libraryId, t]);
 
   useEffect(() => {
     let cancelled = false;
@@ -124,7 +126,7 @@ export default function MusicBrowse({ libraryId, libraryName, onEmpty }: Props) 
         setGenres(genreRows);
         setTracks(trackRows);
       } catch (e: unknown) {
-        if (!cancelled) message.error((e as Error).message || "加载音乐库失败");
+        if (!cancelled) message.error((e as Error).message || t("pages.music_browse.load_failed"));
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -132,7 +134,7 @@ export default function MusicBrowse({ libraryId, libraryName, onEmpty }: Props) 
     return () => {
       cancelled = true;
     };
-  }, [libraryId]);
+  }, [libraryId, t]);
 
   const needle = q.trim().toLowerCase();
 
@@ -184,12 +186,12 @@ export default function MusicBrowse({ libraryId, libraryName, onEmpty }: Props) 
       const album = await fetchAlbum(albumId);
       const queue = albumTracksToQueue(album);
       if (queue.length === 0) {
-        message.warning("专辑暂无音轨，请重新扫描音乐库");
+        message.warning(t("pages.artist_detail.album_no_tracks_rescan"));
         return;
       }
       useMusicPlayerStore.getState().loadAlbum(albumId, queue, 0, { sequential: true });
     } catch (err: unknown) {
-      message.error((err as Error).message || "无法播放专辑");
+      message.error((err as Error).message || t("pages.artist_detail.cannot_play_album"));
     } finally {
       setPlayingId(null);
     }
@@ -200,7 +202,7 @@ export default function MusicBrowse({ libraryId, libraryName, onEmpty }: Props) 
     const queue = libraryTracksToQueue(source);
     const idx = queue.findIndex((q) => q.mediaId === mediaId);
     if (idx < 0 || queue.length === 0) {
-      message.warning("无法播放该曲目");
+      message.warning(t("pages.music_browse.cannot_play_track"));
       return;
     }
     useMusicPlayerStore.getState().playQueue(queue, idx);
@@ -221,18 +223,18 @@ export default function MusicBrowse({ libraryId, libraryName, onEmpty }: Props) 
               const name =
                 recentPlaylistMenu.find((p) => p.id === playlistId)?.name ??
                 readRecentPlaylists().find((p) => p.id === playlistId)?.name ??
-                "播放列表";
-              message.success(`已添加到「${name}」`);
+                t("pages.album_detail.playlist_fallback");
+              message.success(t("pages.album_detail.added_to_playlist", { name }));
               rememberPlaylistAdded({ id: playlistId, name });
               setRecentPlaylistMenu(readRecentPlaylists());
             } catch {
-              message.error("添加失败，可能已在列表中");
+              message.error(t("pages.album_detail.add_failed_duplicate"));
             }
           },
           afterDelete: reloadLibrary,
         },
       ),
-    [nav, recentPlaylistMenu, reloadLibrary],
+    [nav, recentPlaylistMenu, reloadLibrary, t],
   );
 
   const resolveTrackArtistId = useCallback(
@@ -249,13 +251,13 @@ export default function MusicBrowse({ libraryId, libraryName, onEmpty }: Props) 
   const countLabel = (() => {
     switch (tab) {
       case "artists":
-        return `${filteredArtists.length} 位艺人`;
+        return t("pages.music_browse.count_artists", { count: filteredArtists.length });
       case "genres":
-        return `${filteredGenres.length} 个流派`;
+        return t("pages.music_browse.count_genres", { count: filteredGenres.length });
       case "tracks":
-        return `${filteredTracks.length} 首曲目`;
+        return t("pages.music_browse.count_tracks", { count: filteredTracks.length });
       default:
-        return `${filteredAlbums.length} 张专辑`;
+        return t("pages.music_browse.count_albums", { count: filteredAlbums.length });
     }
   })();
 
@@ -263,23 +265,23 @@ export default function MusicBrowse({ libraryId, libraryName, onEmpty }: Props) 
     <div className={musicStyles.wrap}>
       <div className={musicStyles.header}>
         <div>
-          <div className={musicStyles.libraryTitle}>{libraryName || "音乐库"}</div>
+          <div className={musicStyles.libraryTitle}>{libraryName || t("pages.music_browse.library_fallback")}</div>
           <Tabs
             activeKey={tab}
             onChange={(k) => setTab(k as MusicTab)}
             className={musicStyles.tabs}
             items={[
-              { key: "albums", label: "专辑" },
-              { key: "artists", label: "艺人" },
-              { key: "genres", label: "流派" },
-              { key: "tracks", label: "曲目" },
+              { key: "albums", label: t("pages.music_browse.tab_albums") },
+              { key: "artists", label: t("pages.music_browse.tab_artists") },
+              { key: "genres", label: t("pages.music_browse.tab_genres") },
+              { key: "tracks", label: t("pages.music_browse.tab_tracks") },
             ]}
           />
         </div>
         <Space wrap className={musicStyles.toolbar}>
           <Input.Search
             allowClear
-            placeholder="搜索…"
+            placeholder={t("pages.music_browse.search_placeholder")}
             value={q}
             onChange={(e) => setQ(e.target.value)}
             style={{ width: 220 }}
@@ -291,9 +293,9 @@ export default function MusicBrowse({ libraryId, libraryName, onEmpty }: Props) 
                 value={sortField}
                 onChange={setSortField}
                 options={[
-                  { value: "title", label: "按标题" },
-                  { value: "artist", label: "按专辑艺人" },
-                  { value: "year", label: "按年份" },
+                  { value: "title", label: t("pages.music_browse.sort_title") },
+                  { value: "artist", label: t("pages.music_browse.sort_artist") },
+                  { value: "year", label: t("pages.music_browse.sort_year") },
                 ]}
                 style={{ width: 130 }}
               />
@@ -306,14 +308,14 @@ export default function MusicBrowse({ libraryId, libraryName, onEmpty }: Props) 
                   size="small"
                   icon={<AppstoreOutlined />}
                   onClick={() => setViewMode("grid")}
-                  aria-label="网格视图"
+                  aria-label={t("pages.music_browse.view_grid_aria")}
                 />
                 <Button
                   type={viewMode === "table" ? "primary" : "text"}
                   size="small"
                   icon={<TableOutlined />}
                   onClick={() => setViewMode("table")}
-                  aria-label="列表视图"
+                  aria-label={t("pages.music_browse.view_table_aria")}
                 />
               </div>
             </>
@@ -328,7 +330,7 @@ export default function MusicBrowse({ libraryId, libraryName, onEmpty }: Props) 
         </div>
       ) : tab === "albums" ? (
         filteredAlbums.length === 0 ? (
-          <Empty description="暂无专辑，请先扫描音乐库" />
+          <Empty description={t("pages.music_browse.no_albums")} />
         ) : viewMode === "grid" ? (
           <div className={musicStyles.albumGrid}>
             {filteredAlbums.map((a) => (
@@ -340,7 +342,7 @@ export default function MusicBrowse({ libraryId, libraryName, onEmpty }: Props) 
                   className={musicStyles.albumCover}
                   role="link"
                   tabIndex={0}
-                  aria-label={`查看专辑 ${a.title}`}
+                  aria-label={t("pages.artist_detail.view_album_label", { title: a.title })}
                   onClick={() => nav(`/album/${a.id}`)}
                   onKeyDown={(e) => e.key === "Enter" && nav(`/album/${a.id}`)}
                 >
@@ -361,7 +363,7 @@ export default function MusicBrowse({ libraryId, libraryName, onEmpty }: Props) 
                     <button
                       type="button"
                       className={musicStyles.playOverlayBtn}
-                      aria-label="播放专辑"
+                      aria-label={t("pages.artist_detail.play_album")}
                       disabled={playingId === a.id}
                       onClick={(e) => {
                         e.stopPropagation();
@@ -383,8 +385,8 @@ export default function MusicBrowse({ libraryId, libraryName, onEmpty }: Props) 
                   <div className={musicStyles.albumTitle} title={a.title}>
                     {a.title}
                   </div>
-                  <div className={musicStyles.albumArtist} title={a.album_artist || "Various Artists"}>
-                    {a.album_artist || "Various Artists"}
+                  <div className={musicStyles.albumArtist} title={a.album_artist || t("pages.music_browse.various_artists")}>
+                    {a.album_artist || t("pages.music_browse.various_artists")}
                   </div>
                 </div>
               </div>
@@ -395,10 +397,10 @@ export default function MusicBrowse({ libraryId, libraryName, onEmpty }: Props) 
             <table className={musicStyles.table}>
               <thead>
                 <tr>
-                  <th>标题</th>
-                  <th>专辑艺人</th>
-                  <th>年份</th>
-                  <th style={{ width: 72 }}>音轨</th>
+                  <th>{t("pages.music_browse.col_title")}</th>
+                  <th>{t("pages.music_browse.col_album_artist")}</th>
+                  <th>{t("pages.music_browse.col_year")}</th>
+                  <th style={{ width: 72 }}>{t("pages.music_browse.col_track")}</th>
                 </tr>
               </thead>
               <tbody>
@@ -418,7 +420,7 @@ export default function MusicBrowse({ libraryId, libraryName, onEmpty }: Props) 
         )
       ) : tab === "artists" ? (
         filteredArtists.length === 0 ? (
-          <Empty description="暂无艺人" />
+          <Empty description={t("pages.music_browse.no_artists")} />
         ) : (
           <div className={musicStyles.listGrid}>
             {filteredArtists.map((a) => (
@@ -436,7 +438,7 @@ export default function MusicBrowse({ libraryId, libraryName, onEmpty }: Props) 
                 <div className={musicStyles.listMain}>
                   <div className={musicStyles.listTitle}>{a.name}</div>
                   <div className={musicStyles.listSub}>
-                    {a.album_count ?? 0} 张专辑 · {a.track_count ?? 0} 首曲目
+                    {t("pages.music_browse.list_albums_tracks", { albums: a.album_count ?? 0, tracks: a.track_count ?? 0 })}
                   </div>
                 </div>
               </div>
@@ -445,7 +447,7 @@ export default function MusicBrowse({ libraryId, libraryName, onEmpty }: Props) 
         )
       ) : tab === "genres" ? (
         filteredGenres.length === 0 ? (
-          <Empty description="暂无流派" />
+          <Empty description={t("pages.music_browse.no_genres")} />
         ) : (
           <div className={musicStyles.listGrid}>
             {filteredGenres.map((g) => (
@@ -465,7 +467,7 @@ export default function MusicBrowse({ libraryId, libraryName, onEmpty }: Props) 
                 <div className={musicStyles.listMain}>
                   <div className={musicStyles.listTitle}>{g.genre}</div>
                   <div className={musicStyles.listSub}>
-                    {g.album_count ?? 0} 张专辑 · {g.track_count ?? 0} 首曲目
+                    {t("pages.music_browse.list_albums_tracks", { albums: g.album_count ?? 0, tracks: g.track_count ?? 0 })}
                   </div>
                 </div>
               </div>
@@ -473,7 +475,7 @@ export default function MusicBrowse({ libraryId, libraryName, onEmpty }: Props) 
           </div>
         )
       ) : filteredTracks.length === 0 ? (
-        <Empty description="暂无曲目" />
+        <Empty description={t("pages.music_browse.no_tracks")} />
       ) : (
         <MusicTrackList
           tracks={filteredTracks}

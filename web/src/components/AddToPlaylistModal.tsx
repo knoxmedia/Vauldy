@@ -1,6 +1,7 @@
 import { Button, Input, List, message, Modal, Spin } from "antd";
 import { useEffect, useMemo, useState } from "react";
 import { addPlaylistItem, createPlaylist, fetchPlaylists, Playlist } from "../api/client";
+import { useT } from "../i18n";
 
 export interface PlaylistAddedInfo {
   id: number;
@@ -24,6 +25,7 @@ export default function AddToPlaylistModal({
   defaultNewPlaylistName = "",
   onAdded,
 }: AddToPlaylistModalProps) {
+  const t = useT();
   const uniqueIds = useMemo(() => [...new Set(mediaIds)].filter((id) => id > 0), [mediaIds]);
   const count = uniqueIds.length;
 
@@ -37,11 +39,11 @@ export default function AddToPlaylistModal({
       setLoading(true);
       fetchPlaylists()
         .then(setPlaylists)
-        .catch(() => message.error("加载失败"))
+        .catch(() => message.error(t("components.add_to_playlist_modal.load_failed")))
         .finally(() => setLoading(false));
       setNewName(count === 1 ? defaultNewPlaylistName.trim() : "");
     }
-  }, [open, defaultNewPlaylistName, count]);
+  }, [open, defaultNewPlaylistName, count, t]);
 
   async function addAllToPlaylist(playlist: Pick<Playlist, "id" | "name">): Promise<boolean> {
     let ok = 0;
@@ -55,13 +57,17 @@ export default function AddToPlaylistModal({
       }
     }
     if (ok === 0) {
-      message.error("添加失败，可能已在列表中");
+      message.error(t("components.add_to_playlist_modal.add_failed_dup"));
       return false;
     }
     if (count > 1) {
-      message.success(`已将 ${ok} 项添加到「${playlist.name}」${fail > 0 ? `（${fail} 项跳过）` : ""}`);
+      message.success(
+        fail > 0
+          ? t("components.add_to_playlist_modal.added_multi_with_skip", { ok, name: playlist.name, fail })
+          : t("components.add_to_playlist_modal.added_multi", { ok, name: playlist.name })
+      );
     } else {
-      message.success(`已添加到「${playlist.name}」`);
+      message.success(t("components.add_to_playlist_modal.added_single", { name: playlist.name }));
     }
     onAdded?.({ id: playlist.id, name: playlist.name });
     return true;
@@ -76,7 +82,7 @@ export default function AddToPlaylistModal({
   async function handleCreate() {
     const name = newName.trim();
     if (!name) {
-      message.error("请输入列表名称");
+      message.error(t("components.add_to_playlist_modal.name_required"));
       return;
     }
     if (uniqueIds.length === 0) return;
@@ -89,13 +95,15 @@ export default function AddToPlaylistModal({
         onClose();
       }
     } catch (e: unknown) {
-      message.error((e as Error).message || "操作失败");
+      message.error((e as Error).message || t("components.add_to_playlist_modal.create_failed"));
     } finally {
       setCreating(false);
     }
   }
 
-  const modalTitle = count > 1 ? `添加到播放列表（${count} 项）` : "添加到播放列表";
+  const modalTitle = count > 1
+    ? t("components.add_to_playlist_modal.title_multi", { count })
+    : t("components.add_to_playlist_modal.title_single");
 
   return (
     <Modal open={open && count > 0} title={modalTitle} onCancel={onClose} footer={null} destroyOnClose width={420}>
@@ -105,7 +113,7 @@ export default function AddToPlaylistModal({
         </div>
       ) : playlists.length === 0 ? (
         <div style={{ textAlign: "center", color: "#888", padding: "16px 0 8px" }}>
-          暂无播放列表，可在下方新建后添加
+          {t("components.add_to_playlist_modal.empty_create_below")}
         </div>
       ) : (
         <List
@@ -163,7 +171,7 @@ export default function AddToPlaylistModal({
 
       <div style={{ display: "flex", gap: 8, borderTop: "1px solid rgba(255,255,255,0.08)", paddingTop: 12 }}>
         <Input
-          placeholder="新建播放列表名称"
+          placeholder={t("components.add_to_playlist_modal.create_placeholder")}
           value={newName}
           onChange={(e) => setNewName(e.target.value)}
           onPressEnter={handleCreate}
@@ -171,7 +179,7 @@ export default function AddToPlaylistModal({
           style={{ flex: 1 }}
         />
         <Button type="primary" loading={creating} onClick={handleCreate} disabled={!newName.trim()}>
-          创建
+          {t("components.add_to_playlist_modal.create_btn")}
         </Button>
       </div>
     </Modal>

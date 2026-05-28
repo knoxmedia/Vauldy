@@ -12,6 +12,7 @@ import { albumArtworkSrc, fetchMediaLyrics } from "../api/client";
 import { activeLrcIndex, parseLrc } from "../lib/lrc";
 import MusicPlayModeIcon, { MUSIC_PLAY_MODE_LABELS } from "./MusicPlayModeIcon";
 import { currentMusicTrack, useMusicPlayerStore } from "../store/musicPlayer";
+import { useT } from "../i18n";
 import styles from "./MusicFullscreenPlayer.module.css";
 
 type Props = {
@@ -26,6 +27,7 @@ function fmtTime(sec: number): string {
 }
 
 export default function MusicFullscreenPlayer({ onClose }: Props) {
+  const t = useT();
   const lyricsRef = useRef<HTMLDivElement | null>(null);
   const lineRefs = useRef<Array<HTMLParagraphElement | null>>([]);
   const [lrcRaw, setLrcRaw] = useState("");
@@ -93,9 +95,9 @@ export default function MusicFullscreenPlayer({ onClose }: Props) {
   }
 
   return (
-    <div className={styles.overlay} role="dialog" aria-label="全屏音乐播放">
+    <div className={styles.overlay} role="dialog" aria-label={t("components.music_fullscreen_player.aria_dialog")}>
       <div className={styles.topBar}>
-        <button type="button" className={styles.topBtn} onClick={onClose} aria-label="收起">
+        <button type="button" className={styles.topBtn} onClick={onClose} aria-label={t("components.music_fullscreen_player.aria_collapse")}>
           <DownOutlined />
         </button>
       </div>
@@ -148,7 +150,7 @@ export default function MusicFullscreenPlayer({ onClose }: Props) {
             step={1}
             value={Math.min(position, duration || 0)}
             className={styles.progressInput}
-            aria-label="播放进度"
+            aria-label={t("components.music_player_bar.aria_progress")}
             onChange={(e) => seek(Number(e.target.value))}
           />
         </div>
@@ -165,21 +167,21 @@ export default function MusicFullscreenPlayer({ onClose }: Props) {
           </div>
 
           <div className={styles.controls}>
-            <Tooltip title="上一首">
-              <button type="button" className={styles.iconBtn} onClick={prev} aria-label="上一首">
+            <Tooltip title={t("components.music_player_bar.tooltip_prev")}>
+              <button type="button" className={styles.iconBtn} onClick={prev} aria-label={t("components.music_player_bar.aria_prev")}>
                 <StepBackwardOutlined />
               </button>
             </Tooltip>
-            <button type="button" className={styles.playBtn} onClick={toggle} aria-label={playing ? "暂停" : "播放"}>
+            <button type="button" className={styles.playBtn} onClick={toggle} aria-label={playing ? t("components.music_player_bar.aria_pause") : t("components.music_player_bar.aria_play")}>
               {playing ? <PauseOutlined /> : <CaretRightOutlined />}
             </button>
-            <Tooltip title="下一首">
-              <button type="button" className={styles.iconBtn} onClick={next} aria-label="下一首">
+            <Tooltip title={t("components.music_player_bar.tooltip_next")}>
+              <button type="button" className={styles.iconBtn} onClick={next} aria-label={t("components.music_player_bar.aria_next")}>
                 <StepForwardOutlined />
               </button>
             </Tooltip>
-            <Tooltip title="停止">
-              <button type="button" className={styles.iconBtn} onClick={handleStop} aria-label="停止">
+            <Tooltip title={t("components.music_player_bar.tooltip_stop")}>
+              <button type="button" className={styles.iconBtn} onClick={handleStop} aria-label={t("components.music_player_bar.aria_stop")}>
                 <span className={styles.stopIcon} aria-hidden />
               </button>
             </Tooltip>
@@ -201,7 +203,7 @@ export default function MusicFullscreenPlayer({ onClose }: Props) {
                 tooltip={{ formatter: (v) => `${Math.round((v ?? 0) * 100)}%` }}
                 style={{ width: 96 }}
               />
-              <button type="button" className={styles.iconBtn} onClick={toggleMute} aria-label={muted ? "取消静音" : "静音"}>
+              <button type="button" className={styles.iconBtn} onClick={toggleMute} aria-label={muted ? t("components.music_player_bar.aria_unmute") : t("components.music_player_bar.aria_mute")}>
                 {muted || volume === 0 ? "🔇" : "🔊"}
               </button>
             </div>

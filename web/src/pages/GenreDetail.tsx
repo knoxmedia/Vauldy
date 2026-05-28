@@ -17,6 +17,7 @@ import { AlbumSummary, albumArtworkSrc, fetchAlbum, fetchGenreAlbums } from "../
 import ToolbarPlayIcon from "../components/ToolbarPlayIcon";
 import { albumTracksToQueue } from "../lib/albumPlayback";
 import { useMusicPlayerStore } from "../store/musicPlayer";
+import { useT } from "../i18n";
 import artistStyles from "./ArtistDetail.module.css";
 import styles from "./Browse.module.css";
 import musicStyles from "./MusicBrowse.module.css";
@@ -39,10 +40,10 @@ function readViewMode(): ViewMode {
 }
 
 function genreInitials(name: string): string {
-  const t = name.trim();
-  if (!t) return "?";
-  if (t.length >= 2) return t.slice(0, 2).toUpperCase();
-  return t.charAt(0).toUpperCase();
+  const n = name.trim();
+  if (!n) return "?";
+  if (n.length >= 2) return n.slice(0, 2).toUpperCase();
+  return n.charAt(0).toUpperCase();
 }
 
 function fmtDuration(sec?: number): string {
@@ -55,6 +56,7 @@ function fmtDuration(sec?: number): string {
 
 export default function GenreDetailPage() {
   const nav = useNavigate();
+  const t = useT();
   const [searchParams] = useSearchParams();
   const libraryId = Number(searchParams.get("library"));
   const genreName = searchParams.get("name") ?? "";
@@ -106,12 +108,12 @@ export default function GenreDetailPage() {
       const album = await fetchAlbum(albumId);
       const queue = albumTracksToQueue(album);
       if (queue.length === 0) {
-        message.warning("专辑暂无音轨，请重新扫描音乐库");
+        message.warning(t("pages.artist_detail.album_no_tracks_rescan"));
         return;
       }
       useMusicPlayerStore.getState().loadAlbum(albumId, queue, 0, { sequential: true });
     } catch (err: unknown) {
-      message.error((err as Error).message || "无法播放专辑");
+      message.error((err as Error).message || t("pages.artist_detail.cannot_play_album"));
     } finally {
       setPlayingAlbumId(null);
     }
@@ -127,13 +129,13 @@ export default function GenreDetailPage() {
         queue.push(...albumTracksToQueue(album));
       }
       if (queue.length === 0) {
-        message.warning("暂无可用音轨，请重新扫描音乐库");
+        message.warning(t("pages.artist_detail.no_tracks_rescan"));
         return;
       }
       const firstAlbumId = queue[0]?.albumId ?? sortedAlbums[0]!.id;
       useMusicPlayerStore.getState().loadAlbum(firstAlbumId, queue, 0, { sequential: true });
     } catch (err: unknown) {
-      message.error((err as Error).message || "无法播放");
+      message.error((err as Error).message || t("pages.artist_detail.cannot_play"));
     } finally {
       setPlaying(false);
     }
@@ -142,7 +144,7 @@ export default function GenreDetailPage() {
   if (!Number.isFinite(libraryId) || libraryId <= 0 || !genreName.trim()) {
     return (
       <div className={musicStyles.wrap}>
-        <Empty description="无效的流派链接" />
+        <Empty description={t("pages.genre_detail.invalid_link")} />
       </div>
     );
   }
@@ -164,9 +166,9 @@ export default function GenreDetailPage() {
           onClick={() => nav(`/browse?library_id=${libraryId}`)}
           style={{ color: "rgba(255,255,255,0.65)", marginBottom: 16 }}
         >
-          返回资料库
+          {t("pages.genre_detail.back_to_library")}
         </Button>
-        <Empty description="该流派暂无专辑" />
+        <Empty description={t("pages.genre_detail.no_albums_in_genre")} />
       </div>
     );
   }
@@ -179,7 +181,7 @@ export default function GenreDetailPage() {
         onClick={() => nav(`/browse?library_id=${libraryId}`)}
         style={{ color: "rgba(255,255,255,0.65)", marginBottom: 16 }}
       >
-        返回资料库
+        {t("pages.genre_detail.back_to_library")}
       </Button>
 
       <div className={md.hero}>
@@ -188,13 +190,13 @@ export default function GenreDetailPage() {
             {genreInitials(genreName)}
           </div>
           <div className={md.heroInfo}>
-            <Typography.Text type="secondary">流派</Typography.Text>
+            <Typography.Text type="secondary">{t("pages.genre_detail.kind_genre")}</Typography.Text>
             <Typography.Title level={2} style={{ color: "#fff", margin: 0 }}>
               {genreName}
             </Typography.Title>
             <div className={musicStyles.albumMetaRow}>
-              <span>{albums.length} 张专辑</span>
-              {trackTotal > 0 ? <span>{trackTotal} 首曲目</span> : null}
+              <span>{t("pages.genre_detail.albums_count", { count: albums.length })}</span>
+              {trackTotal > 0 ? <span>{t("pages.genre_detail.tracks_count", { count: trackTotal })}</span> : null}
             </div>
             <div style={{ marginTop: 4 }}>
               {[1, 2, 3, 4, 5].map((n) => (
@@ -211,9 +213,9 @@ export default function GenreDetailPage() {
                 disabled={albums.length === 0}
                 onClick={() => void playGenre()}
               >
-                播放
+                {t("pages.genre_detail.play")}
               </Button>
-              <Button type="text" icon={<MoreOutlined />} style={{ color: "rgba(255,255,255,0.65)" }} aria-label="更多" />
+              <Button type="text" icon={<MoreOutlined />} style={{ color: "rgba(255,255,255,0.65)" }} aria-label={t("pages.genre_detail.more_aria")} />
             </div>
           </div>
         </div>
@@ -222,7 +224,7 @@ export default function GenreDetailPage() {
       <div className={artistStyles.sectionHeader}>
         <Typography.Title level={5} className={artistStyles.sectionTitle}>
           <UnorderedListOutlined className={artistStyles.sectionIcon} />
-          {albums.length} 专辑
+          {t("pages.genre_detail.albums_section", { count: albums.length })}
         </Typography.Title>
         <Space wrap className={artistStyles.sectionToolbar}>
           <Select
@@ -230,8 +232,8 @@ export default function GenreDetailPage() {
             value={sortField}
             onChange={setSortField}
             options={[
-              { value: "title", label: "按标题" },
-              { value: "year", label: "按年份" },
+              { value: "title", label: t("pages.artist_detail.sort_title") },
+              { value: "year", label: t("pages.artist_detail.sort_year") },
             ]}
             style={{ width: 120 }}
           />
@@ -244,14 +246,14 @@ export default function GenreDetailPage() {
               size="small"
               icon={<AppstoreOutlined />}
               onClick={() => setViewMode("grid")}
-              aria-label="网格视图"
+              aria-label={t("pages.artist_detail.view_grid_aria")}
             />
             <Button
               type={viewMode === "table" ? "primary" : "text"}
               size="small"
               icon={<TableOutlined />}
               onClick={() => setViewMode("table")}
-              aria-label="详细视图"
+              aria-label={t("pages.artist_detail.view_table_aria")}
             />
           </div>
         </Space>
@@ -268,7 +270,7 @@ export default function GenreDetailPage() {
                 className={musicStyles.albumCover}
                 role="link"
                 tabIndex={0}
-                aria-label={`查看专辑 ${a.title}`}
+                aria-label={t("pages.artist_detail.view_album_label", { title: a.title })}
                 onClick={() => nav(`/album/${a.id}`)}
                 onKeyDown={(e) => e.key === "Enter" && nav(`/album/${a.id}`)}
               >
@@ -289,7 +291,7 @@ export default function GenreDetailPage() {
                   <button
                     type="button"
                     className={musicStyles.playOverlayBtn}
-                    aria-label="播放专辑"
+                    aria-label={t("pages.artist_detail.play_album")}
                     disabled={playingAlbumId === a.id}
                     onClick={(e) => {
                       e.stopPropagation();
@@ -311,8 +313,8 @@ export default function GenreDetailPage() {
                 <div className={musicStyles.albumTitle} title={a.title}>
                   {a.title}
                 </div>
-                <div className={musicStyles.albumArtist} title={a.album_artist || "Various Artists"}>
-                  {a.album_artist || "Various Artists"}
+                <div className={musicStyles.albumArtist} title={a.album_artist || t("pages.genre_detail.various_artists")}>
+                  {a.album_artist || t("pages.genre_detail.various_artists")}
                 </div>
               </div>
             </div>
@@ -323,11 +325,11 @@ export default function GenreDetailPage() {
           <table className={musicStyles.table}>
             <thead>
               <tr>
-                <th>标题</th>
-                <th>专辑艺人</th>
-                <th style={{ width: 88 }}>年份</th>
-                <th style={{ width: 72 }}>音轨</th>
-                <th style={{ width: 96 }}>时长</th>
+                <th>{t("pages.artist_detail.col_title")}</th>
+                <th>{t("pages.genre_detail.col_album_artist")}</th>
+                <th style={{ width: 88 }}>{t("pages.artist_detail.col_year")}</th>
+                <th style={{ width: 72 }}>{t("pages.artist_detail.col_track")}</th>
+                <th style={{ width: 96 }}>{t("pages.artist_detail.col_duration")}</th>
                 <th style={{ width: 40 }} />
               </tr>
             </thead>
@@ -346,7 +348,7 @@ export default function GenreDetailPage() {
                       type="text"
                       size="small"
                       icon={<CaretRightOutlined />}
-                      aria-label="播放专辑"
+                      aria-label={t("pages.artist_detail.play_album")}
                       onClick={(e) => {
                         e.stopPropagation();
                         void playAlbum(a.id, e);

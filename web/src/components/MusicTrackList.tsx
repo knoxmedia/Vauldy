@@ -27,6 +27,7 @@ import {
 import browseStyles from "../pages/Browse.module.css";
 import musicStyles from "../pages/MusicBrowse.module.css";
 import { currentMusicTrack, useMusicPlayerStore } from "../store/musicPlayer";
+import { useT } from "../i18n";
 import NowPlayingIndicator from "./NowPlayingIndicator";
 
 type Props = {
@@ -47,6 +48,7 @@ function ColumnPicker({
   visible: Set<TrackColumnId>;
   onChange: (next: Set<TrackColumnId>) => void;
 }) {
+  const t = useT();
   const [open, setOpen] = useState(false);
 
   function toggle(id: TrackColumnId) {
@@ -93,7 +95,7 @@ function ColumnPicker({
         type="text"
         size="small"
         icon={<SlidersOutlined />}
-        aria-label="列显示"
+        aria-label={t("components.music_track_list.col_aria")}
         className={browseStyles.browseColPickerTrigger}
         onClick={(e) => e.stopPropagation()}
       />
@@ -134,6 +136,7 @@ export default function MusicTrackList({
   showAlbumColumn = true,
   showHeader = true,
 }: Props) {
+  const t = useT();
   const nav = useNavigate();
   const playerPlaying = useMusicPlayerStore((s) => s.playing);
   const currentMediaId = useMusicPlayerStore((s) => currentMusicTrack(s)?.mediaId ?? null);
@@ -275,16 +278,16 @@ export default function MusicTrackList({
                   )}
                 </th>
               ))}
-              <th style={{ width: 72 }} aria-label="操作" />
+              <th style={{ width: 72 }} aria-label={t("components.music_track_list.actions_aria")} />
             </tr>
           </thead>
         ) : null}
         <tbody>
-          {sortedTracks.map((t, idx) => {
-            const isSelected = selectedIds.has(t.media_id);
+          {sortedTracks.map((tr, idx) => {
+            const isSelected = selectedIds.has(tr.media_id);
             return (
             <tr
-              key={t.id}
+              key={tr.id}
               className={musicStyles.trackRow}
               data-selected={isSelected ? "" : undefined}
             >
@@ -292,30 +295,30 @@ export default function MusicTrackList({
                 <button
                   type="button"
                   className={musicStyles.trackGutterSelect}
-                  aria-label={isSelected ? "取消选择" : "选择"}
+                  aria-label={isSelected ? t("components.music_track_list.aria_deselect") : t("components.music_track_list.aria_select")}
                   aria-pressed={isSelected}
                   data-selected={isSelected ? "" : undefined}
                   onClick={(e) => {
                     e.stopPropagation();
-                    toggleSelect(t.media_id);
+                    toggleSelect(tr.media_id);
                   }}
                 >
                   {isSelected ? <CheckOutlined /> : null}
                 </button>
               </td>
               <td className={musicStyles.trackIndexCell}>
-                {currentMediaId === t.media_id ? (
+                {currentMediaId === tr.media_id ? (
                   <NowPlayingIndicator playing={playerPlaying} />
                 ) : (
                   <>
-                    <span className={musicStyles.trackIndexNum}>{t.track_number || idx + 1}</span>
+                    <span className={musicStyles.trackIndexNum}>{tr.track_number || idx + 1}</span>
                     <button
                       type="button"
                       className={musicStyles.trackPlayBtn}
-                      aria-label={`播放 ${t.title}`}
+                      aria-label={t("components.music_track_list.aria_play_track", { title: tr.title })}
                       onClick={(e) => {
                         e.stopPropagation();
-                        onPlayTrack(t.media_id, sortedTracks);
+                        onPlayTrack(tr.media_id, sortedTracks);
                       }}
                     >
                       <CaretRightOutlined />
@@ -324,7 +327,7 @@ export default function MusicTrackList({
                 )}
               </td>
               {activeColumns.map((col) => (
-                <td key={col.id}>{renderCell(t, col)}</td>
+                <td key={col.id}>{renderCell(tr, col)}</td>
               ))}
               <td className={musicStyles.rowActionsCell}>
                 <div className={musicStyles.rowActions}>
@@ -333,19 +336,19 @@ export default function MusicTrackList({
                     size="small"
                     className={musicStyles.rowActionBtn}
                     icon={<EditOutlined />}
-                    aria-label="编辑"
+                    aria-label={t("components.music_track_list.aria_edit")}
                     onClick={(e) => {
                       e.stopPropagation();
-                      nav(`/detail/${t.media_id}`);
+                      nav(`/detail/${tr.media_id}`);
                     }}
                   />
-                  <Dropdown menu={buildTrackMenu(t)} trigger={["click"]} placement="bottomRight">
+                  <Dropdown menu={buildTrackMenu(tr)} trigger={["click"]} placement="bottomRight">
                     <Button
                       type="text"
                       size="small"
                       className={musicStyles.rowActionBtn}
                       icon={<EllipsisOutlined rotate={90} />}
-                      aria-label="更多"
+                      aria-label={t("components.music_track_list.aria_more")}
                       onClick={(e) => e.stopPropagation()}
                     />
                   </Dropdown>

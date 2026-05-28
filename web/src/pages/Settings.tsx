@@ -181,7 +181,7 @@ export default function SettingsPage() {
     const f = e.target.files?.[0];
     e.target.value = "";
     if (!f || !f.type.startsWith("image/")) {
-      message.warning("请选择图片文件");
+      message.warning(t("settings.avatar.select_image_file"));
       return;
     }
     const url = URL.createObjectURL(f);

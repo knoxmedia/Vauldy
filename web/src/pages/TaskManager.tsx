@@ -66,6 +66,7 @@ import {
   type SubtitleTask,
   type TranscodeTask,
 } from "../api/client";
+import { useT } from "../i18n";
 
 type ScheduledTaskForm = {
   name: string;
@@ -146,6 +147,7 @@ function ActionIconConfirmButton({
 }
 
 export default function TaskManagerPage() {
+  const t = useT();
   const [transcodeTasks, setTranscodeTasks] = useState<TranscodeTask[]>([]);
   const [transcodeLoading, setTranscodeLoading] = useState(false);
   const [cleaning, setCleaning] = useState(false);
@@ -394,7 +396,7 @@ export default function TaskManagerPage() {
     [lyricTasks, lyricStatusFilter]
   );
   const getStatusOptionsForTab = (tab: string) => {
-    const commonAll = [{ value: "all", label: "全部状态" }];
+    const commonAll = [{ value: "all", label: t("pages.task_manager.all_statuses") }];
     if (tab === "scheduled") {
       return [
         ...commonAll,
@@ -464,11 +466,11 @@ export default function TaskManagerPage() {
         options={getStatusOptionsForTab(tab)}
       />
       <Space size={4}>
-        <span style={{ color: "#999" }}>自动刷新</span>
+        <span style={{ color: "#999" }}>{t("pages.task_manager.auto_refresh")}</span>
         <Switch size="small" checked={autoRefresh} onChange={setAutoRefresh} />
       </Space>
       <Button disabled={autoRefresh} onClick={() => void onRefresh()}>
-        刷新
+        {t("pages.task_manager.refresh")}
       </Button>
     </>
   );
@@ -498,12 +500,12 @@ export default function TaskManagerPage() {
         enabled: v.enabled ? 1 : 0,
         payload,
       });
-      message.success("定时任务已创建");
+      message.success(t("pages.task_manager.scheduled_created"));
       setCreateModalOpen(false);
       form.resetFields();
       await loadScheduled();
     } catch {
-      message.error("创建定时任务失败");
+      message.error(t("pages.task_manager.scheduled_create_failed"));
     } finally {
       setCreatingSchedule(false);
     }
@@ -546,11 +548,11 @@ export default function TaskManagerPage() {
         enabled: v.enabled ? 1 : 0,
         payload,
       });
-      message.success("定时任务已更新");
+      message.success(t("pages.task_manager.scheduled_updated"));
       setEditingTask(null);
       await loadScheduled();
     } catch {
-      message.error("更新定时任务失败");
+      message.error(t("pages.task_manager.scheduled_update_failed"));
     } finally {
       setUpdatingSchedule(false);
     }
@@ -564,11 +566,11 @@ export default function TaskManagerPage() {
       items={[
         {
           key: "scheduled",
-          label: "定时任务",
+          label: t("pages.task_manager.tab_scheduled"),
           children: (
             <Space direction="vertical" size="large" style={{ width: "100%" }}>
               <Card
-                title="定时任务列表"
+                title={t("pages.task_manager.scheduled_card_title")}
                 extra={(
                   <Space>
                     <Button
@@ -579,7 +581,7 @@ export default function TaskManagerPage() {
                         setCreateModalOpen(true);
                       }}
                     >
-                      创建定时任务
+                      {t("pages.task_manager.create_scheduled_btn")}
                     </Button>
                     {renderListHeaderControls("scheduled", scheduledStatusFilter, setScheduledStatusFilter, loadScheduled)}
                   </Space>
@@ -594,7 +596,7 @@ export default function TaskManagerPage() {
                   columns={[
                     { title: "ID", dataIndex: "id", width: 70 },
                     {
-                      title: "名称",
+                      title: t("pages.task_manager.col_name"),
                       dataIndex: "name",
                       width: 180,
                       ellipsis: true,
@@ -615,15 +617,15 @@ export default function TaskManagerPage() {
                         </Tooltip>
                       ),
                     },
-                    { title: "分类", dataIndex: "category", width: 110 },
-                    { title: "类型", dataIndex: "task_type", width: 220 },
-                    { title: "间隔(分)", dataIndex: "interval_min", width: 90 },
-                    { title: "启用", dataIndex: "enabled", width: 80, render: (v: number) => (v === 1 ? <Tag color="green">启用</Tag> : <Tag>停用</Tag>) },
-                    { title: "上次状态", dataIndex: "last_status", width: 110, render: (v?: string) => v || "-" },
-                    { title: "上次执行", dataIndex: "last_run_at", width: 170, render: (v?: string) => v || "-" },
-                    { title: "执行信息", dataIndex: "last_message", ellipsis: true },
+                    { title: t("pages.task_manager.col_category"), dataIndex: "category", width: 110 },
+                    { title: t("pages.task_manager.col_type"), dataIndex: "task_type", width: 220 },
+                    { title: t("pages.task_manager.col_interval_min"), dataIndex: "interval_min", width: 90 },
+                    { title: t("pages.task_manager.col_enabled"), dataIndex: "enabled", width: 80, render: (v: number) => (v === 1 ? <Tag color="green">{t("pages.task_manager.enabled_tag")}</Tag> : <Tag>{t("pages.task_manager.disabled_tag")}</Tag>) },
+                    { title: t("pages.task_manager.col_last_status"), dataIndex: "last_status", width: 110, render: (v?: string) => v || "-" },
+                    { title: t("pages.task_manager.col_last_run"), dataIndex: "last_run_at", width: 170, render: (v?: string) => v || "-" },
+                    { title: t("pages.task_manager.col_last_message"), dataIndex: "last_message", ellipsis: true },
                     {
-                      title: "操作",
+                      title: t("pages.task_manager.col_actions"),
                       key: "actions",
                       width: 120,
                       align: "center",
@@ -631,25 +633,25 @@ export default function TaskManagerPage() {
                       render: (_: unknown, r: ScheduledTask) => (
                         <Space size={4}>
                           <ActionIconButton
-                            title="立即执行"
+                            title={t("pages.task_manager.tooltip_run_now")}
                             icon={<ThunderboltOutlined />}
                             loading={runningScheduledId === r.id}
                             onClick={() => {
                               setRunningScheduledId(r.id);
-                              void runScheduledTask(r.id).then(() => message.success("任务已执行")).catch(() => message.error("任务执行失败")).finally(async () => {
+                              void runScheduledTask(r.id).then(() => message.success(t("pages.task_manager.task_run_success"))).catch(() => message.error(t("pages.task_manager.task_run_failed"))).finally(async () => {
                                 setRunningScheduledId(null);
                                 await loadScheduled();
                               });
                             }}
                           />
                           <ActionIconButton
-                            title="编辑"
+                            title={t("pages.task_manager.tooltip_edit")}
                             icon={<EditOutlined />}
                             onClick={() => fillEditForm(r)}
                           />
                           <ActionIconConfirmButton
-                            title="删除"
-                            confirmTitle="确认删除该任务？"
+                            title={t("pages.task_manager.tooltip_delete")}
+                            confirmTitle={t("pages.task_manager.confirm_delete_task")}
                             icon={<DeleteOutlined />}
                             danger
                             onConfirm={() => void deleteScheduledTask(r.id).then(loadScheduled)}
@@ -665,29 +667,29 @@ export default function TaskManagerPage() {
         },
         {
           key: "transcode",
-          label: "转码任务",
+          label: t("pages.task_manager.tab_transcode"),
           children: (
             <Card
-              title="转码任务"
+              title={t("pages.task_manager.transcode_card_title")}
               extra={
                 <Space>
-                  <Popconfirm title="确认清理 7 天前失败任务？" onConfirm={() => {
+                  <Popconfirm title={t("pages.task_manager.confirm_cleanup_7d")} onConfirm={() => {
                     setCleaningOld(true);
-                    void cleanupFailedTranscodeTasksBefore(7).then((n) => message.success(`已清理 ${n} 条`)).catch(() => message.error("清理失败")).finally(async () => {
+                    void cleanupFailedTranscodeTasksBefore(7).then((n) => message.success(t("pages.task_manager.cleanup_done", { n }))).catch(() => message.error(t("pages.task_manager.cleanup_failed"))).finally(async () => {
                       setCleaningOld(false);
                       await loadTranscode();
                     });
                   }}>
-                    <Button loading={cleaningOld}>清理 7 天前失败任务</Button>
+                    <Button loading={cleaningOld}>{t("pages.task_manager.btn_cleanup_7d")}</Button>
                   </Popconfirm>
-                  <Popconfirm title="确认清理失败任务？" onConfirm={() => {
+                  <Popconfirm title={t("pages.task_manager.confirm_cleanup_all_failed")} onConfirm={() => {
                     setCleaning(true);
-                    void cleanupFailedTranscodeTasks().then((n) => message.success(`已清理 ${n} 条`)).catch(() => message.error("清理失败")).finally(async () => {
+                    void cleanupFailedTranscodeTasks().then((n) => message.success(t("pages.task_manager.cleanup_done", { n }))).catch(() => message.error(t("pages.task_manager.cleanup_failed"))).finally(async () => {
                       setCleaning(false);
                       await loadTranscode();
                     });
                   }}>
-                    <Button danger loading={cleaning}>清理失败任务</Button>
+                    <Button danger loading={cleaning}>{t("pages.task_manager.btn_cleanup_all_failed")}</Button>
                   </Popconfirm>
                   {renderListHeaderControls("transcode", transcodeStatusFilter, setTranscodeStatusFilter, () => void loadTranscode())}
                 </Space>
@@ -702,15 +704,15 @@ export default function TaskManagerPage() {
                   { title: "ID", dataIndex: "id", width: 70 },
                   { title: "file_id", dataIndex: "file_id", ellipsis: true },
                   { title: "Pipeline", dataIndex: "pipeline_type", width: 110, render: (v?: string) => v || "-" },
-                  { title: "清晰度", dataIndex: "quality", width: 90 },
-                  { title: "状态", dataIndex: "status", width: 100 },
+                  { title: t("pages.task_manager.col_quality"), dataIndex: "quality", width: 90 },
+                  { title: t("pages.task_manager.col_status"), dataIndex: "status", width: 100 },
                   { title: "DRM", dataIndex: "drm_status", width: 90, render: (v?: string) => v || "-" },
                   { title: "Cleanup", dataIndex: "source_cleanup_status", width: 110, render: (v?: string) => v || "-" },
-                  { title: "进度", dataIndex: "progress", width: 80, render: (p: number) => `${p}%` },
-                  { title: "失败原因", dataIndex: "error_message", ellipsis: true, render: (v?: string) => v || "-" },
-                  { title: "创建时间", dataIndex: "created_at", width: 180 },
+                  { title: t("pages.task_manager.col_progress"), dataIndex: "progress", width: 80, render: (p: number) => `${p}%` },
+                  { title: t("pages.task_manager.col_error"), dataIndex: "error_message", ellipsis: true, render: (v?: string) => v || "-" },
+                  { title: t("pages.task_manager.col_created_at"), dataIndex: "created_at", width: 180 },
                   {
-                    title: "操作",
+                    title: t("pages.task_manager.col_actions"),
                     key: "ops",
                     width: 90,
                     align: "center",
@@ -718,26 +720,26 @@ export default function TaskManagerPage() {
                       <Space size={4}>
                         {(r.status === "waiting" || r.status === "running") ? (
                           <ActionIconButton
-                            title="取消任务"
+                            title={t("pages.task_manager.tooltip_cancel_task")}
                             icon={<StopOutlined />}
                             onClick={() => {
                               void cancelTranscodeTask(r.id)
-                                .then(() => message.success("已取消任务"))
+                                .then(() => message.success(t("pages.task_manager.task_cancelled")))
                                 .then(loadTranscode)
-                                .catch(() => message.error("取消失败"));
+                                .catch(() => message.error(t("pages.task_manager.task_cancel_failed")));
                             }}
                           />
                         ) : null}
                         {(r.status === "failed" || r.status === "cancelled") ? (
                           <ActionIconButton
-                            title="重试"
+                            title={t("pages.task_manager.tooltip_retry")}
                             icon={<RedoOutlined />}
                             type="primary"
                             onClick={() => {
                               void retryTranscodeTask(r.id)
-                                .then(() => message.success("已提交重试"))
+                                .then(() => message.success(t("pages.task_manager.retry_submitted")))
                                 .then(loadTranscode)
-                                .catch(() => message.error("重试失败"));
+                                .catch(() => message.error(t("pages.task_manager.retry_failed")));
                             }}
                           />
                         ) : null}
@@ -751,11 +753,11 @@ export default function TaskManagerPage() {
         },
         {
           key: "scrape",
-          label: "刮削任务",
+          label: t("pages.task_manager.tab_scrape"),
           children: (
             <Card
               loading={scrapeLoading}
-              title="刮削任务管理"
+              title={t("pages.task_manager.scrape_card_title")}
               extra={(
                 <Space>
                   {renderListHeaderControls("scrape", scrapeStatusFilter, setScrapeStatusFilter, () => void loadScrape())}
@@ -769,11 +771,11 @@ export default function TaskManagerPage() {
                   pagination={{ pageSize: 10 }}
                   columns={[
                     { title: "ID", dataIndex: "id", width: 70 },
-                    { title: "媒体ID", dataIndex: "media_id", width: 90 },
-                    { title: "标题", dataIndex: "title", ellipsis: true },
-                    { title: "来源", dataIndex: "source", width: 90 },
+                    { title: t("pages.task_manager.col_media_id"), dataIndex: "media_id", width: 90 },
+                    { title: t("pages.task_manager.col_title"), dataIndex: "title", ellipsis: true },
+                    { title: t("pages.task_manager.col_source"), dataIndex: "source", width: 90 },
                     {
-                      title: "状态",
+                      title: t("pages.task_manager.col_status"),
                       dataIndex: "status",
                       width: 100,
                       render: (v: string) => {
@@ -789,29 +791,29 @@ export default function TaskManagerPage() {
                                   : "default";
                         const label =
                           v === "done"
-                            ? "完成"
+                            ? t("pages.task_manager.status_done")
                             : v === "failed"
-                              ? "失败"
+                              ? t("pages.task_manager.status_failed")
                               : v === "abandoned"
-                                ? "已放弃"
+                                ? t("pages.task_manager.status_abandoned")
                                 : v === "running"
-                                  ? "进行中"
+                                  ? t("pages.task_manager.status_running")
                                   : v === "waiting"
-                                    ? "等待"
+                                    ? t("pages.task_manager.status_waiting")
                                     : v;
                         return <Tag color={c}>{label}</Tag>;
                       },
                     },
                     {
-                      title: "失败次数",
+                      title: t("pages.task_manager.col_attempts"),
                       dataIndex: "fail_count",
                       width: 90,
                       render: (v: number | undefined) => (v && v > 0 ? v : "-"),
                     },
-                    { title: "进度", dataIndex: "progress", width: 90, render: (v: number) => `${v}%` },
-                    { title: "结果/原因", dataIndex: "message", ellipsis: true, render: (v?: string) => v || "-" },
-                    { title: "创建时间", dataIndex: "created_at", width: 180 },
-                    { title: "完成时间", dataIndex: "finished_at", width: 180, render: (v?: string) => v || "-" },
+                    { title: t("pages.task_manager.col_progress"), dataIndex: "progress", width: 90, render: (v: number) => `${v}%` },
+                    { title: t("pages.task_manager.col_message"), dataIndex: "message", ellipsis: true, render: (v?: string) => v || "-" },
+                    { title: t("pages.task_manager.col_created_at"), dataIndex: "created_at", width: 180 },
+                    { title: t("pages.task_manager.col_finished_at"), dataIndex: "finished_at", width: 180, render: (v?: string) => v || "-" },
                   ]}
                 />
               </Space>
@@ -820,10 +822,10 @@ export default function TaskManagerPage() {
         },
         {
           key: "scan",
-          label: "扫描任务",
+          label: t("pages.task_manager.tab_scan"),
           children: (
             <Card
-              title="媒体库扫描任务"
+              title={t("pages.task_manager.scan_card_title")}
               extra={(
                 <Space>
                   {renderListHeaderControls("scan", scanStatusFilter, setScanStatusFilter, () => void loadScanTasks())}
@@ -837,32 +839,32 @@ export default function TaskManagerPage() {
                 pagination={{ pageSize: 10 }}
                 scroll={{ x: 1250 }}
                 columns={[
-                  { title: "任务ID", dataIndex: "id", width: 90 },
-                  { title: "媒体库", dataIndex: "library_name", ellipsis: true },
-                  { title: "状态", dataIndex: "status", width: 100 },
-                  { title: "来源", dataIndex: "source", width: 90 },
-                  { title: "已处理", dataIndex: "processed_count", width: 90 },
-                  { title: "新增", dataIndex: "added_count", width: 80 },
-                  { title: "开始时间", dataIndex: "started_at", width: 180 },
-                  { title: "结束时间", dataIndex: "finished_at", width: 180, render: (v?: string) => v || "-" },
-                  { title: "错误信息", dataIndex: "error_message", ellipsis: true, render: (v?: string) => v || "-" },
+                  { title: t("pages.task_manager.col_task_id"), dataIndex: "id", width: 90 },
+                  { title: t("pages.task_manager.col_library"), dataIndex: "library_name", ellipsis: true },
+                  { title: t("pages.task_manager.col_status"), dataIndex: "status", width: 100 },
+                  { title: t("pages.task_manager.col_source"), dataIndex: "source", width: 90 },
+                  { title: t("pages.task_manager.col_processed"), dataIndex: "processed_count", width: 90 },
+                  { title: t("pages.task_manager.col_added"), dataIndex: "added_count", width: 80 },
+                  { title: t("pages.task_manager.col_started_at"), dataIndex: "started_at", width: 180 },
+                  { title: t("pages.task_manager.col_finished_at"), dataIndex: "finished_at", width: 180, render: (v?: string) => v || "-" },
+                  { title: t("pages.task_manager.col_error_message"), dataIndex: "error_message", ellipsis: true, render: (v?: string) => v || "-" },
                   {
-                    title: "操作",
+                    title: t("pages.task_manager.col_actions"),
                     key: "actions",
                     width: 80,
                     align: "center",
                     fixed: "right",
                     render: (_: unknown, r: ScanTask) => (
                       <ActionIconButton
-                        title="取消扫描"
+                        title={t("pages.task_manager.tooltip_cancel_scan")}
                         icon={<StopOutlined />}
                         disabled={r.status !== "running"}
                         loading={cancellingScanId === r.id}
                         onClick={() => {
                           setCancellingScanId(r.id);
                           void cancelScanTask(r.id)
-                            .then(() => message.success("已请求取消"))
-                            .catch(() => message.error("取消失败"))
+                            .then(() => message.success(t("pages.task_manager.cancel_requested")))
+                            .catch(() => message.error(t("pages.task_manager.task_cancel_failed")))
                             .finally(async () => {
                               setCancellingScanId(null);
                               await loadScanTasks();
@@ -878,48 +880,48 @@ export default function TaskManagerPage() {
         },
         {
           key: "subtitle",
-          label: "字幕任务",
+          label: t("pages.task_manager.tab_subtitle"),
           children: (
             <Card
-              title="字幕处理任务"
+              title={t("pages.task_manager.subtitle_card_title")}
               extra={(
                 <Space>
                   {renderListHeaderControls("subtitle", subtitleStatusFilter, setSubtitleStatusFilter, () => void loadSubtitleTasks())}
                   <Popconfirm
-                    title="删除所有失败状态的字幕任务记录？（不删除已生成的字幕文件，仅任务表）"
+                    title={t("pages.task_manager.confirm_subtitle_cleanup_failed")}
                     onConfirm={() => {
                       setCleaningSubtitleFailed(true);
                       void cleanupFailedSubtitleTasks()
-                        .then((n) => message.success(`已清理 ${n} 条`))
-                        .catch(() => message.error("清理失败"))
+                        .then((n) => message.success(t("pages.task_manager.cleanup_done", { n })))
+                        .catch(() => message.error(t("pages.task_manager.cleanup_failed")))
                         .finally(async () => {
                           setCleaningSubtitleFailed(false);
                           await loadSubtitleTasks();
                         });
                     }}
                   >
-                    <Button loading={cleaningSubtitleFailed}>清理失败记录</Button>
+                    <Button loading={cleaningSubtitleFailed}>{t("pages.task_manager.btn_cleanup_failed_records")}</Button>
                   </Popconfirm>
                   <Popconfirm
-                    title="删除 30 天前已完成或失败的任务记录？"
+                    title={t("pages.task_manager.confirm_subtitle_cleanup_old")}
                     onConfirm={() => {
                       setCleaningSubtitleOld(true);
                       void cleanupSubtitleTasksBefore(30)
-                        .then((n) => message.success(`已清理 ${n} 条`))
-                        .catch(() => message.error("清理失败"))
+                        .then((n) => message.success(t("pages.task_manager.cleanup_done", { n })))
+                        .catch(() => message.error(t("pages.task_manager.cleanup_failed")))
                         .finally(async () => {
                           setCleaningSubtitleOld(false);
                           await loadSubtitleTasks();
                         });
                     }}
                   >
-                    <Button loading={cleaningSubtitleOld}>清理 30 天前记录</Button>
+                    <Button loading={cleaningSubtitleOld}>{t("pages.task_manager.btn_cleanup_30d_records")}</Button>
                   </Popconfirm>
                 </Space>
               )}
             >
               <div style={{ marginBottom: 12, color: "rgba(0,0,0,0.55)", fontSize: 13 }}>
-                每个视频一条记录。在媒体详情中手动处理、媒体库扫描发现新视频（若开启 subtitle.auto_on_scan）、或定时任务「subtitle_process」批量处理时，会显示状态与完成时间。
+                {t("pages.task_manager.subtitle_help")}
               </div>
               <Table
                 rowKey="id"
@@ -928,19 +930,19 @@ export default function TaskManagerPage() {
                 pagination={{ pageSize: 12 }}
                 scroll={{ x: 1200 }}
                 columns={[
-                  { title: "任务ID", dataIndex: "id", width: 80 },
-                  { title: "媒体ID", dataIndex: "media_id", width: 90 },
-                  { title: "视频名称", dataIndex: "title", ellipsis: true },
-                  { title: "状态", dataIndex: "status", width: 100, render: (v: string) => {
+                  { title: t("pages.task_manager.col_task_id"), dataIndex: "id", width: 80 },
+                  { title: t("pages.task_manager.col_media_id"), dataIndex: "media_id", width: 90 },
+                  { title: t("pages.task_manager.col_video_title"), dataIndex: "title", ellipsis: true },
+                  { title: t("pages.task_manager.col_status"), dataIndex: "status", width: 100, render: (v: string) => {
                     const c = v === "done" ? "green" : v === "failed" ? "red" : v === "running" ? "processing" : "default";
                     return <Tag color={c}>{v}</Tag>;
                   } },
-                  { title: "备注", dataIndex: "message", ellipsis: true, render: (v?: string) => v || "-" },
-                  { title: "创建时间", dataIndex: "created_at", width: 170 },
-                  { title: "开始时间", dataIndex: "started_at", width: 170, render: (v?: string) => v || "-" },
-                  { title: "完成时间", dataIndex: "finished_at", width: 170, render: (v?: string) => v || "-" },
+                  { title: t("pages.task_manager.col_note"), dataIndex: "message", ellipsis: true, render: (v?: string) => v || "-" },
+                  { title: t("pages.task_manager.col_created_at"), dataIndex: "created_at", width: 170 },
+                  { title: t("pages.task_manager.col_started_at"), dataIndex: "started_at", width: 170, render: (v?: string) => v || "-" },
+                  { title: t("pages.task_manager.col_finished_at"), dataIndex: "finished_at", width: 170, render: (v?: string) => v || "-" },
                   {
-                    title: "操作",
+                    title: t("pages.task_manager.col_actions"),
                     key: "subactions",
                     width: 90,
                     align: "center",
@@ -948,15 +950,15 @@ export default function TaskManagerPage() {
                     render: (_: unknown, r: SubtitleTask) => (
                       <Space size={4}>
                         <ActionIconConfirmButton
-                          title="重置"
-                          confirmTitle="将清除该媒体的字幕缓存与数据库记录，并标记为待处理。确定？"
+                          title={t("pages.task_manager.tooltip_reset")}
+                          confirmTitle={t("pages.task_manager.confirm_subtitle_reset")}
                           icon={<RollbackOutlined />}
                           loading={resettingSubtitleId === r.media_id}
                           onConfirm={() => {
                             setResettingSubtitleId(r.media_id);
                             void resetSubtitleTask(r.media_id)
-                              .then(() => message.success("已重置"))
-                              .catch(() => message.error("重置失败"))
+                              .then(() => message.success(t("pages.task_manager.reset_success")))
+                              .catch(() => message.error(t("pages.task_manager.reset_failed")))
                               .finally(async () => {
                                 setResettingSubtitleId(null);
                                 await loadSubtitleTasks();
@@ -964,15 +966,15 @@ export default function TaskManagerPage() {
                           }}
                         />
                         <ActionIconButton
-                          title="重新处理"
+                          title={t("pages.task_manager.tooltip_reprocess")}
                           icon={<SyncOutlined />}
                           type="primary"
                           loading={retryingSubtitleId === r.media_id}
                           onClick={() => {
                             setRetryingSubtitleId(r.media_id);
                             void retrySubtitleTask(r.media_id)
-                              .then(() => message.success("已提交重新处理"))
-                              .catch(() => message.error("提交失败"))
+                              .then(() => message.success(t("pages.task_manager.retry_submitted")))
+                              .catch(() => message.error(t("pages.task_manager.retry_failed")))
                               .finally(async () => {
                                 setRetryingSubtitleId(null);
                                 await loadSubtitleTasks();
@@ -989,48 +991,48 @@ export default function TaskManagerPage() {
         },
         {
           key: "lyric",
-          label: "歌词识别",
+          label: t("pages.task_manager.tab_lyric"),
           children: (
             <Card
-              title="歌词识别任务"
+              title={t("pages.task_manager.lyric_card_title")}
               extra={(
                 <Space>
                   {renderListHeaderControls("lyric", lyricStatusFilter, setLyricStatusFilter, () => void loadLyricTasks())}
                   <Popconfirm
-                    title="删除所有失败状态的歌词识别任务记录？"
+                    title={t("pages.task_manager.confirm_lyric_cleanup_failed")}
                     onConfirm={() => {
                       setCleaningLyricFailed(true);
                       void cleanupFailedLyricTasks()
-                        .then((n) => message.success(`已清理 ${n} 条`))
-                        .catch(() => message.error("清理失败"))
+                        .then((n) => message.success(t("pages.task_manager.cleanup_done", { n })))
+                        .catch(() => message.error(t("pages.task_manager.cleanup_failed")))
                         .finally(async () => {
                           setCleaningLyricFailed(false);
                           await loadLyricTasks();
                         });
                     }}
                   >
-                    <Button loading={cleaningLyricFailed}>清理失败记录</Button>
+                    <Button loading={cleaningLyricFailed}>{t("pages.task_manager.btn_cleanup_failed_records")}</Button>
                   </Popconfirm>
                   <Popconfirm
-                    title="删除 30 天前已完成或失败的任务记录？"
+                    title={t("pages.task_manager.confirm_subtitle_cleanup_old")}
                     onConfirm={() => {
                       setCleaningLyricOld(true);
                       void cleanupLyricTasksBefore(30)
-                        .then((n) => message.success(`已清理 ${n} 条`))
-                        .catch(() => message.error("清理失败"))
+                        .then((n) => message.success(t("pages.task_manager.cleanup_done", { n })))
+                        .catch(() => message.error(t("pages.task_manager.cleanup_failed")))
                         .finally(async () => {
                           setCleaningLyricOld(false);
                           await loadLyricTasks();
                         });
                     }}
                   >
-                    <Button loading={cleaningLyricOld}>清理 30 天前记录</Button>
+                    <Button loading={cleaningLyricOld}>{t("pages.task_manager.btn_cleanup_30d_records")}</Button>
                   </Popconfirm>
                 </Space>
               )}
             >
               <div style={{ marginBottom: 12, color: "rgba(0,0,0,0.55)", fontSize: 13 }}>
-                每个音频一条记录。在曲目列表「识别歌词」加入任务后，后台使用 ASR 生成 WebVTT 并转换为同目录 LRC 文件。
+                {t("pages.task_manager.lyric_help")}
               </div>
               <Table
                 rowKey="id"
@@ -1039,38 +1041,38 @@ export default function TaskManagerPage() {
                 pagination={{ pageSize: 12 }}
                 scroll={{ x: 1200 }}
                 columns={[
-                  { title: "任务ID", dataIndex: "id", width: 80 },
-                  { title: "媒体ID", dataIndex: "media_id", width: 90 },
-                  { title: "曲目标题", dataIndex: "title", ellipsis: true },
-                  { title: "状态", dataIndex: "status", width: 100, render: (v: string) => {
+                  { title: t("pages.task_manager.col_task_id"), dataIndex: "id", width: 80 },
+                  { title: t("pages.task_manager.col_media_id"), dataIndex: "media_id", width: 90 },
+                  { title: t("pages.task_manager.col_track_title"), dataIndex: "title", ellipsis: true },
+                  { title: t("pages.task_manager.col_status"), dataIndex: "status", width: 100, render: (v: string) => {
                     const c = v === "done" ? "green" : v === "failed" ? "red" : v === "running" ? "processing" : "default";
                     return <Tag color={c}>{v}</Tag>;
                   } },
-                  { title: "备注", dataIndex: "message", ellipsis: true, render: (v?: string) => v || "-" },
+                  { title: t("pages.task_manager.col_note"), dataIndex: "message", ellipsis: true, render: (v?: string) => v || "-" },
                   { title: "VTT", dataIndex: "vtt_path", ellipsis: true, render: (v?: string) => v || "-" },
                   { title: "LRC", dataIndex: "lrc_path", ellipsis: true, render: (v?: string) => v || "-" },
-                  { title: "创建时间", dataIndex: "created_at", width: 170 },
-                  { title: "开始时间", dataIndex: "started_at", width: 170, render: (v?: string) => v || "-" },
-                  { title: "完成时间", dataIndex: "finished_at", width: 170, render: (v?: string) => v || "-" },
+                  { title: t("pages.task_manager.col_created_at"), dataIndex: "created_at", width: 170 },
+                  { title: t("pages.task_manager.col_started_at"), dataIndex: "started_at", width: 170, render: (v?: string) => v || "-" },
+                  { title: t("pages.task_manager.col_finished_at"), dataIndex: "finished_at", width: 170, render: (v?: string) => v || "-" },
                   {
-                    title: "操作",
+                    title: t("pages.task_manager.col_actions"),
                     key: "lyricactions",
                     width: 70,
                     align: "center",
                     fixed: "right",
                     render: (_: unknown, r: LyricTask) => (
                       <ActionIconButton
-                        title="重试"
+                        title={t("pages.task_manager.tooltip_retry")}
                         icon={<RedoOutlined />}
                         loading={retryingLyricId === r.media_id}
                         onClick={async () => {
                           setRetryingLyricId(r.media_id);
                           try {
                             await retryLyricTask(r.media_id);
-                            message.success("已提交重新识别");
+                            message.success(t("pages.task_manager.reprocess_submitted"));
                             await loadLyricTasks();
                           } catch {
-                            message.error("提交失败");
+                            message.error(t("pages.task_manager.reprocess_failed"));
                           } finally {
                             setRetryingLyricId(null);
                           }
@@ -1085,10 +1087,10 @@ export default function TaskManagerPage() {
         },
         {
           key: "preview",
-          label: "进度条预览任务",
+          label: t("pages.task_manager.tab_preview"),
           children: (
             <Card
-              title="进度条预览任务"
+              title={t("pages.task_manager.preview_card_title")}
               extra={(
                 <Space>
                   {renderListHeaderControls("preview", previewStatusFilter, setPreviewStatusFilter, () => void loadPreview())}
@@ -1100,27 +1102,27 @@ export default function TaskManagerPage() {
                 dataSource={filteredPreview}
                 pagination={{ pageSize: 10 }}
                 columns={[
-                  { title: "媒体ID", dataIndex: "media_id", width: 90 },
-                  { title: "标题", dataIndex: "title", ellipsis: true },
-                  { title: "状态", dataIndex: "status", width: 110 },
-                  { title: "间隔(s)", dataIndex: "interval_sec", width: 90 },
-                  { title: "缩略图数", dataIndex: "thumb_count", width: 100 },
-                  { title: "尺寸", key: "size", width: 120, render: (_: unknown, r: PreviewTask) => `${r.thumb_width}x${r.thumb_height}` },
-                  { title: "错误信息", dataIndex: "error_message", ellipsis: true, render: (v?: string) => v || "-" },
-                  { title: "更新时间", dataIndex: "updated_at", width: 180 },
+                  { title: t("pages.task_manager.col_media_id"), dataIndex: "media_id", width: 90 },
+                  { title: t("pages.task_manager.col_title"), dataIndex: "title", ellipsis: true },
+                  { title: t("pages.task_manager.col_status"), dataIndex: "status", width: 110 },
+                  { title: t("pages.task_manager.col_interval_s"), dataIndex: "interval_sec", width: 90 },
+                  { title: t("pages.task_manager.col_thumb_count"), dataIndex: "thumb_count", width: 100 },
+                  { title: t("pages.task_manager.col_size"), key: "size", width: 120, render: (_: unknown, r: PreviewTask) => `${r.thumb_width}x${r.thumb_height}` },
+                  { title: t("pages.task_manager.col_error_message"), dataIndex: "error_message", ellipsis: true, render: (v?: string) => v || "-" },
+                  { title: t("pages.task_manager.col_updated_at"), dataIndex: "updated_at", width: 180 },
                   {
-                    title: "操作",
+                    title: t("pages.task_manager.col_actions"),
                     key: "actions",
                     width: 70,
                     align: "center",
                     render: (_: unknown, r: PreviewTask) => (
                       <ActionIconButton
-                        title="重试"
+                        title={t("pages.task_manager.tooltip_retry")}
                         icon={<RedoOutlined />}
                         loading={retryingPreview === r.media_id}
                         onClick={() => {
                           setRetryingPreview(r.media_id);
-                          void retryPreviewTask(r.media_id).then(() => message.success("已触发重试")).then(loadPreview).catch(() => message.error("重试失败")).finally(() => setRetryingPreview(null));
+                          void retryPreviewTask(r.media_id).then(() => message.success(t("pages.task_manager.trigger_retry_success"))).then(loadPreview).catch(() => message.error(t("pages.task_manager.retry_failed"))).finally(() => setRetryingPreview(null));
                         }}
                       />
                     ),
@@ -1132,10 +1134,10 @@ export default function TaskManagerPage() {
         },
         {
           key: "atrack",
-          label: "音轨提取任务",
+          label: t("pages.task_manager.tab_atrack"),
           children: (
             <Card
-              title="音轨提取任务"
+              title={t("pages.task_manager.atrack_card_title")}
               extra={(
                 <Space>
                   {renderListHeaderControls("atrack", atrackStatusFilter, setAtrackStatusFilter, () => void loadAtrackTasks())}
@@ -1148,30 +1150,30 @@ export default function TaskManagerPage() {
                 dataSource={filteredAtrack}
                 pagination={{ pageSize: 10 }}
                 columns={[
-                  { title: "媒体ID", dataIndex: "media_id", width: 90 },
-                  { title: "标题", dataIndex: "title", ellipsis: true },
-                  { title: "状态", dataIndex: "status", width: 110 },
-                  { title: "输出目录", dataIndex: "output_dir", ellipsis: true, render: (v?: string) => v || "-" },
-                  { title: "错误信息", dataIndex: "error_message", ellipsis: true, render: (v?: string) => v || "-" },
-                  { title: "更新时间", dataIndex: "updated_at", width: 180 },
+                  { title: t("pages.task_manager.col_media_id"), dataIndex: "media_id", width: 90 },
+                  { title: t("pages.task_manager.col_title"), dataIndex: "title", ellipsis: true },
+                  { title: t("pages.task_manager.col_status"), dataIndex: "status", width: 110 },
+                  { title: t("pages.task_manager.col_output_dir"), dataIndex: "output_dir", ellipsis: true, render: (v?: string) => v || "-" },
+                  { title: t("pages.task_manager.col_error_message"), dataIndex: "error_message", ellipsis: true, render: (v?: string) => v || "-" },
+                  { title: t("pages.task_manager.col_updated_at"), dataIndex: "updated_at", width: 180 },
                   {
-                    title: "操作",
+                    title: t("pages.task_manager.col_actions"),
                     key: "actions",
                     width: 70,
                     align: "center",
                     render: (_: unknown, r: AtrackTask) => (
                       <ActionIconButton
-                        title="重试"
+                        title={t("pages.task_manager.tooltip_retry")}
                         icon={<RedoOutlined />}
                         loading={retryingAtrackId === r.media_id}
                         onClick={async () => {
                           setRetryingAtrackId(r.media_id);
                           try {
                             await retryAudioTrackExtraction(r.media_id);
-                            message.success("已触发重试");
+                            message.success(t("pages.task_manager.trigger_retry_success"));
                             await loadAtrackTasks();
                           } catch {
-                            message.error("重试失败");
+                            message.error(t("pages.task_manager.retry_failed"));
                           } finally {
                             setRetryingAtrackId(null);
                           }
@@ -1186,10 +1188,10 @@ export default function TaskManagerPage() {
         },
         {
           key: "keyframe",
-          label: "关键帧提取任务",
+          label: t("pages.task_manager.tab_keyframe"),
           children: (
             <Card
-              title="关键帧提取任务"
+              title={t("pages.task_manager.keyframe_card_title")}
               extra={(
                 <Space>
                   {renderListHeaderControls("keyframe", keyframeStatusFilter, setKeyframeStatusFilter, () => void loadKeyframeTasks())}
@@ -1202,31 +1204,31 @@ export default function TaskManagerPage() {
                 dataSource={filteredKeyframe}
                 pagination={{ pageSize: 10 }}
                 columns={[
-                  { title: "媒体ID", dataIndex: "media_id", width: 90 },
-                  { title: "标题", dataIndex: "title", ellipsis: true },
-                  { title: "状态", dataIndex: "status", width: 110 },
-                  { title: "关键帧数", dataIndex: "keyframe_count", width: 100 },
-                  { title: "输出目录", dataIndex: "output_dir", ellipsis: true, render: (v?: string) => v || "-" },
-                  { title: "错误信息", dataIndex: "error_message", ellipsis: true, render: (v?: string) => v || "-" },
-                  { title: "更新时间", dataIndex: "updated_at", width: 180 },
+                  { title: t("pages.task_manager.col_media_id"), dataIndex: "media_id", width: 90 },
+                  { title: t("pages.task_manager.col_title"), dataIndex: "title", ellipsis: true },
+                  { title: t("pages.task_manager.col_status"), dataIndex: "status", width: 110 },
+                  { title: t("pages.task_manager.col_keyframe_count"), dataIndex: "keyframe_count", width: 100 },
+                  { title: t("pages.task_manager.col_output_dir"), dataIndex: "output_dir", ellipsis: true, render: (v?: string) => v || "-" },
+                  { title: t("pages.task_manager.col_error_message"), dataIndex: "error_message", ellipsis: true, render: (v?: string) => v || "-" },
+                  { title: t("pages.task_manager.col_updated_at"), dataIndex: "updated_at", width: 180 },
                   {
-                    title: "操作",
+                    title: t("pages.task_manager.col_actions"),
                     key: "actions",
                     width: 70,
                     align: "center",
                     render: (_: unknown, r: KeyframeTask) => (
                       <ActionIconButton
-                        title="重试"
+                        title={t("pages.task_manager.tooltip_retry")}
                         icon={<RedoOutlined />}
                         loading={retryingKeyframeId === r.media_id}
                         onClick={async () => {
                           setRetryingKeyframeId(r.media_id);
                           try {
                             await retryKeyframeExtraction(r.media_id);
-                            message.success("已触发重试");
+                            message.success(t("pages.task_manager.trigger_retry_success"));
                             await loadKeyframeTasks();
                           } catch {
-                            message.error("重试失败");
+                            message.error(t("pages.task_manager.retry_failed"));
                           } finally {
                             setRetryingKeyframeId(null);
                           }
@@ -1242,7 +1244,7 @@ export default function TaskManagerPage() {
       ]}
       />
       <Modal
-        title="创建定时任务"
+        title={t("pages.task_manager.scheduled_modal_create")}
         open={createModalOpen}
         onCancel={() => {
           setCreateModalOpen(false);
@@ -1252,32 +1254,32 @@ export default function TaskManagerPage() {
         confirmLoading={creatingSchedule}
       >
         <Form form={form} layout="vertical" initialValues={{ category: "media", interval_min: 60, enabled: true, task_type: "library_scan" }}>
-          <Form.Item name="name" label="任务名称" rules={[{ required: true }]}><Input /></Form.Item>
-          <Form.Item name="category" label="任务分类" rules={[{ required: true }]}>
-            <Select options={[{ value: "media", label: "媒体库相关" }, { value: "maintenance", label: "系统维护" }]} />
+          <Form.Item name="name" label={t("pages.task_manager.form_task_name")} rules={[{ required: true }]}><Input /></Form.Item>
+          <Form.Item name="category" label={t("pages.task_manager.form_category")} rules={[{ required: true }]}>
+            <Select options={[{ value: "media", label: t("pages.task_manager.category_media") }, { value: "maintenance", label: t("pages.task_manager.category_maintenance") }]} />
           </Form.Item>
-          <Form.Item name="task_type" label="任务类型" rules={[{ required: true }]}>
+          <Form.Item name="task_type" label={t("pages.task_manager.task_type_label")} rules={[{ required: true }]}>
             <Select
               options={[
-                { value: "library_scan", label: "定时扫描媒体库" },
-                { value: "subtitle_process", label: "定时字幕处理（批量）" },
-                { value: "lyric_process", label: "定时歌词识别（批量）" },
-                { value: "scrape_run", label: "定时执行刮削任务" },
-                { value: "transcode_cleanup_failed_before", label: "清理历史转码失败任务" },
-                { value: "activity_cleanup", label: "清理活动日志" },
-                { value: "db_optimize", label: "优化数据库" },
+                { value: "library_scan", label: t("pages.task_manager.task_type_library_scan") },
+                { value: "subtitle_process", label: t("pages.task_manager.task_type_subtitle_process") },
+                { value: "lyric_process", label: t("pages.task_manager.task_type_lyric_process") },
+                { value: "scrape_run", label: t("pages.task_manager.task_type_scrape_run") },
+                { value: "transcode_cleanup_failed_before", label: t("pages.task_manager.task_type_transcode_cleanup") },
+                { value: "activity_cleanup", label: t("pages.task_manager.task_type_activity_cleanup") },
+                { value: "db_optimize", label: t("pages.task_manager.task_type_db_optimize") },
               ]}
             />
           </Form.Item>
-          <Form.Item name="interval_min" label="执行间隔（分钟）" rules={[{ required: true }]}><InputNumber min={1} style={{ width: "100%" }} /></Form.Item>
-          <Form.Item name="enabled" label="启用" valuePropName="checked"><Switch /></Form.Item>
+          <Form.Item name="interval_min" label={t("pages.task_manager.form_interval_minutes")} rules={[{ required: true }]}><InputNumber min={1} style={{ width: "100%" }} /></Form.Item>
+          <Form.Item name="enabled" label={t("pages.task_manager.form_enabled")} valuePropName="checked"><Switch /></Form.Item>
           <Space wrap>
             {createTaskType === "library_scan" ? (
-              <Form.Item name="library_id" label="媒体库（扫描任务）">
+              <Form.Item name="library_id" label={t("pages.task_manager.form_library_scan")}>
                 <Select
                   allowClear
                   showSearch
-                  placeholder="选择媒体库"
+                  placeholder={t("pages.task_manager.form_library_pick")}
                   options={libraryOptions}
                   optionFilterProp="label"
                   style={{ width: 240 }}
@@ -1285,59 +1287,59 @@ export default function TaskManagerPage() {
               </Form.Item>
             ) : null}
             {createTaskType === "scrape_run" ? (
-              <Form.Item name="limit" label="处理条数（刮削任务）"><InputNumber min={1} max={200} /></Form.Item>
+              <Form.Item name="limit" label={t("pages.task_manager.form_limit_scrape")}><InputNumber min={1} max={200} /></Form.Item>
             ) : null}
             {createTaskType === "subtitle_process" ? (
               <>
-                <Form.Item name="library_id" label="媒体库（0 表示全部）">
-                  <Select allowClear showSearch placeholder="留空或 0 为全部库" options={[{ value: 0, label: "全部" }, ...libraryOptions]} optionFilterProp="label" style={{ width: 280 }} />
+                <Form.Item name="library_id" label={t("pages.task_manager.form_library_all_0")}>
+                  <Select allowClear showSearch placeholder={t("pages.task_manager.form_library_all_placeholder")} options={[{ value: 0, label: t("pages.task_manager.form_library_all_label") }, ...libraryOptions]} optionFilterProp="label" style={{ width: 280 }} />
                 </Form.Item>
-                <Form.Item name="limit" label="每轮处理视频数量"><InputNumber min={1} max={500} placeholder="默认 50" style={{ width: 200 }} /></Form.Item>
+                <Form.Item name="limit" label={t("pages.task_manager.form_limit_videos")}><InputNumber min={1} max={500} placeholder={t("pages.task_manager.form_limit_videos_default")} style={{ width: 200 }} /></Form.Item>
               </>
             ) : null}
             {createTaskType === "lyric_process" ? (
-              <Form.Item name="limit" label="每轮处理音频数量"><InputNumber min={1} max={200} placeholder="默认 20" style={{ width: 200 }} /></Form.Item>
+              <Form.Item name="limit" label={t("pages.task_manager.form_limit_audios")}><InputNumber min={1} max={200} placeholder={t("pages.task_manager.form_limit_audios_default")} style={{ width: 200 }} /></Form.Item>
             ) : null}
             {createTaskType === "transcode_cleanup_failed_before" || createTaskType === "activity_cleanup" ? (
-              <Form.Item name="days" label="保留天数（清理任务）"><InputNumber min={1} max={3650} /></Form.Item>
+              <Form.Item name="days" label={t("pages.task_manager.form_days_cleanup")}><InputNumber min={1} max={3650} /></Form.Item>
             ) : null}
           </Space>
         </Form>
       </Modal>
       <Modal
-        title="编辑定时任务"
+        title={t("pages.task_manager.scheduled_modal_edit")}
         open={!!editingTask}
         onCancel={() => setEditingTask(null)}
         onOk={() => void onUpdateScheduled()}
         confirmLoading={updatingSchedule}
       >
         <Form form={editForm} layout="vertical">
-          <Form.Item name="name" label="任务名称" rules={[{ required: true }]}><Input /></Form.Item>
-          <Form.Item name="category" label="任务分类" rules={[{ required: true }]}>
-            <Select options={[{ value: "media", label: "媒体库相关" }, { value: "maintenance", label: "系统维护" }]} />
+          <Form.Item name="name" label={t("pages.task_manager.form_task_name")} rules={[{ required: true }]}><Input /></Form.Item>
+          <Form.Item name="category" label={t("pages.task_manager.form_category")} rules={[{ required: true }]}>
+            <Select options={[{ value: "media", label: t("pages.task_manager.category_media") }, { value: "maintenance", label: t("pages.task_manager.category_maintenance") }]} />
           </Form.Item>
-          <Form.Item name="task_type" label="任务类型" rules={[{ required: true }]}>
+          <Form.Item name="task_type" label={t("pages.task_manager.task_type_label")} rules={[{ required: true }]}>
             <Select
               options={[
-                { value: "library_scan", label: "定时扫描媒体库" },
-                { value: "subtitle_process", label: "定时字幕处理（批量）" },
-                { value: "lyric_process", label: "定时歌词识别（批量）" },
-                { value: "scrape_run", label: "定时执行刮削任务" },
-                { value: "transcode_cleanup_failed_before", label: "清理历史转码失败任务" },
-                { value: "activity_cleanup", label: "清理活动日志" },
-                { value: "db_optimize", label: "优化数据库" },
+                { value: "library_scan", label: t("pages.task_manager.task_type_library_scan") },
+                { value: "subtitle_process", label: t("pages.task_manager.task_type_subtitle_process") },
+                { value: "lyric_process", label: t("pages.task_manager.task_type_lyric_process") },
+                { value: "scrape_run", label: t("pages.task_manager.task_type_scrape_run") },
+                { value: "transcode_cleanup_failed_before", label: t("pages.task_manager.task_type_transcode_cleanup") },
+                { value: "activity_cleanup", label: t("pages.task_manager.task_type_activity_cleanup") },
+                { value: "db_optimize", label: t("pages.task_manager.task_type_db_optimize") },
               ]}
             />
           </Form.Item>
-          <Form.Item name="interval_min" label="执行间隔（分钟）" rules={[{ required: true }]}><InputNumber min={1} style={{ width: "100%" }} /></Form.Item>
-          <Form.Item name="enabled" label="启用" valuePropName="checked"><Switch /></Form.Item>
+          <Form.Item name="interval_min" label={t("pages.task_manager.form_interval_minutes")} rules={[{ required: true }]}><InputNumber min={1} style={{ width: "100%" }} /></Form.Item>
+          <Form.Item name="enabled" label={t("pages.task_manager.form_enabled")} valuePropName="checked"><Switch /></Form.Item>
           <Space wrap>
             {editTaskType === "library_scan" ? (
-              <Form.Item name="library_id" label="媒体库（扫描任务）">
+              <Form.Item name="library_id" label={t("pages.task_manager.form_library_scan")}>
                 <Select
                   allowClear
                   showSearch
-                  placeholder="选择媒体库"
+                  placeholder={t("pages.task_manager.form_library_pick")}
                   options={libraryOptions}
                   optionFilterProp="label"
                   style={{ width: 240 }}
@@ -1345,21 +1347,21 @@ export default function TaskManagerPage() {
               </Form.Item>
             ) : null}
             {editTaskType === "scrape_run" ? (
-              <Form.Item name="limit" label="处理条数（刮削任务）"><InputNumber min={1} max={200} /></Form.Item>
+              <Form.Item name="limit" label={t("pages.task_manager.form_limit_scrape")}><InputNumber min={1} max={200} /></Form.Item>
             ) : null}
             {editTaskType === "subtitle_process" ? (
               <>
-                <Form.Item name="library_id" label="媒体库（0 表示全部）">
-                  <Select allowClear showSearch placeholder="留空或 0 为全部库" options={[{ value: 0, label: "全部" }, ...libraryOptions]} optionFilterProp="label" style={{ width: 280 }} />
+                <Form.Item name="library_id" label={t("pages.task_manager.form_library_all_0")}>
+                  <Select allowClear showSearch placeholder={t("pages.task_manager.form_library_all_placeholder")} options={[{ value: 0, label: t("pages.task_manager.form_library_all_label") }, ...libraryOptions]} optionFilterProp="label" style={{ width: 280 }} />
                 </Form.Item>
-                <Form.Item name="limit" label="每轮处理视频数量"><InputNumber min={1} max={500} placeholder="默认 50" style={{ width: 200 }} /></Form.Item>
+                <Form.Item name="limit" label={t("pages.task_manager.form_limit_videos")}><InputNumber min={1} max={500} placeholder={t("pages.task_manager.form_limit_videos_default")} style={{ width: 200 }} /></Form.Item>
               </>
             ) : null}
             {editTaskType === "lyric_process" ? (
-              <Form.Item name="limit" label="每轮处理音频数量"><InputNumber min={1} max={200} placeholder="默认 20" style={{ width: 200 }} /></Form.Item>
+              <Form.Item name="limit" label={t("pages.task_manager.form_limit_audios")}><InputNumber min={1} max={200} placeholder={t("pages.task_manager.form_limit_audios_default")} style={{ width: 200 }} /></Form.Item>
             ) : null}
             {editTaskType === "transcode_cleanup_failed_before" || editTaskType === "activity_cleanup" ? (
-              <Form.Item name="days" label="保留天数（清理任务）"><InputNumber min={1} max={3650} /></Form.Item>
+              <Form.Item name="days" label={t("pages.task_manager.form_days_cleanup")}><InputNumber min={1} max={3650} /></Form.Item>
             ) : null}
           </Space>
         </Form>

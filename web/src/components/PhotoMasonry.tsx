@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { MediaItem, photoThumbSrc } from "../api/client";
+import { tGlobal } from "../i18n";
 import styles from "./PhotoMasonry.module.css";
 
 const MIN_COL_PX = 160;
@@ -190,7 +191,7 @@ export default function PhotoMasonry({ items, onOpen }: Props) {
                     onLoad={(e) => onImgLoad(item.id, e.currentTarget)}
                   />
                 </div>
-                <div className={styles.caption}>{item.title || "未命名"}</div>
+                <div className={styles.caption}>{item.title || tGlobal("components.photo_lightbox.untitled")}</div>
               </div>
             ))}
           </div>

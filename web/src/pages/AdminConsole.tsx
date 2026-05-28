@@ -2,9 +2,11 @@ import { Button, Card, Col, Progress, Row, Space, Statistic, Table, Tag, Tooltip
 import { useEffect, useState } from "react";
 import { ReloadOutlined } from "@ant-design/icons";
 import { fetchAdminOverview, type AdminOverview } from "../api/client";
+import { useT } from "../i18n";
 import { useAuthStore } from "../store/auth";
 
 export default function AdminConsolePage() {
+  const t = useT();
   const token = useAuthStore((s) => s.token);
   const [overview, setOverview] = useState<AdminOverview | null>(null);
   const [overviewLoading, setOverviewLoading] = useState(false);
@@ -64,15 +66,19 @@ export default function AdminConsolePage() {
   return (
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
       <Card
-        title="系统监控"
+        title={t("pages.admin_console.system_monitor")}
         loading={overviewLoading}
         extra={
           <Space>
             <Tag color={streamConnected ? "green" : "orange"}>
-              {streamConnected ? "推送已连接" : "轮询模式"}
+              {streamConnected ? t("pages.admin_console.stream_connected") : t("pages.admin_console.polling_mode")}
             </Tag>
-            <Tooltip title="刷新监控">
-              <Button icon={<ReloadOutlined />} onClick={() => void loadOverview(false, false)} aria-label="刷新监控" />
+            <Tooltip title={t("pages.admin_console.refresh_tooltip")}>
+              <Button
+                icon={<ReloadOutlined />}
+                onClick={() => void loadOverview(false, false)}
+                aria-label={t("pages.admin_console.refresh_aria")}
+              />
             </Tooltip>
           </Space>
         }
@@ -80,56 +86,56 @@ export default function AdminConsolePage() {
         <Row gutter={16}>
           <Col xs={24} md={12} lg={8}>
             <Card size="small">
-              <Statistic title="CPU 占用" value={overview?.monitor.cpu_percent ?? 0} precision={1} suffix="%" />
+              <Statistic title={t("pages.admin_console.cpu_usage")} value={overview?.monitor.cpu_percent ?? 0} precision={1} suffix="%" />
               <Progress percent={Number((overview?.monitor.cpu_percent ?? 0).toFixed(1))} size="small" />
             </Card>
           </Col>
           <Col xs={24} md={12} lg={8}>
             <Card size="small">
-              <Statistic title="内存占用" value={overview?.monitor.memory_percent ?? 0} precision={1} suffix="%" />
+              <Statistic title={t("pages.admin_console.memory_usage")} value={overview?.monitor.memory_percent ?? 0} precision={1} suffix="%" />
               <Progress percent={Number((overview?.monitor.memory_percent ?? 0).toFixed(1))} size="small" />
             </Card>
           </Col>
           <Col xs={24} md={12} lg={8}>
             <Card size="small">
-              <Statistic title="磁盘占用" value={overview?.monitor.disk_percent ?? 0} precision={1} suffix="%" />
+              <Statistic title={t("pages.admin_console.disk_usage")} value={overview?.monitor.disk_percent ?? 0} precision={1} suffix="%" />
               <Progress percent={Number((overview?.monitor.disk_percent ?? 0).toFixed(1))} size="small" />
             </Card>
           </Col>
           <Col xs={24} md={12} lg={8}>
             <Card size="small">
-              <Statistic title="转码任务数" value={overview?.monitor.transcode_task_count ?? 0} />
+              <Statistic title={t("pages.admin_console.transcode_tasks")} value={overview?.monitor.transcode_task_count ?? 0} />
             </Card>
           </Col>
           <Col xs={24} md={12} lg={8}>
             <Card size="small">
-              <Statistic title="媒体总数" value={overview?.monitor.media_total ?? 0} />
+              <Statistic title={t("pages.admin_console.media_total")} value={overview?.monitor.media_total ?? 0} />
             </Card>
           </Col>
         </Row>
       </Card>
 
-      <Card title="系统信息" loading={overviewLoading}>
+      <Card title={t("pages.admin_console.system_info")} loading={overviewLoading}>
         <Row gutter={16}>
-          <Col xs={24} md={12} lg={8}><Statistic title="CPU 数量" value={overview?.system.cpu_count ?? 0} /></Col>
-          <Col xs={24} md={12} lg={8}><Statistic title="内存大小" value={fmtBytesGB(overview?.system.memory_total)} /></Col>
-          <Col xs={24} md={12} lg={8}><Statistic title="操作系统" value={overview?.system.os || "-"} /></Col>
-          <Col xs={24} md={12} lg={8}><Statistic title="数据库" value={overview?.system.database || "-"} /></Col>
-          <Col xs={24} md={12} lg={8}><Statistic title="软件版本" value={overview?.system.software_version || "dev"} /></Col>
+          <Col xs={24} md={12} lg={8}><Statistic title={t("pages.admin_console.cpu_count")} value={overview?.system.cpu_count ?? 0} /></Col>
+          <Col xs={24} md={12} lg={8}><Statistic title={t("pages.admin_console.memory_size")} value={fmtBytesGB(overview?.system.memory_total)} /></Col>
+          <Col xs={24} md={12} lg={8}><Statistic title={t("pages.admin_console.os")} value={overview?.system.os || "-"} /></Col>
+          <Col xs={24} md={12} lg={8}><Statistic title={t("pages.admin_console.database")} value={overview?.system.database || "-"} /></Col>
+          <Col xs={24} md={12} lg={8}><Statistic title={t("pages.admin_console.software_version")} value={overview?.system.software_version || "dev"} /></Col>
         </Row>
       </Card>
 
-      <Card title="当前活动" loading={overviewLoading}>
+      <Card title={t("pages.admin_console.current_activities")} loading={overviewLoading}>
         <Table
           rowKey="id"
           pagination={{ pageSize: 10 }}
           dataSource={overview?.activities ?? []}
           columns={[
-            { title: "时间", dataIndex: "created_at", width: 180 },
-            { title: "用户", dataIndex: "username", width: 120, render: (v?: string) => v || "-" },
-            { title: "动作", dataIndex: "action", width: 120 },
-            { title: "媒体ID", dataIndex: "media_id", width: 100, render: (v: number) => (v > 0 ? v : "-") },
-            { title: "说明", dataIndex: "message", ellipsis: true },
+            { title: t("pages.admin_console.col_time"), dataIndex: "created_at", width: 180 },
+            { title: t("pages.admin_console.col_user"), dataIndex: "username", width: 120, render: (v?: string) => v || "-" },
+            { title: t("pages.admin_console.col_action"), dataIndex: "action", width: 120 },
+            { title: t("pages.admin_console.col_media_id"), dataIndex: "media_id", width: 100, render: (v: number) => (v > 0 ? v : "-") },
+            { title: t("pages.admin_console.col_message"), dataIndex: "message", ellipsis: true },
           ]}
         />
       </Card>

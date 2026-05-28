@@ -15,6 +15,7 @@ import {
   unmatchMedia,
 } from "../api/client";
 import type { RecentPlaylistEntry } from "../lib/recentPlaylists";
+import { tGlobal as t } from "../i18n";
 
 export interface MediaMenuTarget {
   id: number;
@@ -38,15 +39,15 @@ export function confirmDeleteMedia(
     }
 
     Modal.confirm({
-      title: "删除媒体",
+      title: t("components.media_menu.delete_title"),
       centered: true,
-      okText: "确定",
-      cancelText: "取消",
+      okText: t("components.media_menu.ok"),
+      cancelText: t("components.media_menu.cancel"),
       okButtonProps: { danger: true },
       content: (
         <div>
           <p style={{ marginBottom: 8 }}>
-            删除此项目将从文件系统和媒体库同时删除，将删除以下文件：
+            {t("components.media_menu.delete_warning")}
           </p>
           {files.length > 0 ? (
             <ul style={{ margin: "0 0 12px", paddingLeft: 20, wordBreak: "break-all" }}>
@@ -55,18 +56,18 @@ export function confirmDeleteMedia(
               ))}
             </ul>
           ) : (
-            <p style={{ margin: "0 0 12px", color: "#8c8c8c" }}>（无可用文件路径）</p>
+            <p style={{ margin: "0 0 12px", color: "#8c8c8c" }}>{t("components.media_menu.no_paths")}</p>
           )}
-          <p style={{ marginBottom: 0 }}>您确定要继续吗？</p>
+          <p style={{ marginBottom: 0 }}>{t("components.media_menu.confirm_continue")}</p>
         </div>
       ),
       onOk: async () => {
         try {
           await deleteMedia(target.id);
-          message.success("已删除");
+          message.success(t("components.media_menu.deleted"));
           await afterDelete?.();
         } catch (err: unknown) {
-          message.error((err as Error).message || "删除失败");
+          message.error((err as Error).message || t("components.media_menu.delete_failed"));
           throw err;
         }
       },
@@ -110,7 +111,7 @@ export function buildMediaMenuItems(
 ): MenuProps {
   const preset = extra?.preset ?? "full";
   const isWatched = extra?.isWatched ?? false;
-  const watchedLabel = isWatched ? "标记为未观看" : "标记为已观看";
+  const watchedLabel = isWatched ? t("components.media_menu.watched_mark_as_unwatched") : t("components.media_menu.watched_mark_as_watched");
   const atrackDone = extra?.atrackDone ?? false;
   const keyframeDone = extra?.keyframeDone ?? false;
   const onAddToPlaylist = extra?.onAddToPlaylist;
@@ -129,19 +130,19 @@ export function buildMediaMenuItems(
   const addToChildren: MenuProps["items"] = [
     {
       key: "addToCollection",
-      label: "添加到收藏集...",
+      label: t("components.media_menu.add_to_collection"),
     },
     { type: "divider" as const },
     {
       key: "openAddToPlaylist",
-      label: "添加到播放列表...",
+      label: t("components.media_menu.add_to_playlist"),
       disabled: !onAddToPlaylist,
     },
   ];
   if (recentPlaylists.length > 0 && onQuickAddToPlaylist) {
     addToChildren.push({
       type: "group",
-      label: "最近",
+      label: t("components.media_menu.recent"),
       children: recentPlaylists.slice(0, 3).map((pl) => ({
         key: `recentPlaylist:${pl.id}`,
         label: pl.name,
@@ -150,46 +151,46 @@ export function buildMediaMenuItems(
   }
 
   const fullItems: MenuProps["items"] = [
-      { key: "play", label: "播放" },
-      { key: "detail", label: "详情" },
+      { key: "play", label: t("components.media_menu.play") },
+      { key: "detail", label: t("components.media_menu.detail") },
       { type: "divider" as const },
       {
         key: "addTo",
-        label: "添加到",
+        label: t("components.media_menu.add_to"),
         children: addToChildren,
       },
       { key: "toggleWatched", label: watchedLabel },
       ...(onRemoveFromContinueWatching
-        ? [{ key: "removeFromContinueWatching", label: "从继续观看移除" }]
+        ? [{ key: "removeFromContinueWatching", label: t("components.media_menu.remove_from_continue") }]
         : []),
-      ...(onOpenMatch && !scraped ? [{ key: "match", label: "匹配" }] : []),
+      ...(onOpenMatch && !scraped ? [{ key: "match", label: t("components.media_menu.match") }] : []),
       ...(onOpenMatch && scraped
         ? [
-            { key: "fixMatch", label: "修改匹配" },
-            { key: "unmatch", label: "取消匹配" },
+            { key: "fixMatch", label: t("components.media_menu.fix_match") },
+            { key: "unmatch", label: t("components.media_menu.unmatch") },
           ]
         : []),
       { type: "divider" as const },
-      { key: "refreshMetadata", label: "刷新元数据" },
-      { key: "analyze", label: "分析" },
-      { key: "optimize", label: "优化" },
+      { key: "refreshMetadata", label: t("components.media_menu.refresh_metadata") },
+      { key: "analyze", label: t("components.media_menu.analyze") },
+      { key: "optimize", label: t("components.media_menu.optimize") },
       { type: "divider" as const },
-      { key: "recognizeSubtitles", label: "识别字幕" },
-      { key: "extractAudio", label: atrackDone ? "重新分离音轨" : "分离音轨" },
-      { key: "extractKeyframes", label: keyframeDone ? "重新提取关键帧" : "提取关键帧" },
+      { key: "recognizeSubtitles", label: t("components.media_menu.recognize_subtitles") },
+      { key: "extractAudio", label: atrackDone ? t("components.media_menu.reextract_audio") : t("components.media_menu.extract_audio") },
+      { key: "extractKeyframes", label: keyframeDone ? t("components.media_menu.reextract_keyframes") : t("components.media_menu.extract_keyframes") },
       { type: "divider" as const },
-      { key: "viewHistory", label: "查看播放历史" },
-      { key: "getInfo", label: preset === "detailMore" ? "查看信息" : "获取信息" },
+      { key: "viewHistory", label: t("components.media_menu.view_history") },
+      { key: "getInfo", label: preset === "detailMore" ? t("components.media_menu.get_info_view") : t("components.media_menu.get_info_get") },
       ...(onUnfavorite
         ? [
             { type: "divider" as const },
-            { key: "unfavorite", label: "取消收藏", danger: true },
+            { key: "unfavorite", label: t("components.media_menu.unfavorite"), danger: true },
           ]
         : []),
       ...(!hideDelete
         ? [
             { type: "divider" as const },
-            { key: "delete", label: "删除", danger: true },
+            { key: "delete", label: t("components.media_menu.delete"), danger: true },
           ]
         : []),
     ];
@@ -197,23 +198,23 @@ export function buildMediaMenuItems(
   const detailMoreItems: MenuProps["items"] = [
     {
       key: "addTo",
-      label: "添加到",
+      label: t("components.media_menu.add_to"),
       children: addToChildren,
     },
     { type: "divider" as const },
-    { key: "refreshMetadata", label: "刷新元数据" },
-    { key: "analyze", label: "分析" },
-    ...(onOpenMatch && !scraped ? [{ key: "match", label: "匹配" }] : []),
+    { key: "refreshMetadata", label: t("components.media_menu.refresh_metadata") },
+    { key: "analyze", label: t("components.media_menu.analyze") },
+    ...(onOpenMatch && !scraped ? [{ key: "match", label: t("components.media_menu.match") }] : []),
     ...(onOpenMatch && scraped
       ? [
-          { key: "fixMatch", label: "修改匹配" },
-          { key: "unmatch", label: "取消匹配" },
+          { key: "fixMatch", label: t("components.media_menu.fix_match") },
+          { key: "unmatch", label: t("components.media_menu.unmatch") },
         ]
       : []),
-    { key: "optimize", label: "优化" },
+    { key: "optimize", label: t("components.media_menu.optimize") },
     { type: "divider" as const },
-    { key: "viewHistory", label: "查看播放历史" },
-    { key: "getInfo", label: "查看信息" },
+    { key: "viewHistory", label: t("components.media_menu.view_history") },
+    { key: "getInfo", label: t("components.media_menu.get_info_view") },
   ];
 
   return {
@@ -229,36 +230,36 @@ export function buildMediaMenuItems(
           break;
         case "addToCollection":
           addFavorite(r.id)
-            .then(() => message.success("已加入收藏集"))
-            .catch(() => message.error("操作失败"));
+            .then(() => message.success(t("components.media_menu.added_to_favorites")))
+            .catch(() => message.error(t("components.media_menu.operation_failed")));
           break;
         case "openAddToPlaylist":
           if (onAddToPlaylist) {
             onAddToPlaylist(r.id);
           } else {
-            message.info("播放列表功能开发中");
+            message.info(t("components.media_menu.playlist_wip"));
           }
           break;
         case "toggleWatched":
           if (isWatched) {
             markUnwatched(r.id)
               .then(() => {
-                message.success("已标记为未观看");
+                message.success(t("components.media_menu.marked_unwatched"));
                 afterToggleWatched?.();
               })
-              .catch(() => message.error("操作失败"));
+              .catch(() => message.error(t("components.media_menu.operation_failed")));
           } else {
             markWatched(r.id)
               .then(() => {
-                message.success("已标记为已观看");
+                message.success(t("components.media_menu.marked_watched"));
                 afterToggleWatched?.();
               })
-              .catch(() => message.error("操作失败"));
+              .catch(() => message.error(t("components.media_menu.operation_failed")));
           }
           break;
         case "removeFromContinueWatching":
           void Promise.resolve(onRemoveFromContinueWatching?.(r.id)).catch(() =>
-            message.error("操作失败"),
+            message.error(t("components.media_menu.operation_failed")),
           );
           break;
         case "match":
@@ -267,18 +268,18 @@ export function buildMediaMenuItems(
           break;
         case "unmatch":
           Modal.confirm({
-            title: "取消匹配",
+            title: t("components.media_menu.unmatch_modal_title"),
             centered: true,
-            okText: "确定",
-            cancelText: "取消",
-            content: "将清除该媒体的刮削元数据，标题将恢复为原始文件名。",
+            okText: t("components.media_menu.ok"),
+            cancelText: t("components.media_menu.cancel"),
+            content: t("components.media_menu.unmatch_modal_content"),
             onOk: async () => {
               try {
                 await unmatchMedia(r.id);
-                message.success("已取消匹配");
+                message.success(t("components.media_menu.unmatched"));
                 await afterUnmatch?.();
               } catch (err: unknown) {
-                message.error((err as Error).message || "操作失败");
+                message.error((err as Error).message || t("components.media_menu.operation_failed"));
                 throw err;
               }
             },
@@ -292,36 +293,36 @@ export function buildMediaMenuItems(
           break;
         case "refreshMetadata":
           createScrapeTasks([r.id])
-            .then(() => message.success("已创建刮削任务"))
-            .catch(() => message.error("操作失败"));
+            .then(() => message.success(t("components.media_menu.scrape_task_created")))
+            .catch(() => message.error(t("components.media_menu.operation_failed")));
           break;
         case "analyze":
           transcodeAsync(r.id, "analyze")
-            .then(() => message.success("已创建分析任务"))
-            .catch(() => message.error("操作失败"));
+            .then(() => message.success(t("components.media_menu.analyze_task_created")))
+            .catch(() => message.error(t("components.media_menu.operation_failed")));
           break;
         case "optimize":
           transcodeAsync(r.id, "optimize")
-            .then(() => message.success("已创建优化任务"))
-            .catch(() => message.error("操作失败"));
+            .then(() => message.success(t("components.media_menu.optimize_task_created")))
+            .catch(() => message.error(t("components.media_menu.operation_failed")));
           break;
         case "recognizeSubtitles":
           recognizeMediaSubtitles(r.id)
-            .then(() => message.success("已加入字幕识别任务"))
+            .then(() => message.success(t("components.media_menu.subtitle_task_created")))
             .catch((err: unknown) => {
               const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error;
-              message.error(msg || "操作失败");
+              message.error(msg || t("components.media_menu.operation_failed"));
             });
           break;
         case "extractAudio":
           extractAudioTrack(r.id)
-            .then(() => message.success("已创建音轨提取任务"))
-            .catch(() => message.error("操作失败"));
+            .then(() => message.success(t("components.media_menu.atrack_task_created")))
+            .catch(() => message.error(t("components.media_menu.operation_failed")));
           break;
         case "extractKeyframes":
           extractKeyframes(r.id)
-            .then(() => message.success("已创建关键帧提取任务"))
-            .catch(() => message.error("操作失败"));
+            .then(() => message.success(t("components.media_menu.keyframe_task_created")))
+            .catch(() => message.error(t("components.media_menu.operation_failed")));
           break;
         case "viewHistory":
           nav(`/playback-history?media_id=${r.id}`);

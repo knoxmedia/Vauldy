@@ -2,6 +2,7 @@ import { Checkbox } from "antd";
 import { HolderOutlined } from "@ant-design/icons";
 import { useEffect, useMemo, useState } from "react";
 import type { ScrapeProviderOption } from "../lib/scrapeProviders";
+import { tGlobal } from "../i18n";
 import styles from "./ProviderPriorityPicker.module.css";
 
 type RowState = { id: string; enabled: boolean };
@@ -101,7 +102,7 @@ export default function ProviderPriorityPicker({
               <span
                 className={styles.dragHandle}
                 draggable
-                title="拖动排序"
+                title={tGlobal("pages.playlists.drag_to_sort")}
                 onDragStart={(e) => {
                   e.dataTransfer.setData("text/plain", String(index));
                   e.dataTransfer.effectAllowed = "move";

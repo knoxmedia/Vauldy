@@ -6,6 +6,7 @@ import {
   normalizeListPosterUrl,
   updateSeries,
 } from "../api/client";
+import { useT } from "../i18n";
 
 const { Text } = Typography;
 
@@ -27,6 +28,7 @@ export interface SeriesEditModalProps {
 }
 
 export default function SeriesEditModal({ series, open, onClose, onSaved }: SeriesEditModalProps) {
+  const t = useT();
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [title, setTitle] = useState("");
@@ -49,7 +51,7 @@ export default function SeriesEditModal({ series, open, onClose, onSaved }: Seri
         setPoster(posterVal);
         setOverview(parseSeriesOverview(detail.meta_json));
       } catch (e: unknown) {
-        if (!cancelled) message.error((e as Error).message || "加载剧集信息失败");
+        if (!cancelled) message.error((e as Error).message || t("components.series_edit_modal.load_failed"));
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -63,7 +65,7 @@ export default function SeriesEditModal({ series, open, onClose, onSaved }: Seri
     if (!series) return;
     const trimmedTitle = title.trim();
     if (!trimmedTitle) {
-      message.warning("请填写标题");
+      message.warning(t("components.series_edit_modal.title_required"));
       return;
     }
     setSaving(true);
@@ -74,7 +76,7 @@ export default function SeriesEditModal({ series, open, onClose, onSaved }: Seri
         poster: poster.trim() || undefined,
         overview: overview.trim() || undefined,
       });
-      message.success("已保存");
+      message.success(t("components.series_edit_modal.saved"));
       onSaved?.({
         id: series.id,
         title: data.title || trimmedTitle,
@@ -85,7 +87,7 @@ export default function SeriesEditModal({ series, open, onClose, onSaved }: Seri
       });
       onClose();
     } catch (e: unknown) {
-      message.error((e as Error).message || "保存失败");
+      message.error((e as Error).message || t("components.series_edit_modal.save_failed"));
     } finally {
       setSaving(false);
     }
@@ -93,12 +95,12 @@ export default function SeriesEditModal({ series, open, onClose, onSaved }: Seri
 
   return (
     <Modal
-      title="编辑剧集"
+      title={t("components.series_edit_modal.title")}
       open={open}
       onCancel={onClose}
       onOk={() => void handleSave()}
-      okText="保存"
-      cancelText="取消"
+      okText={t("components.series_edit_modal.ok")}
+      cancelText={t("components.series_edit_modal.cancel")}
       confirmLoading={saving}
       destroyOnClose
       centered
@@ -111,35 +113,35 @@ export default function SeriesEditModal({ series, open, onClose, onSaved }: Seri
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           <div>
-            <Text type="secondary">标题</Text>
-            <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="剧集标题" />
+            <Text type="secondary">{t("components.series_edit_modal.label_title")}</Text>
+            <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder={t("components.series_edit_modal.title_placeholder")} />
           </div>
           <div>
-            <Text type="secondary">年份</Text>
+            <Text type="secondary">{t("components.series_edit_modal.label_year")}</Text>
             <InputNumber
               value={year}
               onChange={(v) => setYear(typeof v === "number" ? v : null)}
               min={1800}
               max={2100}
-              placeholder="可选"
+              placeholder={t("components.series_edit_modal.year_placeholder")}
               style={{ width: "100%" }}
             />
           </div>
           <div>
-            <Text type="secondary">海报 URL</Text>
+            <Text type="secondary">{t("components.series_edit_modal.label_poster")}</Text>
             <Input
               value={poster}
               onChange={(e) => setPoster(e.target.value)}
-              placeholder="/metadata/library/… 或完整 URL"
+              placeholder={t("components.series_edit_modal.poster_placeholder")}
             />
           </div>
           <div>
-            <Text type="secondary">简介</Text>
+            <Text type="secondary">{t("components.series_edit_modal.label_overview")}</Text>
             <Input.TextArea
               value={overview}
               onChange={(e) => setOverview(e.target.value)}
               rows={5}
-              placeholder="剧集简介"
+              placeholder={t("components.series_edit_modal.overview_placeholder")}
             />
           </div>
         </div>

@@ -1,4 +1,5 @@
 import type { MusicTrackRow } from "../api/client";
+import { tGlobal } from "../i18n";
 
 export type TrackColumnId =
   | "title"
@@ -18,27 +19,38 @@ export type TrackSortOrder = "asc" | "desc";
 
 export type TrackColumnDef = {
   id: TrackColumnId;
-  label: string;
+  /** Computed at access time so it follows the active locale. */
+  readonly label: string;
   defaultVisible: boolean;
   sortable: boolean;
   /** Hidden from picker when album column is not applicable */
   requiresAlbum?: boolean;
 };
 
-export const TRACK_COLUMNS: TrackColumnDef[] = [
-  { id: "title", label: "标题", defaultVisible: true, sortable: true },
-  { id: "album_artist", label: "专辑艺人", defaultVisible: true, sortable: true },
-  { id: "artist", label: "艺术家", defaultVisible: true, sortable: true },
-  { id: "album", label: "专辑", defaultVisible: true, sortable: true, requiresAlbum: true },
-  { id: "rating", label: "评分", defaultVisible: false, sortable: true },
-  { id: "duration", label: "时长", defaultVisible: true, sortable: true },
-  { id: "plays", label: "播放", defaultVisible: false, sortable: true },
-  { id: "added_at", label: "日期已添加", defaultVisible: false, sortable: true },
-  { id: "played_at", label: "播放日期", defaultVisible: false, sortable: true },
-  { id: "rated_at", label: "评分日期", defaultVisible: false, sortable: true },
-  { id: "popularity", label: "人气", defaultVisible: false, sortable: true },
-  { id: "bitrate", label: "比特率", defaultVisible: false, sortable: true },
+type TrackColumnSpec = Omit<TrackColumnDef, "label"> & { labelKey: string };
+
+const TRACK_COLUMN_SPECS: TrackColumnSpec[] = [
+  { id: "title", labelKey: "components.music_track_list.col_title", defaultVisible: true, sortable: true },
+  { id: "album_artist", labelKey: "components.music_track_list.col_album_artist", defaultVisible: true, sortable: true },
+  { id: "artist", labelKey: "components.music_track_list.col_artist", defaultVisible: true, sortable: true },
+  { id: "album", labelKey: "components.music_track_list.col_album", defaultVisible: true, sortable: true, requiresAlbum: true },
+  { id: "rating", labelKey: "components.music_track_list.col_rating", defaultVisible: false, sortable: true },
+  { id: "duration", labelKey: "components.music_track_list.col_duration", defaultVisible: true, sortable: true },
+  { id: "plays", labelKey: "components.music_track_list.col_plays", defaultVisible: false, sortable: true },
+  { id: "added_at", labelKey: "components.music_track_list.col_added_at", defaultVisible: false, sortable: true },
+  { id: "played_at", labelKey: "components.music_track_list.col_played_at", defaultVisible: false, sortable: true },
+  { id: "rated_at", labelKey: "components.music_track_list.col_rated_at", defaultVisible: false, sortable: true },
+  { id: "popularity", labelKey: "components.music_track_list.col_popularity", defaultVisible: false, sortable: true },
+  { id: "bitrate", labelKey: "components.music_track_list.col_bitrate", defaultVisible: false, sortable: true },
 ];
+
+/** Locale-reactive column definitions. */
+export const TRACK_COLUMNS: TrackColumnDef[] = TRACK_COLUMN_SPECS.map((spec) => ({
+  ...Object.fromEntries(Object.entries(spec).filter(([k]) => k !== "labelKey")) as Omit<TrackColumnSpec, "labelKey">,
+  get label() {
+    return tGlobal(spec.labelKey);
+  },
+})) as TrackColumnDef[];
 
 export const TRACK_COLUMN_STORAGE_KEY = "knox.music.trackColumns.v1";
 

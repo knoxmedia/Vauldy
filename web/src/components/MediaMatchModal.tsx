@@ -12,6 +12,7 @@ import {
 } from "../api/client";
 import { proxyImageSrc } from "../lib/imageUrl";
 import { METADATA_PROVIDER_OPTIONS, providerLabel } from "../lib/scrapeProviders";
+import { useT, type TranslateFn } from "../i18n";
 import styles from "./MediaMatchModal.module.css";
 
 const { Text, Paragraph } = Typography;
@@ -20,11 +21,13 @@ const MATCH_SOURCE_OPTIONS = METADATA_PROVIDER_OPTIONS.filter(
   (o) => o.value !== "fanart" && o.value !== "ai",
 );
 
-const LANGUAGE_OPTIONS = [
-  { value: "zh-CN", label: "中文" },
-  { value: "en-US", label: "English" },
-  { value: "ja-JP", label: "日本語" },
-];
+function buildLanguageOptions(t: TranslateFn): { value: string; label: string }[] {
+  return [
+    { value: "zh-CN", label: t("components.media_match_modal.lang_zh") },
+    { value: "en-US", label: "English" },
+    { value: "ja-JP", label: "日本語" },
+  ];
+}
 
 function parseYearFromTitle(title: string): number | undefined {
   const m = title.match(/(19|20)\d{2}/);
@@ -63,6 +66,8 @@ export default function MediaMatchModal({
   onClose,
   onMatched,
 }: MediaMatchModalProps) {
+  const t = useT();
+  const LANGUAGE_OPTIONS = useMemo(() => buildLanguageOptions(t), [t]);
   const [query, setQuery] = useState("");
   const [year, setYear] = useState<number | null>(null);
   const [source, setSource] = useState("tmdb");
@@ -95,16 +100,16 @@ export default function MediaMatchModal({
         setResults(data.items ?? []);
         setBrokenPosters(new Set());
         if ((data.items ?? []).length === 0) {
-          setSearchMessage(data.message || "未找到相似片源");
+          setSearchMessage(data.message || t("components.media_match_modal.no_similar"));
         }
       } catch (e: unknown) {
         setResults([]);
-        setSearchMessage((e as Error).message || "搜索失败");
+        setSearchMessage((e as Error).message || t("components.media_match_modal.search_failed"));
       } finally {
         setSearching(false);
       }
     },
-    [media],
+    [media, t],
   );
 
   useEffect(() => {
@@ -150,12 +155,12 @@ export default function MediaMatchModal({
         if (openTokenRef.current !== token) return;
         setResults(data.items ?? []);
         if ((data.items ?? []).length === 0) {
-          setSearchMessage(data.message || "未找到相似片源");
+          setSearchMessage(data.message || t("components.media_match_modal.no_similar"));
         }
       } catch (e: unknown) {
         if (openTokenRef.current !== token) return;
         setResults([]);
-        setSearchMessage((e as Error).message || "搜索失败");
+        setSearchMessage((e as Error).message || t("components.media_match_modal.search_failed"));
       } finally {
         if (openTokenRef.current === token) setSearching(false);
       }
@@ -181,11 +186,11 @@ export default function MediaMatchModal({
         poster: item.poster,
         overview: item.overview,
       });
-      message.success(`已匹配为「${item.title}」`);
+      message.success(t("components.media_match_modal.matched_as", { title: item.title }));
       onMatched?.(mediaMatchListUpdate(media.id, data, item));
       onClose();
     } catch (e: unknown) {
-      message.error((e as Error).message || "匹配失败");
+      message.error((e as Error).message || t("components.media_match_modal.match_failed"));
     } finally {
       setMatchingId(null);
     }
@@ -193,7 +198,7 @@ export default function MediaMatchModal({
 
   return (
     <Modal
-      title={fixMatch ? "修复匹配" : "匹配"}
+      title={fixMatch ? t("components.media_match_modal.title_fix") : t("components.media_match_modal.title_match")}
       open={open}
       onCancel={onClose}
       width={720}
@@ -201,7 +206,7 @@ export default function MediaMatchModal({
       centered
       footer={[
         <Button key="cancel" onClick={onClose}>
-          取消
+          {t("components.media_match_modal.cancel")}
         </Button>,
         <Button
           key="search"
@@ -210,13 +215,13 @@ export default function MediaMatchModal({
           disabled={!canSearch}
           onClick={() => void handleSearch()}
         >
-          搜索
+          {t("components.media_match_modal.search")}
         </Button>,
       ]}
     >
       {media?.file_path ? (
         <div className={styles.filePath}>
-          <Text type="secondary">位置：</Text>
+          <Text type="secondary">{t("components.media_match_modal.label_location")}</Text>
           <Text className={styles.filePathValue}>{media.file_path}</Text>
         </div>
       ) : null}
@@ -227,9 +232,9 @@ export default function MediaMatchModal({
           className={`${styles.toolbarAction} ${showSearchOptions ? styles.toolbarActionActive : ""}`}
           onClick={() => setShowSearchOptions((v) => !v)}
         >
-          搜索选项
+          {t("components.media_match_modal.section_search_options")}
         </button>
-        <span className={styles.toolbarLabel}>自动匹配</span>
+        <span className={styles.toolbarLabel}>{t("components.media_match_modal.auto_match")}</span>
         <Select
           className={styles.sourceSelect}
           variant="borderless"
@@ -245,16 +250,16 @@ export default function MediaMatchModal({
         <div className={styles.searchForm}>
           <div className={styles.formRow}>
             <div className={styles.field}>
-              <Text type="secondary">标题</Text>
+              <Text type="secondary">{t("components.media_match_modal.label_title")}</Text>
               <Input
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 onPressEnter={() => void handleSearch()}
-                placeholder="输入片名"
+                placeholder={t("components.media_match_modal.title_placeholder")}
               />
             </div>
             <div className={styles.field}>
-              <Text type="secondary">刮削源</Text>
+              <Text type="secondary">{t("components.media_match_modal.label_source")}</Text>
               <Select
                 value={source}
                 onChange={setSource}
@@ -265,18 +270,18 @@ export default function MediaMatchModal({
           </div>
           <div className={styles.formRow}>
             <div className={styles.field}>
-              <Text type="secondary">年份</Text>
+              <Text type="secondary">{t("components.media_match_modal.label_year")}</Text>
               <InputNumber
                 value={year}
                 onChange={(v) => setYear(typeof v === "number" ? v : null)}
                 min={1800}
                 max={2100}
-                placeholder="可选"
+                placeholder={t("components.media_match_modal.year_placeholder")}
                 style={{ width: "100%" }}
               />
             </div>
             <div className={styles.field}>
-              <Text type="secondary">语言</Text>
+              <Text type="secondary">{t("components.media_match_modal.label_language")}</Text>
               <Select
                 value={language}
                 onChange={setLanguage}
@@ -294,7 +299,7 @@ export default function MediaMatchModal({
             <Spin />
           </div>
         ) : results.length === 0 ? (
-          <Empty description={searchMessage || "未找到匹配结果"} image={Empty.PRESENTED_IMAGE_SIMPLE} />
+          <Empty description={searchMessage || t("components.media_match_modal.no_match_results")} image={Empty.PRESENTED_IMAGE_SIMPLE} />
         ) : (
           <ul className={styles.resultList}>
             {results.map((item) => {
@@ -315,7 +320,7 @@ export default function MediaMatchModal({
                         {item.year ? <span className={styles.resultYear}>{item.year}</span> : null}
                       </div>
                       <Paragraph className={styles.overview} ellipsis={{ rows: 3 }}>
-                        {item.overview || "暂无简介"}
+                        {item.overview || t("components.media_match_modal.no_overview")}
                       </Paragraph>
                       <Text type="secondary" className={styles.sourceTag}>
                         {providerLabel(item.source)}
@@ -343,7 +348,7 @@ export default function MediaMatchModal({
                           }}
                         />
                       ) : (
-                        <div className={styles.posterPlaceholder}>无图</div>
+                        <div className={styles.posterPlaceholder}>{t("components.media_match_modal.no_image")}</div>
                       )}
                     </div>
                   </button>

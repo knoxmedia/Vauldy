@@ -1,5 +1,6 @@
 import type { SVGProps } from "react";
 import type { MusicPlayMode } from "../store/musicPlayer";
+import { tGlobal } from "../i18n";
 
 type Props = SVGProps<SVGSVGElement> & {
   mode: MusicPlayMode;
@@ -50,9 +51,14 @@ export default function MusicPlayModeIcon({ mode, className, ...rest }: Props) {
   }
 }
 
-export const MUSIC_PLAY_MODE_LABELS: Record<MusicPlayMode, string> = {
-  sequential: "顺序播放",
-  "repeat-all": "列表循环",
-  shuffle: "随机播放",
-  "repeat-one": "单曲循环",
-};
+/**
+ * Reactive playback-mode labels.
+ *
+ * Reads from the active locale at access time (via tGlobal), so refreshing the
+ * UI after a language change picks up the new translations automatically.
+ */
+export const MUSIC_PLAY_MODE_LABELS = new Proxy({} as Record<MusicPlayMode, string>, {
+  get(_target, prop: string): string {
+    return tGlobal(`components.music_play_mode.${prop}`);
+  },
+});

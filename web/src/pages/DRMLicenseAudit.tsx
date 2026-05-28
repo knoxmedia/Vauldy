@@ -2,9 +2,11 @@ import { Alert, Button, Card, Descriptions, Input, Select, Space, Switch, Table,
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { fetchDRMLicenseAudits, type DRMLicenseAuditItem, type VerifyDRMLicenseResponse, verifyDRMLicense } from "../api/client";
+import { useT } from "../i18n";
 
 export default function DRMLicenseAuditPage() {
   const navigate = useNavigate();
+  const t = useT();
   const [rows, setRows] = useState<DRMLicenseAuditItem[]>([]);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [resultFilter, setResultFilter] = useState("all");
@@ -33,12 +35,14 @@ export default function DRMLicenseAuditPage() {
 
   useEffect(() => {
     void load();
+     
   }, []);
 
   useEffect(() => {
     if (!autoRefresh) return;
     const timer = window.setInterval(() => void load(), 10000);
     return () => window.clearInterval(timer);
+     
   }, [autoRefresh, resultFilter, mediaFilter, typeFilter, reasonFilter, rangeFilter]);
 
   const filtered = useMemo(
@@ -56,7 +60,7 @@ export default function DRMLicenseAuditPage() {
     } catch (err) {
       const e = err as { response?: { data?: { error?: string; code?: string } }; message?: string };
       const code = e.response?.data?.code ? `[${e.response?.data?.code}] ` : "";
-      setVerifyError(`${code}${e.response?.data?.error || e.message || "校验失败"}`);
+      setVerifyError(`${code}${e.response?.data?.error || e.message || t("pages.drm_audit.verify_failed")}`);
     } finally {
       setVerifyLoading(false);
     }
@@ -76,18 +80,18 @@ export default function DRMLicenseAuditPage() {
 
   return (
     <Space direction="vertical" style={{ width: "100%" }} size="middle">
-      <Card title="DRM 许可证校验（管理员）">
+      <Card title={t("pages.drm_audit.verify_title")}>
         <Space direction="vertical" style={{ width: "100%" }} size="small">
           <Input.TextArea
             autoSize={{ minRows: 3, maxRows: 6 }}
             value={verifyLicense}
             onChange={(e) => setVerifyLicense(e.target.value)}
-            placeholder="粘贴 base64 license"
+            placeholder={t("pages.drm_audit.verify_license_placeholder")}
           />
           <Input
             value={verifySig}
             onChange={(e) => setVerifySig(e.target.value)}
-            placeholder="粘贴 base64 sig"
+            placeholder={t("pages.drm_audit.verify_sig_placeholder")}
           />
           <Space>
             <Button
@@ -96,7 +100,7 @@ export default function DRMLicenseAuditPage() {
               onClick={() => void onVerify()}
               disabled={!verifyLicense.trim() || !verifySig.trim()}
             >
-              校验许可证
+              {t("pages.drm_audit.verify_btn")}
             </Button>
           </Space>
           {verifyError ? <Alert type="error" message={verifyError} showIcon /> : null}
@@ -111,37 +115,37 @@ export default function DRMLicenseAuditPage() {
                 size="small"
                 onClick={() => {
                   void navigator.clipboard.writeText(buildCanonicalPreview(verifyResult));
-                  message.success("已复制 canonical");
+                  message.success(t("pages.drm_audit.copied_canonical"));
                 }}
               >
-                复制 canonical
+                {t("pages.drm_audit.copy_canonical")}
               </Button>
               <Descriptions size="small" bordered column={2}>
-                <Descriptions.Item label="校验结果">
+                <Descriptions.Item label={t("pages.drm_audit.verify_result_label")}>
                   <Tag color="green">valid</Tag>
                 </Descriptions.Item>
-                <Descriptions.Item label="DRM 类型">{verifyResult.claims.drm_type}</Descriptions.Item>
-                <Descriptions.Item label="媒体 ID">{verifyResult.claims.media_id}</Descriptions.Item>
-                <Descriptions.Item label="KID">{verifyResult.claims.kid}</Descriptions.Item>
-                <Descriptions.Item label="KID 版本">{verifyResult.claims.kid_version}</Descriptions.Item>
-                <Descriptions.Item label="签名版本">{verifyResult.claims.sig_version}</Descriptions.Item>
-                <Descriptions.Item label="签发时间">{formatUnixLocal(verifyResult.claims.iat)}</Descriptions.Item>
-                <Descriptions.Item label="到期时间">{formatUnixLocal(verifyResult.claims.exp)}</Descriptions.Item>
+                <Descriptions.Item label={t("pages.drm_audit.drm_type_label")}>{verifyResult.claims.drm_type}</Descriptions.Item>
+                <Descriptions.Item label={t("pages.drm_audit.media_id_label")}>{verifyResult.claims.media_id}</Descriptions.Item>
+                <Descriptions.Item label={t("pages.drm_audit.kid_label")}>{verifyResult.claims.kid}</Descriptions.Item>
+                <Descriptions.Item label={t("pages.drm_audit.kid_version_label")}>{verifyResult.claims.kid_version}</Descriptions.Item>
+                <Descriptions.Item label={t("pages.drm_audit.sig_version_label")}>{verifyResult.claims.sig_version}</Descriptions.Item>
+                <Descriptions.Item label={t("pages.drm_audit.iat_label")}>{formatUnixLocal(verifyResult.claims.iat)}</Descriptions.Item>
+                <Descriptions.Item label={t("pages.drm_audit.exp_label")}>{formatUnixLocal(verifyResult.claims.exp)}</Descriptions.Item>
               </Descriptions>
               <Tag color={verifyResult.claims.exp * 1000 > Date.now() ? "green" : "red"}>
-                {verifyResult.claims.exp * 1000 > Date.now() ? "未过期" : "已过期"}
+                {verifyResult.claims.exp * 1000 > Date.now() ? t("pages.drm_audit.not_expired") : t("pages.drm_audit.expired")}
               </Tag>
             </>
           ) : null}
         </Space>
       </Card>
       <Card
-        title="DRM 许可证审计"
+        title={t("pages.drm_audit.title")}
         extra={
           <Space>
           <Input
             size="small"
-            placeholder="媒体ID"
+            placeholder={t("pages.drm_audit.filter_media_id")}
             style={{ width: 110 }}
             value={mediaFilter}
             onChange={(e) => setMediaFilter(e.target.value)}
@@ -171,7 +175,7 @@ export default function DRMLicenseAuditPage() {
           />
           <Input
             size="small"
-            placeholder="reason关键词"
+            placeholder={t("pages.drm_audit.filter_reason_keyword")}
             style={{ width: 140 }}
             value={reasonFilter}
             onChange={(e) => setReasonFilter(e.target.value)}
@@ -189,11 +193,11 @@ export default function DRMLicenseAuditPage() {
             ]}
           />
           <Space size={4}>
-            <span style={{ color: "#999" }}>自动刷新</span>
+            <span style={{ color: "#999" }}>{t("pages.drm_audit.auto_refresh")}</span>
             <Switch size="small" checked={autoRefresh} onChange={setAutoRefresh} />
           </Space>
           <Button size="small" onClick={() => void load()}>
-            刷新
+            {t("pages.drm_audit.refresh")}
           </Button>
           </Space>
         }
@@ -203,20 +207,20 @@ export default function DRMLicenseAuditPage() {
         dataSource={filtered}
         pagination={{ pageSize: 15 }}
         columns={[
-          { title: "ID", dataIndex: "id", width: 80 },
-          { title: "媒体ID", dataIndex: "media_id", width: 90 },
-          { title: "DRM", dataIndex: "drm_type", width: 100 },
-          { title: "结果", dataIndex: "result", width: 100 },
-          { title: "原因", dataIndex: "reason", ellipsis: true, render: (v?: string) => v || "-" },
-          { title: "客户端IP", dataIndex: "client_ip", width: 140 },
-          { title: "时间", dataIndex: "created_at", width: 180 },
+          { title: t("pages.drm_audit.col_id"), dataIndex: "id", width: 80 },
+          { title: t("pages.drm_audit.col_media_id"), dataIndex: "media_id", width: 90 },
+          { title: t("pages.drm_audit.col_drm"), dataIndex: "drm_type", width: 100 },
+          { title: t("pages.drm_audit.col_result"), dataIndex: "result", width: 100 },
+          { title: t("pages.drm_audit.col_reason"), dataIndex: "reason", ellipsis: true, render: (v?: string) => v || "-" },
+          { title: t("pages.drm_audit.col_client_ip"), dataIndex: "client_ip", width: 140 },
+          { title: t("pages.drm_audit.col_time"), dataIndex: "created_at", width: 180 },
           {
-            title: "操作",
+            title: t("pages.drm_audit.col_ops"),
             key: "ops",
             width: 100,
             render: (_: unknown, r: DRMLicenseAuditItem) => (
               <Button size="small" onClick={() => navigate(`/detail/${r.media_id}`)}>
-                媒体详情
+                {t("pages.drm_audit.view_media_detail")}
               </Button>
             ),
           },

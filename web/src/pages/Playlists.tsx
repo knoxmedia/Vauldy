@@ -27,6 +27,7 @@ import AddToListIcon from "../components/AddToListIcon";
 import PlaylistFormModal from "../components/PlaylistFormModal";
 import ShufflePlayIcon from "../components/ShufflePlayIcon";
 import ToolbarPlayIcon from "../components/ToolbarPlayIcon";
+import { useT, type TranslateFn } from "../i18n";
 import styles from "./Playlists.module.css";
 
 type PlaybackMode = "ordered" | "shuffle";
@@ -76,7 +77,7 @@ function fmtDurationShort(sec: number): string {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
-function playlistKindLabel(items: PlaylistItem[]): string {
+function playlistKindLabel(items: PlaylistItem[], t: TranslateFn): string {
   if (items.length === 0) return "—";
   const toCat = (ft: string) => {
     const f = (ft || "").toLowerCase().trim();
@@ -89,10 +90,10 @@ function playlistKindLabel(items: PlaylistItem[]): string {
   const cats = new Set(items.map((i) => toCat(i.file_type)));
   if (cats.size === 1) {
     const c = [...cats][0]!;
-    if (c === "audio") return "音乐";
-    if (c === "video") return "视频";
+    if (c === "audio") return t("pages.playlists.category_audio");
+    if (c === "video") return t("pages.playlists.category_video");
   }
-  return "其他";
+  return t("pages.playlists.category_other");
 }
 
 function detailHeroSrc(pl: Playlist, orderedItems: PlaylistItem[]): string {
@@ -105,6 +106,7 @@ function detailHeroSrc(pl: Playlist, orderedItems: PlaylistItem[]): string {
 
 export default function PlaylistsPage() {
   const nav = useNavigate();
+  const t = useT();
   const [searchParams] = useSearchParams();
   const currentMediaId = searchParams.get("current_media_id");
   const playingMediaId = currentMediaId ? Number(currentMediaId) : NaN;
@@ -162,11 +164,11 @@ export default function PlaylistsPage() {
     try {
       setPlaylists(await fetchPlaylists());
     } catch (e: unknown) {
-      message.error((e as Error).message || "加载失败");
+      message.error((e as Error).message || t("pages.playlists.load_failed"));
     } finally {
       setListLoading(false);
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     void loadPlaylists();
@@ -194,7 +196,7 @@ export default function PlaylistsPage() {
       .then((p) => {
         setDetail(p);
       })
-      .catch((e: unknown) => message.error((e as Error).message || "加载失败"))
+      .catch((e: unknown) => message.error((e as Error).message || t("pages.playlists.load_failed")))
       .finally(() => setDetailLoading(false));
   }
 
@@ -228,7 +230,7 @@ export default function PlaylistsPage() {
     const idx = displayItems.findIndex((i) => i.id === item.id);
     if (idx < 0) return;
     if (idx + 1 >= displayItems.length) {
-      message.info("已是列表中的最后一项");
+      message.info(t("pages.playlists.last_item_warning"));
       return;
     }
     const nextIdx = idx + 1;
@@ -265,19 +267,19 @@ export default function PlaylistsPage() {
   function confirmDeletePlaylist(pl: Playlist, e: React.MouseEvent) {
     e.stopPropagation();
     Modal.confirm({
-      title: "确认删除",
-      content: `您确定要删除「${pl.name}」吗？此操作不能撤销。`,
-      okText: "确定",
-      cancelText: "取消",
+      title: t("pages.playlists.delete_confirm_title"),
+      content: t("pages.playlists.delete_confirm_content", { name: pl.name }),
+      okText: t("pages.playlists.ok_text"),
+      cancelText: t("pages.playlists.cancel_text"),
       okButtonProps: { danger: true },
       centered: true,
       onOk: async () => {
         try {
           await deletePlaylist(pl.id);
-          message.success("已删除");
+          message.success(t("pages.playlists.deleted"));
           void loadPlaylists();
         } catch (err: unknown) {
-          message.error((err as Error).message || "删除失败");
+          message.error((err as Error).message || t("pages.playlists.delete_failed"));
           throw err;
         }
       },
@@ -288,11 +290,11 @@ export default function PlaylistsPage() {
     if (!detail) return;
     try {
       await removePlaylistItem(detail.id, item.id);
-      message.success("已移除");
+      message.success(t("pages.playlists.removed"));
       const updated = await fetchPlaylist(detail.id);
       setDetail(updated);
     } catch (e: unknown) {
-      message.error((e as Error).message || "移除失败");
+      message.error((e as Error).message || t("pages.playlists.remove_failed"));
     }
   }
 
@@ -313,10 +315,10 @@ export default function PlaylistsPage() {
         await reorderPlaylistItems(detail.id, payload);
       } catch (e: unknown) {
         setDetail(prevDetail);
-        message.error((e as Error).message || "排序保存失败");
+        message.error((e as Error).message || t("pages.playlists.sort_save_failed"));
       }
     },
-    [detail, playbackMode, shuffleOrder]
+    [detail, playbackMode, shuffleOrder, t]
   );
 
   function makeItemMenu(item: PlaylistItem): MenuProps {
@@ -324,14 +326,14 @@ export default function PlaylistsPage() {
       items: [
         {
           key: "play_next",
-          label: "播放下一个",
+          label: t("pages.playlists.menu_play_next"),
           icon: <ToolbarPlayIcon className={styles.playlistMenuPlaySvg} />,
           onClick: () => playNextAfter(item),
         },
         { type: "divider" },
         {
           key: "remove",
-          label: "删除",
+          label: t("pages.playlists.menu_delete"),
           danger: true,
           onClick: () => void handleDeleteItem(item),
         },
@@ -360,7 +362,7 @@ export default function PlaylistsPage() {
               className={styles.createBtn}
               onClick={openCreate}
             >
-              新建播放列表
+              {t("pages.playlists.create_btn")}
             </Button>
           </div>
         </div>
@@ -368,7 +370,7 @@ export default function PlaylistsPage() {
         {listLoading ? (
           <div className={styles.loadingWrap}><Spin /></div>
         ) : playlists.length === 0 ? (
-          <Empty description="暂无播放列表，点击「新建播放列表」开始创建" />
+          <Empty description={t("pages.playlists.empty_create_hint")} />
         ) : (
           <div className={styles.playlistGrid}>
             {playlists.map((pl) => (
@@ -397,12 +399,12 @@ export default function PlaylistsPage() {
                       <FileAddOutlined style={{ fontSize: 40, color: "rgba(255,255,255,0.2)" }} />
                     </div>
                   )}
-                  <div className={styles.playlistCountBadge}>{pl.item_count} 个项目</div>
+                  <div className={styles.playlistCountBadge}>{t("pages.playlists.item_count", { count: pl.item_count })}</div>
                   <div className={styles.playlistHoverShade}>
                     <button
                       type="button"
                       className={styles.playlistPlayBtn}
-                      aria-label="播放"
+                      aria-label={t("pages.playlists.card_play_aria")}
                       onClick={(e) => {
                         e.stopPropagation();
                         if (pl.item_count > 0) void openDetail(pl.id);
@@ -414,7 +416,7 @@ export default function PlaylistsPage() {
                   <button
                     type="button"
                     className={styles.playlistEditBtn}
-                    aria-label="编辑"
+                    aria-label={t("pages.playlists.card_edit_aria")}
                     onClick={(e) => void openEdit(pl, e)}
                   >
                     <EditOutlined />
@@ -422,7 +424,7 @@ export default function PlaylistsPage() {
                   <button
                     type="button"
                     className={styles.playlistDeleteBtn}
-                    aria-label="删除"
+                    aria-label={t("pages.playlists.card_delete_aria")}
                     onClick={(e) => confirmDeletePlaylist(pl, e)}
                   >
                     <DeleteOutlined />
@@ -456,7 +458,7 @@ export default function PlaylistsPage() {
   return (
     <div className={styles.detailPage}>
       <Button type="text" icon={<LeftOutlined />} className={styles.detailBackLink} onClick={goBack}>
-        返回
+        {t("pages.playlists.back")}
       </Button>
 
       {detailLoading ? (
@@ -481,7 +483,7 @@ export default function PlaylistsPage() {
               <button
                 type="button"
                 className={styles.detailHeroPlayFab}
-                aria-label="播放"
+                aria-label={t("pages.playlists.play_aria")}
                 disabled={displayItems.length === 0}
                 onClick={() => playFrom(0)}
               >
@@ -491,12 +493,12 @@ export default function PlaylistsPage() {
             <div className={styles.detailHeroMeta}>
               <h1 className={styles.detailHeroTitle}>{detail.name}</h1>
               <div className={styles.detailHeroSubtitle}>
-                {detail.description?.trim() ? detail.description : "[无简介]"}
+                {detail.description?.trim() ? detail.description : t("pages.playlists.no_description")}
               </div>
-              <div className={styles.detailHeroKind}>{playlistKindLabel(apiOrderedItems)}</div>
+              <div className={styles.detailHeroKind}>{playlistKindLabel(apiOrderedItems, t)}</div>
               <Rate disabled value={0} count={5} className={styles.detailHeroStars} />
               <div className={styles.detailToolbar}>
-                <Tooltip title="播放" placement="bottom">
+                <Tooltip title={t("pages.playlists.tooltip_play")} placement="bottom">
                   <span className={styles.detailToolbarIconWrap}>
                     <Button
                       type="primary"
@@ -508,11 +510,11 @@ export default function PlaylistsPage() {
                       }}
                       disabled={displayItems.length === 0}
                     >
-                      播放
+                      {t("pages.playlists.btn_play")}
                     </Button>
                   </span>
                 </Tooltip>
-                <Tooltip title="随机播放" placement="bottom">
+                <Tooltip title={t("pages.playlists.tooltip_shuffle")} placement="bottom">
                   <span className={styles.detailToolbarIconWrap}>
                     <Button
                       type="text"
@@ -521,55 +523,55 @@ export default function PlaylistsPage() {
                       data-active={playbackMode === "shuffle" ? "" : undefined}
                       onClick={() => setPlaybackMode((m) => (m === "shuffle" ? "ordered" : "shuffle"))}
                       aria-pressed={playbackMode === "shuffle"}
-                      aria-label="随机播放"
+                      aria-label={t("pages.playlists.btn_shuffle")}
                     />
                   </span>
                 </Tooltip>
-                <Tooltip title="添加到列表" placement="bottom">
+                <Tooltip title={t("pages.playlists.tooltip_add_to_list")} placement="bottom">
                   <Button
                     type="text"
                     icon={<AddToListIcon className={styles.detailToolbarAddSvg} />}
                     className={styles.detailIconBtn}
-                    aria-label="添加到列表"
+                    aria-label={t("pages.playlists.tooltip_add_to_list")}
                     onClick={() => {
-                      message.info("请在「浏览」中选择内容，通过菜单「添加到播放列表」加入本列表");
+                      message.info(t("pages.playlists.info_add_via_browse"));
                       nav("/browse");
                     }}
                   />
                 </Tooltip>
-                <Tooltip title="编辑" placement="bottom">
+                <Tooltip title={t("pages.playlists.tooltip_edit")} placement="bottom">
                   <Button
                     type="text"
                     icon={<EditOutlined />}
                     className={styles.detailIconBtn}
                     onClick={openEditFromDetail}
-                    aria-label="编辑"
+                    aria-label={t("pages.playlists.tooltip_edit")}
                   />
                 </Tooltip>
-                <Tooltip title="更多" placement="bottom">
+                <Tooltip title={t("pages.playlists.tooltip_more")} placement="bottom">
                   <Dropdown
                     menu={{
                       items: [
                         {
                           key: "p_del",
                           danger: true,
-                          label: "删除播放列表",
+                          label: t("pages.playlists.menu_delete_playlist"),
                           icon: <DeleteOutlined />,
                           onClick: () => {
                             Modal.confirm({
-                              title: "确认删除",
-                              content: `您确定要删除「${detail.name}」吗？此操作不能撤销。`,
-                              okText: "确定",
+                              title: t("pages.playlists.delete_confirm_title"),
+                              content: t("pages.playlists.delete_confirm_content", { name: detail.name }),
+                              okText: t("pages.playlists.ok_text"),
                               okButtonProps: { danger: true },
-                              cancelText: "取消",
+                              cancelText: t("pages.playlists.cancel_text"),
                               centered: true,
                               onOk: async () => {
                                 try {
                                   await deletePlaylist(detail.id);
-                                  message.success("已删除");
+                                  message.success(t("pages.playlists.deleted"));
                                   goBack();
                                 } catch (err: unknown) {
-                                  message.error((err as Error).message || "删除失败");
+                                  message.error((err as Error).message || t("pages.playlists.delete_failed"));
                                   throw err;
                                 }
                               },
@@ -581,7 +583,7 @@ export default function PlaylistsPage() {
                     trigger={["click"]}
                     placement="bottomRight"
                   >
-                    <Button type="text" icon={<MoreOutlined />} className={styles.detailIconBtn} aria-label="更多" />
+                    <Button type="text" icon={<MoreOutlined />} className={styles.detailIconBtn} aria-label={t("pages.playlists.tooltip_more")} />
                   </Dropdown>
                 </Tooltip>
               </div>
@@ -589,10 +591,10 @@ export default function PlaylistsPage() {
           </div>
 
           {displayItems.length === 0 ? (
-            <Empty className={styles.detailEmpty} description="列表为空，从「浏览」添加媒体到播放列表" />
+            <Empty className={styles.detailEmpty} description={t("pages.playlists.empty_detail")} />
           ) : (
             <>
-              <div className={styles.trackSectionHead}>{displayItems.length} 个视频</div>
+              <div className={styles.trackSectionHead}>{t("pages.playlists.video_count", { count: displayItems.length })}</div>
               <div className={styles.trackList}>
                 {displayItems.map((item, globalIdx) => {
                   const isPlaying =
@@ -648,7 +650,7 @@ export default function PlaylistsPage() {
                           setDragOverItemId(null);
                         }}
                         onClick={(e) => e.stopPropagation()}
-                        title="拖动排序"
+                        title={t("pages.playlists.drag_to_sort")}
                       >
                         <HolderOutlined />
                       </span>
@@ -656,8 +658,8 @@ export default function PlaylistsPage() {
                         {isPlaying ? <ToolbarPlayIcon className={styles.trackPlayingIcon} /> : globalIdx + 1}
                       </span>
                       <span className={styles.trackTitle}>
-                        {item.title || "未命名"}
-                        {isPlaying ? <span className={styles.trackPlayingLabel}>正在播放</span> : null}
+                        {item.title || t("pages.playlists.untitled")}
+                        {isPlaying ? <span className={styles.trackPlayingLabel}>{t("pages.playlists.now_playing_label")}</span> : null}
                       </span>
                       <span className={styles.trackDuration}>{fmtDurationShort(item.duration)}</span>
                       <span
@@ -672,7 +674,7 @@ export default function PlaylistsPage() {
                             type="text"
                             size="small"
                             icon={<EllipsisOutlined rotate={90} />}
-                            aria-label="更多"
+                            aria-label={t("pages.playlists.more_aria")}
                             onClick={(e) => e.stopPropagation()}
                           />
                         </Dropdown>
