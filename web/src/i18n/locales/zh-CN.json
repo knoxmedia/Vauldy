@@ -1019,6 +1019,27 @@
     }
   },
   "components": {
+    "music_track_list": {
+      "col_aria": "列显示",
+      "actions_aria": "操作",
+      "aria_deselect": "取消选择",
+      "aria_select": "选择",
+      "aria_play_track": "播放 {title}",
+      "aria_edit": "编辑",
+      "aria_more": "更多",
+      "col_title": "标题",
+      "col_album_artist": "专辑艺人",
+      "col_artist": "艺术家",
+      "col_album": "专辑",
+      "col_rating": "评分",
+      "col_duration": "时长",
+      "col_plays": "播放",
+      "col_added_at": "日期已添加",
+      "col_played_at": "播放日期",
+      "col_rated_at": "评分日期",
+      "col_popularity": "人气",
+      "col_bitrate": "比特率"
+    },
     "photo_lightbox": {
       "tags_updated": "分类已更新",
       "save_failed": "保存失败",

@@ -1019,6 +1019,27 @@
     }
   },
   "components": {
+    "music_track_list": {
+      "col_aria": "Show columns",
+      "actions_aria": "Actions",
+      "aria_deselect": "Deselect",
+      "aria_select": "Select",
+      "aria_play_track": "Play {title}",
+      "aria_edit": "Edit",
+      "aria_more": "More",
+      "col_title": "Title",
+      "col_album_artist": "Album artist",
+      "col_artist": "Artist",
+      "col_album": "Album",
+      "col_rating": "Rating",
+      "col_duration": "Duration",
+      "col_plays": "Plays",
+      "col_added_at": "Date added",
+      "col_played_at": "Last played",
+      "col_rated_at": "Date rated",
+      "col_popularity": "Popularity",
+      "col_bitrate": "Bitrate"
+    },
     "photo_lightbox": {
       "tags_updated": "Tags updated",
       "save_failed": "Save failed",

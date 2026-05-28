@@ -1019,6 +1019,27 @@
     }
   },
   "components": {
+    "music_track_list": {
+      "col_aria": "열 표시",
+      "actions_aria": "작업",
+      "aria_deselect": "선택 해제",
+      "aria_select": "선택",
+      "aria_play_track": "{title} 재생",
+      "aria_edit": "편집",
+      "aria_more": "더 보기",
+      "col_title": "제목",
+      "col_album_artist": "앨범 아티스트",
+      "col_artist": "아티스트",
+      "col_album": "앨범",
+      "col_rating": "평점",
+      "col_duration": "재생 시간",
+      "col_plays": "재생 횟수",
+      "col_added_at": "추가일",
+      "col_played_at": "재생일",
+      "col_rated_at": "평점일",
+      "col_popularity": "인기도",
+      "col_bitrate": "비트레이트"
+    },
     "photo_lightbox": {
       "tags_updated": "태그가 업데이트되었습니다",
       "save_failed": "저장 실패",

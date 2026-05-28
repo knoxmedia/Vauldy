@@ -1019,6 +1019,27 @@
     }
   },
   "components": {
+    "music_track_list": {
+      "col_aria": "欄位顯示",
+      "actions_aria": "操作",
+      "aria_deselect": "取消選擇",
+      "aria_select": "選擇",
+      "aria_play_track": "播放 {title}",
+      "aria_edit": "編輯",
+      "aria_more": "更多",
+      "col_title": "標題",
+      "col_album_artist": "專輯藝人",
+      "col_artist": "藝術家",
+      "col_album": "專輯",
+      "col_rating": "評分",
+      "col_duration": "時長",
+      "col_plays": "播放",
+      "col_added_at": "新增日期",
+      "col_played_at": "播放日期",
+      "col_rated_at": "評分日期",
+      "col_popularity": "人氣",
+      "col_bitrate": "位元率"
+    },
     "photo_lightbox": {
       "tags_updated": "分類已更新",
       "save_failed": "儲存失敗",

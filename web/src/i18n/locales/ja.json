@@ -1019,6 +1019,27 @@
     }
   },
   "components": {
+    "music_track_list": {
+      "col_aria": "列を表示",
+      "actions_aria": "操作",
+      "aria_deselect": "選択解除",
+      "aria_select": "選択",
+      "aria_play_track": "{title} を再生",
+      "aria_edit": "編集",
+      "aria_more": "その他",
+      "col_title": "タイトル",
+      "col_album_artist": "アルバムアーティスト",
+      "col_artist": "アーティスト",
+      "col_album": "アルバム",
+      "col_rating": "評価",
+      "col_duration": "長さ",
+      "col_plays": "再生回数",
+      "col_added_at": "追加日",
+      "col_played_at": "再生日",
+      "col_rated_at": "評価日",
+      "col_popularity": "人気",
+      "col_bitrate": "ビットレート"
+    },
     "photo_lightbox": {
       "tags_updated": "タグを更新しました",
       "save_failed": "保存に失敗しました",
