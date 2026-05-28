@@ -1,6 +1,7 @@
 import { Button, Card, Form, Input, Typography, message } from "antd";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { fetchUserInfo, login } from "../api/client";
+import { useT } from "../i18n";
 import { defaultPlayerPrefs, normalizePlayerPrefs } from "../lib/playerPrefs";
 import { useAuthStore, type UserRole } from "../store/auth";
 
@@ -12,6 +13,7 @@ export default function LoginPage() {
   const [params] = useSearchParams();
   const setToken = useAuthStore((s) => s.setToken);
   const setProfile = useAuthStore((s) => s.setProfile);
+  const t = useT();
 
   return (
     <div
@@ -35,18 +37,18 @@ export default function LoginPage() {
       >
         <Card
           style={{ width: "100%", maxWidth: 400 }}
-          title={<Title level={4} style={{ margin: 0 }}>登录 Knox-Media</Title>}
+          title={<Title level={4} style={{ margin: 0 }}>{t("login.title")}</Title>}
         >
           <Paragraph type="secondary" style={{ marginBottom: 16 }}>
-            登录后可浏览媒体与播放。管理员可进行媒体库、上传与控制台操作。
+            {t("login.subtitle")}
           </Paragraph>
           <Form
             form={form}
             layout="vertical"
             onFinish={async (v: { username: string; password: string }) => {
               try {
-                const t = await login(v.username, v.password);
-                setToken(t);
+                const tk = await login(v.username, v.password);
+                setToken(tk);
                 const u = await fetchUserInfo();
                 setProfile(u.username, u.role as UserRole, {
                   canPlay: u.can_play !== false,
@@ -54,27 +56,31 @@ export default function LoginPage() {
                   uiLocale: u.ui_locale || null,
                   playerPrefs: u.player_prefs ? normalizePlayerPrefs(u.player_prefs) : defaultPlayerPrefs(),
                 });
-                message.success("登录成功");
+                message.success(t("login.success"));
                 const redir = params.get("redirect");
                 nav(redir && redir.startsWith("/") ? redir : "/", { replace: true });
               } catch {
-                message.error("用户名或密码错误");
+                message.error(t("login.failure"));
               }
             }}
           >
-            <Form.Item name="username" label="用户名" rules={[{ required: true, message: "请输入用户名" }]}>
-              <Input autoComplete="username" size="large" placeholder="admin 或 viewer" />
+            <Form.Item name="username" label={t("login.username")} rules={[{ required: true, message: t("login.username_required") }]}>
+              <Input autoComplete="username" size="large" placeholder={t("login.username_placeholder")} />
             </Form.Item>
-            <Form.Item name="password" label="密码" rules={[{ required: true, message: "请输入密码" }]}>
+            <Form.Item name="password" label={t("login.password")} rules={[{ required: true, message: t("login.password_required") }]}>
               <Input.Password autoComplete="current-password" size="large" />
             </Form.Item>
             <Button type="primary" htmlType="submit" size="large" block>
-              登录
+              {t("login.submit")}
             </Button>
           </Form>
           <Paragraph type="secondary" style={{ marginTop: 16, fontSize: 12 }}>
-            演示账号：管理员 <code>admin</code> / <code>admin123</code>；普通用户 <code>viewer</code> /{" "}
-            <code>viewer123</code>
+            {t("login.demo_hint", {
+              admin_user: "admin",
+              admin_pass: "admin123",
+              viewer_user: "viewer",
+              viewer_pass: "viewer123",
+            })}
           </Paragraph>
         </Card>
       </div>

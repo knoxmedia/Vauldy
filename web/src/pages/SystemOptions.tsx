@@ -23,6 +23,7 @@ import {
 } from "react";
 import {
   fetchSystemOptions,
+  fetchUserInfo,
   saveSystemOptions,
   testSystemOptionsASR,
   testSystemOptionsOCR,
@@ -35,15 +36,19 @@ import {
   testSystemOptionsDocTrans,
   installSystemOptionsDocTrans,
   installLibreOfficeDocTrans,
+  updateUserProfile,
   type SystemOptions,
   type RecognitionTestResult,
   type DocTransTestResult,
 } from "../api/client";
+import { languageOptions, resolveLocale, useT } from "../i18n";
+import { defaultPlayerPrefs, normalizePlayerPrefs } from "../lib/playerPrefs";
+import { useAuthStore } from "../store/auth";
 
 function defaultSystemOptions(): SystemOptions {
   return {
     general: {
-      display_language: "zh-Hans",
+      display_language: "zh-CN",
       start_on_boot: false,
       open_browser_on_first_start: true,
       maintenance_mode: false,
@@ -152,13 +157,14 @@ function buildHomeStreamQualityOptions(): { value: string; label: string }[] {
 
 const HOME_STREAM_QUALITY_OPTIONS = buildHomeStreamQualityOptions();
 
-const DISPLAY_LANGUAGE_OPTIONS = [
-  { value: "zh-Hans", label: "简体中文" },
-  { value: "zh-Hant", label: "繁體中文" },
-  { value: "en", label: "English" },
-  { value: "ja", label: "日本語" },
-  { value: "ko", label: "한국어" },
-];
+/**
+ * Build dropdown options for the admin's preferred display language. The
+ * codes match the per-user `ui_locale` field so the admin's selection is
+ * persisted directly on their account (per FR-ADM-05).
+ */
+function buildDisplayLanguageOptions(): { value: string; label: string }[] {
+  return languageOptions();
+}
 
 const TRANSCODER_QUALITY_OPTIONS = [
   { value: "auto", label: "自动" },
@@ -241,6 +247,13 @@ const PHOTO_CLASSIFY_ENGINE_OPTIONS = [
 ];
 
 export default function SystemOptionsPage() {
+  const t = useT();
+  const uiLocale = useAuthStore((s) => s.uiLocale);
+  const setProfile = useAuthStore((s) => s.setProfile);
+  const adminLanguage = useMemo(() => resolveLocale(uiLocale), [uiLocale]);
+  const [languageSaving, setLanguageSaving] = useState(false);
+  const DISPLAY_LANGUAGE_OPTIONS = useMemo(() => buildDisplayLanguageOptions(), []);
+
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [opts, setOpts] = useState<SystemOptions>(() => defaultSystemOptions());
@@ -296,6 +309,30 @@ export default function SystemOptionsPage() {
       message.error("保存失败");
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleAdminLanguageChange = async (next: string) => {
+    if (next === adminLanguage) return;
+    setLanguageSaving(true);
+    try {
+      const data = await updateUserProfile({ ui_locale: next });
+      const u = await fetchUserInfo();
+      setProfile(u.username, u.role, {
+        canPlay: u.can_play !== false,
+        avatarUrl: u.avatar_url || null,
+        uiLocale: data.ui_locale,
+        playerPrefs: data.player_prefs
+          ? normalizePlayerPrefs(data.player_prefs)
+          : u.player_prefs
+            ? normalizePlayerPrefs(u.player_prefs)
+            : defaultPlayerPrefs(),
+      });
+      message.success(t("system_options.general.saved"));
+    } catch {
+      message.error(t("system_options.general.save_failed"));
+    } finally {
+      setLanguageSaving(false);
     }
   };
 
@@ -556,15 +593,15 @@ export default function SystemOptionsPage() {
   const tabGeneral = (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
       <Typography.Title level={5} style={{ margin: 0 }}>
-        语言
+        {t("system_options.general.language_section")}
       </Typography.Title>
       <SettingRow
-        title="首选显示语言"
+        title={t("system_options.general.preferred_display_language")}
         description={
           <>
-            界面与文案的完善是一项持续进行的工作。{" "}
+            {t("system_options.general.preferred_display_language_desc_prefix")}{" "}
             <Typography.Link href="https://translate.emby.media/" target="_blank" rel="noreferrer">
-              了解如何参与翻译贡献。
+              {t("system_options.general.preferred_display_language_desc_link")}
             </Typography.Link>
           </>
         }
@@ -572,13 +609,11 @@ export default function SystemOptionsPage() {
         <Select
           style={{ minWidth: 200 }}
           options={DISPLAY_LANGUAGE_OPTIONS}
-          value={opts.general.display_language}
-          onChange={(v) =>
-            setOpts((p) => ({
-              ...p,
-              general: { ...p.general, display_language: v },
-            }))
-          }
+          value={adminLanguage}
+          loading={languageSaving}
+          disabled={languageSaving}
+          placeholder={t("system_options.general.placeholder")}
+          onChange={(v) => void handleAdminLanguageChange(v)}
         />
       </SettingRow>
 
@@ -1390,14 +1425,14 @@ export default function SystemOptionsPage() {
       <Tabs
         defaultActiveKey="general"
         items={[
-          { key: "general", label: "通用", children: tabGeneral },
-          { key: "playback", label: "播放", children: tabPlayback },
-          { key: "transcoder", label: "转码器", children: tabTranscoder },
+          { key: "general", label: t("system_options.tab.general"), children: tabGeneral },
+          { key: "playback", label: t("system_options.tab.playback"), children: tabPlayback },
+          { key: "transcoder", label: t("system_options.tab.transcoder"), children: tabTranscoder },
           { key: "asr", label: "语音识别", children: tabASR },
           { key: "ocr", label: "字符识别", children: tabOCR },
-          { key: "photo-classify", label: "智能分类", children: tabPhotoClassify },
-          { key: "photo-face", label: "人脸聚类", children: tabPhotoFace },
-          { key: "doc-trans", label: "文档转换", children: tabDocTrans },
+          { key: "photo-classify", label: t("system_options.tab.photo_classify"), children: tabPhotoClassify },
+          { key: "photo-face", label: t("system_options.tab.photo_face"), children: tabPhotoFace },
+          { key: "doc-trans", label: t("system_options.tab.doc_trans"), children: tabDocTrans },
         ]}
       />
     </Card>

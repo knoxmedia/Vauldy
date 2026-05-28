@@ -114,28 +114,37 @@ func decodePlayerPrefs(raw string) PlayerPrefs {
 	return p
 }
 
+// localeToTrackLang derives a BCP-47 primary language tag from a UI locale code.
+// It accepts both legacy short codes (zh, en) and full BCP-47 tags
+// (zh-CN, zh-TW, zh-Hans, en-US, ...).
 func localeToTrackLang(locale string) string {
-	switch strings.TrimSpace(strings.ToLower(locale)) {
-	case "zh", "zh-cn", "zh-hans", "中文":
+	s := strings.TrimSpace(strings.ToLower(locale))
+	if s == "" {
 		return "zh"
-	case "en", "english":
+	}
+	switch s {
+	case "中文":
+		return "zh"
+	case "english":
 		return "en"
-	case "ja", "jp", "日本語":
+	case "日本語":
 		return "ja"
-	case "ko", "한국어":
+	case "한국어":
 		return "ko"
-	case "fr":
-		return "fr"
-	case "de":
-		return "de"
-	case "es":
-		return "es"
-	case "ru":
-		return "ru"
-	case "pt":
-		return "pt"
-	case "it":
-		return "it"
+	}
+	// Take the primary subtag (zh-CN -> zh, en-US -> en).
+	primary := s
+	if i := strings.IndexAny(s, "-_"); i > 0 {
+		primary = s[:i]
+	}
+	switch primary {
+	case "zh", "cmn", "yue":
+		return "zh"
+	case "en", "ja", "jp", "ko", "fr", "de", "es", "ru", "pt", "it":
+		if primary == "jp" {
+			return "ja"
+		}
+		return primary
 	default:
 		return "zh"
 	}

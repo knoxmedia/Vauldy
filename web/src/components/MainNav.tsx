@@ -23,6 +23,7 @@ import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useEffect, useMemo, useState } from "react";
 import { fetchLibraries, type Library } from "../api/client";
 import { isAdminRole, useAuthStore } from "../store/auth";
+import { useT } from "../i18n";
 
 function libIcon(type: string) {
   if (type === "movie" || type === "tv" || type === "anime") {
@@ -41,6 +42,7 @@ type MainNavProps = {
 export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
   const navigate = useNavigate();
   const loc = useLocation();
+  const t = useT();
   const path = loc.pathname;
   const search = loc.search;
   const role = useAuthStore((s) => s.role);
@@ -139,7 +141,7 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
               disabled: true,
               label: (
                 <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-                  <Spin size="small" /> 加载中…
+                  <Spin size="small" /> {t("common.loading")}
                 </span>
               ),
             },
@@ -149,7 +151,7 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
               {
                 key: "lib-empty",
                 disabled: true,
-                label: <span style={{ color: "#666" }}>暂无媒体库</span>,
+                label: <span style={{ color: "#666" }}>{t("nav.no_library")}</span>,
               },
             ]
           : libs.map((lib) => ({
@@ -168,7 +170,7 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
         icon: <HomeOutlined />,
         label: (
           <Link to="/" onClick={onNavigate}>
-            首页
+            {t("nav.home")}
           </Link>
         ),
       },
@@ -177,7 +179,7 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
         icon: <StarOutlined />,
         label: (
           <Link to="/favorites" onClick={onNavigate}>
-            我的收藏
+            {t("nav.favorites")}
           </Link>
         ),
       },
@@ -191,7 +193,7 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
                   to={firstLibrary ? `/browse?library_id=${firstLibrary.id}` : "/browse"}
                   onClick={onNavigate}
                 >
-                  我的媒体
+                  {t("nav.my_media")}
                 </Link>
               ),
             },
@@ -200,7 +202,7 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
             {
               key: "my-media",
               icon: <AppstoreOutlined />,
-              label: "我的媒体",
+              label: t("nav.my_media"),
               children: [...libraryChildren],
             },
           ]),
@@ -209,7 +211,7 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
         icon: <UnorderedListOutlined />,
         label: (
           <Link to="/playlists" onClick={onNavigate}>
-            播放列表
+            {t("nav.playlists")}
           </Link>
         ),
       },
@@ -218,7 +220,7 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
         icon: <HistoryOutlined />,
         label: (
           <Link to="/playback-history" onClick={onNavigate}>
-            播放历史
+            {t("nav.playback_history")}
           </Link>
         ),
       },
@@ -233,7 +235,7 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
         icon: <ControlOutlined />,
         label: (
           <Link to="/console" onClick={onNavigate}>
-            管理
+            {t("nav.management")}
           </Link>
         ),
         children: [
@@ -242,7 +244,7 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
             icon: <ControlOutlined />,
             label: (
               <Link to="/console" onClick={onNavigate}>
-                控制台
+                {t("nav.console")}
               </Link>
             ),
           },
@@ -251,7 +253,7 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
             icon: <SettingOutlined />,
             label: (
               <Link to="/system-options" onClick={onNavigate}>
-                系统选项
+                {t("nav.system_options")}
               </Link>
             ),
           },
@@ -260,7 +262,7 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
             icon: <FolderOpenOutlined />,
             label: (
               <Link to="/library" onClick={onNavigate}>
-                媒体库
+                {t("nav.library")}
               </Link>
             ),
           },
@@ -269,7 +271,7 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
             icon: <CloudUploadOutlined />,
             label: (
               <Link to="/upload" onClick={onNavigate}>
-                上传
+                {t("nav.upload")}
               </Link>
             ),
           },
@@ -278,7 +280,7 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
             icon: <EditOutlined />,
             label: (
               <Link to="/media-manager" onClick={onNavigate}>
-                媒体资料管理
+                {t("nav.media_manager")}
               </Link>
             ),
           },
@@ -287,7 +289,7 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
             icon: <ScheduleOutlined />,
             label: (
               <Link to="/tasks" onClick={onNavigate}>
-                任务管理
+                {t("nav.tasks")}
               </Link>
             ),
           },
@@ -296,7 +298,7 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
             icon: <HistoryOutlined />,
             label: (
               <Link to="/drm-license-audit" onClick={onNavigate}>
-                DRM许可证审计
+                {t("nav.drm_audit")}
               </Link>
             ),
           },
@@ -305,7 +307,7 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
             icon: <HistoryOutlined />,
             label: (
               <Link to="/access-logs" onClick={onNavigate}>
-                访问日志
+                {t("nav.access_logs")}
               </Link>
             ),
           },
@@ -314,7 +316,7 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
             icon: <TeamOutlined />,
             label: (
               <Link to="/users" onClick={onNavigate}>
-                用户管理
+                {t("nav.users")}
               </Link>
             ),
           },
@@ -323,7 +325,7 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
             icon: <ApiOutlined />,
             label: (
               <Link to="/api-credentials" onClick={onNavigate}>
-                API 凭证
+                {t("nav.api_credentials")}
               </Link>
             ),
           },
@@ -332,7 +334,7 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
             icon: <DatabaseOutlined />,
             label: (
               <Link to="/scrape-config" onClick={onNavigate}>
-                元数据提供者
+                {t("nav.scrape_config")}
               </Link>
             ),
           },
@@ -341,7 +343,7 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
             icon: <RobotOutlined />,
             label: (
               <Link to="/ai-provider" onClick={onNavigate}>
-                AI 提供商
+                {t("nav.ai_provider")}
               </Link>
             ),
           },
@@ -350,7 +352,7 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
     }
 
     return items;
-  }, [libs, libsLoading, admin, onNavigate]);
+  }, [libs, libsLoading, admin, onNavigate, t]);
 
   return (
     <div className="app-main-nav">
@@ -359,7 +361,7 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
           <Button
             type="text"
             className="app-main-nav-search-icon"
-            aria-label="搜索"
+            aria-label={t("nav.search_aria")}
             icon={<SearchOutlined style={{ color: "#ddd", fontSize: 18 }} />}
             onClick={() => {
               onNavigate?.();
@@ -370,7 +372,7 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
           <Input
             allowClear
             prefix={<SearchOutlined style={{ color: "#666" }} />}
-            placeholder="搜索"
+            placeholder={t("nav.search_placeholder")}
             className="app-main-nav-search-input"
             onPressEnter={(e) => {
               const el = e.target as HTMLInputElement;
