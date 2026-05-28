@@ -30,6 +30,7 @@ import {
   type MediaItem,
   updateMediaAdmin,
 } from "../api/client";
+import { useT } from "../i18n";
 
 type EditorValues = {
   title?: string;
@@ -121,6 +122,7 @@ function nodeTitle(name: string, kind: "dir" | "file") {
 }
 
 export default function MediaManagerPage() {
+  const t = useT();
   const [libs, setLibs] = useState<Library[]>([]);
   const [libraryId, setLibraryId] = useState<number | undefined>(undefined);
   const [rows, setRows] = useState<MediaItem[]>([]);
@@ -205,17 +207,20 @@ export default function MediaManagerPage() {
   }
 
   useEffect(() => {
-    void loadLibraries().catch((e: unknown) => message.error((e as Error).message || "加载媒体库失败"));
+    void loadLibraries().catch((e: unknown) => message.error((e as Error).message || t("pages.media_manager.load_libraries_failed")));
+     
   }, []);
 
   useEffect(() => {
     if (libraryId === undefined) return;
-    void loadMedia(libraryId).catch((e: unknown) => message.error((e as Error).message || "加载媒体失败"));
+    void loadMedia(libraryId).catch((e: unknown) => message.error((e as Error).message || t("pages.media_manager.load_media_failed")));
+     
   }, [libraryId]);
 
   useEffect(() => {
     if (!selectedId) return;
-    void loadDetail(selectedId).catch((e: unknown) => message.error((e as Error).message || "加载媒体详情失败"));
+    void loadDetail(selectedId).catch((e: unknown) => message.error((e as Error).message || t("pages.media_manager.load_detail_failed")));
+     
   }, [selectedId]);
 
   const { treeData, treeMap } = useMemo(() => {
@@ -342,11 +347,11 @@ export default function MediaManagerPage() {
         format: v.format ?? "",
         meta_json: mergedMetaJSON,
       });
-      message.success("媒体资料已保存");
+      message.success(t("pages.media_manager.saved"));
       await loadMedia(libraryId);
       await loadDetail(selectedId);
     } catch (e: unknown) {
-      message.error((e as Error).message || "保存失败");
+      message.error((e as Error).message || t("pages.media_manager.save_failed"));
     } finally {
       setSaving(false);
     }
@@ -355,17 +360,17 @@ export default function MediaManagerPage() {
   return (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
       <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
-        左侧树展示媒体库目录与文件；点击目录显示目录信息，点击文件可编辑并保存元数据。
+        {t("pages.media_manager.intro")}
       </Typography.Paragraph>
 
       <Row gutter={16}>
         <Col xs={24} lg={11}>
           <Card
-            title="媒体库树"
+            title={t("pages.media_manager.tree_title")}
             extra={
               <Select
                 style={{ width: 220 }}
-                placeholder="选择媒体库"
+                placeholder={t("pages.media_manager.library_placeholder")}
                 value={libraryId}
                 onChange={(v) => setLibraryId(v)}
                 options={libs.map((l) => ({ value: l.id, label: l.name }))}
@@ -374,7 +379,7 @@ export default function MediaManagerPage() {
           >
             <Input
               allowClear
-              placeholder="按文件名或路径过滤"
+              placeholder={t("pages.media_manager.filter_placeholder")}
               value={treeKeyword}
               onChange={(e) => setTreeKeyword(e.target.value)}
               style={{ marginBottom: 10 }}
@@ -401,11 +406,11 @@ export default function MediaManagerPage() {
 
         <Col xs={24} lg={13}>
           {selectedNode?.type === "dir" ? (
-            <Card title={`目录信息 - ${selectedNode.name}`}>
+            <Card title={t("pages.media_manager.dir_info_prefix", { name: selectedNode.name })}>
               <Descriptions column={1} bordered size="small">
-                <Descriptions.Item label="目录名称">{selectedNode.name}</Descriptions.Item>
-                <Descriptions.Item label="目录路径">{selectedNode.path}</Descriptions.Item>
-                <Descriptions.Item label="包含文件数">
+                <Descriptions.Item label={t("pages.media_manager.dir_name_label")}>{selectedNode.name}</Descriptions.Item>
+                <Descriptions.Item label={t("pages.media_manager.dir_path_label")}>{selectedNode.path}</Descriptions.Item>
+                <Descriptions.Item label={t("pages.media_manager.dir_file_count_label")}>
                   {rows.filter((x) => toLibraryDisplayRelativePath(x.file_path || "", selectedLibraryRoots).startsWith(selectedNode.path)).length}
                 </Descriptions.Item>
               </Descriptions>
@@ -415,10 +420,10 @@ export default function MediaManagerPage() {
                 items={[
                   {
                     key: "debug-root",
-                    label: "排障信息（仅管理员可见）",
+                    label: t("pages.media_manager.debug_panel_title"),
                     children: (
                       <Descriptions column={1} bordered size="small">
-                        <Descriptions.Item label="媒体库根路径">
+                        <Descriptions.Item label={t("pages.media_manager.lib_root_path_label")}>
                           {selectedLibrary?.path || "-"}
                         </Descriptions.Item>
                       </Descriptions>
@@ -428,7 +433,7 @@ export default function MediaManagerPage() {
               />
               <Divider />
               <Space style={{ marginBottom: 8 }}>
-                <Typography.Text strong>目录内文件</Typography.Text>
+                <Typography.Text strong>{t("pages.media_manager.dir_files_label")}</Typography.Text>
                 <Button
                   size="small"
                   disabled={dirFiles.length === 0}
@@ -444,7 +449,7 @@ export default function MediaManagerPage() {
                     });
                   }}
                 >
-                  编辑第一条
+                  {t("pages.media_manager.edit_first")}
                 </Button>
               </Space>
               <List
@@ -468,7 +473,7 @@ export default function MediaManagerPage() {
                           })
                         }
                       >
-                        编辑
+                        {t("pages.media_manager.btn_edit")}
                       </Button>,
                       <Button
                         key="next"
@@ -486,7 +491,7 @@ export default function MediaManagerPage() {
                           });
                         }}
                       >
-                        下一条
+                        {t("pages.media_manager.btn_next")}
                       </Button>,
                     ]}
                   >
@@ -500,15 +505,15 @@ export default function MediaManagerPage() {
             </Card>
           ) : (
           <Card
-            title={detail ? `编辑 #${detail.id} - ${detail.title || "未命名"}` : "编辑媒体资料"}
+            title={detail ? t("pages.media_manager.edit_modal_title", { id: detail.id, title: detail.title || t("pages.media_manager.default_untitled") }) : t("pages.media_manager.default_edit_title")}
             loading={loadingDetail}
             extra={
               <Space>
                 <Button onClick={() => (selectedId ? void loadDetail(selectedId) : undefined)} disabled={!selectedId}>
-                  重置
+                  {t("pages.media_manager.btn_reset")}
                 </Button>
                 <Button type="primary" onClick={() => void onSave()} loading={saving} disabled={!selectedId}>
-                  保存
+                  {t("pages.media_manager.btn_save")}
                 </Button>
               </Space>
             }
@@ -516,19 +521,19 @@ export default function MediaManagerPage() {
             <Form form={form} layout="vertical">
               <Row gutter={12}>
                 <Col span={12}>
-                  <Form.Item name="title" label="标题">
+                  <Form.Item name="title" label={t("pages.media_manager.field_title")}>
                     <Input />
                   </Form.Item>
                 </Col>
                 <Col span={12}>
-                  <Form.Item name="original_title" label="原始标题">
+                  <Form.Item name="original_title" label={t("pages.media_manager.field_original_title")}>
                     <Input />
                   </Form.Item>
                 </Col>
               </Row>
               <Row gutter={12}>
                 <Col span={12}>
-                  <Form.Item name="status" label="状态">
+                  <Form.Item name="status" label={t("pages.media_manager.field_status")}>
                     <Select
                       options={[
                         { value: "active", label: "active" },
@@ -539,35 +544,35 @@ export default function MediaManagerPage() {
                   </Form.Item>
                 </Col>
                 <Col span={12}>
-                  <Form.Item name="format" label="容器/格式">
-                    <Input placeholder="例如 mov,mp4,m4a,3gp,3g2,mj2" />
+                  <Form.Item name="format" label={t("pages.media_manager.field_format")}>
+                    <Input placeholder={t("pages.media_manager.format_placeholder")} />
                   </Form.Item>
                 </Col>
               </Row>
-              <Divider>刮削资料（结构化）</Divider>
-              <Form.Item name="overview" label="简介">
-                <Input.TextArea rows={3} placeholder="影片简介" />
+              <Divider>{t("pages.media_manager.divider_scrape")}</Divider>
+              <Form.Item name="overview" label={t("pages.media_manager.field_overview")}>
+                <Input.TextArea rows={3} placeholder={t("pages.media_manager.overview_placeholder")} />
               </Form.Item>
               <Row gutter={12}>
                 <Col span={8}>
-                  <Form.Item name="rating" label="评分">
+                  <Form.Item name="rating" label={t("pages.media_manager.field_rating")}>
                     <InputNumber min={0} max={10} step={0.1} style={{ width: "100%" }} />
                   </Form.Item>
                 </Col>
                 <Col span={16}>
-                  <Form.Item name="genres" label="类型（逗号分隔）">
-                    <Input placeholder="动作, 科幻, 冒险" />
+                  <Form.Item name="genres" label={t("pages.media_manager.field_genres")}>
+                    <Input placeholder={t("pages.media_manager.genres_placeholder")} />
                   </Form.Item>
                 </Col>
               </Row>
               <Row gutter={12}>
                 <Col span={8}>
-                  <Form.Item name="poster" label="海报URL">
+                  <Form.Item name="poster" label={t("pages.media_manager.field_poster")}>
                     <Input placeholder="https://..." />
                   </Form.Item>
                 </Col>
                 <Col span={8}>
-                  <Form.Item name="backdrop" label="背景URL">
+                  <Form.Item name="backdrop" label={t("pages.media_manager.field_backdrop")}>
                     <Input placeholder="https://..." />
                   </Form.Item>
                 </Col>
@@ -579,7 +584,7 @@ export default function MediaManagerPage() {
               </Row>
               <Row gutter={12}>
                 <Col span={8}>
-                  <Card size="small" title="海报预览">
+                  <Card size="small" title={t("pages.media_manager.card_poster_preview")}>
                     {posterPreview ? (
                       <Image src={posterPreview} alt="poster" width="100%" />
                     ) : (
@@ -588,7 +593,7 @@ export default function MediaManagerPage() {
                   </Card>
                 </Col>
                 <Col span={8}>
-                  <Card size="small" title="背景预览">
+                  <Card size="small" title={t("pages.media_manager.card_backdrop_preview")}>
                     {backdropPreview ? (
                       <Image src={backdropPreview} alt="backdrop" width="100%" />
                     ) : (
@@ -597,7 +602,7 @@ export default function MediaManagerPage() {
                   </Card>
                 </Col>
                 <Col span={8}>
-                  <Card size="small" title="Logo 预览">
+                  <Card size="small" title={t("pages.media_manager.card_logo_preview")}>
                     {logoPreview ? (
                       <Image src={logoPreview} alt="logo" width="100%" />
                     ) : (
@@ -610,33 +615,33 @@ export default function MediaManagerPage() {
                 type="info"
                 showIcon
                 style={{ marginBottom: 12 }}
-                message="结构化字段会自动同步到 meta_json.scrape，无需手动维护 JSON。"
+                message={t("pages.media_manager.auto_sync_msg")}
               />
               <Row gutter={12}>
                 <Col span={6}>
-                  <Form.Item name="duration" label="时长(秒)">
+                  <Form.Item name="duration" label={t("pages.media_manager.field_duration")}>
                     <InputNumber min={0} style={{ width: "100%" }} />
                   </Form.Item>
                 </Col>
                 <Col span={6}>
-                  <Form.Item name="width" label="宽度">
+                  <Form.Item name="width" label={t("pages.media_manager.field_width")}>
                     <InputNumber min={0} style={{ width: "100%" }} />
                   </Form.Item>
                 </Col>
                 <Col span={6}>
-                  <Form.Item name="height" label="高度">
+                  <Form.Item name="height" label={t("pages.media_manager.field_height")}>
                     <InputNumber min={0} style={{ width: "100%" }} />
                   </Form.Item>
                 </Col>
                 <Col span={6}>
-                  <Form.Item name="bitrate" label="码率">
+                  <Form.Item name="bitrate" label={t("pages.media_manager.field_bitrate")}>
                     <InputNumber min={0} style={{ width: "100%" }} />
                   </Form.Item>
                 </Col>
               </Row>
               <Form.Item
                 name="meta_json"
-                label="完整元数据(JSON)"
+                label={t("pages.media_manager.field_meta_json")}
                 rules={[
                   {
                     validator: (_, value: string | undefined) => {
@@ -646,13 +651,13 @@ export default function MediaManagerPage() {
                         JSON.parse(raw);
                         return Promise.resolve();
                       } catch {
-                        return Promise.reject(new Error("JSON 格式无效"));
+                        return Promise.reject(new Error(t("pages.media_manager.json_invalid_error")));
                       }
                     },
                   },
                 ]}
               >
-                <Input.TextArea rows={16} placeholder='例如 {"scrape":{"overview":"..."}}' />
+                <Input.TextArea rows={16} placeholder={t("pages.media_manager.meta_json_placeholder")} />
               </Form.Item>
             </Form>
           </Card>
