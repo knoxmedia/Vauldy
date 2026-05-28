@@ -72,6 +72,7 @@ import { buildMediaMenuItems } from "../components/mediaMenuItems";
 import { readRecentPlaylists, rememberPlaylistAdded } from "../lib/recentPlaylists";
 import ToolbarPlayIcon from "../components/ToolbarPlayIcon";
 import { isAdminRole, useAuthStore } from "../store/auth";
+import { tGlobal, useT } from "../i18n";
 import styles from "./MediaDetail.module.css";
 
 type AudioTrackInfo = {
@@ -269,13 +270,13 @@ function fmtSeconds(sec?: number) {
   return `${m}m ${s}s`;
 }
 
-/** 中文时长展示（影片信息行） */
-function fmtDurationZh(sec?: number) {
+/** Localized duration display (media info row). */
+function fmtDurationLocalized(sec?: number) {
   if (!sec || sec <= 0) return "—";
   const h = Math.floor(sec / 3600);
   const m = Math.floor((sec % 3600) / 60);
-  if (h > 0) return `${h}小时 ${m}分钟`;
-  return `${m}分钟`;
+  if (h > 0) return tGlobal("pages.media_detail.fmt_h_m", { h, m });
+  return tGlobal("pages.media_detail.fmt_m", { m });
 }
 
 function videoTierLabel(height?: number) {
@@ -295,8 +296,8 @@ function formatMetaRating(r?: number) {
 
 function audioTrackLabel(t: AudioTrackInfo) {
   const codec = t.codec.toUpperCase();
-  const ch = t.channels ? `${t.channels} 声道` : "";
-  const lang = t.lang || "默认";
+  const ch = t.channels ? tGlobal("pages.media_detail.channels_n", { n: t.channels }) : "";
+  const lang = t.lang || tGlobal("pages.media_detail.lang_default");
   return ch ? `${lang} · ${codec} (${ch})` : `${lang} · ${codec}`;
 }
 
@@ -410,14 +411,14 @@ function MediaHorizontalShelf({
           {title}
         </Typography.Title>
         {hasContent && hasOverflow ? (
-          <div className={styles.shelfArrows} role="navigation" aria-label={`${title} 横向浏览`}>
+          <div className={styles.shelfArrows} role="navigation" aria-label={tGlobal("pages.media_detail.shelf_aria", { title })}>
             <Button
               type="text"
               icon={<LeftOutlined />}
               disabled={!canPrev}
               onClick={() => scroll(-1)}
               className={styles.shelfArrowBtn}
-              aria-label="向左"
+              aria-label={tGlobal("pages.media_detail.scroll_left_aria")}
             />
             <Button
               type="text"
@@ -425,7 +426,7 @@ function MediaHorizontalShelf({
               disabled={!canNext}
               onClick={() => scroll(1)}
               className={styles.shelfArrowBtn}
-              aria-label="向右"
+              aria-label={tGlobal("pages.media_detail.scroll_right_aria")}
             />
           </div>
         ) : null}
@@ -505,7 +506,7 @@ function RelatedMovieCard({
           <button
             type="button"
             className={`${styles.relatedOverlayBtn} ${styles.relatedOverlaySelect}`}
-            aria-label={selected ? "取消选中" : "选中"}
+            aria-label={selected ? tGlobal("pages.media_detail.aria_deselect") : tGlobal("pages.media_detail.aria_select")}
             onClick={(e) => {
               e.stopPropagation();
               onToggleSelect();
@@ -518,7 +519,7 @@ function RelatedMovieCard({
               <button
                 type="button"
                 className={styles.relatedOverlayPlay}
-                aria-label={`播放 ${m.title || "影片"}`}
+                aria-label={tGlobal("pages.media_detail.aria_play_video", { title: m.title || tGlobal("pages.media_detail.video_fallback") })}
                 onClick={(e) => {
                   e.stopPropagation();
                   nav(`/player/${m.id}`);
@@ -529,7 +530,7 @@ function RelatedMovieCard({
               <button
                 type="button"
                 className={`${styles.relatedOverlayBtn} ${styles.relatedOverlayEdit}`}
-                aria-label="编辑"
+                aria-label={tGlobal("pages.media_detail.aria_edit")}
                 onClick={(e) => {
                   e.stopPropagation();
                   nav(`/detail/${m.id}`);
@@ -541,7 +542,7 @@ function RelatedMovieCard({
                 <button
                   type="button"
                   className={`${styles.relatedOverlayBtn} ${styles.relatedOverlayMore}`}
-                  aria-label="更多"
+                  aria-label={tGlobal("pages.media_detail.aria_more")}
                   onClick={(e) => e.stopPropagation()}
                 >
                   <EllipsisOutlined style={{ transform: "rotate(90deg)" }} />
@@ -551,7 +552,7 @@ function RelatedMovieCard({
           )}
         </div>
       </div>
-      <div className={styles.relatedTitle}>{m.title || "未命名"}</div>
+      <div className={styles.relatedTitle}>{m.title || tGlobal("pages.media_detail.untitled")}</div>
       <div className={styles.relatedYear}>
         {m.year != null && m.year > 0 ? String(m.year) : m.release_date?.slice(0, 4) || "—"}
       </div>
@@ -560,6 +561,7 @@ function RelatedMovieCard({
 }
 
 export default function MediaDetailPage() {
+  const t = useT();
   const { id } = useParams();
   const nav = useNavigate();
   const role = useAuthStore((s) => s.role);
@@ -609,25 +611,25 @@ export default function MediaDetailPage() {
   }, [related, relatedSelectedIds]);
 
   const relatedBulkListContent = useMemo(() => {
-    const idToTitle = new Map(related.map((r) => [r.id, r.title || "未命名"]));
+    const idToTitle = new Map(related.map((r) => [r.id, r.title || t("pages.media_detail.untitled")]));
     const lines = relatedSelectedIds.map((id) => idToTitle.get(id) || "—");
     if (lines.length === 0) {
-      return <span className={styles.relatedBulkPopoverEmpty}>无</span>;
+      return <span className={styles.relatedBulkPopoverEmpty}>{t("pages.media_detail.empty_bulk")}</span>;
     }
     return (
       <ul className={styles.relatedBulkPopoverList}>
-        {lines.map((t, i) => (
-          <li key={`${relatedSelectedIds[i]}-${i}`}>{t}</li>
+        {lines.map((label, i) => (
+          <li key={`${relatedSelectedIds[i]}-${i}`}>{label}</li>
         ))}
       </ul>
     );
-  }, [related, relatedSelectedIds]);
+  }, [related, relatedSelectedIds, t]);
 
   const relatedBulkMoreItems: MenuProps["items"] = useMemo(
     () => [
       {
         key: "play1",
-        label: "播放第一个",
+        label: t("pages.media_detail.menu_play_first"),
         onClick: () => {
           const f = relatedSelectedIds[0];
           if (f != null) nav(`/player/${f}`);
@@ -635,14 +637,14 @@ export default function MediaDetailPage() {
       },
       {
         key: "detail1",
-        label: "查看第一个详情",
+        label: t("pages.media_detail.menu_view_first_detail"),
         onClick: () => {
           const f = relatedSelectedIds[0];
           if (f != null) nav(`/detail/${f}`);
         },
       },
     ],
-    [relatedSelectedIds, nav]
+    [relatedSelectedIds, nav, t]
   );
 
   useEffect(() => {
@@ -665,7 +667,7 @@ export default function MediaDetailPage() {
 
   useEffect(() => {
     if (!mediaId || Number.isNaN(mediaId)) {
-      message.error("无效的媒体 ID");
+      message.error(t("pages.media_detail.invalid_media_id"));
       nav("/browse", { replace: true });
       return;
     }
@@ -697,7 +699,7 @@ export default function MediaDetailPage() {
           setRelated([]);
         }
       } else {
-        message.error("加载影片信息失败");
+        message.error(t("pages.media_detail.load_failed"));
         setLibraryType("");
         setIsMovieLibrary(false);
       }
@@ -759,8 +761,8 @@ export default function MediaDetailPage() {
   }, [subtitleOptionValues, selectedSubId]);
 
   const avgPct = Math.round(stats?.avg_progress_percent ?? 0);
-  const runtimeZh = fmtDurationZh(detail?.duration);
-  const overview = meta.overview || "暂无简介";
+  const runtimeZh = fmtDurationLocalized(detail?.duration);
+  const overview = meta.overview || t("pages.media_detail.no_overview");
   const overviewPreviewLen = 220;
   const overviewLong = overview.length > overviewPreviewLen;
   const overviewShown = overviewOpen || !overviewLong ? overview : `${overview.slice(0, overviewPreviewLen)}…`;
@@ -817,31 +819,31 @@ export default function MediaDetailPage() {
       if (favorited) {
         await removeFavorite(mediaId);
         setFavorited(false);
-        message.success("已取消收藏");
+        message.success(t("pages.media_detail.unfavorited"));
       } else {
         await addFavorite(mediaId);
         setFavorited(true);
-        message.success("已加入收藏");
+        message.success(t("pages.media_detail.favorited"));
       }
     } catch {
-      message.error("收藏操作失败");
+      message.error(t("pages.media_detail.favorite_failed"));
     }
   }
 
   async function onToggleWatched() {
     const durationSec = detail?.duration ?? 0;
     if (!isCompleted && durationSec <= 0) {
-      message.warning("无法标记：缺少时长信息");
+      message.warning(t("pages.media_detail.mark_no_duration"));
       return;
     }
     setMarkBusy(true);
     try {
       if (isCompleted) {
         await savePlaybackProgress(mediaId, { position: 0, completed: 0 });
-        message.success("已标记为未观看");
+        message.success(t("pages.media_detail.marked_unwatched"));
       } else {
         await savePlaybackProgress(mediaId, { position: durationSec, completed: 1 });
-        message.success("已标记为观看完毕");
+        message.success(t("pages.media_detail.marked_watched"));
       }
       await refreshHistory();
     } catch (e: unknown) {
@@ -849,11 +851,11 @@ export default function MediaDetailPage() {
       const status = ax.response?.status;
       const serverErr = ax.response?.data?.error;
       if (status === 401) {
-        message.error("标记失败，请先登录");
+        message.error(t("pages.media_detail.mark_need_login"));
       } else if (typeof serverErr === "string" && serverErr.trim()) {
-        message.error(`标记失败：${serverErr.trim()}`);
+        message.error(t("pages.media_detail.mark_failed_server", { msg: serverErr.trim() }));
       } else {
-        message.error("标记失败，请稍后重试");
+        message.error(t("pages.media_detail.mark_failed"));
       }
     } finally {
       setMarkBusy(false);
@@ -864,7 +866,7 @@ export default function MediaDetailPage() {
     if (isAdminRole(role)) {
       nav("/media-manager");
     } else {
-      message.info("编辑元数据需要管理员在「媒体资料管理」中进行");
+      message.info(t("pages.media_detail.edit_admin_only"));
     }
   }
 
@@ -874,9 +876,9 @@ export default function MediaDetailPage() {
       const d = await fetchMediaDetail(mediaId);
       setDetail(d);
     } catch {
-      message.error("刷新媒体信息失败");
+      message.error(t("pages.media_detail.refresh_failed"));
     }
-  }, [mediaId]);
+  }, [mediaId, t]);
 
   const applyMatchUpdate = useCallback((update: MediaMatchListUpdate) => {
     setDetail((prev) =>
@@ -915,12 +917,12 @@ export default function MediaDetailPage() {
             const name =
               recentPlaylistMenu.find((p) => p.id === playlistId)?.name ??
               readRecentPlaylists().find((p) => p.id === playlistId)?.name ??
-              "播放列表";
-            message.success(`已添加到「${name}」`);
+              t("pages.media_detail.playlist_fallback");
+            message.success(t("pages.media_detail.added_to_playlist", { name }));
             rememberPlaylistAdded({ id: playlistId, name });
             setRecentPlaylistMenu(readRecentPlaylists());
           } catch {
-            message.error("添加失败，可能已在列表中");
+            message.error(t("pages.media_detail.add_failed_dup"));
           }
         },
         onGetInfo: scrollToFileInfo,
@@ -957,7 +959,7 @@ export default function MediaDetailPage() {
           <div className={styles.heroBackdrop} />
           <div className={styles.head}>
             <Button type="text" icon={<ArrowLeftOutlined />} onClick={() => nav(-1)} className={styles.backBtn}>
-              返回
+              {t("pages.media_detail.back")}
             </Button>
           </div>
 
@@ -966,14 +968,14 @@ export default function MediaDetailPage() {
               {posterUrl ? (
                 <img
                   src={posterUrl}
-                  alt={`${detail.title || "影片"} 海报`}
+                  alt={t("pages.media_detail.poster_alt", { title: detail.title || t("pages.media_detail.video_fallback") })}
                   className={styles.posterImg}
                   onError={() => setBrokenImages((prev) => ({ ...prev, poster: true }))}
                 />
               ) : (
                 <div className={styles.posterFallback}>
                   <FileImageOutlined />
-                  <span>暂无海报</span>
+                  <span>{t("pages.media_detail.no_poster")}</span>
                 </div>
               )}
             </div>
@@ -983,16 +985,16 @@ export default function MediaDetailPage() {
                 <Tag>{detail.width && detail.height ? `${detail.width}x${detail.height}` : "Unknown Res"}</Tag>
                 <Tag>{meta.videoCodec?.toUpperCase() || "Video"}</Tag>
                 <Tag>{meta.audioCodec?.toUpperCase() || "Audio"}</Tag>
-                {historyItem?.completed === 1 ? <Tag color="green">已看完</Tag> : null}
-                {historyItem ? <Tag color="cyan">播放 {historyItem.play_count ?? 0} 次</Tag> : null}
+                {historyItem?.completed === 1 ? <Tag color="green">{t("pages.media_detail.watched_tag")}</Tag> : null}
+                {historyItem ? <Tag color="cyan">{t("pages.media_detail.play_count", { count: historyItem.play_count ?? 0 })}</Tag> : null}
               </div>
               <Typography.Title level={2} className={styles.title}>
-                {detail.title || "未命名影片"}
+                {detail.title || t("pages.media_detail.untitled_movie")}
               </Typography.Title>
               {logoUrlClassic ? (
                 <img
                   src={logoUrlClassic}
-                  alt={`${detail.title || "影片"} logo`}
+                  alt={t("pages.media_detail.logo_alt", { title: detail.title || t("pages.media_detail.video_fallback") })}
                   className={styles.logoLayer}
                   onError={() => setBrokenImages((prev) => ({ ...prev, logo: true }))}
                 />
@@ -1022,10 +1024,10 @@ export default function MediaDetailPage() {
                       icon={<ToolbarPlayIcon className={styles.mediaDetailPlaySvg} />}
                       onClick={() => nav(resumeTarget)}
                     >
-                      继续播放
+                      {t("pages.media_detail.btn_continue")}
                     </Button>
                     <Button size="large" type="default" style={{ opacity: 0.82 }} onClick={() => nav(playFromStartTarget)}>
-                      从头播放
+                      {t("pages.media_detail.btn_play_from_start")}
                     </Button>
                   </>
                 ) : (
@@ -1035,11 +1037,11 @@ export default function MediaDetailPage() {
                     icon={<ToolbarPlayIcon className={styles.mediaDetailPlaySvg} />}
                     onClick={() => nav(playFromStartTarget)}
                   >
-                    播放
+                    {t("pages.media_detail.btn_play")}
                   </Button>
                 )}
                 <Button size="large" onClick={() => nav(`/browse?library_id=${detail.library_id}`)}>
-                  返回媒体库
+                  {t("pages.media_detail.back_to_library")}
                 </Button>
               </div>
             </div>
@@ -1047,88 +1049,90 @@ export default function MediaDetailPage() {
         </section>
 
         <section className={styles.overviewPanel}>
-          <Typography.Title level={4}>简介</Typography.Title>
+          <Typography.Title level={4}>{t("pages.media_detail.section_overview")}</Typography.Title>
           <Typography.Paragraph className={styles.overviewText}>{overview}</Typography.Paragraph>
         </section>
 
         <section className={styles.grid}>
           <div className={styles.panel}>
-            <Typography.Title level={4}>文件信息与技术规格</Typography.Title>
+            <Typography.Title level={4}>{t("pages.media_detail.section_file_specs")}</Typography.Title>
             <div className={styles.specGrid}>
               <div className={styles.specItem}>
-                <div className={styles.specLabel}>容器</div>
+                <div className={styles.specLabel}>{t("pages.media_detail.spec_container")}</div>
                 <div className={styles.specValue}>{meta.container || detail.format || "—"}</div>
               </div>
               <div className={styles.specItem}>
-                <div className={styles.specLabel}>视频</div>
+                <div className={styles.specLabel}>{t("pages.media_detail.spec_video")}</div>
                 <div className={styles.specValue}>
                   {meta.videoCodec || "—"}
                   {meta.videoProfile ? ` / ${meta.videoProfile}` : ""}
                 </div>
               </div>
               <div className={styles.specItem}>
-                <div className={styles.specLabel}>音频</div>
+                <div className={styles.specLabel}>{t("pages.media_detail.spec_audio")}</div>
                 <div className={styles.specValue}>
                   {meta.audioCodec || "—"}
                   {meta.audioChannels ? ` / ${meta.audioChannels}ch` : ""}
                 </div>
               </div>
               <div className={styles.specItem}>
-                <div className={styles.specLabel}>字幕</div>
+                <div className={styles.specLabel}>{t("pages.media_detail.spec_subtitle")}</div>
                 <div className={styles.specValue}>
-                  {meta.subtitleCodecs.length ? meta.subtitleCodecs.join(", ") : "无内嵌字幕"}
+                  {meta.subtitleCodecs.length ? meta.subtitleCodecs.join(", ") : t("pages.media_detail.no_embedded_subtitle")}
                 </div>
               </div>
               <div className={styles.specItem}>
-                <div className={styles.specLabel}>比特率</div>
+                <div className={styles.specLabel}>{t("pages.media_detail.spec_bitrate")}</div>
                 <div className={styles.specValue}>{fmtBitrate(meta.bitrate || detail.bitrate)}</div>
               </div>
               <div className={styles.specItem}>
-                <div className={styles.specLabel}>帧率</div>
+                <div className={styles.specLabel}>{t("pages.media_detail.spec_framerate")}</div>
                 <div className={styles.specValue}>{meta.fps || "—"}</div>
               </div>
               <div className={styles.specItem}>
-                <div className={styles.specLabel}>配音/语言</div>
+                <div className={styles.specLabel}>{t("pages.media_detail.spec_audio_lang")}</div>
                 <div className={styles.specValue}>
-                  <SoundOutlined /> {meta.audioLanguage || "默认音轨"}
+                  <SoundOutlined /> {meta.audioLanguage || t("pages.media_detail.default_audio_track")}
                 </div>
               </div>
             </div>
           </div>
 
           <div className={styles.panel}>
-            <Typography.Title level={4}>播放统计</Typography.Title>
+            <Typography.Title level={4}>{t("pages.media_detail.section_play_stats")}</Typography.Title>
             <div className={styles.stats}>
-              <Statistic title="观看人数" value={stats?.watch_users ?? 0} />
-              <Statistic title="平均观看时长" value={fmtSeconds(Math.round(stats?.avg_position_seconds ?? 0))} />
-              <Statistic title="最近播放" value={stats?.latest_watch_at || "—"} />
+              <Statistic title={t("pages.media_detail.stat_watch_users")} value={stats?.watch_users ?? 0} />
+              <Statistic title={t("pages.media_detail.stat_avg_duration")} value={fmtSeconds(Math.round(stats?.avg_position_seconds ?? 0))} />
+              <Statistic title={t("pages.media_detail.stat_latest_watch")} value={stats?.latest_watch_at || "—"} />
             </div>
             <div className={styles.progressBox}>
-              <div className={styles.specLabel}>平均观看进度</div>
+              <div className={styles.specLabel}>{t("pages.media_detail.stat_avg_progress")}</div>
               <Progress percent={avgPct} strokeColor="#00b3ff" trailColor="rgba(255,255,255,0.18)" />
             </div>
             <div className={styles.progressBox}>
-              <div className={styles.specLabel}>我的观看记录</div>
+              <div className={styles.specLabel}>{t("pages.media_detail.stat_my_history")}</div>
               <div className={styles.historyTags}>
                 <Tag color={historyItem?.completed === 1 ? "green" : "default"}>
-                  {historyItem?.completed === 1 ? "已看完" : "未看完"}
+                  {historyItem?.completed === 1 ? t("pages.media_detail.history_completed") : t("pages.media_detail.history_uncompleted")}
                 </Tag>
-                <Tag color="blue">最后位置：{fmtSeconds(historyItem?.position ?? 0)}</Tag>
-                <Tag color="cyan">播放次数：{historyItem?.play_count ?? 0}</Tag>
-                <Tag>开始：{historyItem?.play_start_at || "—"}</Tag>
-                <Tag>结束：{historyItem?.play_end_at || "—"}</Tag>
+                <Tag color="blue">{t("pages.media_detail.history_last_pos", { pos: fmtSeconds(historyItem?.position ?? 0) })}</Tag>
+                <Tag color="cyan">{t("pages.media_detail.history_play_count", { count: historyItem?.play_count ?? 0 })}</Tag>
+                <Tag>{t("pages.media_detail.history_start", { time: historyItem?.play_start_at || "—" })}</Tag>
+                <Tag>{t("pages.media_detail.history_end", { time: historyItem?.play_end_at || "—" })}</Tag>
               </div>
             </div>
             <div className={styles.directorLine}>
-              <TeamOutlined /> 导演：{meta.director?.length ? meta.director.join(" / ") : "暂无"}
+              <TeamOutlined /> {t("pages.media_detail.director_label", {
+                names: meta.director?.length ? meta.director.join(" / ") : t("pages.media_detail.director_none"),
+              })}
             </div>
           </div>
         </section>
 
         <section className={styles.panel}>
-          <Typography.Title level={4}>演职人员</Typography.Title>
+          <Typography.Title level={4}>{t("pages.media_detail.section_cast")}</Typography.Title>
           {castListClassic.length === 0 ? (
-            <div className={styles.empty}>暂无演员信息</div>
+            <div className={styles.empty}>{t("pages.media_detail.no_cast")}</div>
           ) : (
             <div className={styles.castRow}>
               {castListClassic.map((member, idx) => (
@@ -1144,7 +1148,7 @@ export default function MediaDetailPage() {
                     <div className={styles.castAvatarEmptyClassic} />
                   )}
                   <div className={styles.castName}>{member.name}</div>
-                  <div className={styles.castRole}>{member.role || "演员"}</div>
+                  <div className={styles.castRole}>{member.role || t("pages.media_detail.role_actor")}</div>
                 </div>
               ))}
             </div>
@@ -1152,15 +1156,15 @@ export default function MediaDetailPage() {
         </section>
 
         <section className={styles.panel}>
-          <Typography.Title level={4}>相关推荐</Typography.Title>
+          <Typography.Title level={4}>{t("pages.media_detail.section_related")}</Typography.Title>
           {related.length === 0 ? (
-            <div className={styles.empty}>暂无相关推荐</div>
+            <div className={styles.empty}>{t("pages.media_detail.no_related")}</div>
           ) : (
             <div className={styles.relatedRow}>
               {related.slice(0, 8).map((m) => (
                 <Link key={m.id} to={`/detail/${m.id}`} className={styles.relatedCard}>
                   <div className={styles.relatedPoster}>{(m.title || "?").slice(0, 1)}</div>
-                  <div className={styles.relatedTitle}>{m.title || "未命名"}</div>
+                  <div className={styles.relatedTitle}>{m.title || tGlobal("pages.media_detail.untitled")}</div>
                 </Link>
               ))}
             </div>
@@ -1176,7 +1180,7 @@ export default function MediaDetailPage() {
         <div
           className={styles.relatedBulkBar}
           role="toolbar"
-          aria-label="相关影片批量操作"
+          aria-label={t("pages.media_detail.related_bulk_aria")}
           style={{
             left: relatedBulkDock.left,
             width: relatedBulkDock.width,
@@ -1187,13 +1191,13 @@ export default function MediaDetailPage() {
         >
           <div className={styles.relatedBulkLeft}>
             <CheckOutlined className={styles.relatedBulkOrangeMark} aria-hidden />
-            <span className={styles.relatedBulkOrangeText}>已选择 {relatedSelectedIds.length} 个项目</span>
+            <span className={styles.relatedBulkOrangeText}>{t("pages.media_detail.selected_count", { count: relatedSelectedIds.length })}</span>
           </div>
           <div className={styles.relatedBulkCenter}>
             <button
               type="button"
               className={styles.relatedBulkIconBtn}
-              aria-label="播放"
+              aria-label={t("pages.media_detail.aria_play")}
               onClick={() => {
                 const first = relatedSelectedIds[0];
                 if (first != null) nav(`/player/${first}`);
@@ -1206,33 +1210,33 @@ export default function MediaDetailPage() {
               className={styles.relatedBulkIconBtn}
               aria-label={
                 related.length > 0 && related.every((r) => relatedSelectedIds.includes(r.id))
-                  ? "取消全选相关推荐"
-                  : "全选相关推荐"
+                  ? t("pages.media_detail.aria_deselect_all_related")
+                  : t("pages.media_detail.aria_select_all_related")
               }
               onClick={selectAllRelatedOrClear}
             >
               <CheckCircleOutlined />
             </button>
             <Popover content={relatedBulkListContent} trigger="click" placement="bottom">
-              <button type="button" className={styles.relatedBulkIconBtn} aria-label="已选列表">
+              <button type="button" className={styles.relatedBulkIconBtn} aria-label={t("pages.media_detail.aria_selected_list")}>
                 <UnorderedListOutlined />
               </button>
             </Popover>
             <Dropdown menu={{ items: relatedBulkMoreItems }} trigger={["click"]} placement="bottomRight">
-              <button type="button" className={styles.relatedBulkIconBtn} aria-label="更多">
+              <button type="button" className={styles.relatedBulkIconBtn} aria-label={t("pages.media_detail.aria_more_short")}>
                 <MoreOutlined />
               </button>
             </Dropdown>
           </div>
           <button type="button" className={styles.relatedBulkCancel} onClick={clearRelatedSelect}>
             <CloseOutlined aria-hidden />
-            <span>取消全选</span>
+            <span>{t("pages.media_detail.deselect_all")}</span>
           </button>
         </div>
       ) : null}
       <div className={styles.topBar}>
         <Button type="text" icon={<ArrowLeftOutlined />} onClick={() => nav(-1)} className={styles.backBtn}>
-          返回
+          {t("pages.media_detail.back")}
         </Button>
       </div>
 
@@ -1244,7 +1248,7 @@ export default function MediaDetailPage() {
                 type="button"
                 className={styles.posterPlayHit}
                 onClick={() => nav(showResumeActions ? resumeTarget : playFromStartTarget)}
-                aria-label={showResumeActions ? "继续播放" : "播放"}
+                aria-label={showResumeActions ? t("pages.media_detail.aria_continue_play") : t("pages.media_detail.aria_play_short")}
               >
                 <div className={styles.poster}>
                   {posterUrl ? (
@@ -1257,7 +1261,7 @@ export default function MediaDetailPage() {
                   ) : (
                     <div className={styles.posterFallback}>
                       <FileImageOutlined />
-                      <span>暂无海报</span>
+                      <span>{t("pages.media_detail.no_poster")}</span>
                     </div>
                   )}
                   <div className={styles.posterHoverOverlay} aria-hidden>
@@ -1268,21 +1272,23 @@ export default function MediaDetailPage() {
                 </div>
               </button>
               {isCompleted ? (
-                <div className={styles.posterWatchedBar} role="status" aria-label="已观看">
+                <div className={styles.posterWatchedBar} role="status" aria-label={t("pages.media_detail.aria_watched")}>
                   <CheckOutlined className={styles.posterWatchedIcon} />
-                  <span>已观看</span>
+                  <span>{t("pages.media_detail.watched_label")}</span>
                 </div>
               ) : null}
             </div>
             <div className={styles.introMain}>
               <Typography.Title level={2} className={styles.title}>
-                {detail.title || "未命名影片"}
+                {detail.title || t("pages.media_detail.untitled_movie")}
               </Typography.Title>
               <div className={styles.directorLine}>
-                <TeamOutlined /> 导演：{meta.director?.length ? meta.director.join("、") : "暂无"}
+                <TeamOutlined /> {t("pages.media_detail.director_label_dot", {
+                  names: meta.director?.length ? meta.director.join("、") : t("pages.media_detail.director_none"),
+                })}
               </div>
               <div className={styles.metaRow}>
-                <span>{yearStr !== "—" ? `${yearStr} 年` : "—"}</span>
+                <span>{yearStr !== "—" ? t("pages.media_detail.year_unit", { year: yearStr }) : "—"}</span>
                 <span className={styles.metaDot}>·</span>
                 <span>{runtimeZh}</span>
                 {meta.certification ? (
@@ -1303,11 +1309,11 @@ export default function MediaDetailPage() {
               ) : null}
               <div className={styles.scoreRow}>
                 {scoreText ? (
-                  <span className={styles.criticScore}>评分 {scoreText}</span>
+                  <span className={styles.criticScore}>{t("pages.media_detail.score_label", { score: scoreText })}</span>
                 ) : (
-                  <span className={styles.criticScoreMuted}>暂无评分</span>
+                  <span className={styles.criticScoreMuted}>{t("pages.media_detail.no_score")}</span>
                 )}
-                <span className={styles.rateLabel}>我的打分</span>
+                <span className={styles.rateLabel}>{t("pages.media_detail.my_rating")}</span>
                 <Rate
                   allowHalf
                   value={userStars}
@@ -1331,7 +1337,7 @@ export default function MediaDetailPage() {
                     className={styles.playBtn}
                     onClick={() => nav(resumeTarget)}
                   >
-                    继续播放
+                    {t("pages.media_detail.btn_continue")}
                   </Button>
                 ) : (
                   <Button
@@ -1341,23 +1347,23 @@ export default function MediaDetailPage() {
                     className={styles.playBtn}
                     onClick={() => nav(playFromStartTarget)}
                   >
-                    播放
+                    {t("pages.media_detail.btn_play")}
                   </Button>
                 )}
-                <Tooltip title={favorited ? "取消收藏" : "加入收藏"} placement="top">
+                <Tooltip title={favorited ? t("pages.media_detail.tooltip_unfavorite") : t("pages.media_detail.tooltip_favorite")} placement="top">
                   <Button
                     type="default"
                     shape="circle"
                     size="large"
                     icon={favorited ? <StarFilled /> : <StarOutlined />}
-                    aria-label={favorited ? "取消收藏" : "加入收藏"}
+                    aria-label={favorited ? t("pages.media_detail.tooltip_unfavorite") : t("pages.media_detail.tooltip_favorite")}
                     className={`${styles.iconAction} ${styles.iconActionCircle} ${styles.iconActionFavorite}${
                       favorited ? ` ${styles.iconActionFavorited}` : ""
                     }`}
                     onClick={() => void onToggleFavorite()}
                   />
                 </Tooltip>
-                <Tooltip title={isCompleted ? "标记为未观看" : "标记为已观看"} placement="top">
+                <Tooltip title={isCompleted ? t("pages.media_detail.tooltip_mark_unwatched") : t("pages.media_detail.tooltip_mark_watched")} placement="top">
                   <Button
                     shape="circle"
                     size="large"
@@ -1368,18 +1374,18 @@ export default function MediaDetailPage() {
                         <CheckCircleOutlined />
                       )
                     }
-                    aria-label={isCompleted ? "标记为未观看" : "标记为已观看"}
+                    aria-label={isCompleted ? t("pages.media_detail.tooltip_mark_unwatched") : t("pages.media_detail.tooltip_mark_watched")}
                     loading={markBusy}
                     onClick={() => void onToggleWatched()}
                     className={`${styles.iconAction} ${styles.iconActionCircle} ${styles.iconActionWatch}`}
                   />
                 </Tooltip>
-                <Tooltip title="编辑" placement="top">
+                <Tooltip title={t("pages.media_detail.tooltip_edit")} placement="top">
                   <Button
                     shape="circle"
                     size="large"
                     icon={<EditOutlined />}
-                    aria-label="编辑"
+                    aria-label={t("pages.media_detail.aria_edit")}
                     onClick={onEditClick}
                     className={`${styles.iconAction} ${styles.iconActionCircle}`}
                   />
@@ -1389,7 +1395,7 @@ export default function MediaDetailPage() {
                     shape="circle"
                     size="large"
                     icon={<MoreOutlined />}
-                    aria-label="更多"
+                    aria-label={t("pages.media_detail.aria_more")}
                     className={`${styles.iconAction} ${styles.iconActionCircle}`}
                   />
                 </Dropdown>
@@ -1403,19 +1409,19 @@ export default function MediaDetailPage() {
                 <Typography.Paragraph className={styles.overviewText}>{overviewShown}</Typography.Paragraph>
                 {overviewLong ? (
                   <Button type="link" size="small" className={styles.expandLink} onClick={() => setOverviewOpen(!overviewOpen)}>
-                    {overviewOpen ? "收起" : "展开"}
+                    {overviewOpen ? t("pages.media_detail.collapse") : t("pages.media_detail.expand")}
                   </Button>
                 ) : null}
               </div>
               <div className={styles.streamPickers}>
                 <span className={styles.streamKey}>
-                  <VideoCameraOutlined /> 视频
+                  <VideoCameraOutlined /> {t("pages.media_detail.section_video")}
                 </span>
                 <div className={styles.streamValueCell}>
                   <span className={styles.streamVal}>{videoFormatLine}</span>
                 </div>
                 <span className={styles.streamKey}>
-                  <SoundOutlined /> 音频
+                  <SoundOutlined /> {t("pages.media_detail.section_audio")}
                 </span>
                 <div className={styles.streamValueCell}>
                   <Select
@@ -1425,8 +1431,8 @@ export default function MediaDetailPage() {
                     styles={{ root: { padding: 0, margin: 0 }, content: { padding: 0, margin: 0 } }}
                     disabled={audioOptions.length === 0}
                     value={audioOptions.length ? safeAudioIdx : undefined}
-                    placeholder={audioOptions.length ? undefined : "无音轨信息"}
-                    options={audioOptions.map((t) => ({ value: t.index, label: audioTrackLabel(t) }))}
+                    placeholder={audioOptions.length ? undefined : t("pages.media_detail.no_audio_tracks")}
+                    options={audioOptions.map((track) => ({ value: track.index, label: audioTrackLabel(track) }))}
                     onChange={(v) => {
                       setSelectedAudioIdx(v);
                       try {
@@ -1438,7 +1444,7 @@ export default function MediaDetailPage() {
                   />
                 </div>
                 <span className={styles.streamKey}>
-                  <TranslationOutlined /> 字幕
+                  <TranslationOutlined /> {t("pages.media_detail.section_subtitle")}
                 </span>
                 <div className={styles.streamValueCell}>
                   <Select
@@ -1448,12 +1454,12 @@ export default function MediaDetailPage() {
                     styles={{ root: { padding: 0, margin: 0 }, content: { padding: 0, margin: 0 } }}
                     value={subtitleSelectValue}
                     options={[
-                      { value: "off", label: "关闭 / 无" },
+                      { value: "off", label: t("pages.media_detail.subtitle_off") },
                       ...subtitleRows.map((r) => ({ value: String(r.id), label: subtitleRowLabel(r) })),
                       ...(meta.subtitleCodecs.length && subtitleRows.length === 0
                         ? meta.subtitleCodecs.map((c, i) => ({
                             value: `embedded-${i}`,
-                            label: `内嵌 · ${c}`,
+                            label: t("pages.media_detail.subtitle_embedded_prefix", { codec: c }),
                           }))
                         : []),
                     ]}
@@ -1473,39 +1479,39 @@ export default function MediaDetailPage() {
         </div>
       </section>
 
-      {/* 2. 播放统计 */}
+      {/* Playback statistics */}
       <section className={styles.block} ref={fileInfoRef}>
         <Typography.Title level={4} className={styles.blockTitle}>
-          播放统计
+          {t("pages.media_detail.stats_section_title")}
         </Typography.Title>
         <div className={styles.statsPanel}>
           <div className={styles.stats}>
-            <Statistic title="观看人数" value={stats?.watch_users ?? 0} />
-            <Statistic title="平均观看时长" value={fmtSeconds(Math.round(stats?.avg_position_seconds ?? 0))} />
-            <Statistic title="最近播放" value={stats?.latest_watch_at || "—"} />
+            <Statistic title={t("pages.media_detail.stat_watch_users")} value={stats?.watch_users ?? 0} />
+            <Statistic title={t("pages.media_detail.stat_avg_duration")} value={fmtSeconds(Math.round(stats?.avg_position_seconds ?? 0))} />
+            <Statistic title={t("pages.media_detail.stat_latest_watch")} value={stats?.latest_watch_at || "—"} />
           </div>
           <div className={styles.progressBox}>
-            <div className={styles.specLabel}>平均观看进度</div>
+            <div className={styles.specLabel}>{t("pages.media_detail.stat_avg_progress")}</div>
             <Progress percent={avgPct} strokeColor="#e5a00d" trailColor="rgba(255,255,255,0.12)" />
           </div>
           <div className={styles.progressBox}>
-            <div className={styles.specLabel}>我的观看记录</div>
+            <div className={styles.specLabel}>{t("pages.media_detail.stat_my_history")}</div>
             <div className={styles.historyTags}>
               <Tag color={historyItem?.completed === 1 ? "green" : "default"}>
-                {historyItem?.completed === 1 ? "已看完" : "未看完"}
+                {historyItem?.completed === 1 ? t("pages.media_detail.history_completed") : t("pages.media_detail.history_uncompleted")}
               </Tag>
-              <Tag color="blue">最后位置：{fmtSeconds(historyItem?.position ?? 0)}</Tag>
-              <Tag color="cyan">播放次数：{historyItem?.play_count ?? 0}</Tag>
-              <Tag>开始：{historyItem?.play_start_at || "—"}</Tag>
-              <Tag>结束：{historyItem?.play_end_at || "—"}</Tag>
+              <Tag color="blue">{t("pages.media_detail.history_last_pos", { pos: fmtSeconds(historyItem?.position ?? 0) })}</Tag>
+              <Tag color="cyan">{t("pages.media_detail.history_play_count", { count: historyItem?.play_count ?? 0 })}</Tag>
+              <Tag>{t("pages.media_detail.history_start", { time: historyItem?.play_start_at || "—" })}</Tag>
+              <Tag>{t("pages.media_detail.history_end", { time: historyItem?.play_end_at || "—" })}</Tag>
             </div>
           </div>
         </div>
       </section>
 
       <MediaHorizontalShelf
-        title="演员表和工作人员"
-        empty={<div className={styles.empty}>暂无演员信息</div>}
+        title={t("pages.media_detail.section_cast_crew")}
+        empty={<div className={styles.empty}>{t("pages.media_detail.no_cast")}</div>}
         trackClassName={styles.castRow}
         hasContent={castList.length > 0}
         refreshKey={castList.map((c) => c.name).join("\n")}
@@ -1523,14 +1529,14 @@ export default function MediaDetailPage() {
               <div className={styles.castAvatarEmpty}>{(member.name || "?").slice(0, 1).toUpperCase()}</div>
             )}
             <div className={styles.castName}>{member.name}</div>
-            <div className={styles.castRole}>{member.role || "演员"}</div>
+            <div className={styles.castRole}>{member.role || t("pages.media_detail.role_actor")}</div>
           </div>
         ))}
       </MediaHorizontalShelf>
 
       <MediaHorizontalShelf
-        title={isTVLibraryType(libraryType) ? "相关视频" : "相关电影"}
-        empty={<div className={styles.empty}>暂无相关推荐</div>}
+        title={isTVLibraryType(libraryType) ? t("pages.media_detail.section_related_tv") : t("pages.media_detail.section_related_movie")}
+        empty={<div className={styles.empty}>{t("pages.media_detail.no_related")}</div>}
         trackClassName={styles.relatedRow}
         hasContent={related.length > 0}
         refreshKey={related.map((r) => r.id).join(",")}
