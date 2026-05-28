@@ -20,6 +20,7 @@ import AddToPlaylistModal from "../components/AddToPlaylistModal";
 import MediaPosterImg from "../components/MediaPosterImg";
 import { buildMediaMenuItems } from "../components/mediaMenuItems";
 import { readRecentPlaylists, rememberPlaylistAdded } from "../lib/recentPlaylists";
+import { useT, type TranslateFn } from "../i18n";
 import styles from "./Favorites.module.css";
 
 type ViewMode = "poster" | "thumb" | "list" | "table";
@@ -29,21 +30,25 @@ type SortOrder = "asc" | "desc";
 const FAVORITES_PREFS_KEY = "knox.favorites.prefs.v1";
 const TABLE_PAGE_SIZE = 20;
 
-const VIEW_MODES: { value: ViewMode; label: string; Icon: ComponentType }[] = [
-  { value: "poster", label: "海报", Icon: PictureOutlined },
-  { value: "thumb", label: "缩略图", Icon: AppstoreOutlined },
-  { value: "list", label: "列表", Icon: BarsOutlined },
-  { value: "table", label: "表格", Icon: TableOutlined },
-];
+type ViewModeEntry = { value: ViewMode; label: string; Icon: ComponentType };
 
-function fmtDurationZh(sec: number): string {
+function buildViewModes(t: TranslateFn): ViewModeEntry[] {
+  return [
+    { value: "poster", label: t("pages.browse.view_poster"), Icon: PictureOutlined },
+    { value: "thumb", label: t("pages.browse.view_thumb"), Icon: AppstoreOutlined },
+    { value: "list", label: t("pages.browse.view_list"), Icon: BarsOutlined },
+    { value: "table", label: t("pages.browse.view_table"), Icon: TableOutlined },
+  ];
+}
+
+function fmtDurationLocalized(sec: number, t: TranslateFn): string {
   if (sec == null || Number.isNaN(sec) || sec <= 0) return "—";
   const total = Math.floor(sec);
   const h = Math.floor(total / 3600);
   const m = Math.floor((total % 3600) / 60);
-  if (h > 0) return `${h} 小时 ${m} 分钟`;
-  if (m > 0) return `${m} 分钟`;
-  return `${total % 60} 秒`;
+  if (h > 0) return t("pages.browse.fmt_h_m", { h, m });
+  if (m > 0) return t("pages.browse.fmt_m", { m });
+  return t("pages.browse.fmt_s", { s: total % 60 });
 }
 
 function readFavoritesPrefs(): {
@@ -73,15 +78,22 @@ function readFavoritesPrefs(): {
   }
 }
 
-const TABLE_COL_SPECS: { key: string; label: string; sortField: SortField; widthPx: number }[] = [
-  { key: "title", label: "标题", sortField: "title", widthPx: 0 },
-  { key: "duration", label: "时长", sortField: "added", widthPx: 112 },
-  { key: "quality", label: "分辨率", sortField: "added", widthPx: 104 },
-  { key: "added", label: "日期已添加", sortField: "added", widthPx: 168 },
-];
+type TableColSpec = { key: string; label: string; sortField: SortField; widthPx: number };
+
+function buildTableColSpecs(t: TranslateFn): TableColSpec[] {
+  return [
+    { key: "title", label: t("pages.browse.col_title"), sortField: "title", widthPx: 0 },
+    { key: "duration", label: t("pages.browse.col_duration"), sortField: "added", widthPx: 112 },
+    { key: "quality", label: t("pages.browse.col_quality"), sortField: "added", widthPx: 104 },
+    { key: "added", label: t("pages.browse.col_added"), sortField: "added", widthPx: 168 },
+  ];
+}
 
 export default function FavoritesPage() {
   const nav = useNavigate();
+  const t = useT();
+  const VIEW_MODES = useMemo(() => buildViewModes(t), [t]);
+  const TABLE_COL_SPECS = useMemo(() => buildTableColSpecs(t), [t]);
   const [rows, setRows] = useState<MediaItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>(() => readFavoritesPrefs()?.viewMode ?? "table");
@@ -98,12 +110,12 @@ export default function FavoritesPage() {
     try {
       setRows(await fetchFavorites());
     } catch (e: unknown) {
-      message.error((e as Error).message || "加载失败");
+      message.error((e as Error).message || t("pages.favorites.load_failed"));
       setRows([]);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     void load();
@@ -157,10 +169,10 @@ export default function FavoritesPage() {
   async function onUnfavorite(id: number) {
     try {
       await removeFavorite(id);
-      message.success("已取消收藏");
+      message.success(t("pages.favorites.unfavorited"));
       void load();
     } catch (e: unknown) {
-      message.error((e as Error).message || "操作失败");
+      message.error((e as Error).message || t("pages.favorites.operation_failed"));
     }
   }
 
@@ -178,18 +190,18 @@ export default function FavoritesPage() {
             const name =
               recentPlaylistMenu.find((p) => p.id === pid)?.name ??
               readRecentPlaylists().find((p) => p.id === pid)?.name ??
-              "播放列表";
-            message.success(`已添加到「${name}」`);
+              t("pages.favorites.playlist_fallback");
+            message.success(t("pages.favorites.added_to_playlist", { name }));
             rememberPlaylistAdded({ id: pid, name });
             setRecentPlaylistMenu(readRecentPlaylists());
           } catch {
-            message.error("添加失败，可能已在列表中");
+            message.error(t("pages.favorites.add_failed"));
           }
         },
         onUnfavorite: (id) => void onUnfavorite(id),
         afterToggleWatched: () => void load(),
       }),
-    [nav, recentPlaylistMenu, load],
+    [nav, recentPlaylistMenu, load, t],
   );
 
   const addToPlaylistTarget = useMemo(
@@ -204,7 +216,7 @@ export default function FavoritesPage() {
   }));
 
   const CurrentViewIcon = VIEW_MODES.find((m) => m.value === viewMode)?.Icon ?? TableOutlined;
-  const currentViewLabel = VIEW_MODES.find((m) => m.value === viewMode)?.label ?? "表格";
+  const currentViewLabel = VIEW_MODES.find((m) => m.value === viewMode)?.label ?? t("pages.browse.table_fallback");
 
   return (
     <div style={{ padding: "16px 0 32px" }}>
@@ -233,7 +245,7 @@ export default function FavoritesPage() {
                 type="text"
                 size="small"
                 icon={viewModeMenuOpen ? <UpOutlined /> : <DownOutlined />}
-                aria-label="选择显示方式"
+                aria-label={t("pages.browse.view_mode_aria")}
                 aria-expanded={viewModeMenuOpen}
               />
             </Dropdown>
@@ -246,7 +258,7 @@ export default function FavoritesPage() {
           <Spin />
         </div>
       ) : sortedRows.length === 0 ? (
-        <Empty description="暂无收藏，去浏览媒体并加入收藏吧" />
+        <Empty description={t("pages.favorites.empty")} />
       ) : viewMode === "table" ? (
         <div className={styles.browseTableWrap}>
           <div className={styles.browseTableHead}>
@@ -304,7 +316,7 @@ export default function FavoritesPage() {
                     <button
                       type="button"
                       className={styles.browseGutterSelect}
-                      aria-label={isSel ? "取消选择" : "选择"}
+                      aria-label={isSel ? t("pages.browse.aria_deselect") : t("pages.browse.aria_select")}
                       data-selected={isSel ? "" : undefined}
                       onClick={(e) => {
                         e.stopPropagation();
@@ -319,7 +331,7 @@ export default function FavoritesPage() {
                       <button
                         type="button"
                         className={styles.browseRowPlay}
-                        aria-label="播放"
+                        aria-label={t("pages.browse.aria_play")}
                         onClick={(e) => {
                           e.stopPropagation();
                           nav(`/player/${r.id}`);
@@ -328,9 +340,9 @@ export default function FavoritesPage() {
                         <CaretRightOutlined />
                       </button>
                     ) : null}
-                    <span className={styles.browseTitleText}>{r.title || "未命名"}</span>
+                    <span className={styles.browseTitleText}>{r.title || t("pages.favorites.untitled")}</span>
                   </div>
-                  <div className={styles.browseTd}>{fmtDurationZh(r.duration)}</div>
+                  <div className={styles.browseTd}>{fmtDurationLocalized(r.duration, t)}</div>
                   <div className={styles.browseTd}>{r.width && r.height ? `${r.width}x${r.height}` : "—"}</div>
                   <div className={styles.browseTd}>{r.created_at ? r.created_at.replace("T", " ").slice(0, 19) : "—"}</div>
                   <div className={styles.browseTdActions}>
@@ -345,7 +357,7 @@ export default function FavoritesPage() {
                           size="small"
                           className={styles.browseRowMoreBtn}
                           icon={<EllipsisOutlined rotate={90} />}
-                          aria-label="更多"
+                          aria-label={t("pages.browse.aria_more")}
                           onClick={(e) => e.stopPropagation()}
                         />
                       </Dropdown>
@@ -383,7 +395,7 @@ export default function FavoritesPage() {
                   <button
                     type="button"
                     className={styles.listSelectBtn}
-                    aria-label={isListSelected ? "取消选择" : "选择"}
+                    aria-label={isListSelected ? t("pages.browse.aria_deselect") : t("pages.browse.aria_select")}
                     aria-pressed={isListSelected}
                     data-selected={isListSelected ? "" : undefined}
                     onClick={(e) => {
@@ -428,7 +440,7 @@ export default function FavoritesPage() {
                         <button
                           type="button"
                           className={styles.listPlayOverlay}
-                          aria-label="播放"
+                          aria-label={t("pages.browse.aria_play")}
                           onClick={(e) => {
                             e.stopPropagation();
                             nav(`/player/${r.id}`);
@@ -442,9 +454,9 @@ export default function FavoritesPage() {
                     </div>
                   </div>
                   <div className={styles.listInfo}>
-                    <div className={styles.listTitle}>{r.title || "未命名"}</div>
+                    <div className={styles.listTitle}>{r.title || t("pages.favorites.untitled")}</div>
                     <div className={styles.listMeta}>
-                      {r.width && r.height ? `${r.width}x${r.height}` : "—"} · {fmtDurationZh(r.duration)}
+                      {r.width && r.height ? `${r.width}x${r.height}` : "—"} · {fmtDurationLocalized(r.duration, t)}
                     </div>
                   </div>
                 </div>
@@ -460,7 +472,7 @@ export default function FavoritesPage() {
                         size="small"
                         className={styles.listMoreBtn}
                         icon={<EllipsisOutlined rotate={90} />}
-                        aria-label="更多"
+                        aria-label={t("pages.browse.aria_more")}
                         onClick={(e) => e.stopPropagation()}
                       />
                     </Dropdown>
@@ -515,7 +527,7 @@ export default function FavoritesPage() {
                           type="button"
                           data-browse-card-action
                           className={`${styles.gridCornerBtn} ${styles.gridEditBtn}`}
-                          aria-label="编辑"
+                          aria-label={t("pages.browse.aria_edit")}
                           onClick={(e) => {
                             e.stopPropagation();
                             nav(`/detail/${r.id}`);
@@ -527,7 +539,7 @@ export default function FavoritesPage() {
                           type="button"
                           data-browse-card-action
                           className={styles.gridPlayBtn}
-                          aria-label="播放"
+                          aria-label={t("pages.browse.aria_play")}
                           onClick={(e) => {
                             e.stopPropagation();
                             nav(`/player/${r.id}`);
@@ -546,7 +558,7 @@ export default function FavoritesPage() {
                               size="small"
                               className={styles.gridMoreIconBtn}
                               icon={<EllipsisOutlined rotate={90} />}
-                              aria-label="更多"
+                              aria-label={t("pages.browse.aria_more")}
                               onClick={(e) => e.stopPropagation()}
                             />
                           </Dropdown>
@@ -559,7 +571,7 @@ export default function FavoritesPage() {
                     data-browse-card-action
                     className={styles.gridSelectBtn}
                     data-selected={isCardSelected ? "" : undefined}
-                    aria-label={isCardSelected ? "取消选择" : "选择"}
+                    aria-label={isCardSelected ? t("pages.browse.aria_deselect") : t("pages.browse.aria_select")}
                     aria-pressed={isCardSelected}
                     onClick={(e) => {
                       e.stopPropagation();
@@ -570,7 +582,7 @@ export default function FavoritesPage() {
                   </button>
                 </div>
                 <div className={styles.cardBody}>
-                  <div className={styles.cardTitle}>{r.title || "未命名"}</div>
+                  <div className={styles.cardTitle}>{r.title || t("pages.favorites.untitled")}</div>
                 </div>
               </div>
             );

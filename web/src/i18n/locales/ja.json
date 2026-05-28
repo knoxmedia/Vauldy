@@ -508,6 +508,16 @@
       "stat_token_count": "トークン消費",
       "stat_last_used": "最終使用"
     },
+    "favorites": {
+      "load_failed": "読み込みに失敗しました",
+      "operation_failed": "操作に失敗しました",
+      "unfavorited": "お気に入りから削除しました",
+      "playlist_fallback": "プレイリスト",
+      "added_to_playlist": "「{name}」に追加しました",
+      "add_failed": "追加に失敗しました。既にリストにある可能性があります",
+      "empty": "お気に入りがありません。メディアを閲覧して追加してください。",
+      "untitled": "無題"
+    },
     "home": {
       "aria_deselect": "選択解除",
       "aria_select": "選択",

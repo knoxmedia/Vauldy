@@ -508,6 +508,16 @@
       "stat_token_count": "Tokens",
       "stat_last_used": "Last used"
     },
+    "favorites": {
+      "load_failed": "Failed to load",
+      "operation_failed": "Operation failed",
+      "unfavorited": "Removed from favorites",
+      "playlist_fallback": "Playlist",
+      "added_to_playlist": "Added to \"{name}\"",
+      "add_failed": "Add failed, may already be in the playlist",
+      "empty": "No favorites yet. Browse media and add some.",
+      "untitled": "Untitled"
+    },
     "home": {
       "aria_deselect": "Deselect",
       "aria_select": "Select",
