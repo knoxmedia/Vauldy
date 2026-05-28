@@ -74,9 +74,9 @@ subtitle:
     tesseract_path: tesseract
     tessdata_prefix: ""
     languages: chi_sim+eng
-    python_path: ""
-    script_path: ""
-    pgsrip_path: ""
+    python_path: tools/recognition/.venv/Scripts/python.exe
+    script_path: tools/subtitle_ocr/bitmap_subtitle_ocr.py
+    pgsrip_path: tools/recognition/.venv/Scripts/pgsrip.exe
     mkvextract_path: ""
     mkvmerge_path: ""
 # Audio track extraction: separate audio from video on library scan.
