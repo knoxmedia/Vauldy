@@ -2,6 +2,7 @@ import type { MenuProps } from "antd";
 import { Modal, message } from "antd";
 import { deleteMedia, unmatchMedia } from "../api/client";
 import type { RecentPlaylistEntry } from "../lib/recentPlaylists";
+import { tGlobal as t } from "../i18n";
 
 export function buildSeriesMenuItems(
   extra: {
@@ -29,14 +30,14 @@ export function buildSeriesMenuItems(
   const addToChildren: MenuProps["items"] = [
     {
       key: "openAddToPlaylist",
-      label: "添加到播放列表...",
+      label: t("components.series_menu.add_to_playlist"),
       disabled: !onAddToPlaylist || allMediaIds.length === 0,
     },
   ];
   if (recentPlaylists.length > 0 && onQuickAddToPlaylist) {
     addToChildren.push({
       type: "group",
-      label: "最近",
+      label: t("components.series_menu.recent"),
       children: recentPlaylists.slice(0, 3).map((pl) => ({
         key: `recentPlaylist:${pl.id}`,
         label: pl.name,
@@ -47,19 +48,19 @@ export function buildSeriesMenuItems(
   const items: MenuProps["items"] = [
     {
       key: "addTo",
-      label: "添加到",
+      label: t("components.series_menu.add_to"),
       children: addToChildren,
     },
     { type: "divider" as const },
-    ...(onOpenMatch && !scraped ? [{ key: "match", label: "匹配" }] : []),
+    ...(onOpenMatch && !scraped ? [{ key: "match", label: t("components.series_menu.match") }] : []),
     ...(onOpenMatch && scraped
       ? [
-          { key: "fixMatch", label: "修正匹配" },
-          { key: "unmatch", label: "取消匹配" },
+          { key: "fixMatch", label: t("components.series_menu.fix_match") },
+          { key: "unmatch", label: t("components.series_menu.unmatch") },
         ]
       : []),
     { type: "divider" as const },
-    { key: "deleteSeries", label: "删除剧集", danger: true },
+    { key: "deleteSeries", label: t("components.series_menu.delete_series"), danger: true },
   ];
 
   return {
@@ -85,29 +86,29 @@ export function buildSeriesMenuItems(
             for (const id of allMediaIds) {
               await unmatchMedia(id);
             }
-            message.success("已取消匹配");
+            message.success(t("components.series_menu.unmatched"));
             await afterUnmatch?.();
           } catch (e: unknown) {
-            message.error((e as Error).message || "取消匹配失败");
+            message.error((e as Error).message || t("components.series_menu.unmatch_failed"));
           }
         })();
         return;
       }
       if (key === "deleteSeries") {
         if (allMediaIds.length === 0) {
-          message.warning("暂无可删除的媒体文件");
+          message.warning(t("components.series_menu.no_files_to_delete"));
           return;
         }
         Modal.confirm({
-          title: "删除剧集",
+          title: t("components.series_menu.delete_modal_title"),
           centered: true,
-          okText: "确定删除",
-          cancelText: "取消",
+          okText: t("components.series_menu.delete_modal_ok"),
+          cancelText: t("components.series_menu.delete_modal_cancel"),
           okButtonProps: { danger: true },
           content: (
             <div>
               <p style={{ marginBottom: 8 }}>
-                将从文件系统和媒体库删除此剧集的全部 {allMediaIds.length} 个视频文件，确定继续吗？
+                {t("components.series_menu.delete_warning", { count: allMediaIds.length })}
               </p>
             </div>
           ),
@@ -116,10 +117,10 @@ export function buildSeriesMenuItems(
               for (const id of allMediaIds) {
                 await deleteMedia(id);
               }
-              message.success("剧集已删除");
+              message.success(t("components.series_menu.deleted"));
               await afterDelete?.();
             } catch (e: unknown) {
-              message.error((e as Error).message || "删除失败");
+              message.error((e as Error).message || t("components.series_menu.delete_failed"));
               throw e;
             }
           },

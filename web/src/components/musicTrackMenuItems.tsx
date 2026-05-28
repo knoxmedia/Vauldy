@@ -3,6 +3,7 @@ import { message } from "antd";
 import type { NavigateFunction } from "react-router-dom";
 import { addFavorite, enqueueLyricRecognition } from "../api/client";
 import type { RecentPlaylistEntry } from "../lib/recentPlaylists";
+import { tGlobal as t } from "../i18n";
 import { confirmDeleteMedia } from "./mediaMenuItems";
 
 export type MusicTrackMenuTarget = {
@@ -32,18 +33,18 @@ export function buildMusicTrackMenuItems(
   const addToChildren: MenuProps["items"] = [
     {
       key: "openAddToPlaylist",
-      label: "添加到播放列表…",
+      label: t("components.music_track_menu.add_to_playlist"),
       disabled: !onAddToPlaylist,
     },
     {
       key: "addFavorite",
-      label: "收藏",
+      label: t("components.music_track_menu.favorite"),
     },
   ];
   if (recentPlaylists.length > 0 && onQuickAddToPlaylist) {
     addToChildren.push({
       type: "group",
-      label: "最近",
+      label: t("components.music_track_menu.recent"),
       children: recentPlaylists.slice(0, 3).map((pl) => ({
         key: `recentPlaylist:${pl.id}`,
         label: pl.name,
@@ -53,39 +54,39 @@ export function buildMusicTrackMenuItems(
 
   return {
     items: [
-      { key: "play", label: "播放" },
+      { key: "play", label: t("components.music_track_menu.play") },
       { type: "divider" },
-      { key: "addTo", label: "添加到", children: addToChildren },
-      { key: "edit", label: "编辑" },
-      { key: "identifyLyrics", label: "识别歌词" },
+      { key: "addTo", label: t("components.music_track_menu.add_to"), children: addToChildren },
+      { key: "edit", label: t("components.music_track_menu.edit") },
+      { key: "identifyLyrics", label: t("components.music_track_menu.identify_lyrics") },
       { type: "divider" },
-      { key: "viewHistory", label: "查看播放历史" },
-      { key: "getInfo", label: "查看信息" },
+      { key: "viewHistory", label: t("components.music_track_menu.view_history") },
+      { key: "getInfo", label: t("components.music_track_menu.get_info") },
       { type: "divider" },
-      { key: "delete", label: "删除", danger: true },
+      { key: "delete", label: t("components.music_track_menu.delete"), danger: true },
     ],
     onClick: ({ key, domEvent }) => {
       domEvent.stopPropagation();
       switch (key) {
         case "play":
           if (onPlay) onPlay(mediaId);
-          else message.info("无法播放该曲目");
+          else message.info(t("components.music_track_menu.cannot_play_track"));
           break;
         case "openAddToPlaylist":
           onAddToPlaylist?.(mediaId);
           break;
         case "addFavorite":
           addFavorite(mediaId)
-            .then(() => message.success("已加入收藏"))
-            .catch(() => message.error("操作失败"));
+            .then(() => message.success(t("components.music_track_menu.added_to_favorites")))
+            .catch(() => message.error(t("components.music_track_menu.operation_failed")));
           break;
         case "edit":
           nav(`/detail/${mediaId}`);
           break;
         case "identifyLyrics":
           void enqueueLyricRecognition(mediaId)
-            .then(() => message.success("已加入歌词识别任务"))
-            .catch(() => message.error("加入歌词识别任务失败"));
+            .then(() => message.success(t("components.music_track_menu.lyric_task_created")))
+            .catch(() => message.error(t("components.music_track_menu.lyric_task_failed")));
           break;
         case "viewHistory":
           nav(`/playback-history?media_id=${mediaId}`);
