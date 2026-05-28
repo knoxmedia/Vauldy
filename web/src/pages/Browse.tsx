@@ -46,6 +46,7 @@ import MusicBrowse from "./MusicBrowse";
 import PhotoBrowse from "./PhotoBrowse";
 import DocumentBrowse from "./DocumentBrowse";
 import { readRecentPlaylists, rememberPlaylistAdded } from "../lib/recentPlaylists";
+import { useT, type TranslateFn } from "../i18n";
 import styles from "./Browse.module.css";
 
 type ViewMode = "poster" | "thumb" | "list" | "table";
@@ -96,43 +97,55 @@ function writeBrowseViewMode(libraryId: number | undefined, mode: ViewMode): voi
   window.localStorage.setItem(BROWSE_VIEW_MODE_KEY, JSON.stringify(store));
 }
 
-const TABLE_COL_SPECS: { key: TableColKey; label: string; sortField: SortField; widthPx: number }[] = [
-  { key: "title", label: "标题", sortField: "title", widthPx: 0 },
-  { key: "year", label: "年份", sortField: "year", widthPx: 72 },
-  { key: "release_date", label: "发布日期", sortField: "release_date", widthPx: 118 },
-  { key: "duration", label: "时长", sortField: "duration", widthPx: 112 },
-  { key: "last_play", label: "播放", sortField: "played", widthPx: 168 },
-  { key: "quality", label: "分辨率", sortField: "quality", widthPx: 104 },
-  { key: "bitrate", label: "比特率", sortField: "bitrate", widthPx: 96 },
-  { key: "added", label: "日期已添加", sortField: "added", widthPx: 168 },
-  { key: "type", label: "类型", sortField: "type", widthPx: 80 },
+type TableColSpec = { key: TableColKey; label: string; sortField: SortField; widthPx: number };
+
+function buildTableColSpecs(t: TranslateFn): TableColSpec[] {
+  return [
+    { key: "title", label: t("pages.browse.col_title"), sortField: "title", widthPx: 0 },
+    { key: "year", label: t("pages.browse.col_year"), sortField: "year", widthPx: 72 },
+    { key: "release_date", label: t("pages.browse.col_release_date"), sortField: "release_date", widthPx: 118 },
+    { key: "duration", label: t("pages.browse.col_duration"), sortField: "duration", widthPx: 112 },
+    { key: "last_play", label: t("pages.browse.col_last_play"), sortField: "played", widthPx: 168 },
+    { key: "quality", label: t("pages.browse.col_quality"), sortField: "quality", widthPx: 104 },
+    { key: "bitrate", label: t("pages.browse.col_bitrate"), sortField: "bitrate", widthPx: 96 },
+    { key: "added", label: t("pages.browse.col_added"), sortField: "added", widthPx: 168 },
+    { key: "type", label: t("pages.browse.col_type"), sortField: "type", widthPx: 80 },
+  ];
+}
+
+const TABLE_COL_KEYS: TableColKey[] = [
+  "title", "year", "release_date", "duration", "last_play", "quality", "bitrate", "added", "type",
 ];
 
 const DEFAULT_TABLE_VISIBLE: TableColKey[] = ["title", "year", "release_date", "duration", "last_play", "quality", "bitrate"];
 
 function normalizeTableVisibleCols(raw: unknown): TableColKey[] {
-  const valid = new Set(TABLE_COL_SPECS.map((c) => c.key));
+  const valid = new Set(TABLE_COL_KEYS);
   if (!Array.isArray(raw)) return [...DEFAULT_TABLE_VISIBLE];
   const xs = raw.filter((k): k is TableColKey => typeof k === "string" && valid.has(k as TableColKey));
   const withTitle: TableColKey[] = xs.includes("title") ? xs : (["title", ...xs] as TableColKey[]);
   return withTitle.length ? withTitle : [...DEFAULT_TABLE_VISIBLE];
 }
 
-const VIEW_MODES: { value: ViewMode; label: string; Icon: ComponentType }[] = [
-  { value: "poster", label: "海报", Icon: PictureOutlined },
-  { value: "thumb", label: "缩略图", Icon: AppstoreOutlined },
-  { value: "list", label: "列表", Icon: BarsOutlined },
-  { value: "table", label: "表格", Icon: TableOutlined },
-];
+type ViewModeEntry = { value: ViewMode; label: string; Icon: ComponentType };
 
-function fmtDurationZh(sec: number): string {
+function buildViewModes(t: TranslateFn): ViewModeEntry[] {
+  return [
+    { value: "poster", label: t("pages.browse.view_poster"), Icon: PictureOutlined },
+    { value: "thumb", label: t("pages.browse.view_thumb"), Icon: AppstoreOutlined },
+    { value: "list", label: t("pages.browse.view_list"), Icon: BarsOutlined },
+    { value: "table", label: t("pages.browse.view_table"), Icon: TableOutlined },
+  ];
+}
+
+function fmtDurationLocalized(sec: number, t: TranslateFn): string {
   if (sec == null || Number.isNaN(sec) || sec <= 0) return "—";
   const total = Math.floor(sec);
   const h = Math.floor(total / 3600);
   const m = Math.floor((total % 3600) / 60);
-  if (h > 0) return `${h} 小时 ${m} 分钟`;
-  if (m > 0) return `${m} 分钟`;
-  return `${total % 60} 秒`;
+  if (h > 0) return t("pages.browse.fmt_h_m", { h, m });
+  if (m > 0) return t("pages.browse.fmt_m", { m });
+  return t("pages.browse.fmt_s", { s: total % 60 });
 }
 
 function displayYear(r: MediaItem): string | number {
@@ -179,8 +192,10 @@ function readBrowsePrefs(): {
   }
 }
 
-/** 浏览全部媒体：按库筛选、最近添加（原「我的媒体」列表能力） */
 export default function BrowsePage() {
+  const t = useT();
+  const VIEW_MODES = useMemo(() => buildViewModes(t), [t]);
+  const TABLE_COL_SPECS = useMemo(() => buildTableColSpecs(t), [t]);
   const nav = useNavigate();
   const [searchParams] = useSearchParams();
   const libraryIdParam = searchParams.get("library_id") ?? searchParams.get("library");
@@ -257,7 +272,7 @@ export default function BrowsePage() {
           : undefined;
       setRows(await fetchMedia(libFromUrl, opts));
     } catch (e: unknown) {
-      message.error((e as Error).message || "加载失败");
+      message.error((e as Error).message || t("pages.browse.load_failed"));
     } finally {
       setLoading(false);
     }
@@ -433,13 +448,13 @@ export default function BrowsePage() {
   function renderTableCell(r: MediaItem, key: TableColKey): string {
     switch (key) {
       case "title":
-        return r.title || "未命名";
+        return r.title || t("pages.browse.untitled");
       case "year":
         return String(displayYear(r));
       case "release_date":
         return fmtReleaseDate(r.release_date);
       case "duration":
-        return fmtDurationZh(r.duration);
+        return fmtDurationLocalized(r.duration, t);
       case "last_play":
         return fmtDate(r.last_play_at);
       case "quality":
@@ -462,7 +477,7 @@ export default function BrowsePage() {
   }));
 
   const CurrentViewIcon = VIEW_MODES.find((m) => m.value === viewMode)?.Icon ?? TableOutlined;
-  const currentViewLabel = VIEW_MODES.find((m) => m.value === viewMode)?.label ?? "表格";
+  const currentViewLabel = VIEW_MODES.find((m) => m.value === viewMode)?.label ?? t("pages.browse.table_fallback");
 
   function toggleBrowseSelect(id: number) {
     setBrowseSelectedIds((prev) => {
@@ -508,9 +523,13 @@ export default function BrowsePage() {
       }
     }
     if (ok > 0) {
-      message.success(`已将 ${ok} 项加入收藏集${fail > 0 ? `（${fail} 项未变更）` : ""}`);
+      message.success(
+        fail > 0
+          ? t("pages.browse.added_to_favorites_with_skip", { ok, fail })
+          : t("pages.browse.added_to_favorites", { ok })
+      );
     } else {
-      message.warning("未能加入收藏（可能已在收藏中）");
+      message.warning(t("pages.browse.favorite_failed"));
     }
   }
 
@@ -529,26 +548,30 @@ export default function BrowsePage() {
     const name =
       recentPlaylistMenu.find((p) => p.id === playlistId)?.name ??
       readRecentPlaylists().find((p) => p.id === playlistId)?.name ??
-      "播放列表";
+      t("pages.browse.playlist_fallback");
     if (ok > 0) {
       rememberPlaylistAdded({ id: playlistId, name });
       setRecentPlaylistMenu(readRecentPlaylists());
-      message.success(`已将 ${ok} 项添加到「${name}」${fail > 0 ? `（${fail} 项跳过）` : ""}`);
+      message.success(
+        fail > 0
+          ? t("pages.browse.added_to_playlist_with_skip", { ok, name, fail })
+          : t("pages.browse.added_to_playlist", { ok, name })
+      );
     } else {
-      message.warning("未能添加到播放列表");
+      message.warning(t("pages.browse.playlist_add_failed"));
     }
   }
 
   const browseBulkAddMenuItems = useMemo((): MenuProps["items"] => {
     const items: MenuProps["items"] = [
-      { key: "bulkAddCollection", label: "添加到收藏集..." },
+      { key: "bulkAddCollection", label: t("pages.browse.bulk_add_collection") },
       { type: "divider" },
-      { key: "bulkOpenPlaylist", label: "添加到播放列表..." },
+      { key: "bulkOpenPlaylist", label: t("pages.browse.bulk_open_playlist") },
     ];
     if (recentPlaylistMenu.length > 0) {
       items.push({
         type: "group",
-        label: "最近",
+        label: t("pages.browse.bulk_recent"),
         children: recentPlaylistMenu.slice(0, 3).map((pl) => ({
           key: `recentPlaylist:${pl.id}`,
           label: pl.name,
@@ -556,7 +579,7 @@ export default function BrowsePage() {
       });
     }
     return items;
-  }, [recentPlaylistMenu]);
+  }, [recentPlaylistMenu, t]);
 
   function onBrowseBulkAddMenuClick(key: string) {
     const ids = [...browseSelectedIds];
@@ -602,12 +625,12 @@ export default function BrowsePage() {
           const name =
             recentPlaylistMenu.find((p) => p.id === playlistId)?.name ??
             readRecentPlaylists().find((p) => p.id === playlistId)?.name ??
-            "播放列表";
-          message.success(`已添加到「${name}」`);
+            t("pages.browse.playlist_fallback");
+          message.success(t("pages.browse.single_added_to_playlist", { name }));
           rememberPlaylistAdded({ id: playlistId, name });
           setRecentPlaylistMenu(readRecentPlaylists());
         } catch {
-          message.error("添加失败，可能已在列表中");
+          message.error(t("pages.browse.single_add_failed"));
         }
       },
     });
@@ -667,15 +690,15 @@ export default function BrowsePage() {
                 value={sortField}
                 onChange={setSortField}
                 options={[
-                  { value: "title", label: "按标题" },
-                  { value: "added", label: "按添加日期" },
-                  { value: "played", label: "按播放日期" },
-                  { value: "release_date", label: "按发行日期" },
-                  { value: "year", label: "按年份" },
-                  { value: "duration", label: "按时长" },
-                  { value: "type", label: "按类型" },
-                  { value: "quality", label: "按清晰度" },
-                  { value: "bitrate", label: "按码率" },
+                  { value: "title", label: t("pages.browse.sort_title") },
+                  { value: "added", label: t("pages.browse.sort_added") },
+                  { value: "played", label: t("pages.browse.sort_played") },
+                  { value: "release_date", label: t("pages.browse.sort_release_date") },
+                  { value: "year", label: t("pages.browse.sort_year") },
+                  { value: "duration", label: t("pages.browse.sort_duration") },
+                  { value: "type", label: t("pages.browse.sort_type") },
+                  { value: "quality", label: t("pages.browse.sort_quality") },
+                  { value: "bitrate", label: t("pages.browse.sort_bitrate") },
                 ]}
                 style={{ width: 150 }}
               />
@@ -687,7 +710,7 @@ export default function BrowsePage() {
         </Space>
         <Space wrap className={styles.topRightTools}>
           <Button type="link" size="small" onClick={() => nav("/playback-history")} style={{ color: "rgba(255,255,255,0.65)" }}>
-            播放历史
+            {t("pages.browse.playback_history")}
           </Button>
           <div className={styles.viewModePicker}>
             <span className={styles.viewModeCurrentIcon} title={currentViewLabel} aria-label={currentViewLabel}>
@@ -711,7 +734,7 @@ export default function BrowsePage() {
                 type="text"
                 size="small"
                 icon={viewModeMenuOpen ? <UpOutlined /> : <DownOutlined />}
-                aria-label="选择显示方式"
+                aria-label={t("pages.browse.view_mode_aria")}
                 aria-expanded={viewModeMenuOpen}
               />
             </Dropdown>
@@ -723,7 +746,7 @@ export default function BrowsePage() {
         <div className={styles.browseSelectionBar}>
           <div className={styles.browseSelectionBarLeft}>
             <CheckOutlined className={styles.browseSelectionCheckIcon} aria-hidden />
-            <span>已选择 {browseSelectionCount} 个项目</span>
+            <span>{t("pages.browse.selection_count", { count: browseSelectionCount })}</span>
           </div>
           <div className={styles.browseSelectionBarCenter}>
             <Space size="small">
@@ -731,7 +754,7 @@ export default function BrowsePage() {
                 type="text"
                 className={styles.browseSelectionActionBtn}
                 icon={<PlayCircleOutlined />}
-                aria-label="播放"
+                aria-label={t("pages.browse.selection_play_aria")}
                 disabled={firstSelectedId == null}
                 onClick={() => {
                   if (firstSelectedId != null) nav(`/player/${firstSelectedId}`);
@@ -741,8 +764,8 @@ export default function BrowsePage() {
                 type="text"
                 className={styles.browseSelectionActionBtn}
                 icon={<CheckCircleOutlined />}
-                aria-label="标记"
-                onClick={() => message.info("批量标记功能开发中")}
+                aria-label={t("pages.browse.selection_mark_aria")}
+                onClick={() => message.info(t("pages.browse.mark_wip"))}
               />
               <Dropdown
                 menu={{
@@ -759,15 +782,15 @@ export default function BrowsePage() {
                   type="text"
                   className={styles.browseSelectionActionBtn}
                   icon={<UnorderedListOutlined />}
-                  aria-label="添加到列表"
+                  aria-label={t("pages.browse.selection_add_aria")}
                   onClick={(e) => e.stopPropagation()}
                 />
               </Dropdown>
               <Dropdown
                 menu={{
                   items: [
-                    { key: "play", label: "播放", icon: <PlayCircleOutlined /> },
-                    { key: "detail", label: "详情", icon: <EditOutlined /> },
+                    { key: "play", label: t("pages.browse.menu_play"), icon: <PlayCircleOutlined /> },
+                    { key: "detail", label: t("pages.browse.menu_detail"), icon: <EditOutlined /> },
                   ],
                   onClick: ({ key }) => {
                     if (firstSelectedId == null) return;
@@ -778,7 +801,7 @@ export default function BrowsePage() {
                 trigger={["click"]}
                 placement="bottom"
               >
-                <Button type="text" className={styles.browseSelectionActionBtn} icon={<EllipsisOutlined />} aria-label="更多" />
+                <Button type="text" className={styles.browseSelectionActionBtn} icon={<EllipsisOutlined />} aria-label={t("pages.browse.selection_more_aria")} />
               </Dropdown>
             </Space>
           </div>
@@ -789,7 +812,7 @@ export default function BrowsePage() {
               icon={<CloseOutlined />}
               onClick={clearBrowseSelection}
             >
-              取消全选
+              {t("pages.browse.deselect_all")}
             </Button>
           </div>
         </div>
@@ -800,7 +823,7 @@ export default function BrowsePage() {
           <Spin />
         </div>
       ) : sortedRows.length === 0 ? (
-        <Empty description="暂无媒体" />
+        <Empty description={t("pages.browse.empty_media")} />
       ) : viewMode === "table" ? (
         <div className={styles.browseTableWrap}>
           <div className={styles.browseTableHead}>
@@ -830,7 +853,7 @@ export default function BrowsePage() {
                     </div>
                   }
                 >
-                  <Button type="text" size="small" icon={<SlidersOutlined />} aria-label="列显示" className={styles.browseColPickerTrigger} />
+                  <Button type="text" size="small" icon={<SlidersOutlined />} aria-label={t("pages.browse.col_picker_aria")} className={styles.browseColPickerTrigger} />
                 </Popover>
               </div>
               {tableOrderedSpecs.map((spec) => (
@@ -885,7 +908,7 @@ export default function BrowsePage() {
                       type="button"
                       className={styles.browseGutterSelect}
                       data-browse-table-action
-                      aria-label={isSel ? "取消选择" : "选择"}
+                      aria-label={isSel ? t("pages.browse.aria_deselect") : t("pages.browse.aria_select")}
                       data-selected={isSel ? "" : undefined}
                       onClick={(e) => {
                         e.stopPropagation();
@@ -903,7 +926,7 @@ export default function BrowsePage() {
                             type="button"
                             className={styles.browseRowPlay}
                             data-browse-table-action
-                            aria-label="播放"
+                            aria-label={t("pages.browse.aria_play")}
                             onClick={(e) => {
                               e.stopPropagation();
                               nav(`/player/${r.id}`);
@@ -959,7 +982,7 @@ export default function BrowsePage() {
                           data-browse-table-action
                           className={styles.browseRowMoreBtn}
                           icon={<EllipsisOutlined rotate={90} />}
-                          aria-label="更多"
+                          aria-label={t("pages.browse.aria_more")}
                           onClick={(e) => e.stopPropagation()}
                         />
                       </Dropdown>
@@ -997,7 +1020,7 @@ export default function BrowsePage() {
                   <button
                     type="button"
                     className={styles.listSelectBtn}
-                    aria-label={isListSelected ? "取消选择" : "选择"}
+                    aria-label={isListSelected ? t("pages.browse.aria_deselect") : t("pages.browse.aria_select")}
                     aria-pressed={isListSelected}
                     data-selected={isListSelected ? "" : undefined}
                     onClick={(e) => {
@@ -1013,8 +1036,8 @@ export default function BrowsePage() {
                   tabIndex={0}
                   aria-label={
                     browseBulkPick
-                      ? `${r.title || "未命名"}，Enter 切换选择，标题可打开详情`
-                      : `${r.title || "未命名"}，查看详情`
+                      ? t("pages.browse.list_view_label", { title: r.title || t("pages.browse.untitled") })
+                      : t("pages.browse.list_view_label_detail", { title: r.title || t("pages.browse.untitled") })
                   }
                   onClick={() => {
                     if (!browseBulkPick) nav(`/detail/${r.id}`);
@@ -1057,7 +1080,7 @@ export default function BrowsePage() {
                         <button
                           type="button"
                           className={styles.listPlayOverlay}
-                          aria-label="播放"
+                          aria-label={t("pages.browse.aria_play")}
                           onClick={(e) => {
                             e.stopPropagation();
                             nav(`/player/${r.id}`);
@@ -1075,9 +1098,9 @@ export default function BrowsePage() {
                     onClick={browseBulkPick ? () => nav(`/detail/${r.id}`) : undefined}
                     style={browseBulkPick ? { cursor: "pointer" } : undefined}
                   >
-                    <div className={styles.listTitle}>{r.title || "未命名"}</div>
+                    <div className={styles.listTitle}>{r.title || t("pages.browse.untitled")}</div>
                     <div className={styles.listMeta}>
-                      {displayYear(r)} · {fmtDurationZh(r.duration)}
+                      {displayYear(r)} · {fmtDurationLocalized(r.duration, t)}
                     </div>
                   </div>
                 </div>
@@ -1093,7 +1116,7 @@ export default function BrowsePage() {
                         size="small"
                         className={styles.listMoreBtn}
                         icon={<EllipsisOutlined rotate={90} />}
-                        aria-label="更多"
+                        aria-label={t("pages.browse.aria_more")}
                         onClick={(e) => e.stopPropagation()}
                       />
                     </Dropdown>
@@ -1117,8 +1140,8 @@ export default function BrowsePage() {
                   tabIndex={0}
                   aria-label={
                     browseBulkPick
-                      ? `${r.title || "未命名"}，点击海报切换选择`
-                      : `${r.title || "未命名"}，查看详情`
+                      ? t("pages.browse.card_view_label_select", { title: r.title || t("pages.browse.untitled") })
+                      : t("pages.browse.list_view_label_detail", { title: r.title || t("pages.browse.untitled") })
                   }
                   onClick={(e) => {
                     if ((e.target as HTMLElement).closest("[data-browse-card-action]")) return;
@@ -1161,7 +1184,7 @@ export default function BrowsePage() {
                           type="button"
                           data-browse-card-action
                           className={`${styles.gridCornerBtn} ${styles.gridEditBtn}`}
-                          aria-label="编辑"
+                          aria-label={t("pages.browse.aria_edit")}
                           onClick={(e) => {
                             e.stopPropagation();
                             nav(`/detail/${r.id}`);
@@ -1173,7 +1196,7 @@ export default function BrowsePage() {
                           type="button"
                           data-browse-card-action
                           className={styles.gridPlayBtn}
-                          aria-label="播放"
+                          aria-label={t("pages.browse.aria_play")}
                           onClick={(e) => {
                             e.stopPropagation();
                             nav(`/player/${r.id}`);
@@ -1192,7 +1215,7 @@ export default function BrowsePage() {
                               size="small"
                               className={styles.gridMoreIconBtn}
                               icon={<EllipsisOutlined rotate={90} />}
-                              aria-label="更多"
+                              aria-label={t("pages.browse.aria_more")}
                               onClick={(e) => e.stopPropagation()}
                             />
                           </Dropdown>
@@ -1205,7 +1228,7 @@ export default function BrowsePage() {
                     data-browse-card-action
                     className={styles.gridSelectBtn}
                     data-selected={isCardSelected ? "" : undefined}
-                    aria-label={isCardSelected ? "取消选择" : "选择"}
+                    aria-label={isCardSelected ? t("pages.browse.aria_deselect") : t("pages.browse.aria_select")}
                     aria-pressed={isCardSelected}
                     onClick={(e) => {
                       e.stopPropagation();
@@ -1220,7 +1243,7 @@ export default function BrowsePage() {
                   onClick={browseBulkPick ? () => nav(`/detail/${r.id}`) : undefined}
                   style={browseBulkPick ? { cursor: "pointer" } : undefined}
                 >
-                  <div className={styles.cardTitle}>{r.title || "未命名"}</div>
+                  <div className={styles.cardTitle}>{r.title || t("pages.browse.untitled")}</div>
                 </div>
               </div>
             );
