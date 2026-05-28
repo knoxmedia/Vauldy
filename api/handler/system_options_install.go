@@ -100,11 +100,7 @@ func (h *Handler) InstallSystemOptionsOCR(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 45*time.Minute)
 	defer cancel()
 
-	deploy, err := recognition.InstallOCR(ctx, mediaRoot)
-	if err != nil {
-		c.JSON(http.StatusOK, recognitionInstallResult{OK: false, Message: err.Error()})
-		return
-	}
+	deploy, installErr := recognition.InstallOCR(ctx, mediaRoot)
 	current := recognitionFromConfig(h.App.Config)
 	current.OCR = deployOCRToOptions(deploy)
 	current = normalizeRecognitionOptions(current)
@@ -112,7 +108,7 @@ func (h *Handler) InstallSystemOptionsOCR(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "写入 config.yml 失败: " + err.Error()})
 		return
 	}
-	check := subtitle.CheckOCRConfig(ctx, subtitle.OCRConfig{
+	check := subtitle.CheckOCRConfig(ctx, mediaRoot, subtitle.OCRConfig{
 		Enabled:        current.OCR.Enabled,
 		TesseractPath:  current.OCR.TesseractPath,
 		TessdataPrefix: current.OCR.TessdataPrefix,
@@ -124,11 +120,19 @@ func (h *Handler) InstallSystemOptionsOCR(c *gin.Context) {
 		MkvmergePath:   current.OCR.MkvmergePath,
 	})
 	msg := "OCR 工具已安装并写入 config.yml"
-	if check.Message != "" {
-		msg = msg + "；" + check.Message
+	if installErr != nil {
+		msg = installErr.Error()
 	}
+	if check.Message != "" {
+		if installErr != nil {
+			msg = msg + "；" + check.Message
+		} else {
+			msg = msg + "；" + check.Message
+		}
+	}
+	ok := installErr == nil && check.OK
 	c.JSON(http.StatusOK, recognitionInstallResult{
-		OK:          check.OK,
+		OK:          ok,
 		Message:     msg,
 		Recognition: &current,
 	})

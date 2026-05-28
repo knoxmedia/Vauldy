@@ -2,6 +2,7 @@ package subtitle
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 )
 
@@ -37,15 +38,26 @@ func TestCheckASRConfigShellValid(t *testing.T) {
 
 func TestCheckOCRConfigDisabled(t *testing.T) {
 	t.Parallel()
-	r := CheckOCRConfig(context.Background(), OCRConfig{Enabled: false})
+	r := CheckOCRConfig(context.Background(), "", OCRConfig{Enabled: false})
 	if !r.OK {
 		t.Fatalf("expected ok when disabled, got %+v", r)
 	}
 }
 
+func TestResolveOCRPathDefault(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	want := filepath.Join(dir, "tools", "subtitle_ocr", "bitmap_subtitle_ocr.py")
+	got := resolveOCRPath(dir, "")
+	if got != want {
+		t.Fatalf("resolveOCRPath=%q want %q", got, want)
+	}
+}
+
 func TestCheckOCRConfigMissingScript(t *testing.T) {
 	t.Parallel()
-	r := CheckOCRConfig(context.Background(), OCRConfig{Enabled: true, ScriptPath: ""})
+	dir := t.TempDir()
+	r := CheckOCRConfig(context.Background(), dir, OCRConfig{Enabled: true, ScriptPath: "tools/subtitle_ocr/missing.py"})
 	if r.OK {
 		t.Fatalf("expected failure, got %+v", r)
 	}

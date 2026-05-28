@@ -32,11 +32,32 @@ if ($Target -eq "ocr" -or $Target -eq "all") {
     $tessDir = Join-Path $mediaRoot "tools/tesseract"
     $tessExe = Join-Path $tessDir "tesseract.exe"
     if (-not (Test-Path $tessExe)) {
-        Write-Host "Installing Tesseract OCR (silent)..."
+        Write-Host "Installing Tesseract OCR..."
         New-Item -ItemType Directory -Force -Path $tessDir | Out-Null
         $installer = Join-Path $tessDir "tesseract-setup.exe"
         Invoke-WebRequest -Uri "https://github.com/tesseract-ocr/tesseract/releases/download/5.5.0/tesseract-ocr-w64-setup-5.5.0.20241111.exe" -OutFile $installer -UseBasicParsing
-        Start-Process -FilePath $installer -ArgumentList "/S", "/D=$tessDir" -Wait
+        $sevenZip = @(
+            (Get-Command 7z -ErrorAction SilentlyContinue).Source,
+            "${env:ProgramFiles}\7-Zip\7z.exe",
+            "${env:ProgramFiles(x86)}\7-Zip\7z.exe"
+        ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+        if ($sevenZip) {
+            $extract = Join-Path $tessDir ".extract"
+            if (Test-Path $extract) { Remove-Item $extract -Recurse -Force }
+            & $sevenZip x -y "-o$extract" $installer | Out-Null
+            $found = Get-ChildItem -Path $extract -Filter tesseract.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found) {
+                Copy-Item -Path (Join-Path $found.DirectoryName '*') -Destination $tessDir -Force
+            }
+            Remove-Item $extract -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        if (-not (Test-Path $tessExe)) {
+            try {
+                Start-Process -FilePath $installer -ArgumentList "/S", "/D=$tessDir" -Wait
+            } catch {
+                Write-Warning "Silent install failed (may need elevation). Install 7-Zip or Tesseract manually."
+            }
+        }
         Remove-Item $installer -Force -ErrorAction SilentlyContinue
     }
     $tessdata = Join-Path $tessDir "tessdata"

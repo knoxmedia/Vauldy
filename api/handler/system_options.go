@@ -119,7 +119,7 @@ func defaultRecognitionOptions() SystemOptionsRecognition {
 			TessdataPrefix: "",
 			Languages:      "chi_sim+eng",
 			PythonPath:     "",
-			ScriptPath:     "",
+			ScriptPath:     "tools/subtitle_ocr/bitmap_subtitle_ocr.py",
 			PgsripPath:     "",
 			MkvextractPath: "",
 			MkvmergePath:   "",
@@ -176,6 +176,9 @@ func fillRecognitionDefaults(o *SystemOptionsRecognition, def SystemOptionsRecog
 	}
 	if strings.TrimSpace(o.OCR.Languages) == "" {
 		o.OCR.Languages = def.OCR.Languages
+	}
+	if strings.TrimSpace(o.OCR.ScriptPath) == "" {
+		o.OCR.ScriptPath = def.OCR.ScriptPath
 	}
 }
 
@@ -330,6 +333,9 @@ func normalizeRecognitionOptions(r SystemOptionsRecognition) SystemOptionsRecogn
 	}
 	r.OCR.PythonPath = strings.TrimSpace(r.OCR.PythonPath)
 	r.OCR.ScriptPath = strings.TrimSpace(r.OCR.ScriptPath)
+	if r.OCR.ScriptPath == "" {
+		r.OCR.ScriptPath = defaultRecognitionOptions().OCR.ScriptPath
+	}
 	r.OCR.PgsripPath = strings.TrimSpace(r.OCR.PgsripPath)
 	r.OCR.MkvextractPath = strings.TrimSpace(r.OCR.MkvextractPath)
 	r.OCR.MkvmergePath = strings.TrimSpace(r.OCR.MkvmergePath)
@@ -575,6 +581,12 @@ func (h *Handler) TestSystemOptionsASR(c *gin.Context) {
 func (h *Handler) TestSystemOptionsOCR(c *gin.Context) {
 	var body recognitionTestBody
 	_ = c.ShouldBindJSON(&body)
-	result := subtitle.CheckOCRConfig(c.Request.Context(), h.resolveOCRForTest(&body))
+	mediaRoot := ""
+	if h != nil {
+		if p, err := h.mediaRoot(); err == nil {
+			mediaRoot = p
+		}
+	}
+	result := subtitle.CheckOCRConfig(c.Request.Context(), mediaRoot, h.resolveOCRForTest(&body))
 	c.JSON(http.StatusOK, result)
 }

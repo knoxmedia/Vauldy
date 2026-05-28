@@ -82,7 +82,7 @@ function defaultSystemOptions(): SystemOptions {
         tessdata_prefix: "",
         languages: "chi_sim+eng",
         python_path: "",
-        script_path: "",
+        script_path: "tools/subtitle_ocr/bitmap_subtitle_ocr.py",
         pgsrip_path: "",
         mkvextract_path: "",
         mkvmerge_path: "",

@@ -100,23 +100,41 @@ func InstallOCR(ctx context.Context, mediaRoot string) (OCRDeploy, error) {
 	if err := pipInstall(ctx, py, mediaRoot, []string{"pgsrip>=0.1.12"}); err != nil {
 		return OCRDeploy{}, fmt.Errorf("pip install pgsrip: %w", err)
 	}
-	tessExe, tessdataDir, err := ensureTesseract(ctx, mediaRoot)
-	if err != nil {
-		return OCRDeploy{}, err
-	}
-	if err := ensureTessdata(ctx, tessdataDir, []string{"chi_sim", "eng"}); err != nil {
-		return OCRDeploy{}, err
+	tessExe, tessdataDir, tessErr := ensureTesseract(ctx, mediaRoot)
+	if tessErr == nil {
+		if err := ensureTessdata(ctx, tessdataDir, []string{"chi_sim", "eng"}); err != nil {
+			return OCRDeploy{}, err
+		}
+	} else if runtime.GOOS == "windows" {
+		if sysExe, sysData := findWindowsSystemTesseract(); sysExe != "" {
+			tessExe, tessdataDir, tessErr = sysExe, sysData, nil
+			localData := filepath.Join(mediaRoot, filepath.FromSlash(tesseractRelDir), "tessdata")
+			if err := ensureTessdata(ctx, preferTessdataDir(tessdataDir, localData), []string{"chi_sim", "eng"}); err != nil {
+				return OCRDeploy{}, err
+			}
+			if tessdataDir == "" || tessdataDir != localData {
+				tessdataDir = localData
+			}
+		}
 	}
 	pgsrip := venvScriptBin(mediaRoot, "pgsrip")
-	return OCRDeploy{
+	deploy := OCRDeploy{
 		Enabled:        true,
-		TesseractPath:  relIfUnder(mediaRoot, tessExe),
-		TessdataPrefix: relIfUnder(mediaRoot, tessdataDir),
+		TesseractPath:  "tesseract",
+		TessdataPrefix: "",
 		Languages:      "chi_sim+eng",
 		PythonPath:     relIfUnder(mediaRoot, py),
 		ScriptPath:     relIfUnder(mediaRoot, filepath.Join(mediaRoot, ocrScriptRel)),
 		PgsripPath:     relIfUnder(mediaRoot, pgsrip),
-	}, nil
+	}
+	if tessErr == nil && tessExe != "" {
+		deploy.TesseractPath = relIfUnder(mediaRoot, tessExe)
+		deploy.TessdataPrefix = relIfUnder(mediaRoot, tessdataDir)
+	}
+	if tessErr != nil {
+		return deploy, fmt.Errorf("Python/pgsrip 已安装；Tesseract: %w", tessErr)
+	}
+	return deploy, nil
 }
 
 // EnsureVenv creates tools/recognition/.venv if needed and returns venv python path.
@@ -237,41 +255,6 @@ func ensureTesseract(ctx context.Context, mediaRoot string) (exe string, tessdat
 		}
 		return "", "", fmt.Errorf("未找到 Tesseract，请安装系统包 (如 apt install tesseract-ocr tesseract-ocr-chi-sim) 或在 Windows 服务器上使用一键安装")
 	}
-}
-
-func installTesseractWindows(ctx context.Context, destDir string) (string, string, error) {
-	exe := filepath.Join(destDir, "tesseract.exe")
-	tessdata := filepath.Join(destDir, "tessdata")
-	if fileExists(exe) {
-		return exe, tessdata, nil
-	}
-	if err := os.MkdirAll(destDir, 0o755); err != nil {
-		return "", "", err
-	}
-	installer := filepath.Join(destDir, "tesseract-setup.exe")
-	if err := downloadFile(ctx, tesseractWinURL, installer); err != nil {
-		return "", "", fmt.Errorf("download tesseract: %w", err)
-	}
-	// NSIS: /D= must be last argument, no trailing backslash issues.
-	cmd := exec.CommandContext(ctx, installer, "/S", "/D="+destDir)
-	out, err := cmd.CombinedOutput()
-	_ = os.Remove(installer)
-	if err != nil && !fileExists(exe) {
-		return "", "", fmt.Errorf("tesseract silent install: %w: %s", err, trimOut(out))
-	}
-	if !fileExists(exe) {
-		// Some installers nest one level down.
-		alt := filepath.Join(destDir, "tesseract.exe")
-		if fileExists(alt) {
-			exe = alt
-		} else {
-			return "", "", fmt.Errorf("tesseract.exe not found under %s after install", destDir)
-		}
-	}
-	if err := os.MkdirAll(tessdata, 0o755); err != nil {
-		return "", "", err
-	}
-	return exe, tessdata, nil
 }
 
 func ensureTessdata(ctx context.Context, tessdataDir string, langs []string) error {

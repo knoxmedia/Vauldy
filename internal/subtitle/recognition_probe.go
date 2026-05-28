@@ -5,10 +5,45 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 )
+
+const defaultOCRScriptRel = "tools/subtitle_ocr/bitmap_subtitle_ocr.py"
+
+func resolveOCRPath(mediaRoot, path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		path = defaultOCRScriptRel
+	}
+	if filepath.IsAbs(path) {
+		return filepath.Clean(path)
+	}
+	if mediaRoot != "" {
+		return filepath.Clean(filepath.Join(mediaRoot, filepath.FromSlash(path)))
+	}
+	return filepath.Clean(filepath.FromSlash(path))
+}
+
+func resolveToolPath(mediaRoot, path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if filepath.IsAbs(path) {
+		return filepath.Clean(path)
+	}
+	// Bare command names (tesseract, python) are resolved via PATH in runProbe.
+	if !strings.Contains(path, "/") && !strings.Contains(path, `\`) {
+		return path
+	}
+	if mediaRoot != "" {
+		return filepath.Clean(filepath.Join(mediaRoot, filepath.FromSlash(path)))
+	}
+	return filepath.Clean(filepath.FromSlash(path))
+}
 
 // RecognitionTestResult is returned by ASR/OCR connectivity checks.
 type RecognitionTestResult struct {
@@ -50,14 +85,12 @@ func CheckASRConfig(ctx context.Context, asr ASRConfig) RecognitionTestResult {
 }
 
 // CheckOCRConfig verifies OCR tool paths and helper script.
-func CheckOCRConfig(ctx context.Context, ocr OCRConfig) RecognitionTestResult {
+func CheckOCRConfig(ctx context.Context, mediaRoot string, ocr OCRConfig) RecognitionTestResult {
 	if !ocr.Enabled {
 		return RecognitionTestResult{OK: true, Message: "OCR 未启用"}
 	}
-	script := strings.TrimSpace(ocr.ScriptPath)
-	if script == "" {
-		return RecognitionTestResult{OK: false, Message: "OCR 脚本路径 (script_path) 未设置"}
-	}
+	mediaRoot = strings.TrimSpace(mediaRoot)
+	script := resolveOCRPath(mediaRoot, ocr.ScriptPath)
 	if _, err := os.Stat(script); err != nil {
 		return RecognitionTestResult{OK: false, Message: fmt.Sprintf("OCR 脚本不存在: %s", script)}
 	}
@@ -65,14 +98,26 @@ func CheckOCRConfig(ctx context.Context, ocr OCRConfig) RecognitionTestResult {
 	if runtime.GOOS == "windows" {
 		py = defaultString(ocr.PythonPath, "python")
 	}
+	py = resolveToolPath(mediaRoot, py)
+	if py == "" {
+		py = defaultString(ocr.PythonPath, "python3")
+		if runtime.GOOS == "windows" {
+			py = defaultString(ocr.PythonPath, "python")
+		}
+	}
 	if err := runProbe(ctx, py, "--version"); err != nil {
 		return RecognitionTestResult{OK: false, Message: fmt.Sprintf("Python 不可用 (%s): %v", py, err)}
 	}
 	tess := defaultString(ocr.TesseractPath, "tesseract")
+	tess = resolveToolPath(mediaRoot, tess)
+	if tess == "" {
+		tess = defaultString(ocr.TesseractPath, "tesseract")
+	}
 	if err := runProbe(ctx, tess, "--version"); err != nil {
 		return RecognitionTestResult{OK: false, Message: fmt.Sprintf("Tesseract 不可用 (%s): %v", tess, err)}
 	}
 	if p := strings.TrimSpace(ocr.TessdataPrefix); p != "" {
+		p = resolveToolPath(mediaRoot, p)
 		if st, err := os.Stat(p); err != nil || !st.IsDir() {
 			return RecognitionTestResult{OK: false, Message: fmt.Sprintf("tessdata_prefix 目录无效: %s", p)}
 		}
@@ -84,7 +129,7 @@ func CheckOCRConfig(ctx context.Context, ocr OCRConfig) RecognitionTestResult {
 		{ocr.MkvextractPath, "mkvextract"},
 		{ocr.MkvmergePath, "mkvmerge"},
 	} {
-		p := strings.TrimSpace(pair.path)
+		p := resolveToolPath(mediaRoot, pair.path)
 		if p == "" {
 			continue
 		}
