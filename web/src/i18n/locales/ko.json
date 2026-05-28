@@ -856,6 +856,27 @@
       "col_track": "트랙",
       "various_artists": "Various Artists"
     },
+    "document_reader": {
+      "unsupported_format": "{format} 형식은 온라인 미리보기를 지원하지 않습니다. 원본 파일을 다운로드하여 읽으세요.",
+      "office_convert_failed": "Office 문서 변환 실패: {msg}. 시스템 옵션 → 문서 변환을 확인하세요.",
+      "cannot_open": "문서를 열 수 없습니다",
+      "epub_open_failed": "EPUB을 열 수 없습니다",
+      "back": "뒤로",
+      "default_title": "리더",
+      "prev_page": "이전",
+      "next_page": "다음",
+      "zoom_out_aria": "축소",
+      "zoom_in_aria": "확대",
+      "theme_light": "라이트",
+      "theme_sepia": "세피아",
+      "theme_dark": "다크",
+      "search_placeholder": "검색",
+      "pdf_search_hint": "PDF 내 검색은 브라우저의 Ctrl+F를 사용하세요",
+      "converting_office": "Office 문서를 PDF로 변환 중…",
+      "download_original": "원본 다운로드",
+      "prev_page_aria": "이전 페이지",
+      "next_page_aria": "다음 페이지"
+    },
     "player": {
       "denied_play_perm": "현재 계정에는 재생 권한이 없습니다. 관리자에게 「사용자 관리 → 기본 속성 → 작업 권한」에서 「재생」을 활성화해 달라고 요청하세요.",
       "denied_library": "재생 불가: 이 콘텐츠의 라이브러리는 접근 범위에 없습니다.",

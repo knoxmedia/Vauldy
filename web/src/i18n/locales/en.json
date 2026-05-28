@@ -856,6 +856,27 @@
       "col_track": "Tracks",
       "various_artists": "Various Artists"
     },
+    "document_reader": {
+      "unsupported_format": "Online preview is not supported for {format}. Please download the original file.",
+      "office_convert_failed": "Office document conversion failed: {msg}. Check System Options → Document Conversion.",
+      "cannot_open": "Cannot open document",
+      "epub_open_failed": "Cannot open EPUB",
+      "back": "Back",
+      "default_title": "Reader",
+      "prev_page": "Previous",
+      "next_page": "Next",
+      "zoom_out_aria": "Zoom out",
+      "zoom_in_aria": "Zoom in",
+      "theme_light": "Light",
+      "theme_sepia": "Sepia",
+      "theme_dark": "Dark",
+      "search_placeholder": "Search",
+      "pdf_search_hint": "For PDF search use the browser's Ctrl+F",
+      "converting_office": "Converting Office document to PDF…",
+      "download_original": "Download original",
+      "prev_page_aria": "Previous page",
+      "next_page_aria": "Next page"
+    },
     "player": {
       "denied_play_perm": "Your account is not allowed to play. Ask an administrator to enable Play under Users → Basic info → Permissions.",
       "denied_library": "Playback denied: this library is not in your access scope.",

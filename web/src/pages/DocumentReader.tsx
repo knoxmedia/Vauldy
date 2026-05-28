@@ -24,6 +24,7 @@ import {
   saveReadProgress,
 } from "../api/client";
 import { useAuthStore } from "../store/auth";
+import { useT } from "../i18n";
 import styles from "./DocumentReader.module.css";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
@@ -48,6 +49,7 @@ function savePrefs(theme: Theme, fontSize: number) {
 }
 
 export default function DocumentReader() {
+  const t = useT();
   const { id } = useParams<{ id: string }>();
   const mediaId = Number(id);
   const nav = useNavigate();
@@ -138,15 +140,15 @@ export default function DocumentReader() {
         } else if (["txt", "md", "mdx", "csv", "html", "htm"].includes(fmt)) {
           await loadText(fmt, position);
         } else {
-          setError(`暂不支持在线预览 ${fmt.toUpperCase()} 格式，请下载原文件阅读。`);
+          setError(t("pages.document_reader.unsupported_format", { format: fmt.toUpperCase() }));
         }
       } catch (e) {
         setConverting(false);
         const msg = e instanceof Error ? e.message : String(e);
         setError(
           msg.includes("500") || /conversion|convert|转换/i.test(msg)
-            ? `Office 文档转换失败：${msg}。请检查 系统选项 → 文档转换`
-            : msg || "无法打开文档",
+            ? t("pages.document_reader.office_convert_failed", { msg })
+            : msg || t("pages.document_reader.cannot_open"),
         );
       } finally {
         setLoading(false);
@@ -210,7 +212,7 @@ export default function DocumentReader() {
       } catch (e) {
         if (!disposed) {
           setEpubReady(false);
-          setError(e instanceof Error ? e.message : "无法打开 EPUB");
+          setError(e instanceof Error ? e.message : t("pages.document_reader.epub_open_failed"));
         }
       }
     })();
@@ -358,24 +360,24 @@ export default function DocumentReader() {
   return (
     <div className={`${styles.reader} ${styles[`theme-${theme}`]}`} style={{ "--reader-font-size": `${fontSize}px` } as React.CSSProperties}>
       <header className={styles.toolbar}>
-        <Button type="text" icon={<ArrowLeftOutlined />} onClick={() => nav(-1)}>返回</Button>
+        <Button type="text" icon={<ArrowLeftOutlined />} onClick={() => nav(-1)}>{t("pages.document_reader.back")}</Button>
         <span className={styles.toolbarTitle}>
-          {detail?.title || "阅读器"}
+          {detail?.title || t("pages.document_reader.default_title")}
         </span>
         {showPdfToolbar && (
           <Space>
-            <Button size="small" disabled={pdfPage <= 1} onClick={() => setPdfPage((p) => p - 1)}>上一页</Button>
+            <Button size="small" disabled={pdfPage <= 1} onClick={() => setPdfPage((p) => p - 1)}>{t("pages.document_reader.prev_page")}</Button>
             <span className={styles.toolbarPageInfo}>{pdfPage} / {pdfPages}</span>
-            <Button size="small" disabled={pdfPage >= pdfPages} onClick={() => setPdfPage((p) => p + 1)}>下一页</Button>
+            <Button size="small" disabled={pdfPage >= pdfPages} onClick={() => setPdfPage((p) => p + 1)}>{t("pages.document_reader.next_page")}</Button>
           </Space>
         )}
         {showEpubToolbar && (
           <Space>
-            <Button size="small" disabled={epubAtStart} onClick={epubPrev}>上一页</Button>
+            <Button size="small" disabled={epubAtStart} onClick={epubPrev}>{t("pages.document_reader.prev_page")}</Button>
             <span className={styles.toolbarPageInfo}>
               {epubPage > 0 && epubTotalPages > 0 ? `${epubPage} / ${epubTotalPages}` : "—"}
             </span>
-            <Button size="small" disabled={epubAtEnd} onClick={epubNext}>下一页</Button>
+            <Button size="small" disabled={epubAtEnd} onClick={epubNext}>{t("pages.document_reader.next_page")}</Button>
           </Space>
         )}
         <Button type="text" icon={<MenuOutlined />} onClick={() => setTocOpen((v) => !v)} />
@@ -383,24 +385,24 @@ export default function DocumentReader() {
           type="text"
           icon={<MinusOutlined />}
           disabled={fontSize <= 12}
-          aria-label="缩小"
+          aria-label={t("pages.document_reader.zoom_out_aria")}
           onClick={() => setFontSize((s) => Math.max(12, s - 2))}
         />
         <Button
           type="text"
           icon={<PlusOutlined />}
           disabled={fontSize >= 28}
-          aria-label="放大"
+          aria-label={t("pages.document_reader.zoom_in_aria")}
           onClick={() => setFontSize((s) => Math.min(28, s + 2))}
         />
         <Select size="small" value={theme} onChange={setTheme} options={[
-          { value: "light", label: "亮白" },
-          { value: "sepia", label: "护眼" },
-          { value: "dark", label: "暗黑" },
+          { value: "light", label: t("pages.document_reader.theme_light") },
+          { value: "sepia", label: t("pages.document_reader.theme_sepia") },
+          { value: "dark", label: t("pages.document_reader.theme_dark") },
         ]} />
         <Input
           size="small"
-          placeholder="搜索"
+          placeholder={t("pages.document_reader.search_placeholder")}
           prefix={<SearchOutlined />}
           value={searchQ}
           onChange={(e) => setSearchQ(e.target.value)}
@@ -409,7 +411,7 @@ export default function DocumentReader() {
               const w = window as Window & { find?: (s: string) => boolean };
               w.find?.(searchQ);
             } else {
-              message.info("PDF 内搜索请使用浏览器 Ctrl+F");
+              message.info(t("pages.document_reader.pdf_search_hint"));
             }
           }}
           style={{ width: 120 }}
@@ -420,19 +422,19 @@ export default function DocumentReader() {
       <div className={styles.body}>
         {tocOpen && tocItems.length > 0 && (
           <aside className={styles.tocPanel}>
-            {tocItems.map((t, i) => (
+            {tocItems.map((toc, i) => (
               <div
                 key={i}
                 className={styles.tocItem}
                 onClick={() => {
                   if (isEpub && epubRenditionRef.current) {
-                    void epubRenditionRef.current.display(t.href);
-                  } else if (t.href.startsWith("page:")) {
-                    setPdfPage(parseInt(t.href.slice(5), 10) || 1);
+                    void epubRenditionRef.current.display(toc.href);
+                  } else if (toc.href.startsWith("page:")) {
+                    setPdfPage(parseInt(toc.href.slice(5), 10) || 1);
                   }
                 }}
               >
-                {t.label}
+                {toc.label}
               </div>
             ))}
           </aside>
@@ -442,13 +444,13 @@ export default function DocumentReader() {
           {(loading || converting) && (
             <div style={{ textAlign: "center", padding: 48 }}>
               <Spin size="large" />
-              {converting && <div style={{ marginTop: 12, opacity: 0.7 }}>正在转换 Office 文档为 PDF…</div>}
+              {converting && <div style={{ marginTop: 12, opacity: 0.7 }}>{t("pages.document_reader.converting_office")}</div>}
             </div>
           )}
           {error && (
             <div className={styles.errorBox}>
               <p>{error}</p>
-              <Button type="primary" href={documentDownloadSrc(mediaId, token)}>下载原文件</Button>
+              <Button type="primary" href={documentDownloadSrc(mediaId, token)}>{t("pages.document_reader.download_original")}</Button>
             </div>
           )}
           {viewAsPdf && !error && !loading && !converting && (
@@ -463,14 +465,14 @@ export default function DocumentReader() {
                 type="button"
                 className={`${styles.epubNavZone} ${styles.epubNavZonePrev}`}
                 disabled={epubAtStart}
-                aria-label="上一页"
+                aria-label={t("pages.document_reader.prev_page_aria")}
                 onClick={epubPrev}
               />
               <button
                 type="button"
                 className={`${styles.epubNavZone} ${styles.epubNavZoneNext}`}
                 disabled={epubAtEnd}
-                aria-label="下一页"
+                aria-label={t("pages.document_reader.next_page_aria")}
                 onClick={epubNext}
               />
             </div>

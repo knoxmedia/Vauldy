@@ -856,6 +856,27 @@
       "col_track": "トラック",
       "various_artists": "Various Artists"
     },
+    "document_reader": {
+      "unsupported_format": "{format} 形式のオンラインプレビューはサポートされていません。元のファイルをダウンロードしてください。",
+      "office_convert_failed": "Office ドキュメントの変換に失敗しました: {msg}。システム設定 → ドキュメント変換を確認してください。",
+      "cannot_open": "ドキュメントを開けません",
+      "epub_open_failed": "EPUB を開けません",
+      "back": "戻る",
+      "default_title": "リーダー",
+      "prev_page": "前へ",
+      "next_page": "次へ",
+      "zoom_out_aria": "縮小",
+      "zoom_in_aria": "拡大",
+      "theme_light": "ライト",
+      "theme_sepia": "セピア",
+      "theme_dark": "ダーク",
+      "search_placeholder": "検索",
+      "pdf_search_hint": "PDF 内検索はブラウザの Ctrl+F を使用してください",
+      "converting_office": "Office ドキュメントを PDF に変換中…",
+      "download_original": "元ファイルをダウンロード",
+      "prev_page_aria": "前のページ",
+      "next_page_aria": "次のページ"
+    },
     "player": {
       "denied_play_perm": "このアカウントには再生権限がありません。管理者に「ユーザー管理 → 基本属性 → 操作権限」で「再生」を有効化してもらってください。",
       "denied_library": "再生不可: このコンテンツのライブラリがアクセス範囲外です。",

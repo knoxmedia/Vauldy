@@ -856,6 +856,27 @@
       "col_track": "音轨",
       "various_artists": "Various Artists"
     },
+    "document_reader": {
+      "unsupported_format": "暂不支持在线预览 {format} 格式，请下载原文件阅读。",
+      "office_convert_failed": "Office 文档转换失败：{msg}。请检查 系统选项 → 文档转换",
+      "cannot_open": "无法打开文档",
+      "epub_open_failed": "无法打开 EPUB",
+      "back": "返回",
+      "default_title": "阅读器",
+      "prev_page": "上一页",
+      "next_page": "下一页",
+      "zoom_out_aria": "缩小",
+      "zoom_in_aria": "放大",
+      "theme_light": "亮白",
+      "theme_sepia": "护眼",
+      "theme_dark": "暗黑",
+      "search_placeholder": "搜索",
+      "pdf_search_hint": "PDF 内搜索请使用浏览器 Ctrl+F",
+      "converting_office": "正在转换 Office 文档为 PDF…",
+      "download_original": "下载原文件",
+      "prev_page_aria": "上一页",
+      "next_page_aria": "下一页"
+    },
     "player": {
       "denied_play_perm": "当前账号未开通播放权限，请联系管理员在「用户管理 → 基本属性 → 操作权限」中开启「播放」。",
       "denied_library": "无权播放：该内容所属媒体库不在您的访问范围内。",

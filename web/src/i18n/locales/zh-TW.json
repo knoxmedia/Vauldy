@@ -856,6 +856,27 @@
       "col_track": "音軌",
       "various_artists": "Various Artists"
     },
+    "document_reader": {
+      "unsupported_format": "暫不支援線上預覽 {format} 格式，請下載原始檔閱讀。",
+      "office_convert_failed": "Office 文件轉換失敗：{msg}。請檢查 系統選項 → 文件轉換",
+      "cannot_open": "無法開啟文件",
+      "epub_open_failed": "無法開啟 EPUB",
+      "back": "返回",
+      "default_title": "閱讀器",
+      "prev_page": "上一頁",
+      "next_page": "下一頁",
+      "zoom_out_aria": "縮小",
+      "zoom_in_aria": "放大",
+      "theme_light": "亮白",
+      "theme_sepia": "護眼",
+      "theme_dark": "暗黑",
+      "search_placeholder": "搜尋",
+      "pdf_search_hint": "PDF 內搜尋請使用瀏覽器 Ctrl+F",
+      "converting_office": "正在將 Office 文件轉換為 PDF…",
+      "download_original": "下載原始檔",
+      "prev_page_aria": "上一頁",
+      "next_page_aria": "下一頁"
+    },
     "player": {
       "denied_play_perm": "目前帳號尚未開通播放權限，請聯絡管理員在「使用者管理 → 基本屬性 → 操作權限」中開啟「播放」。",
       "denied_library": "無權播放：此內容所屬媒體庫不在您的存取範圍內。",
