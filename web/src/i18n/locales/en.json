@@ -98,6 +98,12 @@
     "and": "and",
     "from": "from",
     "to": "to"
+    "loading": "Loading…",
+    "edit": "Edit",
+    "delete": "Delete",
+    "saved": "Saved",
+    "save_failed": "Save failed",
+    "loading_failed": "Failed to load"
   },
   "languages": {
     "zh-CN": "简体中文",
