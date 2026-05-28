@@ -101,6 +101,8 @@ export type MediaItem = {
   year?: number;
   /** From scrape or empty; UI may fall back to `/uploads/posters/{id}.jpg`. */
   poster_url?: string;
+  /** Landscape backdrop from scrape (TV / anime shelves). */
+  backdrop_url?: string;
   /** EXIF or file mtime for photo libraries. */
   photo_taken_at?: string;
   /** AI / manual classification tags. */
@@ -109,6 +111,10 @@ export type MediaItem = {
   photo_tag_ids?: string[];
   /** True when meaningful scrape metadata exists. */
   scraped?: boolean;
+  /** Populated for audio tracks linked in music_track. */
+  music_album_id?: number;
+  music_album_title?: string;
+  music_artist?: string;
 };
 
 /** Normalize poster string from DB (some SQLite/json paths may retain JSON quotes). */
@@ -136,10 +142,46 @@ export function hasScrapedPosterUrl(r: Pick<MediaItem, "poster_url">): boolean {
   return Boolean(normalizeListPosterUrl(r.poster_url || ""));
 }
 
+/** Album artwork for music tracks; null when none (UI should leave cover blank). */
+export function musicMediaPosterSrc(
+  r: Pick<MediaItem, "id" | "poster_url" | "music_album_id" | "file_type">,
+): string | null {
+  if (r.file_type !== "audio") {
+    return mediaPosterSrc(r);
+  }
+  if (r.music_album_id && r.music_album_id > 0) {
+    return albumArtworkSrc(r.music_album_id);
+  }
+  if (hasScrapedPosterUrl(r)) {
+    return normalizeListPosterUrl(r.poster_url || "");
+  }
+  return null;
+}
+
+/** 16:9 shelf / thumb: prefer scraped backdrop, then poster / frame capture. */
+export function mediaLandscapeThumbSrc(
+  r: Pick<MediaItem, "id" | "poster_url" | "backdrop_url" | "music_album_id"> & { file_type?: string },
+): string {
+  if (r.file_type === "image" || r.file_type === "document" || r.file_type === "audio") {
+    return mediaPosterSrc(r);
+  }
+  const backdrop = normalizeListPosterUrl(r.backdrop_url || "");
+  if (backdrop) return backdrop;
+  return mediaPosterSrc(r);
+}
+
 /** Poster/thumbnail URL for grids: scraped poster or server-generated frame capture. */
-export function mediaPosterSrc(r: Pick<MediaItem, "id" | "poster_url"> & { file_type?: string }): string {
+export function mediaPosterSrc(
+  r: Pick<MediaItem, "id" | "poster_url" | "music_album_id"> & { file_type?: string },
+): string {
+  if (r.file_type === "audio") {
+    return musicMediaPosterSrc({ ...r, file_type: "audio" }) ?? "";
+  }
   if (r.file_type === "image") {
     return photoThumbSrc(r.id);
+  }
+  if (r.file_type === "document") {
+    return documentCoverSrc(r.id);
   }
   const u = normalizeListPosterUrl(r.poster_url || "");
   if (u) return u;

@@ -1,5 +1,5 @@
 import type { NavigateFunction } from "react-router-dom";
-import type { AlbumDetail, MusicTrackRow } from "../api/client";
+import type { AlbumDetail, MediaItem, MusicTrackRow } from "../api/client";
 import { ALBUM_PLAY_SESSION_KEY } from "../api/client";
 
 export type AlbumPlaySession = {
@@ -64,6 +64,20 @@ export function libraryTracksToQueue(tracks: MusicTrackRow[]): MusicQueueItem[] 
       albumTitle: t.album_title || "",
       albumId: Number(t.album_id) || 0,
       duration: t.duration,
+    }));
+}
+
+/** Build a playback queue from home / media list rows (audio). */
+export function mediaItemsToMusicQueue(items: MediaItem[]): MusicQueueItem[] {
+  return items
+    .filter((m) => m.file_type === "audio" && m.id > 0)
+    .map((m) => ({
+      mediaId: m.id,
+      title: m.title,
+      artist: (m.music_artist || "").trim() || "Various Artists",
+      albumTitle: (m.music_album_title || "").trim(),
+      albumId: Number(m.music_album_id) || 0,
+      duration: m.duration,
     }));
 }
 

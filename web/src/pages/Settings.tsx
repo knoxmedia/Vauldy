@@ -15,12 +15,12 @@ import { defaultPlayerPrefs, normalizePlayerPrefs, type PlayerPrefs } from "../l
 import { isAdminRole, useAuthStore } from "../store/auth";
 import { getCroppedCircularPngBlob } from "../utils/cropImage";
 import {
-  BG_COLOR_OPTIONS,
   BG_OPACITY_OPTIONS,
   POS_PCT_OPTIONS,
-  SHADOW_OPTIONS,
-  TEXT_COLOR_OPTIONS,
-  TEXT_SIZE_OPTIONS,
+  buildBgColorOptions,
+  buildShadowOptions,
+  buildTextColorOptions,
+  buildTextSizeOptions,
   normalizeSubtitleAppearance,
   previewSubtitleBoxStyle,
   summarizeSubtitleAppearance,
@@ -102,6 +102,10 @@ export default function SettingsPage() {
     ],
     [t]
   );
+  const subtitleTextSizeOptions = useMemo(() => buildTextSizeOptions(t), [t]);
+  const subtitleTextColorOptions = useMemo(() => buildTextColorOptions(t), [t]);
+  const subtitleShadowOptions = useMemo(() => buildShadowOptions(t), [t]);
+  const subtitleBgColorOptions = useMemo(() => buildBgColorOptions(t), [t]);
 
   const uiLocaleLabel = useCallback(
     (code: string | null | undefined) => {
@@ -133,6 +137,10 @@ export default function SettingsPage() {
   }, [refresh]);
 
   const prefs = playerPrefs ?? defaultPlayerPrefs();
+  const subtitleAppearanceSummary = useMemo(
+    () => summarizeSubtitleAppearance(prefs.subtitle_appearance, t),
+    [prefs.subtitle_appearance, t],
+  );
   const loc = resolveLocale(uiLocale);
 
   const [langDraft, setLangDraft] = useState(loc);
@@ -632,7 +640,7 @@ export default function SettingsPage() {
         <div className={styles.row}>
           <div style={{ flex: 1 }}>
             <div className={styles.label}>{t("settings.subtitle_appearance.label")}</div>
-            <div className={styles.value}>{summarizeSubtitleAppearance(prefs.subtitle_appearance)}</div>
+            <div className={styles.value}>{subtitleAppearanceSummary}</div>
           </div>
           <button type="button" className={styles.edit} onClick={() => setEdit("subtitle")}>
             {t("common.edit")}
@@ -661,7 +669,7 @@ export default function SettingsPage() {
               <Select
                 style={selectDark}
                 value={subtitleDraft.text_size}
-                options={TEXT_SIZE_OPTIONS}
+                options={subtitleTextSizeOptions}
                 onChange={(v) => setSubtitleDraft({ ...subtitleDraft, text_size: v })}
               />
             </div>
@@ -670,7 +678,7 @@ export default function SettingsPage() {
               <Select
                 style={selectDark}
                 value={subtitleDraft.text_color}
-                options={TEXT_COLOR_OPTIONS}
+                options={subtitleTextColorOptions}
                 onChange={(v) => setSubtitleDraft({ ...subtitleDraft, text_color: v })}
               />
             </div>
@@ -679,7 +687,7 @@ export default function SettingsPage() {
               <Select
                 style={selectDark}
                 value={subtitleDraft.shadow}
-                options={SHADOW_OPTIONS}
+                options={subtitleShadowOptions}
                 onChange={(v) => setSubtitleDraft({ ...subtitleDraft, shadow: v })}
               />
             </div>
@@ -688,7 +696,7 @@ export default function SettingsPage() {
               <Select
                 style={selectDark}
                 value={subtitleDraft.bg_color}
-                options={BG_COLOR_OPTIONS}
+                options={subtitleBgColorOptions}
                 onChange={(v) => setSubtitleDraft({ ...subtitleDraft, bg_color: v })}
               />
             </div>

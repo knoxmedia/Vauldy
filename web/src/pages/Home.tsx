@@ -22,13 +22,22 @@ import {
   HistoryItem,
   addPlaylistItem,
   fetchLibraries,
-  fetchMedia,
   fetchUserHistory,
+  mediaLandscapeThumbSrc,
   mediaPosterSrc,
+  musicMediaPosterSrc,
   removePlayProgress,
 } from "../api/client";
+import { mediaItemsToMusicQueue } from "../lib/albumPlayback";
+import { useMusicPlayerStore } from "../store/musicPlayer";
 import AddToPlaylistModal from "../components/AddToPlaylistModal";
+import PhotoLightbox from "../components/PhotoLightbox";
 import { buildMediaMenuItems } from "../components/mediaMenuItems";
+import {
+  buildHomeRecentSections,
+  flattenHomeRecent,
+  loadHomeRecentBySection,
+} from "../lib/homeRecentSections";
 import { readRecentPlaylists, rememberPlaylistAdded } from "../lib/recentPlaylists";
 import { useT, type TranslateFn } from "../i18n";
 import styles from "./Home.module.css";
@@ -225,26 +234,16 @@ function HistoryContinueCard({
   );
 }
 
-type RecentSection = { key: string; title: string; libTypes: string[]; landscape: boolean };
-
-function buildRecentSections(t: TranslateFn): RecentSection[] {
-  return [
-    { key: "movie", title: t("pages.home.section_movie"), libTypes: ["movie"], landscape: false },
-    { key: "tv", title: t("pages.home.section_tv"), libTypes: ["tv"], landscape: false },
-    { key: "music", title: t("pages.home.section_music"), libTypes: ["music"], landscape: false },
-    { key: "photo", title: t("pages.home.section_photo"), libTypes: ["photo"], landscape: false },
-    { key: "document", title: t("pages.home.section_document"), libTypes: ["document"], landscape: false },
-    { key: "other_video", title: t("pages.home.section_other_video"), libTypes: ["video", "anime"], landscape: true },
-  ];
-}
-
-function RecentMovieShelfCard({
+function RecentShelfCard({
   m,
   nav,
   selected,
   onToggleSelect,
   bulkSelectMode,
   buildHomeMediaMenu,
+  variant,
+  shelfItems,
+  shelfIndex,
   t,
 }: {
   m: MediaItem;
@@ -253,14 +252,34 @@ function RecentMovieShelfCard({
   onToggleSelect: () => void;
   bulkSelectMode: boolean;
   buildHomeMediaMenu: (mediaId: number, extra?: { isWatched?: boolean; fromContinueWatching?: boolean }) => MenuProps;
+  variant: "movie" | "music";
+  shelfItems: MediaItem[];
+  shelfIndex: number;
   t: TranslateFn;
 }) {
   const [posterFailed, setPosterFailed] = useState(false);
-  const year = mediaReleaseYear(m);
+  const year = variant === "movie" ? mediaReleaseYear(m) : "";
+  const posterSrc = variant === "music" ? musicMediaPosterSrc(m) : mediaPosterSrc(m);
+  const showPosterImg = Boolean(posterSrc) && !posterFailed;
   const homeMediaMenu = useMemo(
     () => buildHomeMediaMenu(m.id),
     [m.id, buildHomeMediaMenu],
   );
+
+  const playShelfItem = () => {
+    if (variant === "music") {
+      const queue = mediaItemsToMusicQueue(shelfItems);
+      if (queue.length === 0) return;
+      useMusicPlayerStore.getState().playQueue(queue, Math.min(shelfIndex, queue.length - 1));
+      return;
+    }
+    nav(`/player/${m.id}`);
+  };
+
+  const playAria =
+    variant === "music"
+      ? t("pages.music.aria_play_track", { title: m.title || t("pages.home.untitled") })
+      : t("pages.home.aria_play_video", { title: m.title || t("pages.home.movie_fallback") });
 
   return (
     <div
@@ -294,17 +313,17 @@ function RecentMovieShelfCard({
         }}
       >
         <>
-          {posterFailed ? (
-            <div className={styles.posterEmptyMovieSolid} aria-hidden />
-          ) : (
+          {showPosterImg ? (
             <img
               className={styles.posterImgMovie}
-              src={mediaPosterSrc(m)}
+              src={posterSrc!}
               alt=""
               loading="lazy"
               decoding="async"
               onError={() => setPosterFailed(true)}
             />
+          ) : (
+            <div className={styles.posterEmptyMovieSolid} aria-hidden />
           )}
           <div
             className={styles.posterOverlay}
@@ -332,10 +351,10 @@ function RecentMovieShelfCard({
                 <button
                   type="button"
                   className={styles.posterPlayFab}
-                  aria-label={t("pages.home.aria_play_video", { title: m.title || t("pages.home.movie_fallback") })}
+                  aria-label={playAria}
                   onClick={(e) => {
                     e.stopPropagation();
-                    nav(`/player/${m.id}`);
+                    playShelfItem();
                   }}
                 >
                   <CaretRightOutlined />
@@ -391,6 +410,7 @@ function RecentAddedRow({
   onToggleMovieSelect,
   homeBulkActive,
   buildHomeMediaMenu,
+  onOpenPhotoPreview,
   t,
 }: {
   sectionTitle: string;
@@ -402,8 +422,22 @@ function RecentAddedRow({
   onToggleMovieSelect: (id: number) => void;
   homeBulkActive: boolean;
   buildHomeMediaMenu: (mediaId: number, extra?: { isWatched?: boolean; fromContinueWatching?: boolean }) => MenuProps;
+  onOpenPhotoPreview?: (items: MediaItem[], index: number) => void;
   t: TranslateFn;
 }) {
+  const openRecentItem = (m: MediaItem, index: number) => {
+    if (sectionKey === "photo") {
+      onOpenPhotoPreview?.(items, index);
+      return;
+    }
+    if (sectionKey === "document") {
+      nav(`/reader/${m.id}`);
+      return;
+    }
+    nav(`/detail/${m.id}`);
+  };
+
+  const showPlayButton = sectionKey !== "photo" && sectionKey !== "document";
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [showLeft, setShowLeft] = useState(false);
   const [showRight, setShowRight] = useState(false);
@@ -471,9 +505,9 @@ function RecentAddedRow({
           className={`${styles.rowScroll} ${styles.rowScrollNoBar}`}
           onScroll={updateArrows}
         >
-        {items.map((m) =>
-          !landscape && sectionKey === "movie" ? (
-            <RecentMovieShelfCard
+        {items.map((m, index) =>
+          !landscape && (sectionKey === "movie" || sectionKey === "music") ? (
+            <RecentShelfCard
               key={m.id}
               m={m}
               nav={nav}
@@ -481,6 +515,9 @@ function RecentAddedRow({
               onToggleSelect={() => onToggleMovieSelect(m.id)}
               bulkSelectMode={homeBulkActive}
               buildHomeMediaMenu={buildHomeMediaMenu}
+              variant={sectionKey === "music" ? "music" : "movie"}
+              shelfItems={items}
+              shelfIndex={index}
               t={t}
             />
           ) : (
@@ -489,23 +526,33 @@ function RecentAddedRow({
               className={landscape ? `${styles.thumbPoster} ${styles.thumbPosterLandscape}` : styles.thumbPoster}
               role="button"
               tabIndex={0}
-              onClick={() => nav(`/detail/${m.id}`)}
+              onClick={() => openRecentItem(m, index)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" || e.key === " ") {
                   e.preventDefault();
-                  nav(`/detail/${m.id}`);
+                  openRecentItem(m, index);
                 }
               }}
             >
               <div className={landscape ? `${styles.posterBox} ${styles.posterBoxLandscape}` : styles.posterBox}>
                 <img
                   className={styles.posterFillImg}
-                  src={mediaPosterSrc(m)}
+                  src={landscape ? mediaLandscapeThumbSrc(m) : mediaPosterSrc(m)}
                   alt=""
                   loading="lazy"
                   decoding="async"
                   onError={(e) => {
-                    e.currentTarget.style.display = "none";
+                    const img = e.currentTarget;
+                    if (landscape) {
+                      const fallback = mediaPosterSrc(m);
+                      if (fallback && img.src !== fallback && !img.dataset.fallbackTried) {
+                        img.dataset.fallbackTried = "1";
+                        img.style.display = "";
+                        img.src = fallback;
+                        return;
+                      }
+                    }
+                    img.style.display = "none";
                   }}
                 />
                 <div className={styles.posterEmpty}>
@@ -513,17 +560,19 @@ function RecentAddedRow({
                   <span>{t("pages.home.no_poster")}</span>
                 </div>
               </div>
-              <button
-                type="button"
-                className={landscape ? `${styles.posterPlayBtn} ${styles.posterPlayBtnLandscape}` : styles.posterPlayBtn}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  nav(`/player/${m.id}`);
-                }}
-                aria-label={t("pages.home.aria_play_video", { title: m.title || t("pages.home.movie_fallback") })}
-              >
-                <PlayCircleOutlined />
-              </button>
+              {showPlayButton ? (
+                <button
+                  type="button"
+                  className={landscape ? `${styles.posterPlayBtn} ${styles.posterPlayBtnLandscape}` : styles.posterPlayBtn}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    nav(`/player/${m.id}`);
+                  }}
+                  aria-label={t("pages.home.aria_play_video", { title: m.title || t("pages.home.movie_fallback") })}
+                >
+                  <PlayCircleOutlined />
+                </button>
+              ) : null}
               <div className={styles.posterCap}>
                 <div className={styles.posterTitle}>{m.title || t("pages.home.untitled")}</div>
               </div>
@@ -539,11 +588,12 @@ function RecentAddedRow({
 export default function HomePage() {
   const nav = useNavigate();
   const t = useT();
-  const RECENT_SECTIONS = useMemo(() => buildRecentSections(t), [t]);
+  const RECENT_SECTIONS = useMemo(() => buildHomeRecentSections(t), [t]);
   const [loading, setLoading] = useState(true);
   const [libs, setLibs] = useState<Library[]>([]);
   const [history, setHistory] = useState<HistoryItem[]>([]);
-  const [allRecent, setAllRecent] = useState<MediaItem[]>([]);
+  const [recentBySection, setRecentBySection] = useState<Map<string, MediaItem[]>>(() => new Map());
+  const [photoLightbox, setPhotoLightbox] = useState<{ items: MediaItem[]; index: number } | null>(null);
   const [historySelectedKeys, setHistorySelectedKeys] = useState<Set<string>>(() => new Set());
   const [movieSelectedIds, setMovieSelectedIds] = useState<Set<number>>(() => new Set());
   const historyScrollRef = useRef<HTMLDivElement | null>(null);
@@ -615,33 +665,28 @@ export default function HomePage() {
     setLoading(true);
     // 分项处理：任一接口失败不应清空其它接口的成功数据（Promise.all 会全失败）
     void (async () => {
-      const [libR, histR, mediaR] = await Promise.allSettled([
-        fetchLibraries(),
-        fetchUserHistory(24),
-        fetchMedia(undefined, { sort: "created_desc", limit: 400 }),
-      ]);
+      const [libR, histR] = await Promise.allSettled([fetchLibraries(), fetchUserHistory(24)]);
       if (cancelled) return;
-      if (libR.status === "fulfilled") {
-        setLibs(Array.isArray(libR.value) ? libR.value : []);
-      } else {
-        setLibs([]);
-      }
+      const libsData = libR.status === "fulfilled" && Array.isArray(libR.value) ? libR.value : [];
+      setLibs(libsData);
       if (histR.status === "fulfilled") {
         setHistory(histR.value.filter((h) => h.media_id > 0));
       } else {
         setHistory([]);
       }
-      if (mediaR.status === "fulfilled") {
-        setAllRecent(Array.isArray(mediaR.value) ? mediaR.value : []);
-      } else {
-        setAllRecent([]);
+      const sections = buildHomeRecentSections(t);
+      const recentMap = libsData.length
+        ? await loadHomeRecentBySection(libsData, sections)
+        : new Map<string, MediaItem[]>();
+      if (!cancelled) {
+        setRecentBySection(recentMap);
+        setLoading(false);
       }
-      setLoading(false);
     })();
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     let cancelled = false;
@@ -662,13 +707,26 @@ export default function HomePage() {
     };
   }, []);
 
-  const libraryTypeById = useMemo(() => {
-    const m = new Map<number, string>();
-    for (const lib of libs) {
-      m.set(lib.id, lib.type);
+  useEffect(() => {
+    if (libs.length === 0) {
+      setRecentBySection(new Map());
+      return;
     }
-    return m;
-  }, [libs]);
+    let cancelled = false;
+    const refreshRecent = () => {
+      void loadHomeRecentBySection(libs, RECENT_SECTIONS).then((map) => {
+        if (!cancelled) setRecentBySection(map);
+      });
+    };
+    refreshRecent();
+    const timer = window.setInterval(refreshRecent, 10000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [libs, RECENT_SECTIONS]);
+
+  const allRecent = useMemo(() => flattenHomeRecent(recentBySection), [recentBySection]);
 
   /** Prefer poster_url from recent list when the same media appears in「继续观看」. */
   const recentPosterById = useMemo(() => {
@@ -680,26 +738,11 @@ export default function HomePage() {
     return m;
   }, [allRecent]);
 
-  const recentBySection = useMemo(() => {
-    const out = new Map<string, MediaItem[]>();
-    for (const sec of RECENT_SECTIONS) {
-      out.set(sec.key, []);
-    }
-    for (const item of allRecent) {
-      const t = libraryTypeById.get(item.library_id);
-      if (!t) continue;
-      for (const sec of RECENT_SECTIONS) {
-        if (sec.libTypes.includes(t)) {
-          const arr = out.get(sec.key)!;
-          if (arr.length < 24) arr.push(item);
-          break;
-        }
-      }
-    }
-    return out;
-  }, [allRecent, libraryTypeById]);
-
   const movieShelfItems = recentBySection.get("movie") ?? [];
+
+  const openPhotoPreview = useCallback((items: MediaItem[], index: number) => {
+    setPhotoLightbox({ items, index });
+  }, []);
 
   const [addToPlaylistMediaId, setAddToPlaylistMediaId] = useState<number | null>(null);
   const [recentPlaylistMenu, setRecentPlaylistMenu] = useState(readRecentPlaylists);
@@ -861,7 +904,8 @@ export default function HomePage() {
   }, [homeBulkActive, measureHomeBulkDock]);
 
   useEffect(() => {
-    const valid = new Set(movieShelfItems.map((m) => m.id));
+    const musicShelf = recentBySection.get("music") ?? [];
+    const valid = new Set([...movieShelfItems, ...musicShelf].map((m) => m.id));
     setMovieSelectedIds((prev) => {
       const next = new Set<number>();
       for (const id of prev) {
@@ -870,7 +914,7 @@ export default function HomePage() {
       if (next.size === prev.size && [...next].every((id) => prev.has(id))) return prev;
       return next;
     });
-  }, [movieShelfItems]);
+  }, [movieShelfItems, recentBySection]);
 
   useEffect(() => {
     updateHistoryArrows();
@@ -1170,10 +1214,19 @@ export default function HomePage() {
               onToggleMovieSelect={toggleMovieSelect}
               homeBulkActive={homeBulkActive}
               buildHomeMediaMenu={buildHomeMediaMenu}
+              onOpenPhotoPreview={openPhotoPreview}
             />
           </section>
         );
       })}
+      {photoLightbox ? (
+        <PhotoLightbox
+          items={photoLightbox.items}
+          index={photoLightbox.index}
+          onClose={() => setPhotoLightbox(null)}
+          onChangeIndex={(index) => setPhotoLightbox((prev) => (prev ? { ...prev, index } : null))}
+        />
+      ) : null}
       {addToPlaylistMediaId != null && (
         <AddToPlaylistModal
           mediaIds={[addToPlaylistMediaId]}

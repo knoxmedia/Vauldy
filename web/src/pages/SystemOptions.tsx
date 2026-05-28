@@ -41,7 +41,7 @@ import {
   type RecognitionTestResult,
   type DocTransTestResult,
 } from "../api/client";
-import { languageOptions, resolveLocale, useT } from "../i18n";
+import { languageOptions, resolveLocale, useT, type TranslateFn } from "../i18n";
 import { defaultPlayerPrefs, normalizePlayerPrefs } from "../lib/playerPrefs";
 import { useAuthStore } from "../store/auth";
 
@@ -137,25 +137,27 @@ function mergeSystemOptions(data: Partial<SystemOptions> | null | undefined): Sy
   };
 }
 
-function buildHomeStreamQualityOptions(): { value: string; label: string }[] {
-  const out: { value: string; label: string }[] = [{ value: "auto", label: "自动" }];
+function buildHomeStreamQualityOptions(t: TranslateFn): { value: string; label: string }[] {
+  const bitrate = (resolution: string, mbps: number | string) =>
+    t("system_options.common.stream_bitrate", { resolution, mbps });
+  const out: { value: string; label: string }[] = [
+    { value: "auto", label: t("system_options.common.auto") },
+  ];
   for (const m of [200, 160, 140, 120, 100, 80, 60, 40]) {
-    out.push({ value: `4k-${m}mbps`, label: `4K · ${m} Mbps` });
+    out.push({ value: `4k-${m}mbps`, label: bitrate("4K", m) });
   }
   for (const m of [60, 50, 40, 30, 25, 20, 15, 12, 10, 8, 6, 5]) {
-    out.push({ value: `1080p-${m}mbps`, label: `1080p · ${m} Mbps` });
+    out.push({ value: `1080p-${m}mbps`, label: bitrate("1080p", m) });
   }
   for (const m of [8, 6, 4, 3, 2]) {
-    out.push({ value: `720p-${m}mbps`, label: `720p · ${m} Mbps` });
+    out.push({ value: `720p-${m}mbps`, label: bitrate("720p", m) });
   }
   for (const m of [4, 3, 2]) {
-    out.push({ value: `480p-${m}mbps`, label: `480p · ${m} Mbps` });
+    out.push({ value: `480p-${m}mbps`, label: bitrate("480p", m) });
   }
-  out.push({ value: "480p-1_5mbps", label: "480p · 1.5 Mbps" });
+  out.push({ value: "480p-1_5mbps", label: bitrate("480p", "1.5") });
   return out;
 }
-
-const HOME_STREAM_QUALITY_OPTIONS = buildHomeStreamQualityOptions();
 
 /**
  * Build dropdown options for the admin's preferred display language. The
@@ -166,33 +168,43 @@ function buildDisplayLanguageOptions(): { value: string; label: string }[] {
   return languageOptions();
 }
 
-const TRANSCODER_QUALITY_OPTIONS = [
-  { value: "auto", label: "自动" },
-  { value: "max", label: "最高" },
-  { value: "high", label: "高" },
-  { value: "medium", label: "中" },
-  { value: "low", label: "低" },
-];
+function buildTranscoderQualityOptions(t: TranslateFn): { value: string; label: string }[] {
+  return [
+    { value: "auto", label: t("system_options.common.auto") },
+    { value: "max", label: t("system_options.common.quality_max") },
+    { value: "high", label: t("system_options.common.quality_high") },
+    { value: "medium", label: t("system_options.common.quality_medium") },
+    { value: "low", label: t("system_options.common.quality_low") },
+  ];
+}
 
-const X264_PRESET_OPTIONS = [
-  { value: "ultrafast", label: "极快 (ultrafast)" },
-  { value: "superfast", label: "超快 (superfast)" },
-  { value: "veryfast", label: "非常快 (veryfast)" },
-  { value: "faster", label: "更快 (faster)" },
-  { value: "fast", label: "快 (fast)" },
-  { value: "medium", label: "中等 (medium)" },
-  { value: "slow", label: "慢 (slow)" },
-  { value: "slower", label: "更慢 (slower)" },
-  { value: "veryslow", label: "非常慢 (veryslow)" },
-];
+function buildX264PresetOptions(t: TranslateFn): { value: string; label: string }[] {
+  const presets = [
+    "ultrafast",
+    "superfast",
+    "veryfast",
+    "faster",
+    "fast",
+    "medium",
+    "slow",
+    "slower",
+    "veryslow",
+  ] as const;
+  return presets.map((value) => ({
+    value,
+    label: t(`system_options.transcoder.x264.${value}`),
+  }));
+}
 
-const CPU_CONCURRENT_OPTIONS = [
-  { value: "unlimited", label: "无限制" },
-  ...Array.from({ length: 16 }, (_, i) => ({
-    value: String(i + 1),
-    label: String(i + 1),
-  })),
-];
+function buildCpuConcurrentOptions(t: TranslateFn): { value: string; label: string }[] {
+  return [
+    { value: "unlimited", label: t("system_options.common.unlimited") },
+    ...Array.from({ length: 16 }, (_, i) => ({
+      value: String(i + 1),
+      label: String(i + 1),
+    })),
+  ];
+}
 
 const BG_CONCURRENT_OPTIONS = Array.from({ length: 8 }, (_, i) => ({
   value: String(i + 1),
@@ -234,17 +246,21 @@ function SettingRow(props: {
   );
 }
 
-const ASR_PROVIDER_OPTIONS = [
-  { value: "none", label: "关闭" },
-  { value: "whisper_cli", label: "Whisper CLI" },
-  { value: "shell", label: "Shell 脚本" },
-];
+function buildAsrProviderOptions(t: TranslateFn): { value: string; label: string }[] {
+  return [
+    { value: "none", label: t("system_options.asr.provider_none") },
+    { value: "whisper_cli", label: t("system_options.asr.provider_whisper_cli") },
+    { value: "shell", label: t("system_options.asr.provider_shell") },
+  ];
+}
 
-const PHOTO_CLASSIFY_ENGINE_OPTIONS = [
-  { value: "auto", label: "自动（有 ONNX 模型时用 ONNX，否则启发式）" },
-  { value: "heuristic", label: "启发式（Go + 颜色/构图，无需 Python）" },
-  { value: "onnx", label: "ONNX（MobileNet + Python）" },
-];
+function buildPhotoClassifyEngineOptions(t: TranslateFn): { value: string; label: string }[] {
+  return [
+    { value: "auto", label: t("system_options.photo_classify.engine_auto") },
+    { value: "heuristic", label: t("system_options.photo_classify.engine_heuristic") },
+    { value: "onnx", label: t("system_options.photo_classify.engine_onnx") },
+  ];
+}
 
 export default function SystemOptionsPage() {
   const t = useT();
@@ -253,6 +269,20 @@ export default function SystemOptionsPage() {
   const adminLanguage = useMemo(() => resolveLocale(uiLocale), [uiLocale]);
   const [languageSaving, setLanguageSaving] = useState(false);
   const DISPLAY_LANGUAGE_OPTIONS = useMemo(() => buildDisplayLanguageOptions(), []);
+  const homeStreamQualityOptions = useMemo(() => buildHomeStreamQualityOptions(t), [t]);
+  const transcoderQualityOptions = useMemo(() => buildTranscoderQualityOptions(t), [t]);
+  const x264PresetOptions = useMemo(() => buildX264PresetOptions(t), [t]);
+  const cpuConcurrentOptions = useMemo(() => buildCpuConcurrentOptions(t), [t]);
+  const asrProviderOptions = useMemo(() => buildAsrProviderOptions(t), [t]);
+  const photoClassifyEngineOptions = useMemo(() => buildPhotoClassifyEngineOptions(t), [t]);
+  const screenOrientationOptions = useMemo(
+    () => [
+      { value: "auto", label: t("system_options.playback.orientation_auto") },
+      { value: "lock_landscape", label: t("system_options.playback.orientation_lock_landscape") },
+      { value: "device", label: t("system_options.playback.orientation_device") },
+    ],
+    [t],
+  );
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -285,11 +315,11 @@ export default function SystemOptionsPage() {
       setOcrTestResult(null);
       setClassifyTestResult(null);
     } catch {
-      message.error("加载系统选项失败");
+      message.error(t("system_options.messages.load_failed"));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     void load();
@@ -304,9 +334,9 @@ export default function SystemOptionsPage() {
       const merged = mergeSystemOptions(saved);
       setOpts(merged);
       setBaseline(merged);
-      message.success("已保存");
+      message.success(t("system_options.messages.saved"));
     } catch {
-      message.error("保存失败");
+      message.error(t("system_options.messages.save_failed"));
     } finally {
       setSaving(false);
     }
@@ -341,7 +371,7 @@ export default function SystemOptionsPage() {
     setAsrTestResult(null);
     setOcrTestResult(null);
     setClassifyTestResult(null);
-    message.info("已恢复为上次加载的值");
+    message.info(t("system_options.messages.reset_to_last_loaded"));
   };
 
   const runAsrTest = async () => {
@@ -351,7 +381,7 @@ export default function SystemOptionsPage() {
       const result = await testSystemOptionsASR(opts.recognition.asr);
       setAsrTestResult(result);
     } catch {
-      setAsrTestResult({ ok: false, message: "测试请求失败" });
+      setAsrTestResult({ ok: false, message: t("system_options.messages.test_request_failed") });
     } finally {
       setAsrTesting(false);
     }
@@ -364,7 +394,7 @@ export default function SystemOptionsPage() {
       const result = await testSystemOptionsOCR(opts.recognition.ocr);
       setOcrTestResult(result);
     } catch {
-      setOcrTestResult({ ok: false, message: "测试请求失败" });
+      setOcrTestResult({ ok: false, message: t("system_options.messages.test_request_failed") });
     } finally {
       setOcrTesting(false);
     }
@@ -392,7 +422,7 @@ export default function SystemOptionsPage() {
         message.error(result.message);
       }
     } catch {
-      message.error("ASR 安装请求失败（可能超时，请查看服务器日志）");
+      message.error(t("system_options.messages.asr_install_request_failed"));
     } finally {
       setAsrInstalling(false);
     }
@@ -413,7 +443,7 @@ export default function SystemOptionsPage() {
         message.error(result.message);
       }
     } catch {
-      message.error("OCR 安装请求失败（可能超时，请查看服务器日志）");
+      message.error(t("system_options.messages.ocr_install_request_failed"));
     } finally {
       setOcrInstalling(false);
     }
@@ -433,7 +463,7 @@ export default function SystemOptionsPage() {
       const result = await testSystemOptionsPhotoClassify(opts.photo_classify);
       setClassifyTestResult(result);
     } catch {
-      setClassifyTestResult({ ok: false, message: "测试请求失败" });
+      setClassifyTestResult({ ok: false, message: t("system_options.messages.test_request_failed") });
     } finally {
       setClassifyTesting(false);
     }
@@ -454,7 +484,7 @@ export default function SystemOptionsPage() {
         message.error(result.message);
       }
     } catch {
-      message.error("智能分类安装请求失败（可能超时，请查看服务器日志）");
+      message.error(t("system_options.messages.classify_install_request_failed"));
     } finally {
       setClassifyInstalling(false);
     }
@@ -474,7 +504,7 @@ export default function SystemOptionsPage() {
       const result = await testSystemOptionsPhotoFace(opts.photo_face);
       setFaceTestResult(result);
     } catch {
-      setFaceTestResult({ ok: false, message: "测试请求失败" });
+      setFaceTestResult({ ok: false, message: t("system_options.messages.test_request_failed") });
     } finally {
       setFaceTesting(false);
     }
@@ -495,7 +525,7 @@ export default function SystemOptionsPage() {
         message.error(result.message);
       }
     } catch {
-      message.error("人脸检测安装请求失败（可能超时，请查看服务器日志）");
+      message.error(t("system_options.messages.face_install_request_failed"));
     } finally {
       setFaceInstalling(false);
     }
@@ -515,7 +545,7 @@ export default function SystemOptionsPage() {
       const result = await testSystemOptionsDocTrans(opts.doc_trans);
       setDocTransTestResult(result);
     } catch {
-      setDocTransTestResult({ ok: false, message: "测试请求失败" });
+      setDocTransTestResult({ ok: false, message: t("system_options.messages.test_request_failed") });
     } finally {
       setDocTransTesting(false);
     }
@@ -540,7 +570,7 @@ export default function SystemOptionsPage() {
         message.warning(result.message);
       }
     } catch {
-      message.error("引擎检测失败");
+      message.error(t("system_options.messages.doc_trans_engine_detect_failed"));
     } finally {
       setDocTransInstalling(false);
     }
@@ -565,7 +595,7 @@ export default function SystemOptionsPage() {
         message.error(result.message);
       }
     } catch {
-      message.error("LibreOffice 安装失败");
+      message.error(t("system_options.messages.libreoffice_install_failed"));
     } finally {
       setDocTransInstallingLO(false);
     }
@@ -581,14 +611,21 @@ export default function SystemOptionsPage() {
     });
   };
 
-  const engineLabel = (k: string) => {
-    switch (k) {
-      case "office": return "Microsoft Office";
-      case "wps": return "WPS Office";
-      case "libreoffice": return "LibreOffice";
-      default: return k;
-    }
-  };
+  const engineLabel = useCallback(
+    (k: string) => {
+      switch (k) {
+        case "office":
+          return t("system_options.doc_trans.engine_office");
+        case "wps":
+          return t("system_options.doc_trans.engine_wps");
+        case "libreoffice":
+          return t("system_options.doc_trans.engine_libreoffice");
+        default:
+          return k;
+      }
+    },
+    [t],
+  );
 
   const tabGeneral = (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
@@ -620,11 +657,11 @@ export default function SystemOptionsPage() {
       <Divider style={{ margin: "8px 0" }} />
 
       <Typography.Title level={5} style={{ margin: 0 }}>
-        启动选项
+        {t("system_options.general.startup_section")}
       </Typography.Title>
       <SettingRow
-        title="开机自启"
-        description="这将在 Windows 启动时启动托盘图标（若使用桌面安装版）。若已配置为 Windows 服务，请关闭此项并改为由服务开机自启。"
+        title={t("system_options.general.start_on_boot")}
+        description={t("system_options.general.start_on_boot_desc")}
       >
         <Switch
           checked={opts.general.start_on_boot}
@@ -632,8 +669,8 @@ export default function SystemOptionsPage() {
         />
       </SettingRow>
       <SettingRow
-        title="服务器首次启动时打开浏览器访问 Web 应用"
-        description="仅在首次启动时打开默认浏览器进入 Web 界面；进程重启后不会再次自动打开。"
+        title={t("system_options.general.open_browser_first_start")}
+        description={t("system_options.general.open_browser_first_start_desc")}
       >
         <Switch
           checked={opts.general.open_browser_on_first_start}
@@ -649,9 +686,12 @@ export default function SystemOptionsPage() {
       <Divider style={{ margin: "8px 0" }} />
 
       <Typography.Title level={5} style={{ margin: 0 }}>
-        维护模式
+        {t("system_options.general.maintenance_section")}
       </Typography.Title>
-      <SettingRow title="将服务器设置为维护模式" description="用户将只会看到维护模式消息。">
+      <SettingRow
+        title={t("system_options.general.maintenance_mode")}
+        description={t("system_options.general.maintenance_mode_desc")}
+      >
         <Switch
           checked={opts.general.maintenance_mode}
           onChange={(v) =>
@@ -666,11 +706,11 @@ export default function SystemOptionsPage() {
       <Divider style={{ margin: "8px 0" }} />
 
       <Typography.Title level={5} style={{ margin: 0 }}>
-        高级
+        {t("system_options.general.advanced_section")}
       </Typography.Title>
       <SettingRow
-        title="缓存路径"
-        description="为服务器缓存文件（例如图像）指定自定义位置。留空可使用服务器默认值。"
+        title={t("system_options.general.cache_path")}
+        description={t("system_options.general.cache_path_desc")}
       >
         <Input
           style={{ width: 480, maxWidth: "100%" }}
@@ -681,11 +721,11 @@ export default function SystemOptionsPage() {
               general: { ...p.general, cache_path: e.target.value },
             }))
           }
-          placeholder="默认"
+          placeholder={t("system_options.general.cache_path_placeholder")}
           suffix={
             <SearchOutlined
               style={{ color: "rgba(255,255,255,0.45)" }}
-              onClick={() => message.info("请在服务器可访问的路径下手动填写目录")}
+              onClick={() => message.info(t("system_options.messages.cache_path_manual_hint"))}
             />
           }
         />
@@ -694,9 +734,9 @@ export default function SystemOptionsPage() {
       <Divider style={{ margin: "8px 0" }} />
 
       <Typography.Title level={5} style={{ margin: 0 }}>
-        自动更新
+        {t("system_options.general.auto_update_section")}
       </Typography.Title>
-      <SettingRow title="启用服务器自动更新">
+      <SettingRow title={t("system_options.general.auto_update_enabled")}>
         <Switch
           checked={opts.general.auto_update_enabled}
           onChange={(v) =>
@@ -713,19 +753,22 @@ export default function SystemOptionsPage() {
   const tabPlayback = (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
       <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
-        这些设置会影响在此设备上播放的所有用户。
+        {t("system_options.playback.device_scope_note")}
       </Typography.Paragraph>
       <Typography.Title level={5} style={{ margin: 0 }}>
-        视频
+        {t("system_options.playback.video_section")}
       </Typography.Title>
-      <SettingRow title="家庭流传输质量" description="选择远程或本地播放时的默认最大码率上限（与服务器转码能力相关）。">
+      <SettingRow
+        title={t("system_options.playback.home_stream_quality")}
+        description={t("system_options.playback.home_stream_quality_desc")}
+      >
         <Select
           showSearch
           optionFilterProp="label"
           style={{ minWidth: 260 }}
           listHeight={360}
           popupMatchSelectWidth={false}
-          options={HOME_STREAM_QUALITY_OPTIONS}
+          options={homeStreamQualityOptions}
           value={opts.playback.home_stream_quality}
           onChange={(v) =>
             setOpts((p) => ({
@@ -735,7 +778,10 @@ export default function SystemOptionsPage() {
           }
         />
       </SettingRow>
-      <SettingRow title="屏幕方向" description="客户端全屏播放时的显示方向策略。">
+      <SettingRow
+        title={t("system_options.playback.screen_orientation")}
+        description={t("system_options.playback.screen_orientation_desc")}
+      >
         <Select
           style={{ minWidth: 220 }}
           value={opts.playback.screen_orientation}
@@ -745,11 +791,7 @@ export default function SystemOptionsPage() {
               playback: { ...p.playback, screen_orientation: v },
             }))
           }
-          options={[
-            { value: "auto", label: "自动" },
-            { value: "lock_landscape", label: "锁定横屏" },
-            { value: "device", label: "使用设备设置" },
-          ]}
+          options={screenOrientationOptions}
         />
       </SettingRow>
     </Space>
@@ -757,10 +799,13 @@ export default function SystemOptionsPage() {
 
   const tabTranscoder = (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
-      <SettingRow title="转码器质量" description="转码器使用的质量配置文件。">
+      <SettingRow
+        title={t("system_options.transcoder.quality")}
+        description={t("system_options.transcoder.quality_desc")}
+      >
         <Select
           style={{ minWidth: 180 }}
-          options={TRANSCODER_QUALITY_OPTIONS}
+          options={transcoderQualityOptions}
           value={opts.transcoder.quality}
           onChange={(v) =>
             setOpts((p) => ({
@@ -770,7 +815,10 @@ export default function SystemOptionsPage() {
           }
         />
       </SettingRow>
-      <SettingRow title="转码器临时目录" description="为临时文件转码时使用的目录。">
+      <SettingRow
+        title={t("system_options.transcoder.temp_dir")}
+        description={t("system_options.transcoder.temp_dir_desc")}
+      >
         <Input
           style={{ width: 480, maxWidth: "100%" }}
           value={opts.transcoder.temp_dir}
@@ -780,10 +828,13 @@ export default function SystemOptionsPage() {
               transcoder: { ...p.transcoder, temp_dir: e.target.value },
             }))
           }
-          placeholder="留空使用服务器默认"
+          placeholder={t("system_options.common.placeholder_server_default")}
         />
       </SettingRow>
-      <SettingRow title="下载临时目录" description="在客户端下载之前存储转码下载时使用的目录。">
+      <SettingRow
+        title={t("system_options.transcoder.download_temp_dir")}
+        description={t("system_options.transcoder.download_temp_dir_desc")}
+      >
         <Input
           style={{ width: 480, maxWidth: "100%" }}
           value={opts.transcoder.download_temp_dir}
@@ -793,10 +844,13 @@ export default function SystemOptionsPage() {
               transcoder: { ...p.transcoder, download_temp_dir: e.target.value },
             }))
           }
-          placeholder="留空使用服务器默认"
+          placeholder={t("system_options.common.placeholder_server_default")}
         />
       </SettingRow>
-      <SettingRow title="转码器默认的节流缓冲器" description="在对转码器进行节流前缓冲所用的秒数。">
+      <SettingRow
+        title={t("system_options.transcoder.throttle_buffer")}
+        description={t("system_options.transcoder.throttle_buffer_desc")}
+      >
         <InputNumber
           min={1}
           max={600}
@@ -814,12 +868,12 @@ export default function SystemOptionsPage() {
         />
       </SettingRow>
       <SettingRow
-        title="后台转码 x264 预设"
-        description="x264 预设值用于后台转码（同步和媒体优化器）。值越小，视频质量越好、文件越小，但处理时间更长。"
+        title={t("system_options.transcoder.bg_x264_preset")}
+        description={t("system_options.transcoder.bg_x264_preset_desc")}
       >
         <Select
           style={{ minWidth: 260 }}
-          options={X264_PRESET_OPTIONS}
+          options={x264PresetOptions}
           value={opts.transcoder.background_x264_preset}
           onChange={(v) =>
             setOpts((p) => ({
@@ -830,8 +884,8 @@ export default function SystemOptionsPage() {
         />
       </SettingRow>
       <SettingRow
-        title="禁用视频流转码"
-        description="在转码操作中禁用视频流的转码。设置后，转码器仍然可以转码音频或重新封装视频。"
+        title={t("system_options.transcoder.disable_video_transcode")}
+        description={t("system_options.transcoder.disable_video_transcode_desc")}
       >
         <Switch
           checked={opts.transcoder.disable_video_stream_transcoding}
@@ -843,10 +897,13 @@ export default function SystemOptionsPage() {
           }
         />
       </SettingRow>
-      <SettingRow title="最大 CPU 并发转码数" description="限制服务器使用 CPU 进行视频转码的并发数量。">
+      <SettingRow
+        title={t("system_options.transcoder.max_cpu_concurrent")}
+        description={t("system_options.transcoder.max_cpu_concurrent_desc")}
+      >
         <Select
           style={{ minWidth: 200 }}
-          options={CPU_CONCURRENT_OPTIONS}
+          options={cpuConcurrentOptions}
           value={opts.transcoder.max_cpu_concurrent}
           onChange={(v) =>
             setOpts((p) => ({
@@ -857,8 +914,8 @@ export default function SystemOptionsPage() {
         />
       </SettingRow>
       <SettingRow
-        title="最大后台视频并发转码数"
-        description="限制服务器可用于优化器和下载的视频转码的并发数量。"
+        title={t("system_options.transcoder.max_bg_concurrent")}
+        description={t("system_options.transcoder.max_bg_concurrent_desc")}
       >
         <Select
           style={{ minWidth: 120 }}
@@ -878,17 +935,16 @@ export default function SystemOptionsPage() {
   const tabASR = (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
       <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
-        语音识别（ASR）配置保存在 config.yml 的 subtitle.asr 段。若未安装依赖，可使用「一键安装」自动部署到
-        tools/recognition/（Python 虚拟环境）。
+        {t("system_options.asr.intro")}
       </Typography.Paragraph>
 
       <Flex justify="flex-end" wrap="wrap" gap={8}>
         <Space wrap>
           <Button icon={<CloudDownloadOutlined />} loading={asrInstalling} onClick={() => void runAsrInstall()}>
-            一键安装
+            {t("system_options.actions.one_click_install")}
           </Button>
           <Button icon={<ApiOutlined />} loading={asrTesting} onClick={() => void runAsrTest()}>
-            连接测试
+            {t("system_options.actions.connection_test")}
           </Button>
         </Space>
       </Flex>
@@ -897,13 +953,10 @@ export default function SystemOptionsPage() {
           {asrTestResult.message}
         </Typography.Text>
       ) : null}
-      <SettingRow
-        title="Provider"
-        description="无字幕时可选自动语音识别。Whisper CLI 直接调用 whisper 命令；Shell 使用自定义脚本（支持 {input}、{output_dir}、{output_vtt} 占位符）。"
-      >
+      <SettingRow title={t("system_options.asr.provider")} description={t("system_options.asr.provider_desc")}>
         <Select
           style={{ minWidth: 220 }}
-          options={ASR_PROVIDER_OPTIONS}
+          options={asrProviderOptions}
           value={opts.recognition.asr.provider}
           onChange={(v) =>
             setOpts((p) => ({
@@ -913,7 +966,7 @@ export default function SystemOptionsPage() {
           }
         />
       </SettingRow>
-      <SettingRow title="Whisper 路径" description="provider 为 whisper_cli 时使用；留空默认为 whisper。">
+      <SettingRow title={t("system_options.asr.whisper_path")} description={t("system_options.asr.whisper_path_desc")}>
         <Input
           style={{ width: 480, maxWidth: "100%" }}
           value={opts.recognition.asr.whisper_path}
@@ -926,7 +979,7 @@ export default function SystemOptionsPage() {
           placeholder="whisper"
         />
       </SettingRow>
-      <SettingRow title="额外参数" description="Whisper CLI 附加参数，空格分隔（例如 --model small --language zh）。">
+      <SettingRow title={t("system_options.asr.extra_args")} description={t("system_options.asr.extra_args_desc")}>
         <Input
           style={{ width: 480, maxWidth: "100%" }}
           value={(opts.recognition.asr.extra_args ?? []).join(" ")}
@@ -945,7 +998,7 @@ export default function SystemOptionsPage() {
           placeholder="--model small --language zh"
         />
       </SettingRow>
-      <SettingRow title="Shell 命令" description="provider 为 shell 时使用；可引用 tools/asr/asr_to_vtt.py 等脚本。" controlLayout="full">
+      <SettingRow title={t("system_options.asr.shell_cmd")} description={t("system_options.asr.shell_cmd_desc")} controlLayout="full">
         <Input.TextArea
           rows={4}
           value={opts.recognition.asr.shell}
@@ -964,17 +1017,16 @@ export default function SystemOptionsPage() {
   const tabOCR = (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
       <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
-        字符识别（OCR）配置保存在 config.yml 的 subtitle.graphical_ocr 段。若未安装依赖，可使用「一键安装」自动部署 Python 包及
-        tools/tesseract/（Windows）。
+        {t("system_options.ocr.intro")}
       </Typography.Paragraph>
 
       <Flex justify="flex-end" wrap="wrap" gap={8}>
         <Space wrap>
           <Button icon={<CloudDownloadOutlined />} loading={ocrInstalling} onClick={() => void runOcrInstall()}>
-            一键安装
+            {t("system_options.actions.one_click_install")}
           </Button>
           <Button icon={<ApiOutlined />} loading={ocrTesting} onClick={() => void runOcrTest()}>
-            连接测试
+            {t("system_options.actions.connection_test")}
           </Button>
         </Space>
       </Flex>
@@ -983,7 +1035,7 @@ export default function SystemOptionsPage() {
           {ocrTestResult.message}
         </Typography.Text>
       ) : null}
-      <SettingRow title="启用 OCR" description="对 PGS、VobSub 等位图字幕进行 Tesseract OCR 提取。">
+      <SettingRow title={t("system_options.ocr.enable")} description={t("system_options.ocr.enable_desc")}>
         <Switch
           checked={opts.recognition.ocr.enabled}
           onChange={(v) =>
@@ -994,7 +1046,7 @@ export default function SystemOptionsPage() {
           }
         />
       </SettingRow>
-      <SettingRow title="Tesseract 路径">
+      <SettingRow title={t("system_options.ocr.tesseract_path")}>
         <Input
           style={{ width: 480, maxWidth: "100%" }}
           value={opts.recognition.ocr.tesseract_path}
@@ -1007,7 +1059,7 @@ export default function SystemOptionsPage() {
           placeholder="tesseract"
         />
       </SettingRow>
-      <SettingRow title="Tessdata 目录" description="TESSDATA_PREFIX，可选。">
+      <SettingRow title={t("system_options.ocr.tessdata_dir")} description={t("system_options.ocr.tessdata_dir_desc")}>
         <Input
           style={{ width: 480, maxWidth: "100%" }}
           value={opts.recognition.ocr.tessdata_prefix}
@@ -1017,10 +1069,10 @@ export default function SystemOptionsPage() {
               recognition: { ...p.recognition, ocr: { ...p.recognition.ocr, tessdata_prefix: e.target.value } },
             }))
           }
-          placeholder="留空使用系统默认"
+          placeholder={t("system_options.common.placeholder_system_default")}
         />
       </SettingRow>
-      <SettingRow title="识别语言" description="Tesseract 语言包，多个用 + 连接。">
+      <SettingRow title={t("system_options.ocr.languages")} description={t("system_options.ocr.languages_desc")}>
         <Input
           style={{ width: 480, maxWidth: "100%" }}
           value={opts.recognition.ocr.languages}
@@ -1033,7 +1085,7 @@ export default function SystemOptionsPage() {
           placeholder="chi_sim+eng"
         />
       </SettingRow>
-      <SettingRow title="Python 路径" description="运行 OCR 脚本的解释器；留空在 Windows 用 python，其他平台用 python3。">
+      <SettingRow title={t("system_options.ocr.python_path")} description={t("system_options.ocr.python_path_desc")}>
         <Input
           style={{ width: 480, maxWidth: "100%" }}
           value={opts.recognition.ocr.python_path}
@@ -1046,7 +1098,7 @@ export default function SystemOptionsPage() {
           placeholder="python"
         />
       </SettingRow>
-      <SettingRow title="OCR 脚本路径" description="bitmap_subtitle_ocr.py 的绝对或相对路径。" controlLayout="full">
+      <SettingRow title={t("system_options.ocr.script_path")} description={t("system_options.ocr.script_path_desc")} controlLayout="full">
         <Input
           style={{ width: 480, maxWidth: "100%" }}
           value={opts.recognition.ocr.script_path}
@@ -1059,7 +1111,7 @@ export default function SystemOptionsPage() {
           placeholder="tools/subtitle_ocr/bitmap_subtitle_ocr.py"
         />
       </SettingRow>
-      <SettingRow title="pgsrip 路径" description="可选，PGS 字幕预处理工具。">
+      <SettingRow title={t("system_options.ocr.pgsrip_path")} description={t("system_options.ocr.pgsrip_path_desc")}>
         <Input
           style={{ width: 480, maxWidth: "100%" }}
           value={opts.recognition.ocr.pgsrip_path}
@@ -1071,7 +1123,7 @@ export default function SystemOptionsPage() {
           }
         />
       </SettingRow>
-      <SettingRow title="mkvextract 路径" description="可选，Matroska 轨道提取。">
+      <SettingRow title={t("system_options.ocr.mkvextract_path")} description={t("system_options.ocr.mkvextract_path_desc")}>
         <Input
           style={{ width: 480, maxWidth: "100%" }}
           value={opts.recognition.ocr.mkvextract_path}
@@ -1085,7 +1137,7 @@ export default function SystemOptionsPage() {
           }
         />
       </SettingRow>
-      <SettingRow title="mkvmerge 路径" description="可选，Matroska 工具。">
+      <SettingRow title={t("system_options.ocr.mkvmerge_path")} description={t("system_options.ocr.mkvmerge_path_desc")}>
         <Input
           style={{ width: 480, maxWidth: "100%" }}
           value={opts.recognition.ocr.mkvmerge_path}
@@ -1103,17 +1155,16 @@ export default function SystemOptionsPage() {
   const tabPhotoClassify = (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
       <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
-        图片库 AI 智能分类配置保存在 config.yml 的 photo_classify 段。启发式引擎由 Go 内置；ONNX 引擎需 Python 依赖与
-        MobileNet 模型。可使用「一键安装」自动部署到 tools/photo_classify/（共用 tools/recognition/.venv）。
+        {t("system_options.photo_classify.intro")}
       </Typography.Paragraph>
 
       <Flex justify="flex-end" wrap="wrap" gap={8}>
         <Space wrap>
           <Button icon={<CloudDownloadOutlined />} loading={classifyInstalling} onClick={() => void runClassifyInstall()}>
-            一键安装
+            {t("system_options.actions.one_click_install")}
           </Button>
           <Button icon={<ApiOutlined />} loading={classifyTesting} onClick={() => void runClassifyTest()}>
-            连接测试
+            {t("system_options.actions.connection_test")}
           </Button>
         </Space>
       </Flex>
@@ -1124,8 +1175,8 @@ export default function SystemOptionsPage() {
       ) : null}
 
       <SettingRow
-        title="扫描时自动分类"
-        description="导入或扫描图片库时，为新图片自动加入 photo_classify_task 队列。"
+        title={t("system_options.photo_classify.auto_on_scan")}
+        description={t("system_options.photo_classify.auto_on_scan_desc")}
       >
         <Switch
           checked={opts.photo_classify.auto_on_scan}
@@ -1138,12 +1189,12 @@ export default function SystemOptionsPage() {
         />
       </SettingRow>
       <SettingRow
-        title="分类引擎"
-        description="auto：检测到 ONNX 模型时使用深度学习增强；heuristic：仅使用内置启发式；onnx：强制使用 ONNX。"
+        title={t("system_options.photo_classify.engine")}
+        description={t("system_options.photo_classify.engine_desc")}
       >
         <Select
           style={{ minWidth: 320 }}
-          options={PHOTO_CLASSIFY_ENGINE_OPTIONS}
+          options={photoClassifyEngineOptions}
           value={opts.photo_classify.engine}
           onChange={(v) =>
             setOpts((p) => ({
@@ -1153,7 +1204,10 @@ export default function SystemOptionsPage() {
           }
         />
       </SettingRow>
-      <SettingRow title="Python 路径" description="运行 classify.py 的解释器；留空在 Windows 用 python，其他平台用 python3。">
+      <SettingRow
+        title={t("system_options.photo_classify.python_path")}
+        description={t("system_options.photo_classify.python_path_desc")}
+      >
         <Input
           style={{ width: 480, maxWidth: "100%" }}
           value={opts.photo_classify.python_path}
@@ -1166,7 +1220,11 @@ export default function SystemOptionsPage() {
           placeholder="tools/recognition/.venv/Scripts/python.exe"
         />
       </SettingRow>
-      <SettingRow title="分类脚本路径" description="classify.py 的相对或绝对路径。" controlLayout="full">
+      <SettingRow
+        title={t("system_options.photo_classify.script_path")}
+        description={t("system_options.photo_classify.script_path_desc")}
+        controlLayout="full"
+      >
         <Input
           style={{ width: 480, maxWidth: "100%" }}
           value={opts.photo_classify.script_path}
@@ -1179,7 +1237,10 @@ export default function SystemOptionsPage() {
           placeholder="tools/photo_classify/classify.py"
         />
       </SettingRow>
-      <SettingRow title="ONNX 模型路径" description="MobileNetV2 ONNX 模型；auto/onnx 引擎需要。">
+      <SettingRow
+        title={t("system_options.photo_classify.model_path")}
+        description={t("system_options.photo_classify.model_path_desc")}
+      >
         <Input
           style={{ width: 480, maxWidth: "100%" }}
           value={opts.photo_classify.model_path}
@@ -1192,7 +1253,10 @@ export default function SystemOptionsPage() {
           placeholder="tools/photo_classify/models/mobilenetv2-7.onnx"
         />
       </SettingRow>
-      <SettingRow title="ImageNet 标签文件" description="每行一个类别名，与模型输出索引对应。">
+      <SettingRow
+        title={t("system_options.photo_classify.labels_path")}
+        description={t("system_options.photo_classify.labels_path_desc")}
+      >
         <Input
           style={{ width: 480, maxWidth: "100%" }}
           value={opts.photo_classify.labels_path}
@@ -1211,17 +1275,16 @@ export default function SystemOptionsPage() {
   const tabPhotoFace = (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
       <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
-        人脸检测与聚类配置保存在 config.yml 的 photo_face 段，使用 InsightFace 检测人脸并自动聚类为「人物」（共用
-        tools/recognition/.venv）。
+        {t("system_options.photo_face.intro")}
       </Typography.Paragraph>
 
       <Flex justify="flex-end" wrap="wrap" gap={8}>
         <Space wrap>
           <Button icon={<CloudDownloadOutlined />} loading={faceInstalling} onClick={() => void runFaceInstall()}>
-            一键安装
+            {t("system_options.actions.one_click_install")}
           </Button>
           <Button icon={<ApiOutlined />} loading={faceTesting} onClick={() => void runFaceTest()}>
-            连接测试
+            {t("system_options.actions.connection_test")}
           </Button>
         </Space>
       </Flex>
@@ -1232,8 +1295,8 @@ export default function SystemOptionsPage() {
       ) : null}
 
       <SettingRow
-        title="扫描时自动人脸检测"
-        description="导入或扫描图片库时，为新图片自动加入 photo_face_task 队列。"
+        title={t("system_options.photo_face.auto_on_scan")}
+        description={t("system_options.photo_face.auto_on_scan_desc")}
       >
         <Switch
           checked={opts.photo_face.auto_on_scan}
@@ -1246,8 +1309,8 @@ export default function SystemOptionsPage() {
         />
       </SettingRow>
       <SettingRow
-        title="聚类相似度阈值"
-        description="人脸特征余弦相似度达到该值时视为同一人，范围 0.3–0.6，默认 0.45。"
+        title={t("system_options.photo_face.similarity_threshold")}
+        description={t("system_options.photo_face.similarity_threshold_desc")}
       >
         <InputNumber
           min={0.3}
@@ -1262,7 +1325,10 @@ export default function SystemOptionsPage() {
           }
         />
       </SettingRow>
-      <SettingRow title="Python 路径" description="运行 detect.py 的解释器；留空则使用智能分类中的 Python 路径。">
+      <SettingRow
+        title={t("system_options.photo_face.python_path")}
+        description={t("system_options.photo_face.python_path_desc")}
+      >
         <Input
           style={{ width: 480, maxWidth: "100%" }}
           value={opts.photo_face.python_path}
@@ -1275,7 +1341,11 @@ export default function SystemOptionsPage() {
           placeholder="tools/recognition/.venv/Scripts/python.exe"
         />
       </SettingRow>
-      <SettingRow title="人脸检测脚本路径" description="detect.py 的相对或绝对路径。" controlLayout="full">
+      <SettingRow
+        title={t("system_options.photo_face.script_path")}
+        description={t("system_options.photo_face.script_path_desc")}
+        controlLayout="full"
+      >
         <Input
           style={{ width: 480, maxWidth: "100%" }}
           value={opts.photo_face.script_path}
@@ -1293,26 +1363,27 @@ export default function SystemOptionsPage() {
 
   const tabDocTrans = (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
-      <Typography.Paragraph type="secondary">
-        Office 文档在线预览按引擎优先级依次尝试：Microsoft Office、WPS、LibreOffice。
-        LibreOffice 默认部署在 <Typography.Text code>tools/doctran</Typography.Text>。
-      </Typography.Paragraph>
+      <Typography.Paragraph type="secondary">{t("system_options.doc_trans.intro")}</Typography.Paragraph>
       <Flex gap="small" wrap="wrap">
         <Button icon={<SearchOutlined />} loading={docTransTesting} onClick={() => void runDocTransTest()}>
-          检测引擎
+          {t("system_options.actions.detect_engines")}
         </Button>
         <Button icon={<ApiOutlined />} loading={docTransInstalling} onClick={() => void runDocTransInstall()}>
-          自动检测并写入配置
+          {t("system_options.actions.auto_detect_write_config")}
         </Button>
         <Button icon={<CloudDownloadOutlined />} loading={docTransInstallingLO} onClick={() => void runLibreOfficeInstall()}>
-          一键安装 LibreOffice
+          {t("system_options.actions.install_libreoffice")}
         </Button>
       </Flex>
       {docTransTestResult && (
         <>
           <Typography.Paragraph type={docTransTestResult.ok ? "success" : "warning"}>
             {docTransTestResult.message}
-            {docTransTestResult.active_engine ? `（当前首选: ${engineLabel(docTransTestResult.active_engine)}）` : ""}
+            {docTransTestResult.active_engine
+              ? t("system_options.messages.doc_trans_active_engine", {
+                  engine: engineLabel(docTransTestResult.active_engine),
+                })
+              : ""}
           </Typography.Paragraph>
           {docTransTestResult.engines && docTransTestResult.engines.length > 0 && (
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -1320,7 +1391,7 @@ export default function SystemOptionsPage() {
                 <Flex key={e.kind} justify="space-between" style={{ padding: "6px 10px", background: "rgba(255,255,255,0.04)", borderRadius: 6 }}>
                   <span>{e.label}</span>
                   <span style={{ color: e.available ? "#52c41a" : "rgba(255,255,255,0.45)" }}>
-                    {e.available ? "可用" : e.message || "不可用"}
+                    {e.available ? t("system_options.common.available") : e.message || t("system_options.common.unavailable")}
                   </span>
                 </Flex>
               ))}
@@ -1328,7 +1399,10 @@ export default function SystemOptionsPage() {
           )}
         </>
       )}
-      <SettingRow title="引擎优先级" description="从上到下依次尝试；仅使用已安装且可用的引擎。">
+      <SettingRow
+        title={t("system_options.doc_trans.engine_priority")}
+        description={t("system_options.doc_trans.engine_priority_desc")}
+      >
         <Space direction="vertical" style={{ width: "100%" }}>
           {opts.doc_trans.engine_order.map((k, i) => (
             <Flex key={k} gap={8} align="center">
@@ -1340,13 +1414,16 @@ export default function SystemOptionsPage() {
           ))}
         </Space>
       </SettingRow>
-      <SettingRow title="启用文档转换" description="关闭后 Office 格式仅支持下载。">
+      <SettingRow title={t("system_options.doc_trans.enable")} description={t("system_options.doc_trans.enable_desc")}>
         <Switch
           checked={opts.doc_trans.enabled}
           onChange={(v) => setOpts((p) => ({ ...p, doc_trans: { ...p.doc_trans, enabled: v } }))}
         />
       </SettingRow>
-      <SettingRow title="LibreOffice 路径" description="soffice 可执行文件。">
+      <SettingRow
+        title={t("system_options.doc_trans.libreoffice_path")}
+        description={t("system_options.doc_trans.libreoffice_path_desc")}
+      >
         <Input
           value={opts.doc_trans.libreoffice_path}
           onChange={(e) =>
@@ -1358,21 +1435,24 @@ export default function SystemOptionsPage() {
           placeholder="tools/doctran/LibreOffice/program/soffice.exe"
         />
       </SettingRow>
-      <SettingRow title="Office 路径（可选）" description="留空则自动检测 WINWORD.EXE 所在目录。">
+      <SettingRow
+        title={t("system_options.doc_trans.office_path")}
+        description={t("system_options.doc_trans.office_path_desc")}
+      >
         <Input
           value={opts.doc_trans.office_path}
           onChange={(e) => setOpts((p) => ({ ...p, doc_trans: { ...p.doc_trans, office_path: e.target.value } }))}
           placeholder=""
         />
       </SettingRow>
-      <SettingRow title="WPS 路径（可选）" description="WPS office6 目录，留空则自动检测。">
+      <SettingRow title={t("system_options.doc_trans.wps_path")} description={t("system_options.doc_trans.wps_path_desc")}>
         <Input
           value={opts.doc_trans.wps_path}
           onChange={(e) => setOpts((p) => ({ ...p, doc_trans: { ...p.doc_trans, wps_path: e.target.value } }))}
           placeholder=""
         />
       </SettingRow>
-      <SettingRow title="转换缓存目录" description="留空则使用 data/preview/documents/convert。">
+      <SettingRow title={t("system_options.doc_trans.cache_dir")} description={t("system_options.doc_trans.cache_dir_desc")}>
         <Input
           value={opts.doc_trans.cache_dir}
           onChange={(e) =>
@@ -1381,7 +1461,7 @@ export default function SystemOptionsPage() {
           placeholder=""
         />
       </SettingRow>
-      <SettingRow title="缓存有效期（天）" description="超过此时间的转换缓存将被忽略并重新转换。">
+      <SettingRow title={t("system_options.doc_trans.cache_ttl")} description={t("system_options.doc_trans.cache_ttl_desc")}>
         <InputNumber
           min={1}
           max={365}
@@ -1394,7 +1474,7 @@ export default function SystemOptionsPage() {
           }
         />
       </SettingRow>
-      <SettingRow title="转换超时（秒）" description="单次 LibreOffice 转换的最长等待时间。">
+      <SettingRow title={t("system_options.doc_trans.timeout")} description={t("system_options.doc_trans.timeout_desc")}>
         <InputNumber
           min={30}
           max={600}
@@ -1415,10 +1495,10 @@ export default function SystemOptionsPage() {
       <Flex justify="flex-end" style={{ marginBottom: 16 }}>
         <Space>
           <Button onClick={reset} disabled={!dirty || saving}>
-            重置
+            {t("system_options.actions.reset")}
           </Button>
           <Button type="primary" onClick={() => void save()} disabled={!dirty} loading={saving}>
-            保存更改
+            {t("system_options.actions.save_changes")}
           </Button>
         </Space>
       </Flex>
@@ -1428,8 +1508,8 @@ export default function SystemOptionsPage() {
           { key: "general", label: t("system_options.tab.general"), children: tabGeneral },
           { key: "playback", label: t("system_options.tab.playback"), children: tabPlayback },
           { key: "transcoder", label: t("system_options.tab.transcoder"), children: tabTranscoder },
-          { key: "asr", label: "语音识别", children: tabASR },
-          { key: "ocr", label: "字符识别", children: tabOCR },
+          { key: "asr", label: t("system_options.tab.asr"), children: tabASR },
+          { key: "ocr", label: t("system_options.tab.ocr"), children: tabOCR },
           { key: "photo-classify", label: t("system_options.tab.photo_classify"), children: tabPhotoClassify },
           { key: "photo-face", label: t("system_options.tab.photo_face"), children: tabPhotoFace },
           { key: "doc-trans", label: t("system_options.tab.doc_trans"), children: tabDocTrans },

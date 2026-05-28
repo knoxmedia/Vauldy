@@ -1,6 +1,7 @@
 /** 外挂 VTT 字幕外观（xgplayer TextTrack / xgplayer-subtitles + Knox CSS 变量） */
 
 import type { CSSProperties } from "react";
+import type { TranslateFn } from "../i18n";
 export type SubtitleTextSize = "small" | "normal" | "large" | "xlarge";
 
 export type SubtitleAppearance = {
@@ -19,34 +20,47 @@ export type SubtitleAppearance = {
   pos_top: number;
 };
 
-export const TEXT_SIZE_OPTIONS: { value: SubtitleTextSize; label: string }[] = [
-  { value: "small", label: "小" },
-  { value: "normal", label: "正常" },
-  { value: "large", label: "大" },
-  { value: "xlarge", label: "特大" },
-];
+const TEXT_SIZE_VALUES: SubtitleTextSize[] = ["small", "normal", "large", "xlarge"];
+const TEXT_COLOR_VALUES = ["white", "black", "yellow", "cyan", "green"] as const;
+const SHADOW_VALUES: SubtitleAppearance["shadow"][] = ["none", "shadow", "strong"];
+const BG_COLOR_VALUES = ["blue", "black", "white", "yellow", "transparent"] as const;
 
-export const TEXT_COLOR_OPTIONS: { value: string; label: string }[] = [
-  { value: "white", label: "白色" },
-  { value: "black", label: "黑色" },
-  { value: "yellow", label: "黄色" },
-  { value: "cyan", label: "青色" },
-  { value: "green", label: "绿色" },
-];
+export function buildTextSizeOptions(t: TranslateFn): { value: SubtitleTextSize; label: string }[] {
+  return TEXT_SIZE_VALUES.map((value) => ({
+    value,
+    label: t(`settings.subtitle_appearance.options.text_size.${value}`),
+  }));
+}
 
-export const SHADOW_OPTIONS: { value: SubtitleAppearance["shadow"]; label: string }[] = [
-  { value: "none", label: "无" },
-  { value: "shadow", label: "投影" },
-  { value: "strong", label: "重投影" },
-];
+export function buildTextColorOptions(t: TranslateFn): { value: string; label: string }[] {
+  return TEXT_COLOR_VALUES.map((value) => ({
+    value,
+    label: t(`settings.subtitle_appearance.options.text_color.${value}`),
+  }));
+}
 
-export const BG_COLOR_OPTIONS: { value: string; label: string }[] = [
-  { value: "blue", label: "蓝色" },
-  { value: "black", label: "黑色" },
-  { value: "white", label: "白色" },
-  { value: "yellow", label: "黄色" },
-  { value: "transparent", label: "透明" },
-];
+export function buildShadowOptions(t: TranslateFn): { value: SubtitleAppearance["shadow"]; label: string }[] {
+  return SHADOW_VALUES.map((value) => ({
+    value,
+    label: t(`settings.subtitle_appearance.options.shadow.${value}`),
+  }));
+}
+
+export function buildBgColorOptions(t: TranslateFn): { value: string; label: string }[] {
+  return BG_COLOR_VALUES.map((value) => ({
+    value,
+    label: t(`settings.subtitle_appearance.options.bg_color.${value}`),
+  }));
+}
+
+function optionLabel(
+  options: { value: string; label: string }[],
+  value: string,
+  fallbackKey: string,
+  t: TranslateFn,
+): string {
+  return options.find((o) => o.value === value)?.label ?? t(fallbackKey);
+}
 
 const OPACITY_OPTIONS = [0, 25, 50, 75, 100] as const;
 export const BG_OPACITY_OPTIONS: { value: number; label: string }[] = OPACITY_OPTIONS.map((v) => ({
@@ -180,13 +194,27 @@ export function applyKnoxSubtitleCssVars(root: HTMLElement | null, appearance: S
   root.style.setProperty("--knox-sub-top-safe", `${a.pos_top}%`);
 }
 
-export function summarizeSubtitleAppearance(a: SubtitleAppearance | null | undefined): string {
+export function summarizeSubtitleAppearance(
+  a: SubtitleAppearance | null | undefined,
+  t: TranslateFn,
+): string {
   const x = normalizeSubtitleAppearance(a);
-  const ts = TEXT_SIZE_OPTIONS.find((o) => o.value === x.text_size)?.label || "正常";
-  const tc = TEXT_COLOR_OPTIONS.find((o) => o.value === x.text_color)?.label || "白色";
-  const bg = BG_COLOR_OPTIONS.find((o) => o.value === x.bg_color)?.label || "蓝色";
-  const sh = SHADOW_OPTIONS.find((o) => o.value === x.shadow)?.label || "投影";
-  return `大小 ${ts} · 字色 ${tc} · 背景 ${bg}（${x.bg_opacity}%）· ${sh} · 底距 ${x.pos_bottom}%`;
+  const textSizes = buildTextSizeOptions(t);
+  const textColors = buildTextColorOptions(t);
+  const bgColors = buildBgColorOptions(t);
+  const shadows = buildShadowOptions(t);
+  const size = optionLabel(textSizes, x.text_size, "settings.subtitle_appearance.options.text_size.normal", t);
+  const textColor = optionLabel(textColors, x.text_color, "settings.subtitle_appearance.options.text_color.white", t);
+  const bgColor = optionLabel(bgColors, x.bg_color, "settings.subtitle_appearance.options.bg_color.blue", t);
+  const shadow = optionLabel(shadows, x.shadow, "settings.subtitle_appearance.options.shadow.shadow", t);
+  return t("settings.subtitle_appearance.summary", {
+    size,
+    textColor,
+    bgColor,
+    opacity: x.bg_opacity,
+    shadow,
+    bottom: x.pos_bottom,
+  });
 }
 
 export function previewSubtitleBoxStyle(a: SubtitleAppearance): CSSProperties {

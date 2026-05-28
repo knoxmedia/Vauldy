@@ -17,20 +17,13 @@ import {
   SettingOutlined,
   StarOutlined,
   UnorderedListOutlined,
-  VideoCameraOutlined,
 } from "@ant-design/icons";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useEffect, useMemo, useState } from "react";
 import { fetchLibraries, type Library } from "../api/client";
+import { libraryTypeIcon } from "../lib/libraryTypeIcon";
 import { isAdminRole, useAuthStore } from "../store/auth";
 import { useT } from "../i18n";
-
-function libIcon(type: string) {
-  if (type === "movie" || type === "tv" || type === "anime") {
-    return <VideoCameraOutlined />;
-  }
-  return <FolderOpenOutlined />;
-}
 
 type MainNavProps = {
   /** 关闭抽屉（侧栏隐藏模式下的浮动菜单） */
@@ -156,7 +149,7 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
             ]
           : libs.map((lib) => ({
               key: `lib-${lib.id}`,
-              icon: libIcon(lib.type),
+              icon: libraryTypeIcon(lib.type),
               label: (
                 <Link to={`/browse?library_id=${lib.id}`} onClick={onNavigate}>
                   {lib.name}
@@ -187,7 +180,7 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
         ? [
             {
               key: "my-media",
-              icon: firstLibrary ? libIcon(firstLibrary.type) : <FolderOpenOutlined />,
+              icon: firstLibrary ? libraryTypeIcon(firstLibrary.type) : <FolderOpenOutlined />,
               label: (
                 <Link
                   to={firstLibrary ? `/browse?library_id=${firstLibrary.id}` : "/browse"}

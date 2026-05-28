@@ -13,6 +13,7 @@ import (
 	"knox-media/api/middleware"
 	"knox-media/internal/photoclass"
 	"knox-media/internal/scraper"
+	"knox-media/internal/textencoding"
 )
 
 type updateMediaAdminBody struct {
@@ -70,8 +71,16 @@ func (h *Handler) ListMedia(c *gin.Context) {
 			NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.poster')), ''),
 			NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.extra.poster')), '')
 		) AS poster_url,
+		COALESCE(
+			NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.backdrop')), ''),
+			NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.extra.backdrop')), ''),
+			NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.extra.series_backdrop')), '')
+		) AS backdrop_url,
 		NULLIF(json_extract(m.meta_json, '$.photo.taken_at'), '') AS photo_taken_at,
 		COALESCE(json_extract(m.meta_json, '$.photo.tags'), '[]') AS photo_tags,
+		(SELECT mt.album_id FROM music_track mt WHERE mt.media_id = m.id LIMIT 1) AS music_album_id,
+		(SELECT COALESCE(NULLIF(TRIM(a.title), ''), '') FROM music_track mt JOIN music_album a ON a.id = mt.album_id WHERE mt.media_id = m.id LIMIT 1) AS music_album_title,
+		(SELECT COALESCE(NULLIF(TRIM(mt.artist_display), ''), NULLIF(TRIM(ar.name), ''), '') FROM music_track mt JOIN music_album a ON a.id = mt.album_id LEFT JOIN music_artist ar ON ar.id = a.album_artist_id WHERE mt.media_id = m.id LIMIT 1) AS music_artist,
 		CASE WHEN COALESCE(json_extract(m.meta_json, '$.scrape.source'), '') NOT IN ('', 'aggregated-stub')
 			AND COALESCE(json_extract(m.meta_json, '$.scrape.extra.note'), '') != 'stub'
 			AND (
@@ -130,9 +139,9 @@ func (h *Handler) ListMedia(c *gin.Context) {
 	for rows.Next() {
 		var mid int64
 		var libID sql.NullInt64
-		var fileID, title, orig, path, ftype, format, status, created, lastPlayAt, releaseDate, posterURL, photoTakenAt, photoTagsRaw sql.NullString
-		var dur, w, h, br, releaseYear, scraped sql.NullInt64
-		if err := rows.Scan(&mid, &libID, &fileID, &title, &orig, &path, &ftype, &dur, &w, &h, &br, &format, &status, &created, &lastPlayAt, &releaseDate, &releaseYear, &posterURL, &photoTakenAt, &photoTagsRaw, &scraped); err != nil {
+		var fileID, title, orig, path, ftype, format, status, created, lastPlayAt, releaseDate, posterURL, backdropURL, photoTakenAt, photoTagsRaw, musicAlbumTitle, musicArtist sql.NullString
+		var dur, w, h, br, releaseYear, scraped, musicAlbumID sql.NullInt64
+		if err := rows.Scan(&mid, &libID, &fileID, &title, &orig, &path, &ftype, &dur, &w, &h, &br, &format, &status, &created, &lastPlayAt, &releaseDate, &releaseYear, &posterURL, &backdropURL, &photoTakenAt, &photoTagsRaw, &musicAlbumID, &musicAlbumTitle, &musicArtist, &scraped); err != nil {
 			continue
 		}
 		if strings.EqualFold(profile.LibraryScope, "selected") {
@@ -154,10 +163,13 @@ func (h *Handler) ListMedia(c *gin.Context) {
 			"file_type": ftype.String, "duration": dur.Int64, "width": w.Int64, "height": h.Int64,
 			"bitrate": br.Int64, "format": format.String, "status": status.String, "created_at": created.String,
 			"last_play_at": lastPlayAt.String, "release_date": releaseDate.String, "year": releaseYear.Int64,
-			"poster_url": posterURL.String, "scraped": scraped.Int64 == 1,
+			"poster_url": posterURL.String, "backdrop_url": backdropURL.String, "scraped": scraped.Int64 == 1,
 			"photo_taken_at": photoTakenAt.String,
 			"photo_tags":     photoTags,
 			"photo_tag_ids":  photoTagIDs,
+			"music_album_id": musicAlbumID.Int64,
+			"music_album_title": textencoding.FixMetadataString(musicAlbumTitle.String),
+			"music_artist":      textencoding.FixMetadataString(musicArtist.String),
 		})
 		if len(items) >= limit {
 			break
