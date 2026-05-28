@@ -42,8 +42,8 @@
 
 | 功能域 | 核心能力 |
 |--------|----------|
-| 📁 媒体库 | 电影 · 剧集 · 动漫 · 音乐 · 图片 · 文档，多路径多库管理 |
-| ▶️ 播放引擎 | 直链 MP4 · HLS 自适应转码 · JIT 按需切片 · 多播放器引擎自动切换 |
+| 📁 媒体库 | 电影 · 剧集 · 动漫 · 音乐 · 图片 · 文档，多路径多库管理，各类型均有专属浏览/播放或阅读 UI |
+| ▶️ 播放引擎 | 直链 MP4 · HLS/DASH 自适应转码 · JIT 按需切片 · 音乐全局播放器 · 多播放器引擎自动切换 |
 | 🔍 元数据刮削 | TMDB · TVDB · 豆瓣 · Bangumi · OMDb · AI 大模型兜底 |
 | 🔐 内容保护 | Widevine · FairPlay · PowerDRM · HLS AES-128，内置许可证服务 |
 | 🖼️ 预览图 | 进度条 sprite 缩略图 + WebVTT 时间线 |
@@ -76,10 +76,14 @@ flowchart TB
     Scanner["库扫描 & 文件监控"]
     Scraper["元数据刮削"]
     TVStore["剧集季集模型"]
+    MusicStore["音乐专辑/艺人模型"]
+    PhotoAI["图片分类/人脸/地理"]
+    DocParse["文档解析 & 预览转 PDF"]
     Transcode["转码 & DRM 打包"]
     JIT["JIT 即时转码会话"]
     Preview["预览图 / 缩略图"]
     Subtitle["字幕提取 & OCR/ASR"]
+    Lyric["歌词识别 ASR"]
   end
 
   subgraph Workers["后台 Worker"]
@@ -88,6 +92,10 @@ flowchart TB
     SW["Slice / Transcode Worker (Redis)"]
     ATW["音轨提取"]
     KFW["关键帧索引"]
+    LTW["歌词任务"]
+    PCW["图片分类"]
+    PFW["人脸聚类"]
+    DCW["文档封面"]
   end
 
   subgraph Storage["存储"]
@@ -134,25 +142,39 @@ flowchart LR
 #### 媒体入库流水线
 
 ```mermaid
-flowchart LR
-  Ingest["📥 新视频入库"] --> Probe["ffprobe 探针"]
-  Probe --> Poster["截取海报帧"]
+flowchart TB
+  Ingest["📥 新媒体入库"] --> Type{"文件类型"}
+  Type -->|视频| VProbe["ffprobe 探针"]
+  VProbe --> Poster["截取海报帧"]
   Poster --> Scrape["元数据刮削"]
-  Scrape --> Preview["生成预览缩略图"]
+  Scrape --> Preview["进度条预览缩略图"]
   Preview --> Sub["字幕提取/OCR/ASR"]
   Sub --> Audio["音轨预提取"]
   Audio --> KF["关键帧索引"]
   KF --> DRM{"DRM?"}
   DRM -->|是| Package["CMAF fMP4 打包"]
-  DRM -->|否| Done["✅ 就绪"]
-  Package --> Done
+  DRM -->|否| VDone["✅ 视频就绪"]
+  Package --> VDone
+  Type -->|音频| MProbe["ID3/元数据解析"]
+  MProbe --> Album["专辑/艺人聚合"]
+  Album --> Lyric["歌词 ASR 识别"]
+  Lyric --> MDone["✅ 音乐就绪"]
+  Type -->|图片| IThumb["缩略图/中图"]
+  IThumb --> PClass["AI 分类标签"]
+  PClass --> PFace["人脸检测聚类"]
+  PFace --> PGeo["GPS 逆地理"]
+  PGeo --> IDone["✅ 图片就绪"]
+  Type -->|文档| DParse["元数据解析 EPUB/PDF"]
+  DParse --> DCover["封面生成"]
+  DCover --> DPrev["Office→PDF 预览缓存"]
+  DPrev --> DDone["✅ 文档就绪"]
 ```
 
 #### 架构要点
 
 1. **单体可部署**：`cmd/server` 嵌入前端静态资源（`web/dist`），一条命令即可启动完整服务。
-2. **流水线式入库**：扫描或上传新视频后，自动排队本地海报截帧 → 刮削 → 预览图 → 字幕 → 音轨/关键帧 →（可选）DRM 打包 / JIT 预准备。
-3. **多层播放策略**：浏览器可直解的 MP4 走直链；不兼容格式走 HLS 自适应转码；高阶场景支持 JIT 按需切片转码、Widevine / FairPlay / PowerDRM 加密流。
+2. **流水线式入库**：按文件类型自动排队——视频：海报 → 刮削 → 预览图 → 字幕 → 音轨/关键帧 →（可选）DRM；音乐：专辑聚合 → 歌词 ASR；图片：缩略图 → AI 分类 → 人脸/地点；文档：元数据 → 封面 → Office 转 PDF 预览。
+3. **多层播放策略**：浏览器可直解的 MP4 走直链；不兼容格式走 HLS/DASH 自适应转码；高阶场景支持 JIT 按需切片、Widevine / FairPlay / PowerDRM 加密流；音乐走独立全局播放器。
 4. **分布式扩展（可选）**：Redis + `cmd/scheduler` + `cmd/sliceworker` + `cmd/transcodeworker` 组成即时转码集群；无 Redis 时回退到进程内 Session JIT（不依赖 Redis）。
 5. **开放集成**：OAuth 客户端凭证、播放 URL 支持 `access_token` 查询参数，便于 HTML5 播放器与外部系统集成。
 
@@ -169,7 +191,7 @@ media/
 │   ├── transcodeworker/  # 分布式转码 Worker
 │   └── transcodeworkerd/ # 转码 daemon（独立进程）
 ├── api/
-│   ├── handler/          # REST 处理器（~49 文件）
+│   ├── handler/          # REST 处理器（~68 文件）
 │   ├── middleware/       # JWT 鉴权 · CORS
 │   └── router.go
 ├── internal/
@@ -177,11 +199,24 @@ media/
 │   ├── scraper/          # TMDB / 豆瓣 / Bangumi 等刮削
 │   ├── tvparse/          # 剧集文件名解析
 │   ├── tvstore/          # 剧集·季·集数据模型
+│   ├── musicparse/       # 音乐文件名/ID3 解析
+│   ├── musicstore/       # 专辑·艺人·流派聚合
+│   ├── musiclyrics/      # 歌词解析（LRC/VTT）
+│   ├── lyrictask/        # 歌词 ASR 识别任务
+│   ├── photoparse/       # 图片 EXIF/GPS 解析
+│   ├── photoclass/       # 图片 AI 分类（启发式/ONNX）
+│   ├── photoface/        # 人脸检测与人物聚类
+│   ├── photogeocode/     # GPS 逆地理（地点）
+│   ├── imagethumb/       # 图片缩略图/中图生成
+│   ├── docparse/         # 文档元数据（PDF/EPUB 等）
+│   ├── doccover/         # 文档封面生成
+│   ├── doctrans/         # Office→PDF 预览转换
 │   ├── transcode/        # HLS 转码 & CMAF DRM 打包
 │   ├── drm/              # 本地许可证服务
-│   ├── jit/              # 即时转码（会话/调度/预加热）
+│   ├── jit/              # 即时转码（会话/调度/预加热/入库准备）
 │   ├── preview/          # 进度条预览缩略图
 │   ├── subtitle/         # 字幕流水线（提取/OCR/ASR）
+│   ├── recognition/      # ASR/OCR 工具安装与探测
 │   ├── atrack/           # 音轨提取
 │   ├── keyframe/         # 关键帧索引
 │   ├── upload/           # 分片上传服务
@@ -194,15 +229,21 @@ media/
 │   └── model/            # 内部数据模型
 ├── pkg/
 │   ├── ffprobe/          # FFprobe 封装
-│   ├── fileutil/         # 文件工具
+│   ├── fileutil/         # 文件类型/扩展名识别
 │   └── hashutil/         # 哈希计算
 ├── web/                  # React 前端 SPA
-│   └── src/pages/        # 首页 · 浏览 · 播放 · 管理 · 设置
+│   └── src/
+│       ├── pages/        # 首页 · 浏览 · 播放/阅读 · 管理 · 设置
+│       ├── components/   # 音乐播放器 · 图片灯箱 · 剧集/音乐组件
+│       └── i18n/         # 多语言（zh-CN/zh-TW/en/ja/ko）
 ├── tools/
 │   ├── ffmpeg/bin/       # ffmpeg/ffprobe 二进制
 │   ├── shaka-packager/   # Shaka Packager 二进制
 │   ├── asr/              # ASR 脚本（Whisper/Paraformer）
-│   └── subtitle_ocr/     # 图形字幕 OCR 脚本
+│   ├── subtitle_ocr/     # 图形字幕 OCR 脚本
+│   ├── photo_classify/   # 图片 ONNX 分类模型
+│   ├── photo_face/       # InsightFace 人脸检测
+│   └── doctran/           # LibreOffice 便携版（文档预览）
 ├── data/                 # 运行时数据（数据库/缓存/上传）
 ├── config.yml            # 运行配置
 ├── Dockerfile
@@ -237,6 +278,16 @@ drm:
     enabled: false  # 需配置外部许可证服务
   powerdrm:
     enabled: true   # 内置自定义加密，开箱即用
+
+# 音乐/图片/文档（可选，见 config.yml 默认值）
+lyric:
+  auto_on_scan: true          # 扫描后自动排队歌词 ASR
+photo_classify:
+  auto_on_scan: true          # 图片库 AI 分类
+photo_face:
+  auto_on_scan: true          # 图片库人脸聚类
+doc_trans:
+  enabled: true               # Office 文档转 PDF 预览
 ```
 
 #### 开发模式
@@ -297,11 +348,8 @@ services:
 2. 使用默认账号 `admin` / `admin123` 登录
 3. 进入 **管理后台 → 媒体库**，创建媒体库（选择类型：电影/剧集等）
 4. 为媒体库 **添加文件夹**（指向存放视频的目录，Docker 需确保路径已挂载）
-5. 点击 **扫描**，系统将自动：
-   - 发现视频文件 → ffprobe 解析元数据
-   - 自动刮削海报、简介、演员等信息
-   - 生成预览缩略图和字幕
-6. 扫描完成后返回首页，即可浏览和播放
+5. 点击 **扫描**，系统将按库类型自动处理（示例：视频 → ffprobe + 刮削 + 预览图 + 字幕；音乐 → 专辑聚合 + 歌词任务；图片 → 缩略图 + 分类/人脸；文档 → 元数据 + 封面 + PDF 预览）
+6. 扫描完成后返回首页，即可浏览、播放或阅读
 
 ---
 
@@ -309,12 +357,13 @@ services:
 
 #### 媒体库与扫描
 
-- 支持库类型：**电影、剧集、动漫、其他影片**（完整浏览播放体验）；音乐/图片/文档类型可创建库并扫描入库，尚无专属浏览与播放 UI
+- 支持库类型：**电影、剧集、动漫、其他影片、音乐、图片、文档**（均有专属浏览/播放或阅读界面；`other` 类型走通用文件列表）
 - 多路径文件夹、启用/禁用、自动扫描、**实时文件监控**（fsnotify）
-- 全量/增量扫描任务，扫描进度与取消
-- 视频/音频文件识别，ffprobe 元数据解析（分辨率、编码、时长等）
+- 全量/增量扫描任务，扫描进度与取消；**扫描日志**查询（`/scan-logs`）
+- 按扩展名识别 **video / audio / image / document**，视频走 ffprobe，文档走 EPUB/PDF 元数据解析
 - **剧集文件名解析**（`S01E01`、`Season 1` 等模式），**剧集聚合浏览**（`/series/:id`）
 - 季集视图：按系列分组、季选择、剧集列表展示
+- 扫描性能选项：`fast_ffprobe`、可选文件哈希去重（`file_hash_on_scan`）
 
 #### 元数据刮削
 
@@ -327,8 +376,8 @@ services:
 #### 播放体验
 
 - **直链播放**（浏览器兼容的 MP4/H.264+AAC）
-- **HLS 自适应转码**（多码率 master playlist）
-- **JIT 即时转码**（按需切片，支持 seek/pause/resume/end）
+- **HLS / DASH 自适应转码**（多码率；DRM 场景可走 DASH）
+- **JIT 即时转码**（Redis 集群或进程内 Session 双模式，支持 seek/pause/resume/end）
 - 播放器引擎：**PowerPlayer、xgplayer、Shaka Player**（按场景自动选择）
 - 进度条 **预览缩略图**（sprite + WebVTT）
 - 多音轨 HLS（可配置）、外挂/内嵌字幕 WebVTT 输出
@@ -347,13 +396,43 @@ services:
 - 可选 **Whisper ASR** 语音识别字幕、**PGS 图形字幕 OCR**（Tesseract）
 - 音轨预提取（独立 HLS 音轨，降低转码成本，支持多音轨切换）
 
+#### 音乐模块
+
+- 扫描入库：ID3/文件名解析，**专辑·艺人·流派**自动聚合（`musicstore`）
+- 浏览 UI：**专辑 / 艺人 / 流派 / 曲目** 四 Tab，网格/表格视图，库内搜索与排序
+- **专辑详情**（`/album/:id`）：曲目列表、封面、播放整张专辑
+- **艺人详情**（`/artist/:id`）、**流派详情**（`/genre`）
+- **全局音乐播放器**：底部 `MusicPlayerBar`、全屏播放器、播放队列与播放模式
+- **歌词**：侧车 LRC/VTT 解析；无歌词时可排队 **ASR 歌词识别任务**（`lyric_task`）
+- 曲目可加入播放列表、从首页/继续收听入口快速播放
+
+#### 图片模块
+
+- 扫描时生成 **缩略图 + 中图**（`imagethumb`），读取 EXIF 拍摄时间
+- 浏览 UI：**时间轴**（按月分组）、网格/列表布局、关键词过滤
+- **智能分类**：启发式色彩/场景标签 + 可选 **ONNX MobileNet** 模型（`photo_classify`）
+- **人物**：InsightFace 人脸检测与聚类，人物封面与重命名（`/library/:id/photo/persons`）
+- **地点**：GPS 逆地理编码为中国省市/地标展示，支持批量回填
+- **灯箱**预览：缩放、左右切换、标签编辑（`PATCH /media/:id/photo/tags`）
+- 管理员可触发整库 **重新分类 / 地点回填 / 人脸回填**，任务进度可轮询
+
+#### 文档模块
+
+- 支持扩展名：PDF、EPUB、Office（doc/docx/xls/xlsx/ppt/pptx）、txt/md/html/csv/rtf、mobi/azw/azw3 等
+- 扫描提取标题、作者、出版社、页数、标签等元数据；**封面**自动生成或从 EPUB 提取
+- 浏览 UI：目录树、**作者/格式/标签/年份** 分面筛选、最近阅读、网格/列表视图
+- **阅读器**（`/reader/:id`）：PDF（pdf.js）、EPUB（epub.js）；Office 经 **LibreOffice/WPS/Office** 转 PDF 后在线预览
+- **阅读进度**本地 + 服务端同步；主题/字号偏好；原文下载与批量打包下载
+- 文本类（txt/md/html）流式阅读；Markdown 渲染
+
 #### 用户端功能
 
-- 首页：媒体库卡片、**继续观看**、最近添加
-- 浏览：海报/缩略图/列表/表格多视图，排序与库筛选
+- 首页：媒体库卡片、**继续观看/收听**、按类型分组的**最近添加**（含音乐封面与图片灯箱）
+- 浏览：海报/缩略图/列表/表格多视图；按库类型自动切换 **剧集 / 音乐 / 图片 / 文档** 专属页
 - 剧集库：按系列聚合展示，季集详情页
 - 收藏、**播放列表**（支持排序与多图）、搜索（标题关键字）
-- 个人设置：资料、密码、头像上传、播放器偏好（字幕语言等）
+- 个人设置：资料、密码、头像上传、播放器偏好、**界面语言**（zh-CN / zh-TW / en / ja / ko）
+- **播放历史**（`/playback-history`）：按库类型筛选，支持清除进度
 
 #### 上传与管理
 
@@ -364,8 +443,9 @@ services:
 
 #### 管理后台
 
-- 媒体库 CRUD、扫描控制与进度
-- 任务中心：转码/预览/刮削/字幕/扫描/音轨/关键帧/定时任务
+- 媒体库 CRUD、扫描控制与进度；图片库可一键 **排队全库 AI 分类**
+- 任务中心：转码/预览/刮削/字幕/**歌词**/扫描/音轨/关键帧/定时任务
+- **系统选项**（`/system-options`）：ASR/OCR/图片分类/人脸/文档转换 的检测、测试与一键安装
 - 刮削配置（提供商开关与优先级）、AI Provider 配置（OpenAI/DeepSeek/通义/Ollama）
 - 用户管理（角色/权限/库范围/家长控制）、API 凭证管理
 - DRM 许可证审计、访问日志
@@ -381,27 +461,57 @@ services:
 
 ### API 概览
 
+> 播放相关 URL 支持 Header `Authorization: Bearer` 或查询参数 `?access_token=`，便于 `<video>` / 外置播放器集成。完整路由见 `api/router.go`。
+
+#### 认证与用户
+
 | 端点 | 鉴权 | 说明 |
 |------|------|------|
 | `POST /api/v1/user/login` | 无 | 用户登录，获取 JWT |
 | `POST /api/v1/oauth/token` | OAuth | OAuth 客户端凭证换取 Token |
 | `GET /api/v1/user/info` | JWT | 当前用户信息 |
-| `GET /api/v1/library` | JWT | 获取媒体库列表 |
-| `GET /api/v1/media` | JWT | 媒体列表（支持库/排序/分页） |
-| `GET /api/v1/media/:id/play` | JWT/Token | 播放信息与策略 |
-| `GET /api/v1/media/:id/hls/*` | Token | HLS 流（段/播放列表） |
-| `GET /api/v1/media/:id/preview/*` | Token | 预览缩略图 |
-| `GET /api/v1/media/:id/subtitles/:sid/vtt` | Token | 字幕 WebVTT |
-| `GET /api/v1/proxy/image` | JWT | 图片代理（跨域海报） |
-| `POST /api/v1/drm/widevine/license` | Token | Widevine 许可证 |
-| `POST /api/v1/drm/fairplay/license` | Token | FairPlay 许可证 |
-| `GET /api/v1/drm/powerdrm/key` | Token | PowerDRM 密钥 |
-| `POST /api/v1/jit/session/:id/seek` | Token | JIT 会话跳转 |
-| `POST /api/v1/library` | Admin | 创建媒体库 |
-| `POST /api/v1/scan` | Admin | 触发库扫描 |
-| `GET /api/v1/admin/overview` | Admin | 管理仪表盘 |
+| `PUT /api/v1/user/profile` | JWT | 资料与 `ui_locale`、播放器偏好 |
+| `GET /api/v1/playback-history` | JWT | 播放历史列表 |
 
-> 管理端点（库/用户/任务/系统配置/DRM审计等）全部要求 Admin 角色。
+#### 浏览与元数据
+
+| 端点 | 鉴权 | 说明 |
+|------|------|------|
+| `GET /api/v1/library` | JWT | 媒体库列表 |
+| `GET /api/v1/media` | JWT | 媒体列表（库/排序/分页） |
+| `GET /api/v1/series/:id` | JWT | 剧集系列详情 |
+| `GET /api/v1/library/:id/albums` | JWT | 音乐专辑列表 |
+| `GET /api/v1/library/:id/artists` | JWT | 音乐艺人列表 |
+| `GET /api/v1/library/:id/tracks` | JWT | 音乐曲目列表 |
+| `GET /api/v1/library/:id/documents` | JWT | 文档列表 |
+| `GET /api/v1/library/:id/photo/categories` | JWT | 图片智能分类 |
+| `GET /api/v1/library/:id/photo/persons` | JWT | 图片人物聚类 |
+
+#### 播放与 DRM
+
+| 端点 | 鉴权 | 说明 |
+|------|------|------|
+| `GET /api/v1/media/:id/play` | JWT/Token | 播放策略（直链/HLS/JIT/DRM） |
+| `GET /api/v1/media/:id/hls/*` | Token | HLS 段与播放列表 |
+| `GET /api/v1/media/:id/dash/*` | Token | DASH 资源（DRM 场景） |
+| `GET /api/v1/media/:id/preview/*` | Token | 进度条 sprite + WebVTT |
+| `GET /api/v1/media/:id/lyrics` | JWT | 歌词内容 |
+| `GET /api/v1/media/:id/photo/thumb.jpg` | Token | 图片缩略图 |
+| `GET /api/v1/media/:id/document/preview.pdf` | Token | 文档 PDF 预览 |
+| `POST /api/v1/jit/session/:id/seek` | Token | JIT 会话跳转 |
+| `POST /api/v1/drm/widevine/license` | Token | Widevine 许可证 |
+
+#### 管理
+
+| 端点 | 鉴权 | 说明 |
+|------|------|------|
+| `POST /api/v1/library` | Admin | 创建媒体库 |
+| `POST /api/v1/library/:id/scan` | Admin | 触发库扫描 |
+| `GET /api/v1/admin/overview` | Admin | 管理仪表盘 |
+| `GET /api/v1/admin/system-options` | Admin | 系统选项（ASR/OCR/图片/文档） |
+| `GET /api/v1/lyric/task` | Admin | 歌词识别任务列表 |
+
+> 其余管理端点（用户/任务/刮削/上传/DRM 审计等）均要求 **Admin** 角色。
 
 ---
 
@@ -419,20 +529,20 @@ services:
 
 #### 技术路标
 
-| 方向 | 说明 |
-|------|------|
-| 音乐模块 | 专辑/歌手/流派视图、歌词、封面墙、专用播放器 |
-| 图片模块 | 时间轴、相册分类、幻灯片、EXIF 浏览 |
-| 文档模块 | 文档预览、全文检索 |
-| 高级检索 | Bleve/OpenSearch 全文索引，替代当前标题关键字过滤 |
-| 远程入库 | URL 离线下载、WebDAV 服务端 |
-| 存储协议 | 库路径抽象为 NFS/SMB/WebDAV/S3（当前为本地或 OS 挂载路径） |
-| 数据库 | PostgreSQL 可选后端（当前仅 SQLite） |
-| NFO 双向同步 | 完整 NFO 读写与 Jellyfin/Emby 目录结构兼容 |
-| 访客角色 | 只读访客账号、播放并发/带宽限速 |
-| 分布式集群 | 与 Knox 任务中心/独立转码服务深度集成的生产级集群方案（参见分布式集群部署文档） |
-| 移动端 | 原生 App/PWA 离线缓存 |
-| 多语言 UI | 前端界面国际化（后端已支持用户 `ui_locale` 字段） |
+| 方向 | 状态 | 说明 |
+|------|------|------|
+| 音乐模块 | ✅ 基础完成 | 专辑/艺人/流派/曲目、全局播放器、ASR 歌词；待增强：在线歌词源、电台、智能推荐 |
+| 图片模块 | ✅ 基础完成 | 时间轴、AI 分类、人脸/地点；待增强：幻灯片放映、相册手工编排、RAW 深度预览 |
+| 文档模块 | ✅ 基础完成 | 多格式入库、PDF/EPUB/Office 阅读、进度同步；待增强：全文检索、MOBI 原生渲染 |
+| 界面多语言 | ✅ 基础完成 | 前端 zh-CN/zh-TW/en/ja/ko；待增强：管理端与错误文案全覆盖 |
+| 高级检索 | 规划中 | Bleve/OpenSearch 全文索引，替代当前标题关键字过滤 |
+| 远程入库 | 规划中 | URL 离线下载、WebDAV 服务端 |
+| 存储协议 | 规划中 | 库路径抽象为 NFS/SMB/WebDAV/S3（当前为本地或 OS 挂载路径） |
+| 数据库 | 规划中 | PostgreSQL 可选后端（当前仅 SQLite） |
+| NFO 双向同步 | 规划中 | 完整 NFO 读写与 Jellyfin/Emby 目录结构兼容 |
+| 访客角色 | 规划中 | 只读访客账号、播放并发/带宽限速 |
+| 分布式集群 | 规划中 | 与 Knox 任务中心/独立转码服务深度集成（参见分布式集群部署文档） |
+| 移动端 | 规划中 | 原生 App/PWA 离线缓存 |
 
 ---
 
@@ -475,8 +585,8 @@ services:
 
 | Domain | Capabilities |
 |--------|-------------|
-| 📁 Libraries | Movies · TV · Anime · Music · Photos · Documents, multi-folder per library |
-| ▶️ Playback | Direct MP4 · HLS ABR · JIT segment transcode · Multi-engine auto-select |
+| 📁 Libraries | Movies · TV · Anime · Music · Photos · Documents — each type has dedicated browse/play/read UI |
+| ▶️ Playback | Direct MP4 · HLS/DASH ABR · JIT transcode · Global music player · Multi-engine auto-select |
 | 🔍 Metadata | TMDB · TVDB · Douban · Bangumi · OMDb · AI LLM fallback |
 | 🔐 DRM | Widevine · FairPlay · PowerDRM · HLS AES-128, built-in license service |
 | 🖼️ Previews | Sprite thumbnails + WebVTT timeline for scrubber |
@@ -509,10 +619,14 @@ flowchart TB
     Scanner["Library scan & file watch"]
     Scraper["Metadata scraping"]
     TVStore["Series / season / episode model"]
+    MusicStore["Music album / artist model"]
+    PhotoAI["Photo classify / face / geo"]
+    DocParse["Document parse & PDF preview"]
     Transcode["Transcode & DRM packaging"]
     JIT["JIT on-demand transcode sessions"]
     Preview["Preview thumbnails"]
     Subtitle["Subtitle pipeline & OCR/ASR"]
+    Lyric["Lyric ASR recognition"]
   end
 
   subgraph Workers["Background workers"]
@@ -521,6 +635,10 @@ flowchart TB
     SW["Slice / transcode workers (Redis)"]
     ATW["Audio track extraction"]
     KFW["Keyframe indexing"]
+    LTW["Lyric tasks"]
+    PCW["Photo classify"]
+    PFW["Face clustering"]
+    DCW["Document covers"]
   end
 
   subgraph Storage["Storage"]
@@ -567,25 +685,39 @@ flowchart LR
 #### Media Ingest Pipeline
 
 ```mermaid
-flowchart LR
-  Ingest["📥 New video ingested"] --> Probe["ffprobe probe"]
-  Probe --> Poster["Poster frame capture"]
+flowchart TB
+  Ingest["📥 New media ingested"] --> Type{"File type"}
+  Type -->|Video| VProbe["ffprobe probe"]
+  VProbe --> Poster["Poster frame capture"]
   Poster --> Scrape["Metadata scrape"]
-  Scrape --> Preview["Preview thumbnails"]
+  Scrape --> Preview["Scrubber preview sprites"]
   Preview --> Sub["Subtitle extract / OCR / ASR"]
   Sub --> Audio["Audio track extraction"]
   Audio --> KF["Keyframe index"]
   KF --> DRM{"DRM?"}
   DRM -->|Yes| Package["CMAF fMP4 packaging"]
-  DRM -->|No| Done["✅ Ready"]
-  Package --> Done
+  DRM -->|No| VDone["✅ Video ready"]
+  Package --> VDone
+  Type -->|Audio| MProbe["ID3 / metadata parse"]
+  MProbe --> Album["Album / artist aggregation"]
+  Album --> Lyric["Lyric ASR"]
+  Lyric --> MDone["✅ Music ready"]
+  Type -->|Image| IThumb["Thumb + medium variants"]
+  IThumb --> PClass["AI classification"]
+  PClass --> PFace["Face detect & cluster"]
+  PFace --> PGeo["GPS reverse geocode"]
+  PGeo --> IDone["✅ Photo ready"]
+  Type -->|Document| DParse["EPUB/PDF metadata"]
+  DParse --> DCover["Cover generation"]
+  DCover --> DPrev["Office→PDF preview cache"]
+  DPrev --> DDone["✅ Document ready"]
 ```
 
 #### Key Design Points
 
 1. **Single-binary deployment** — `cmd/server` serves embedded frontend assets (`web/dist`).
-2. **Ingest pipeline** — new videos trigger poster capture → scrape → preview sprites → subtitles → audio/keyframe jobs → (optional) DRM packaging / JIT pre-warm.
-3. **Tiered playback** — direct MP4 when browser-compatible; HLS ABR transcode otherwise; JIT segment transcode and Widevine / FairPlay / PowerDRM for protected content.
+2. **Ingest pipeline** — per file type: video poster→scrape→preview→subtitles→audio/keyframe→(optional) DRM; music album aggregation→lyric ASR; photo thumbs→classify→face/geo; document metadata→cover→Office→PDF preview.
+3. **Tiered playback** — direct MP4 when browser-compatible; HLS/DASH ABR otherwise; JIT sessions; DRM (Widevine/FairPlay/PowerDRM); dedicated global music player.
 4. **Optional scale-out** — Redis-backed scheduler + slice/transcode workers; falls back to in-process session JIT when Redis is unavailable.
 5. **Integration-friendly** — OAuth client credentials; playback URLs accept `access_token` query param for HTML5 players.
 
@@ -602,7 +734,7 @@ media/
 │   ├── transcodeworker/  # Distributed transcode worker
 │   └── transcodeworkerd/ # Transcode daemon (standalone)
 ├── api/
-│   ├── handler/          # REST handlers (~49 files)
+│   ├── handler/          # REST handlers (~68 files)
 │   ├── middleware/       # JWT auth · CORS
 │   └── router.go
 ├── internal/
@@ -610,11 +742,24 @@ media/
 │   ├── scraper/          # TMDB / Douban / Bangumi providers
 │   ├── tvparse/          # TV filename parser
 │   ├── tvstore/          # Series·season·episode models
+│   ├── musicparse/       # Music filename / ID3 parser
+│   ├── musicstore/       # Album · artist · genre aggregation
+│   ├── musiclyrics/      # Lyric parsing (LRC/VTT)
+│   ├── lyrictask/        # Lyric ASR tasks
+│   ├── photoparse/       # Photo EXIF/GPS parser
+│   ├── photoclass/       # Photo AI classify (heuristic/ONNX)
+│   ├── photoface/        # Face detect & person clustering
+│   ├── photogeocode/     # GPS reverse geocoding
+│   ├── imagethumb/       # Photo thumb/medium generation
+│   ├── docparse/         # Document metadata (PDF/EPUB, …)
+│   ├── doccover/         # Document cover generation
+│   ├── doctrans/         # Office→PDF preview conversion
 │   ├── transcode/        # HLS transcode & CMAF DRM packaging
 │   ├── drm/              # Local license service
 │   ├── jit/              # On-demand transcode (session/schedule/preheat)
 │   ├── preview/          # Scrubber sprite thumbnails
 │   ├── subtitle/         # Subtitle pipeline (extract/OCR/ASR)
+│   ├── recognition/      # ASR/OCR tool install & probe
 │   ├── atrack/           # Audio track extraction
 │   ├── keyframe/         # Keyframe indexing
 │   ├── upload/           # Chunked upload service
@@ -627,15 +772,21 @@ media/
 │   └── model/            # Internal data models
 ├── pkg/
 │   ├── ffprobe/          # FFprobe wrapper
-│   ├── fileutil/         # File utilities
+│   ├── fileutil/         # File type / extension detection
 │   └── hashutil/         # Hash utilities
 ├── web/                  # React SPA frontend
-│   └── src/pages/        # Home · Browse · Player · Admin · Settings
+│   └── src/
+│       ├── pages/        # Home · Browse · Play/Read · Admin · Settings
+│       ├── components/   # Music player · photo lightbox · TV/music widgets
+│       └── i18n/         # Locales: zh-CN, zh-TW, en, ja, ko
 ├── tools/
 │   ├── ffmpeg/bin/       # ffmpeg/ffprobe binaries
 │   ├── shaka-packager/   # Shaka Packager binary
 │   ├── asr/              # ASR scripts (Whisper/Paraformer)
-│   └── subtitle_ocr/     # Bitmap subtitle OCR scripts
+│   ├── subtitle_ocr/     # Bitmap subtitle OCR scripts
+│   ├── photo_classify/   # ONNX image classification model
+│   ├── photo_face/       # InsightFace detection
+│   └── doctran/           # Portable LibreOffice (doc preview)
 ├── data/                 # Runtime data (DB/caches/uploads)
 ├── config.yml            # Runtime configuration
 ├── Dockerfile
@@ -728,11 +879,8 @@ Config file: `config.yml` (override path with `KNOX_MEDIA_CONFIG` env var).
 2. Login with `admin` / `admin123`
 3. Go to **Admin Console → Libraries**, create a library (movie / TV / anime)
 4. **Add folders** pointing to your video directories (Docker: ensure paths are mounted)
-5. Click **Scan** — the system will:
-   - Discover video files → ffprobe metadata
-   - Auto-scrape posters, descriptions, cast info
-   - Generate preview thumbnails and subtitles
-6. Return to Home once scanning finishes — browse and play
+5. Click **Scan** — processing depends on library type (e.g. video: ffprobe + scrape + previews + subtitles; music: album aggregation + lyrics; photos: thumbs + classify/faces; documents: metadata + cover + PDF preview)
+6. Return to Home once scanning finishes — browse, play, or read
 
 ---
 
@@ -740,11 +888,12 @@ Config file: `config.yml` (override path with `KNOX_MEDIA_CONFIG` env var).
 
 #### Libraries & Scanning
 
-- Library types: **movies, TV series, anime, general video** (full browse & playback); music/photo/document libraries can scan files but lack dedicated browse/play UI
+- Library types: **movies, TV, anime, general video, music, photos, documents** — each has dedicated browse/play/read UI (`other` falls back to a flat file list)
 - Multi-folder paths, enable/disable, auto-scan, **real-time filesystem watch** (fsnotify)
-- Full & incremental scan tasks with progress and cancel
-- Video/audio detection with ffprobe metadata (resolution, codec, duration, etc.)
+- Full & incremental scan tasks with progress, cancel, and **scan logs** (`/scan-logs`)
+- Detects **video / audio / image / document** by extension; ffprobe for video, EPUB/PDF parsers for documents
 - **Episode filename parsing** (`S01E01`, `Season 1`, …) and **series aggregation** (`/series/:id`) with season/episode detail views
+- Scan tuning: `fast_ffprobe`, optional per-file MD5 hashing (`file_hash_on_scan`)
 
 #### Metadata Scraping
 
@@ -757,8 +906,8 @@ Config file: `config.yml` (override path with `KNOX_MEDIA_CONFIG` env var).
 #### Playback
 
 - **Direct progressive** playback for browser-friendly MP4
-- **HLS adaptive transcode** (multi-bitrate master playlist)
-- **JIT on-demand transcode** (segment-based, seek/pause/resume/end)
+- **HLS / DASH adaptive transcode** (multi-bitrate; DASH for some DRM paths)
+- **JIT on-demand transcode** (Redis cluster or in-process sessions; seek/pause/resume/end)
 - Player engines: **PowerPlayer, xgplayer, Shaka Player** (auto-selected per scenario)
 - **Preview thumbnails** on the progress bar (sprite + WebVTT)
 - Multi-audio HLS (configurable); embedded & external subtitles as WebVTT
@@ -777,13 +926,42 @@ Config file: `config.yml` (override path with `KNOX_MEDIA_CONFIG` env var).
 - Optional **Whisper ASR** speech-to-text and **PGS bitmap OCR** (Tesseract)
 - Pre-extracted audio tracks for cheaper video-only HLS segments, multi-track switching
 
+#### Music Module
+
+- Scan: ID3/filename parsing with **album · artist · genre** aggregation (`musicstore`)
+- Browse UI: **albums / artists / genres / tracks** tabs, grid/table views, in-library search & sort
+- **Album detail** (`/album/:id`), **artist** (`/artist/:id`), **genre** (`/genre`) pages
+- **Global music player**: bottom bar, fullscreen player, queue & play modes
+- **Lyrics**: sidecar LRC/VTT; **ASR lyric tasks** when no lyrics exist (`lyric_task`)
+- Add tracks to playlists; play from home / continue listening
+
+#### Photo Module
+
+- Scan generates **thumb + medium** variants (`imagethumb`) and reads EXIF capture time
+- Browse UI: **timeline** (by month), grid/list layouts, keyword filter
+- **Smart classify**: heuristics + optional **ONNX MobileNet** (`photo_classify`)
+- **People**: InsightFace detect & cluster, rename persons, face thumbnails
+- **Places**: GPS reverse geocode (China regions), batch backfill
+- **Lightbox** with navigation and tag editing (`PATCH /media/:id/photo/tags`)
+- Admins can enqueue library-wide re-classify / location / face backfill with progress polling
+
+#### Document Module
+
+- Extensions: PDF, EPUB, Office (doc/docx/xls/xlsx/ppt/pptx), txt/md/html/csv/rtf, mobi/azw/azw3, …
+- Scan extracts title, author, publisher, pages, tags; auto **cover** from file or EPUB
+- Browse UI: folder tree, **author/format/tag/year** facets, recent reads, grid/list
+- **Reader** (`/reader/:id`): PDF (pdf.js), EPUB (epub.js); Office via **LibreOffice/WPS/Office** → PDF preview
+- **Read progress** (local + server), theme/font prefs, original download & batch zip
+- Text/markdown/html streaming read with Markdown rendering
+
 #### End-User Features
 
-- Home: library cards, **continue watching**, recently added
-- Browse: poster / thumb / list / table views with sort & library filter
+- Home: library cards, **continue watching/listening**, **recently added** by media type (music art, photo lightbox)
+- Browse: poster/thumb/list/table; auto-routes to **TV / music / photo / document** views per library type
 - TV libraries: series grid and season/episode detail pages
 - Favorites, **playlists** (sortable, multi-image), title keyword search
-- Settings: profile, password, avatar upload, player preferences (subtitle languages, etc.)
+- Settings: profile, password, avatar, player prefs, **UI locale** (zh-CN / zh-TW / en / ja / ko)
+- **Playback history** (`/playback-history`) with per-type filters and progress clear
 
 #### Upload & Administration
 
@@ -794,8 +972,9 @@ Config file: `config.yml` (override path with `KNOX_MEDIA_CONFIG` env var).
 
 #### Admin Console
 
-- Library CRUD & scan control with progress
-- Task manager: transcode / preview / scrape / subtitle / scan / audio / keyframe / scheduled
+- Library CRUD & scan control; enqueue **full-library photo classify** for photo libraries
+- Task manager: transcode / preview / scrape / subtitle / **lyrics** / scan / audio / keyframe / scheduled
+- **System options** (`/system-options`): probe, test, and one-click install for ASR/OCR/photo classify/face/doc conversion
 - Scrape config (provider toggles & priority), AI provider config (OpenAI / DeepSeek / Tongyi / Ollama)
 - User management (roles / permissions / library scope / parental controls), API credentials
 - DRM license audit, access logs
@@ -811,27 +990,52 @@ Config file: `config.yml` (override path with `KNOX_MEDIA_CONFIG` env var).
 
 ### API Overview
 
+> Playback URLs accept `Authorization: Bearer` or `?access_token=` for HTML5 players. See `api/router.go` for the full route table.
+
+#### Auth & User
+
 | Endpoint | Auth | Description |
 |----------|------|-------------|
 | `POST /api/v1/user/login` | None | User login, returns JWT |
 | `POST /api/v1/oauth/token` | OAuth | OAuth client credentials → token |
 | `GET /api/v1/user/info` | JWT | Current user profile |
+| `PUT /api/v1/user/profile` | JWT | Profile, `ui_locale`, player prefs |
+| `GET /api/v1/playback-history` | JWT | Playback history |
+
+#### Browse & Metadata
+
+| Endpoint | Auth | Description |
+|----------|------|-------------|
 | `GET /api/v1/library` | JWT | List media libraries |
 | `GET /api/v1/media` | JWT | Media list (filter/sort/paginate) |
-| `GET /api/v1/media/:id/play` | JWT/Token | Playback info & strategy |
-| `GET /api/v1/media/:id/hls/*` | Token | HLS stream (segments/playlists) |
-| `GET /api/v1/media/:id/preview/*` | Token | Preview thumbnails |
-| `GET /api/v1/media/:id/subtitles/:sid/vtt` | Token | Subtitle WebVTT |
-| `GET /api/v1/proxy/image` | JWT | Image proxy (cross-origin posters) |
-| `POST /api/v1/drm/widevine/license` | Token | Widevine license |
-| `POST /api/v1/drm/fairplay/license` | Token | FairPlay license |
-| `GET /api/v1/drm/powerdrm/key` | Token | PowerDRM key |
-| `POST /api/v1/jit/session/:id/seek` | Token | JIT session seek |
-| `POST /api/v1/library` | Admin | Create library |
-| `POST /api/v1/scan` | Admin | Trigger library scan |
-| `GET /api/v1/admin/overview` | Admin | Dashboard overview |
+| `GET /api/v1/series/:id` | JWT | TV series detail |
+| `GET /api/v1/library/:id/albums` | JWT | Music albums |
+| `GET /api/v1/library/:id/documents` | JWT | Documents |
+| `GET /api/v1/library/:id/photo/persons` | JWT | Photo person clusters |
 
-> All admin endpoints (libraries / users / tasks / system config / DRM audit / etc.) require the Admin role.
+#### Playback & DRM
+
+| Endpoint | Auth | Description |
+|----------|------|-------------|
+| `GET /api/v1/media/:id/play` | JWT/Token | Playback plan (direct/HLS/JIT/DRM) |
+| `GET /api/v1/media/:id/hls/*` | Token | HLS segments & playlists |
+| `GET /api/v1/media/:id/dash/*` | Token | DASH assets (DRM) |
+| `GET /api/v1/media/:id/lyrics` | JWT | Lyrics content |
+| `GET /api/v1/media/:id/document/preview.pdf` | Token | Document PDF preview |
+| `POST /api/v1/jit/session/:id/seek` | Token | JIT session seek |
+| `POST /api/v1/drm/widevine/license` | Token | Widevine license |
+
+#### Admin
+
+| Endpoint | Auth | Description |
+|----------|------|-------------|
+| `POST /api/v1/library` | Admin | Create library |
+| `POST /api/v1/library/:id/scan` | Admin | Trigger scan |
+| `GET /api/v1/admin/overview` | Admin | Dashboard |
+| `GET /api/v1/admin/system-options` | Admin | ASR/OCR/photo/doc tool options |
+| `GET /api/v1/lyric/task` | Admin | Lyric recognition tasks |
+
+> Remaining admin endpoints (users / tasks / scrape / upload / DRM audit / …) require the **Admin** role.
 
 ---
 
@@ -849,20 +1053,20 @@ From `docs/TODO.MD`, organized by target audience:
 
 #### Technology Roadmap
 
-| Area | Description |
-|------|-------------|
-| Music module | Album/artist/genre views, lyrics, cover wall, dedicated player |
-| Photo module | Timeline, albums, slideshow, EXIF viewer |
-| Document module | In-browser preview, full-text search |
-| Advanced search | Bleve / OpenSearch index instead of client-side title filter |
-| Remote ingest | URL download, WebDAV server |
-| Storage backends | First-class NFS / SMB / WebDAV / S3 library paths (today: local or OS mounts) |
-| Database | Optional PostgreSQL (SQLite only today) |
-| NFO sync | Full read/write NFO; Jellyfin/Emby folder compatibility |
-| Guest role | Read-only guest accounts; playback concurrency / bandwidth limits |
-| Distributed cluster | Production-grade integration with Knox task center / standalone transcode fleet |
-| Mobile | Native apps / PWA offline cache |
-| UI i18n | Frontend locale switching (backend already stores `ui_locale` per user) |
+| Area | Status | Description |
+|------|--------|-------------|
+| Music module | ✅ Baseline done | Albums/artists/genres/tracks, global player, ASR lyrics; next: online lyric sources, radio, recommendations |
+| Photo module | ✅ Baseline done | Timeline, AI tags, faces/places; next: slideshow, manual albums, deep RAW preview |
+| Document module | ✅ Baseline done | Multi-format ingest, PDF/EPUB/Office read, progress sync; next: full-text search, native MOBI render |
+| UI i18n | ✅ Baseline done | Frontend zh-CN/zh-TW/en/ja/ko; next: full admin & error string coverage |
+| Advanced search | Planned | Bleve / OpenSearch index instead of title filter |
+| Remote ingest | Planned | URL download, WebDAV server |
+| Storage backends | Planned | First-class NFS / SMB / WebDAV / S3 paths (today: local or OS mounts) |
+| Database | Planned | Optional PostgreSQL (SQLite only today) |
+| NFO sync | Planned | Full read/write NFO; Jellyfin/Emby folder compatibility |
+| Guest role | Planned | Read-only guest; concurrency / bandwidth limits |
+| Distributed cluster | Planned | Knox task center / standalone transcode fleet integration |
+| Mobile | Planned | Native apps / PWA offline cache |
 
 ---
 
