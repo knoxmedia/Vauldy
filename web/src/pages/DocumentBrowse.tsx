@@ -20,6 +20,7 @@ import {
   fetchRecentDocuments,
 } from "../api/client";
 import { useAuthStore } from "../store/auth";
+import { useT } from "../i18n";
 import styles from "./DocumentBrowse.module.css";
 
 type Props = {
@@ -73,6 +74,7 @@ function formatSize(n?: number): string {
 
 export default function DocumentBrowse({ libraryId, libraryName }: Props) {
   const nav = useNavigate();
+  const t = useT();
   const token = useAuthStore((s) => s.token);
   const [items, setItems] = useState<DocumentItem[]>([]);
   const [loading, setLoading] = useState(false);
@@ -109,11 +111,11 @@ export default function DocumentBrowse({ libraryId, libraryName }: Props) {
       const rows = await fetchDocuments(libraryId, params);
       setItems(rows);
     } catch {
-      message.error("加载文档列表失败");
+      message.error(t("pages.document_browse.load_failed"));
     } finally {
       setLoading(false);
     }
-  }, [libraryId, q, sort, order, filter, selectedFolder, sidebarTab, fullText]);
+  }, [libraryId, q, sort, order, filter, selectedFolder, sidebarTab, fullText, t]);
 
   useEffect(() => {
     void loadItems();
@@ -126,7 +128,7 @@ export default function DocumentBrowse({ libraryId, libraryName }: Props) {
       setTreeData([
         {
           key: LIBRARY_ROOT_KEY,
-          title: libraryName || "全部文档",
+          title: libraryName || t("pages.document_browse.all_documents_fallback"),
           icon: <FolderOutlined />,
           children,
           isLeaf: children.length === 0,
@@ -135,11 +137,11 @@ export default function DocumentBrowse({ libraryId, libraryName }: Props) {
       setExpandedKeys([LIBRARY_ROOT_KEY]);
     } catch {
       setTreeData([]);
-      message.error("加载目录树失败");
+      message.error(t("pages.document_browse.load_tree_failed"));
     } finally {
       setTreeLoading(false);
     }
-  }, [libraryId, libraryName]);
+  }, [libraryId, libraryName, t]);
 
   useEffect(() => {
     setSelectedFolder("");
@@ -158,14 +160,14 @@ export default function DocumentBrowse({ libraryId, libraryName }: Props) {
   }, [libraryId, sidebarTab]);
 
   const breadcrumbParts = useMemo(() => {
-    const parts = [{ label: libraryName || "图书馆", path: "" }];
+    const parts = [{ label: libraryName || t("pages.document_browse.library_fallback"), path: "" }];
     if (selectedFolder) {
       selectedFolder.split("/").forEach((seg, i, arr) => {
         parts.push({ label: displayNodeName(seg), path: arr.slice(0, i + 1).join("/") });
       });
     }
     return parts;
-  }, [libraryName, selectedFolder]);
+  }, [libraryName, selectedFolder, t]);
 
   const onTreeLoadData = async (node: DataNode) => {
     if (node.key === LIBRARY_ROOT_KEY || node.children?.length) return;
@@ -173,7 +175,7 @@ export default function DocumentBrowse({ libraryId, libraryName }: Props) {
       const children = await loadFolderTreeNodes(libraryId, String(node.key));
       setTreeData((prev) => updateTreeData(prev, node.key, children));
     } catch {
-      message.error("加载子目录失败");
+      message.error(t("pages.document_browse.load_subtree_failed"));
     }
   };
 
@@ -188,7 +190,7 @@ export default function DocumentBrowse({ libraryId, libraryName }: Props) {
 
   const handleBatchDownload = async () => {
     if (selected.size === 0) {
-      message.warning("请先选择文件");
+      message.warning(t("pages.document_browse.select_file_first"));
       return;
     }
     setDownloading(true);
@@ -200,9 +202,9 @@ export default function DocumentBrowse({ libraryId, libraryName }: Props) {
       a.download = `documents-${Date.now()}.zip`;
       a.click();
       URL.revokeObjectURL(url);
-      message.success("下载已开始");
+      message.success(t("pages.document_browse.download_started"));
     } catch {
-      message.error("打包下载失败");
+      message.error(t("pages.document_browse.download_failed"));
     } finally {
       setDownloading(false);
     }
@@ -221,7 +223,7 @@ export default function DocumentBrowse({ libraryId, libraryName }: Props) {
             <img src={documentCoverSrc(doc.id, token)} alt="" loading="lazy" />
           </div>
           <div className={styles.cardBody} onClick={() => openReader(doc.id)}>
-            <div className={styles.cardTitle}>{doc.title || "未命名"}</div>
+            <div className={styles.cardTitle}>{doc.title || t("pages.document_browse.untitled")}</div>
             {doc.author && <div className={styles.cardMeta}>{doc.author}</div>}
             <span className={styles.formatBadge}>{doc.format || "doc"}</span>
           </div>
@@ -243,7 +245,7 @@ export default function DocumentBrowse({ libraryId, libraryName }: Props) {
             </div>
           </div>
           <Button type="link" icon={<ReadOutlined />} onClick={(e) => { e.stopPropagation(); openReader(doc.id); }}>
-            阅读
+            {t("pages.document_browse.read")}
           </Button>
         </div>
       ))}
@@ -259,7 +261,7 @@ export default function DocumentBrowse({ libraryId, libraryName }: Props) {
         return (
           <Empty
             image={Empty.PRESENTED_IMAGE_SIMPLE}
-            description="暂无目录，请先扫描媒体库"
+            description={t("pages.document_browse.no_tree")}
             className={styles.treeEmpty}
           />
         );
@@ -316,12 +318,12 @@ export default function DocumentBrowse({ libraryId, libraryName }: Props) {
             setFilter({});
           }}
           items={[
-            { key: "tree", label: "目录" },
-            { key: "author", label: "作者" },
-            { key: "format", label: "格式" },
-            { key: "tag", label: "标签" },
-            { key: "year", label: "年份" },
-            { key: "recent", label: "最近" },
+            { key: "tree", label: t("pages.document_browse.tab_tree") },
+            { key: "author", label: t("pages.document_browse.tab_author") },
+            { key: "format", label: t("pages.document_browse.tab_format") },
+            { key: "tag", label: t("pages.document_browse.tab_tag") },
+            { key: "year", label: t("pages.document_browse.tab_year") },
+            { key: "recent", label: t("pages.document_browse.tab_recent") },
           ]}
         />
         {sidebarContent()}
@@ -339,38 +341,38 @@ export default function DocumentBrowse({ libraryId, libraryName }: Props) {
 
         <div className={styles.toolbar}>
           <Input.Search
-            placeholder="搜索书名、作者…"
+            placeholder={t("pages.document_browse.search_placeholder")}
             allowClear
             value={q}
             onChange={(e) => setQ(e.target.value)}
             onSearch={() => void loadItems()}
             style={{ width: 260 }}
           />
-          <Checkbox checked={fullText} onChange={(e) => setFullText(e.target.checked)}>全文</Checkbox>
+          <Checkbox checked={fullText} onChange={(e) => setFullText(e.target.checked)}>{t("pages.document_browse.fulltext")}</Checkbox>
           <Select value={sort} onChange={setSort} style={{ width: 120 }} options={[
-            { value: "title", label: "标题" },
-            { value: "author", label: "作者" },
-            { value: "size", label: "大小" },
-            { value: "modified", label: "修改时间" },
-            { value: "added", label: "添加时间" },
+            { value: "title", label: t("pages.document_browse.sort_title") },
+            { value: "author", label: t("pages.document_browse.sort_author") },
+            { value: "size", label: t("pages.document_browse.sort_size") },
+            { value: "modified", label: t("pages.document_browse.sort_modified") },
+            { value: "added", label: t("pages.document_browse.sort_added") },
           ]} />
           <Select value={order} onChange={setOrder} style={{ width: 90 }} options={[
-            { value: "asc", label: "升序" },
-            { value: "desc", label: "降序" },
+            { value: "asc", label: t("pages.document_browse.order_asc") },
+            { value: "desc", label: t("pages.document_browse.order_desc") },
           ]} />
           <Space>
             <Button icon={<AppstoreOutlined />} type={viewMode === "grid" ? "primary" : "default"} onClick={() => setViewMode("grid")} />
             <Button icon={<UnorderedListOutlined />} type={viewMode === "list" ? "primary" : "default"} onClick={() => setViewMode("list")} />
           </Space>
           <Button icon={<DownloadOutlined />} loading={downloading} onClick={() => void handleBatchDownload()}>
-            批量下载 ({selected.size})
+            {t("pages.document_browse.batch_download", { count: selected.size })}
           </Button>
         </div>
 
         {loading ? (
           <div style={{ textAlign: "center", padding: 48 }}><Spin /></div>
         ) : items.length === 0 ? (
-          <div className={styles.emptyWrap}><Empty description="没有找到匹配的文档" /></div>
+          <div className={styles.emptyWrap}><Empty description={t("pages.document_browse.no_results")} /></div>
         ) : viewMode === "grid" ? renderGrid() : renderList()}
       </main>
     </div>
