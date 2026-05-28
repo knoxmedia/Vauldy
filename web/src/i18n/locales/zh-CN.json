@@ -1019,6 +1019,24 @@
     }
   },
   "components": {
+    "now_playing_indicator": {
+      "playing": "正在播放",
+      "paused": "已暂停"
+    },
+    "scroll_to_top": {
+      "back_to_top": "回到顶部"
+    },
+    "library_provider_source_tabs": {
+      "tab_metadata": "元数据下载源",
+      "tab_image": "图片获取源",
+      "metadata_required": "请至少选择一个元数据下载源",
+      "image_required": "请至少选择一个图片获取源",
+      "metadata_hint": "勾选需要的元数据下载源，拖动右侧手柄调整优先级。优先级较低的源仅用于填补缺失信息。",
+      "image_hint": "勾选需要的图片获取源，拖动右侧手柄调整优先级。优先级较低的源仅用于填补缺失海报或背景。"
+    },
+    "photo_list_view": {
+      "date_with_count": "{label} · {count} 张"
+    },
     "photo_person_drill_title": {
       "default_name": "未命名人物",
       "rename_success": "人物名称已更新",

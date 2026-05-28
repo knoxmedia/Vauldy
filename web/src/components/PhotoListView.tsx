@@ -1,6 +1,7 @@
 import type { MediaItem } from "../api/client";
 import { photoThumbSrc } from "../api/client";
 import type { LayoutMode, MonthBucket } from "../lib/photoBrowseUtils";
+import { tGlobal } from "../i18n";
 import PhotoMasonry from "./PhotoMasonry";
 import styles from "./PhotoListView.module.css";
 
@@ -16,7 +17,7 @@ function GridCard({ item, onOpen }: { item: MediaItem; onOpen: (id: number) => v
   return (
     <div className={styles.card} onClick={() => onOpen(item.id)} title={item.title}>
       <img src={photoThumbSrc(item.id)} alt={item.title || ""} loading="lazy" decoding="async" />
-      <div className={styles.cardTitle}>{item.title || "未命名"}</div>
+      <div className={styles.cardTitle}>{item.title || tGlobal("components.photo_lightbox.untitled")}</div>
     </div>
   );
 }
@@ -37,7 +38,7 @@ export default function PhotoListView({ items, layout, months, onOpen, showDateG
               {month.days.map(({ day, label, items: dayItems }) => (
                 <div key={day} className={styles.dateGroup}>
                   <h3 className={styles.dateHeading}>
-                    {label} · {dayItems.length} 张
+                    {tGlobal("components.photo_list_view.date_with_count", { label, count: dayItems.length })}
                   </h3>
                   {layout === "masonry" ? (
                     <PhotoMasonry items={dayItems} onOpen={onOpen} />

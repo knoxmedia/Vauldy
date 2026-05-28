@@ -7,6 +7,7 @@ import {
   METADATA_PROVIDER_OPTIONS,
   normalizeProviderList,
 } from "../lib/scrapeProviders";
+import { useT } from "../i18n";
 import styles from "./LibraryProviderSourceTabs.module.css";
 
 type LibraryProviderSourceTabsProps = {
@@ -15,6 +16,7 @@ type LibraryProviderSourceTabsProps = {
 };
 
 export default function LibraryProviderSourceTabs({ activeKey, onChange }: LibraryProviderSourceTabsProps) {
+  const t = useT();
   return (
     <Tabs
       className={styles.tabs}
@@ -23,7 +25,7 @@ export default function LibraryProviderSourceTabs({ activeKey, onChange }: Libra
       items={[
         {
           key: "metadata",
-          label: "元数据下载源",
+          label: t("components.library_provider_source_tabs.tab_metadata"),
           children: (
             <Form.Item
               name="metadata_providers"
@@ -32,7 +34,7 @@ export default function LibraryProviderSourceTabs({ activeKey, onChange }: Libra
                 {
                   validator: async (_, value) => {
                     if (normalizeProviderList(value).length === 0) {
-                      throw new Error("请至少选择一个元数据下载源");
+                      throw new Error(t("components.library_provider_source_tabs.metadata_required"));
                     }
                   },
                 },
@@ -41,14 +43,14 @@ export default function LibraryProviderSourceTabs({ activeKey, onChange }: Libra
             >
               <ProviderPriorityPicker
                 options={METADATA_PROVIDER_OPTIONS}
-                hint="勾选需要的元数据下载源，拖动右侧手柄调整优先级。优先级较低的源仅用于填补缺失信息。"
+                hint={t("components.library_provider_source_tabs.metadata_hint")}
               />
             </Form.Item>
           ),
         },
         {
           key: "image",
-          label: "图片获取源",
+          label: t("components.library_provider_source_tabs.tab_image"),
           children: (
             <Form.Item
               name="image_providers"
@@ -57,7 +59,7 @@ export default function LibraryProviderSourceTabs({ activeKey, onChange }: Libra
                 {
                   validator: async (_, value) => {
                     if (normalizeProviderList(value).length === 0) {
-                      throw new Error("请至少选择一个图片获取源");
+                      throw new Error(t("components.library_provider_source_tabs.image_required"));
                     }
                   },
                 },
@@ -66,7 +68,7 @@ export default function LibraryProviderSourceTabs({ activeKey, onChange }: Libra
             >
               <ProviderPriorityPicker
                 options={IMAGE_PROVIDER_OPTIONS}
-                hint="勾选需要的图片获取源，拖动右侧手柄调整优先级。优先级较低的源仅用于填补缺失海报或背景。"
+                hint={t("components.library_provider_source_tabs.image_hint")}
               />
             </Form.Item>
           ),

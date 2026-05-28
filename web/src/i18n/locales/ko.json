@@ -1019,6 +1019,24 @@
     }
   },
   "components": {
+    "now_playing_indicator": {
+      "playing": "재생 중",
+      "paused": "일시정지됨"
+    },
+    "scroll_to_top": {
+      "back_to_top": "맨 위로"
+    },
+    "library_provider_source_tabs": {
+      "tab_metadata": "메타데이터 다운로드 소스",
+      "tab_image": "이미지 가져오기 소스",
+      "metadata_required": "메타데이터 다운로드 소스를 하나 이상 선택하세요",
+      "image_required": "이미지 가져오기 소스를 하나 이상 선택하세요",
+      "metadata_hint": "사용할 메타데이터 소스를 선택하고 오른쪽 핸들을 끌어 우선순위를 조정하세요. 우선순위가 낮은 소스는 누락된 정보를 채우는 용도로만 사용됩니다.",
+      "image_hint": "사용할 이미지 소스를 선택하고 오른쪽 핸들을 끌어 우선순위를 조정하세요. 우선순위가 낮은 소스는 누락된 포스터나 배경을 채우는 용도로만 사용됩니다."
+    },
+    "photo_list_view": {
+      "date_with_count": "{label} · {count}장"
+    },
     "photo_person_drill_title": {
       "default_name": "이름 없는 인물",
       "rename_success": "인물 이름이 업데이트되었습니다",

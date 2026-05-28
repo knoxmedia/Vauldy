@@ -1019,6 +1019,24 @@
     }
   },
   "components": {
+    "now_playing_indicator": {
+      "playing": "Now playing",
+      "paused": "Paused"
+    },
+    "scroll_to_top": {
+      "back_to_top": "Back to top"
+    },
+    "library_provider_source_tabs": {
+      "tab_metadata": "Metadata sources",
+      "tab_image": "Image sources",
+      "metadata_required": "Please pick at least one metadata source",
+      "image_required": "Please pick at least one image source",
+      "metadata_hint": "Check the metadata sources you want; drag the handles to adjust priority. Lower-priority sources only fill in missing information.",
+      "image_hint": "Check the image sources you want; drag the handles to adjust priority. Lower-priority sources only fill in missing posters or backdrops."
+    },
+    "photo_list_view": {
+      "date_with_count": "{label} · {count} photos"
+    },
     "photo_person_drill_title": {
       "default_name": "Unnamed person",
       "rename_success": "Person name updated",

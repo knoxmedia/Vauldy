@@ -1019,6 +1019,24 @@
     }
   },
   "components": {
+    "now_playing_indicator": {
+      "playing": "正在播放",
+      "paused": "已暫停"
+    },
+    "scroll_to_top": {
+      "back_to_top": "回到頂部"
+    },
+    "library_provider_source_tabs": {
+      "tab_metadata": "中繼資料下載源",
+      "tab_image": "圖片取得源",
+      "metadata_required": "請至少選擇一個中繼資料下載源",
+      "image_required": "請至少選擇一個圖片取得源",
+      "metadata_hint": "勾選需要的中繼資料下載源，拖曳右側握把調整優先順序。優先順序較低的來源僅用於填補缺失資訊。",
+      "image_hint": "勾選需要的圖片取得源，拖曳右側握把調整優先順序。優先順序較低的來源僅用於填補缺失海報或背景。"
+    },
+    "photo_list_view": {
+      "date_with_count": "{label} · {count} 張"
+    },
     "photo_person_drill_title": {
       "default_name": "未命名人物",
       "rename_success": "人物名稱已更新",

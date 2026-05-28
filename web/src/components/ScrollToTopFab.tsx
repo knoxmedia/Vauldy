@@ -2,6 +2,7 @@ import { VerticalAlignTopOutlined } from "@ant-design/icons";
 import { Button, Tooltip } from "antd";
 import { useCallback, useEffect, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
+import { useT } from "../i18n";
 import styles from "./ScrollToTopFab.module.css";
 
 const SHOW_AFTER_PX = 200;
@@ -20,6 +21,7 @@ function readScrollTop(root: HTMLElement | null | undefined): number {
 }
 
 export default function ScrollToTopFab({ hidden = false, bottomOffset = 24, scrollRootRef }: Props) {
+  const t = useT();
   const visible = useVisibleScroll(!hidden, scrollRootRef);
 
   const scrollToTop = useCallback(() => {
@@ -33,14 +35,14 @@ export default function ScrollToTopFab({ hidden = false, bottomOffset = 24, scro
   if (hidden || !visible) return null;
 
   return createPortal(
-    <Tooltip title="回到顶部" placement="left">
+    <Tooltip title={t("components.scroll_to_top.back_to_top")} placement="left">
       <Button
         type="default"
         shape="circle"
         className={styles.fab}
         style={{ bottom: bottomOffset }}
         icon={<VerticalAlignTopOutlined />}
-        aria-label="回到顶部"
+        aria-label={t("components.scroll_to_top.back_to_top")}
         onClick={scrollToTop}
       />
     </Tooltip>,

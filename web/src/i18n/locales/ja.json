@@ -1019,6 +1019,24 @@
     }
   },
   "components": {
+    "now_playing_indicator": {
+      "playing": "再生中",
+      "paused": "一時停止中"
+    },
+    "scroll_to_top": {
+      "back_to_top": "トップに戻る"
+    },
+    "library_provider_source_tabs": {
+      "tab_metadata": "メタデータダウンロード元",
+      "tab_image": "画像取得元",
+      "metadata_required": "メタデータダウンロード元を 1 つ以上選択してください",
+      "image_required": "画像取得元を 1 つ以上選択してください",
+      "metadata_hint": "使用するメタデータ元をチェックし、右側のハンドルで優先順位を調整します。優先順位が低い元は欠落情報の補完にのみ使用されます。",
+      "image_hint": "使用する画像元をチェックし、右側のハンドルで優先順位を調整します。優先順位が低い元はポスターや背景の欠落補完にのみ使用されます。"
+    },
+    "photo_list_view": {
+      "date_with_count": "{label} · {count} 枚"
+    },
     "photo_person_drill_title": {
       "default_name": "名前のない人物",
       "rename_success": "人物名を更新しました",
