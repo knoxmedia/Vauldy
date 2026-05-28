@@ -4,6 +4,7 @@ import dayjs from "dayjs";
 import axios from "axios";
 import { useEffect, useState } from "react";
 import { createAdminUser, deleteAdminUser, fetchAdminUsers, fetchLibraries, resetAdminUserPassword, type AdminUser, type Library, updateAdminUser } from "../api/client";
+import { useT } from "../i18n";
 
 type FormData = {
   username: string;
@@ -33,6 +34,7 @@ type FormData = {
 };
 
 export default function UsersPage() {
+  const t = useT();
   const sectionStyle = {
     padding: 12,
     border: "1px solid #303030",
@@ -89,7 +91,7 @@ export default function UsersPage() {
       setUsers(u);
       setLibraries(libs);
     } catch (e: unknown) {
-      message.error((e as Error).message || "加载失败");
+      message.error((e as Error).message || t("pages.users.load_failed"));
     } finally {
       setLoading(false);
     }
@@ -119,7 +121,7 @@ export default function UsersPage() {
       const hasFolderSelection = Object.values(library_folders).some((paths) => Array.isArray(paths) && paths.length > 0);
       const hasLibrarySelection = library_ids.length > 0 || hasFolderSelection;
       if (!v.allow_all_libraries && !hasLibrarySelection) {
-        message.error('请选择至少一个媒体库，或将「允许访问所有媒体库」打开');
+        message.error(t("pages.users.library_required"));
         setActiveTab("access");
         setSaving(false);
         return;
@@ -148,29 +150,29 @@ export default function UsersPage() {
           .filter((p) => Number.isInteger(p.weekday) && p.weekday >= 0 && p.weekday <= 6 && p.start_time && p.end_time),
       } as const;
       if (payload.parental_plans.length > 0 && hasParentalPlanConflict(v.parental_plans || [])) {
-        message.error("家长控制访问计划存在时间冲突，请调整后再保存");
+        message.error(t("pages.users.schedule_conflict"));
         setActiveTab("parental");
         return;
       }
       if (editing) {
         await updateAdminUser(editing.id, payload);
-        message.success("用户已更新");
+        message.success(t("pages.users.user_updated"));
       } else {
         if (!v.password) {
-          message.error("请输入初始密码");
+          message.error(t("pages.users.password_required"));
           return;
         }
         await createAdminUser({ ...payload, password: v.password });
-        message.success("用户已创建");
+        message.success(t("pages.users.user_created"));
       }
       setOpen(false);
       await load();
     } catch (e: unknown) {
       const msg = axios.isAxiosError(e)
-        ? String((e.response?.data as { error?: string } | undefined)?.error || e.message || "保存失败")
-        : String((e as Error)?.message || "保存失败");
+        ? String((e.response?.data as { error?: string } | undefined)?.error || e.message || t("pages.users.save_failed"))
+        : String((e as Error)?.message || t("pages.users.save_failed"));
       if (msg.includes("parental plans conflict")) {
-        message.error("访问计划时间段冲突，请检查星期与时间设置");
+        message.error(t("pages.users.schedule_time_conflict"));
         setActiveTab("parental");
       } else {
         message.error(msg);
@@ -182,24 +184,24 @@ export default function UsersPage() {
 
   const submitResetPassword = async () => {
     if (!editing) {
-      message.info("新建用户请在“基本属性”填写初始密码");
+      message.info(t("pages.users.set_password_in_basic_info"));
       return;
     }
     const pwd = String(form.getFieldValue("reset_password") || "").trim();
     const pwdConfirm = String(form.getFieldValue("reset_password_confirm") || "").trim();
     if (pwd.length < 6) {
-      message.error("新密码至少 6 位");
+      message.error(t("pages.users.password_too_short"));
       return;
     }
     if (pwd !== pwdConfirm) {
-      message.error("两次输入的新密码不一致");
+      message.error(t("pages.users.password_mismatch"));
       return;
     }
     setResettingPassword(true);
     try {
       await resetAdminUserPassword(editing.id, pwd);
       form.setFieldValue("reset_password", "");
-      message.success("密码已重置");
+      message.success(t("pages.users.password_reset_success"));
     } finally {
       setResettingPassword(false);
     }
@@ -208,7 +210,7 @@ export default function UsersPage() {
   return (
     <div>
       <Space style={{ marginBottom: 16 }}>
-        <Button type="primary" onClick={openCreate}>新增用户</Button>
+        <Button type="primary" onClick={openCreate}>{t("pages.users.create_btn")}</Button>
       </Space>
       <Table
         rowKey="id"
@@ -216,13 +218,13 @@ export default function UsersPage() {
         dataSource={users}
         pagination={false}
         columns={[
-          { title: "用户名", dataIndex: "username" },
-          { title: "角色", dataIndex: "role", render: (v: string) => <Tag color={v === "admin" ? "blue" : "default"}>{v}</Tag> },
-          { title: "媒体库", dataIndex: "library_scope", render: (v: string, r: AdminUser) => v === "all" ? "全部" : `已选 ${r.library_ids?.length || 0}` },
-          { title: "播放/下载", render: (_, r: AdminUser) => `${r.can_play ? "是" : "否"} / ${r.can_download ? "是" : "否"}` },
-          { title: "家长控制", render: (_, r: AdminUser) => r.parental_enabled ? `开启 (${r.parental_max_rating || "不限"})` : "关闭" },
+          { title: t("pages.users.col_username"), dataIndex: "username" },
+          { title: t("pages.users.col_role"), dataIndex: "role", render: (v: string) => <Tag color={v === "admin" ? "blue" : "default"}>{v}</Tag> },
+          { title: t("pages.users.col_library"), dataIndex: "library_scope", render: (v: string, r: AdminUser) => v === "all" ? t("pages.users.library_all") : t("pages.users.library_selected", { count: r.library_ids?.length || 0 }) },
+          { title: t("pages.users.col_play_download"), render: (_, r: AdminUser) => `${r.can_play ? t("pages.users.yes") : t("pages.users.no")} / ${r.can_download ? t("pages.users.yes") : t("pages.users.no")}` },
+          { title: t("pages.users.col_parental"), render: (_, r: AdminUser) => r.parental_enabled ? t("pages.users.parental_on", { rating: r.parental_max_rating || t("pages.users.parental_unlimited") }) : t("pages.users.parental_off") },
           {
-            title: "操作",
+            title: t("pages.users.col_actions"),
             render: (_, r: AdminUser) => (
               <Space>
                 <Button size="small" onClick={() => {
@@ -244,17 +246,17 @@ export default function UsersPage() {
                   });
                   setActiveTab("basic");
                   setOpen(true);
-                }}>编辑</Button>
+                }}>{t("pages.users.edit")}</Button>
                 <Button size="small" danger onClick={() => {
                   Modal.confirm({
-                    title: `删除用户 ${r.username}?`,
+                    title: t("pages.users.delete_user_title", { username: r.username }),
                     onOk: async () => {
                       await deleteAdminUser(r.id);
-                      message.success("已删除");
+                      message.success(t("pages.users.deleted"));
                       await load();
                     },
                   });
-                }}>删除</Button>
+                }}>{t("pages.users.delete")}</Button>
               </Space>
             ),
           },
@@ -262,15 +264,15 @@ export default function UsersPage() {
       />
 
       <Drawer
-        title={editing ? `用户属性：${editing.username}` : "新增用户"}
+        title={editing ? t("pages.users.modal_edit_title", { username: editing.username }) : t("pages.users.modal_create_title")}
         open={open}
         width={760}
         onClose={() => setOpen(false)}
         destroyOnClose
         extra={
           <Space>
-            <Button onClick={() => setOpen(false)}>取消</Button>
-            <Button type="primary" loading={saving} onClick={() => void submit()}>保存</Button>
+            <Button onClick={() => setOpen(false)}>{t("pages.users.modal_cancel")}</Button>
+            <Button type="primary" loading={saving} onClick={() => void submit()}>{t("pages.users.modal_save")}</Button>
           </Space>
         }
       >
@@ -284,26 +286,26 @@ export default function UsersPage() {
           <Tabs activeKey={activeTab} onChange={setActiveTab} destroyInactiveTabPane={false} items={[
             {
               key: "basic",
-              label: "基本属性",
+              label: t("pages.users.tab_basic"),
               children: (
                 <>
-                  <Alert type="info" showIcon style={{ marginBottom: 12 }} message="基本属性用于定义用户身份与初始登录信息。" />
+                  <Alert type="info" showIcon style={{ marginBottom: 12 }} message={t("pages.users.alert_basic")} />
                   <div style={sectionStyle}>
-                    <Typography.Text strong>身份信息</Typography.Text>
+                    <Typography.Text strong>{t("pages.users.section_identity")}</Typography.Text>
                     <Divider style={{ margin: "10px 0 14px" }} />
-                  <Form.Item name="username" label="用户名" rules={[{ required: true }]}><Input /></Form.Item>
-                  {!editing && <Form.Item name="password" label="初始密码" rules={[{ required: true, min: 6 }]}><Input.Password /></Form.Item>}
-                  <Form.Item name="allow_server_manage" label="允许用户管理此服务器" valuePropName="checked" initialValue={false}>
-                    <Switch checkedChildren="管理员" unCheckedChildren="普通用户" />
+                  <Form.Item name="username" label={t("pages.users.field_username")} rules={[{ required: true }]}><Input /></Form.Item>
+                  {!editing && <Form.Item name="password" label={t("pages.users.field_password")} rules={[{ required: true, min: 6 }]}><Input.Password /></Form.Item>}
+                  <Form.Item name="allow_server_manage" label={t("pages.users.field_allow_manage")} valuePropName="checked" initialValue={false}>
+                    <Switch checkedChildren={t("pages.users.switch_admin")} unCheckedChildren={t("pages.users.switch_user")} />
                   </Form.Item>
                   </div>
                   <div style={sectionStyle}>
-                    <Typography.Text strong>操作权限</Typography.Text>
+                    <Typography.Text strong>{t("pages.users.section_action_perms")}</Typography.Text>
                     <Divider style={{ margin: "10px 0 14px" }} />
                     <Space wrap>
-                      <Form.Item name="can_play" label="播放" valuePropName="checked"><Switch /></Form.Item>
-                      <Form.Item name="can_download" label="下载" valuePropName="checked"><Switch /></Form.Item>
-                      <Form.Item name="can_access_features" label="功能访问" valuePropName="checked"><Switch /></Form.Item>
+                      <Form.Item name="can_play" label={t("pages.users.field_can_play")} valuePropName="checked"><Switch /></Form.Item>
+                      <Form.Item name="can_download" label={t("pages.users.field_can_download")} valuePropName="checked"><Switch /></Form.Item>
+                      <Form.Item name="can_access_features" label={t("pages.users.field_can_access_features")} valuePropName="checked"><Switch /></Form.Item>
                     </Space>
                   </div>
                 </>
@@ -311,18 +313,18 @@ export default function UsersPage() {
             },
             {
               key: "access",
-              label: "访问控制",
+              label: t("pages.users.tab_access"),
               children: (
                 <>
-                  <Alert type="info" showIcon style={{ marginBottom: 12 }} message="访问控制决定该用户能看到哪些媒体库、可执行哪些操作。" />
+                  <Alert type="info" showIcon style={{ marginBottom: 12 }} message={t("pages.users.alert_access")} />
                   <div style={sectionStyle}>
-                    <Typography.Title level={4} style={{ margin: 0 }}>媒体库访问</Typography.Title>
+                    <Typography.Title level={4} style={{ margin: 0 }}>{t("pages.users.section_library_access")}</Typography.Title>
                     <Divider style={{ margin: "10px 0 14px" }} />
-                    <Form.Item label="允许访问所有媒体库" style={{ marginBottom: 10 }}>
+                    <Form.Item label={t("pages.users.field_allow_all_libraries")} style={{ marginBottom: 10 }}>
                       <Form.Item name="allow_all_libraries" valuePropName="checked" noStyle initialValue>
                         <Switch
-                          checkedChildren="全部"
-                          unCheckedChildren="自定义"
+                          checkedChildren={t("pages.users.switch_all")}
+                          unCheckedChildren={t("pages.users.switch_custom")}
                           onChange={(checked) => {
                             if (checked) {
                               form.setFieldValue("library_ids", []);
@@ -340,7 +342,7 @@ export default function UsersPage() {
                         if (all) return null;
                         return (
                           <div>
-                            <Typography.Text strong>媒体库</Typography.Text>
+                            <Typography.Text strong>{t("pages.users.library_label")}</Typography.Text>
                             <div style={{ marginTop: 10 }}>
                               {libraries.map((lib) => {
                                 const checked = selected.includes(lib.id);
@@ -409,7 +411,7 @@ export default function UsersPage() {
                               })}
                             </div>
                             <Typography.Text type="secondary">
-                              选择要与此用户共享的媒体文件夹。管理员可在媒体库管理中编辑所有文件夹。
+                              {t("pages.users.folders_hint")}
                             </Typography.Text>
                           </div>
                         );
@@ -417,15 +419,15 @@ export default function UsersPage() {
                     </Form.Item>
                   </div>
                   <div style={sectionStyle}>
-                    <Typography.Title level={4} style={{ margin: 0 }}>设备访问</Typography.Title>
+                    <Typography.Title level={4} style={{ margin: 0 }}>{t("pages.users.section_device_access")}</Typography.Title>
                     <Divider style={{ margin: "10px 0 14px" }} />
-                    <Form.Item label="全部">
+                    <Form.Item label={t("pages.users.all_label")}>
                       <Form.Item name="can_access_features" valuePropName="checked" noStyle>
                         <Switch />
                       </Form.Item>
                     </Form.Item>
                     <Typography.Text type="secondary">
-                      关闭后，该用户将不能访问需要功能授权的扩展能力与新设备授权流程。
+                      {t("pages.users.features_disabled_hint")}
                     </Typography.Text>
                   </div>
                 </>
@@ -433,29 +435,29 @@ export default function UsersPage() {
             },
             {
               key: "parental",
-              label: "家长控制",
+              label: t("pages.users.tab_parental"),
               children: (
                 <>
-                  <Alert type="warning" showIcon style={{ marginBottom: 12 }} message="家长控制可按分级、时段和 PIN 对播放行为进行限制。" />
+                  <Alert type="warning" showIcon style={{ marginBottom: 12 }} message={t("pages.users.alert_parental")} />
                   <div style={sectionStyle}>
-                    <Typography.Text strong>限制策略</Typography.Text>
+                    <Typography.Text strong>{t("pages.users.section_restrictions")}</Typography.Text>
                     <Divider style={{ margin: "10px 0 14px" }} />
-                  <Form.Item name="parental_enabled" label="家长控制开关" valuePropName="checked"><Switch /></Form.Item>
+                  <Form.Item name="parental_enabled" label={t("pages.users.field_parental_enabled")} valuePropName="checked"><Switch /></Form.Item>
                   <Form.Item shouldUpdate noStyle>
                     {({ getFieldValue }) =>
                       getFieldValue("parental_enabled") ? (
                         <>
-                          <Form.Item name="parental_max_rating" label="最高分级">
+                          <Form.Item name="parental_max_rating" label={t("pages.users.field_max_rating")}>
                             <Select allowClear options={["G", "PG", "PG-13", "R", "NC-17"].map((x) => ({ value: x, label: x }))} />
                           </Form.Item>
-                          <Form.Item name="parental_pin" label="家长 PIN（留空则不修改）"><Input.Password /></Form.Item>
+                          <Form.Item name="parental_pin" label={t("pages.users.field_pin")}><Input.Password /></Form.Item>
                         </>
                       ) : null}
                   </Form.Item>
                   <Divider style={{ margin: "10px 0 14px" }} />
-                  <Typography.Text strong>访问计划</Typography.Text>
+                  <Typography.Text strong>{t("pages.users.section_schedule")}</Typography.Text>
                   <Typography.Paragraph type="secondary" style={{ margin: "4px 0 10px" }}>
-                    可添加多个时间计划。仅在计划覆盖的星期与时间段内允许访问（关闭家长控制时计划仍保留在表单中，避免保存时被清空）。
+                    {t("pages.users.schedule_hint")}
                   </Typography.Paragraph>
                   <div style={{ display: parentalEnabledWatch ? "block" : "none" }}>
                     <Form.List name="parental_plans">
@@ -466,7 +468,7 @@ export default function UsersPage() {
                               <Form.Item
                                 {...field}
                                 name={[field.name, "weekday"]}
-                                label="星期"
+                                label={t("pages.users.field_weekdays")}
                                 dependencies={["parental_enabled"]}
                                 rules={[
                                   ({ getFieldValue }) => ({
@@ -474,7 +476,7 @@ export default function UsersPage() {
                                       if (!getFieldValue("parental_enabled")) return Promise.resolve();
                                       const n = Number(value);
                                       if (!Number.isInteger(n) || n < 0 || n > 6) {
-                                        return Promise.reject(new Error("请选择星期"));
+                                        return Promise.reject(new Error(t("pages.users.weekdays_required")));
                                       }
                                       return Promise.resolve();
                                     },
@@ -484,26 +486,26 @@ export default function UsersPage() {
                                 <Select
                                   style={{ width: 120 }}
                                   options={[
-                                    { value: 0, label: "星期日" },
-                                    { value: 1, label: "星期一" },
-                                    { value: 2, label: "星期二" },
-                                    { value: 3, label: "星期三" },
-                                    { value: 4, label: "星期四" },
-                                    { value: 5, label: "星期五" },
-                                    { value: 6, label: "星期六" },
+                                    { value: 0, label: t("pages.users.weekday_sun") },
+                                    { value: 1, label: t("pages.users.weekday_mon") },
+                                    { value: 2, label: t("pages.users.weekday_tue") },
+                                    { value: 3, label: t("pages.users.weekday_wed") },
+                                    { value: 4, label: t("pages.users.weekday_thu") },
+                                    { value: 5, label: t("pages.users.weekday_fri") },
+                                    { value: 6, label: t("pages.users.weekday_sat") },
                                   ]}
                                 />
                               </Form.Item>
                               <Form.Item
                                 {...field}
                                 name={[field.name, "start_time"]}
-                                label="开始"
+                                label={t("pages.users.field_start")}
                                 dependencies={["parental_enabled"]}
                                 rules={[
                                   ({ getFieldValue }) => ({
                                     validator(_, value) {
                                       if (!getFieldValue("parental_enabled")) return Promise.resolve();
-                                      if (!value) return Promise.reject(new Error("请选择开始时间"));
+                                      if (!value) return Promise.reject(new Error(t("pages.users.start_required")));
                                       return Promise.resolve();
                                     },
                                   }),
@@ -514,13 +516,13 @@ export default function UsersPage() {
                               <Form.Item
                                 {...field}
                                 name={[field.name, "end_time"]}
-                                label="结束"
+                                label={t("pages.users.field_end")}
                                 dependencies={["parental_enabled"]}
                                 rules={[
                                   ({ getFieldValue }) => ({
                                     validator(_, value) {
                                       if (!getFieldValue("parental_enabled")) return Promise.resolve();
-                                      if (!value) return Promise.reject(new Error("请选择结束时间"));
+                                      if (!value) return Promise.reject(new Error(t("pages.users.end_required")));
                                       return Promise.resolve();
                                     },
                                   }),
@@ -532,7 +534,7 @@ export default function UsersPage() {
                             </Space>
                           ))}
                           <Button type="dashed" icon={<PlusOutlined />} onClick={() => add({ weekday: 1 })}>
-                            添加访问计划
+                            {t("pages.users.add_schedule")}
                           </Button>
                         </>
                       )}
@@ -544,20 +546,20 @@ export default function UsersPage() {
             },
             {
               key: "reset-password",
-              label: "重置密码",
+              label: t("pages.users.tab_reset_password"),
               children: (
                 <>
                   {editing ? (
                     <div style={sectionStyle}>
-                      <Typography.Text strong>重置登录密码</Typography.Text>
+                      <Typography.Text strong>{t("pages.users.section_reset_password")}</Typography.Text>
                       <Divider style={{ margin: "10px 0 14px" }} />
                     <Space direction="vertical" style={{ width: "100%" }}>
-                      <Form.Item name="reset_password" label="新密码（至少 6 位）">
+                      <Form.Item name="reset_password" label={t("pages.users.field_new_password")}>
                         <Input.Password />
                       </Form.Item>
                       <Form.Item
                         name="reset_password_confirm"
-                        label="确认新密码"
+                        label={t("pages.users.field_confirm_password")}
                         dependencies={["reset_password"]}
                         rules={[
                           ({ getFieldValue }) => ({
@@ -565,7 +567,7 @@ export default function UsersPage() {
                               const p1 = String(getFieldValue("reset_password") || "");
                               const p2 = String(value || "");
                               if (!p2 || p1 === p2) return Promise.resolve();
-                              return Promise.reject(new Error("两次输入的新密码不一致"));
+                              return Promise.reject(new Error(t("pages.users.confirm_mismatch_error")));
                             },
                           }),
                         ]}
@@ -573,12 +575,12 @@ export default function UsersPage() {
                         <Input.Password />
                       </Form.Item>
                       <Button type="primary" loading={resettingPassword} onClick={() => void submitResetPassword()}>
-                        立即重置密码
+                        {t("pages.users.btn_reset_password")}
                       </Button>
                     </Space>
                     </div>
                   ) : (
-                    <Tag color="blue">新建用户时请在“基本属性”里填写初始密码。</Tag>
+                    <Tag color="blue">{t("pages.users.tag_create_password_hint")}</Tag>
                   )}
                 </>
               ),
