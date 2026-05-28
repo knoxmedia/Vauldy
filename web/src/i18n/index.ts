@@ -120,6 +120,35 @@ export type I18nContextValue = {
 
 const I18nContext = createContext<I18nContextValue | null>(null);
 
+/**
+ * Module-level active locale, kept in sync with the React provider state.
+ * Allows non-React callers (helpers, menus, action builders) to look up
+ * translations without threading a t() function through every signature.
+ */
+let activeLocale: string = DEFAULT_LOCALE;
+
+/** Translate using the current active locale. Safe to call outside React. */
+export function tGlobal(
+  key: string,
+  paramsOrFallback?: Record<string, string | number> | string,
+  fallback?: string
+): string {
+  const params =
+    paramsOrFallback && typeof paramsOrFallback === "object" ? paramsOrFallback : undefined;
+  const inlineFallback = typeof paramsOrFallback === "string" ? paramsOrFallback : fallback;
+  const primary = lookup(RESOURCES[activeLocale], key);
+  if (primary !== undefined) return interpolate(primary, params);
+  const fb = lookup(RESOURCES[FALLBACK_LOCALE], key);
+  if (fb !== undefined) return interpolate(fb, params);
+  if (inlineFallback !== undefined) return interpolate(inlineFallback, params);
+  return key;
+}
+
+/** Return the current active locale code. */
+export function getActiveLocale(): string {
+  return activeLocale;
+}
+
 function readInitialLocale(): string {
   // Persisted user preference takes priority for instant first render before
   // /user/info resolves.
@@ -152,9 +181,11 @@ export type I18nProviderProps = {
 
 export function I18nProvider({ children, locale: locked }: I18nProviderProps) {
   const storeLocale = useAuthStore((s) => s.uiLocale);
-  const [localeState, setLocaleState] = useState<string>(() =>
-    locked ? resolveLocale(locked) : readInitialLocale()
-  );
+  const [localeState, setLocaleState] = useState<string>(() => {
+    const initial = locked ? resolveLocale(locked) : readInitialLocale();
+    activeLocale = initial;
+    return initial;
+  });
 
   // React to changes in the auth store's uiLocale (e.g. after login or settings save).
   useEffect(() => {
@@ -165,6 +196,7 @@ export function I18nProvider({ children, locale: locked }: I18nProviderProps) {
   }, [storeLocale, locked]);
 
   useEffect(() => {
+    activeLocale = localeState;
     try {
       if (typeof document !== "undefined") {
         document.documentElement.lang = localeState;
