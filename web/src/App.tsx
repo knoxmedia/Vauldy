@@ -65,6 +65,7 @@ import MainNav from "./components/MainNav";
 import MusicPlayerBar from "./components/MusicPlayerBar";
 import ScrollToTopFab from "./components/ScrollToTopFab";
 import { useMusicPlayerStore } from "./store/musicPlayer";
+import { useT } from "./i18n";
 
 const { Header, Content, Sider } = Layout;
 
@@ -112,6 +113,7 @@ function ProfileSync() {
 function MainShell() {
   const loc = useLocation();
   const nav = useNavigate();
+  const t = useT();
   const role = useAuthStore((s) => s.role);
   const username = useAuthStore((s) => s.username);
   const avatarUrl = useAuthStore((s) => s.avatarUrl);
@@ -147,8 +149,8 @@ function MainShell() {
       key: "who",
       label: (
         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-          {username || "用户"}
-          {role ? ` · ${role === "admin" ? "管理员" : "用户"}` : ""}
+          {username || t("user_menu.default_user")}
+          {role ? ` · ${role === "admin" ? t("user_menu.role_admin") : t("user_menu.role_user")}` : ""}
         </Typography.Text>
       ),
       disabled: true,
@@ -157,14 +159,14 @@ function MainShell() {
     {
       key: "settings",
       icon: <SlidersOutlined />,
-      label: "账号设置",
+      label: t("user_menu.account_settings"),
       onClick: () => nav("/settings"),
     },
     { type: "divider" },
     {
       key: "logout",
       danger: true,
-      label: "退出",
+      label: t("user_menu.logout"),
       onClick: async () => {
         try {
           await logout();
@@ -181,30 +183,30 @@ function MainShell() {
   const pathTitle = (() => {
     const p = loc.pathname;
     if (p === "/" || p === "") return "";
-    if (p.startsWith("/favorites")) return "我的收藏";
-    if (p.startsWith("/playlists")) return "播放列表";
-    if (p.startsWith("/search")) return "搜索";
-    if (p.startsWith("/browse")) return "浏览媒体";
-    if (p.startsWith("/series")) return "剧集详情";
-    if (p.startsWith("/album")) return "专辑详情";
-    if (p.startsWith("/artist")) return "艺人详情";
-    if (p.startsWith("/genre")) return "流派详情";
-    if (p.startsWith("/playback-history")) return "播放历史";
-    if (p.startsWith("/player")) return "播放";
-    if (p.startsWith("/reader")) return "阅读";
-    if (p.startsWith("/settings")) return "账号";
-    if (p.startsWith("/library")) return "媒体库";
-    if (p.startsWith("/upload")) return "上传";
-    if (p.startsWith("/media-manager")) return "媒体资料管理";
-    if (p.startsWith("/tasks")) return "任务管理";
-    if (p.startsWith("/drm-license-audit")) return "DRM许可证审计";
-    if (p.startsWith("/access-logs")) return "访问日志";
-    if (p.startsWith("/api-credentials")) return "API 凭证";
-    if (p.startsWith("/users")) return "用户管理";
-    if (p.startsWith("/console")) return "控制台";
-    if (p.startsWith("/system-options")) return "系统选项";
-    if (p.startsWith("/scrape-config")) return "元数据提供者";
-    if (p.startsWith("/ai-provider")) return "AI 提供商";
+    if (p.startsWith("/favorites")) return t("shell.title.favorites");
+    if (p.startsWith("/playlists")) return t("shell.title.playlists");
+    if (p.startsWith("/search")) return t("shell.title.search");
+    if (p.startsWith("/browse")) return t("shell.title.browse");
+    if (p.startsWith("/series")) return t("shell.title.series");
+    if (p.startsWith("/album")) return t("shell.title.album");
+    if (p.startsWith("/artist")) return t("shell.title.artist");
+    if (p.startsWith("/genre")) return t("shell.title.genre");
+    if (p.startsWith("/playback-history")) return t("shell.title.playback_history");
+    if (p.startsWith("/player")) return t("shell.title.player");
+    if (p.startsWith("/reader")) return t("shell.title.reader");
+    if (p.startsWith("/settings")) return t("shell.title.settings");
+    if (p.startsWith("/library")) return t("shell.title.library");
+    if (p.startsWith("/upload")) return t("shell.title.upload");
+    if (p.startsWith("/media-manager")) return t("shell.title.media_manager");
+    if (p.startsWith("/tasks")) return t("shell.title.tasks");
+    if (p.startsWith("/drm-license-audit")) return t("shell.title.drm_audit");
+    if (p.startsWith("/access-logs")) return t("shell.title.access_logs");
+    if (p.startsWith("/api-credentials")) return t("shell.title.api_credentials");
+    if (p.startsWith("/users")) return t("shell.title.users");
+    if (p.startsWith("/console")) return t("shell.title.console");
+    if (p.startsWith("/system-options")) return t("shell.title.system_options");
+    if (p.startsWith("/scrape-config")) return t("shell.title.scrape_config");
+    if (p.startsWith("/ai-provider")) return t("shell.title.ai_provider");
     return "";
   })();
 
@@ -251,7 +253,7 @@ function MainShell() {
                   setAutoCollapseOnLeave(true);
                   setMode("expanded");
                 }}
-                aria-label="展开导航栏"
+                aria-label={t("shell.expand_sider")}
               />
             ) : (
               <>
@@ -264,21 +266,21 @@ function MainShell() {
                     setAutoCollapseOnLeave(false);
                     setMode("collapsed");
                   }}
-                  aria-label="仅图标显示"
+                  aria-label={t("shell.icon_only")}
                 />
-                <Link to="/" className="app-sider-logo" title="首页">
+                <Link to="/" className="app-sider-logo" title={t("shell.open_brand")}>
                   <>
                     <span>Knox-Media</span>
                   </>
                 </Link>
-                <Tooltip title="关闭侧边栏">
+                <Tooltip title={t("shell.hide_sider")}>
                   <Button
                     type="text"
                     size="small"
                     className="app-sider-close-btn"
                     icon={<CloseOutlined style={{ color: "#aaa" }} />}
                     onClick={() => setMode("hidden")}
-                    aria-label="隐藏侧栏"
+                    aria-label={t("shell.hide_sider")}
                   />
                 </Tooltip>
               </>
@@ -311,7 +313,7 @@ function MainShell() {
                   <Button
                     type="text"
                     className="app-hidden-nav-open-btn"
-                    aria-label="打开导航"
+                    aria-label={t("shell.open_nav_aria")}
                     icon={<MenuOutlined style={{ fontSize: 22, color: "#fff" }} />}
                     onClick={() => setDrawerOpen(true)}
                   />
@@ -342,11 +344,11 @@ function MainShell() {
             <div className="app-header-right app-shell-header-right">
               <Space size="middle">
                 {admin && (
-                  <Tooltip title="管理控制台">
+                  <Tooltip title={t("shell.console_tooltip")}>
                     <Button
                       type="text"
                       icon={<SettingOutlined style={{ fontSize: 20, color: "#00a4dc" }} />}
-                      aria-label="管理控制台"
+                      aria-label={t("shell.console_aria")}
                       onClick={() => nav("/console")}
                     />
                   </Tooltip>
@@ -381,11 +383,11 @@ function MainShell() {
             </span>
           }
           extra={
-            <Tooltip title="固定侧边栏">
+            <Tooltip title={t("shell.pin_sider")}>
               <Button
                 type="text"
                 icon={<PushpinOutlined style={{ color: "#ddd" }} />}
-                aria-label="固定侧边栏"
+                aria-label={t("shell.pin_sider")}
                 onClick={() => {
                   setAutoCollapseOnLeave(false);
                   setMode("expanded");

@@ -77,7 +77,7 @@ type SystemOptionsTranscoder struct {
 func defaultSystemOptions() SystemOptionsJSON {
 	return SystemOptionsJSON{
 		General: SystemOptionsGeneral{
-			DisplayLanguage:         "zh-Hans",
+			DisplayLanguage:         "zh-CN",
 			StartOnBoot:             false,
 			OpenBrowserOnFirstStart: true,
 			MaintenanceMode:         false,
@@ -198,11 +198,37 @@ func homeStreamQualityValues() []string {
 }
 
 func normalizeSystemOptions(o SystemOptionsJSON) SystemOptionsJSON {
-	allowedLang := map[string]struct{}{
-		"zh-Hans": {}, "zh-Hant": {}, "en": {}, "ja": {}, "ko": {},
+	// Allow both new BCP-47 codes (zh-CN, zh-TW) and legacy aliases that the
+	// older clients may still send. They map to a canonical code so the
+	// admin UI dropdown stays consistent.
+	canonicalLang := map[string]string{
+		"zh-CN":   "zh-CN",
+		"zh-cn":   "zh-CN",
+		"zh-Hans": "zh-CN",
+		"zh-hans": "zh-CN",
+		"zh":      "zh-CN",
+		"zh-TW":   "zh-TW",
+		"zh-tw":   "zh-TW",
+		"zh-Hant": "zh-TW",
+		"zh-hant": "zh-TW",
+		"zh-HK":   "zh-TW",
+		"zh-hk":   "zh-TW",
+		"en":      "en",
+		"en-US":   "en",
+		"en-us":   "en",
+		"en-GB":   "en",
+		"en-gb":   "en",
+		"ja":      "ja",
+		"ja-JP":   "ja",
+		"ja-jp":   "ja",
+		"ko":      "ko",
+		"ko-KR":   "ko",
+		"ko-kr":   "ko",
 	}
-	if _, ok := allowedLang[o.General.DisplayLanguage]; !ok {
-		o.General.DisplayLanguage = "zh-Hans"
+	if canonical, ok := canonicalLang[o.General.DisplayLanguage]; ok {
+		o.General.DisplayLanguage = canonical
+	} else {
+		o.General.DisplayLanguage = "zh-CN"
 	}
 	if o.Transcoder.ThrottleBufferSeconds < 1 {
 		o.Transcoder.ThrottleBufferSeconds = 1

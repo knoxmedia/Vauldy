@@ -1,5 +1,5 @@
 import { Checkbox, Select, message } from "antd";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Cropper, { type Area } from "react-easy-crop";
 import "react-easy-crop/react-easy-crop.css";
 
@@ -10,7 +10,8 @@ import {
   updateUserProfile,
   uploadUserAvatar,
 } from "../api/client";
-import { defaultPlayerPrefs, normalizePlayerPrefs, summarizePlayerPrefs, type PlayerPrefs } from "../lib/playerPrefs";
+import { languageOptions, resolveLocale, useT, type TranslateFn } from "../i18n";
+import { defaultPlayerPrefs, normalizePlayerPrefs, type PlayerPrefs } from "../lib/playerPrefs";
 import { isAdminRole, useAuthStore } from "../store/auth";
 import { getCroppedCircularPngBlob } from "../utils/cropImage";
 import {
@@ -29,46 +30,43 @@ import styles from "./Settings.module.css";
 
 type EditMode = null | "avatar" | "language" | "audio" | "password" | "subtitle";
 
-const UI_LOCALES: { value: string; label: string }[] = [
-  { value: "zh", label: "中文" },
-  { value: "en", label: "English" },
-  { value: "ja", label: "日本語" },
-  { value: "ko", label: "한국어" },
-  { value: "fr", label: "Français" },
-  { value: "de", label: "Deutsch" },
-];
+const TRACK_LANG_VALUES = ["zh", "en", "ja", "ko", "fr", "de", "es", "ru"] as const;
 
-const LANG_TRACKS: { value: string; label: string }[] = [
-  { value: "", label: "选择语言" },
-  { value: "zh", label: "中文" },
-  { value: "en", label: "English" },
-  { value: "ja", label: "日本語" },
-  { value: "ko", label: "한국어" },
-  { value: "fr", label: "Français" },
-  { value: "de", label: "Deutsch" },
-  { value: "es", label: "Español" },
-  { value: "ru", label: "Русский" },
-];
+function buildTrackLangOptions(t: TranslateFn): { value: string; label: string }[] {
+  const labels: Record<(typeof TRACK_LANG_VALUES)[number], string> = {
+    zh: t("languages.zh-CN"),
+    en: t("languages.en"),
+    ja: t("languages.ja"),
+    ko: t("languages.ko"),
+    fr: "Français",
+    de: "Deutsch",
+    es: "Español",
+    ru: "Русский",
+  };
+  return [
+    { value: "", label: t("settings.audio.track_select_lang") },
+    ...TRACK_LANG_VALUES.map((v) => ({ value: v, label: labels[v] })),
+  ];
+}
 
-const SUBTITLE_MODE_OPTS: { value: PlayerPrefs["subtitle_mode"]; label: string }[] = [
-  { value: "foreign", label: "以外语音频显示" },
-  { value: "always", label: "始终显示" },
-  { value: "off", label: "关闭" },
-];
-
-const SDH_OPTS: { value: PlayerPrefs["sdh_search"]; label: string }[] = [
-  { value: "prefer_non_sdh", label: "首选非SDH字幕" },
-  { value: "prefer_sdh", label: "首选SDH字幕" },
-];
-
-const FORCED_OPTS: { value: PlayerPrefs["forced_search"]; label: string }[] = [
-  { value: "prefer_non_forced", label: "非强制字幕优先" },
-  { value: "prefer_forced", label: "强制字幕优先" },
-];
-
-function uiLocaleLabel(code: string | null | undefined): string {
-  const c = (code || "zh").toLowerCase();
-  return UI_LOCALES.find((x) => x.value === c)?.label || code || "中文";
+function summarizePlayerPrefsLocalized(prefs: PlayerPrefs, t: TranslateFn): string {
+  const SUBTITLE_MODE_LABEL: Record<PlayerPrefs["subtitle_mode"], string> = {
+    foreign: t("settings.audio.subtitle_mode_foreign"),
+    always: t("settings.audio.subtitle_mode_always"),
+    off: t("settings.audio.subtitle_mode_off"),
+  };
+  const SDH_LABEL: Record<PlayerPrefs["sdh_search"], string> = {
+    prefer_non_sdh: t("settings.audio.sdh_prefer_non_sdh"),
+    prefer_sdh: t("settings.audio.sdh_prefer_sdh"),
+  };
+  const FORCED_LABEL: Record<PlayerPrefs["forced_search"], string> = {
+    prefer_non_forced: t("settings.audio.forced_prefer_non_forced"),
+    prefer_forced: t("settings.audio.forced_prefer_forced"),
+  };
+  const auto = prefs.auto_select ? t("settings.audio.summary_auto") : t("settings.audio.summary_manual");
+  const track = `${t("settings.audio.summary_track")}${SUBTITLE_MODE_LABEL[prefs.subtitle_mode]}`;
+  const search = `${t("settings.audio.summary_search")}${SDH_LABEL[prefs.sdh_search]}，${FORCED_LABEL[prefs.forced_search]}`;
+  return `${auto}${track}\n${search}`;
 }
 
 export default function SettingsPage() {
@@ -78,6 +76,40 @@ export default function SettingsPage() {
   const uiLocale = useAuthStore((s) => s.uiLocale);
   const playerPrefs = useAuthStore((s) => s.playerPrefs);
   const setProfile = useAuthStore((s) => s.setProfile);
+  const t = useT();
+
+  const UI_LOCALES = useMemo(() => languageOptions(), []);
+  const LANG_TRACKS = useMemo(() => buildTrackLangOptions(t), [t]);
+  const SUBTITLE_MODE_OPTS: { value: PlayerPrefs["subtitle_mode"]; label: string }[] = useMemo(
+    () => [
+      { value: "foreign", label: t("settings.audio.subtitle_mode_foreign") },
+      { value: "always", label: t("settings.audio.subtitle_mode_always") },
+      { value: "off", label: t("settings.audio.subtitle_mode_off") },
+    ],
+    [t]
+  );
+  const SDH_OPTS: { value: PlayerPrefs["sdh_search"]; label: string }[] = useMemo(
+    () => [
+      { value: "prefer_non_sdh", label: t("settings.audio.sdh_prefer_non_sdh") },
+      { value: "prefer_sdh", label: t("settings.audio.sdh_prefer_sdh") },
+    ],
+    [t]
+  );
+  const FORCED_OPTS: { value: PlayerPrefs["forced_search"]; label: string }[] = useMemo(
+    () => [
+      { value: "prefer_non_forced", label: t("settings.audio.forced_prefer_non_forced") },
+      { value: "prefer_forced", label: t("settings.audio.forced_prefer_forced") },
+    ],
+    [t]
+  );
+
+  const uiLocaleLabel = useCallback(
+    (code: string | null | undefined) => {
+      const resolved = resolveLocale(code);
+      return UI_LOCALES.find((x) => x.value === resolved)?.label || resolved;
+    },
+    [UI_LOCALES]
+  );
 
   const [edit, setEdit] = useState<EditMode>(null);
   const [loading, setLoading] = useState(false);
@@ -92,16 +124,16 @@ export default function SettingsPage() {
         playerPrefs: u.player_prefs ? normalizePlayerPrefs(u.player_prefs) : defaultPlayerPrefs(),
       });
     } catch {
-      message.error("无法加载账号信息");
+      message.error(t("settings.language.load_failure"));
     }
-  }, [setProfile]);
+  }, [setProfile, t]);
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
 
   const prefs = playerPrefs ?? defaultPlayerPrefs();
-  const loc = uiLocale || "zh";
+  const loc = resolveLocale(uiLocale);
 
   const [langDraft, setLangDraft] = useState(loc);
   useEffect(() => {
@@ -176,10 +208,10 @@ export default function SettingsPage() {
         uiLocale: u.ui_locale || null,
         playerPrefs: u.player_prefs ? normalizePlayerPrefs(u.player_prefs) : defaultPlayerPrefs(),
       });
-      message.success("头像已更新");
+      message.success(t("settings.avatar.saved"));
       setEdit(null);
     } catch {
-      message.error("上传失败");
+      message.error(t("settings.avatar.save_failed"));
     } finally {
       setLoading(false);
     }
@@ -190,10 +222,10 @@ export default function SettingsPage() {
     try {
       await deleteUserAvatar();
       await refresh();
-      message.success("已删除头像");
+      message.success(t("settings.avatar.deleted"));
       setEdit(null);
     } catch {
-      message.error("删除失败");
+      message.error(t("settings.avatar.delete_failed"));
     } finally {
       setLoading(false);
     }
@@ -210,10 +242,10 @@ export default function SettingsPage() {
         uiLocale: data.ui_locale,
         playerPrefs: normalizePlayerPrefs(data.player_prefs),
       });
-      message.success("语言已保存");
+      message.success(t("settings.language.success"));
       setEdit(null);
     } catch {
-      message.error("保存失败");
+      message.error(t("settings.language.failure"));
     } finally {
       setLoading(false);
     }
@@ -230,10 +262,10 @@ export default function SettingsPage() {
         uiLocale: u.ui_locale || null,
         playerPrefs: normalizePlayerPrefs(data.player_prefs),
       });
-      message.success("音频与字幕设置已保存");
+      message.success(t("settings.audio.success"));
       setEdit(null);
     } catch {
-      message.error("保存失败");
+      message.error(t("settings.audio.failure"));
     } finally {
       setLoading(false);
     }
@@ -255,10 +287,10 @@ export default function SettingsPage() {
         uiLocale: u.ui_locale || null,
         playerPrefs: normalizePlayerPrefs(data.player_prefs),
       });
-      message.success("字幕外观已保存");
+      message.success(t("settings.subtitle_appearance.success"));
       setEdit(null);
     } catch {
-      message.error("保存失败");
+      message.error(t("settings.subtitle_appearance.failure"));
     } finally {
       setLoading(false);
     }
@@ -266,22 +298,22 @@ export default function SettingsPage() {
 
   const savePassword = async () => {
     if (pw1.length < 6) {
-      message.warning("密码至少 6 位");
+      message.warning(t("settings.password.too_short"));
       return;
     }
     if (pw1 !== pw2) {
-      message.warning("两次输入的密码不一致");
+      message.warning(t("settings.password.mismatch"));
       return;
     }
     setLoading(true);
     try {
       await changeUserPassword(pw1, pw2);
-      message.success("密码已更新");
+      message.success(t("settings.password.success"));
       setPw1("");
       setPw2("");
       setEdit(null);
     } catch {
-      message.error("修改密码失败");
+      message.error(t("settings.password.failure"));
     } finally {
       setLoading(false);
     }
@@ -296,11 +328,11 @@ export default function SettingsPage() {
     <div className={`${styles.page} app-narrow-block`}>
       <div className={styles.row}>
         <div style={{ flex: 1 }}>
-          <div className={styles.label}>用户名 / 角色</div>
+          <div className={styles.label}>{t("settings.username_role_label")}</div>
           <div className={styles.value}>
             <strong>{username || "—"}</strong>
             {" · "}
-            {isAdminRole(role) ? "管理员" : "普通用户"}
+            {isAdminRole(role) ? t("settings.role_admin") : t("settings.role_user")}
           </div>
         </div>
       </div>
@@ -308,7 +340,7 @@ export default function SettingsPage() {
       {edit !== "avatar" ? (
         <div className={styles.row}>
           <div>
-            <div className={styles.label}>头像</div>
+            <div className={styles.label}>{t("settings.avatar.label")}</div>
             <div className={styles.avatarCircle}>
               {avatarUrl ? (
                 <img src={avatarUrl} alt="" />
@@ -330,15 +362,15 @@ export default function SettingsPage() {
             </div>
           </div>
           <button type="button" className={styles.edit} onClick={() => setEdit("avatar")}>
-            编辑
+            {t("common.edit")}
           </button>
         </div>
       ) : (
         <div className={styles.panel}>
           <div className={styles.panelHead}>
-            <span className={styles.panelTitle}>头像</span>
+            <span className={styles.panelTitle}>{t("settings.avatar.title")}</span>
             <button type="button" className={styles.cancel} onClick={() => setEdit(null)}>
-              取消
+              {t("common.cancel")}
             </button>
           </div>
           <div className={styles.avatarBody}>
@@ -358,7 +390,7 @@ export default function SettingsPage() {
                   />
                 ) : (
                   <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                    <span style={{ color: "#666", fontSize: 13 }}>请选择相片</span>
+                    <span style={{ color: "#666", fontSize: 13 }}>{t("settings.avatar.no_photo")}</span>
                   </div>
                 )}
               </div>
@@ -378,12 +410,12 @@ export default function SettingsPage() {
             <div className={styles.avatarSide}>
               <input ref={fileRef} type="file" accept="image/*" style={{ display: "none" }} onChange={onPickFile} />
               <button type="button" className={styles.selectPhoto} onClick={() => fileRef.current?.click()}>
-                选择相片
+                {t("settings.avatar.select_photo")}
               </button>
               <p className={styles.hint}>
-                您可以使用下方的滑块调整照片的比例，并通过在圆圈内拖动来调整裁剪。或者您可以{" "}
+                {t("settings.avatar.hint_part1")}
                 <button type="button" className={styles.link} onClick={() => void removeAvatar()}>
-                  删除您的个人资料图片。
+                  {t("settings.avatar.hint_part2")}
                 </button>
               </p>
             </div>
@@ -395,7 +427,7 @@ export default function SettingsPage() {
               disabled={!canSaveAvatar || loading}
               onClick={() => void saveAvatar()}
             >
-              保存修改
+              {t("settings.avatar.save")}
             </button>
           </div>
         </div>
@@ -404,27 +436,27 @@ export default function SettingsPage() {
       {edit !== "password" ? (
         <div className={styles.row}>
           <div>
-            <div className={styles.label}>密码</div>
-            <div className={styles.value}>已设置登录密码</div>
+            <div className={styles.label}>{t("settings.password.label")}</div>
+            <div className={styles.value}>{t("settings.password.value")}</div>
           </div>
           <button type="button" className={styles.edit} onClick={() => setEdit("password")}>
-            编辑
+            {t("common.edit")}
           </button>
         </div>
       ) : (
         <div className={styles.panel}>
           <div className={styles.panelHead}>
-            <span className={styles.panelTitle}>密码</span>
+            <span className={styles.panelTitle}>{t("settings.password.title")}</span>
             <button type="button" className={styles.cancel} onClick={() => setEdit(null)}>
-              取消
+              {t("common.cancel")}
             </button>
           </div>
           <p className={styles.hint} style={{ marginBottom: 16 }}>
-            设置新登录密码（至少 6 位）。保存后请使用新密码登录。
+            {t("settings.password.hint")}
           </p>
           <div className={styles.formStack}>
             <div>
-              <div className={styles.fieldLabel}>新密码</div>
+              <div className={styles.fieldLabel}>{t("settings.password.new_password")}</div>
               <input
                 className={styles.darkField}
                 type="password"
@@ -434,7 +466,7 @@ export default function SettingsPage() {
               />
             </div>
             <div>
-              <div className={styles.fieldLabel}>新密码确认</div>
+              <div className={styles.fieldLabel}>{t("settings.password.confirm_password")}</div>
               <input
                 className={styles.darkField}
                 type="password"
@@ -451,40 +483,41 @@ export default function SettingsPage() {
               disabled={loading || pw1.length < 6 || pw1 !== pw2}
               onClick={() => void savePassword()}
             >
-              保存修改
+              {t("settings.password.save")}
             </button>
           </div>
         </div>
       )}
 
-      <div className={styles.sectionBar}>设置</div>
+      <div className={styles.sectionBar}>{t("settings.page_section")}</div>
 
       {edit !== "language" ? (
         <div className={styles.row}>
           <div>
-            <div className={styles.label}>语言</div>
+            <div className={styles.label}>{t("settings.language.label")}</div>
             <div className={styles.value}>{uiLocaleLabel(loc)}</div>
           </div>
           <button type="button" className={styles.edit} onClick={() => setEdit("language")}>
-            编辑
+            {t("common.edit")}
           </button>
         </div>
       ) : (
         <div className={styles.panel}>
           <div className={styles.panelHead}>
-            <span className={styles.panelTitle}>语言</span>
+            <span className={styles.panelTitle}>{t("settings.language.title")}</span>
             <button type="button" className={styles.cancel} onClick={() => setEdit(null)}>
-              取消
+              {t("common.cancel")}
             </button>
           </div>
           <div className={styles.formStack}>
             <div>
-              <div className={styles.fieldLabel}>界面语言（将同步首选音轨 / 字幕语言）</div>
+              <div className={styles.fieldLabel}>{t("settings.language.field_label")}</div>
               <Select
                 style={selectDark}
                 value={langDraft}
                 options={UI_LOCALES}
                 onChange={(v) => setLangDraft(v)}
+                placeholder={t("settings.language.placeholder")}
                 popupMatchSelectWidth={false}
               />
             </div>
@@ -496,7 +529,7 @@ export default function SettingsPage() {
               disabled={loading}
               onClick={() => void saveLanguage()}
             >
-              保存修改
+              {t("settings.language.save")}
             </button>
           </div>
         </div>
@@ -505,23 +538,23 @@ export default function SettingsPage() {
       {edit !== "audio" ? (
         <div className={styles.row}>
           <div style={{ flex: 1 }}>
-            <div className={styles.label}>音频和字幕设置</div>
-            <div className={styles.value}>{summarizePlayerPrefs(prefs)}</div>
+            <div className={styles.label}>{t("settings.audio.label")}</div>
+            <div className={styles.value}>{summarizePlayerPrefsLocalized(prefs, t)}</div>
           </div>
           <button type="button" className={styles.edit} onClick={() => setEdit("audio")}>
-            编辑
+            {t("common.edit")}
           </button>
         </div>
       ) : (
         <div className={styles.panel}>
           <div className={styles.panelHead}>
-            <span className={styles.panelTitle}>音频和字幕设置</span>
+            <span className={styles.panelTitle}>{t("settings.audio.title")}</span>
             <button type="button" className={styles.cancel} onClick={() => setEdit(null)}>
-              取消
+              {t("common.cancel")}
             </button>
           </div>
           <p className={styles.hint} style={{ marginBottom: 16 }}>
-            这些设置决定了在播放器中如何选择音频和字幕轨。
+            {t("settings.audio.hint")}
           </p>
           <div className={styles.formStack}>
             <Checkbox
@@ -529,10 +562,10 @@ export default function SettingsPage() {
               checked={audioDraft.auto_select}
               onChange={(e) => setAudioDraft({ ...audioDraft, auto_select: e.target.checked })}
             >
-              自动选择音频及字幕曲目
+              {t("settings.audio.auto_select")}
             </Checkbox>
             <div>
-              <div className={styles.fieldLabel}>首选音频语言</div>
+              <div className={styles.fieldLabel}>{t("settings.audio.preferred_audio_lang")}</div>
               <Select
                 style={selectDark}
                 value={audioDraft.preferred_audio_lang || ""}
@@ -542,7 +575,7 @@ export default function SettingsPage() {
               />
             </div>
             <div>
-              <div className={styles.fieldLabel}>首选字幕语言</div>
+              <div className={styles.fieldLabel}>{t("settings.audio.preferred_subtitle_lang")}</div>
               <Select
                 style={selectDark}
                 value={audioDraft.preferred_subtitle_lang || ""}
@@ -552,7 +585,7 @@ export default function SettingsPage() {
               />
             </div>
             <div>
-              <div className={styles.fieldLabel}>自动选择字幕模式</div>
+              <div className={styles.fieldLabel}>{t("settings.audio.subtitle_mode")}</div>
               <Select
                 style={selectDark}
                 value={audioDraft.subtitle_mode}
@@ -562,7 +595,7 @@ export default function SettingsPage() {
               />
             </div>
             <div>
-              <div className={styles.fieldLabel}>适用于聋哑或听力障碍人士的字幕 (SDH) 搜索</div>
+              <div className={styles.fieldLabel}>{t("settings.audio.sdh_search")}</div>
               <Select
                 style={selectDark}
                 value={audioDraft.sdh_search}
@@ -572,7 +605,7 @@ export default function SettingsPage() {
               />
             </div>
             <div>
-              <div className={styles.fieldLabel}>强制字幕搜索</div>
+              <div className={styles.fieldLabel}>{t("settings.audio.forced_search")}</div>
               <Select
                 style={selectDark}
                 value={audioDraft.forced_search}
@@ -589,7 +622,7 @@ export default function SettingsPage() {
               disabled={loading}
               onClick={() => void saveAudio()}
             >
-              保存修改
+              {t("settings.audio.save")}
             </button>
           </div>
         </div>
@@ -598,33 +631,33 @@ export default function SettingsPage() {
       {edit !== "subtitle" ? (
         <div className={styles.row}>
           <div style={{ flex: 1 }}>
-            <div className={styles.label}>字幕外观</div>
+            <div className={styles.label}>{t("settings.subtitle_appearance.label")}</div>
             <div className={styles.value}>{summarizeSubtitleAppearance(prefs.subtitle_appearance)}</div>
           </div>
           <button type="button" className={styles.edit} onClick={() => setEdit("subtitle")}>
-            编辑
+            {t("common.edit")}
           </button>
         </div>
       ) : (
         <div className={styles.panel}>
           <div className={styles.panelHead}>
-            <span className={styles.panelTitle}>字幕外观</span>
+            <span className={styles.panelTitle}>{t("settings.subtitle_appearance.title")}</span>
             <button type="button" className={styles.cancel} onClick={() => setEdit(null)}>
-              取消
+              {t("common.cancel")}
             </button>
           </div>
 
           <div className={styles.previewFrame}>
             <div className={styles.previewInner}>
-              <span style={previewSubtitleBoxStyle(subtitleDraft)}>这些设置会影响此设备上的字幕</span>
+              <span style={previewSubtitleBoxStyle(subtitleDraft)}>{t("settings.subtitle_appearance.preview_text")}</span>
             </div>
           </div>
           <p className={styles.hint} style={{ marginBottom: 16 }}>
-            这些设置不适用于图形字幕（PGS、DVD 等）以及有其自己内嵌样式的字幕（ASS/SSA）。
+            {t("settings.subtitle_appearance.hint")}
           </p>
           <div className={styles.formStack}>
             <div>
-              <div className={styles.fieldLabel}>文本大小</div>
+              <div className={styles.fieldLabel}>{t("settings.subtitle_appearance.text_size")}</div>
               <Select
                 style={selectDark}
                 value={subtitleDraft.text_size}
@@ -633,7 +666,7 @@ export default function SettingsPage() {
               />
             </div>
             <div>
-              <div className={styles.fieldLabel}>文本颜色</div>
+              <div className={styles.fieldLabel}>{t("settings.subtitle_appearance.text_color")}</div>
               <Select
                 style={selectDark}
                 value={subtitleDraft.text_color}
@@ -642,7 +675,7 @@ export default function SettingsPage() {
               />
             </div>
             <div>
-              <div className={styles.fieldLabel}>投影</div>
+              <div className={styles.fieldLabel}>{t("settings.subtitle_appearance.shadow")}</div>
               <Select
                 style={selectDark}
                 value={subtitleDraft.shadow}
@@ -651,7 +684,7 @@ export default function SettingsPage() {
               />
             </div>
             <div>
-              <div className={styles.fieldLabel}>背景色</div>
+              <div className={styles.fieldLabel}>{t("settings.subtitle_appearance.bg_color")}</div>
               <Select
                 style={selectDark}
                 value={subtitleDraft.bg_color}
@@ -660,7 +693,7 @@ export default function SettingsPage() {
               />
             </div>
             <div>
-              <div className={styles.fieldLabel}>背景不透明度</div>
+              <div className={styles.fieldLabel}>{t("settings.subtitle_appearance.bg_opacity")}</div>
               <Select
                 style={selectDark}
                 value={subtitleDraft.bg_opacity}
@@ -672,11 +705,11 @@ export default function SettingsPage() {
           </div>
 
           <h3 className={styles.sectionHeading} style={{ marginTop: 20 }}>
-            字幕位置
+            {t("settings.subtitle_appearance.section_position")}
           </h3>
           <div className={styles.formStack}>
             <div>
-              <div className={styles.fieldLabel}>底部边缘位置</div>
+              <div className={styles.fieldLabel}>{t("settings.subtitle_appearance.pos_bottom")}</div>
               <Select
                 style={selectDark}
                 value={subtitleDraft.pos_bottom}
@@ -684,11 +717,11 @@ export default function SettingsPage() {
                 onChange={(v) => setSubtitleDraft({ ...subtitleDraft, pos_bottom: v })}
               />
               <p className={styles.hint} style={{ marginTop: 6 }}>
-                设置字幕相对于屏幕底部的垂直位置。
+                {t("settings.subtitle_appearance.pos_bottom_hint")}
               </p>
             </div>
             <div>
-              <div className={styles.fieldLabel}>顶部边缘位置</div>
+              <div className={styles.fieldLabel}>{t("settings.subtitle_appearance.pos_top")}</div>
               <Select
                 style={selectDark}
                 value={subtitleDraft.pos_top}
@@ -696,7 +729,7 @@ export default function SettingsPage() {
                 onChange={(v) => setSubtitleDraft({ ...subtitleDraft, pos_top: v })}
               />
               <p className={styles.hint} style={{ marginTop: 6 }}>
-                设置字幕相对于屏幕顶部允许的最高垂直位置。当字幕包含要放置在顶部的定位指令时使用此功能。
+                {t("settings.subtitle_appearance.pos_top_hint")}
               </p>
             </div>
           </div>
@@ -707,17 +740,15 @@ export default function SettingsPage() {
               disabled={loading}
               onClick={() => void saveSubtitleAppearance()}
             >
-              保存修改
+              {t("settings.subtitle_appearance.save")}
             </button>
           </div>
         </div>
       )}
 
       <p className={styles.footnote}>
-        {isAdminRole(role)
-          ? "管理员可使用侧边栏「媒体库」「上传」「控制台」进行管理与运维。"
-          : "您可「浏览媒体」「我的收藏」与播放；媒体库与上传由管理员维护。"}{" "}
-        生产环境请在服务器 config.yml 中修改 JWT 密钥；勿共享管理员账号。
+        {isAdminRole(role) ? t("settings.footnote_admin") : t("settings.footnote_user")}{" "}
+        {t("settings.footnote_warning")}
       </p>
     </div>
   );
