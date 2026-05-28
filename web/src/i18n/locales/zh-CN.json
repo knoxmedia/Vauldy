@@ -508,6 +508,34 @@
       "stat_token_count": "Token 消耗",
       "stat_last_used": "最近使用"
     },
+    "series_browse": {
+      "load_failed": "加载剧集失败",
+      "cannot_play": "无法播放该剧集",
+      "search_placeholder": "搜索剧集…",
+      "sort_title": "按标题",
+      "sort_year": "按年份",
+      "sort_episodes": "按集数",
+      "library_count": "{count} 部剧集",
+      "no_series": "暂无剧集，请先扫描电视节目库",
+      "unnamed": "未命名",
+      "card_view_label": "{title}，查看详情",
+      "card_edit": "编辑",
+      "card_play": "播放",
+      "episode_count": "{count} 集"
+    },
+    "genre_detail": {
+      "invalid_link": "无效的流派链接",
+      "no_albums_in_genre": "该流派暂无专辑",
+      "back_to_library": "返回资料库",
+      "kind_genre": "流派",
+      "albums_count": "{count} 张专辑",
+      "tracks_count": "{count} 首曲目",
+      "play": "播放",
+      "more_aria": "更多",
+      "albums_section": "{count} 专辑",
+      "various_artists": "Various Artists",
+      "col_album_artist": "专辑艺人"
+    },
     "artist_detail": {
       "not_found": "艺人不存在",
       "back_to_library": "返回资料库",

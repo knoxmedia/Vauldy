@@ -508,6 +508,34 @@
       "stat_token_count": "トークン消費",
       "stat_last_used": "最終使用"
     },
+    "series_browse": {
+      "load_failed": "シリーズの読み込みに失敗しました",
+      "cannot_play": "このシリーズを再生できません",
+      "search_placeholder": "シリーズを検索…",
+      "sort_title": "タイトル順",
+      "sort_year": "年順",
+      "sort_episodes": "エピソード数順",
+      "library_count": "{count} 件のシリーズ",
+      "no_series": "シリーズがありません。先に TV ライブラリをスキャンしてください。",
+      "unnamed": "無題",
+      "card_view_label": "{title}、詳細を表示",
+      "card_edit": "編集",
+      "card_play": "再生",
+      "episode_count": "{count} 話"
+    },
+    "genre_detail": {
+      "invalid_link": "無効なジャンルリンク",
+      "no_albums_in_genre": "このジャンルにはアルバムがありません",
+      "back_to_library": "ライブラリに戻る",
+      "kind_genre": "ジャンル",
+      "albums_count": "{count} 枚のアルバム",
+      "tracks_count": "{count} 曲",
+      "play": "再生",
+      "more_aria": "その他",
+      "albums_section": "{count} アルバム",
+      "various_artists": "Various Artists",
+      "col_album_artist": "アルバムアーティスト"
+    },
     "artist_detail": {
       "not_found": "アーティストが見つかりません",
       "back_to_library": "ライブラリに戻る",

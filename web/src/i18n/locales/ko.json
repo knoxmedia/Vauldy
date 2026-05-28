@@ -508,6 +508,34 @@
       "stat_token_count": "토큰 사용량",
       "stat_last_used": "마지막 사용"
     },
+    "series_browse": {
+      "load_failed": "시리즈를 불러오지 못했습니다",
+      "cannot_play": "이 시리즈를 재생할 수 없습니다",
+      "search_placeholder": "시리즈 검색…",
+      "sort_title": "제목순",
+      "sort_year": "연도순",
+      "sort_episodes": "에피소드 수순",
+      "library_count": "시리즈 {count}편",
+      "no_series": "시리즈가 없습니다. 먼저 TV 라이브러리를 스캔하세요.",
+      "unnamed": "제목 없음",
+      "card_view_label": "{title}, 자세히 보기",
+      "card_edit": "편집",
+      "card_play": "재생",
+      "episode_count": "{count}화"
+    },
+    "genre_detail": {
+      "invalid_link": "잘못된 장르 링크",
+      "no_albums_in_genre": "이 장르에는 앨범이 없습니다",
+      "back_to_library": "라이브러리로 돌아가기",
+      "kind_genre": "장르",
+      "albums_count": "{count}개 앨범",
+      "tracks_count": "{count}개 트랙",
+      "play": "재생",
+      "more_aria": "더 보기",
+      "albums_section": "{count}개 앨범",
+      "various_artists": "Various Artists",
+      "col_album_artist": "앨범 아티스트"
+    },
     "artist_detail": {
       "not_found": "아티스트를 찾을 수 없습니다",
       "back_to_library": "라이브러리로 돌아가기",

@@ -12,6 +12,7 @@ import {
 import SeriesEditModal from "../components/SeriesEditModal";
 import { fetchSeriesEpisodeMediaOrder } from "../lib/seriesEpisodeOrder";
 import { storeSeriesPlaySession } from "../lib/seriesPlayback";
+import { useT, type TranslateFn } from "../i18n";
 import styles from "./Browse.module.css";
 
 type Props = {
@@ -20,13 +21,14 @@ type Props = {
   onEmpty?: () => void;
 };
 
-function fmtEpisodeCount(n?: number): string {
+function fmtEpisodeCount(n: number | undefined, t: TranslateFn): string {
   if (n == null || n <= 0) return "";
-  return `${n} 集`;
+  return t("pages.series_browse.episode_count", { count: n });
 }
 
 export default function SeriesBrowse({ libraryId, libraryName, onEmpty }: Props) {
   const nav = useNavigate();
+  const t = useT();
   const [rows, setRows] = useState<SeriesSummary[]>([]);
   const [loading, setLoading] = useState(false);
   const [q, setQ] = useState("");
@@ -47,7 +49,7 @@ export default function SeriesBrowse({ libraryId, libraryName, onEmpty }: Props)
         }
         setRows(items);
       } catch (e: unknown) {
-        if (!cancelled) message.error((e as Error).message || "加载剧集失败");
+        if (!cancelled) message.error((e as Error).message || t("pages.series_browse.load_failed"));
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -93,7 +95,7 @@ export default function SeriesBrowse({ libraryId, libraryName, onEmpty }: Props)
       const pos = target.position > 0 ? `&t=${target.position}` : "";
       nav(`/player/${target.media_id}?series_id=${seriesId}&index=${idx}${pos}`);
     } catch (e: unknown) {
-      message.error((e as Error).message || "无法播放该剧集");
+      message.error((e as Error).message || t("pages.series_browse.cannot_play"));
     } finally {
       setPlayingId(null);
     }
@@ -111,7 +113,7 @@ export default function SeriesBrowse({ libraryId, libraryName, onEmpty }: Props)
         <Space wrap className={styles.topLeftTools}>
           <Input.Search
             allowClear
-            placeholder="搜索剧集…"
+            placeholder={t("pages.series_browse.search_placeholder")}
             value={q}
             onChange={(e) => setQ(e.target.value)}
             style={{ width: 220 }}
@@ -121,16 +123,16 @@ export default function SeriesBrowse({ libraryId, libraryName, onEmpty }: Props)
             value={sortField}
             onChange={setSortField}
             options={[
-              { value: "title", label: "按标题" },
-              { value: "year", label: "按年份" },
-              { value: "episodes", label: "按集数" },
+              { value: "title", label: t("pages.series_browse.sort_title") },
+              { value: "year", label: t("pages.series_browse.sort_year") },
+              { value: "episodes", label: t("pages.series_browse.sort_episodes") },
             ]}
             style={{ width: 120 }}
           />
         </Space>
         <div style={{ color: "rgba(255,255,255,0.55)", fontSize: 13 }}>
           {libraryName ? `${libraryName} · ` : ""}
-          {filtered.length} 部剧集
+          {t("pages.series_browse.library_count", { count: filtered.length })}
         </div>
       </div>
 
@@ -139,7 +141,7 @@ export default function SeriesBrowse({ libraryId, libraryName, onEmpty }: Props)
           <Spin />
         </div>
       ) : filtered.length === 0 ? (
-        <Empty description="暂无剧集，请先扫描电视节目库" />
+        <Empty description={t("pages.series_browse.no_series")} />
       ) : (
         <div className={styles.posterGrid}>
           {filtered.map((s) => {
@@ -151,7 +153,7 @@ export default function SeriesBrowse({ libraryId, libraryName, onEmpty }: Props)
                   className={styles.posterImage}
                   role="button"
                   tabIndex={0}
-                  aria-label={`${s.title || "未命名"}，查看详情`}
+                  aria-label={t("pages.series_browse.card_view_label", { title: s.title || t("pages.series_browse.unnamed") })}
                   onClick={(e) => {
                     if ((e.target as HTMLElement).closest("[data-series-card-action]")) return;
                     nav(`/series/${s.id}`);
@@ -172,7 +174,7 @@ export default function SeriesBrowse({ libraryId, libraryName, onEmpty }: Props)
                       type="button"
                       data-series-card-action
                       className={`${styles.gridCornerBtn} ${styles.gridEditBtn}`}
-                      aria-label="编辑"
+                      aria-label={t("pages.series_browse.card_edit")}
                       onClick={(e) => {
                         e.stopPropagation();
                         setEditSeries(s);
@@ -184,7 +186,7 @@ export default function SeriesBrowse({ libraryId, libraryName, onEmpty }: Props)
                       type="button"
                       data-series-card-action
                       className={styles.gridPlayBtn}
-                      aria-label="播放"
+                      aria-label={t("pages.series_browse.card_play")}
                       disabled={playBusy}
                       onClick={(e) => {
                         e.stopPropagation();
@@ -198,7 +200,7 @@ export default function SeriesBrowse({ libraryId, libraryName, onEmpty }: Props)
                 <div className={styles.cardBody}>
                   <div className={styles.cardTitle}>{s.title}</div>
                   <div style={{ fontSize: 12, color: "rgba(255,255,255,0.45)", marginTop: 4 }}>
-                    {[s.year && s.year > 0 ? String(s.year) : null, fmtEpisodeCount(s.episode_count)]
+                    {[s.year && s.year > 0 ? String(s.year) : null, fmtEpisodeCount(s.episode_count, t)]
                       .filter(Boolean)
                       .join(" · ")}
                   </div>

@@ -508,6 +508,34 @@
       "stat_token_count": "Token 消耗",
       "stat_last_used": "最近使用"
     },
+    "series_browse": {
+      "load_failed": "載入影集失敗",
+      "cannot_play": "無法播放此影集",
+      "search_placeholder": "搜尋影集…",
+      "sort_title": "依標題",
+      "sort_year": "依年份",
+      "sort_episodes": "依集數",
+      "library_count": "{count} 部影集",
+      "no_series": "尚無影集，請先掃描電視節目庫",
+      "unnamed": "未命名",
+      "card_view_label": "{title}，檢視詳情",
+      "card_edit": "編輯",
+      "card_play": "播放",
+      "episode_count": "{count} 集"
+    },
+    "genre_detail": {
+      "invalid_link": "無效的類型連結",
+      "no_albums_in_genre": "該類型暫無專輯",
+      "back_to_library": "返回資料庫",
+      "kind_genre": "類型",
+      "albums_count": "{count} 張專輯",
+      "tracks_count": "{count} 首曲目",
+      "play": "播放",
+      "more_aria": "更多",
+      "albums_section": "{count} 專輯",
+      "various_artists": "Various Artists",
+      "col_album_artist": "專輯藝人"
+    },
     "artist_detail": {
       "not_found": "藝人不存在",
       "back_to_library": "返回資料庫",

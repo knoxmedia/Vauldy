@@ -508,6 +508,34 @@
       "stat_token_count": "Tokens",
       "stat_last_used": "Last used"
     },
+    "series_browse": {
+      "load_failed": "Failed to load series",
+      "cannot_play": "Cannot play this series",
+      "search_placeholder": "Search series…",
+      "sort_title": "By title",
+      "sort_year": "By year",
+      "sort_episodes": "By episode count",
+      "library_count": "{count} series",
+      "no_series": "No series. Please scan the TV library first.",
+      "unnamed": "Untitled",
+      "card_view_label": "{title}, view details",
+      "card_edit": "Edit",
+      "card_play": "Play",
+      "episode_count": "{count} episodes"
+    },
+    "genre_detail": {
+      "invalid_link": "Invalid genre link",
+      "no_albums_in_genre": "No albums for this genre",
+      "back_to_library": "Back to library",
+      "kind_genre": "Genre",
+      "albums_count": "{count} albums",
+      "tracks_count": "{count} tracks",
+      "play": "Play",
+      "more_aria": "More",
+      "albums_section": "{count} albums",
+      "various_artists": "Various Artists",
+      "col_album_artist": "Album artist"
+    },
     "artist_detail": {
       "not_found": "Artist not found",
       "back_to_library": "Back to library",
