@@ -36,6 +36,7 @@ import {
 } from "../lib/seriesPlayback";
 import { buildTextTrackListWithPrefs, normalizePlayerPrefs } from "../lib/playerPrefs";
 import { applyKnoxSubtitleCssVars, buildXgTexttrackStyle } from "../lib/subtitleAppearance";
+import { tGlobal, useT } from "../i18n";
 
 /** fetch that aborts after timeoutMs (clears hung UI when backend blocks). */
 async function fetchWithTimeout(
@@ -333,18 +334,18 @@ function playbackForbiddenMessage(code: string): string {
   const c = (code || "").trim().toLowerCase();
   switch (c) {
     case "playback denied":
-      return "当前账号未开通播放权限，请联系管理员在「用户管理 → 基本属性 → 操作权限」中开启「播放」。";
+      return tGlobal("pages.player.denied_play_perm");
     case "library access denied":
-      return "无权播放：该内容所属媒体库不在您的访问范围内。";
+      return tGlobal("pages.player.denied_library");
     case "folder access denied":
-      return "无权播放：该文件所在文件夹未对您共享，请联系管理员检查文件夹权限。";
+      return tGlobal("pages.player.denied_folder");
     case "outside parental allowed time":
-      return "当前不在家长控制允许的观看时段内。";
+      return tGlobal("pages.player.denied_time");
     case "parental pin required":
-      return "需要家长 PIN 才能播放此分级内容。";
+      return tGlobal("pages.player.denied_pin");
     default:
-      if (!code) return "播放被拒绝（403），请重新登录或联系管理员。";
-      return `播放被拒绝：${code}`;
+      if (!code) return tGlobal("pages.player.denied_default");
+      return tGlobal("pages.player.denied_with_code", { code });
   }
 }
 
@@ -487,6 +488,7 @@ async function detectClientCaps(): Promise<ClientCaps> {
 }
 
 export default function PlayerPage() {
+  const t = useT();
   const { id } = useParams();
   const [searchParams] = useSearchParams();
   const searchParamsRef = useRef(searchParams);
@@ -512,7 +514,7 @@ export default function PlayerPage() {
   const token = useAuthStore((s) => s.token);
   const canPlay = useAuthStore((s) => s.canPlay);
   const [showBack, setShowBack] = useState(true);
-  const [loadingText, setLoadingText] = useState("正在准备播放...");
+  const [loadingText, setLoadingText] = useState(() => tGlobal("pages.player.preparing"));
   const [parentalUnlockToken, setParentalUnlockToken] = useState<string>("");
   const [transcodeProgress, setTranscodeProgress] = useState<number>(0);
   const [transcodeStatus, setTranscodeStatus] = useState<"waiting" | "running" | null>(null);
@@ -555,19 +557,17 @@ export default function PlayerPage() {
 
   useEffect(() => {
     if (!mid || Number.isNaN(mid)) {
-      setLoadingText("缺少媒体 ID，无法播放。");
+      setLoadingText(t("pages.player.no_media_id"));
       return;
     }
     if (!token) {
-      setLoadingText("等待登录…");
+      setLoadingText(t("pages.player.waiting_login"));
       return;
     }
     if (canPlay === false) {
       setTranscodeStatus(null);
-      setLoadingText("当前账号未开通播放权限");
-      message.warning(
-        "当前账号未开通播放权限。请在「用户管理」中为该用户开启「播放」，或联系管理员处理。"
-      );
+      setLoadingText(t("pages.player.no_play_perm_title"));
+      message.warning(t("pages.player.no_play_perm_detail"));
       return;
     }
     const sessionGen = ++playbackGenerationRef.current;
@@ -737,16 +737,16 @@ export default function PlayerPage() {
         clearPlaylistPlaySession();
         setPlaylistFinished(true);
         setShowBack(true);
-        message.info("播放列表已播放完毕");
+        message.info(t("pages.player.playlist_done"));
       } else if (!advanced && isSeriesPlaybackFinished(params, mid)) {
         clearSeriesPlaySession();
         setSeriesFinished(true);
         setShowBack(true);
-        message.info("已播放完所有可用集数");
+        message.info(t("pages.player.series_done"));
       } else if (!advanced && isAlbumPlaybackFinished(params, mid)) {
         clearAlbumPlaySession();
         setShowBack(true);
-        message.info("专辑已播放完毕");
+        message.info(t("pages.player.album_done"));
       }
     };
 
@@ -992,7 +992,7 @@ export default function PlayerPage() {
         if (sourceFallbackTriedRef.current || !mid) return;
         sourceFallbackTriedRef.current = true;
         setTranscodeStatus(null);
-        setLoadingText("DRM 播放失败，正在回退到源文件播放...");
+        setLoadingText(t("pages.player.drm_fallback"));
         const sourceURL = appendToken(`/api/v1/media/${mid}/play?prefer_source=1`);
         void fetchPreviewPlan().then(async (previewPlan) => {
           await playWithURL(sourceURL, previewPlan);
@@ -1108,9 +1108,7 @@ export default function PlayerPage() {
       let chosen = pickPlaybackEngine(engineOrder, { hasWidevineFairplay, powerDRMOnly });
       if (chosen === null) {
         if (powerDRMOnly) {
-          throw new Error(
-            "未加载 PowerPlayer，无法播放 PowerDRM 内容。请将 powerplayer.min.js 部署到 /static/powerplayer6/ 并刷新页面。"
-          );
+          throw new Error(t("pages.player.no_powerplayer"));
         }
         chosen = hasWidevineFairplay ? "shaka" : "xgplayer";
       }
@@ -1293,7 +1291,7 @@ export default function PlayerPage() {
         const definitionList = isJitMaster ? [] : await fetchHlsDefinitions(url);
         if (definitionList.length > 0) {
           options.definition = {
-            list: [{ definition: "auto", text: "自动", url }, ...definitionList],
+            list: [{ definition: "auto", text: t("pages.player.definition_auto"), url }, ...definitionList],
             defaultDefinition: "auto",
           };
         }
@@ -1317,7 +1315,7 @@ export default function PlayerPage() {
         if (sourceFallbackTriedRef.current || !mid) return;
         sourceFallbackTriedRef.current = true;
         setTranscodeStatus(null);
-        setLoadingText("当前设备不支持该流，正在回退到源文件播放...");
+        setLoadingText(t("pages.player.device_unsupported_fallback"));
         const sourceURL = appendToken(`/api/v1/media/${mid}/play?prefer_source=1`);
         void fetchPreviewPlan().then(async (previewPlan) => {
           await playWithURL(sourceURL, previewPlan);
@@ -1401,7 +1399,7 @@ export default function PlayerPage() {
       if (state.failed) {
         const fallbackURL = appendToken(fallback || `/api/v1/media/${mid}/play`);
         setTranscodeStatus(null);
-        setLoadingText("转码失败，正在回退到原始播放...");
+        setLoadingText(t("pages.player.transcode_failed_fallback"));
         const preview = await fetchPreviewPlan();
         const meta = playbackPlanMetaRef.current;
         await playWithURL(fallbackURL, preview, {
@@ -1416,7 +1414,7 @@ export default function PlayerPage() {
         setTranscodeStatus(state.status);
       }
       setTranscodeProgress(progress);
-      setLoadingText(`正在实时转码为 HLS 自适应流（${progress}%），请稍候...`);
+      setLoadingText(t("pages.player.transcoding_progress", { percent: progress }));
       const nextDelay = state.poll_after_ms && state.poll_after_ms > 0 ? state.poll_after_ms : 1800;
       timer = window.setTimeout(() => {
         void pollTaskStatus(taskId, fallback);
@@ -1447,8 +1445,8 @@ export default function PlayerPage() {
           const pin = await new Promise<string>((resolve) => {
             const id = `parental-pin-${Date.now()}`;
             Modal.confirm({
-              title: "请输入家长 PIN",
-              content: <Input.Password id={id} placeholder="家长 PIN" autoFocus />,
+              title: t("pages.player.pin_prompt_title"),
+              content: <Input.Password id={id} placeholder={t("pages.player.pin_prompt_placeholder")} autoFocus />,
               onOk: () => {
                 const el = document.getElementById(id) as HTMLInputElement | null;
                 resolve((el?.value || "").trim());
@@ -1457,7 +1455,7 @@ export default function PlayerPage() {
             });
           });
           if (!pin) {
-            throw new Error("需要家长 PIN 才能播放");
+            throw new Error(t("pages.player.pin_required_play"));
           }
           const unlockResp = await fetch("/api/v1/user/parental/unlock", {
             method: "POST",
@@ -1468,14 +1466,14 @@ export default function PlayerPage() {
             body: JSON.stringify({ media_id: mid, pin }),
           });
           if (!unlockResp.ok) {
-            throw new Error("家长 PIN 验证失败");
+            throw new Error(t("pages.player.pin_verify_failed"));
           }
           const unlock = (await unlockResp.json()) as { unlock_token?: string };
           if (!unlock.unlock_token) {
-            throw new Error("家长控制解锁失败");
+            throw new Error(t("pages.player.parental_unlock_failed"));
           }
           setParentalUnlockToken(unlock.unlock_token);
-          message.success("已临时解锁受限内容");
+          message.success(t("pages.player.parental_unlocked"));
           timer = window.setTimeout(() => void resolvePlan(), 10);
           return;
         }
@@ -1502,7 +1500,7 @@ export default function PlayerPage() {
           if (isStale()) return;
           const sid = typeof plan.session_id === "string" ? plan.session_id.trim() : "";
           jitPlaybackSessionIdRef.current = sid || null;
-          setLoadingText("正在连接即时播放…");
+          setLoadingText(t("pages.player.connecting_jit"));
           const preview = await fetchPreviewPlan();
           await playWithURL(appendToken(plan.hls_master), preview, {
             engineOrder: coalesceEngineOrder(plan),
@@ -1529,7 +1527,7 @@ export default function PlayerPage() {
           await pollTaskStatus(plan.task_id, plan.fallback);
           return;
         }
-        setLoadingText("正在准备转码任务，请稍候...");
+        setLoadingText(t("pages.player.preparing_transcode"));
         timer = window.setTimeout(() => void resolvePlan(), 1200);
         return;
       }
@@ -1552,7 +1550,7 @@ export default function PlayerPage() {
       }
       dbgErr("resolvePlan failed; fallback to source", err);
       setTranscodeStatus(null);
-      setLoadingText("播放准备失败，正在尝试原始播放...");
+      setLoadingText(t("pages.player.play_prep_failed"));
       void fetchPreviewPlan().then(async (preview) => {
         try {
           await playWithURL(appendToken(`/api/v1/media/${mid}/play`), preview);
@@ -1625,7 +1623,7 @@ export default function PlayerPage() {
             type="text"
             icon={<ArrowLeftOutlined style={{ fontSize: 18, color: "#fff" }} />}
             onClick={() => goBackFromPlayer()}
-            aria-label="返回上一页"
+            aria-label={t("pages.player.aria_back")}
             style={{
               width: 40,
               height: 40,
@@ -1665,7 +1663,7 @@ export default function PlayerPage() {
                   }}
                 >
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-                    <div style={{ color: "#fff", fontSize: 15, fontWeight: 600 }}>正在转码</div>
+                    <div style={{ color: "#fff", fontSize: 15, fontWeight: 600 }}>{t("pages.player.transcoding_label")}</div>
                     <Tag color={transcodeStatus === "running" ? "processing" : "gold"}>
                       {transcodeStatus === "running" ? "running" : "waiting"}
                     </Tag>
@@ -1707,8 +1705,8 @@ export default function PlayerPage() {
                   boxShadow: "0 10px 28px rgba(0,0,0,0.45)",
                 }}
               >
-                <div style={{ color: "#fff", fontSize: 18, fontWeight: 600, marginBottom: 8 }}>播放列表已播放完毕</div>
-                <div style={{ color: "#aaa", fontSize: 13, marginBottom: 20 }}>当前列表中的所有项目均已播放完成</div>
+                <div style={{ color: "#fff", fontSize: 18, fontWeight: 600, marginBottom: 8 }}>{t("pages.player.playlist_done_title")}</div>
+                <div style={{ color: "#aaa", fontSize: 13, marginBottom: 20 }}>{t("pages.player.playlist_done_detail")}</div>
                 <Button
                   type="primary"
                   onClick={() => {
@@ -1720,7 +1718,7 @@ export default function PlayerPage() {
                     nav(-1);
                   }}
                 >
-                  返回播放列表
+                  {t("pages.player.back_to_playlist")}
                 </Button>
               </div>
             </div>
@@ -1748,8 +1746,8 @@ export default function PlayerPage() {
                   boxShadow: "0 10px 28px rgba(0,0,0,0.45)",
                 }}
               >
-                <div style={{ color: "#fff", fontSize: 18, fontWeight: 600, marginBottom: 8 }}>已播放完所有可用集数</div>
-                <div style={{ color: "#aaa", fontSize: 13, marginBottom: 20 }}>当前剧集中没有更多可播放的分集</div>
+                <div style={{ color: "#fff", fontSize: 18, fontWeight: 600, marginBottom: 8 }}>{t("pages.player.series_done_title")}</div>
+                <div style={{ color: "#aaa", fontSize: 13, marginBottom: 20 }}>{t("pages.player.series_done_detail")}</div>
                 <Button
                   type="primary"
                   onClick={() => {
@@ -1761,14 +1759,14 @@ export default function PlayerPage() {
                     nav(-1);
                   }}
                 >
-                  返回剧集详情
+                  {t("pages.player.back_to_series")}
                 </Button>
               </div>
             </div>
           ) : null}
         </>
       ) : (
-        <div style={{ color: "#bbb", padding: 24 }}>缺少媒体 ID，无法播放。</div>
+        <div style={{ color: "#bbb", padding: 24 }}>{t("pages.player.no_media_id_short")}</div>
       )}
     </div>
   );
