@@ -1109,7 +1109,7 @@ Config file: `config.yml` (override path with `KNOX_MEDIA_CONFIG` env var).
 
 ### Roadmap
 
-From `[docs/TODO.MD](./docs/TODO.MD)`, with gaps filled from **Plex / Emby / Jellyfin / Norwen-Video** feature comparison (no product tier split). See **Implemented Features** above for what already ships.
+Roadmap items are organized by capability (no product tier split), with gaps identified from **Plex / Emby / Jellyfin / Norwen-Video** feature comparison. See **Implemented Features** above for what already ships.
 
 
 | Area                       | Status          | Description                                                                                                 |
