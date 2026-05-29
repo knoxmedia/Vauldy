@@ -2,18 +2,16 @@
 
 **Knox 全媒体平台 · 轻量级家庭媒体服务器** / *Lightweight home media server for the Knox omnimedia platform*
 
-[![Go](https://img.shields.io/badge/Go-1.22-00ADD8?logo=go)](https://go.dev)
-[![React](https://img.shields.io/badge/React-19-61DAFB?logo=react)](https://react.dev)
-[![TypeScript](https://img.shields.io/badge/TypeScript-6.0-3178C6?logo=typescript)](https://www.typescriptlang.org)
-[![SQLite](https://img.shields.io/badge/SQLite-3-003B57?logo=sqlite)](https://sqlite.org)
-[![Docker](https://img.shields.io/badge/Docker-✓-2496ED?logo=docker)](https://docker.com)
-[![License](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
+[Go](https://go.dev)
+[React](https://react.dev)
+[TypeScript](https://www.typescriptlang.org)
+[SQLite](https://sqlite.org)
+[Docker](https://docker.com)
+[License](./LICENSE)
 
 [中文](#中文) · [English](#english)
 
 ---
-
-<a id="中文"></a>
 
 ## 中文
 
@@ -21,37 +19,43 @@
 
 **Knox-Media** 是 Knox 全媒体平台的媒体子系统，采用 **Go + React** 构建，定位为轻量级家庭/个人媒体中心，对标 Jellyfin、Emby 等产品的核心体验。系统可独立部署，也可作为微服务供 Knox 其他模块通过 REST API 调用。
 
-| 项目 | 说明 |
-|------|------|
-| 后端 | Go 1.22 · Gin · SQLite · Redis（可选） |
-| 前端 | React 19 · TypeScript · Ant Design 6 · Vite 8 |
-| 媒体引擎 | FFmpeg / FFprobe · Shaka Packager |
-| 默认端口 | `8200` |
-| 运行环境 | Windows / Linux / macOS / Docker |
+
+| 项目   | 说明                                            |
+| ---- | --------------------------------------------- |
+| 后端   | Go 1.22 · Gin · SQLite · Redis（可选）            |
+| 前端   | React 19 · TypeScript · Ant Design 6 · Vite 8 |
+| 媒体引擎 | FFmpeg / FFprobe · Shaka Packager             |
+| 默认端口 | `8200`                                        |
+| 运行环境 | Windows / Linux / macOS / Docker              |
+
 
 **默认演示账号**（首次启动自动创建，生产环境请立即修改）：
 
-| 用户名 | 密码 | 角色 |
-|--------|------|------|
-| `admin` | `admin123` | 管理员 |
+
+| 用户名      | 密码          | 角色   |
+| -------- | ----------- | ---- |
+| `admin`  | `admin123`  | 管理员  |
 | `viewer` | `viewer123` | 普通用户 |
+
 
 ---
 
 ### 功能矩阵
 
-| 功能域 | 核心能力 |
-|--------|----------|
-| 📁 媒体库 | 电影 · 剧集 · 动漫 · 音乐 · 图片 · 文档，多路径多库管理，各类型均有专属浏览/播放或阅读 UI |
-| ▶️ 播放引擎 | 直链 MP4 · HLS/DASH 自适应转码 · JIT 按需切片 · 音乐全局播放器 · 多播放器引擎自动切换 |
-| 🔍 元数据刮削 | TMDB · TVDB · 豆瓣 · Bangumi · OMDb · AI 大模型兜底 |
-| 🔐 内容保护 | Widevine · FairPlay · PowerDRM · HLS AES-128，内置许可证服务 |
-| 🖼️ 预览图 | 进度条 sprite 缩略图 + WebVTT 时间线 |
-| 📝 字幕 | 内嵌轨提取 · Sidecar 扫描 · PGS 图形 OCR · Whisper ASR |
-| 🎵 多音轨 | 音轨预提取，多音轨 HLS master playlist |
-| 👥 用户管理 | 多角色 · 库级 ACL · 家长控制（分级+PIN+时段） |
-| 🔒 安全 | JWT · OAuth 客户端凭证 · Bearer / Query Token 双模式 |
-| 🛠️ 扩展 | 嵌入式部署 → Docker → 分布式 Redis 集群 |
+
+| 功能域      | 核心能力                                                      |
+| -------- | --------------------------------------------------------- |
+| 📁 媒体库   | 电影 · 剧集 · 动漫 · 音乐 · 图片 · 文档，多路径多库管理，各类型均有专属浏览/播放或阅读 UI    |
+| ▶️ 播放引擎  | 直链 MP4 · HLS/DASH 自适应转码 · JIT 按需切片 · 音乐全局播放器 · 多播放器引擎自动切换 |
+| 🔍 元数据刮削 | TMDB · TVDB · 豆瓣 · Bangumi · OMDb · AI 大模型兜底              |
+| 🔐 内容保护  | Widevine · FairPlay · PowerDRM · HLS AES-128，内置许可证服务      |
+| 🖼️ 预览图  | 进度条 sprite 缩略图 + WebVTT 时间线                               |
+| 📝 字幕    | 内嵌轨提取 · Sidecar 扫描 · PGS 图形 OCR · Whisper ASR             |
+| 🎵 多音轨   | 音轨预提取，多音轨 HLS master playlist                             |
+| 👥 用户管理  | 多角色 · 库级 ACL · 家长控制（分级+PIN+时段）                            |
+| 🔒 安全    | JWT · OAuth 客户端凭证 · Bearer / Query Token 双模式              |
+| 🛠️ 扩展   | 嵌入式部署 → Docker → 分布式 Redis 集群                             |
+
 
 ---
 
@@ -117,6 +121,8 @@ flowchart TB
   Scanner --> FS
 ```
 
+
+
 #### 部署模式
 
 ```mermaid
@@ -138,6 +144,8 @@ flowchart LR
 
   Embedded -.->|"无 Redis 时回退"| Distributed
 ```
+
+
 
 #### 媒体入库流水线
 
@@ -169,6 +177,8 @@ flowchart TB
   DCover --> DPrev["Office→PDF 预览缓存"]
   DPrev --> DDone["✅ 文档就绪"]
 ```
+
+
 
 #### 架构要点
 
@@ -465,51 +475,59 @@ services:
 
 #### 认证与用户
 
-| 端点 | 鉴权 | 说明 |
-|------|------|------|
-| `POST /api/v1/user/login` | 无 | 用户登录，获取 JWT |
-| `POST /api/v1/oauth/token` | OAuth | OAuth 客户端凭证换取 Token |
-| `GET /api/v1/user/info` | JWT | 当前用户信息 |
-| `PUT /api/v1/user/profile` | JWT | 资料与 `ui_locale`、播放器偏好 |
-| `GET /api/v1/playback-history` | JWT | 播放历史列表 |
+
+| 端点                             | 鉴权    | 说明                    |
+| ------------------------------ | ----- | --------------------- |
+| `POST /api/v1/user/login`      | 无     | 用户登录，获取 JWT           |
+| `POST /api/v1/oauth/token`     | OAuth | OAuth 客户端凭证换取 Token   |
+| `GET /api/v1/user/info`        | JWT   | 当前用户信息                |
+| `PUT /api/v1/user/profile`     | JWT   | 资料与 `ui_locale`、播放器偏好 |
+| `GET /api/v1/playback-history` | JWT   | 播放历史列表                |
+
 
 #### 浏览与元数据
 
-| 端点 | 鉴权 | 说明 |
-|------|------|------|
-| `GET /api/v1/library` | JWT | 媒体库列表 |
-| `GET /api/v1/media` | JWT | 媒体列表（库/排序/分页） |
-| `GET /api/v1/series/:id` | JWT | 剧集系列详情 |
-| `GET /api/v1/library/:id/albums` | JWT | 音乐专辑列表 |
-| `GET /api/v1/library/:id/artists` | JWT | 音乐艺人列表 |
-| `GET /api/v1/library/:id/tracks` | JWT | 音乐曲目列表 |
-| `GET /api/v1/library/:id/documents` | JWT | 文档列表 |
-| `GET /api/v1/library/:id/photo/categories` | JWT | 图片智能分类 |
-| `GET /api/v1/library/:id/photo/persons` | JWT | 图片人物聚类 |
+
+| 端点                                         | 鉴权  | 说明            |
+| ------------------------------------------ | --- | ------------- |
+| `GET /api/v1/library`                      | JWT | 媒体库列表         |
+| `GET /api/v1/media`                        | JWT | 媒体列表（库/排序/分页） |
+| `GET /api/v1/series/:id`                   | JWT | 剧集系列详情        |
+| `GET /api/v1/library/:id/albums`           | JWT | 音乐专辑列表        |
+| `GET /api/v1/library/:id/artists`          | JWT | 音乐艺人列表        |
+| `GET /api/v1/library/:id/tracks`           | JWT | 音乐曲目列表        |
+| `GET /api/v1/library/:id/documents`        | JWT | 文档列表          |
+| `GET /api/v1/library/:id/photo/categories` | JWT | 图片智能分类        |
+| `GET /api/v1/library/:id/photo/persons`    | JWT | 图片人物聚类        |
+
 
 #### 播放与 DRM
 
-| 端点 | 鉴权 | 说明 |
-|------|------|------|
-| `GET /api/v1/media/:id/play` | JWT/Token | 播放策略（直链/HLS/JIT/DRM） |
-| `GET /api/v1/media/:id/hls/*` | Token | HLS 段与播放列表 |
-| `GET /api/v1/media/:id/dash/*` | Token | DASH 资源（DRM 场景） |
-| `GET /api/v1/media/:id/preview/*` | Token | 进度条 sprite + WebVTT |
-| `GET /api/v1/media/:id/lyrics` | JWT | 歌词内容 |
-| `GET /api/v1/media/:id/photo/thumb.jpg` | Token | 图片缩略图 |
-| `GET /api/v1/media/:id/document/preview.pdf` | Token | 文档 PDF 预览 |
-| `POST /api/v1/jit/session/:id/seek` | Token | JIT 会话跳转 |
-| `POST /api/v1/drm/widevine/license` | Token | Widevine 许可证 |
+
+| 端点                                           | 鉴权        | 说明                   |
+| -------------------------------------------- | --------- | -------------------- |
+| `GET /api/v1/media/:id/play`                 | JWT/Token | 播放策略（直链/HLS/JIT/DRM） |
+| `GET /api/v1/media/:id/hls/`*                | Token     | HLS 段与播放列表           |
+| `GET /api/v1/media/:id/dash/`*               | Token     | DASH 资源（DRM 场景）      |
+| `GET /api/v1/media/:id/preview/*`            | Token     | 进度条 sprite + WebVTT  |
+| `GET /api/v1/media/:id/lyrics`               | JWT       | 歌词内容                 |
+| `GET /api/v1/media/:id/photo/thumb.jpg`      | Token     | 图片缩略图                |
+| `GET /api/v1/media/:id/document/preview.pdf` | Token     | 文档 PDF 预览            |
+| `POST /api/v1/jit/session/:id/seek`          | Token     | JIT 会话跳转             |
+| `POST /api/v1/drm/widevine/license`          | Token     | Widevine 许可证         |
+
 
 #### 管理
 
-| 端点 | 鉴权 | 说明 |
-|------|------|------|
-| `POST /api/v1/library` | Admin | 创建媒体库 |
-| `POST /api/v1/library/:id/scan` | Admin | 触发库扫描 |
-| `GET /api/v1/admin/overview` | Admin | 管理仪表盘 |
+
+| 端点                                 | 鉴权    | 说明                  |
+| ---------------------------------- | ----- | ------------------- |
+| `POST /api/v1/library`             | Admin | 创建媒体库               |
+| `POST /api/v1/library/:id/scan`    | Admin | 触发库扫描               |
+| `GET /api/v1/admin/overview`       | Admin | 管理仪表盘               |
 | `GET /api/v1/admin/system-options` | Admin | 系统选项（ASR/OCR/图片/文档） |
-| `GET /api/v1/lyric/task` | Admin | 歌词识别任务列表 |
+| `GET /api/v1/lyric/task`           | Admin | 歌词识别任务列表            |
+
 
 > 其余管理端点（用户/任务/刮削/上传/DRM 审计等）均要求 **Admin** 角色。
 
@@ -517,46 +535,76 @@ services:
 
 ### 开发计划
 
-#### 版本分层路线
+下表为待增强或规划中方向。
 
-来源于 `docs/TODO.MD`，按目标用户分层推进：
 
-| 层级 | 定位 | 核心特性 |
-|------|------|----------|
-| **Standard**（大众版） | 家庭个人用户 | GPU 硬件加速 · 标准加密 · AI 刮削 · 语音识别字幕 · 客户端码率切换 · 一键导入 Plex/Emby/Jellyfin · 视频目录变更自动适配 · 用户 3/并发 3 |
-| **Premium**（专业版） | 高级用户/小团队 | 私有加密 · 本地剪辑 · 远程访问 · DRM 加密 · 电子书（PDF/MOBI/EPUB/DOCX） · 用户 10/并发 20 |
-| **Enterprise**（企业版） | 平台集成 | 兼容 PowerCMS 11（上传/浏览/URL 上传/转码） · 用户数定制 · 平台授权管理 |
+| 方向              | 状态      | 说明                                                                |
+| --------------- | ------- | ----------------------------------------------------------------- |
+| 音乐模块            | ✅ 基础完成  | 专辑/艺人/流派/曲目、全局播放器、ASR 歌词；待增强：在线歌词源、电台、智能推荐                        |
+| 图片模块            | ✅ 基础完成  | 时间轴、AI 分类、人脸/地点；待增强：幻灯片放映、相册手工编排、RAW 深度预览                         |
+| 文档模块            | ✅ 基础完成  | 多格式入库、PDF/EPUB/Office 阅读、进度同步；待增强：全文检索、MOBI 原生渲染                  |
+| 界面多语言           | ✅ 基础完成  | 前端 zh-CN/zh-TW/en/ja/ko；待增强：管理端与错误文案全覆盖                           |
+| AI 刮削与 ASR 字幕   | ✅ 基础完成  | TMDB/TVDB/豆瓣/Bangumi/OMDb/Fanart + Whisper；待增强：在线字幕源、刮削调度优化       |
+| DRM 与内容保护       | ✅ 基础完成  | Widevine/FairPlay/PowerDRM/HLS AES-128；待增强：私有密钥策略、标准加密套件          |
+| 目录变更适配          | 🔶 部分完成 | fsnotify 实时监控；待增强：路径迁移、批量重命名修复（对标 Norwen/三件套）                     |
+| GPU 硬件加速        | 规划中     | NVENC/QSV/AMF/VAAPI 硬件转码（对标 Plex Pass / Emby / Jellyfin / Norwen） |
+| 客户端码率切换         | 规划中     | 播放端手动切换清晰度/码率（对标 Plex/Emby/Jellyfin/Norwen）                       |
+| 转码结果缓存复用        | 规划中     | 同片同档位只转一次、缓存命中策略（对标 Norwen/Jellyfin）                              |
+| 一键导入            | 规划中     | 从 Plex/Emby/Jellyfin/Norwen-Video 迁移库、NFO、进度与列表                   |
+| Emby API 兼容     | 规划中     | Emby Server API，接入 Infuse/Kodi/Emby 等第三方客户端（对标 Emby/Norwen）       |
+| 直播与 IPTV        | 规划中     | M3U 源管理、频道列表、EPG 节目单与播放（对标 Jellyfin/Emby/Plex/Norwen）             |
+| DVR 录制          | 规划中     | 调谐器/IPTV 时移与预约录制（长期，对标 Plex/Emby/Jellyfin）                        |
+| DLNA / 投屏       | 规划中     | DLNA Server、Chromecast 发现与控制（对标 Emby/Jellyfin/Norwen）             |
+| SyncPlay 同步观看   | 规划中     | 多用户同步播放进度与暂停（对标 Jellyfin/Emby）                                    |
+| 插件扩展            | 规划中     | 第三方插件安装与 API 钩子（对标 Jellyfin/Emby/Norwen）                          |
+| 电影系列合集          | 规划中     | TMDb Collection 系列归集浏览（对标 Jellyfin/Norwen/Plex）                   |
+| 在线字幕下载          | 规划中     | OpenSubtitles 等在线搜索下载，补充侧车扫描与 ASR（对标 Emby/Jellyfin/Norwen）        |
+| 跳过片头片尾          | 规划中     | 片头/演职员表检测与一键跳过（对标 Plex/Emby）                                      |
+| 章节与精彩片段         | 规划中     | 章节标记、场景/精彩片段导航（对标 Norwen AI 场景识别）                                 |
+| 预告片与花絮          | 规划中     | 在线预告片、Extra 花絮轨（对标 Plex/Emby/Jellyfin）                            |
+| 播客与有声书          | 规划中     | Podcast RSS 订阅、有声书章节库（对标 Jellyfin/Plex）                           |
+| 智能播放列表          | 规划中     | 按规则自动更新的动态列表（对标 Plex/Jellyfin）                                    |
+| Trakt / Last.fm | 规划中     | 观看同步、关注列表、继续观看双向（对标 Jellyfin/Emby）                                |
+| Webhook 通知      | 规划中     | 扫描/转码/入库事件推送 Discord、邮件等（对标 Jellyfin）                             |
+| 外部分享链接          | 规划中     | 只读分享链接，密码与过期时间（对标 Norwen）                                         |
+| 服务端文件管理         | 规划中     | 库内浏览、重命名、批量移动、操作审计（对标 Norwen/Jellyfin）                            |
+| 数据备份恢复          | 规划中     | 用户/库/配置 JSON 或 ZIP 导出导入（对标 Norwen）                                |
+| 观影统计看板          | 规划中     | 个人与全站观影时长、按日图表（管理端概览待扩展，对标 Plex/Norwen）                           |
+| Quick Connect   | 规划中     | 配对码远程接入，免手填服务器地址（对标 Jellyfin/Emby Connect）                        |
+| HDR 色调映射        | 规划中     | HDR10/DV 转 SDR 色调映射（对标 Plex/Jellyfin）                             |
+| AI 自然语言搜索       | 规划中     | 语义化检索，如「太空科幻片」（对标 Norwen）                                         |
+| AI 智能重命名        | 规划中     | 刮削驱动的批量文件名规范化（对标 Norwen）                                          |
+| AI 推荐理由         | 规划中     | 首页/详情个性化推荐文案（对标 Norwen）                                           |
+| AI 媒体库助手        | 规划中     | 对话式管理、批量重分类与异常诊断（对标 Norwen）                                       |
+| 本地剪辑            | 规划中     | 片段裁剪、导出（浏览器或服务端）                                                  |
+| 远程访问            | 规划中     | 公网/反向代理、HTTPS、外网安全播放                                              |
+| 高级检索            | 规划中     | Bleve/OpenSearch 全文索引 + 演员/标签/类型筛选                                |
+| 远程入库            | 规划中     | URL 离线下载、WebDAV 服务端                                               |
+| 存储协议            | 规划中     | 库路径抽象为 NFS/SMB/WebDAV/S3（当前为本地或 OS 挂载路径）                          |
+| 数据库             | 规划中     | PostgreSQL 可选后端（当前仅 SQLite）                                       |
+| NFO 双向同步        | 规划中     | 完整 NFO 读写与 Jellyfin/Emby 目录结构兼容                                   |
+| 访客角色与配额         | 规划中     | 只读访客、可配置用户数/并发数/带宽限速                                              |
+| 离线缓存下载          | 规划中     | 移动端/PWA 预约下载已转码文件（对标 Plex/Jellyfin）                               |
+| LDAP / SSO      | 规划中     | 企业目录单点登录（对标 Emby/Jellyfin 企业部署）                                   |
+| PowerCMS 11 集成  | 规划中     | 上传/浏览/URL 上传/转码 API 兼容                                            |
+| 平台授权            | 规划中     | 从 Knox 平台拉取授权与功能开关                                                |
+| 分布式集群           | 规划中     | 与 Knox 任务中心/独立转码服务深度集成（参见分布式集群部署文档）                               |
+| 多端终端            | 规划中     | Mobile/TV/PC 原生 App 或 PWA                                         |
 
-#### 技术路标
-
-| 方向 | 状态 | 说明 |
-|------|------|------|
-| 音乐模块 | ✅ 基础完成 | 专辑/艺人/流派/曲目、全局播放器、ASR 歌词；待增强：在线歌词源、电台、智能推荐 |
-| 图片模块 | ✅ 基础完成 | 时间轴、AI 分类、人脸/地点；待增强：幻灯片放映、相册手工编排、RAW 深度预览 |
-| 文档模块 | ✅ 基础完成 | 多格式入库、PDF/EPUB/Office 阅读、进度同步；待增强：全文检索、MOBI 原生渲染 |
-| 界面多语言 | ✅ 基础完成 | 前端 zh-CN/zh-TW/en/ja/ko；待增强：管理端与错误文案全覆盖 |
-| 高级检索 | 规划中 | Bleve/OpenSearch 全文索引，替代当前标题关键字过滤 |
-| 远程入库 | 规划中 | URL 离线下载、WebDAV 服务端 |
-| 存储协议 | 规划中 | 库路径抽象为 NFS/SMB/WebDAV/S3（当前为本地或 OS 挂载路径） |
-| 数据库 | 规划中 | PostgreSQL 可选后端（当前仅 SQLite） |
-| NFO 双向同步 | 规划中 | 完整 NFO 读写与 Jellyfin/Emby 目录结构兼容 |
-| 访客角色 | 规划中 | 只读访客账号、播放并发/带宽限速 |
-| 分布式集群 | 规划中 | 与 Knox 任务中心/独立转码服务深度集成（参见分布式集群部署文档） |
-| 移动端 | 规划中 | 原生 App/PWA 离线缓存 |
 
 ---
 
 ### 相关文档
 
-| 文档 | 用途 |
-|------|------|
-| [FUNCTIONAL_TEST.md](./FUNCTIONAL_TEST.md) | 功能回归测试清单 |
-| [cmd/scheduler/README.md](./cmd/scheduler/README.md) | JIT 即时转码调度架构 |
-| [分布式媒体处理于转码集群部署手册.MD](./docs/分布式媒体处理于转码集群部署手册.MD) | 分布式转码集群部署（扩展模式） |
+
+| 文档                                                   | 用途              |
+| ---------------------------------------------------- | --------------- |
+| [FUNCTIONAL_TEST.md](./FUNCTIONAL_TEST.md)           | 功能回归测试清单        |
+| [cmd/scheduler/README.md](./cmd/scheduler/README.md) | JIT 即时转码调度架构    |
+| [分布式媒体处理于转码集群部署手册.MD](./docs/分布式媒体处理于转码集群部署手册.MD)    | 分布式转码集群部署（扩展模式） |
+
 
 ---
-
-<a id="english"></a>
 
 ## English
 
@@ -564,37 +612,43 @@ services:
 
 **Knox-Media** is the media subsystem of the Knox omnimedia platform, built with **Go + React** as a lightweight home/personal media server comparable to Jellyfin or Emby. It runs standalone or as a microservice exposing REST APIs to other Knox modules.
 
-| Item | Details |
-|------|---------|
-| Backend | Go 1.22 · Gin · SQLite · Redis (optional) |
-| Frontend | React 19 · TypeScript · Ant Design 6 · Vite 8 |
-| Media stack | FFmpeg / FFprobe · Shaka Packager |
-| Default port | `8200` |
-| Platforms | Windows / Linux / macOS / Docker |
+
+| Item         | Details                                       |
+| ------------ | --------------------------------------------- |
+| Backend      | Go 1.22 · Gin · SQLite · Redis (optional)     |
+| Frontend     | React 19 · TypeScript · Ant Design 6 · Vite 8 |
+| Media stack  | FFmpeg / FFprobe · Shaka Packager             |
+| Default port | `8200`                                        |
+| Platforms    | Windows / Linux / macOS / Docker              |
+
 
 **Default demo accounts** (seeded on first boot — change in production):
 
-| Username | Password | Role |
-|----------|----------|------|
-| `admin` | `admin123` | Administrator |
-| `viewer` | `viewer123` | Regular user |
+
+| Username | Password    | Role          |
+| -------- | ----------- | ------------- |
+| `admin`  | `admin123`  | Administrator |
+| `viewer` | `viewer123` | Regular user  |
+
 
 ---
 
 ### Feature Matrix
 
-| Domain | Capabilities |
-|--------|-------------|
-| 📁 Libraries | Movies · TV · Anime · Music · Photos · Documents — each type has dedicated browse/play/read UI |
-| ▶️ Playback | Direct MP4 · HLS/DASH ABR · JIT transcode · Global music player · Multi-engine auto-select |
-| 🔍 Metadata | TMDB · TVDB · Douban · Bangumi · OMDb · AI LLM fallback |
-| 🔐 DRM | Widevine · FairPlay · PowerDRM · HLS AES-128, built-in license service |
-| 🖼️ Previews | Sprite thumbnails + WebVTT timeline for scrubber |
-| 📝 Subtitles | Embedded extraction · Sidecar scan · PGS OCR · Whisper ASR |
-| 🎵 Multi-audio | Pre-extracted tracks, multi-audio HLS master playlist |
-| 👥 Users | Multi-role · Library ACL · Parental controls (ratings+PIN+schedules) |
-| 🔒 Security | JWT · OAuth client credentials · Bearer / Query token dual mode |
-| 🛠️ Scale | Embedded → Docker → Distributed Redis cluster |
+
+| Domain         | Capabilities                                                                                   |
+| -------------- | ---------------------------------------------------------------------------------------------- |
+| 📁 Libraries   | Movies · TV · Anime · Music · Photos · Documents — each type has dedicated browse/play/read UI |
+| ▶️ Playback    | Direct MP4 · HLS/DASH ABR · JIT transcode · Global music player · Multi-engine auto-select     |
+| 🔍 Metadata    | TMDB · TVDB · Douban · Bangumi · OMDb · AI LLM fallback                                        |
+| 🔐 DRM         | Widevine · FairPlay · PowerDRM · HLS AES-128, built-in license service                         |
+| 🖼️ Previews   | Sprite thumbnails + WebVTT timeline for scrubber                                               |
+| 📝 Subtitles   | Embedded extraction · Sidecar scan · PGS OCR · Whisper ASR                                     |
+| 🎵 Multi-audio | Pre-extracted tracks, multi-audio HLS master playlist                                          |
+| 👥 Users       | Multi-role · Library ACL · Parental controls (ratings+PIN+schedules)                           |
+| 🔒 Security    | JWT · OAuth client credentials · Bearer / Query token dual mode                                |
+| 🛠️ Scale      | Embedded → Docker → Distributed Redis cluster                                                  |
+
 
 ---
 
@@ -660,6 +714,8 @@ flowchart TB
   Scanner --> FS
 ```
 
+
+
 #### Deployment Modes
 
 ```mermaid
@@ -681,6 +737,8 @@ flowchart LR
 
   Embedded -.->|"Falls back when no Redis"| Distributed
 ```
+
+
 
 #### Media Ingest Pipeline
 
@@ -712,6 +770,8 @@ flowchart TB
   DCover --> DPrev["Office→PDF preview cache"]
   DPrev --> DDone["✅ Document ready"]
 ```
+
+
 
 #### Key Design Points
 
@@ -994,46 +1054,54 @@ Config file: `config.yml` (override path with `KNOX_MEDIA_CONFIG` env var).
 
 #### Auth & User
 
-| Endpoint | Auth | Description |
-|----------|------|-------------|
-| `POST /api/v1/user/login` | None | User login, returns JWT |
-| `POST /api/v1/oauth/token` | OAuth | OAuth client credentials → token |
-| `GET /api/v1/user/info` | JWT | Current user profile |
-| `PUT /api/v1/user/profile` | JWT | Profile, `ui_locale`, player prefs |
-| `GET /api/v1/playback-history` | JWT | Playback history |
+
+| Endpoint                       | Auth  | Description                        |
+| ------------------------------ | ----- | ---------------------------------- |
+| `POST /api/v1/user/login`      | None  | User login, returns JWT            |
+| `POST /api/v1/oauth/token`     | OAuth | OAuth client credentials → token   |
+| `GET /api/v1/user/info`        | JWT   | Current user profile               |
+| `PUT /api/v1/user/profile`     | JWT   | Profile, `ui_locale`, player prefs |
+| `GET /api/v1/playback-history` | JWT   | Playback history                   |
+
 
 #### Browse & Metadata
 
-| Endpoint | Auth | Description |
-|----------|------|-------------|
-| `GET /api/v1/library` | JWT | List media libraries |
-| `GET /api/v1/media` | JWT | Media list (filter/sort/paginate) |
-| `GET /api/v1/series/:id` | JWT | TV series detail |
-| `GET /api/v1/library/:id/albums` | JWT | Music albums |
-| `GET /api/v1/library/:id/documents` | JWT | Documents |
-| `GET /api/v1/library/:id/photo/persons` | JWT | Photo person clusters |
+
+| Endpoint                                | Auth | Description                       |
+| --------------------------------------- | ---- | --------------------------------- |
+| `GET /api/v1/library`                   | JWT  | List media libraries              |
+| `GET /api/v1/media`                     | JWT  | Media list (filter/sort/paginate) |
+| `GET /api/v1/series/:id`                | JWT  | TV series detail                  |
+| `GET /api/v1/library/:id/albums`        | JWT  | Music albums                      |
+| `GET /api/v1/library/:id/documents`     | JWT  | Documents                         |
+| `GET /api/v1/library/:id/photo/persons` | JWT  | Photo person clusters             |
+
 
 #### Playback & DRM
 
-| Endpoint | Auth | Description |
-|----------|------|-------------|
-| `GET /api/v1/media/:id/play` | JWT/Token | Playback plan (direct/HLS/JIT/DRM) |
-| `GET /api/v1/media/:id/hls/*` | Token | HLS segments & playlists |
-| `GET /api/v1/media/:id/dash/*` | Token | DASH assets (DRM) |
-| `GET /api/v1/media/:id/lyrics` | JWT | Lyrics content |
-| `GET /api/v1/media/:id/document/preview.pdf` | Token | Document PDF preview |
-| `POST /api/v1/jit/session/:id/seek` | Token | JIT session seek |
-| `POST /api/v1/drm/widevine/license` | Token | Widevine license |
+
+| Endpoint                                     | Auth      | Description                        |
+| -------------------------------------------- | --------- | ---------------------------------- |
+| `GET /api/v1/media/:id/play`                 | JWT/Token | Playback plan (direct/HLS/JIT/DRM) |
+| `GET /api/v1/media/:id/hls/`*                | Token     | HLS segments & playlists           |
+| `GET /api/v1/media/:id/dash/`*               | Token     | DASH assets (DRM)                  |
+| `GET /api/v1/media/:id/lyrics`               | JWT       | Lyrics content                     |
+| `GET /api/v1/media/:id/document/preview.pdf` | Token     | Document PDF preview               |
+| `POST /api/v1/jit/session/:id/seek`          | Token     | JIT session seek                   |
+| `POST /api/v1/drm/widevine/license`          | Token     | Widevine license                   |
+
 
 #### Admin
 
-| Endpoint | Auth | Description |
-|----------|------|-------------|
-| `POST /api/v1/library` | Admin | Create library |
-| `POST /api/v1/library/:id/scan` | Admin | Trigger scan |
-| `GET /api/v1/admin/overview` | Admin | Dashboard |
+
+| Endpoint                           | Auth  | Description                    |
+| ---------------------------------- | ----- | ------------------------------ |
+| `POST /api/v1/library`             | Admin | Create library                 |
+| `POST /api/v1/library/:id/scan`    | Admin | Trigger scan                   |
+| `GET /api/v1/admin/overview`       | Admin | Dashboard                      |
 | `GET /api/v1/admin/system-options` | Admin | ASR/OCR/photo/doc tool options |
-| `GET /api/v1/lyric/task` | Admin | Lyric recognition tasks |
+| `GET /api/v1/lyric/task`           | Admin | Lyric recognition tasks        |
+
 
 > Remaining admin endpoints (users / tasks / scrape / upload / DRM audit / …) require the **Admin** role.
 
@@ -1041,43 +1109,75 @@ Config file: `config.yml` (override path with `KNOX_MEDIA_CONFIG` env var).
 
 ### Roadmap
 
-#### Tiered Version Plan
+From `[docs/TODO.MD](./docs/TODO.MD)`, with gaps filled from **Plex / Emby / Jellyfin / Norwen-Video** feature comparison (no product tier split). See **Implemented Features** above for what already ships.
 
-From `docs/TODO.MD`, organized by target audience:
 
-| Tier | Audience | Key Features |
-|------|----------|-------------|
-| **Standard** | Home / personal users | GPU hardware acceleration · Standard encryption · AI scraping · ASR subtitles · Client-side bitrate switching · One-click import from Plex/Emby/Jellyfin · Auto-adapt to media directory changes · 3 users / 3 concurrent |
-| **Premium** | Power users / small teams | Private encryption · Local clip editor · Remote access · DRM encryption · E-books (PDF/MOBI/EPUB/DOCX) · 10 users / 20 concurrent |
-| **Enterprise** | Platform integration | PowerCMS 11 compatibility (upload/browse/URL upload/transcode) · Custom user count · Platform license management |
+| Area                       | Status          | Description                                                                                                 |
+| -------------------------- | --------------- | ----------------------------------------------------------------------------------------------------------- |
+| Music module               | ✅ Baseline done | Albums/artists/genres/tracks, global player, ASR lyrics; next: online lyric sources, radio, recommendations |
+| Photo module               | ✅ Baseline done | Timeline, AI tags, faces/places; next: slideshow, manual albums, deep RAW preview                           |
+| Document module            | ✅ Baseline done | Multi-format ingest, PDF/EPUB/Office read, progress sync; next: full-text search, native MOBI render        |
+| UI i18n                    | ✅ Baseline done | Frontend zh-CN/zh-TW/en/ja/ko; next: full admin & error string coverage                                     |
+| AI scrape & ASR subtitles  | ✅ Baseline done | TMDB/TVDB/Douban/Bangumi/OMDb/Fanart + Whisper; next: online subtitle sources, scheduler tuning             |
+| DRM & content protection   | ✅ Baseline done | Widevine/FairPlay/PowerDRM/HLS AES-128; next: private key policies, standard encryption suite               |
+| Directory change adapt     | 🔶 Partial      | fsnotify watch; next: path migration, bulk rename repair (vs Norwen / mainstream servers)                   |
+| GPU acceleration           | Planned         | NVENC/QSV/AMF/VAAPI hardware transcode (Plex Pass / Emby / Jellyfin / Norwen)                               |
+| Client bitrate switch      | Planned         | Manual quality/bitrate in player (all four)                                                                 |
+| Transcode cache reuse      | Planned         | Reuse prior transcode outputs per title/quality (Norwen / Jellyfin)                                         |
+| One-click import           | Planned         | Migrate libraries, NFO, progress, playlists from Plex/Emby/Jellyfin/Norwen-Video                            |
+| Emby API compatibility     | Planned         | Emby Server API for Infuse/Kodi/Emby clients (Emby / Norwen)                                                |
+| Live TV & IPTV             | Planned         | M3U sources, channel grid, EPG (Jellyfin / Emby / Plex / Norwen)                                            |
+| DVR recording              | Planned         | Tuner/IPTV time-shift and scheduled record (long-term; Plex / Emby / Jellyfin)                              |
+| DLNA & casting             | Planned         | DLNA server, Chromecast discovery/control (Emby / Jellyfin / Norwen)                                        |
+| SyncPlay                   | Planned         | Synchronized multi-user playback (Jellyfin / Emby)                                                          |
+| Plugin extensions          | Planned         | Third-party plugins and hooks (Jellyfin / Emby / Norwen)                                                    |
+| Movie collections          | Planned         | TMDb Collection series browsing (Jellyfin / Norwen / Plex)                                                  |
+| Online subtitle download   | Planned         | OpenSubtitles search/download beyond sidecar + ASR (Emby / Jellyfin / Norwen)                               |
+| Skip intro/credits         | Planned         | Intro/credits detection and one-tap skip (Plex / Emby)                                                      |
+| Chapters & highlights      | Planned         | Chapter markers and scene/highlight navigation (Norwen AI scenes)                                           |
+| Trailers & extras          | Planned         | Online trailers and bonus/extra tracks (Plex / Emby / Jellyfin)                                             |
+| Podcasts & audiobooks      | Planned         | Podcast RSS and audiobook libraries (Jellyfin / Plex)                                                       |
+| Smart playlists            | Planned         | Rule-based dynamic playlists (Plex / Jellyfin)                                                              |
+| Trakt / Last.fm            | Planned         | Scrobble, watchlists, continue-watching sync (Jellyfin / Emby)                                              |
+| Webhook notifications      | Planned         | Scan/transcode/ingest events to Discord, email, etc. (Jellyfin)                                             |
+| External share links       | Planned         | Read-only shares with password and expiry (Norwen)                                                          |
+| Server file manager        | Planned         | In-library browse, rename, bulk move, audit log (Norwen / Jellyfin)                                         |
+| Backup & restore           | Planned         | Export/import settings and user data as JSON/ZIP (Norwen)                                                   |
+| Viewing statistics         | Planned         | Per-user and global watch-time charts (Plex / Norwen; admin overview TBD)                                   |
+| Quick Connect              | Planned         | Pairing-code remote access without manual URL (Jellyfin / Emby Connect)                                     |
+| HDR tone mapping           | Planned         | HDR10/DV to SDR tone mapping (Plex / Jellyfin)                                                              |
+| AI natural-language search | Planned         | Semantic queries e.g. “space sci-fi movies” (Norwen)                                                        |
+| AI smart rename            | Planned         | Scrape-driven batch filename normalization (Norwen)                                                         |
+| AI recommendation copy     | Planned         | Personalized blurbs on home/detail (Norwen)                                                                 |
+| AI library assistant       | Planned         | Chat-style admin: reclassify, diagnose, bulk fixes (Norwen)                                                 |
+| Local clip editor          | Planned         | Trim/export clips (browser or server-side)                                                                  |
+| Remote access              | Planned         | Public reach, reverse proxy, HTTPS, secure external playback                                                |
+| Advanced search            | Planned         | Bleve/OpenSearch + cast/genre/tag filters                                                                   |
+| Remote ingest              | Planned         | URL download, WebDAV server                                                                                 |
+| Storage backends           | Planned         | First-class NFS / SMB / WebDAV / S3 paths (today: local or OS mounts)                                       |
+| Database                   | Planned         | Optional PostgreSQL (SQLite only today)                                                                     |
+| NFO sync                   | Planned         | Full read/write NFO; Jellyfin/Emby folder compatibility                                                     |
+| Guest role & quotas        | Planned         | Read-only guest; configurable user/concurrency/bandwidth limits                                             |
+| Offline download           | Planned         | Mobile/PWA scheduled download of transcoded files (Plex / Jellyfin)                                         |
+| LDAP / SSO                 | Planned         | Enterprise directory login (Emby / Jellyfin enterprise)                                                     |
+| PowerCMS 11 integration    | Planned         | Upload/browse/URL upload/transcode API compatibility                                                        |
+| Platform licensing         | Planned         | License and feature flags from Knox platform                                                                |
+| Distributed cluster        | Planned         | Knox task center / standalone transcode fleet integration                                                   |
+| Multi-device clients       | Planned         | Mobile/TV/PC native apps or PWA                                                                             |
 
-#### Technology Roadmap
-
-| Area | Status | Description |
-|------|--------|-------------|
-| Music module | ✅ Baseline done | Albums/artists/genres/tracks, global player, ASR lyrics; next: online lyric sources, radio, recommendations |
-| Photo module | ✅ Baseline done | Timeline, AI tags, faces/places; next: slideshow, manual albums, deep RAW preview |
-| Document module | ✅ Baseline done | Multi-format ingest, PDF/EPUB/Office read, progress sync; next: full-text search, native MOBI render |
-| UI i18n | ✅ Baseline done | Frontend zh-CN/zh-TW/en/ja/ko; next: full admin & error string coverage |
-| Advanced search | Planned | Bleve / OpenSearch index instead of title filter |
-| Remote ingest | Planned | URL download, WebDAV server |
-| Storage backends | Planned | First-class NFS / SMB / WebDAV / S3 paths (today: local or OS mounts) |
-| Database | Planned | Optional PostgreSQL (SQLite only today) |
-| NFO sync | Planned | Full read/write NFO; Jellyfin/Emby folder compatibility |
-| Guest role | Planned | Read-only guest; concurrency / bandwidth limits |
-| Distributed cluster | Planned | Knox task center / standalone transcode fleet integration |
-| Mobile | Planned | Native apps / PWA offline cache |
 
 ---
 
 ### Related Docs
 
-| Document | Purpose |
-|----------|---------|
-| [FUNCTIONAL_TEST.md](./FUNCTIONAL_TEST.md) | Manual regression checklist |
-| [cmd/scheduler/README.md](./cmd/scheduler/README.md) | JIT transcode scheduler design |
-| [分布式媒体处理于转码集群部署手册.MD](./docs/分布式媒体处理于转码集群部署手册.MD) | Distributed transcode cluster (extension mode) |
+
+| Document                                             | Purpose                                        |
+| ---------------------------------------------------- | ---------------------------------------------- |
+| [FUNCTIONAL_TEST.md](./FUNCTIONAL_TEST.md)           | Manual regression checklist                    |
+| [cmd/scheduler/README.md](./cmd/scheduler/README.md) | JIT transcode scheduler design                 |
+| [分布式媒体处理于转码集群部署手册.MD](./docs/分布式媒体处理于转码集群部署手册.MD)    | Distributed transcode cluster (extension mode) |
+
 
 ---
 
-<p align="center"><a href="#中文">↑ 中文</a> · <a href="#english">↑ English</a></p>
+[↑ 中文](#中文) · [↑ English](#english)
