@@ -13,6 +13,7 @@ import { Button, Empty, Select, Space, Spin, Typography, message } from "antd";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { AlbumSummary, albumArtworkSrc, fetchAlbum, fetchArtistAlbums } from "../api/client";
+import MusicPosterPlaceholderIcon from "../components/MusicPosterPlaceholderIcon";
 import ToolbarPlayIcon from "../components/ToolbarPlayIcon";
 import { albumTracksToQueue } from "../lib/albumPlayback";
 import { useMusicPlayerStore } from "../store/musicPlayer";
@@ -281,7 +282,7 @@ export default function ArtistDetailPage() {
                   }}
                 />
                 <div className={musicStyles.noCoverIcon}>
-                  <CustomerServiceOutlined />
+                  <MusicPosterPlaceholderIcon />
                 </div>
                 <div className={musicStyles.playOverlay} aria-hidden>
                   <button

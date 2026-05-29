@@ -14,6 +14,8 @@ import {
   transcodeAsync,
   unmatchMedia,
 } from "../api/client";
+import type { RecentFavoriteFolderEntry } from "../lib/recentFavoriteFolders";
+import { MAX_RECENT_FAVORITE_FOLDERS } from "../lib/recentFavoriteFolders";
 import type { RecentPlaylistEntry } from "../lib/recentPlaylists";
 import { tGlobal as t } from "../i18n";
 
@@ -89,6 +91,9 @@ export function buildMediaMenuItems(
     onAddToPlaylist?: (mediaId: number) => void;
     recentPlaylists?: RecentPlaylistEntry[];
     onQuickAddToPlaylist?: (mediaId: number, playlistId: number) => void | Promise<void>;
+    onAddToFavoriteFolder?: (mediaId: number) => void;
+    recentFavoriteFolders?: RecentFavoriteFolderEntry[];
+    onQuickAddToFavoriteFolder?: (mediaId: number, folderId: number) => void | Promise<void>;
     /** 收藏页：菜单底部「取消收藏」 */
     onUnfavorite?: (mediaId: number) => void;
     /** 标记观看状态成功后刷新列表（如收藏页） */
@@ -117,6 +122,9 @@ export function buildMediaMenuItems(
   const onAddToPlaylist = extra?.onAddToPlaylist;
   const recentPlaylists = extra?.recentPlaylists ?? [];
   const onQuickAddToPlaylist = extra?.onQuickAddToPlaylist;
+  const onAddToFavoriteFolder = extra?.onAddToFavoriteFolder;
+  const recentFavoriteFolders = extra?.recentFavoriteFolders ?? [];
+  const onQuickAddToFavoriteFolder = extra?.onQuickAddToFavoriteFolder;
   const onUnfavorite = extra?.onUnfavorite;
   const afterToggleWatched = extra?.afterToggleWatched;
   const afterDelete = extra?.afterDelete;
@@ -134,11 +142,27 @@ export function buildMediaMenuItems(
     },
     { type: "divider" as const },
     {
-      key: "openAddToPlaylist",
-      label: t("components.media_menu.add_to_playlist"),
-      disabled: !onAddToPlaylist,
+      key: "openAddToFavoriteFolder",
+      label: t("components.media_menu.add_to_favorite_folder"),
+      disabled: !onAddToFavoriteFolder,
     },
   ];
+  if (recentFavoriteFolders.length > 0 && onQuickAddToFavoriteFolder) {
+    addToChildren.push({
+      type: "group",
+      label: t("components.media_menu.recent_favorite_folders"),
+      children: recentFavoriteFolders.slice(0, MAX_RECENT_FAVORITE_FOLDERS).map((folder) => ({
+        key: `recentFavoriteFolder:${folder.id}`,
+        label: folder.name,
+      })),
+    });
+  }
+  addToChildren.push({ type: "divider" as const });
+  addToChildren.push({
+    key: "openAddToPlaylist",
+    label: t("components.media_menu.add_to_playlist"),
+    disabled: !onAddToPlaylist,
+  });
   if (recentPlaylists.length > 0 && onQuickAddToPlaylist) {
     addToChildren.push({
       type: "group",
@@ -232,6 +256,13 @@ export function buildMediaMenuItems(
           addFavorite(r.id)
             .then(() => message.success(t("components.media_menu.added_to_favorites")))
             .catch(() => message.error(t("components.media_menu.operation_failed")));
+          break;
+        case "openAddToFavoriteFolder":
+          if (onAddToFavoriteFolder) {
+            onAddToFavoriteFolder(r.id);
+          } else {
+            message.info(t("components.media_menu.favorite_folder_wip"));
+          }
           break;
         case "openAddToPlaylist":
           if (onAddToPlaylist) {
@@ -336,6 +367,13 @@ export function buildMediaMenuItems(
           break;
         default: {
           const sk = String(key);
+          if (sk.startsWith("recentFavoriteFolder:") && onQuickAddToFavoriteFolder) {
+            const fid = Number(sk.slice("recentFavoriteFolder:".length));
+            if (!Number.isNaN(fid)) {
+              void Promise.resolve(onQuickAddToFavoriteFolder(r.id, fid));
+            }
+            break;
+          }
           if (sk.startsWith("recentPlaylist:") && onQuickAddToPlaylist) {
             const pid = Number(sk.slice("recentPlaylist:".length));
             if (!Number.isNaN(pid)) {

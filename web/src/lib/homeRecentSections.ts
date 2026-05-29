@@ -3,6 +3,9 @@ import type { TranslateFn } from "../i18n";
 
 export const HOME_RECENT_LIMIT = 24;
 
+/** 首页「继续观看」仅展示影片、电视剧、其他视频库中的资源。 */
+export const CONTINUE_WATCHING_LIBRARY_TYPES = ["movie", "tv", "video"] as const;
+
 export type HomeRecentSection = {
   key: string;
   title: string;

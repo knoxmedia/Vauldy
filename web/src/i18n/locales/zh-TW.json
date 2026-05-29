@@ -1167,7 +1167,19 @@
       "added_to_playlist": "已加入「{name}」",
       "add_failed": "加入失敗，可能已在清單中",
       "empty": "暫無收藏，去瀏覽媒體並加入收藏吧",
-      "untitled": "未命名"
+      "untitled": "未命名",
+      "category_tabs_aria": "收藏類型",
+      "type_folders": "收藏夾",
+      "type_movie": "影片",
+      "type_tv": "劇集",
+      "type_video": "其他影片",
+      "type_anime": "動漫",
+      "type_music": "音樂",
+      "type_photo": "圖片",
+      "type_document": "文件",
+      "folders_empty": "暫無收藏夾",
+      "folder_items_empty": "此收藏夾暫無內容",
+      "all_folders": "全部收藏夾"
     },
     "home": {
       "aria_deselect": "取消選取",
@@ -1789,6 +1801,17 @@
       "create_placeholder": "新建播放清單名稱",
       "create_btn": "建立"
     },
+    "add_to_favorite_folder_picker_modal": {
+      "load_failed": "載入失敗",
+      "add_failed_dup": "加入失敗，可能已在收藏夾中",
+      "added_single": "已加入「{name}」",
+      "name_required": "請輸入收藏夾名稱",
+      "create_failed": "操作失敗",
+      "title_single": "加入收藏夾",
+      "empty_create_below": "尚無收藏夾，可在下方新建後加入",
+      "create_placeholder": "新建收藏夾名稱",
+      "create_btn": "建立"
+    },
     "playlist_form_modal": {
       "tab_general": "一般",
       "tab_poster": "海報",
@@ -1900,8 +1923,10 @@
       "watched_mark_as_unwatched": "標記為未觀看",
       "watched_mark_as_watched": "標記為已觀看",
       "add_to_collection": "加入收藏集...",
+      "add_to_favorite_folder": "加入收藏夾...",
       "add_to_playlist": "加入播放清單...",
       "recent": "最近",
+      "recent_favorite_folders": "最近收藏夾",
       "play": "播放",
       "detail": "詳情",
       "add_to": "加入",
@@ -1925,6 +1950,8 @@
       "added_to_favorites": "已加入收藏集",
       "operation_failed": "操作失敗",
       "playlist_wip": "播放清單功能開發中",
+      "favorite_folder_wip": "收藏夾功能開發中",
+      "favorite_folder_fallback": "收藏夾",
       "marked_unwatched": "已標記為未觀看",
       "marked_watched": "已標記為已觀看",
       "unmatch_modal_title": "取消比對",

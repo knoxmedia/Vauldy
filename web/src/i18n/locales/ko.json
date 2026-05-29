@@ -1167,7 +1167,19 @@
       "added_to_playlist": "「{name}」에 추가했습니다",
       "add_failed": "추가 실패. 이미 목록에 있을 수 있습니다",
       "empty": "즐겨찾기가 없습니다. 미디어를 탐색해 추가하세요.",
-      "untitled": "제목 없음"
+      "untitled": "제목 없음",
+      "category_tabs_aria": "즐겨찾기 유형",
+      "type_folders": "컬렉션",
+      "type_movie": "영화",
+      "type_tv": "TV",
+      "type_video": "기타 동영상",
+      "type_anime": "애니메",
+      "type_music": "음악",
+      "type_photo": "사진",
+      "type_document": "문서",
+      "folders_empty": "컬렉션이 없습니다",
+      "folder_items_empty": "이 컬렉션이 비어 있습니다",
+      "all_folders": "모든 컬렉션"
     },
     "home": {
       "aria_deselect": "선택 해제",
@@ -1789,6 +1801,17 @@
       "create_placeholder": "새 재생 목록 이름",
       "create_btn": "만들기"
     },
+    "add_to_favorite_folder_picker_modal": {
+      "load_failed": "불러오기 실패",
+      "add_failed_dup": "추가 실패, 폴더에 이미 있을 수 있습니다",
+      "added_single": "「{name}」에 추가됨",
+      "name_required": "폴더 이름을 입력하세요",
+      "create_failed": "작업 실패",
+      "title_single": "컬렉션 폴더에 추가",
+      "empty_create_below": "컬렉션 폴더가 없습니다. 아래에서 새로 만드세요",
+      "create_placeholder": "새 폴더 이름",
+      "create_btn": "만들기"
+    },
     "playlist_form_modal": {
       "tab_general": "일반",
       "tab_poster": "포스터",
@@ -1900,8 +1923,10 @@
       "watched_mark_as_unwatched": "안 본 것으로 표시",
       "watched_mark_as_watched": "본 것으로 표시",
       "add_to_collection": "즐겨찾기에 추가…",
+      "add_to_favorite_folder": "컬렉션 폴더에 추가…",
       "add_to_playlist": "재생 목록에 추가…",
       "recent": "최근",
+      "recent_favorite_folders": "최근 폴더",
       "play": "재생",
       "detail": "세부 정보",
       "add_to": "추가",
@@ -1925,6 +1950,8 @@
       "added_to_favorites": "즐겨찾기에 추가됨",
       "operation_failed": "작업 실패",
       "playlist_wip": "재생 목록 기능은 개발 중입니다",
+      "favorite_folder_wip": "컬렉션 폴더 기능은 개발 중입니다",
+      "favorite_folder_fallback": "컬렉션 폴더",
       "marked_unwatched": "안 본 것으로 표시했습니다",
       "marked_watched": "본 것으로 표시했습니다",
       "unmatch_modal_title": "매칭 해제",

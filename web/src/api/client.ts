@@ -115,6 +115,8 @@ export type MediaItem = {
   music_album_id?: number;
   music_album_title?: string;
   music_artist?: string;
+  /** Joined from library.type when listing favorites. */
+  library_type?: string;
 };
 
 /** Normalize poster string from DB (some SQLite/json paths may retain JSON quotes). */
@@ -276,6 +278,7 @@ export type HistoryItem = {
   play_end_at?: string;
   completed?: number;
   play_count?: number;
+  library_type?: string;
 };
 
 export async function fetchLibraries() {
@@ -959,9 +962,14 @@ export function dedupeUserHistory(items: HistoryItem[]): HistoryItem[] {
   return out;
 }
 
-export async function fetchUserHistory(limit = 24) {
+export async function fetchUserHistory(limit = 24, opts?: { libraryTypes?: readonly string[] }) {
+  const params: Record<string, string | number> = { limit };
+  const types = opts?.libraryTypes?.map((t) => t.trim()).filter(Boolean);
+  if (types?.length) {
+    params.library_types = types.join(",");
+  }
   const { data } = await api.get<{ items?: HistoryItem[] }>("/api/v1/user/history", {
-    params: { limit },
+    params,
   });
   return dedupeUserHistory(data?.items ?? []);
 }
@@ -982,6 +990,68 @@ export async function addFavorite(mediaId: number) {
 
 export async function removeFavorite(mediaId: number) {
   await api.delete(`/api/v1/media/${mediaId}/favorite`);
+}
+
+export interface FavoriteFolderItem {
+  id: number;
+  media_id: number;
+  sort_order: number;
+  title: string;
+  file_type: string;
+  duration: number;
+  width: number;
+  height: number;
+  poster_url: string;
+  added_at: string;
+}
+
+export interface FavoriteFolderPreview {
+  media_id: number;
+  poster_url: string;
+}
+
+export interface FavoriteFolder {
+  id: number;
+  name: string;
+  description: string;
+  item_count: number;
+  first_media_id: number;
+  cover_url: string;
+  created_at: string;
+  updated_at: string;
+  preview_items?: FavoriteFolderPreview[];
+  items?: FavoriteFolderItem[];
+}
+
+export async function fetchFavoriteFolders() {
+  const { data } = await api.get<{ items?: FavoriteFolder[] }>("/api/v1/favorite-folders");
+  return data?.items ?? [];
+}
+
+export async function fetchFavoriteFolder(id: number) {
+  const { data } = await api.get<FavoriteFolder>(`/api/v1/favorite-folders/${id}`);
+  return data;
+}
+
+export async function createFavoriteFolder(name: string, description = "") {
+  const { data } = await api.post<{ id: number }>("/api/v1/favorite-folders", { name, description });
+  return data.id;
+}
+
+export async function updateFavoriteFolder(id: number, name: string, description = "") {
+  await api.put(`/api/v1/favorite-folders/${id}`, { name, description });
+}
+
+export async function deleteFavoriteFolder(id: number) {
+  await api.delete(`/api/v1/favorite-folders/${id}`);
+}
+
+export async function addFavoriteFolderItem(folderId: number, mediaId: number) {
+  await api.post(`/api/v1/favorite-folders/${folderId}/items`, { media_id: mediaId });
+}
+
+export async function removeFavoriteFolderItem(folderId: number, itemId: number) {
+  await api.delete(`/api/v1/favorite-folders/${folderId}/items/${itemId}`);
 }
 
 export async function markWatched(mediaId: number) {

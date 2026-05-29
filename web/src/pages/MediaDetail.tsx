@@ -52,6 +52,7 @@ import {
   MediaStats,
   MediaSubtitleRow,
   addFavorite,
+  addFavoriteFolderItem,
   addPlaylistItem,
   fetchFavoriteStatus,
   fetchMedia,
@@ -66,9 +67,11 @@ import {
   savePlaybackProgress,
   type MediaMatchListUpdate,
 } from "../api/client";
+import AddToFavoriteFolderPickerModal from "../components/AddToFavoriteFolderPickerModal";
 import AddToPlaylistModal from "../components/AddToPlaylistModal";
 import MediaMatchModal from "../components/MediaMatchModal";
 import { buildMediaMenuItems } from "../components/mediaMenuItems";
+import { useFavoriteFolderMenuRecents } from "../lib/useFavoriteFolderMenuRecents";
 import { readRecentPlaylists, rememberPlaylistAdded } from "../lib/recentPlaylists";
 import ToolbarPlayIcon from "../components/ToolbarPlayIcon";
 import { isAdminRole, useAuthStore } from "../store/auth";
@@ -585,8 +588,10 @@ export default function MediaDetailPage() {
   /** 固定工具条与主内容列对齐（.app-main-centered 的视口 left/width） */
   const [relatedBulkDock, setRelatedBulkDock] = useState({ left: 0, width: 0 });
   const [playlistModalOpen, setPlaylistModalOpen] = useState(false);
+  const [favoriteFolderModalOpen, setFavoriteFolderModalOpen] = useState(false);
   const [matchModalOpen, setMatchModalOpen] = useState(false);
   const [recentPlaylistMenu, setRecentPlaylistMenu] = useState(readRecentPlaylists);
+  const { recentFavoriteFolders, rememberFolderMenuAdded } = useFavoriteFolderMenuRecents();
   const fileInfoRef = useRef<HTMLElement | null>(null);
 
   const measureRelatedBulkDock = useCallback(() => {
@@ -925,10 +930,24 @@ export default function MediaDetailPage() {
             message.error(t("pages.media_detail.add_failed_dup"));
           }
         },
+        onAddToFavoriteFolder: () => setFavoriteFolderModalOpen(true),
+        recentFavoriteFolders,
+        onQuickAddToFavoriteFolder: async (_mediaId, folderId) => {
+          try {
+            await addFavoriteFolderItem(folderId, detail.id);
+            const name =
+              recentFavoriteFolders.find((f) => f.id === folderId)?.name ??
+              t("components.media_menu.favorite_folder_fallback");
+            message.success(t("components.add_to_favorite_folder_picker_modal.added_single", { name }));
+            rememberFolderMenuAdded({ id: folderId, name });
+          } catch {
+            message.error(t("components.add_to_favorite_folder_picker_modal.add_failed_dup"));
+          }
+        },
         onGetInfo: scrollToFileInfo,
       },
     );
-  }, [detail, nav, recentPlaylistMenu, reloadDetail, scrollToFileInfo]);
+  }, [detail, nav, recentPlaylistMenu, recentFavoriteFolders, rememberFolderMenuAdded, reloadDetail, scrollToFileInfo, t]);
 
   if (loading) {
     return (
@@ -1564,6 +1583,14 @@ export default function MediaDetailPage() {
             rememberPlaylistAdded(pl);
             setRecentPlaylistMenu(readRecentPlaylists());
           }}
+        />
+      ) : null}
+      {detail && favoriteFolderModalOpen ? (
+        <AddToFavoriteFolderPickerModal
+          mediaId={detail.id}
+          open
+          onClose={() => setFavoriteFolderModalOpen(false)}
+          onAdded={(folder) => rememberFolderMenuAdded(folder)}
         />
       ) : null}
       {detail ? (

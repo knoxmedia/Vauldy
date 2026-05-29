@@ -347,6 +347,30 @@ CREATE TABLE IF NOT EXISTS playlist_item (
 CREATE INDEX IF NOT EXISTS idx_playlist_item_playlist ON playlist_item(playlist_id);
 CREATE INDEX IF NOT EXISTS idx_playlist_item_media ON playlist_item(media_id);
 
+CREATE TABLE IF NOT EXISTS favorite_folder (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES user(id)
+);
+CREATE INDEX IF NOT EXISTS idx_favorite_folder_user ON favorite_folder(user_id);
+
+CREATE TABLE IF NOT EXISTS favorite_folder_item (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    folder_id INTEGER NOT NULL,
+    media_id INTEGER NOT NULL,
+    sort_order INTEGER DEFAULT 0,
+    added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(folder_id, media_id),
+    FOREIGN KEY (folder_id) REFERENCES favorite_folder(id) ON DELETE CASCADE,
+    FOREIGN KEY (media_id) REFERENCES media(id)
+);
+CREATE INDEX IF NOT EXISTS idx_favorite_folder_item_folder ON favorite_folder_item(folder_id);
+CREATE INDEX IF NOT EXISTS idx_favorite_folder_item_media ON favorite_folder_item(media_id);
+
 CREATE TABLE IF NOT EXISTS scrape_config (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     enabled INTEGER DEFAULT 1,

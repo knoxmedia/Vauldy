@@ -20,6 +20,7 @@ import {
   Library,
   MediaItem,
   HistoryItem,
+  addFavoriteFolderItem,
   addPlaylistItem,
   fetchLibraries,
   fetchUserHistory,
@@ -30,14 +31,18 @@ import {
 } from "../api/client";
 import { mediaItemsToMusicQueue } from "../lib/albumPlayback";
 import { useMusicPlayerStore } from "../store/musicPlayer";
+import AddToFavoriteFolderPickerModal from "../components/AddToFavoriteFolderPickerModal";
 import AddToPlaylistModal from "../components/AddToPlaylistModal";
+import MusicPosterPlaceholderIcon from "../components/MusicPosterPlaceholderIcon";
 import PhotoLightbox from "../components/PhotoLightbox";
 import { buildMediaMenuItems } from "../components/mediaMenuItems";
 import {
   buildHomeRecentSections,
+  CONTINUE_WATCHING_LIBRARY_TYPES,
   flattenHomeRecent,
   loadHomeRecentBySection,
 } from "../lib/homeRecentSections";
+import { useFavoriteFolderMenuRecents } from "../lib/useFavoriteFolderMenuRecents";
 import { readRecentPlaylists, rememberPlaylistAdded } from "../lib/recentPlaylists";
 import { useT, type TranslateFn } from "../i18n";
 import styles from "./Home.module.css";
@@ -242,6 +247,7 @@ function RecentShelfCard({
   bulkSelectMode,
   buildHomeMediaMenu,
   variant,
+  layout = "portrait",
   shelfItems,
   shelfIndex,
   t,
@@ -252,19 +258,31 @@ function RecentShelfCard({
   onToggleSelect: () => void;
   bulkSelectMode: boolean;
   buildHomeMediaMenu: (mediaId: number, extra?: { isWatched?: boolean; fromContinueWatching?: boolean }) => MenuProps;
-  variant: "movie" | "music";
+  variant: "movie" | "music" | "video";
+  layout?: "portrait" | "landscape";
   shelfItems: MediaItem[];
   shelfIndex: number;
   t: TranslateFn;
 }) {
+  const isLandscape = layout === "landscape";
   const [posterFailed, setPosterFailed] = useState(false);
+  const [useLandscapePosterFallback, setUseLandscapePosterFallback] = useState(false);
   const year = variant === "movie" ? mediaReleaseYear(m) : "";
-  const posterSrc = variant === "music" ? musicMediaPosterSrc(m) : mediaPosterSrc(m);
+  const landscapePrimary = mediaLandscapeThumbSrc(m);
+  const landscapeFallback = mediaPosterSrc(m);
+  const posterSrc =
+    variant === "music"
+      ? musicMediaPosterSrc(m)
+      : isLandscape
+        ? (useLandscapePosterFallback ? landscapeFallback : landscapePrimary) || landscapeFallback
+        : mediaPosterSrc(m);
   const showPosterImg = Boolean(posterSrc) && !posterFailed;
   const homeMediaMenu = useMemo(
     () => buildHomeMediaMenu(m.id),
     [m.id, buildHomeMediaMenu],
   );
+  const showBulkSelect = variant === "movie" && bulkSelectMode;
+  const showSelectButton = variant === "movie";
 
   const playShelfItem = () => {
     if (variant === "music") {
@@ -283,28 +301,28 @@ function RecentShelfCard({
 
   return (
     <div
-      className={`${styles.thumbPoster} ${styles.thumbPosterMovie} ${selected ? styles.thumbPosterMovieSelected : ""} ${
-        bulkSelectMode ? styles.thumbPosterMovieBulk : ""
+      className={`${styles.thumbPoster} ${styles.thumbPosterMovie} ${isLandscape ? styles.thumbPosterMovieLandscape : ""} ${selected ? styles.thumbPosterMovieSelected : ""} ${
+        showBulkSelect ? styles.thumbPosterMovieBulk : ""
       }`}
       role="button"
       tabIndex={0}
       onClick={(e) => {
-        if (bulkSelectMode && (e.target as HTMLElement).closest(`.${styles.posterBoxMovie}`)) return;
+        if (showBulkSelect && (e.target as HTMLElement).closest(`.${styles.posterBoxMovie}`)) return;
         nav(`/detail/${m.id}`);
       }}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
-          if (bulkSelectMode) onToggleSelect();
+          if (showBulkSelect) onToggleSelect();
           else nav(`/detail/${m.id}`);
         }
       }}
     >
       <div
-        className={`${styles.posterBox} ${styles.posterBoxMovie}`}
+        className={`${styles.posterBox} ${styles.posterBoxMovie} ${isLandscape ? styles.posterBoxMovieLandscape : ""} ${variant === "music" ? styles.posterBoxMovieMusic : ""}`}
         role="presentation"
         onClick={(e) => {
-          if (bulkSelectMode) {
+          if (showBulkSelect) {
             if ((e.target as HTMLElement).closest("[data-home-shelf-action]")) return;
             onToggleSelect();
             return;
@@ -313,40 +331,59 @@ function RecentShelfCard({
         }}
       >
         <>
+          {variant === "music" ? (
+            <div className={styles.posterMusicPlaceholderIcon} aria-hidden>
+              <MusicPosterPlaceholderIcon />
+            </div>
+          ) : null}
           {showPosterImg ? (
             <img
-              className={styles.posterImgMovie}
+              className={`${styles.posterImgMovie} ${isLandscape || variant === "music" ? styles.posterImgMovieCover : ""}`}
               src={posterSrc!}
               alt=""
               loading="lazy"
               decoding="async"
-              onError={() => setPosterFailed(true)}
+              onError={() => {
+                if (
+                  isLandscape &&
+                  landscapeFallback &&
+                  !useLandscapePosterFallback &&
+                  landscapePrimary &&
+                  landscapePrimary !== landscapeFallback
+                ) {
+                  setUseLandscapePosterFallback(true);
+                  return;
+                }
+                setPosterFailed(true);
+              }}
             />
-          ) : (
+          ) : variant !== "music" ? (
             <div className={styles.posterEmptyMovieSolid} aria-hidden />
-          )}
+          ) : null}
           <div
             className={styles.posterOverlay}
             onClick={(e) => {
               e.stopPropagation();
-              if (bulkSelectMode) onToggleSelect();
+              if (showBulkSelect) onToggleSelect();
               else nav(`/detail/${m.id}`);
             }}
             role="presentation"
           >
-            <button
-              type="button"
-              data-home-shelf-action
-              className={`${styles.posterOverlayIconBtn} ${styles.posterOverlaySelect}`}
-              aria-label={selected ? t("pages.home.aria_deselect") : t("pages.home.aria_select")}
-              onClick={(e) => {
-                e.stopPropagation();
-                onToggleSelect();
-              }}
-            >
-              {selected ? <CheckOutlined /> : null}
-            </button>
-            {bulkSelectMode ? null : (
+            {showSelectButton ? (
+              <button
+                type="button"
+                data-home-shelf-action
+                className={`${styles.posterOverlayIconBtn} ${styles.posterOverlaySelect}`}
+                aria-label={selected ? t("pages.home.aria_deselect") : t("pages.home.aria_select")}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onToggleSelect();
+                }}
+              >
+                {selected ? <CheckOutlined /> : null}
+              </button>
+            ) : null}
+            {!showBulkSelect ? (
               <>
                 <button
                   type="button"
@@ -381,7 +418,7 @@ function RecentShelfCard({
                   </button>
                 </Dropdown>
               </>
-            )}
+            ) : null}
           </div>
         </>
       </div>
@@ -438,6 +475,12 @@ function RecentAddedRow({
   };
 
   const showPlayButton = sectionKey !== "photo" && sectionKey !== "document";
+  const useShelfCard =
+    sectionKey === "movie" ||
+    sectionKey === "music" ||
+    sectionKey === "tv" ||
+    sectionKey === "anime" ||
+    sectionKey === "other_video";
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [showLeft, setShowLeft] = useState(false);
   const [showRight, setShowRight] = useState(false);
@@ -506,16 +549,17 @@ function RecentAddedRow({
           onScroll={updateArrows}
         >
         {items.map((m, index) =>
-          !landscape && (sectionKey === "movie" || sectionKey === "music") ? (
+          useShelfCard ? (
             <RecentShelfCard
               key={m.id}
               m={m}
               nav={nav}
-              selected={movieSelectedIds.has(m.id)}
+              selected={sectionKey === "movie" && movieSelectedIds.has(m.id)}
               onToggleSelect={() => onToggleMovieSelect(m.id)}
-              bulkSelectMode={homeBulkActive}
+              bulkSelectMode={sectionKey === "movie" && homeBulkActive}
               buildHomeMediaMenu={buildHomeMediaMenu}
-              variant={sectionKey === "music" ? "music" : "movie"}
+              variant={sectionKey === "music" ? "music" : sectionKey === "movie" ? "movie" : "video"}
+              layout={landscape ? "landscape" : "portrait"}
               shelfItems={items}
               shelfIndex={index}
               t={t}
@@ -665,7 +709,10 @@ export default function HomePage() {
     setLoading(true);
     // 分项处理：任一接口失败不应清空其它接口的成功数据（Promise.all 会全失败）
     void (async () => {
-      const [libR, histR] = await Promise.allSettled([fetchLibraries(), fetchUserHistory(24)]);
+      const [libR, histR] = await Promise.allSettled([
+        fetchLibraries(),
+        fetchUserHistory(24, { libraryTypes: CONTINUE_WATCHING_LIBRARY_TYPES }),
+      ]);
       if (cancelled) return;
       const libsData = libR.status === "fulfilled" && Array.isArray(libR.value) ? libR.value : [];
       setLibs(libsData);
@@ -745,7 +792,9 @@ export default function HomePage() {
   }, []);
 
   const [addToPlaylistMediaId, setAddToPlaylistMediaId] = useState<number | null>(null);
+  const [addToFavoriteFolderMediaId, setAddToFavoriteFolderMediaId] = useState<number | null>(null);
   const [recentPlaylistMenu, setRecentPlaylistMenu] = useState(readRecentPlaylists);
+  const { recentFavoriteFolders, rememberFolderMenuAdded } = useFavoriteFolderMenuRecents();
 
   const buildHomeMediaMenu = useCallback(
     (mediaId: number, menuExtra?: { isWatched?: boolean; fromContinueWatching?: boolean }) =>
@@ -767,6 +816,20 @@ export default function HomePage() {
             message.error(t("pages.home.add_failed"));
           }
         },
+        onAddToFavoriteFolder: (mid) => setAddToFavoriteFolderMediaId(mid),
+        recentFavoriteFolders,
+        onQuickAddToFavoriteFolder: async (mid, folderId) => {
+          try {
+            await addFavoriteFolderItem(folderId, mid);
+            const name =
+              recentFavoriteFolders.find((f) => f.id === folderId)?.name ??
+              t("components.media_menu.favorite_folder_fallback");
+            message.success(t("components.add_to_favorite_folder_picker_modal.added_single", { name }));
+            rememberFolderMenuAdded({ id: folderId, name });
+          } catch {
+            message.error(t("components.add_to_favorite_folder_picker_modal.add_failed_dup"));
+          }
+        },
         onRemoveFromContinueWatching: menuExtra?.fromContinueWatching
           ? async () => {
               await removePlayProgress(mediaId);
@@ -780,7 +843,7 @@ export default function HomePage() {
             }
           : undefined,
       }),
-    [nav, recentPlaylistMenu, t],
+    [nav, recentPlaylistMenu, recentFavoriteFolders, rememberFolderMenuAdded, t],
   );
 
   const addToPlaylistDefaultTitle = useMemo(() => {
@@ -916,15 +979,37 @@ export default function HomePage() {
     });
   }, [movieShelfItems, recentBySection]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    if (loading || history.length === 0) {
+      setShowHistoryLeft(false);
+      setShowHistoryRight(false);
+      return;
+    }
     updateHistoryArrows();
-    const onResize = () => {
-      updateHistoryArrows();
-    };
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [history.length]);
+  }, [history.length, loading]);
+
+  useEffect(() => {
+    if (loading || history.length === 0) return;
+    const el = historyScrollRef.current;
+    if (!el) return;
+
+    const run = () => updateHistoryArrows();
+    const ro = new ResizeObserver(run);
+    ro.observe(el);
+    const onResize = () => run();
+    window.addEventListener("resize", onResize);
+    const t1 = window.setTimeout(run, 300);
+    const t2 = window.setTimeout(run, 800);
+
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", onResize);
+      window.clearTimeout(t1);
+      window.clearTimeout(t2);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [history.length, loading]);
 
   useEffect(() => {
     if (loading) return;
@@ -1237,6 +1322,14 @@ export default function HomePage() {
             rememberPlaylistAdded(pl);
             setRecentPlaylistMenu(readRecentPlaylists());
           }}
+        />
+      )}
+      {addToFavoriteFolderMediaId != null && (
+        <AddToFavoriteFolderPickerModal
+          mediaId={addToFavoriteFolderMediaId}
+          open
+          onClose={() => setAddToFavoriteFolderMediaId(null)}
+          onAdded={(folder) => rememberFolderMenuAdded(folder)}
         />
       )}
     </div>

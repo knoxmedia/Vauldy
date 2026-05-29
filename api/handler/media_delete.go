@@ -201,6 +201,7 @@ func (h *Handler) deleteMediaRecords(id int64, fileID string) error {
 		args []any
 	}{
 		{`DELETE FROM favorite WHERE media_id = ?`, []any{id}},
+		{`DELETE FROM favorite_folder_item WHERE media_id = ?`, []any{id}},
 		{`DELETE FROM playlist_item WHERE media_id = ?`, []any{id}},
 		{`DELETE FROM scrape_task WHERE media_id = ?`, []any{id}},
 		{`DELETE FROM scrape_history WHERE media_id = ?`, []any{id}},

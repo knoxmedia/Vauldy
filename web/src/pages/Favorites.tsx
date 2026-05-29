@@ -6,19 +6,56 @@ import {
   DownOutlined,
   EditOutlined,
   EllipsisOutlined,
+  FolderAddOutlined,
   PictureOutlined,
+  PlusOutlined,
+  RollbackOutlined,
   TableOutlined,
   UpOutlined,
 } from "@ant-design/icons";
 import type { MenuProps } from "antd";
-import { Button, Dropdown, Empty, Pagination, Spin, message } from "antd";
+import { Button, Dropdown, Empty, Modal, Pagination, Spin, message } from "antd";
 import type { ComponentType } from "react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { MediaItem, addPlaylistItem, fetchFavorites, removeFavorite } from "../api/client";
+import {
+  FavoriteFolder,
+  FavoriteFolderItem,
+  MediaItem,
+  addFavoriteFolderItem,
+  addPlaylistItem,
+  createFavoriteFolder,
+  deleteFavoriteFolder,
+  fetchFavoriteFolder,
+  fetchFavoriteFolders,
+  fetchFavorites,
+  fetchLibraries,
+  mediaPosterSrc,
+  removeFavorite,
+  updateFavoriteFolder,
+} from "../api/client";
+import AddToFavoriteFolderPickerModal from "../components/AddToFavoriteFolderPickerModal";
+import AddToFavoriteFolderModal from "../components/AddToFavoriteFolderModal";
 import AddToPlaylistModal from "../components/AddToPlaylistModal";
+import FavoriteFolderFormModal from "../components/FavoriteFolderFormModal";
 import MediaPosterImg from "../components/MediaPosterImg";
+import MusicPosterPlaceholderIcon from "../components/MusicPosterPlaceholderIcon";
 import { buildMediaMenuItems } from "../components/mediaMenuItems";
+import {
+  FAVORITE_CATEGORY_ORDER,
+  FavoriteCategoryKey,
+  FavoriteMediaCategory,
+  buildFavoriteCategoryLabels,
+  buildFolderPreviewSlots,
+  countFavoritesByCategory,
+  favoriteFolderCoverSrc,
+  favoriteFolderItemToMediaItem,
+  filterFavoritesByCategory,
+  isFavoriteCategoryKey,
+  isFavoriteVideoItem,
+  pickDefaultFavoriteCategory,
+} from "../lib/favoriteCategories";
+import { useFavoriteFolderMenuRecents } from "../lib/useFavoriteFolderMenuRecents";
 import { readRecentPlaylists, rememberPlaylistAdded } from "../lib/recentPlaylists";
 import { useT, type TranslateFn } from "../i18n";
 import styles from "./Favorites.module.css";
@@ -55,6 +92,7 @@ function readFavoritesPrefs(): {
   viewMode: ViewMode;
   sortField: SortField;
   sortOrder: SortOrder;
+  category?: FavoriteCategoryKey;
 } | null {
   if (typeof window === "undefined") return null;
   try {
@@ -64,6 +102,7 @@ function readFavoritesPrefs(): {
       viewMode?: ViewMode;
       sortField?: SortField;
       sortOrder?: SortOrder;
+      category?: FavoriteCategoryKey;
     };
     const viewMode: ViewMode = ["poster", "thumb", "list", "table"].includes(String(parsed.viewMode))
       ? (parsed.viewMode as ViewMode)
@@ -72,7 +111,11 @@ function readFavoritesPrefs(): {
       ? (parsed.sortField as SortField)
       : "added";
     const sortOrder: SortOrder = parsed.sortOrder === "asc" || parsed.sortOrder === "desc" ? parsed.sortOrder : "desc";
-    return { viewMode, sortField, sortOrder };
+    const category =
+      parsed.category && isFavoriteCategoryKey(String(parsed.category))
+        ? (parsed.category as FavoriteCategoryKey)
+        : undefined;
+    return { viewMode, sortField, sortOrder, category };
   } catch {
     return null;
   }
@@ -94,7 +137,17 @@ export default function FavoritesPage() {
   const t = useT();
   const VIEW_MODES = useMemo(() => buildViewModes(t), [t]);
   const TABLE_COL_SPECS = useMemo(() => buildTableColSpecs(t), [t]);
+  const CATEGORY_LABELS = useMemo(() => buildFavoriteCategoryLabels(t), [t]);
   const [rows, setRows] = useState<MediaItem[]>([]);
+  const [folders, setFolders] = useState<FavoriteFolder[]>([]);
+  const [libTypeById, setLibTypeById] = useState<Map<number, string>>(() => new Map());
+  const [activeCategory, setActiveCategory] = useState<FavoriteCategoryKey>(
+    () => readFavoritesPrefs()?.category ?? "movie",
+  );
+  const [selectedFolderId, setSelectedFolderId] = useState<number | null>(null);
+  const [folderItems, setFolderItems] = useState<FavoriteFolderItem[]>([]);
+  const [folderLoading, setFolderLoading] = useState(false);
+  const categoryInitialized = useRef(false);
   const [loading, setLoading] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>(() => readFavoritesPrefs()?.viewMode ?? "table");
   const [sortField, setSortField] = useState<SortField>(() => readFavoritesPrefs()?.sortField ?? "added");
@@ -103,15 +156,54 @@ export default function FavoritesPage() {
   const [selectedIds, setSelectedIds] = useState<Set<number>>(() => new Set());
   const [tablePage, setTablePage] = useState(1);
   const [addToPlaylistMediaId, setAddToPlaylistMediaId] = useState<number | null>(null);
+  const [addToFavoriteFolderMediaId, setAddToFavoriteFolderMediaId] = useState<number | null>(null);
   const [recentPlaylistMenu, setRecentPlaylistMenu] = useState(readRecentPlaylists);
+  const { recentFavoriteFolders, rememberFolderMenuAdded, reloadRecentFavoriteFolders } =
+    useFavoriteFolderMenuRecents();
+  const [folderForm, setFolderForm] = useState<null | { mode: "create" } | { mode: "edit"; folder: FavoriteFolder }>(
+    null,
+  );
+  const [folderFormSubmitting, setFolderFormSubmitting] = useState(false);
+  const [addVideoFolderId, setAddVideoFolderId] = useState<number | null>(null);
+
+  const reloadFolders = useCallback(async () => {
+    const list = await fetchFavoriteFolders();
+    setFolders(list);
+    return list;
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      setRows(await fetchFavorites());
+      const [favR, folderR, libR] = await Promise.allSettled([
+        fetchFavorites(),
+        fetchFavoriteFolders(),
+        fetchLibraries(),
+      ]);
+      const favItems = favR.status === "fulfilled" ? favR.value : [];
+      const folderItemsList = folderR.status === "fulfilled" ? folderR.value : [];
+      const libs = libR.status === "fulfilled" ? libR.value : [];
+      setRows(favItems);
+      setFolders(folderItemsList);
+      const typeMap = new Map<number, string>();
+      for (const lib of libs) {
+        typeMap.set(lib.id, (lib.type || "").trim().toLowerCase());
+      }
+      setLibTypeById(typeMap);
+      if (!categoryInitialized.current) {
+        categoryInitialized.current = true;
+        const saved = readFavoritesPrefs()?.category;
+        const counts = countFavoritesByCategory(favItems, typeMap, folderItemsList.length);
+        if (saved && isFavoriteCategoryKey(saved)) {
+          setActiveCategory(saved);
+        } else {
+          setActiveCategory(pickDefaultFavoriteCategory(counts));
+        }
+      }
     } catch (e: unknown) {
       message.error((e as Error).message || t("pages.favorites.load_failed"));
       setRows([]);
+      setFolders([]);
     } finally {
       setLoading(false);
     }
@@ -125,11 +217,46 @@ export default function FavoritesPage() {
     if (typeof window === "undefined") return;
     window.localStorage.setItem(
       FAVORITES_PREFS_KEY,
-      JSON.stringify({ viewMode, sortField, sortOrder })
+      JSON.stringify({ viewMode, sortField, sortOrder, category: activeCategory })
     );
-  }, [viewMode, sortField, sortOrder]);
+  }, [viewMode, sortField, sortOrder, activeCategory]);
 
-  const sortedRows = [...rows].sort((a, b) => {
+  useEffect(() => {
+    if (activeCategory !== "folders" || selectedFolderId == null) {
+      setFolderItems([]);
+      setFolderLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setFolderLoading(true);
+    void fetchFavoriteFolder(selectedFolderId)
+      .then((folder) => {
+        if (!cancelled) setFolderItems(folder.items ?? []);
+      })
+      .catch(() => {
+        if (!cancelled) setFolderItems([]);
+      })
+      .finally(() => {
+        if (!cancelled) setFolderLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeCategory, selectedFolderId]);
+
+  const categoryCounts = useMemo(
+    () => countFavoritesByCategory(rows, libTypeById, folders.length),
+    [rows, libTypeById, folders.length],
+  );
+
+  const filteredRows = useMemo(() => {
+    if (activeCategory === "folders") {
+      return selectedFolderId != null ? folderItems.map(favoriteFolderItemToMediaItem) : [];
+    }
+    return filterFavoritesByCategory(rows, activeCategory as FavoriteMediaCategory, libTypeById);
+  }, [activeCategory, selectedFolderId, folderItems, rows, libTypeById]);
+
+  const sortedRows = [...filteredRows].sort((a, b) => {
     const factor = sortOrder === "asc" ? 1 : -1;
     if (sortField === "title") {
       return (a.title ?? "").localeCompare(b.title ?? "", "zh-CN") * factor;
@@ -152,7 +279,131 @@ export default function FavoritesPage() {
 
   useEffect(() => {
     setTablePage(1);
-  }, [sortedRows.length, viewMode]);
+    setSelectedIds(new Set());
+  }, [sortedRows.length, viewMode, activeCategory, selectedFolderId]);
+
+  function selectCategory(key: FavoriteCategoryKey) {
+    setActiveCategory(key);
+    if (key !== "folders") setSelectedFolderId(null);
+  }
+
+  function openFolder(id: number) {
+    setActiveCategory("folders");
+    setSelectedFolderId(id);
+    setViewMode("thumb");
+  }
+
+  function closeFolderDetail() {
+    setSelectedFolderId(null);
+  }
+
+  const videoFavorites = useMemo(
+    () => rows.filter((row) => isFavoriteVideoItem(row, libTypeById)),
+    [rows, libTypeById],
+  );
+
+  const openCreateFolderForm = useCallback(() => {
+    setFolderForm({ mode: "create" });
+  }, []);
+
+  const openEditFolderForm = useCallback((folder: FavoriteFolder) => {
+    setFolderForm({ mode: "edit", folder });
+  }, []);
+
+  const openAddVideoModal = useCallback((folderId: number) => {
+    setAddVideoFolderId(folderId);
+  }, []);
+
+  const handleFolderFormSubmit = useCallback(
+    async (name: string) => {
+      if (!folderForm) return;
+      setFolderFormSubmitting(true);
+      try {
+        if (folderForm.mode === "create") {
+          await createFavoriteFolder(name);
+          message.success(t("pages.favorites.folder_created"));
+        } else {
+          await updateFavoriteFolder(folderForm.folder.id, name);
+          message.success(t("pages.favorites.folder_updated"));
+        }
+        await reloadFolders();
+        void reloadRecentFavoriteFolders();
+        setFolderForm(null);
+      } catch (e: unknown) {
+        message.error((e as Error).message || t("pages.favorites.operation_failed"));
+      } finally {
+        setFolderFormSubmitting(false);
+      }
+    },
+    [folderForm, reloadFolders, t],
+  );
+
+  const handleDeleteFolder = useCallback(
+    (folder: FavoriteFolder) => {
+      Modal.confirm({
+        title: t("pages.favorites.folder_delete_title"),
+        content: t("pages.favorites.folder_delete_confirm", { name: folder.name }),
+        okText: t("pages.favorites.folder_delete_ok"),
+        cancelText: t("pages.favorites.folder_delete_cancel"),
+        okButtonProps: { danger: true },
+        onOk: async () => {
+          try {
+            await deleteFavoriteFolder(folder.id);
+            if (selectedFolderId === folder.id) setSelectedFolderId(null);
+            await reloadFolders();
+            void reloadRecentFavoriteFolders();
+            message.success(t("pages.favorites.folder_deleted"));
+          } catch (e: unknown) {
+            message.error((e as Error).message || t("pages.favorites.operation_failed"));
+            throw e;
+          }
+        },
+      });
+    },
+    [reloadFolders, selectedFolderId, t],
+  );
+
+  const buildFolderMenu = useCallback(
+    (folder: FavoriteFolder): MenuProps => ({
+      items: [
+        {
+          key: "add",
+          label: t("pages.favorites.menu_add_video"),
+          onClick: () => openAddVideoModal(folder.id),
+        },
+        {
+          key: "edit",
+          label: t("pages.favorites.menu_edit_folder"),
+          onClick: () => openEditFolderForm(folder),
+        },
+        {
+          key: "delete",
+          label: t("pages.favorites.menu_delete_folder"),
+          danger: true,
+          onClick: () => handleDeleteFolder(folder),
+        },
+      ],
+    }),
+    [handleDeleteFolder, openAddVideoModal, openEditFolderForm, t],
+  );
+
+  const refreshFolderItems = useCallback(async () => {
+    if (selectedFolderId == null) return;
+    setFolderLoading(true);
+    try {
+      const folder = await fetchFavoriteFolder(selectedFolderId);
+      setFolderItems(folder.items ?? []);
+      await reloadFolders();
+    } catch {
+      setFolderItems([]);
+    } finally {
+      setFolderLoading(false);
+    }
+  }, [reloadFolders, selectedFolderId]);
+
+  const showFolderGrid = activeCategory === "folders" && selectedFolderId == null;
+  const showFolderSplit = activeCategory === "folders" && selectedFolderId != null;
+  const contentLoading = loading || (showFolderSplit && folderLoading);
 
   function toggleSelect(id: number) {
     setSelectedIds((prev) => {
@@ -198,10 +449,25 @@ export default function FavoritesPage() {
             message.error(t("pages.favorites.add_failed"));
           }
         },
+        onAddToFavoriteFolder: (mid) => setAddToFavoriteFolderMediaId(mid),
+        recentFavoriteFolders,
+        onQuickAddToFavoriteFolder: async (mid, folderId) => {
+          try {
+            await addFavoriteFolderItem(folderId, mid);
+            const name =
+              recentFavoriteFolders.find((f) => f.id === folderId)?.name ??
+              t("components.media_menu.favorite_folder_fallback");
+            message.success(t("components.add_to_favorite_folder_picker_modal.added_single", { name }));
+            rememberFolderMenuAdded({ id: folderId, name });
+            if (selectedFolderId === folderId) void refreshFolderItems();
+          } catch {
+            message.error(t("components.add_to_favorite_folder_picker_modal.add_failed_dup"));
+          }
+        },
         onUnfavorite: (id) => void onUnfavorite(id),
         afterToggleWatched: () => void load(),
       }),
-    [nav, recentPlaylistMenu, load, t],
+    [nav, recentPlaylistMenu, recentFavoriteFolders, rememberFolderMenuAdded, selectedFolderId, refreshFolderItems, load, t],
   );
 
   const addToPlaylistTarget = useMemo(
@@ -218,48 +484,226 @@ export default function FavoritesPage() {
   const CurrentViewIcon = VIEW_MODES.find((m) => m.value === viewMode)?.Icon ?? TableOutlined;
   const currentViewLabel = VIEW_MODES.find((m) => m.value === viewMode)?.label ?? t("pages.browse.table_fallback");
 
+  const viewModePicker = (
+    <div className={styles.viewModePicker}>
+      <span className={styles.viewModeCurrentIcon} title={currentViewLabel} aria-label={currentViewLabel}>
+        <CurrentViewIcon />
+      </span>
+      <Dropdown
+        open={viewModeMenuOpen}
+        onOpenChange={setViewModeMenuOpen}
+        menu={{
+          items: viewModeMenuItems,
+          selectedKeys: [viewMode],
+          onClick: ({ key }) => {
+            setViewMode(key as ViewMode);
+            setViewModeMenuOpen(false);
+          },
+        }}
+        trigger={["click"]}
+        placement="bottomRight"
+      >
+        <Button
+          type="text"
+          size="small"
+          icon={viewModeMenuOpen ? <UpOutlined /> : <DownOutlined />}
+          aria-label={t("pages.browse.view_mode_aria")}
+          aria-expanded={viewModeMenuOpen}
+        />
+      </Dropdown>
+    </div>
+  );
+
   return (
     <div style={{ padding: "16px 0 32px" }}>
       <div className={styles.topBar}>
-        <div className={styles.topLeftTools} />
-        <div className={styles.topRightTools}>
-          <div className={styles.viewModePicker}>
-            <span className={styles.viewModeCurrentIcon} title={currentViewLabel} aria-label={currentViewLabel}>
-              <CurrentViewIcon />
-            </span>
-            <Dropdown
-              open={viewModeMenuOpen}
-              onOpenChange={setViewModeMenuOpen}
-              menu={{
-                items: viewModeMenuItems,
-                selectedKeys: [viewMode],
-                onClick: ({ key }) => {
-                  setViewMode(key as ViewMode);
-                  setViewModeMenuOpen(false);
-                },
-              }}
-              trigger={["click"]}
-              placement="bottomRight"
-            >
-              <Button
-                type="text"
-                size="small"
-                icon={viewModeMenuOpen ? <UpOutlined /> : <DownOutlined />}
-                aria-label={t("pages.browse.view_mode_aria")}
-                aria-expanded={viewModeMenuOpen}
-              />
-            </Dropdown>
+        <div className={styles.topLeftTools}>
+          <div className={styles.categoryTabs} role="tablist" aria-label={t("pages.favorites.category_tabs_aria")}>
+            {FAVORITE_CATEGORY_ORDER.map((key) => (
+              <button
+                key={key}
+                type="button"
+                role="tab"
+                aria-selected={activeCategory === key}
+                className={`${styles.categoryTab} ${activeCategory === key ? styles.categoryTabActive : ""}`}
+                onClick={() => selectCategory(key)}
+              >
+                <span>{CATEGORY_LABELS[key]}</span>
+                {categoryCounts[key] > 0 ? (
+                  <span className={styles.categoryCount}>{categoryCounts[key]}</span>
+                ) : null}
+              </button>
+            ))}
           </div>
+        </div>
+        <div className={styles.topRightTools}>
+          {showFolderGrid ? (
+            <button type="button" className={styles.folderActionBtn} onClick={openCreateFolderForm}>
+              <FolderAddOutlined />
+              <span>{t("pages.favorites.new_folder")}</span>
+            </button>
+          ) : showFolderSplit ? (
+            <>
+              <button
+                type="button"
+                className={`${styles.folderActionBtn} ${styles.folderActionBtnIconOnly}`}
+                aria-label={t("pages.favorites.add_video")}
+                onClick={() => selectedFolderId != null && openAddVideoModal(selectedFolderId)}
+              >
+                <FolderAddOutlined />
+              </button>
+              <button
+                type="button"
+                className={`${styles.folderActionBtn} ${styles.folderActionBtnIconOnly}`}
+                aria-label={t("pages.favorites.back")}
+                onClick={closeFolderDetail}
+              >
+                <RollbackOutlined />
+              </button>
+              {viewModePicker}
+            </>
+          ) : (
+            viewModePicker
+          )}
         </div>
       </div>
 
-      {loading ? (
-        <div className={styles.loadingWrap}>
-          <Spin />
+      {showFolderGrid ? (
+        <div className={styles.folderListPage}>
+          {loading ? (
+            <div className={styles.loadingWrap}>
+              <Spin />
+            </div>
+          ) : folders.length === 0 ? (
+            <div className={styles.folderListEmpty}>
+              <Empty description={t("pages.favorites.folders_empty")} />
+            </div>
+          ) : (
+            <>
+              <div className={styles.folderListGrid}>
+                {folders.map((folder) => {
+                  const previewSlots = buildFolderPreviewSlots(folder);
+                  return (
+                    <div
+                      key={folder.id}
+                      className={styles.folderListCard}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => openFolder(folder.id)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          openFolder(folder.id);
+                        }
+                      }}
+                    >
+                      <div className={styles.folderListCardHead}>
+                        <div>
+                          <div className={styles.folderListCardTitle}>{folder.name}</div>
+                          <div className={styles.folderListCardMeta}>
+                            {t("pages.favorites.folder_work_count", { count: folder.item_count ?? 0 })}
+                          </div>
+                        </div>
+                        <Dropdown menu={buildFolderMenu(folder)} trigger={["click"]} placement="bottomRight">
+                          <button
+                            type="button"
+                            className={styles.folderListCardMenuBtn}
+                            aria-label={t("pages.favorites.folder_menu_aria")}
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <EllipsisOutlined />
+                          </button>
+                        </Dropdown>
+                      </div>
+                      <div className={styles.folderListCardPreviews}>
+                        {previewSlots.map((slot, idx) => {
+                          const poster = slot?.poster_url || (slot?.media_id ? mediaPosterSrc({ id: slot.media_id, poster_url: "" }) : "");
+                          return (
+                            <div key={`${folder.id}-${idx}`} className={styles.folderPreviewSlot}>
+                              {poster ? (
+                                <img className={styles.folderPreviewImg} src={poster} alt="" loading="lazy" />
+                              ) : (
+                                <div className={styles.folderPreviewEmpty} aria-hidden>
+                                  <MusicPosterPlaceholderIcon className={styles.folderPreviewEmptyIcon} />
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className={styles.folderListEnd}>{t("pages.favorites.no_more")}</div>
+            </>
+          )}
         </div>
-      ) : sortedRows.length === 0 ? (
-        <Empty description={t("pages.favorites.empty")} />
-      ) : viewMode === "table" ? (
+      ) : (
+        <div className={showFolderSplit ? styles.folderLayout : undefined}>
+          {showFolderSplit ? (
+            <aside className={styles.folderSidebar}>
+              <button type="button" className={styles.folderSidebarNew} onClick={openCreateFolderForm}>
+                <span className={styles.folderSidebarNewIcon}>
+                  <PlusOutlined />
+                </span>
+                <span>{t("pages.favorites.new_folder")}</span>
+              </button>
+              <div className={styles.folderSidebarList}>
+                {folders.map((folder) => {
+                  const cover =
+                    favoriteFolderCoverSrc(folder) ||
+                    (folder.first_media_id ? mediaPosterSrc({ id: folder.first_media_id, poster_url: "" }) : "");
+                  return (
+                    <div
+                      key={folder.id}
+                      className={`${styles.folderSidebarCard} ${selectedFolderId === folder.id ? styles.folderSidebarCardActive : ""}`}
+                    >
+                      <button
+                        type="button"
+                        className={styles.folderSidebarCardMain}
+                        onClick={() => setSelectedFolderId(folder.id)}
+                      >
+                        <div className={styles.folderSidebarThumb}>
+                          {cover ? (
+                            <img className={styles.folderSidebarThumbImg} src={cover} alt="" loading="lazy" />
+                          ) : (
+                            <div className={styles.folderSidebarThumbFallback} aria-hidden />
+                          )}
+                        </div>
+                        <div className={styles.folderSidebarInfo}>
+                          <div className={styles.folderSidebarCardTitle}>{folder.name}</div>
+                          <div className={styles.folderSidebarCardCount}>{folder.item_count ?? 0}</div>
+                        </div>
+                      </button>
+                      <Dropdown menu={buildFolderMenu(folder)} trigger={["click"]} placement="bottomRight">
+                        <button
+                          type="button"
+                          className={styles.folderSidebarCardMenuBtn}
+                          aria-label={t("pages.favorites.folder_menu_aria")}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <EllipsisOutlined />
+                        </button>
+                      </Dropdown>
+                    </div>
+                  );
+                })}
+              </div>
+            </aside>
+          ) : null}
+          <div className={showFolderSplit ? styles.folderMain : undefined}>
+            {contentLoading ? (
+              <div className={styles.loadingWrap}>
+                <Spin />
+              </div>
+            ) : sortedRows.length === 0 ? (
+              <Empty
+                description={
+                  showFolderSplit ? t("pages.favorites.folder_items_empty") : t("pages.favorites.empty")
+                }
+              />
+            ) : viewMode === "table" ? (
         <div className={styles.browseTableWrap}>
           <div className={styles.browseTableHead}>
             <div className={styles.browseTableHeadRow} style={{ gridTemplateColumns: tableGridTemplate }}>
@@ -589,6 +1033,9 @@ export default function FavoritesPage() {
           })}
         </div>
       )}
+          </div>
+        </div>
+      )}
       {addToPlaylistMediaId != null && (
         <AddToPlaylistModal
           mediaIds={[addToPlaylistMediaId]}
@@ -601,6 +1048,35 @@ export default function FavoritesPage() {
           }}
         />
       )}
+      {addToFavoriteFolderMediaId != null && (
+        <AddToFavoriteFolderPickerModal
+          mediaId={addToFavoriteFolderMediaId}
+          open
+          onClose={() => setAddToFavoriteFolderMediaId(null)}
+          onAdded={(folder) => {
+            rememberFolderMenuAdded(folder);
+            if (selectedFolderId === folder.id) void refreshFolderItems();
+            void reloadFolders();
+          }}
+        />
+      )}
+      {folderForm ? (
+        <FavoriteFolderFormModal
+          open
+          mode={folderForm.mode}
+          initialName={folderForm.mode === "edit" ? folderForm.folder.name : ""}
+          submitting={folderFormSubmitting}
+          onClose={() => setFolderForm(null)}
+          onSubmit={handleFolderFormSubmit}
+        />
+      ) : null}
+      <AddToFavoriteFolderModal
+        open={addVideoFolderId != null}
+        folderId={addVideoFolderId}
+        candidates={videoFavorites}
+        onClose={() => setAddVideoFolderId(null)}
+        onAdded={() => void refreshFolderItems()}
+      />
     </div>
   );
 }

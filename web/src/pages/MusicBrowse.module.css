@@ -183,9 +183,13 @@
   display: none;
   align-items: center;
   justify-content: center;
-  font-size: 36px;
-  color: rgba(255, 255, 255, 0.2);
+  color: rgba(255, 255, 255, 0.22);
   pointer-events: none;
+}
+
+.noCoverIcon svg {
+  width: 46%;
+  height: 46%;
 }
 
 .noCover .noCoverIcon {
@@ -443,6 +447,11 @@
   flex-shrink: 0;
 }
 
+.listIcon svg {
+  width: 22px;
+  height: 22px;
+}
+
 .listMain {
   min-width: 0;
 }
@@ -512,6 +521,12 @@
   display: flex;
   align-items: center;
   justify-content: center;
+  color: rgba(255, 255, 255, 0.22);
+}
+
+.albumCoverPlaceholder svg {
+  width: 46%;
+  height: 46%;
 }
 
 .albumMetaRow {

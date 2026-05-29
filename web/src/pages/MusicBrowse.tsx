@@ -3,7 +3,6 @@ import {
   ArrowDownOutlined,
   ArrowUpOutlined,
   CaretRightOutlined,
-  CustomerServiceOutlined,
   TableOutlined,
   UnorderedListOutlined,
 } from "@ant-design/icons";
@@ -24,6 +23,8 @@ import {
   fetchLibraryTracks,
 } from "../api/client";
 import AddToPlaylistModal from "../components/AddToPlaylistModal";
+import MusicArtistIcon from "../components/MusicArtistIcon";
+import MusicPosterPlaceholderIcon from "../components/MusicPosterPlaceholderIcon";
 import MusicTrackList from "../components/MusicTrackList";
 import { buildMusicTrackMenuItems } from "../components/musicTrackMenuItems";
 import { albumTracksToQueue, libraryTracksToQueue } from "../lib/albumPlayback";
@@ -357,7 +358,7 @@ export default function MusicBrowse({ libraryId, libraryName, onEmpty }: Props) 
                     }}
                   />
                   <div className={musicStyles.noCoverIcon}>
-                    <CustomerServiceOutlined />
+                    <MusicPosterPlaceholderIcon />
                   </div>
                   <div className={musicStyles.playOverlay} aria-hidden>
                     <button
@@ -433,7 +434,7 @@ export default function MusicBrowse({ libraryId, libraryName, onEmpty }: Props) 
                 onKeyDown={(e) => e.key === "Enter" && nav(`/artist/${a.id}`)}
               >
                 <div className={musicStyles.listIcon}>
-                  <CustomerServiceOutlined />
+                  <MusicArtistIcon />
                 </div>
                 <div className={musicStyles.listMain}>
                   <div className={musicStyles.listTitle}>{a.name}</div>

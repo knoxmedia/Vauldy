@@ -1,6 +1,5 @@
 import {
   ArrowLeftOutlined,
-  CustomerServiceOutlined,
   MoreOutlined,
   StarOutlined,
 } from "@ant-design/icons";
@@ -15,6 +14,7 @@ import {
   type MusicTrackRow,
 } from "../api/client";
 import AddToPlaylistModal from "../components/AddToPlaylistModal";
+import MusicPosterPlaceholderIcon from "../components/MusicPosterPlaceholderIcon";
 import MusicTrackList from "../components/MusicTrackList";
 import ToolbarPlayIcon from "../components/ToolbarPlayIcon";
 import { buildMusicTrackMenuItems } from "../components/musicTrackMenuItems";
@@ -201,7 +201,7 @@ export default function AlbumDetailPage() {
               />
             ) : (
               <div className={musicStyles.albumCoverPlaceholder}>
-                <CustomerServiceOutlined style={{ fontSize: 64, color: "rgba(255,255,255,0.15)" }} />
+                <MusicPosterPlaceholderIcon />
               </div>
             )}
           </div>

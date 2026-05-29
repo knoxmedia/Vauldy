@@ -28,9 +28,11 @@ func (h *Handler) ListFavorites(c *gin.Context) {
 			COALESCE(
 				NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.poster')), ''),
 				NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.extra.poster')), '')
-			) AS poster_url
+			) AS poster_url,
+			COALESCE(l.type, '') AS library_type
 		FROM favorite f
 		INNER JOIN media m ON m.id = f.media_id
+		LEFT JOIN library l ON l.id = m.library_id
 		WHERE f.user_id = ?
 		ORDER BY datetime(f.created_at) DESC
 		LIMIT 500`
@@ -44,9 +46,9 @@ func (h *Handler) ListFavorites(c *gin.Context) {
 	for rows.Next() {
 		var mid int64
 		var libID sql.NullInt64
-		var fileID, title, orig, path, ftype, format, status, created, posterURL sql.NullString
+		var fileID, title, orig, path, ftype, format, status, created, posterURL, libType sql.NullString
 		var dur, w, h, br sql.NullInt64
-		if err := rows.Scan(&mid, &libID, &fileID, &title, &orig, &path, &ftype, &dur, &w, &h, &br, &format, &status, &created, &posterURL); err != nil {
+		if err := rows.Scan(&mid, &libID, &fileID, &title, &orig, &path, &ftype, &dur, &w, &h, &br, &format, &status, &created, &posterURL, &libType); err != nil {
 			continue
 		}
 		if strings.EqualFold(profile.LibraryScope, "selected") {
@@ -62,7 +64,7 @@ func (h *Handler) ListFavorites(c *gin.Context) {
 			"title": title.String, "original_title": orig.String, "file_path": path.String,
 			"file_type": ftype.String, "duration": dur.Int64, "width": w.Int64, "height": h.Int64,
 			"bitrate": br.Int64, "format": format.String, "status": status.String, "created_at": created.String,
-			"poster_url": posterURL.String,
+			"poster_url": posterURL.String, "library_type": strings.TrimSpace(libType.String),
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"items": items})

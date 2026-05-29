@@ -494,6 +494,15 @@
   border: none;
 }
 
+.thumbPosterMovieLandscape {
+  width: min(220px, 70vw);
+  max-width: min(220px, 70vw);
+}
+
+.posterImgMovieCover {
+  object-fit: cover;
+}
+
 .thumbPosterMovie:focus-visible {
   outline: none;
 }
@@ -508,6 +517,35 @@
   background: #000;
   border-radius: 4px;
   overflow: visible;
+}
+
+.posterBoxMovieLandscape {
+  flex: 0 0 auto;
+  height: auto;
+  aspect-ratio: 16 / 9;
+}
+
+.posterBoxMovieMusic {
+  flex: 0 0 auto;
+  height: auto;
+  aspect-ratio: 1 / 1;
+  background: #1a1a24;
+}
+
+.posterMusicPlaceholderIcon {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.22);
+  pointer-events: none;
+}
+
+.posterMusicPlaceholderIcon svg {
+  width: 46%;
+  height: 46%;
 }
 
 /* 顶层描边：避免 border 被子层盖住或被横向滚动容器裁掉上下边 */

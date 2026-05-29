@@ -1167,7 +1167,19 @@
       "added_to_playlist": "「{name}」に追加しました",
       "add_failed": "追加に失敗しました。既にリストにある可能性があります",
       "empty": "お気に入りがありません。メディアを閲覧して追加してください。",
-      "untitled": "無題"
+      "untitled": "無題",
+      "category_tabs_aria": "お気に入りの種類",
+      "type_folders": "コレクション",
+      "type_movie": "映画",
+      "type_tv": "テレビ",
+      "type_video": "その他の動画",
+      "type_anime": "アニメ",
+      "type_music": "音楽",
+      "type_photo": "写真",
+      "type_document": "ドキュメント",
+      "folders_empty": "コレクションがありません",
+      "folder_items_empty": "このコレクションは空です",
+      "all_folders": "すべてのコレクション"
     },
     "home": {
       "aria_deselect": "選択解除",
@@ -1789,6 +1801,17 @@
       "create_placeholder": "新しいプレイリスト名",
       "create_btn": "作成"
     },
+    "add_to_favorite_folder_picker_modal": {
+      "load_failed": "読み込みに失敗しました",
+      "add_failed_dup": "追加に失敗しました。フォルダ内に既にある可能性があります",
+      "added_single": "「{name}」に追加しました",
+      "name_required": "フォルダ名を入力してください",
+      "create_failed": "操作に失敗しました",
+      "title_single": "コレクションフォルダに追加",
+      "empty_create_below": "コレクションフォルダがありません。下で新規作成できます",
+      "create_placeholder": "新しいフォルダ名",
+      "create_btn": "作成"
+    },
     "playlist_form_modal": {
       "tab_general": "一般",
       "tab_poster": "ポスター",
@@ -1900,8 +1923,10 @@
       "watched_mark_as_unwatched": "未視聴としてマーク",
       "watched_mark_as_watched": "視聴済みとしてマーク",
       "add_to_collection": "お気に入りに追加…",
+      "add_to_favorite_folder": "コレクションフォルダに追加…",
       "add_to_playlist": "プレイリストに追加…",
       "recent": "最近",
+      "recent_favorite_folders": "最近のフォルダ",
       "play": "再生",
       "detail": "詳細",
       "add_to": "追加",
@@ -1925,6 +1950,8 @@
       "added_to_favorites": "お気に入りに追加しました",
       "operation_failed": "操作に失敗しました",
       "playlist_wip": "プレイリスト機能は開発中です",
+      "favorite_folder_wip": "コレクションフォルダ機能は開発中です",
+      "favorite_folder_fallback": "コレクションフォルダ",
       "marked_unwatched": "未視聴としてマークしました",
       "marked_watched": "視聴済みとしてマークしました",
       "unmatch_modal_title": "マッチ解除",

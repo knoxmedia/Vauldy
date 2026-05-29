@@ -123,6 +123,41 @@ func (h *Handler) UserInfo(c *gin.Context) {
 	})
 }
 
+func parseLibraryTypesQuery(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	seen := make(map[string]struct{})
+	for _, p := range parts {
+		p = strings.ToLower(strings.TrimSpace(p))
+		if p == "" {
+			continue
+		}
+		if _, ok := seen[p]; ok {
+			continue
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+	return out
+}
+
+func libraryTypeAllowed(libType string, allowed []string) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	libType = strings.ToLower(strings.TrimSpace(libType))
+	for _, a := range allowed {
+		if libType == a {
+			return true
+		}
+	}
+	return false
+}
+
 func (h *Handler) UserHistory(c *gin.Context) {
 	if middleware.IsAPIClient(c) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "not available for API client credentials"})
@@ -139,16 +174,22 @@ func (h *Handler) UserHistory(c *gin.Context) {
 			limit = n
 		}
 	}
+	libraryTypesFilter := parseLibraryTypesQuery(c.Query("library_types"))
 	profile, _ := h.loadUserPermissionProfile(uid)
 	scanLimit := limit * 4
-	if scanLimit > 200 {
-		scanLimit = 200
+	if len(libraryTypesFilter) > 0 {
+		scanLimit = limit * 10
+	}
+	if scanLimit > 500 {
+		scanLimit = 500
 	}
 	q := `
 		SELECT p.file_id, p.position, p.update_at, m.id, m.title, m.file_path, m.duration, m.library_id,
-		       COALESCE(p.play_start_at,''), COALESCE(p.play_end_at,''), COALESCE(p.completed,0), COALESCE(p.play_count,0)
+		       COALESCE(p.play_start_at,''), COALESCE(p.play_end_at,''), COALESCE(p.completed,0), COALESCE(p.play_count,0),
+		       COALESCE(l.type, '')
 		FROM play_progress p
 		LEFT JOIN media m ON m.file_id = p.file_id
+		LEFT JOIN library l ON l.id = m.library_id
 		WHERE p.user_id = ?
 		ORDER BY p.update_at DESC
 		LIMIT ` + strconv.Itoa(scanLimit)
@@ -170,7 +211,11 @@ func (h *Handler) UserHistory(c *gin.Context) {
 		var libID sql.NullInt64
 		var playStartAt, playEndAt sql.NullString
 		var completed, playCount sql.NullInt64
-		if err := rows.Scan(&fid, &pos, &upd, &mid, &title, &fpath, &dur, &libID, &playStartAt, &playEndAt, &completed, &playCount); err != nil {
+		var libType sql.NullString
+		if err := rows.Scan(&fid, &pos, &upd, &mid, &title, &fpath, &dur, &libID, &playStartAt, &playEndAt, &completed, &playCount, &libType); err != nil {
+			continue
+		}
+		if len(libraryTypesFilter) > 0 && !libraryTypeAllowed(libType.String, libraryTypesFilter) {
 			continue
 		}
 		if mid.Valid && mid.Int64 > 0 && strings.EqualFold(profile.LibraryScope, "selected") {
@@ -203,6 +248,7 @@ func (h *Handler) UserHistory(c *gin.Context) {
 			"play_end_at":   nullString(playEndAt),
 			"completed":     completed.Int64,
 			"play_count":    playCount.Int64,
+			"library_type":  strings.TrimSpace(libType.String),
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"items": items})

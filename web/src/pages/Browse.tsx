@@ -25,11 +25,13 @@ import type { ComponentType } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { buildMediaMenuItems } from "../components/mediaMenuItems";
+import AddToFavoriteFolderPickerModal from "../components/AddToFavoriteFolderPickerModal";
 import AddToPlaylistModal from "../components/AddToPlaylistModal";
 import MediaMatchModal from "../components/MediaMatchModal";
 import {
   MediaItem,
   addFavorite,
+  addFavoriteFolderItem,
   addPlaylistItem,
   fetchLibraries,
   fetchMedia,
@@ -45,6 +47,7 @@ import SeriesBrowse from "./SeriesBrowse";
 import MusicBrowse from "./MusicBrowse";
 import PhotoBrowse from "./PhotoBrowse";
 import DocumentBrowse from "./DocumentBrowse";
+import { useFavoriteFolderMenuRecents } from "../lib/useFavoriteFolderMenuRecents";
 import { readRecentPlaylists, rememberPlaylistAdded } from "../lib/recentPlaylists";
 import { useT, type TranslateFn } from "../i18n";
 import styles from "./Browse.module.css";
@@ -220,8 +223,10 @@ export default function BrowsePage() {
   const [tablePage, setTablePage] = useState(1);
   const [colPickerOpen, setColPickerOpen] = useState(false);
   const [playlistModalMediaIds, setPlaylistModalMediaIds] = useState<number[] | null>(null);
+  const [addToFavoriteFolderMediaId, setAddToFavoriteFolderMediaId] = useState<number | null>(null);
   const [matchMedia, setMatchMedia] = useState<MediaItem | null>(null);
   const [recentPlaylistMenu, setRecentPlaylistMenu] = useState(readRecentPlaylists);
+  const { recentFavoriteFolders, rememberFolderMenuAdded } = useFavoriteFolderMenuRecents();
   const [libraryType, setLibraryType] = useState<string>("");
   const [libraryName, setLibraryName] = useState<string>("");
   const [libraryResolved, setLibraryResolved] = useState(() => libFromUrl == null);
@@ -631,6 +636,20 @@ export default function BrowsePage() {
           setRecentPlaylistMenu(readRecentPlaylists());
         } catch {
           message.error(t("pages.browse.single_add_failed"));
+        }
+      },
+      onAddToFavoriteFolder: (mediaId: number) => setAddToFavoriteFolderMediaId(mediaId),
+      recentFavoriteFolders,
+      onQuickAddToFavoriteFolder: async (mediaId: number, folderId: number) => {
+        try {
+          await addFavoriteFolderItem(folderId, mediaId);
+          const name =
+            recentFavoriteFolders.find((f) => f.id === folderId)?.name ??
+            t("components.media_menu.favorite_folder_fallback");
+          message.success(t("components.add_to_favorite_folder_picker_modal.added_single", { name }));
+          rememberFolderMenuAdded({ id: folderId, name });
+        } catch {
+          message.error(t("components.add_to_favorite_folder_picker_modal.add_failed_dup"));
         }
       },
     });
@@ -1260,6 +1279,14 @@ export default function BrowsePage() {
             rememberPlaylistAdded(pl);
             setRecentPlaylistMenu(readRecentPlaylists());
           }}
+        />
+      )}
+      {addToFavoriteFolderMediaId != null && (
+        <AddToFavoriteFolderPickerModal
+          mediaId={addToFavoriteFolderMediaId}
+          open
+          onClose={() => setAddToFavoriteFolderMediaId(null)}
+          onAdded={(folder) => rememberFolderMenuAdded(folder)}
         />
       )}
       <MediaMatchModal

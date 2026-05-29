@@ -7,8 +7,42 @@
 }
 
 .topRightTools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   justify-content: flex-end;
   margin-left: auto;
+  flex-shrink: 0;
+}
+
+.folderActionBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.88);
+  font-size: 13px;
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease;
+}
+
+.folderActionBtn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.22);
+  color: #fff;
+}
+
+.folderActionBtnIconOnly {
+  justify-content: center;
+  width: 32px;
+  padding: 0;
+  font-size: 16px;
 }
 
 .viewModePicker {
@@ -29,6 +63,469 @@
 
 .topLeftTools {
   justify-content: flex-start;
+  flex: 1;
+  min-width: 0;
+}
+
+.categoryTabs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.categoryTab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.62);
+  font-size: 13px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition:
+    color 0.12s ease,
+    background 0.12s ease,
+    border-color 0.12s ease;
+}
+
+.categoryTab:hover {
+  color: rgba(255, 255, 255, 0.88);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.categoryTabActive {
+  color: #fff;
+  background: rgba(0, 164, 220, 0.18);
+  border-color: rgba(0, 164, 220, 0.45);
+}
+
+.categoryCount {
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+}
+
+.categoryTabActive .categoryCount {
+  background: rgba(0, 164, 220, 0.28);
+  color: #d6f3ff;
+}
+
+.folderLayout {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.folderSidebar {
+  position: sticky;
+  top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.folderSidebarBack {
+  align-self: flex-start;
+  padding: 0;
+  border: none;
+  background: none;
+  color: #00a4dc;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.folderSidebarBack:hover {
+  color: #4cc3e0;
+  text-decoration: underline;
+}
+
+.folderSidebarList {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid #2a3140;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #12151c;
+}
+
+.folderSidebarItem {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 12px;
+  border: none;
+  border-bottom: 1px solid #232a36;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.82);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.folderSidebarItem:last-child {
+  border-bottom: none;
+}
+
+.folderSidebarItem:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.folderSidebarItemActive {
+  background: rgba(0, 164, 220, 0.14);
+  color: #fff;
+}
+
+.folderSidebarName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folderSidebarCount {
+  flex-shrink: 0;
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 12px;
+}
+
+.folderMain {
+  min-width: 0;
+}
+
+.folderGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+  gap: 16px 14px;
+  align-items: start;
+}
+
+.folderCard {
+  min-width: 0;
+}
+
+.folderCover {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 2 / 3;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #1a2229;
+  border: 2px solid transparent;
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+}
+
+.folderCover:hover {
+  border-color: #fadb14;
+}
+
+.folderCoverImg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.folderCoverFallback {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(160deg, #2a3348 0%, #151922 100%);
+}
+
+.folderCountBadge {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 2;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  font-size: 12px;
+}
+
+.folderTitle {
+  margin-top: 8px;
+  color: #fff;
+  font-size: 13px;
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.folderListPage {
+  min-height: 240px;
+}
+
+.folderListGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.folderListCard {
+  min-width: 0;
+  padding: 14px 16px 12px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease;
+}
+
+.folderListCard:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(0, 164, 220, 0.4);
+}
+
+.folderListCardHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.folderListCardTitle {
+  color: #fff;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.folderListCardMeta {
+  margin-top: 4px;
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 12px;
+}
+
+.folderListCardMenuBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.55);
+  cursor: pointer;
+}
+
+.folderListCardMenuBtn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.folderListCardPreviews {
+  display: flex;
+  gap: 8px;
+}
+
+.folderPreviewSlot {
+  flex: 1;
+  min-width: 0;
+  aspect-ratio: 1 / 1;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #1a2229;
+}
+
+.folderPreviewImg {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.folderPreviewEmpty {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.18);
+  background: linear-gradient(160deg, #252d3a 0%, #171c24 100%);
+}
+
+.folderPreviewEmptyIcon {
+  width: 42%;
+  height: 42%;
+}
+
+.folderListEnd {
+  margin-top: 28px;
+  text-align: center;
+  color: rgba(255, 255, 255, 0.35);
+  font-size: 13px;
+}
+
+.folderListEmpty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 280px;
+}
+
+.folderSidebarNew {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  border: 1px dashed rgba(255, 255, 255, 0.16);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 14px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.folderSidebarNew:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.24);
+}
+
+.folderSidebarNewIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 16px;
+}
+
+.folderSidebarCard {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  width: 100%;
+  padding: 10px 6px 10px 12px;
+  margin-bottom: 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  color: rgba(255, 255, 255, 0.82);
+}
+
+.folderSidebarCard:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.folderSidebarCardMain {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  margin: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+
+.folderSidebarCardMenuBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.55);
+  cursor: pointer;
+}
+
+.folderSidebarCardMenuBtn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.folderSidebarCardActive {
+  background: rgba(0, 164, 220, 0.12);
+  border-color: rgba(0, 164, 220, 0.35);
+}
+
+.folderSidebarCardActive::after {
+  content: "";
+  position: absolute;
+  right: -1px;
+  top: 50%;
+  transform: translateY(-50%);
+  border-top: 8px solid transparent;
+  border-bottom: 8px solid transparent;
+  border-right: 8px solid rgba(255, 255, 255, 0.06);
+}
+
+.folderSidebarThumb {
+  width: 44px;
+  height: 44px;
+  border-radius: 6px;
+  overflow: hidden;
+  flex-shrink: 0;
+  background: #1a2229;
+}
+
+.folderSidebarThumbImg {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.folderSidebarThumbFallback {
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(160deg, #2a3348 0%, #151922 100%);
+}
+
+.folderSidebarInfo {
+  min-width: 0;
+  flex: 1;
+}
+
+.folderSidebarCardTitle {
+  color: #fff;
+  font-size: 14px;
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.folderSidebarCardCount {
+  margin-top: 2px;
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 12px;
 }
 
 .loadingWrap {
@@ -778,5 +1275,17 @@
 @media (max-width: 900px) {
   .topBar {
     flex-direction: column;
+  }
+
+  .folderLayout {
+    grid-template-columns: 1fr;
+  }
+
+  .folderSidebar {
+    position: static;
+  }
+
+  .folderListGrid {
+    grid-template-columns: 1fr;
   }
 }
