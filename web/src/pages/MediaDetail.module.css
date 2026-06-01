@@ -72,7 +72,7 @@
 }
 
 .shelfArrowBtn:hover:not(:disabled) {
-  color: #e5a00d !important;
+  color: #ed6d00 !important;
 }
 
 .shelfTrack {
@@ -126,11 +126,11 @@
 
 .posterPlayHit:hover,
 .posterPlayHit:focus-visible {
-  box-shadow: 0 0 0 2px #e5a00d;
+  box-shadow: 0 0 0 2px #ed6d00;
 }
 
 .posterPlayHit:focus-visible {
-  box-shadow: 0 0 0 2px #e5a00d, 0 0 0 5px rgba(229, 160, 13, 0.28);
+  box-shadow: 0 0 0 2px #ed6d00, 0 0 0 5px rgba(237, 109, 0, 0.28);
 }
 
 .poster {
@@ -173,7 +173,7 @@
   min-width: 48px;
   aspect-ratio: 1;
   border-radius: 50%;
-  background: linear-gradient(165deg, #f5c02f 0%, #e5a00d 55%, #d4940c 100%);
+  background: linear-gradient(165deg, #f58320 0%, #ed6d00 55%, #c45a00 100%);
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45);
   display: flex;
   align-items: center;
@@ -312,7 +312,7 @@
 }
 
 .starRate {
-  color: #e5a00d !important;
+  color: #ed6d00 !important;
 }
 
 .actionBar {
@@ -324,8 +324,8 @@
 }
 
 .playBtn {
-  background: #e5a00d !important;
-  border-color: #e5a00d !important;
+  background: #ed6d00 !important;
+  border-color: #ed6d00 !important;
   color: #1a1a1a !important;
   font-weight: 600 !important;
 }
@@ -470,7 +470,7 @@
 .expandLink {
   padding-left: 0 !important;
   height: auto !important;
-  color: #e5a00d !important;
+  color: #ed6d00 !important;
 }
 
 .streamPickers {
@@ -758,7 +758,7 @@
 /* 仅悬停海报区域时黄框；已选中时始终黄框（取消全选后鼠标离开海报即消失） */
 .relatedPosterWrap:hover::after,
 .relatedCardSelected .relatedPosterWrap::after {
-  border-color: #fadb14;
+  border-color: #ed6d00;
 }
 
 .relatedPosterImg {
@@ -902,8 +902,8 @@
 }
 
 .relatedOverlayPlay:hover {
-  background: #fa8c16;
-  border-color: #fa8c16;
+  background: #ed6d00;
+  border-color: #ed6d00;
   color: #141414;
   transform: scale(1.04);
 }
@@ -921,7 +921,7 @@
   gap: 10px 16px;
   padding: 8px 16px;
   background: rgba(10, 10, 14, 0.96);
-  border: 1px solid #fa8c16;
+  border: 1px solid #ed6d00;
   border-radius: 8px;
   box-shadow: 0 10px 36px rgba(0, 0, 0, 0.55);
   transition: opacity 0.12s ease;
@@ -936,13 +936,13 @@
 
 .relatedBulkOrangeMark {
   font-size: 16px;
-  color: #fa8c16 !important;
+  color: #ed6d00 !important;
 }
 
 .relatedBulkOrangeText {
   font-size: 13px;
   font-weight: 500;
-  color: #fa8c16;
+  color: #ed6d00;
   white-space: nowrap;
 }
 

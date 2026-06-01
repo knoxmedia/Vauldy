@@ -29,11 +29,11 @@
 }
 
 .tabs :global(.ant-tabs-tab-active .ant-tabs-tab-btn) {
-  color: #e5a00d !important;
+  color: #ed6d00 !important;
 }
 
 .tabs :global(.ant-tabs-ink-bar) {
-  background: #e5a00d !important;
+  background: #ed6d00 !important;
 }
 
 .toolbar {
@@ -68,7 +68,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(229, 160, 13, 0.88);
+  background: rgba(237, 109, 0, 0.88);
   color: #fff;
   font-size: 24px;
   cursor: pointer;
@@ -132,11 +132,82 @@
   opacity: 1;
 }
 
+.musicCardIcon {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.28);
+  pointer-events: none;
+}
+
+.musicCardIcon svg {
+  width: 42%;
+  height: 42%;
+}
+
+.artistCover {
+  border-radius: 50%;
+}
+
+.artistEditOnCover {
+  position: absolute;
+  left: 50%;
+  bottom: 10px;
+  z-index: 5;
+  transform: translateX(-50%);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.artistCard:hover .artistEditOnCover {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.artistEditBtn {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.4);
+  color: #fff;
+  font-size: 15px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
+}
+
+.artistEditBtn:hover {
+  background: rgba(255, 255, 255, 0.22);
+  color: #ed6d00;
+}
+
 .albumCoverImg {
   width: 100%;
   height: 100%;
   object-fit: cover;
   display: block;
+}
+
+.artistCard .albumMeta {
+  align-items: center;
+  text-align: center;
+}
+
+.artistCard .albumTitle {
+  width: 100%;
+}
+
+.artistCard .albumArtist {
+  width: 100%;
 }
 
 .albumMeta {
@@ -226,10 +297,15 @@
 
 .table tbody tr {
   transition: background 0.12s ease;
+  cursor: pointer;
+}
+
+.table tbody tr:hover {
+  background: rgba(237, 109, 0, 0.08);
 }
 
 .trackRow:hover {
-  background: rgba(229, 160, 13, 0.08);
+  background: rgba(237, 109, 0, 0.08);
 }
 
 .trackIndexCell {
@@ -261,8 +337,8 @@
 }
 
 .trackPlayBtn:hover {
-  color: #e5a00d;
-  background: rgba(229, 160, 13, 0.12);
+  color: #ed6d00;
+  background: rgba(237, 109, 0, 0.12);
 }
 
 .trackRow:hover .trackIndexNum {
@@ -289,7 +365,7 @@
 }
 
 .trackLink:hover {
-  color: #e5a00d;
+  color: #ed6d00;
   text-decoration: underline;
 }
 
@@ -303,12 +379,14 @@
   justify-content: flex-end;
   gap: 2px;
   opacity: 0;
+  pointer-events: none;
   transition: opacity 0.12s ease;
 }
 
 .trackRow:hover .rowActions,
 .rowActionsCell:focus-within .rowActions {
   opacity: 1;
+  pointer-events: auto;
 }
 
 .rowActionBtn {
@@ -316,7 +394,7 @@
 }
 
 .rowActionBtn:hover {
-  color: #e5a00d !important;
+  color: #ed6d00 !important;
 }
 
 .rowActionsCell {
@@ -367,7 +445,8 @@
 }
 
 .trackRow:hover .trackGutterSelect,
-.trackRow[data-selected] .trackGutterSelect {
+.trackRow[data-selected] .trackGutterSelect,
+.trackRow[data-bulk-pick] .trackGutterSelect {
   opacity: 1;
   pointer-events: auto;
 }
@@ -385,7 +464,7 @@
 }
 
 .trackRow[data-selected] {
-  background: rgba(229, 160, 13, 0.12);
+  background: rgba(237, 109, 0, 0.12);
 }
 
 .sortHeaderBtn {
@@ -407,7 +486,7 @@
 
 .sortHeaderIcon {
   font-size: 11px;
-  color: #e5a00d;
+  color: #ed6d00;
 }
 
 .table th:has(.sortHeaderBtn) {

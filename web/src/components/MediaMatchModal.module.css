@@ -28,7 +28,7 @@
 
 .toolbarAction:hover,
 .toolbarActionActive {
-  color: #fa8c16;
+  color: #ed6d00;
 }
 
 .toolbarLabel {
@@ -41,12 +41,12 @@
 }
 
 .sourceSelect :global(.ant-select-selection-item) {
-  color: #fa8c16 !important;
+  color: #ed6d00 !important;
   padding-inline-end: 18px !important;
 }
 
 .sourceSelectIcon {
-  color: #fa8c16 !important;
+  color: #ed6d00 !important;
   font-size: 10px;
 }
 

@@ -1,11 +1,12 @@
 import {
   AppstoreOutlined,
+  DeleteOutlined,
   DownloadOutlined,
   FolderOutlined,
   ReadOutlined,
   UnorderedListOutlined,
 } from "@ant-design/icons";
-import { Breadcrumb, Button, Checkbox, Empty, Input, Select, Space, Spin, Tabs, Tree, message } from "antd";
+import { Breadcrumb, Button, Checkbox, Empty, Input, Modal, Select, Space, Spin, Tabs, Tree, message } from "antd";
 import type { DataNode } from "antd/es/tree";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -13,6 +14,7 @@ import {
   DocumentFacet,
   DocumentItem,
   batchDownloadDocuments,
+  deleteMedia,
   documentCoverSrc,
   fetchDocumentFacets,
   fetchDocumentNodes,
@@ -93,6 +95,7 @@ export default function DocumentBrowse({ libraryId, libraryName }: Props) {
   const [recent, setRecent] = useState<DocumentItem[]>([]);
   const [fullText, setFullText] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   const loadItems = useCallback(async () => {
     setLoading(true);
@@ -208,6 +211,50 @@ export default function DocumentBrowse({ libraryId, libraryName }: Props) {
     } finally {
       setDownloading(false);
     }
+  };
+
+  const handleBatchDelete = () => {
+    if (selected.size === 0) {
+      message.warning(t("pages.document_browse.select_file_first"));
+      return;
+    }
+    const ids = [...selected];
+    Modal.confirm({
+      title: t("pages.document_browse.batch_delete_title", { count: ids.length }),
+      centered: true,
+      okText: t("components.media_menu.ok"),
+      cancelText: t("components.media_menu.cancel"),
+      okButtonProps: { danger: true },
+      content: t("pages.document_browse.batch_delete_confirm"),
+      onOk: async () => {
+        setDeleting(true);
+        let ok = 0;
+        let fail = 0;
+        try {
+          for (const id of ids) {
+            try {
+              await deleteMedia(id);
+              ok++;
+            } catch {
+              fail++;
+            }
+          }
+          setSelected(new Set());
+          await loadItems();
+          if (ok > 0) {
+            message.success(
+              fail > 0
+                ? t("pages.document_browse.batch_deleted_with_skip", { ok, fail })
+                : t("pages.document_browse.batch_deleted", { ok }),
+            );
+          } else {
+            message.error(t("components.media_menu.delete_failed"));
+          }
+        } finally {
+          setDeleting(false);
+        }
+      },
+    });
   };
 
   const openReader = (id: number) => nav(`/reader/${id}`);
@@ -367,6 +414,16 @@ export default function DocumentBrowse({ libraryId, libraryName }: Props) {
           <Button icon={<DownloadOutlined />} loading={downloading} onClick={() => void handleBatchDownload()}>
             {t("pages.document_browse.batch_download", { count: selected.size })}
           </Button>
+          {selected.size > 0 ? (
+            <Button
+              danger
+              icon={<DeleteOutlined />}
+              loading={deleting}
+              onClick={() => handleBatchDelete()}
+            >
+              {t("pages.document_browse.batch_delete", { count: selected.size })}
+            </Button>
+          ) : null}
         </div>
 
         {loading ? (

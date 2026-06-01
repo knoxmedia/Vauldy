@@ -89,15 +89,15 @@
 }
 
 .tabActive {
-  background: rgba(250, 140, 22, 0.18);
-  color: #faad14;
-  border-right: 3px solid #fa8c16;
+  background: rgba(237, 109, 0, 0.18);
+  color: #ed6d00;
+  border-right: 3px solid #ed6d00;
   padding-right: 13px;
 }
 
 .tabActive:hover {
-  background: rgba(250, 140, 22, 0.22);
-  color: #ffc53d;
+  background: rgba(237, 109, 0, 0.22);
+  color: #ed6d00;
 }
 
 .main {
@@ -140,7 +140,7 @@
 .darkInput :global(.ant-input:hover),
 .darkInput :global(.ant-input:focus),
 .darkInput :global(.ant-input-focused) {
-  border-color: #fa8c16 !important;
+  border-color: #ed6d00 !important;
 }
 
 .uploadLabel {
@@ -155,7 +155,7 @@
 }
 
 .draggerDark :global(.ant-upload-drag:hover) {
-  border-color: #fa8c16 !important;
+  border-color: #ed6d00 !important;
 }
 
 .footer {
@@ -182,8 +182,8 @@
 
 .btnPrimary {
   min-width: 108px;
-  background: #fa8c16 !important;
-  border-color: #fa8c16 !important;
+  background: #ed6d00 !important;
+  border-color: #ed6d00 !important;
   color: #fff !important;
 }
 

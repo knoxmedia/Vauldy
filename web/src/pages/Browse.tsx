@@ -20,7 +20,7 @@ import {
   UpOutlined,
 } from "@ant-design/icons";
 import type { MenuProps } from "antd";
-import { Button, Checkbox, Dropdown, Empty, Popover, Select, Space, Spin, Pagination, message } from "antd";
+import { Button, Checkbox, Dropdown, Empty, Modal, Popover, Select, Space, Spin, Pagination, message } from "antd";
 import type { ComponentType } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
@@ -30,9 +30,12 @@ import AddToPlaylistModal from "../components/AddToPlaylistModal";
 import MediaMatchModal from "../components/MediaMatchModal";
 import {
   MediaItem,
+  PLAYLIST_PLAY_SESSION_KEY,
   addFavorite,
   addFavoriteFolderItem,
   addPlaylistItem,
+  createScrapeTasks,
+  deleteMedia,
   fetchLibraries,
   fetchMedia,
   isTVLibraryType,
@@ -41,6 +44,8 @@ import {
   isDocumentLibraryType,
   mediaPosterSrc,
   normalizeListPosterUrl,
+  removePlayProgress,
+  transcodeAsync,
   type MediaMatchListUpdate,
 } from "../api/client";
 import SeriesBrowse from "./SeriesBrowse";
@@ -48,6 +53,7 @@ import MusicBrowse from "./MusicBrowse";
 import PhotoBrowse from "./PhotoBrowse";
 import DocumentBrowse from "./DocumentBrowse";
 import { useFavoriteFolderMenuRecents } from "../lib/useFavoriteFolderMenuRecents";
+import { MAX_RECENT_FAVORITE_FOLDERS } from "../lib/recentFavoriteFolders";
 import { readRecentPlaylists, rememberPlaylistAdded } from "../lib/recentPlaylists";
 import { useT, type TranslateFn } from "../i18n";
 import styles from "./Browse.module.css";
@@ -61,6 +67,17 @@ const BROWSE_PREFS_KEY = "knox.browse.prefs.v1";
 /** Per-library view mode (poster / thumb / list / table). */
 const BROWSE_VIEW_MODE_KEY = "knox.browse.viewModeByLibrary.v1";
 const TABLE_PAGE_SIZE = 20;
+/** Session playlist id for multi-select play / shuffle from Browse. */
+const BROWSE_BULK_PLAYLIST_ID = -1;
+
+function shuffleMediaIds(ids: number[]): number[] {
+  const arr = [...ids];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j]!, arr[i]!];
+  }
+  return arr;
+}
 
 function browseLibraryKey(libraryId: number | undefined): string {
   return libraryId != null ? String(libraryId) : "_all";
@@ -505,6 +522,11 @@ export default function BrowsePage() {
     return x;
   }, [sortedRows, browseSelectedIds]);
 
+  const browseSelectedIdList = useMemo(
+    () => sortedRows.filter((r) => browseSelectedIds.has(r.id)).map((r) => r.id),
+    [sortedRows, browseSelectedIds],
+  );
+
   const browseSelectionCount = browseSelectedIds.size;
   /** 任意项已选中时：隐藏播放/编辑/更多，海报区点击切换选中 */
   const browseBulkPick = browseSelectionCount > 0;
@@ -567,12 +589,50 @@ export default function BrowsePage() {
     }
   }
 
+  async function bulkAddSelectedToFavoriteFolder(ids: number[], folderId: number) {
+    if (ids.length === 0) return;
+    let ok = 0;
+    let fail = 0;
+    for (const mid of ids) {
+      try {
+        await addFavoriteFolderItem(folderId, mid);
+        ok++;
+      } catch {
+        fail++;
+      }
+    }
+    const name =
+      recentFavoriteFolders.find((f) => f.id === folderId)?.name ??
+      t("components.media_menu.favorite_folder_fallback");
+    if (ok > 0) {
+      rememberFolderMenuAdded({ id: folderId, name });
+      message.success(
+        fail > 0
+          ? t("pages.browse.added_to_favorite_folder_with_skip", { ok, name, fail })
+          : t("pages.browse.added_to_favorite_folder", { ok, name })
+      );
+    } else {
+      message.warning(t("pages.browse.favorite_folder_add_failed"));
+    }
+  }
+
   const browseBulkAddMenuItems = useMemo((): MenuProps["items"] => {
     const items: MenuProps["items"] = [
       { key: "bulkAddCollection", label: t("pages.browse.bulk_add_collection") },
       { type: "divider" },
-      { key: "bulkOpenPlaylist", label: t("pages.browse.bulk_open_playlist") },
     ];
+    if (recentFavoriteFolders.length > 0) {
+      items.push({
+        type: "group",
+        label: t("components.media_menu.recent_favorite_folders"),
+        children: recentFavoriteFolders.slice(0, MAX_RECENT_FAVORITE_FOLDERS).map((folder) => ({
+          key: `recentFavoriteFolder:${folder.id}`,
+          label: folder.name,
+        })),
+      });
+      items.push({ type: "divider" });
+    }
+    items.push({ key: "bulkOpenPlaylist", label: t("pages.browse.bulk_open_playlist") });
     if (recentPlaylistMenu.length > 0) {
       items.push({
         type: "group",
@@ -584,7 +644,7 @@ export default function BrowsePage() {
       });
     }
     return items;
-  }, [recentPlaylistMenu, t]);
+  }, [recentPlaylistMenu, recentFavoriteFolders, t]);
 
   function onBrowseBulkAddMenuClick(key: string) {
     const ids = [...browseSelectedIds];
@@ -592,6 +652,11 @@ export default function BrowsePage() {
     const sk = String(key);
     if (sk === "bulkAddCollection") {
       void bulkAddSelectedToCollection(ids);
+      return;
+    }
+    if (sk.startsWith("recentFavoriteFolder:")) {
+      const fid = Number(sk.slice("recentFavoriteFolder:".length));
+      if (!Number.isNaN(fid)) void bulkAddSelectedToFavoriteFolder(ids, fid);
       return;
     }
     if (sk === "bulkOpenPlaylist") {
@@ -604,9 +669,149 @@ export default function BrowsePage() {
     }
   }
 
+  function startBrowseBulkPlayback(ids: number[], mode: "ordered" | "shuffle") {
+    if (ids.length === 0) return;
+    const order = mode === "shuffle" ? shuffleMediaIds(ids) : [...ids];
+    sessionStorage.setItem(
+      PLAYLIST_PLAY_SESSION_KEY,
+      JSON.stringify({ playlistId: BROWSE_BULK_PLAYLIST_ID, order, mode }),
+    );
+    nav(`/player/${order[0]}?playlist_id=${BROWSE_BULK_PLAYLIST_ID}&index=0`);
+  }
+
+  async function bulkRemoveSelectedFromContinue(ids: number[]) {
+    if (ids.length === 0) return;
+    let ok = 0;
+    for (const id of ids) {
+      try {
+        await removePlayProgress(id);
+        ok++;
+      } catch {
+        /* skip items without progress */
+      }
+    }
+    if (ok > 0) message.success(t("pages.home.removed_from_continue"));
+    else message.warning(t("pages.browse.remove_continue_none"));
+  }
+
+  async function bulkRefreshSelectedMetadata(ids: number[]) {
+    if (ids.length === 0) return;
+    try {
+      await createScrapeTasks(ids);
+      message.success(t("components.media_menu.scrape_task_created"));
+    } catch {
+      message.error(t("components.media_menu.operation_failed"));
+    }
+  }
+
+  async function bulkAnalyzeSelected(ids: number[]) {
+    if (ids.length === 0) return;
+    let ok = 0;
+    let fail = 0;
+    for (const id of ids) {
+      try {
+        await transcodeAsync(id, "analyze");
+        ok++;
+      } catch {
+        fail++;
+      }
+    }
+    if (ok > 0) {
+      message.success(
+        fail > 0
+          ? t("pages.browse.analyze_with_skip", { ok, fail })
+          : t("components.media_menu.analyze_task_created"),
+      );
+    } else {
+      message.error(t("components.media_menu.operation_failed"));
+    }
+  }
+
+  function bulkDeleteSelected(ids: number[]) {
+    if (ids.length === 0) return;
+    Modal.confirm({
+      title: t("pages.browse.bulk_delete_title", { count: ids.length }),
+      centered: true,
+      okText: t("components.media_menu.ok"),
+      cancelText: t("components.media_menu.cancel"),
+      okButtonProps: { danger: true },
+      content: t("pages.browse.bulk_delete_confirm"),
+      onOk: async () => {
+        let ok = 0;
+        let fail = 0;
+        for (const id of ids) {
+          try {
+            await deleteMedia(id);
+            ok++;
+          } catch {
+            fail++;
+          }
+        }
+        setBrowseSelectedIds(new Set());
+        await load();
+        if (ok > 0) {
+          message.success(
+            fail > 0
+              ? t("pages.browse.bulk_deleted_with_skip", { ok, fail })
+              : t("pages.browse.bulk_deleted", { ok }),
+          );
+        } else {
+          message.error(t("components.media_menu.delete_failed"));
+        }
+      },
+    });
+  }
+
+  const browseBulkMoreMenuItems = useMemo((): MenuProps["items"] => {
+    return [
+      { key: "play", label: t("pages.playlists.menu_play_next") },
+      { key: "shuffle", label: t("pages.playlists.btn_shuffle") },
+      { key: "removeFromContinue", label: t("components.media_menu.remove_from_continue") },
+      { type: "divider" },
+      { key: "refreshMetadata", label: t("components.media_menu.refresh_metadata") },
+      { key: "analyze", label: t("components.media_menu.analyze") },
+      { type: "divider" },
+      { key: "merge", label: t("components.media_menu.merge") },
+      { key: "delete", label: t("components.media_menu.delete"), danger: true },
+    ];
+  }, [t]);
+
+  function onBrowseBulkMoreMenuClick(key: string) {
+    const ids = browseSelectedIdList;
+    if (ids.length === 0) return;
+    switch (key) {
+      case "play":
+        startBrowseBulkPlayback(ids, "ordered");
+        break;
+      case "shuffle":
+        startBrowseBulkPlayback(ids, "shuffle");
+        break;
+      case "removeFromContinue":
+        void bulkRemoveSelectedFromContinue(ids);
+        break;
+      case "refreshMetadata":
+        void bulkRefreshSelectedMetadata(ids);
+        break;
+      case "analyze":
+        void bulkAnalyzeSelected(ids);
+        break;
+      case "merge":
+        message.info(t("pages.browse.merge_wip"));
+        break;
+      case "delete":
+        bulkDeleteSelected(ids);
+        break;
+      default:
+        break;
+    }
+  }
+
   function makeMenu(r: MediaItem, extra?: { isWatched?: boolean }): MenuProps {
+    const isWatched = extra?.isWatched ?? r.completed === 1;
     return buildMediaMenuItems(r, nav, {
       ...extra,
+      isWatched,
+      afterToggleWatched: () => load(),
       scraped: r.scraped,
       onOpenMatch: (mediaId) => {
         const item = rows.find((x) => x.id === mediaId) ?? r;
@@ -728,9 +933,6 @@ export default function BrowsePage() {
           )}
         </Space>
         <Space wrap className={styles.topRightTools}>
-          <Button type="link" size="small" onClick={() => nav("/playback-history")} style={{ color: "rgba(255,255,255,0.65)" }}>
-            {t("pages.browse.playback_history")}
-          </Button>
           <div className={styles.viewModePicker}>
             <span className={styles.viewModeCurrentIcon} title={currentViewLabel} aria-label={currentViewLabel}>
               <CurrentViewIcon />
@@ -768,7 +970,7 @@ export default function BrowsePage() {
             <span>{t("pages.browse.selection_count", { count: browseSelectionCount })}</span>
           </div>
           <div className={styles.browseSelectionBarCenter}>
-            <Space size="small">
+            <Space size="middle">
               <Button
                 type="text"
                 className={styles.browseSelectionActionBtn}
@@ -807,14 +1009,10 @@ export default function BrowsePage() {
               </Dropdown>
               <Dropdown
                 menu={{
-                  items: [
-                    { key: "play", label: t("pages.browse.menu_play"), icon: <PlayCircleOutlined /> },
-                    { key: "detail", label: t("pages.browse.menu_detail"), icon: <EditOutlined /> },
-                  ],
-                  onClick: ({ key }) => {
-                    if (firstSelectedId == null) return;
-                    if (key === "play") nav(`/player/${firstSelectedId}`);
-                    if (key === "detail") nav(`/detail/${firstSelectedId}`);
+                  items: browseBulkMoreMenuItems,
+                  onClick: ({ key, domEvent }) => {
+                    domEvent.stopPropagation();
+                    onBrowseBulkMoreMenuClick(String(key));
                   },
                 }}
                 trigger={["click"]}
@@ -1196,6 +1394,11 @@ export default function BrowsePage() {
                       ev.currentTarget.parentElement?.removeAttribute("data-cover-loaded");
                     }}
                   />
+                  {r.completed === 1 ? (
+                    <div className={styles.gridWatchedBadge} role="status" aria-label={t("pages.media_detail.aria_watched")}>
+                      <CheckOutlined />
+                    </div>
+                  ) : null}
                   <div className={styles.gridHoverShade} aria-hidden={browseBulkPick ? true : undefined}>
                     {!browseBulkPick ? (
                       <>

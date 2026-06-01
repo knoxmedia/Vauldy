@@ -279,7 +279,7 @@ export default function PlaylistFormModal({ open, playlist, onClose, onSaved }: 
       <div className={styles.shell}>
         <header className={styles.header}>
           <div className={styles.headerTitle}>
-            {playlist?.id ? <EditOutlined style={{ color: "#faad14" }} /> : <EditOutlined style={{ opacity: 0.65 }} />}
+            {playlist?.id ? <EditOutlined style={{ color: "#ed6d00" }} /> : <EditOutlined style={{ opacity: 0.65 }} />}
             <span>{headerText}</span>
           </div>
           <Button type="text" icon={<CloseOutlined />} onClick={onClose} className={styles.closeBtn} aria-label={t("components.playlist_form_modal.close")} />

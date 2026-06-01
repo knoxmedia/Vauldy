@@ -97,6 +97,8 @@ export type MediaItem = {
   status: string;
   created_at?: string;
   last_play_at?: string;
+  /** 1 when the current user has marked or finished watching this item. */
+  completed?: number;
   release_date?: string;
   year?: number;
   /** From scrape or empty; UI may fall back to `/uploads/posters/{id}.jpg`. */

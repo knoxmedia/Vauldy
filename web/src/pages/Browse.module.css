@@ -82,12 +82,12 @@
 
 .posterImage:hover,
 .thumbImage:hover {
-  border-color: #fadb14;
+  border-color: #ed6d00;
 }
 
 .posterImage[data-selected],
 .thumbImage[data-selected] {
-  border-color: #fadb14;
+  border-color: #ed6d00;
 }
 
 /* 批量点选：未选中项不在悬停时显示黄框（仅已选中保持黄框） */
@@ -112,6 +112,24 @@
   object-fit: contain;
   object-position: center;
   z-index: 1;
+}
+
+.gridWatchedBadge {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  background: #222;
+  border-radius: 3px;
+  color: #fff;
+  font-size: 11px;
+  line-height: 1;
+  pointer-events: none;
 }
 
 /* 海报：固定 2:3 竖幅（宽:高 = 2:3） */
@@ -140,7 +158,41 @@
 }
 
 .posterImage:hover .gridHoverShade,
-.thumbImage:hover .gridHoverShade {
+.thumbImage:hover .gridHoverShade,
+.musicBrowseCover:hover .gridHoverShade {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.musicBrowseCover {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  overflow: hidden;
+  border: 2px solid transparent;
+  box-sizing: border-box;
+  border-radius: 6px;
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    background 0.2s ease;
+}
+
+.musicBrowseCover:hover,
+.musicBrowseCover[data-selected] {
+  border-color: #ed6d00;
+}
+
+.musicBrowseCover[data-bulk-pick]:not([data-selected]):hover {
+  border-color: transparent;
+}
+
+.musicBrowseCover[data-bulk-pick] .gridSelectBtn {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.musicBrowseCover:hover .gridSelectBtn,
+.musicBrowseCover[data-selected] .gridSelectBtn {
   opacity: 1;
   pointer-events: auto;
 }
@@ -166,7 +218,7 @@
 
 .gridCornerBtn:hover {
   background: rgba(255, 255, 255, 0.22);
-  color: #fadb14;
+  color: #ed6d00;
 }
 
 .gridEditBtn {
@@ -216,7 +268,7 @@
 }
 
 .gridMoreIconBtn:hover {
-  color: #fadb14 !important;
+  color: #ed6d00 !important;
   background: rgba(255, 255, 255, 0.12) !important;
 }
 
@@ -422,7 +474,7 @@
 }
 
 .listPosterInner:hover {
-  border-color: #fadb14;
+  border-color: #ed6d00;
 }
 
 .listRow[data-bulk-pick] .listPosterInner:not([data-selected]):hover {
@@ -469,7 +521,7 @@
   width: 44px;
   height: 44px;
   border-radius: 50%;
-  background: #fadb14;
+  background: #ed6d00;
   color: #111;
   font-size: 20px;
   padding-left: 3px;
@@ -516,7 +568,7 @@
 }
 
 .listMoreBtn:hover {
-  color: #fadb14 !important;
+  color: #ed6d00 !important;
 }
 
 /* —— 多选提示条 —— */
@@ -529,7 +581,7 @@
   padding: 10px 14px;
   margin-bottom: 12px;
   background: #141414;
-  border: 1px solid #fa8c16;
+  border: 1px solid #ed6d00;
   border-radius: 4px;
   box-sizing: border-box;
 }
@@ -538,7 +590,7 @@
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  color: #fa8c16;
+  color: #ed6d00;
   font-size: 14px;
   font-weight: 500;
   flex-shrink: 0;
@@ -558,11 +610,23 @@
 
 .browseSelectionActionBtn {
   color: rgba(255, 255, 255, 0.88) !important;
+  width: 40px !important;
+  height: 40px !important;
+  min-width: 40px !important;
+  padding: 0 !important;
+  font-size: 20px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+}
+
+.browseSelectionActionBtn :global(.anticon) {
+  font-size: 20px;
 }
 
 .browseSelectionActionBtn:hover {
-  color: #fa8c16 !important;
-  background: rgba(250, 140, 22, 0.12) !important;
+  color: #ed6d00 !important;
+  background: rgba(237, 109, 0, 0.12) !important;
 }
 
 .browseSelectionBarRight {
@@ -613,7 +677,7 @@
 }
 
 .browseColPickerTrigger:hover {
-  color: #fa8c16 !important;
+  color: #ed6d00 !important;
 }
 
 .browseColPickerOverlay :global(.ant-popover-inner) {
@@ -638,7 +702,7 @@
 }
 
 .browseColPickerActive {
-  color: #fa8c16;
+  color: #ed6d00;
 }
 
 .browseColPickerMuted {
@@ -646,8 +710,8 @@
 }
 
 .browseColPickerOverlay :global(.ant-checkbox-checked .ant-checkbox-inner) {
-  background-color: #fa8c16 !important;
-  border-color: #fa8c16 !important;
+  background-color: #ed6d00 !important;
+  border-color: #ed6d00 !important;
 }
 
 .browseColPickerOverlay :global(.ant-checkbox-checked::after) {
@@ -867,8 +931,8 @@
 }
 
 .browseTdTitle .browseRowPlay:hover {
-  background: #faad14;
-  border-color: #faad14;
+  background: #ed6d00;
+  border-color: #ed6d00;
   color: #111;
   transform: translateY(-50%) scale(1.06);
 }
@@ -878,7 +942,7 @@
 }
 
 .browseRowMoreBtn:hover {
-  color: #fa8c16 !important;
+  color: #ed6d00 !important;
 }
 
 .browseTablePagination {

@@ -22,11 +22,11 @@
 }
 
 .seasonTabs :global(.ant-tabs-tab-active .ant-tabs-tab-btn) {
-  color: #e5a00d !important;
+  color: #ed6d00 !important;
 }
 
 .seasonTabs :global(.ant-tabs-ink-bar) {
-  background: #e5a00d !important;
+  background: #ed6d00 !important;
 }
 
 .episodeList {
@@ -58,11 +58,11 @@
 }
 
 .episodeRow[data-playing] {
-  background: rgba(229, 160, 13, 0.12);
+  background: rgba(237, 109, 0, 0.12);
 }
 
 .episodeRow[data-playing]:hover {
-  background: rgba(229, 160, 13, 0.12);
+  background: rgba(237, 109, 0, 0.12);
 }
 
 .episodeNum {
@@ -92,12 +92,12 @@
 }
 
 .episodeTitle:hover {
-  color: #e5a00d;
+  color: #ed6d00;
 }
 
 .episodeRow[data-playing] .episodeTitle,
 .episodeRow[data-playing] .episodeTitleStatic {
-  color: #faad14;
+  color: #ed6d00;
 }
 
 .episodePlayingIcon {
@@ -105,14 +105,14 @@
   height: 18px;
   display: block;
   margin: 0 auto;
-  color: #faad14;
+  color: #ed6d00;
 }
 
 .episodePlayingLabel {
   margin-left: 8px;
   font-size: 12px;
   font-weight: 500;
-  color: #faad14;
+  color: #ed6d00;
 }
 
 .episodeMeta {

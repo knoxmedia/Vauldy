@@ -1152,7 +1152,7 @@ export default function HomePage() {
               const processed = lib.scan_processed_count ?? 0;
               const total = lib.scan_total_count ?? 0;
               const percent = total > 0 ? Math.max(0, Math.min(100, Math.round((processed / total) * 100))) : 0;
-              const progressColor = percent < 50 ? "#13b6ff" : percent < 90 ? "#faad14" : "#52c41a";
+              const progressColor = percent < 50 ? "#13b6ff" : percent < 90 ? "#ed6d00" : "#52c41a";
               const typeLabel =
                 lib.type === "movie"
                   ? t("pages.home.lib_type_movie")

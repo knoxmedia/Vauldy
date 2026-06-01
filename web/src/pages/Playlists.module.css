@@ -57,11 +57,11 @@
 }
 
 .playlistImage:hover {
-  border-color: #fadb14;
+  border-color: #ed6d00;
 }
 
 .playlistImage[data-selected] {
-  border-color: #fadb14;
+  border-color: #ed6d00;
 }
 
 .playlistCoverImg {
@@ -176,7 +176,7 @@
 
 .playlistEditBtn:hover {
   background: rgba(255, 255, 255, 0.22);
-  color: #fadb14;
+  color: #ed6d00;
 }
 
 .playlistDeleteBtn {
@@ -247,7 +247,7 @@
 }
 
 .backBtn:hover {
-  color: #fadb14 !important;
+  color: #ed6d00 !important;
 }
 
 .detailTitle {
@@ -294,7 +294,7 @@
 }
 
 .playbackModeBtn[data-active] {
-  background: #fadb14;
+  background: #ed6d00;
   color: #111;
 }
 
@@ -353,7 +353,7 @@
 }
 
 .detailRow[data-playing] .detailIndex {
-  color: #fadb14;
+  color: #ed6d00;
   opacity: 1;
 }
 
@@ -387,7 +387,7 @@
 }
 
 .detailPosterInner:hover {
-  border-color: #fadb14;
+  border-color: #ed6d00;
 }
 
 .detailPosterImg {
@@ -426,7 +426,7 @@
   width: 44px;
   height: 44px;
   border-radius: 50%;
-  background: #fadb14;
+  background: #ed6d00;
   color: #111;
   font-size: 20px;
   padding-left: 3px;
@@ -448,7 +448,7 @@
 }
 
 .detailRow[data-playing] .detailItemTitle {
-  color: #fadb14;
+  color: #ed6d00;
 }
 
 .detailMeta {
@@ -477,7 +477,7 @@
 }
 
 .detailMoreBtn:hover {
-  color: #fadb14 !important;
+  color: #ed6d00 !important;
 }
 
 .detailPlayNextBtn {
@@ -486,14 +486,14 @@
 }
 
 .detailPlayNextBtn:hover {
-  color: #fadb14 !important;
+  color: #ed6d00 !important;
 }
 
 /* ——— Create playlist button ——— */
 .createBtn {
-  background: #fadb14 !important;
+  background: #ed6d00 !important;
   color: #111 !important;
-  border-color: #fadb14 !important;
+  border-color: #ed6d00 !important;
   font-weight: 500 !important;
 }
 
@@ -537,7 +537,7 @@
 }
 
 .detailBackLink:hover {
-  color: #faad14 !important;
+  color: #ed6d00 !important;
 }
 
 .detailHero {
@@ -563,7 +563,7 @@
 
 .detailHeroArt:hover,
 .detailHeroArt:focus-within {
-  border-color: #faad14;
+  border-color: #ed6d00;
 }
 
 .detailHeroImg {
@@ -587,7 +587,7 @@
   height: 64px;
   border-radius: 50%;
   border: none;
-  background: #fa8c16;
+  background: #ed6d00;
   color: #111;
   font-size: 26px;
   display: flex;
@@ -673,8 +673,8 @@
 
 /* 主按钮：橙底黑字 + 图标（与参考图一致） */
 .detailToolbarPlayBtn {
-  background: #faad14 !important;
-  border-color: #faad14 !important;
+  background: #ed6d00 !important;
+  border-color: #ed6d00 !important;
   color: #111 !important;
   font-weight: 600 !important;
   height: 42px !important;
@@ -706,8 +706,8 @@
 }
 
 .detailToolbarPlayBtn:hover:not(:disabled) {
-  background: #ffc53d !important;
-  border-color: #ffc53d !important;
+  background: #ed6d00 !important;
+  border-color: #ed6d00 !important;
   color: #111 !important;
 }
 
@@ -751,31 +751,31 @@
 }
 
 .detailToolbar .detailIconBtn:hover {
-  color: #faad14 !important;
+  color: #ed6d00 !important;
   background: rgba(255, 255, 255, 0.06) !important;
 }
 
 .detailToolbar .detailIconBtn:hover :global(.anticon) {
-  color: #faad14 !important;
+  color: #ed6d00 !important;
 }
 
 .detailToolbar .detailIconBtn:hover .detailToolbarShuffleSvg,
 .detailToolbar .detailIconBtn:hover .detailToolbarAddSvg {
-  color: #faad14;
+  color: #ed6d00;
 }
 
 .detailToolbar .detailIconBtn[data-active] {
-  color: #faad14 !important;
+  color: #ed6d00 !important;
   background: rgba(250, 173, 20, 0.1) !important;
 }
 
 .detailToolbar .detailIconBtn[data-active] :global(.anticon) {
-  color: #faad14 !important;
+  color: #ed6d00 !important;
 }
 
 .detailToolbar .detailIconBtn[data-active] .detailToolbarShuffleSvg,
 .detailToolbar .detailIconBtn[data-active] .detailToolbarAddSvg {
-  color: #faad14;
+  color: #ed6d00;
 }
 
 .detailEmpty {
@@ -826,8 +826,8 @@
 }
 
 .trackRowDropTarget {
-  box-shadow: inset 0 2px 0 #fa8c16;
-  background: rgba(250, 140, 22, 0.06);
+  box-shadow: inset 0 2px 0 #ed6d00;
+  background: rgba(237, 109, 0, 0.06);
 }
 
 .trackRow {
@@ -855,25 +855,25 @@
 }
 
 .trackRow[data-playing] .trackTitle {
-  color: #faad14;
+  color: #ed6d00;
 }
 
 .trackPlayingIcon {
   width: 14px;
   height: 14px;
   display: block;
-  color: #faad14;
+  color: #ed6d00;
 }
 
 .trackRow[data-playing] .trackIndex {
-  color: #faad14;
+  color: #ed6d00;
 }
 
 .trackPlayingLabel {
   margin-left: 8px;
   font-size: 12px;
   font-weight: 500;
-  color: #faad14;
+  color: #ed6d00;
   opacity: 0.9;
 }
 
@@ -915,7 +915,7 @@
 }
 
 .trackMore :global(.ant-btn:hover) {
-  color: #faad14 !important;
+  color: #ed6d00 !important;
 }
 
 .detailPaginationBar {

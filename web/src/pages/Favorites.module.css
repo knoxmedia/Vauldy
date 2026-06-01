@@ -231,7 +231,7 @@
 }
 
 .folderCover:hover {
-  border-color: #fadb14;
+  border-color: #ed6d00;
 }
 
 .folderCoverImg {
@@ -580,12 +580,12 @@
 
 .posterImage:hover,
 .thumbImage:hover {
-  border-color: #fadb14;
+  border-color: #ed6d00;
 }
 
 .posterImage[data-selected],
 .thumbImage[data-selected] {
-  border-color: #fadb14;
+  border-color: #ed6d00;
 }
 
 /* 批量点选：未选中项悬停不显示黄框 */
@@ -663,7 +663,7 @@
 
 .gridCornerBtn:hover {
   background: rgba(255, 255, 255, 0.22);
-  color: #fadb14;
+  color: #ed6d00;
 }
 
 .gridEditBtn {
@@ -713,7 +713,7 @@
 }
 
 .gridMoreIconBtn:hover {
-  color: #fadb14 !important;
+  color: #ed6d00 !important;
   background: rgba(255, 255, 255, 0.12) !important;
 }
 
@@ -913,7 +913,7 @@
 }
 
 .listPosterInner:hover {
-  border-color: #fadb14;
+  border-color: #ed6d00;
 }
 
 .listRow[data-bulk-pick] .listPosterInner:not([data-selected]):hover {
@@ -960,7 +960,7 @@
   width: 44px;
   height: 44px;
   border-radius: 50%;
-  background: #fadb14;
+  background: #ed6d00;
   color: #111;
   font-size: 20px;
   padding-left: 3px;
@@ -1007,7 +1007,7 @@
 }
 
 .listMoreBtn:hover {
-  color: #fadb14 !important;
+  color: #ed6d00 !important;
 }
 
 /* ——— Table view ——— */
@@ -1250,8 +1250,8 @@
 }
 
 .browseTdTitle .browseRowPlay:hover {
-  background: #faad14;
-  border-color: #faad14;
+  background: #ed6d00;
+  border-color: #ed6d00;
   color: #111;
   transform: translateY(-50%) scale(1.06);
 }
@@ -1261,7 +1261,7 @@
 }
 
 .browseRowMoreBtn:hover {
-  color: #fa8c16 !important;
+  color: #ed6d00 !important;
 }
 
 .browseTablePagination {

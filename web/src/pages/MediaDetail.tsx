@@ -1511,7 +1511,7 @@ export default function MediaDetailPage() {
           </div>
           <div className={styles.progressBox}>
             <div className={styles.specLabel}>{t("pages.media_detail.stat_avg_progress")}</div>
-            <Progress percent={avgPct} strokeColor="#e5a00d" trailColor="rgba(255,255,255,0.12)" />
+            <Progress percent={avgPct} strokeColor="#ed6d00" trailColor="rgba(255,255,255,0.12)" />
           </div>
           <div className={styles.progressBox}>
             <div className={styles.specLabel}>{t("pages.media_detail.stat_my_history")}</div>

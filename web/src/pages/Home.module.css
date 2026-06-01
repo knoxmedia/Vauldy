@@ -260,7 +260,7 @@
 .thumb169:hover .thumb169Box::after,
 .thumb169:focus-within .thumb169Box::after,
 .thumb169Selected .thumb169Box::after {
-  border-color: #fadb14;
+  border-color: #ed6d00;
 }
 
 .thumb169Overlay {
@@ -564,7 +564,7 @@
 .posterBoxMovie:hover::after,
 .thumbPosterMovie:focus-within .posterBoxMovie::after,
 .thumbPosterMovieSelected .posterBoxMovie::after {
-  border-color: #fadb14;
+  border-color: #ed6d00;
 }
 
 /* 电影海报：铺满海报格（与黄框 ::after 之间无额外边距），contain 仅保留必要黑边 */
@@ -717,8 +717,8 @@
 }
 
 .posterPlayFab:hover {
-  background: #fa8c16;
-  border-color: #fa8c16;
+  background: #ed6d00;
+  border-color: #ed6d00;
   color: #141414;
   transform: scale(1.04);
 }
@@ -768,7 +768,7 @@
   gap: 10px 16px;
   padding: 8px 16px;
   background: rgba(10, 10, 14, 0.96);
-  border: 1px solid #fa8c16;
+  border: 1px solid #ed6d00;
   border-radius: 8px;
   box-shadow: 0 10px 36px rgba(0, 0, 0, 0.55);
   transition: opacity 0.12s ease;
@@ -783,13 +783,13 @@
 
 .homeShelfBulkOrangeMark {
   font-size: 16px;
-  color: #fa8c16 !important;
+  color: #ed6d00 !important;
 }
 
 .homeShelfBulkOrangeText {
   font-size: 13px;
   font-weight: 500;
-  color: #fa8c16;
+  color: #ed6d00;
   white-space: nowrap;
 }
 

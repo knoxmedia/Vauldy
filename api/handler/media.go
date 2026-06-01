@@ -30,10 +30,11 @@ type updateMediaAdminBody struct {
 
 func (h *Handler) ListMedia(c *gin.Context) {
 	var profile userPermissionProfile
+	listUID := int64(0)
 	if !middleware.IsAPIClient(c) {
-		uid := middleware.UserID(c)
-		if uid > 0 {
-			p, err := h.loadUserPermissionProfile(uid)
+		listUID = middleware.UserID(c)
+		if listUID > 0 {
+			p, err := h.loadUserPermissionProfile(listUID)
 			if err == nil {
 				profile = p
 			}
@@ -60,6 +61,7 @@ func (h *Handler) ListMedia(c *gin.Context) {
 	q := `SELECT 
 		m.id, m.library_id, m.file_id, m.title, m.original_title, m.file_path, m.file_type, m.duration, m.width, m.height, m.bitrate, m.format, m.status, m.created_at,
 		(SELECT MAX(pp.update_at) FROM play_progress pp WHERE pp.file_id = m.file_id) AS last_play_at,
+		COALESCE((SELECT pp.completed FROM play_progress pp WHERE pp.file_id = m.file_id AND pp.user_id = ?), 0) AS play_completed,
 		COALESCE(NULLIF(json_extract(m.meta_json, '$.scrape.release_date'), ''), NULLIF(json_extract(m.meta_json, '$.release_date'), '')) AS release_date,
 		COALESCE(
 			CAST(NULLIF(json_extract(m.meta_json, '$.scrape.year'), '') AS INTEGER),
@@ -94,7 +96,7 @@ func (h *Handler) ListMedia(c *gin.Context) {
 			)
 		THEN 1 ELSE 0 END AS scraped
 	FROM media m WHERE 1=1`
-	args := []any{}
+	args := []any{listUID}
 	if lib != "" {
 		q += ` AND library_id = ?`
 		args = append(args, lib)
@@ -140,8 +142,8 @@ func (h *Handler) ListMedia(c *gin.Context) {
 		var mid int64
 		var libID sql.NullInt64
 		var fileID, title, orig, path, ftype, format, status, created, lastPlayAt, releaseDate, posterURL, backdropURL, photoTakenAt, photoTagsRaw, musicAlbumTitle, musicArtist sql.NullString
-		var dur, w, h, br, releaseYear, scraped, musicAlbumID sql.NullInt64
-		if err := rows.Scan(&mid, &libID, &fileID, &title, &orig, &path, &ftype, &dur, &w, &h, &br, &format, &status, &created, &lastPlayAt, &releaseDate, &releaseYear, &posterURL, &backdropURL, &photoTakenAt, &photoTagsRaw, &musicAlbumID, &musicAlbumTitle, &musicArtist, &scraped); err != nil {
+		var dur, w, h, br, releaseYear, scraped, musicAlbumID, playCompleted sql.NullInt64
+		if err := rows.Scan(&mid, &libID, &fileID, &title, &orig, &path, &ftype, &dur, &w, &h, &br, &format, &status, &created, &lastPlayAt, &playCompleted, &releaseDate, &releaseYear, &posterURL, &backdropURL, &photoTakenAt, &photoTagsRaw, &musicAlbumID, &musicAlbumTitle, &musicArtist, &scraped); err != nil {
 			continue
 		}
 		if strings.EqualFold(profile.LibraryScope, "selected") {
@@ -162,7 +164,7 @@ func (h *Handler) ListMedia(c *gin.Context) {
 			"title": title.String, "original_title": orig.String, "file_path": path.String,
 			"file_type": ftype.String, "duration": dur.Int64, "width": w.Int64, "height": h.Int64,
 			"bitrate": br.Int64, "format": format.String, "status": status.String, "created_at": created.String,
-			"last_play_at": lastPlayAt.String, "release_date": releaseDate.String, "year": releaseYear.Int64,
+			"last_play_at": lastPlayAt.String, "completed": playCompleted.Int64, "release_date": releaseDate.String, "year": releaseYear.Int64,
 			"poster_url": posterURL.String, "backdrop_url": backdropURL.String, "scraped": scraped.Int64 == 1,
 			"photo_taken_at": photoTakenAt.String,
 			"photo_tags":     photoTags,

@@ -17,6 +17,12 @@ body,
   --knox-scrollbar-thumb-active: #858585;
   --knox-scrollbar-inset: 3px;
   --knox-scrollbar-arrow: #666666;
+
+  /* 浏览/列表悬停与选中高亮（影片、电视节目、音乐等） */
+  --knox-accent: #ed6d00;
+  --knox-accent-rgb: 237, 109, 0;
+  --knox-accent-bg: rgba(237, 109, 0, 0.08);
+  --knox-accent-bg-strong: rgba(237, 109, 0, 0.12);
 }
 
 body {
