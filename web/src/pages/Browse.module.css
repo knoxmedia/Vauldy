@@ -165,24 +165,29 @@
 }
 
 .musicBrowseCover {
-  position: relative;
-  aspect-ratio: 1 / 1;
-  overflow: hidden;
-  border: 2px solid transparent;
   box-sizing: border-box;
-  border-radius: 6px;
   cursor: pointer;
-  transition:
-    border-color 0.15s ease,
-    background 0.2s ease;
 }
 
-.musicBrowseCover:hover,
-.musicBrowseCover[data-selected] {
+/* 顶层描边：避免 border 被子层盖住，圆角四角完整闭合 */
+.musicBrowseCover::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  box-sizing: border-box;
+  border: 2px solid transparent;
+  border-radius: inherit;
+  pointer-events: none;
+  transition: border-color 0.15s ease;
+}
+
+.musicBrowseCover:hover::after,
+.musicBrowseCover[data-selected]::after {
   border-color: #ed6d00;
 }
 
-.musicBrowseCover[data-bulk-pick]:not([data-selected]):hover {
+.musicBrowseCover[data-bulk-pick]:not([data-selected]):hover::after {
   border-color: transparent;
 }
 

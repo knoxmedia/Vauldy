@@ -331,7 +331,7 @@ func (h *Handler) ServeDocumentCover(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
 		return
 	}
-	if _, ok := h.requireMediaAccess(c, id, true); !ok {
+	if _, ok := h.requireMediaAccess(c, id, false); !ok {
 		return
 	}
 	cache := h.documentCoverPath(id)

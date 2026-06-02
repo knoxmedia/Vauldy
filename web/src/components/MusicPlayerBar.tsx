@@ -7,7 +7,7 @@ import {
   UpOutlined,
 } from "@ant-design/icons";
 import { Slider, Tooltip } from "antd";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { albumArtworkSrc, mediaPlaySrc, reportPlaybackEnd, reportPlaybackStart, savePlaybackProgress } from "../api/client";
 import { isLikelyNaturalPlaybackEnd } from "../lib/playbackComplete";
 import MusicFullscreenPlayer from "./MusicFullscreenPlayer";
@@ -33,7 +33,9 @@ export default function MusicPlayerBar() {
   const endedHandledRef = useRef(false);
   const loadingTrackRef = useRef(false);
   const programmaticPauseRef = useRef(false);
-  const [fullscreenOpen, setFullscreenOpen] = useState(false);
+  const fullscreenOpen = useMusicPlayerStore((s) => s.fullscreen);
+  const openFullscreen = useMusicPlayerStore((s) => s.openFullscreen);
+  const closeFullscreen = useMusicPlayerStore((s) => s.closeFullscreen);
 
   const active = useMusicPlayerStore((s) => s.active);
   const playing = useMusicPlayerStore((s) => s.playing);
@@ -160,7 +162,7 @@ export default function MusicPlayerBar() {
     }
     endedHandledRef.current = true;
     startedRef.current = false;
-    setFullscreenOpen(false);
+    closeFullscreen();
     stop();
   }
 
@@ -191,7 +193,7 @@ export default function MusicPlayerBar() {
               <button
                 type="button"
                 className={styles.coverBtn}
-                onClick={() => setFullscreenOpen(true)}
+                onClick={() => openFullscreen()}
                 aria-label={t("components.music_player_bar.aria_fullscreen")}
               >
                 <img
@@ -272,7 +274,7 @@ export default function MusicPlayerBar() {
           </div>
         </div>
       ) : (
-        <MusicFullscreenPlayer onClose={() => setFullscreenOpen(false)} />
+        <MusicFullscreenPlayer onClose={() => closeFullscreen()} />
       )}
 
       <audio

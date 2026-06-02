@@ -5,13 +5,23 @@ import {
   RightOutlined,
   RotateLeftOutlined,
   RotateRightOutlined,
+  StarFilled,
+  StarOutlined,
   ZoomInOutlined,
   ZoomOutOutlined,
 } from "@ant-design/icons";
 import { Button, Space, Spin, Tag, message } from "antd";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { MediaItem, photoMediumSrc, photoOriginalSrc, updatePhotoTags } from "../api/client";
+import {
+  MediaItem,
+  addFavorite,
+  fetchFavoriteStatus,
+  photoMediumSrc,
+  photoOriginalSrc,
+  removeFavorite,
+  updatePhotoTags,
+} from "../api/client";
 import { useT } from "../i18n";
 import styles from "../pages/PhotoBrowse.module.css";
 
@@ -53,6 +63,8 @@ export default function PhotoLightbox({ items, index, onClose, onChangeIndex, on
   const [editingTags, setEditingTags] = useState(false);
   const [tagDraft, setTagDraft] = useState("");
   const [localTags, setLocalTags] = useState<string[]>([]);
+  const [favorited, setFavorited] = useState(false);
+  const [favoriteBusy, setFavoriteBusy] = useState(false);
   const tagEditRef = useRef<HTMLDivElement>(null);
 
   const hasPrev = index > 0;
@@ -97,6 +109,24 @@ export default function PhotoLightbox({ items, index, onClose, onChangeIndex, on
     setEditingTags(false);
     setTagDraft("");
   }, [index, resetView, item?.photo_tags]);
+
+  useEffect(() => {
+    if (!item?.id) {
+      setFavorited(false);
+      return;
+    }
+    let cancelled = false;
+    void fetchFavoriteStatus(item.id)
+      .then((v) => {
+        if (!cancelled) setFavorited(v);
+      })
+      .catch(() => {
+        if (!cancelled) setFavorited(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [item?.id]);
 
   useEffect(() => {
     setLoading(true);
@@ -185,6 +215,26 @@ export default function PhotoLightbox({ items, index, onClose, onChangeIndex, on
     setUserZoom((s) => Math.min(4, Math.max(0.25, s + delta)));
   }
 
+  async function onToggleFavorite() {
+    if (!item?.id || favoriteBusy) return;
+    setFavoriteBusy(true);
+    try {
+      if (favorited) {
+        await removeFavorite(item.id);
+        setFavorited(false);
+        message.success(t("components.photo_lightbox.unfavorited"));
+      } else {
+        await addFavorite(item.id);
+        setFavorited(true);
+        message.success(t("components.photo_lightbox.favorited"));
+      }
+    } catch {
+      message.error(t("components.photo_lightbox.favorite_failed"));
+    } finally {
+      setFavoriteBusy(false);
+    }
+  }
+
   async function saveTags() {
     const tags = tagDraft
       .split(/[,，、\s]+/)
@@ -233,6 +283,18 @@ export default function PhotoLightbox({ items, index, onClose, onChangeIndex, on
             aria-label={t("components.photo_lightbox.aria_rotate_right")}
             onClick={() => rotateBy(90)}
             style={{ color: "#fff" }}
+          />
+          <Button
+            type="text"
+            icon={favorited ? <StarFilled /> : <StarOutlined />}
+            aria-label={
+              favorited
+                ? t("components.photo_lightbox.aria_unfavorite")
+                : t("components.photo_lightbox.aria_favorite")
+            }
+            loading={favoriteBusy}
+            onClick={() => void onToggleFavorite()}
+            style={{ color: favorited ? "#ed6d00" : "#fff" }}
           />
           <Button
             type="text"

@@ -729,6 +729,7 @@ export default function SeriesDetailPage() {
                     episodeContainsMedia(ep, playingMediaId);
                   const epLabel = `E${String(ep.episode_num).padStart(2, "0")}`;
                   const versionCount = ep.versions?.length ?? 0;
+                  const watched = (ep.versions ?? []).some((v) => v.completed === 1);
                   return (
                     <div
                       key={ep.id}
@@ -758,6 +759,7 @@ export default function SeriesDetailPage() {
                           {fmtDuration(best?.duration ?? ep.duration)}
                           {best?.width && best?.height ? ` · ${best.width}×${best.height}` : ""}
                           {versionCount > 1 ? t("pages.series_detail.versions_suffix", { count: versionCount }) : ""}
+                          {watched ? ` · ${t("pages.media_detail.watched_label")}` : ""}
                         </div>
                         {versionCount > 1 ? (
                           <div className={styles.versionList}>

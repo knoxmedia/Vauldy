@@ -215,6 +215,7 @@ func (h *Handler) ListSeasonEpisodes(c *gin.Context) {
 	if !h.requireLibraryAccess(c, libID) {
 		return
 	}
+	uid := middleware.UserID(c)
 	rows, err := h.App.DB.Query(`
 		SELECT ep.id, ep.episode_num, COALESCE(ep.title, ''), COALESCE(ep.duration, 0)
 		FROM episode ep
@@ -233,7 +234,7 @@ func (h *Handler) ListSeasonEpisodes(c *gin.Context) {
 		if err := rows.Scan(&epID, &epNum, &epTitle, &dur); err != nil {
 			continue
 		}
-		versions, _ := h.listEpisodeMediaVersions(epID)
+		versions, _ := h.listEpisodeMediaVersions(epID, uid)
 		items = append(items, gin.H{
 			"id": epID, "episode_num": epNum, "title": epTitle.String,
 			"duration": dur, "versions": versions,
@@ -242,32 +243,33 @@ func (h *Handler) ListSeasonEpisodes(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"items": items})
 }
 
-func (h *Handler) listEpisodeMediaVersions(episodeID int64) ([]gin.H, error) {
+func (h *Handler) listEpisodeMediaVersions(episodeID int64, userID int64) ([]gin.H, error) {
 	rows, err := h.App.DB.Query(`
 		SELECT m.id, m.file_id, m.title, m.file_path, m.duration, m.width, m.height, m.bitrate, m.format,
 			em.sort_order,
-			COALESCE(NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.poster')), ''), '') AS poster_url
+			COALESCE(NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.poster')), ''), '') AS poster_url,
+			COALESCE((SELECT pp.completed FROM play_progress pp WHERE pp.file_id = m.file_id AND pp.user_id = ?), 0) AS play_completed
 		FROM episode_media em
 		JOIN media m ON m.id = em.media_id
 		WHERE em.episode_id = ?
 		ORDER BY em.sort_order ASC, m.id ASC
-	`, episodeID)
+	`, userID, episodeID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var items []gin.H
 	for rows.Next() {
-		var mid, dur, w, h, br, sortOrder int64
+		var mid, dur, w, h, br, sortOrder, playCompleted int64
 		var fileID, title, path, format, poster sql.NullString
-		if err := rows.Scan(&mid, &fileID, &title, &path, &dur, &w, &h, &br, &format, &sortOrder, &poster); err != nil {
+		if err := rows.Scan(&mid, &fileID, &title, &path, &dur, &w, &h, &br, &format, &sortOrder, &poster, &playCompleted); err != nil {
 			continue
 		}
 		items = append(items, gin.H{
 			"media_id": mid, "file_id": fileID.String, "title": title.String,
 			"file_path": path.String, "duration": dur, "width": w, "height": h,
 			"bitrate": br, "format": format.String, "sort_order": sortOrder,
-			"poster_url": poster.String,
+			"poster_url": poster.String, "completed": playCompleted,
 		})
 	}
 	return items, nil

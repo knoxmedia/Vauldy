@@ -435,6 +435,7 @@ export type EpisodeMediaVersion = {
   format?: string;
   sort_order?: number;
   poster_url?: string;
+  completed?: number;
 };
 
 export type EpisodeRow = {

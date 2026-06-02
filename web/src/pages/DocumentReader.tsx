@@ -5,6 +5,8 @@ import {
   MinusOutlined,
   PlusOutlined,
   SearchOutlined,
+  StarFilled,
+  StarOutlined,
 } from "@ant-design/icons";
 import { Button, Input, Select, Space, Spin, message } from "antd";
 import { marked } from "marked";
@@ -15,12 +17,15 @@ import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
 import pdfWorkerUrl from "pdfjs-dist/legacy/build/pdf.worker.min.mjs?url";
 import ePub from "epubjs";
 import {
+  addFavorite,
   documentPreviewSrc,
   documentDownloadSrc,
   documentStreamSrc,
   fetchDocumentDetail,
+  fetchFavoriteStatus,
   fetchReadProgress,
   isOfficeDocumentFormat,
+  removeFavorite,
   saveReadProgress,
 } from "../api/client";
 import { useAuthStore } from "../store/auth";
@@ -73,6 +78,8 @@ export default function DocumentReader() {
   const [epubAtEnd, setEpubAtEnd] = useState(false);
   const [epubPage, setEpubPage] = useState(0);
   const [epubTotalPages, setEpubTotalPages] = useState(0);
+  const [favorited, setFavorited] = useState(false);
+  const [favoriteBusy, setFavoriteBusy] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const epubRef = useRef<HTMLDivElement>(null);
   const epubBookRef = useRef<ReturnType<typeof ePub> | null>(null);
@@ -99,6 +106,24 @@ export default function DocumentReader() {
   useEffect(() => {
     savePrefs(theme, fontSize);
   }, [theme, fontSize]);
+
+  useEffect(() => {
+    if (!mediaId || Number.isNaN(mediaId)) {
+      setFavorited(false);
+      return;
+    }
+    let cancelled = false;
+    void fetchFavoriteStatus(mediaId)
+      .then((v) => {
+        if (!cancelled) setFavorited(v);
+      })
+      .catch(() => {
+        if (!cancelled) setFavorited(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [mediaId]);
 
   useEffect(() => {
     if (!mediaId || Number.isNaN(mediaId)) return;
@@ -336,6 +361,26 @@ export default function DocumentReader() {
     document.documentElement.requestFullscreen?.();
   };
 
+  async function onToggleFavorite() {
+    if (!mediaId || Number.isNaN(mediaId) || favoriteBusy) return;
+    setFavoriteBusy(true);
+    try {
+      if (favorited) {
+        await removeFavorite(mediaId);
+        setFavorited(false);
+        message.success(t("pages.document_reader.unfavorited"));
+      } else {
+        await addFavorite(mediaId);
+        setFavorited(true);
+        message.success(t("pages.document_reader.favorited"));
+      }
+    } catch {
+      message.error(t("pages.document_reader.favorite_failed"));
+    } finally {
+      setFavoriteBusy(false);
+    }
+  }
+
   const renderCSV = (raw: string) => {
     const lines = raw.split(/\r?\n/).filter(Boolean);
     if (lines.length === 0) return null;
@@ -415,6 +460,18 @@ export default function DocumentReader() {
             }
           }}
           style={{ width: 120 }}
+        />
+        <Button
+          type="text"
+          icon={favorited ? <StarFilled /> : <StarOutlined />}
+          aria-label={
+            favorited
+              ? t("pages.document_reader.aria_unfavorite")
+              : t("pages.document_reader.aria_favorite")
+          }
+          loading={favoriteBusy}
+          onClick={() => void onToggleFavorite()}
+          className={favorited ? styles.toolbarFavoriteActive : undefined}
         />
         <Button type="text" icon={<FullscreenOutlined />} onClick={goFullscreen} />
       </header>

@@ -115,7 +115,7 @@ func (h *Handler) ServePhotoFaceThumb(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	if _, ok := h.requireMediaAccess(c, mediaID, true); !ok {
+	if _, ok := h.requireMediaAccess(c, mediaID, false); !ok {
 		return
 	}
 	var filePath sql.NullString

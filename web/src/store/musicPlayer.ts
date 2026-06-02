@@ -55,6 +55,8 @@ type MusicPlayerState = {
   playMode: MusicPlayMode;
   shuffleMap: number[] | null;
   replayToken: number;
+  /** When true, MusicPlayerBar shows MusicFullscreenPlayer. */
+  fullscreen: boolean;
   loadAlbum: (albumId: number, queue: MusicQueueItem[], startIndex?: number, options?: { sequential?: boolean }) => boolean;
   playTrack: (item: MusicQueueItem, queue?: MusicQueueItem[], index?: number) => boolean;
   playQueue: (queue: MusicQueueItem[], startIndex?: number) => boolean;
@@ -70,6 +72,8 @@ type MusicPlayerState = {
   onTrackEnded: () => void;
   syncPosition: (pos: number, dur: number) => void;
   stop: () => void;
+  openFullscreen: () => void;
+  closeFullscreen: () => void;
   /** Called by MusicPlayerBar when audio element is ready to play. */
   setPlaying: (playing: boolean) => void;
 };
@@ -87,6 +91,10 @@ export const useMusicPlayerStore = create<MusicPlayerState>((set, get) => ({
   playMode: readPlayMode(),
   shuffleMap: null,
   replayToken: 0,
+  fullscreen: false,
+
+  openFullscreen: () => set({ fullscreen: true }),
+  closeFullscreen: () => set({ fullscreen: false }),
 
   loadAlbum: (albumId, queue, startIndex = 0, options) => {
     const filtered = queue.filter((q) => q.mediaId > 0);
@@ -290,6 +298,7 @@ export const useMusicPlayerStore = create<MusicPlayerState>((set, get) => ({
       duration: 0,
       shuffleMap: null,
       replayToken: 0,
+      fullscreen: false,
     });
   },
 }));

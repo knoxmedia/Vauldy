@@ -549,15 +549,24 @@
   align-items: start;
 }
 
+.photoGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 12px;
+  align-items: start;
+}
+
 .posterCard,
-.thumbCard {
+.thumbCard,
+.photoCard {
   background: transparent;
   width: 100%;
   min-width: 0;
 }
 
 .posterImage,
-.thumbImage {
+.thumbImage,
+.photoImage {
   position: relative;
   width: 100%;
   min-width: 0;
@@ -574,29 +583,34 @@
 }
 
 .posterImage[data-cover-loaded],
-.thumbImage[data-cover-loaded] {
+.thumbImage[data-cover-loaded],
+.photoImage[data-cover-loaded] {
   background: transparent;
 }
 
 .posterImage:hover,
-.thumbImage:hover {
+.thumbImage:hover,
+.photoImage:hover {
   border-color: #ed6d00;
 }
 
 .posterImage[data-selected],
-.thumbImage[data-selected] {
+.thumbImage[data-selected],
+.photoImage[data-selected] {
   border-color: #ed6d00;
 }
 
 /* 批量点选：未选中项悬停不显示黄框 */
 .posterImage[data-bulk-pick]:not([data-selected]):hover,
-.thumbImage[data-bulk-pick]:not([data-selected]):hover {
+.thumbImage[data-bulk-pick]:not([data-selected]):hover,
+.photoImage[data-bulk-pick]:not([data-selected]):hover {
   border-color: transparent;
 }
 
 /* 批量点选：选择钮始终可见 */
 .posterImage[data-bulk-pick] .gridSelectBtn,
-.thumbImage[data-bulk-pick] .gridSelectBtn {
+.thumbImage[data-bulk-pick] .gridSelectBtn,
+.photoImage[data-bulk-pick] .gridSelectBtn {
   opacity: 1;
   pointer-events: auto;
 }
@@ -623,6 +637,22 @@
   height: auto;
 }
 
+/* 照片：1:1 方格，与照片库一致 */
+.photoImage {
+  aspect-ratio: 1 / 1;
+  height: auto;
+}
+
+.photoCoverImg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  z-index: 1;
+}
+
 .gridHoverShade {
   position: absolute;
   inset: 0;
@@ -637,7 +667,8 @@
 }
 
 .posterImage:hover .gridHoverShade,
-.thumbImage:hover .gridHoverShade {
+.thumbImage:hover .gridHoverShade,
+.photoImage:hover .gridHoverShade {
   opacity: 1;
   pointer-events: auto;
 }
@@ -750,8 +781,10 @@
 
 .posterImage:hover .gridSelectBtn,
 .thumbImage:hover .gridSelectBtn,
+.photoImage:hover .gridSelectBtn,
 .posterImage[data-selected] .gridSelectBtn,
-.thumbImage[data-selected] .gridSelectBtn {
+.thumbImage[data-selected] .gridSelectBtn,
+.photoImage[data-selected] .gridSelectBtn {
   opacity: 1;
   pointer-events: auto;
 }
@@ -910,6 +943,27 @@
   border: 2px solid transparent;
   background: linear-gradient(135deg, #2a2a3a 0%, #1a1a24 100%);
   transition: border-color 0.15s ease;
+}
+
+.listPosterInnerSquare {
+  aspect-ratio: 1 / 1;
+  border-radius: 6px;
+  background: #1a1a1a;
+}
+
+.listPosterMusicPlaceholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.22);
+  pointer-events: none;
+}
+
+.listPosterMusicPlaceholder svg {
+  width: 46%;
+  height: 46%;
 }
 
 .listPosterInner:hover {

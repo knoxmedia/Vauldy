@@ -36,7 +36,7 @@ func (h *Handler) servePhotoVariant(c *gin.Context, variant string) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
 		return
 	}
-	if _, ok := h.requireMediaAccess(c, id, true); !ok {
+	if _, ok := h.requireMediaAccess(c, id, false); !ok {
 		return
 	}
 	var filePath, fileType sql.NullString
@@ -74,7 +74,7 @@ func (h *Handler) PhotoPreviewInfo(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
 		return
 	}
-	if _, ok := h.requireMediaAccess(c, id, true); !ok {
+	if _, ok := h.requireMediaAccess(c, id, false); !ok {
 		return
 	}
 	var fileType sql.NullString

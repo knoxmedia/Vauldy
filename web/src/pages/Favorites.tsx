@@ -31,6 +31,8 @@ import {
   fetchFavorites,
   fetchLibraries,
   mediaPosterSrc,
+  musicMediaPosterSrc,
+  photoThumbSrc,
   removeFavorite,
   updateFavoriteFolder,
 } from "../api/client";
@@ -40,7 +42,10 @@ import AddToPlaylistModal from "../components/AddToPlaylistModal";
 import FavoriteFolderFormModal from "../components/FavoriteFolderFormModal";
 import MediaPosterImg from "../components/MediaPosterImg";
 import MusicPosterPlaceholderIcon from "../components/MusicPosterPlaceholderIcon";
+import PhotoLightbox from "../components/PhotoLightbox";
 import { buildMediaMenuItems } from "../components/mediaMenuItems";
+import { mediaItemsToMusicQueue } from "../lib/albumPlayback";
+import { useMusicPlayerStore } from "../store/musicPlayer";
 import {
   FAVORITE_CATEGORY_ORDER,
   FavoriteCategoryKey,
@@ -51,6 +56,7 @@ import {
   favoriteFolderCoverSrc,
   favoriteFolderItemToMediaItem,
   filterFavoritesByCategory,
+  getFavoriteMediaCategory,
   isFavoriteCategoryKey,
   isFavoriteVideoItem,
   pickDefaultFavoriteCategory,
@@ -58,7 +64,9 @@ import {
 import { useFavoriteFolderMenuRecents } from "../lib/useFavoriteFolderMenuRecents";
 import { readRecentPlaylists, rememberPlaylistAdded } from "../lib/recentPlaylists";
 import { useT, type TranslateFn } from "../i18n";
+import browseStyles from "./Browse.module.css";
 import styles from "./Favorites.module.css";
+import musicStyles from "./MusicBrowse.module.css";
 
 type ViewMode = "poster" | "thumb" | "list" | "table";
 type SortField = "title" | "added";
@@ -165,6 +173,7 @@ export default function FavoritesPage() {
   );
   const [folderFormSubmitting, setFolderFormSubmitting] = useState(false);
   const [addVideoFolderId, setAddVideoFolderId] = useState<number | null>(null);
+  const [photoLightboxIndex, setPhotoLightboxIndex] = useState<number | null>(null);
 
   const reloadFolders = useCallback(async () => {
     const list = await fetchFavoriteFolders();
@@ -266,6 +275,16 @@ export default function FavoritesPage() {
     return (timeA - timeB) * factor;
   });
 
+  const photoFavorites = useMemo(
+    () => sortedRows.filter((row) => getFavoriteMediaCategory(row, libTypeById) === "photo"),
+    [sortedRows, libTypeById],
+  );
+
+  const musicFavorites = useMemo(
+    () => sortedRows.filter((row) => getFavoriteMediaCategory(row, libTypeById) === "music"),
+    [sortedRows, libTypeById],
+  );
+
   const tableGridTemplate = (() => {
     const parts: string[] = ["40px"];
     for (const spec of TABLE_COL_SPECS) {
@@ -280,7 +299,36 @@ export default function FavoritesPage() {
   useEffect(() => {
     setTablePage(1);
     setSelectedIds(new Set());
+    setPhotoLightboxIndex(null);
   }, [sortedRows.length, viewMode, activeCategory, selectedFolderId]);
+
+  const openFavoritePreview = useCallback(
+    (item: MediaItem) => {
+      const cat = getFavoriteMediaCategory(item, libTypeById);
+      if (cat === "photo") {
+        const idx = photoFavorites.findIndex((r) => r.id === item.id);
+        if (idx >= 0) setPhotoLightboxIndex(idx);
+        return;
+      }
+      if (cat === "document") {
+        nav(`/reader/${item.id}`);
+        return;
+      }
+      if (cat === "music") {
+        const queue = mediaItemsToMusicQueue(
+          musicFavorites.map((m) => ({ ...m, file_type: m.file_type || "audio" })),
+        );
+        if (queue.length === 0) return;
+        const idx = queue.findIndex((q) => q.mediaId === item.id);
+        const st = useMusicPlayerStore.getState();
+        st.playQueue(queue, idx >= 0 ? idx : 0);
+        st.openFullscreen();
+        return;
+      }
+      nav(`/player/${item.id}`);
+    },
+    [libTypeById, musicFavorites, nav, photoFavorites],
+  );
 
   function selectCategory(key: FavoriteCategoryKey) {
     setActiveCategory(key);
@@ -404,6 +452,9 @@ export default function FavoritesPage() {
   const showFolderGrid = activeCategory === "folders" && selectedFolderId == null;
   const showFolderSplit = activeCategory === "folders" && selectedFolderId != null;
   const contentLoading = loading || (showFolderSplit && folderLoading);
+  const isMusicGrid = activeCategory === "music" && viewMode !== "table" && viewMode !== "list";
+  const isPhotoGrid = activeCategory === "photo" && viewMode !== "table" && viewMode !== "list";
+  const isSquareListPoster = activeCategory === "music" || activeCategory === "photo";
 
   function toggleSelect(id: number) {
     setSelectedIds((prev) => {
@@ -778,7 +829,7 @@ export default function FavoritesPage() {
                         aria-label={t("pages.browse.aria_play")}
                         onClick={(e) => {
                           e.stopPropagation();
-                          nav(`/player/${r.id}`);
+                          openFavoritePreview(r);
                         }}
                       >
                         <CaretRightOutlined />
@@ -828,6 +879,8 @@ export default function FavoritesPage() {
         <div className={styles.listWrap}>
           {sortedRows.map((r) => {
             const isListSelected = selectedIds.has(r.id);
+            const musicCoverSrc =
+              activeCategory === "music" ? musicMediaPosterSrc({ ...r, file_type: "audio" }) : null;
             return (
               <div
                 key={r.id}
@@ -876,10 +929,34 @@ export default function FavoritesPage() {
                     }
                   >
                     <div
-                      className={styles.listPosterInner}
+                      className={`${styles.listPosterInner} ${isSquareListPoster ? styles.listPosterInnerSquare : ""}`}
                       data-selected={isListSelected ? "" : undefined}
                     >
-                      <MediaPosterImg item={r} className={styles.listPosterImg} />
+                      {activeCategory === "music" ? (
+                        musicCoverSrc ? (
+                          <img
+                            src={musicCoverSrc}
+                            alt=""
+                            className={styles.listPosterImg}
+                            loading="lazy"
+                            decoding="async"
+                          />
+                        ) : (
+                          <div className={styles.listPosterMusicPlaceholder}>
+                            <MusicPosterPlaceholderIcon />
+                          </div>
+                        )
+                      ) : activeCategory === "photo" ? (
+                        <img
+                          src={photoThumbSrc(r.id)}
+                          alt=""
+                          className={styles.listPosterImg}
+                          loading="lazy"
+                          decoding="async"
+                        />
+                      ) : (
+                        <MediaPosterImg item={r} className={styles.listPosterImg} />
+                      )}
                       {!bulkPick ? (
                         <button
                           type="button"
@@ -887,7 +964,7 @@ export default function FavoritesPage() {
                           aria-label={t("pages.browse.aria_play")}
                           onClick={(e) => {
                             e.stopPropagation();
-                            nav(`/player/${r.id}`);
+                            openFavoritePreview(r);
                           }}
                         >
                           <span className={styles.listPlayCircle}>
@@ -926,18 +1003,21 @@ export default function FavoritesPage() {
             );
           })}
         </div>
-      ) : (
-        <div className={viewMode === "poster" ? styles.posterGrid : styles.thumbGrid}>
+      ) : isMusicGrid ? (
+        <div className={musicStyles.albumGrid}>
           {sortedRows.map((r) => {
             const isCardSelected = selectedIds.has(r.id);
-            const coverClass = viewMode === "poster" ? styles.posterImage : styles.thumbImage;
+            const subtitle = (r.music_artist || r.music_album_title || "").trim() || "—";
+            const coverSrc = musicMediaPosterSrc({ ...r, file_type: "audio" });
             return (
-              <div key={r.id} className={viewMode === "poster" ? styles.posterCard : styles.thumbCard}>
+              <div key={r.id} className={musicStyles.albumCard}>
                 <div
-                  className={coverClass}
+                  className={`${musicStyles.albumCover} ${browseStyles.musicBrowseCover} ${!coverSrc ? musicStyles.noCover : ""}`}
                   data-selected={isCardSelected ? "" : undefined}
                   data-bulk-pick={bulkPick ? "" : undefined}
+                  role="link"
                   tabIndex={0}
+                  aria-label={r.title || t("pages.favorites.untitled")}
                   onClick={(e) => {
                     if ((e.target as HTMLElement).closest("[data-browse-card-action]")) return;
                     if (bulkPick) {
@@ -954,16 +1034,176 @@ export default function FavoritesPage() {
                     }
                   }}
                 >
-                  <MediaPosterImg
-                    item={r}
-                    className={styles.gridCoverImg}
-                    onLoadStart={(e) => {
-                      e.currentTarget.parentElement?.removeAttribute("data-cover-loaded");
+                  {coverSrc ? (
+                    <img
+                      className={musicStyles.albumCoverImg}
+                      src={coverSrc}
+                      alt=""
+                      loading="lazy"
+                      decoding="async"
+                      onLoad={(e) => {
+                        e.currentTarget.parentElement?.classList.remove(musicStyles.noCover);
+                      }}
+                      onError={(e) => {
+                        e.currentTarget.style.display = "none";
+                        e.currentTarget.parentElement?.classList.add(musicStyles.noCover);
+                      }}
+                    />
+                  ) : null}
+                  <div className={musicStyles.noCoverIcon}>
+                    <MusicPosterPlaceholderIcon />
+                  </div>
+                  <div className={browseStyles.gridHoverShade} aria-hidden={bulkPick ? true : undefined}>
+                    {!bulkPick ? (
+                      <>
+                        <button
+                          type="button"
+                          data-browse-card-action
+                          className={`${browseStyles.gridCornerBtn} ${browseStyles.gridEditBtn}`}
+                          aria-label={t("pages.browse.aria_edit")}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            nav(`/detail/${r.id}`);
+                          }}
+                        >
+                          <EditOutlined />
+                        </button>
+                        <div className={browseStyles.gridMoreCorner} data-browse-card-action>
+                          <Dropdown menu={makeMenu(r)} trigger={["click"]} placement="bottomRight">
+                            <Button
+                              type="text"
+                              size="small"
+                              className={browseStyles.gridMoreIconBtn}
+                              icon={<EllipsisOutlined rotate={90} />}
+                              aria-label={t("pages.browse.aria_more")}
+                              onClick={(e) => e.stopPropagation()}
+                            />
+                          </Dropdown>
+                        </div>
+                        <button
+                          type="button"
+                          data-browse-card-action
+                          className={browseStyles.gridPlayBtn}
+                          aria-label={t("pages.browse.aria_play")}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openFavoritePreview(r);
+                          }}
+                        >
+                          <CaretRightOutlined />
+                        </button>
+                      </>
+                    ) : null}
+                  </div>
+                  <button
+                    type="button"
+                    data-browse-card-action
+                    className={browseStyles.gridSelectBtn}
+                    data-selected={isCardSelected ? "" : undefined}
+                    aria-label={isCardSelected ? t("pages.browse.aria_deselect") : t("pages.browse.aria_select")}
+                    aria-pressed={isCardSelected}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      toggleSelect(r.id);
                     }}
-                    onLoad={(e) => {
-                      e.currentTarget.parentElement?.setAttribute("data-cover-loaded", "");
-                    }}
-                  />
+                  >
+                    {isCardSelected ? <CheckOutlined /> : null}
+                  </button>
+                </div>
+                <div
+                  className={musicStyles.albumMeta}
+                  role="link"
+                  tabIndex={0}
+                  onClick={() => nav(`/detail/${r.id}`)}
+                  onKeyDown={(e) => e.key === "Enter" && nav(`/detail/${r.id}`)}
+                >
+                  <div className={musicStyles.albumTitle} title={r.title || t("pages.favorites.untitled")}>
+                    {r.title || t("pages.favorites.untitled")}
+                  </div>
+                  <div className={musicStyles.albumArtist} title={subtitle}>
+                    {subtitle}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <div
+          className={
+            isPhotoGrid ? styles.photoGrid : viewMode === "poster" ? styles.posterGrid : styles.thumbGrid
+          }
+        >
+          {sortedRows.map((r) => {
+            const isCardSelected = selectedIds.has(r.id);
+            const coverClass = isPhotoGrid
+              ? styles.photoImage
+              : viewMode === "poster"
+                ? styles.posterImage
+                : styles.thumbImage;
+            const cardClass = isPhotoGrid
+              ? styles.photoCard
+              : viewMode === "poster"
+                ? styles.posterCard
+                : styles.thumbCard;
+            return (
+              <div key={r.id} className={cardClass}>
+                <div
+                  className={coverClass}
+                  data-selected={isCardSelected ? "" : undefined}
+                  data-bulk-pick={bulkPick ? "" : undefined}
+                  tabIndex={0}
+                  onClick={(e) => {
+                    if ((e.target as HTMLElement).closest("[data-browse-card-action]")) return;
+                    if (bulkPick) {
+                      toggleSelect(r.id);
+                      return;
+                    }
+                    if (isPhotoGrid) {
+                      openFavoritePreview(r);
+                      return;
+                    }
+                    nav(`/detail/${r.id}`);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      if (bulkPick) toggleSelect(r.id);
+                      else if (isPhotoGrid) openFavoritePreview(r);
+                      else nav(`/detail/${r.id}`);
+                    }
+                  }}
+                >
+                  {isPhotoGrid ? (
+                    <img
+                      src={photoThumbSrc(r.id)}
+                      alt=""
+                      className={styles.photoCoverImg}
+                      loading="lazy"
+                      decoding="async"
+                      onLoadStart={(e) => {
+                        e.currentTarget.parentElement?.removeAttribute("data-cover-loaded");
+                      }}
+                      onLoad={(e) => {
+                        e.currentTarget.parentElement?.setAttribute("data-cover-loaded", "");
+                      }}
+                      onError={(e) => {
+                        e.currentTarget.style.display = "none";
+                        e.currentTarget.parentElement?.removeAttribute("data-cover-loaded");
+                      }}
+                    />
+                  ) : (
+                    <MediaPosterImg
+                      item={r}
+                      className={styles.gridCoverImg}
+                      onLoadStart={(e) => {
+                        e.currentTarget.parentElement?.removeAttribute("data-cover-loaded");
+                      }}
+                      onLoad={(e) => {
+                        e.currentTarget.parentElement?.setAttribute("data-cover-loaded", "");
+                      }}
+                    />
+                  )}
                   <div className={styles.gridHoverShade} aria-hidden={bulkPick ? true : undefined}>
                     {!bulkPick ? (
                       <>
@@ -986,7 +1226,7 @@ export default function FavoritesPage() {
                           aria-label={t("pages.browse.aria_play")}
                           onClick={(e) => {
                             e.stopPropagation();
-                            nav(`/player/${r.id}`);
+                            openFavoritePreview(r);
                           }}
                         >
                           <CaretRightOutlined />
@@ -1077,6 +1317,14 @@ export default function FavoritesPage() {
         onClose={() => setAddVideoFolderId(null)}
         onAdded={() => void refreshFolderItems()}
       />
+      {photoLightboxIndex != null && photoFavorites.length > 0 ? (
+        <PhotoLightbox
+          items={photoFavorites}
+          index={photoLightboxIndex}
+          onClose={() => setPhotoLightboxIndex(null)}
+          onChangeIndex={setPhotoLightboxIndex}
+        />
+      ) : null}
     </div>
   );
 }

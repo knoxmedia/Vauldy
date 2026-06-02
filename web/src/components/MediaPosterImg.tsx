@@ -11,10 +11,11 @@ type Props = {
   className?: string;
   onLoad?: (e: React.SyntheticEvent<HTMLImageElement>) => void;
   onLoadStart?: (e: React.SyntheticEvent<HTMLImageElement>) => void;
+  onFinalError?: (img: HTMLImageElement) => void;
 };
 
 /** Grid/list poster: prefer scraped image, fall back to local frame capture on load error. */
-export default function MediaPosterImg({ item, className, onLoad, onLoadStart }: Props) {
+export default function MediaPosterImg({ item, className, onLoad, onLoadStart, onFinalError }: Props) {
   const [scrapedFailed, setScrapedFailed] = useState(false);
   const src = useMemo(() => {
     if (scrapedFailed && hasScrapedPosterUrl(item)) return localPosterSrc(item.id);
@@ -37,6 +38,7 @@ export default function MediaPosterImg({ item, className, onLoad, onLoadStart }:
         }
         e.currentTarget.style.display = "none";
         e.currentTarget.parentElement?.removeAttribute("data-cover-loaded");
+        onFinalError?.(e.currentTarget);
       }}
     />
   );

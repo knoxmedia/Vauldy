@@ -46,6 +46,12 @@
   background: var(--reader-btn-hover-bg) !important;
 }
 
+.toolbarFavoriteActive:global(.ant-btn),
+.toolbarFavoriteActive:global(.ant-btn:not(:disabled):hover),
+.toolbarFavoriteActive:global(.ant-btn:not(:disabled):focus-visible) {
+  color: var(--knox-accent, #ed6d00) !important;
+}
+
 .toolbar :global(.ant-btn-default) {
   color: var(--reader-btn-fg) !important;
   background: var(--reader-input-bg) !important;

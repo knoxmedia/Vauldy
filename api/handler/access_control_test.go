@@ -227,6 +227,69 @@ func TestPlayMediaDeniedWhenCanPlayDisabled(t *testing.T) {
 	}
 }
 
+func TestPhotoPreviewInfoAllowsWhenCanPlayDisabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := setupAccessTestDB(t)
+	if _, err := h.App.DB.Exec(`UPDATE media SET file_type = 'image' WHERE id = 10`); err != nil {
+		t.Fatalf("update file_type: %v", err)
+	}
+	if _, err := h.App.DB.Exec(`UPDATE user SET can_play = 0 WHERE id = 1`); err != nil {
+		t.Fatalf("update can_play: %v", err)
+	}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/media/10/photo", nil)
+	c.Params = gin.Params{{Key: "id", Value: "10"}}
+	setUserCtx(c, 1, "user", "normal")
+	h.PhotoPreviewInfo(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for photo preview info without play permission, got status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestServePhotoFaceThumbAllowsWhenCanPlayDisabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := setupAccessTestDB(t)
+	if _, err := h.App.DB.Exec(`UPDATE media SET file_type = 'image' WHERE id = 10`); err != nil {
+		t.Fatalf("update file_type: %v", err)
+	}
+	if _, err := h.App.DB.Exec(`INSERT INTO photo_face (id, media_id, library_id, bbox_x, bbox_y, bbox_w, bbox_h) VALUES (129, 10, 1, 0.1, 0.1, 0.2, 0.2)`); err != nil {
+		t.Fatalf("insert photo_face: %v", err)
+	}
+	if _, err := h.App.DB.Exec(`UPDATE user SET can_play = 0 WHERE id = 1`); err != nil {
+		t.Fatalf("update can_play: %v", err)
+	}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/photo/face/129/thumb.jpg", nil)
+	c.Params = gin.Params{{Key: "id", Value: "129"}}
+	setUserCtx(c, 1, "user", "normal")
+	h.ServePhotoFaceThumb(c)
+	if w.Code == http.StatusForbidden {
+		t.Fatalf("face thumb should not require play permission, got 403 body=%s", w.Body.String())
+	}
+}
+
+func TestServeDocumentCoverAllowsWhenCanPlayDisabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := setupAccessTestDB(t)
+	if _, err := h.App.DB.Exec(`UPDATE media SET file_type = 'document', format = 'pdf' WHERE id = 10`); err != nil {
+		t.Fatalf("update file_type: %v", err)
+	}
+	if _, err := h.App.DB.Exec(`UPDATE user SET can_play = 0 WHERE id = 1`); err != nil {
+		t.Fatalf("update can_play: %v", err)
+	}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/media/10/document/cover.jpg", nil)
+	c.Params = gin.Params{{Key: "id", Value: "10"}}
+	setUserCtx(c, 1, "user", "normal")
+	h.ServeDocumentCover(c)
+	if w.Code == http.StatusForbidden {
+		t.Fatalf("document cover should not require play permission, got 403 body=%s", w.Body.String())
+	}
+}
+
 func TestGetMediaAllowsWhenCanPlayDisabled(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	h := setupAccessTestDB(t)
