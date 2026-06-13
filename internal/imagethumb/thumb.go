@@ -1,11 +1,15 @@
 package imagethumb
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"knox-media/internal/keystore"
+	"knox-media/internal/storage"
 )
 
 const (
@@ -34,7 +38,8 @@ func ExpectedPaths(baseDir string, mediaID int64) Paths {
 }
 
 // Ensure generates thumb (480px) and medium (1920px) JPEG variants via ffmpeg.
-func Ensure(ffmpegPath, srcPath, baseDir string, mediaID int64) (Paths, error) {
+// When the catalog path is Knox .enc, ffmpeg reads decrypted bytes via pipe:0.
+func Ensure(ctx context.Context, db *sql.DB, vault *keystore.Vault, ffmpegPath, srcPath, baseDir string, mediaID int64) (Paths, error) {
 	out := ExpectedPaths(baseDir, mediaID)
 	if ffmpegPath == "" {
 		return out, fmt.Errorf("ffmpeg path empty")
@@ -43,34 +48,39 @@ func Ensure(ffmpegPath, srcPath, baseDir string, mediaID int64) (Paths, error) {
 	if srcPath == "" {
 		return out, fmt.Errorf("source path empty")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := os.MkdirAll(filepath.Dir(out.Thumb), 0o755); err != nil {
 		return out, err
 	}
-	if err := render(ffmpegPath, srcPath, out.Thumb, ThumbMaxEdge); err != nil {
+	if err := render(ctx, db, vault, ffmpegPath, srcPath, mediaID, out.Thumb, ThumbMaxEdge); err != nil {
 		return out, err
 	}
-	if err := render(ffmpegPath, srcPath, out.Medium, MediumMaxEdge); err != nil {
+	if err := render(ctx, db, vault, ffmpegPath, srcPath, mediaID, out.Medium, MediumMaxEdge); err != nil {
 		return out, err
 	}
 	return out, nil
 }
 
-func render(ffmpegPath, srcPath, dstPath string, maxEdge int) error {
+func render(ctx context.Context, db *sql.DB, vault *keystore.Vault, ffmpegPath, srcPath string, mediaID int64, dstPath string, maxEdge int) error {
 	if st, err := os.Stat(dstPath); err == nil && !st.IsDir() && st.Size() > 0 {
 		return nil
 	}
-	// Avoid min(iw,N) expressions — commas break ffmpeg filter parsing on Windows.
+	if !storage.InputNeedsPipe(db, mediaID, srcPath) {
+		if _, err := os.Stat(srcPath); err != nil {
+			return fmt.Errorf("source missing: %w", err)
+		}
+	}
 	scale := fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=decrease", maxEdge, maxEdge)
-	args := []string{
-		"-hide_banner", "-loglevel", "error", "-y",
-		"-i", srcPath,
+	post := []string{
+		"-hide_banner", "-loglevel", "error",
 		"-vf", scale,
 		"-q:v", "4",
 		dstPath,
 	}
-	cmd := exec.Command(ffmpegPath, args...)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("ffmpeg thumb: %w: %s", err, strings.TrimSpace(string(out)))
+	if _, err := storage.RunFFmpeg(ctx, db, vault, ffmpegPath, mediaID, srcPath, 0, 0, nil, post, ""); err != nil {
+		return fmt.Errorf("ffmpeg thumb: %w", err)
 	}
 	return nil
 }

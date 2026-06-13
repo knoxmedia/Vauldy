@@ -1658,7 +1658,7 @@
       "field_realtime_monitor": "リアルタイム監視（追加/変更/削除を自動同期）",
       "field_preview_extract": "プログレスバーのプレビュー抽出を有効化",
       "field_drm_enabled": "ビデオ暗号化",
-      "field_encryption_mode": "暗号化方式",
+      "field_encryption_mode": "リアルタイム暗号化方式",
       "encryption_standard": "標準暗号化",
       "encryption_powerdrm": "独自暗号化",
       "encryption_drm": "DRM 暗号化",

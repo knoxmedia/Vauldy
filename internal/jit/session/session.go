@@ -4,6 +4,7 @@ package session
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,6 +13,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"knox-media/internal/keystore"
 )
 
 // JITSegmentDurationSeconds is the segment length used by the JIT ffmpeg segment muxer
@@ -23,15 +26,16 @@ type Manager struct {
 	mu       sync.RWMutex
 	sessions map[string]*Session
 
-	// Config
 	ffmpegPath  string
 	ffprobePath string
 	dataDir     string
+	DB          *sql.DB
+	Vault       *keystore.Vault
 }
 
 // NewManager creates a new session manager and removes any leftover files under
 // dataDir/jit from prior runs.
-func NewManager(ffmpegPath, ffprobePath, dataDir string) (*Manager, error) {
+func NewManager(ffmpegPath, ffprobePath, dataDir string, db *sql.DB, vault *keystore.Vault) (*Manager, error) {
 	jitDir := filepath.Join(dataDir, "jit")
 	if err := os.RemoveAll(jitDir); err != nil {
 		return nil, fmt.Errorf("clear jit temp dir: %w", err)
@@ -41,6 +45,8 @@ func NewManager(ffmpegPath, ffprobePath, dataDir string) (*Manager, error) {
 		ffmpegPath:  ffmpegPath,
 		ffprobePath: ffprobePath,
 		dataDir:     dataDir,
+		DB:          db,
+		Vault:       vault,
 	}
 	return m, nil
 }

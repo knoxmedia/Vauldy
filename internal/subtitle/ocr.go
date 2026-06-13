@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+
 )
 
 // OCRConfig enables Tesseract-based extraction for bitmap (PGS / VobSub) subtitles.
@@ -32,7 +33,7 @@ func defaultString(s, def string) string {
 }
 
 // RunBitmapSubtitleOCR invokes the Python helper (Tesseract + pgsrip / mkvtoolnix for tracks).
-func (s *Service) RunBitmapSubtitleOCR(ctx context.Context, videoPath string, streamIndex int, outVtt string) error {
+func (s *Service) RunBitmapSubtitleOCR(ctx context.Context, mediaID int64, videoPath string, streamIndex int, outVtt string) error {
 	if strings.TrimSpace(s.OCR.ScriptPath) == "" {
 		return fmt.Errorf("graphical_ocr.script_path not set")
 	}
@@ -40,9 +41,16 @@ func (s *Service) RunBitmapSubtitleOCR(ctx context.Context, videoPath string, st
 	if runtime.GOOS == "windows" {
 		py = defaultString(s.OCR.PythonPath, "python")
 	}
+	input, stdin, cleanup, err := s.openVideoPipeInput(mediaID, videoPath)
+	if err != nil {
+		return err
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
 	args := []string{
 		s.OCR.ScriptPath,
-		"--input", videoPath,
+		"--input", input,
 		"--stream-index", strconv.Itoa(streamIndex),
 		"--output-vtt", outVtt,
 		"--tesseract", defaultString(s.OCR.TesseractPath, "tesseract"),
@@ -66,6 +74,9 @@ func (s *Service) RunBitmapSubtitleOCR(ctx context.Context, videoPath string, st
 		args = append(args, "--mkvmerge", p)
 	}
 	cmd := exec.CommandContext(ctx, py, args...)
+	if stdin != nil {
+		cmd.Stdin = stdin
+	}
 	cmd.Env = os.Environ()
 	if p := strings.TrimSpace(s.OCR.TessdataPrefix); p != "" {
 		cmd.Env = append(cmd.Env, "TESSDATA_PREFIX="+p)

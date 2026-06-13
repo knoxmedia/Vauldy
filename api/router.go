@@ -23,6 +23,7 @@ import (
 	"knox-media/internal/photoclass"
 	"knox-media/internal/preview"
 	"knox-media/internal/subtitle"
+	"knox-media/internal/storage"
 	"knox-media/internal/transcode"
 	"knox-media/internal/upload"
 )
@@ -39,7 +40,8 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 	r.Static("/static", cfg.Data.Static)
 	r.Static(metadatalib.PublicURLPrefix, cfg.Data.MetadataLibrary)
 
-	h := handler.New(application, worker, packageWorker, previewWorker, sub, up, instant, sm, atw, kfw, lw, pcw, dcw)
+	keyVault, assetEnc := storage.NewAssetEncryptorFromConfig(cfg, application.DB)
+	h := handler.New(application, worker, packageWorker, previewWorker, sub, up, instant, sm, atw, kfw, lw, pcw, dcw, keyVault, assetEnc)
 	go h.StartScheduleLoop(context.Background())
 	go h.StartScrapeTaskLoop(context.Background())
 	go h.StartLyricTaskLoop(context.Background())
@@ -264,6 +266,7 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 			adm.GET("/atrack/task", h.ListAudioTrackTasks)
 			adm.POST("/atrack/task/:mediaId/retry", h.RetryAudioTrackTask)
 			adm.POST("/media/:id/keyframe", h.EnqueueKeyframeExtraction)
+			adm.POST("/media/:id/encrypt-assets", h.EncryptMediaAssets)
 			adm.GET("/keyframe/task", h.ListKeyframeTasks)
 			adm.POST("/keyframe/task/:mediaId/retry", h.RetryKeyframeTask)
 			adm.GET("/schedule/task", h.ListScheduledTasks)

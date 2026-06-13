@@ -389,3 +389,77 @@ func TestScanLibraryFoldersWithContextCanceled(t *testing.T) {
 		t.Fatalf("expected context.Canceled, got %v", err)
 	}
 }
+
+func TestScanLibraryFoldersSkipsEncryptedPlainDuplicate(t *testing.T) {
+	t.Parallel()
+
+	db := newScannerTestDB(t)
+	_, err := db.Exec(`
+CREATE TABLE media_encrypted_assets (
+	media_id INTEGER PRIMARY KEY,
+	enc_path TEXT NOT NULL,
+	wrapped_dek TEXT NOT NULL,
+	iv TEXT NOT NULL,
+	plain_path TEXT NOT NULL,
+	status TEXT NOT NULL DEFAULT 'encrypted',
+	updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);`)
+	if err != nil {
+		t.Fatalf("create encrypted assets table: %v", err)
+	}
+
+	root := t.TempDir()
+	plain := filepath.Join(root, "Movie.mp4")
+	if err := os.WriteFile(plain, []byte("video-bytes"), 0o644); err != nil {
+		t.Fatalf("write plain: %v", err)
+	}
+	enc := filepath.Join(root, ".encrypted", "video", "fid-1.enc")
+	if err := os.MkdirAll(filepath.Dir(enc), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(enc, []byte("enc"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = db.Exec(`INSERT INTO media (id, library_id, file_id, title, file_path, file_type, status, md5) VALUES (42, 7, 'fid-1', 'Movie', ?, 'video', 'active', ?)`, enc, "deadbeef")
+	if err != nil {
+		t.Fatalf("insert media: %v", err)
+	}
+	_, err = db.Exec(`INSERT INTO media_encrypted_assets (media_id, enc_path, wrapped_dek, iv, plain_path, status) VALUES (42, ?, 'aa', 'bb', ?, 'encrypted')`, enc, plain)
+	if err != nil {
+		t.Fatalf("insert encrypted asset: %v", err)
+	}
+
+	addedCalls := 0
+	s := &Scanner{
+		DB:       db,
+		SkipHash: true,
+		OnMediaAdded: func(int64, string, string) {
+			addedCalls++
+		},
+	}
+	added, err := s.ScanLibraryFoldersWithContext(context.Background(), 7, []string{root})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if added != 0 {
+		t.Fatalf("added=%d want 0", added)
+	}
+	if addedCalls != 0 {
+		t.Fatalf("OnMediaAdded=%d want 0", addedCalls)
+	}
+	var mediaCount int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM media WHERE library_id = 7`).Scan(&mediaCount); err != nil {
+		t.Fatal(err)
+	}
+	if mediaCount != 1 {
+		t.Fatalf("media count=%d want 1", mediaCount)
+	}
+	var keptID int64
+	if err := db.QueryRow(`SELECT id FROM media WHERE library_id = 7`).Scan(&keptID); err != nil {
+		t.Fatal(err)
+	}
+	if keptID != 42 {
+		t.Fatalf("kept id=%d want 42", keptID)
+	}
+}

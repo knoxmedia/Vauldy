@@ -7,5 +7,5 @@ func (h *Handler) KickIngestJITPrepare(mediaID int64) {
 	if h == nil || h.App == nil || h.Instant == nil {
 		return
 	}
-	ingestprepare.Kick(h.App.DB, h.Instant, h.Worker, mediaID)
+	ingestprepare.Kick(h.App.DB, h.Instant, mediaID)
 }

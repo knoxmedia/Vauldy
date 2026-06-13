@@ -6,11 +6,12 @@ import (
 	"fmt"
 	"math"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"knox-media/internal/keystore"
+	"knox-media/internal/storage"
 )
 
 type Info struct {
@@ -26,17 +27,19 @@ type Info struct {
 
 type Worker struct {
 	DB         *sql.DB
+	Vault      *keystore.Vault
 	FFmpegPath string
 	PreviewDir string
 	mu         sync.Mutex
 	running    map[int64]bool
 }
 
-func NewWorker(db *sql.DB, ffmpegPath, previewDir string) *Worker {
+func NewWorker(db *sql.DB, vault *keystore.Vault, ffmpegPath, previewDir string) *Worker {
 	return &Worker{
 		DB:         db,
-		FFmpegPath: ffmpegPath,
+		Vault:      vault,
 		PreviewDir: previewDir,
+		FFmpegPath: ffmpegPath,
 		running:    map[int64]bool{},
 	}
 }
@@ -121,8 +124,8 @@ func (w *Worker) run(ctx context.Context, mediaID int64, inputPath string, durat
 	vttPath := filepath.Join(outDir, "thumbs.vtt")
 	_, _ = w.DB.Exec(`UPDATE preview_task SET status='running', updated_at=CURRENT_TIMESTAMP WHERE media_id = ?`, mediaID)
 	filter := fmt.Sprintf("fps=1/%d,scale=240:135:force_original_aspect_ratio=decrease,pad=240:135:(ow-iw)/2:(oh-ih)/2,tile=10x10", intervalSec)
-	cmd := exec.CommandContext(ctx, w.FFmpegPath, "-y", "-i", inputPath, "-vf", filter, "-frames:v", "1", "-q:v", "3", spritePath)
-	if out, err := cmd.CombinedOutput(); err != nil {
+	post := []string{"-vf", filter, "-frames:v", "1", "-q:v", "3", spritePath}
+	if out, err := storage.RunFFmpeg(ctx, w.DB, w.Vault, w.FFmpegPath, mediaID, inputPath, 0, float64(durationSec), nil, post, ""); err != nil {
 		_, _ = w.DB.Exec(`UPDATE preview_task SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id = ?`, trimErr(string(out), err), mediaID)
 		return err
 	}

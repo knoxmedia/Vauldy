@@ -1,7 +1,6 @@
 package transcode
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -11,7 +10,6 @@ import (
 	"io"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -19,10 +17,13 @@ import (
 	"sync"
 
 	"knox-media/internal/config"
+	"knox-media/internal/keystore"
+	"knox-media/internal/storage"
 )
 
 type PackageWorker struct {
 	DB           *sql.DB
+	Vault        *keystore.Vault
 	FFmpegPath   string
 	TranscodeDir string
 	UploadDir    string
@@ -49,7 +50,7 @@ func logDRMf(taskID, mediaID int64, format string, args ...any) {
 	log.Printf(prefix+format, args...)
 }
 
-func NewPackageWorker(db *sql.DB, cfg *config.Config) *PackageWorker {
+func NewPackageWorker(db *sql.DB, cfg *config.Config, vault *keystore.Vault) *PackageWorker {
 	if cfg == nil {
 		cfg = &config.Config{}
 	}
@@ -60,6 +61,7 @@ func NewPackageWorker(db *sql.DB, cfg *config.Config) *PackageWorker {
 	}
 	return &PackageWorker{
 		DB:           db,
+		Vault:        vault,
 		FFmpegPath:   cfg.FFmpeg.FFmpegPath,
 		TranscodeDir: cfg.Data.Transcode,
 		UploadDir:    cfg.Data.Upload,
@@ -167,8 +169,8 @@ func copyFile(src, dst string) error {
 	return out.Close()
 }
 
-// EnqueueForMedia creates a DRM package task when the media belongs to DRM-enabled library.
-// Returns 0 taskID when DRM is disabled or media missing.
+// EnqueueForMedia creates a stream-encryption package task for play-time use (drm_enabled libraries).
+// Ingest/upload must not call this; use only from playback planning when drm_enabled is on.
 func (w *PackageWorker) EnqueueForMedia(mediaID int64) (int64, error) {
 	if w == nil || w.DB == nil || mediaID <= 0 {
 		return 0, nil
@@ -447,8 +449,7 @@ func (w *PackageWorker) runAESHLSPackage(ctx context.Context, taskID, mediaID in
 	for i, r := range ladder {
 		vf := fmt.Sprintf("scale=-2:%d", r.Height)
 		hlsSec := fmt.Sprintf("%d", w.segmentSecOrDefault())
-		args := []string{
-			"-y", "-i", inputPath,
+		post := []string{
 			"-map", "0:v:0", "-map", "0:a:0?",
 			"-vf", vf,
 			"-c:v", "libx264", "-preset", "veryfast", "-b:v", r.VideoRate, "-maxrate", r.VideoRate, "-bufsize", "2M",
@@ -460,14 +461,10 @@ func (w *PackageWorker) runAESHLSPackage(ctx context.Context, taskID, mediaID in
 			"-hls_segment_filename", filepath.Join(outDir, r.Name+"_%03d.ts"),
 			filepath.Join(outDir, r.Name+".m3u8"),
 		}
-		logDRMf(taskID, mediaID, "ffmpeg aes128 rung start: rung=%s cmd=%s %s", r.Name, w.FFmpegPath, strings.Join(args, " "))
-		cmd := exec.CommandContext(ctx, w.FFmpegPath, args...)
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		cmd.Stdout = &stderr
-		if runErr := cmd.Run(); runErr != nil {
-			logDRMf(taskID, mediaID, "ffmpeg aes128 rung failed: rung=%s err=%v stderr=%s", r.Name, runErr, trimErrorMessage(stderr.String()))
-			return "", fmt.Errorf("ffmpeg aes128 rung %d failed: %v; stderr: %s", i, runErr, stderr.String())
+		logDRMf(taskID, mediaID, "ffmpeg aes128 rung start: rung=%s", r.Name)
+		if out, runErr := storage.RunFFmpeg(ctx, w.DB, w.Vault, w.FFmpegPath, mediaID, inputPath, 0, 0, nil, post, ""); runErr != nil {
+			logDRMf(taskID, mediaID, "ffmpeg aes128 rung failed: rung=%s err=%v stderr=%s", r.Name, runErr, trimErrorMessage(string(out)))
+			return "", fmt.Errorf("ffmpeg aes128 rung %d failed: %v; stderr: %s", i, runErr, string(out))
 		}
 		logDRMf(taskID, mediaID, "ffmpeg aes128 rung done: rung=%s", r.Name)
 	}
@@ -713,8 +710,7 @@ func (w *PackageWorker) runCMAFHLS(ctx context.Context, taskID, mediaID int64, i
 	for i, r := range ladder {
 		vf := fmt.Sprintf("scale=-2:%d", r.Height)
 		hlsSec := fmt.Sprintf("%d", w.segmentSecOrDefault())
-		args := []string{
-			"-y", "-i", inputPath,
+		post := []string{
 			"-map", "0:v:0", "-map", "0:a:0?",
 			"-vf", vf,
 			"-c:v", "libx264", "-preset", "veryfast", "-b:v", r.VideoRate, "-maxrate", r.VideoRate, "-bufsize", "2M",
@@ -730,16 +726,10 @@ func (w *PackageWorker) runCMAFHLS(ctx context.Context, taskID, mediaID int64, i
 			"-hls_segment_filename", filepath.Join(outDir, r.Name+"_%03d.m4s"),
 			filepath.Join(outDir, r.Name+".m3u8"),
 		}
-		logDRMf(taskID, mediaID, "ffmpeg rung start: rung=%s cmd=%s %s", r.Name, w.FFmpegPath, strings.Join(args, " "))
-		cmd := exec.CommandContext(ctx, w.FFmpegPath, args...)
-		// Ensure relative fMP4 init names are written under output directory.
-		cmd.Dir = outDir
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		cmd.Stdout = &stderr
-		if err := cmd.Run(); err != nil {
-			logDRMf(taskID, mediaID, "ffmpeg rung failed: rung=%s err=%v stderr=%s", r.Name, err, trimErrorMessage(stderr.String()))
-			return "", fmt.Errorf("ffmpeg rung %d failed: %v; stderr: %s", i, err, stderr.String())
+		logDRMf(taskID, mediaID, "ffmpeg rung start: rung=%s", r.Name)
+		if out, err := storage.RunFFmpeg(ctx, w.DB, w.Vault, w.FFmpegPath, mediaID, inputPath, 0, 0, nil, post, outDir); err != nil {
+			logDRMf(taskID, mediaID, "ffmpeg rung failed: rung=%s err=%v stderr=%s", r.Name, err, trimErrorMessage(string(out)))
+			return "", fmt.Errorf("ffmpeg rung %d failed: %v; stderr: %s", i, err, string(out))
 		}
 		logDRMf(taskID, mediaID, "ffmpeg rung done: rung=%s", r.Name)
 	}

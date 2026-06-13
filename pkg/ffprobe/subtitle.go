@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os/exec"
 )
 
@@ -28,10 +29,25 @@ func SubtitleStreams(ffprobePath, filePath string) ([]SubtitleStream, error) {
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("ffprobe: %w", err)
 	}
+	return ParseSubtitleStreamsJSON(out.Bytes())
+}
+
+// SubtitleStreamsIO probes subtitle streams from a path or pipe:0 stdin.
+func SubtitleStreamsIO(ffprobePath, input string, stdin io.Reader) ([]SubtitleStream, error) {
+	args := []string{"-v", "quiet", "-print_format", "json", "-show_streams", input}
+	out, err := Output(ffprobePath, args, stdin)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSubtitleStreamsJSON(out)
+}
+
+// ParseSubtitleStreamsJSON parses ffprobe -show_streams JSON for subtitle tracks.
+func ParseSubtitleStreamsJSON(raw []byte) ([]SubtitleStream, error) {
 	var pr struct {
 		Streams []Stream `json:"streams"`
 	}
-	if err := json.Unmarshal(out.Bytes(), &pr); err != nil {
+	if err := json.Unmarshal(raw, &pr); err != nil {
 		return nil, fmt.Errorf("ffprobe json: %w", err)
 	}
 	var subs []SubtitleStream

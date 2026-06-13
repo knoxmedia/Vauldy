@@ -12,7 +12,8 @@ import (
 	"strings"
 	"sync"
 
-	"knox-media/pkg/ffprobe"
+	"knox-media/internal/keystore"
+	"knox-media/internal/storage"
 )
 
 var sidecarExts = map[string]struct{}{
@@ -32,6 +33,7 @@ type ASRConfig struct {
 // Service scans sidecar subtitles, probes embedded tracks, extracts WebVTT, and optionally runs ASR.
 type Service struct {
 	DB          *sql.DB
+	Vault       *keystore.Vault
 	MediaRoot   string // directory containing config.yml; resolves tools/ paths in ASR shell
 	FFmpegPath  string
 	FFprobePath string
@@ -53,7 +55,7 @@ func (s *Service) ApplyRecognition(asr ASRConfig, ocr OCRConfig) {
 	s.mu.Unlock()
 }
 
-func NewService(db *sql.DB, mediaRoot, ffmpegPath, ffprobePath, subtitleDir string, asr ASRConfig, ocr OCRConfig) *Service {
+func NewService(db *sql.DB, vault *keystore.Vault, mediaRoot, ffmpegPath, ffprobePath, subtitleDir string, asr ASRConfig, ocr OCRConfig) *Service {
 	if strings.TrimSpace(ffmpegPath) == "" {
 		ffmpegPath = "ffmpeg"
 	}
@@ -62,6 +64,7 @@ func NewService(db *sql.DB, mediaRoot, ffmpegPath, ffprobePath, subtitleDir stri
 	}
 	return &Service{
 		DB:          db,
+		Vault:       vault,
 		MediaRoot:   strings.TrimSpace(mediaRoot),
 		FFmpegPath:  ffmpegPath,
 		FFprobePath: ffprobePath,
@@ -196,7 +199,7 @@ func (s *Service) shouldRunASR() bool {
 }
 
 func (s *Service) syncEmbedded(ctx context.Context, mediaID int64, videoPath, outDir string) error {
-	streams, err := ffprobe.SubtitleStreams(s.FFprobePath, videoPath)
+	streams, err := s.subtitleStreams(ctx, mediaID, videoPath)
 	if err != nil {
 		return err
 	}
@@ -221,7 +224,7 @@ func (s *Service) syncEmbedded(ctx context.Context, mediaID int64, videoPath, ou
 					msg, mediaID, dedupe)
 				continue
 			}
-			if err := s.RunBitmapSubtitleOCR(ctx, videoPath, st.Index, outPath); err != nil {
+			if err := s.RunBitmapSubtitleOCR(ctx, mediaID, videoPath, st.Index, outPath); err != nil {
 				_, _ = s.DB.Exec(`UPDATE media_subtitle SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`,
 					trimErr(err), mediaID, dedupe)
 				continue
@@ -242,7 +245,7 @@ func (s *Service) syncEmbedded(ctx context.Context, mediaID int64, videoPath, ou
 		if err := s.upsertPlaceholder(mediaID, dedupe, "embedded", st.Index, codec, lang, langSrc, label, "", outPath); err != nil {
 			return err
 		}
-		if err := s.extractEmbedded(ctx, videoPath, st.Index, outPath); err != nil {
+		if err := s.extractEmbedded(ctx, mediaID, videoPath, st.Index, outPath); err != nil {
 			_, _ = s.DB.Exec(`UPDATE media_subtitle SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`,
 				trimErr(err), mediaID, dedupe)
 			continue
@@ -282,12 +285,11 @@ func nullStr(s string) any {
 	return s
 }
 
-func (s *Service) extractEmbedded(ctx context.Context, videoPath string, streamIndex int, outPath string) error {
+func (s *Service) extractEmbedded(ctx context.Context, mediaID int64, videoPath string, streamIndex int, outPath string) error {
 	mapArg := fmt.Sprintf("0:%d", streamIndex)
-	cmd := exec.CommandContext(ctx, s.FFmpegPath, "-y", "-i", videoPath, "-map", mapArg, "-c:s", "webvtt", outPath)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%w: %s", err, trimBytes(out))
+	post := []string{"-map", mapArg, "-c:s", "webvtt", outPath}
+	if _, err := storage.RunFFmpeg(ctx, s.DB, s.Vault, s.FFmpegPath, mediaID, videoPath, 0, 0, nil, post, ""); err != nil {
+		return err
 	}
 	return nil
 }
@@ -415,13 +417,20 @@ func (s *Service) runASR(ctx context.Context, mediaID int64, videoPath, outDir s
 	outPath := filepath.Join(outDir, "asr.vtt")
 	_ = s.upsertPlaceholder(mediaID, dedupe, "asr", -1, "", "und", "asr", "", "", outPath)
 
+	asrInput, asrCleanup, err := s.asrInputPath(ctx, mediaID, videoPath, outDir)
+	if err != nil {
+		_, _ = s.DB.Exec(`UPDATE media_subtitle SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`, trimErr(err), mediaID, dedupe)
+		return err
+	}
+	defer asrCleanup()
+
 	switch strings.ToLower(strings.TrimSpace(s.ASR.Provider)) {
 	case "whisper_cli":
 		wp := s.resolveMediaPath(strings.TrimSpace(s.ASR.WhisperPath))
 		if wp == "" {
 			wp = "whisper"
 		}
-		args := []string{videoPath, "--output_format", "vtt", "--output_dir", outDir}
+		args := []string{asrInput, "--output_format", "vtt", "--output_dir", outDir}
 		args = append(args, s.ASR.ExtraArgs...)
 		cmd := exec.CommandContext(ctx, wp, args...)
 		s.applyToolEnv(cmd)
@@ -434,7 +443,7 @@ func (s *Service) runASR(ctx context.Context, mediaID int64, videoPath, outDir s
 			return err
 		}
 		// whisper writes <basename>.vtt next to input by default in output_dir
-		base := strings.TrimSuffix(filepath.Base(videoPath), filepath.Ext(videoPath))
+		base := strings.TrimSuffix(filepath.Base(asrInput), filepath.Ext(asrInput))
 		gen := filepath.Join(outDir, base+".vtt")
 		if err := os.Rename(gen, outPath); err != nil {
 			// if rename fails, try copying from cwd
@@ -450,7 +459,19 @@ func (s *Service) runASR(ctx context.Context, mediaID int64, videoPath, outDir s
 		if sh == "" {
 			return fmt.Errorf("asr.shell empty")
 		}
-		sh = strings.ReplaceAll(sh, "{input}", videoPath)
+		shellInput := asrInput
+		shellCleanup := func() {}
+		if storage.InputNeedsPipe(s.DB, mediaID, videoPath) {
+			// Custom shell may expect a video path; provide decrypted temp when input was pipe-derived WAV only.
+			var matErr error
+			shellInput, shellCleanup, matErr = storage.MaterializePlaintextTemp(s.DB, s.Vault, mediaID, videoPath)
+			if matErr != nil {
+				_, _ = s.DB.Exec(`UPDATE media_subtitle SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`, trimErr(matErr), mediaID, dedupe)
+				return matErr
+			}
+		}
+		defer shellCleanup()
+		sh = strings.ReplaceAll(sh, "{input}", shellInput)
 		sh = strings.ReplaceAll(sh, "{output_dir}", outDir)
 		sh = strings.ReplaceAll(sh, "{output_vtt}", outPath)
 		sh = resolveShellMediaPaths(sh, s.MediaRoot)

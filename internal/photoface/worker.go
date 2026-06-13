@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"knox-media/internal/config"
+	"knox-media/internal/keystore"
 	"knox-media/internal/imagethumb"
 	"knox-media/internal/photoparse"
 )
@@ -17,6 +18,7 @@ import (
 // Worker detects faces and assigns person clusters asynchronously.
 type Worker struct {
 	DB         *sql.DB
+	Vault      *keystore.Vault
 	MediaRoot  string
 	PreviewDir string
 	FFmpegPath string
@@ -25,9 +27,9 @@ type Worker struct {
 	busy       map[int64]bool
 }
 
-func NewWorker(db *sql.DB, mediaRoot, ffmpegPath, previewDir string, cfgFn func() config.PhotoFaceConfig) *Worker {
+func NewWorker(db *sql.DB, vault *keystore.Vault, mediaRoot, ffmpegPath, previewDir string, cfgFn func() config.PhotoFaceConfig) *Worker {
 	return &Worker{
-		DB: db, MediaRoot: mediaRoot, FFmpegPath: ffmpegPath, PreviewDir: previewDir,
+		DB: db, Vault: vault, MediaRoot: mediaRoot, FFmpegPath: ffmpegPath, PreviewDir: previewDir,
 		Cfg: cfgFn, busy: map[int64]bool{},
 	}
 }
@@ -356,7 +358,7 @@ func (w *Worker) ensureDetectImage(mediaID int64, srcPath string) (string, error
 	if strings.TrimSpace(w.FFmpegPath) == "" {
 		return "", fmt.Errorf("ffmpeg path empty")
 	}
-	out, err := imagethumb.Ensure(w.FFmpegPath, srcPath, cacheDir, mediaID)
+	out, err := imagethumb.Ensure(context.Background(), w.DB, w.Vault, w.FFmpegPath, srcPath, cacheDir, mediaID)
 	if err != nil {
 		return "", err
 	}

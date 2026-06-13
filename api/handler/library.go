@@ -2,6 +2,7 @@ package handler
 
 import (
 	"database/sql"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"knox-media/api/middleware"
+	"knox-media/internal/storage"
 )
 
 type libraryBody struct {
@@ -27,8 +29,12 @@ type libraryBody struct {
 	ImageProviders        []string `json:"image_providers"`
 	MetadataRefreshPolicy string   `json:"metadata_refresh_policy"`
 	Scraper               string   `json:"scraper"`
-	JITPrepareOnIngest    *int     `json:"jit_prepare_on_ingest"`
-	ScanExcludePatterns   string   `json:"scan_exclude_patterns"`
+	JITPrepareOnIngest                 *int `json:"jit_prepare_on_ingest"`
+	EncryptedAssetsEnabled             *int   `json:"encrypted_assets_enabled"`
+	EncryptedAssetsCleanupPlaintext    *int   `json:"encrypted_assets_cleanup_plaintext"`
+	EncryptedAssetsDirMode             string `json:"encrypted_assets_dir_mode"`
+	EncryptedAssetsCustomDir           string `json:"encrypted_assets_custom_dir"`
+	ScanExcludePatterns                string `json:"scan_exclude_patterns"`
 }
 
 func (h *Handler) ListLibraries(c *gin.Context) {
@@ -50,7 +56,7 @@ func (h *Handler) ListLibraries(c *gin.Context) {
 		return
 	}
 	rows, err := h.App.DB.Query(`
-		SELECT l.id, l.name, l.type, l.path, l.auto_scan, l.enabled, l.realtime_monitor, l.preview_extract, l.drm_enabled, COALESCE(l.encryption_mode,'drm'), l.cleanup_local_source_after_package, l.jit_prepare_on_ingest, l.metadata_providers, l.image_providers, l.metadata_refresh_policy, l.scraper, l.created_at,
+		SELECT l.id, l.name, l.type, l.path, l.auto_scan, l.enabled, l.realtime_monitor, l.preview_extract, l.drm_enabled, COALESCE(l.encryption_mode,'drm'), l.cleanup_local_source_after_package, l.jit_prepare_on_ingest, COALESCE(l.encrypted_assets_enabled,0), COALESCE(l.encrypted_assets_cleanup_plaintext,0), COALESCE(l.encrypted_assets_dir_mode,'library'), COALESCE(l.encrypted_assets_custom_dir,''), l.metadata_providers, l.image_providers, l.metadata_refresh_policy, l.scraper, l.created_at,
 			(SELECT COUNT(1) FROM media m WHERE m.library_id = l.id) AS media_count,
 			(SELECT id FROM scan_task st WHERE st.library_id = l.id ORDER BY st.id DESC LIMIT 1) AS scan_task_id,
 			(SELECT COALESCE(status,'') FROM scan_task st WHERE st.library_id = l.id ORDER BY st.id DESC LIMIT 1) AS scan_status,
@@ -66,11 +72,11 @@ func (h *Handler) ListLibraries(c *gin.Context) {
 	defer rows.Close()
 	var list []gin.H
 	for rows.Next() {
-		var id, auto, enabled, realtime, preview, drmEnabled, cleanupLocal, jitIngest, cnt int
-		var name, typ, path, encryptionMode, metadataProviders, imageProviders, refreshPolicy, scraper, created string
+		var id, auto, enabled, realtime, preview, drmEnabled, cleanupLocal, jitIngest, encAssets, encCleanupPlain, cnt int
+		var name, typ, path, encryptionMode, encDirMode, encCustomDir, metadataProviders, imageProviders, refreshPolicy, scraper, created string
 		var scanTaskID, scanProcessed, scanTotal, scanAdded sql.NullInt64
 		var scanStatus, scanStarted sql.NullString
-		if err := rows.Scan(&id, &name, &typ, &path, &auto, &enabled, &realtime, &preview, &drmEnabled, &encryptionMode, &cleanupLocal, &jitIngest, &metadataProviders, &imageProviders, &refreshPolicy, &scraper, &created, &cnt, &scanTaskID, &scanStatus, &scanProcessed, &scanTotal, &scanAdded, &scanStarted); err != nil {
+		if err := rows.Scan(&id, &name, &typ, &path, &auto, &enabled, &realtime, &preview, &drmEnabled, &encryptionMode, &cleanupLocal, &jitIngest, &encAssets, &encCleanupPlain, &encDirMode, &encCustomDir, &metadataProviders, &imageProviders, &refreshPolicy, &scraper, &created, &cnt, &scanTaskID, &scanStatus, &scanProcessed, &scanTotal, &scanAdded, &scanStarted); err != nil {
 			continue
 		}
 		folders := foldersForLibrary(folderMap, int64(id), path)
@@ -86,6 +92,8 @@ func (h *Handler) ListLibraries(c *gin.Context) {
 			"id": id, "name": name, "type": typ, "path": path,
 			"folders":   folders,
 			"auto_scan": auto, "enabled": enabled, "realtime_monitor": realtime, "preview_extract": preview, "drm_enabled": drmEnabled, "encryption_mode": h.normalizeEncryptionMode(encryptionMode), "cleanup_local_source_after_package": cleanupLocal, "jit_prepare_on_ingest": jitIngest,
+			"encrypted_assets_enabled": encAssets, "encrypted_assets_cleanup_plaintext": encCleanupPlain,
+			"encrypted_assets_dir_mode": storage.NormalizeEncDirMode(encDirMode), "encrypted_assets_custom_dir": encCustomDir,
 			"metadata_providers": splitCSVList(metadataProviders), "image_providers": splitCSVList(imageProviders), "metadata_refresh_policy": refreshPolicy,
 			"scraper": scraper, "created_at": created,
 			"media_count":          cnt,
@@ -112,6 +120,9 @@ func (h *Handler) ListLibraries(c *gin.Context) {
 		"drm_capabilities": gin.H{
 			"widevine_enabled": widevineEnabled,
 			"powerdrm_enabled": powerdrmEnabled,
+		},
+		"encrypted_assets_config": gin.H{
+			"data_dot_encrypted_dir": h.dataEncryptedDotDir(),
 		},
 	})
 }
@@ -155,9 +166,25 @@ func (h *Handler) CreateLibrary(c *gin.Context) {
 	if body.JITPrepareOnIngest != nil {
 		jitIngest = *body.JITPrepareOnIngest
 	}
+	encAssets := 0
+	if body.EncryptedAssetsEnabled != nil {
+		encAssets = *body.EncryptedAssetsEnabled
+	}
+	encCleanupPlain := 0
+	if body.EncryptedAssetsCleanupPlaintext != nil {
+		encCleanupPlain = *body.EncryptedAssetsCleanupPlaintext
+	} else if h.App != nil && h.App.Config != nil && h.App.Config.EncryptedAssetsCleanupDefault() {
+		encCleanupPlain = 1
+	}
+	encDirMode := storage.NormalizeEncDirMode(body.EncryptedAssetsDirMode)
+	encCustomDir := strings.TrimSpace(body.EncryptedAssetsCustomDir)
 	folders := normalizeFolders(body.Folders, body.Path)
 	if len(folders) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "at least one folder required"})
+		return
+	}
+	if err := h.validateEncryptedAssetsSettings(encAssets, encDirMode, encCustomDir, folders); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 	rootPath := folders[0]
@@ -168,8 +195,8 @@ func (h *Handler) CreateLibrary(c *gin.Context) {
 		refreshPolicy = "never"
 	}
 	res, err := h.App.DB.Exec(
-		`INSERT INTO library (name, type, path, auto_scan, enabled, realtime_monitor, preview_extract, drm_enabled, encryption_mode, cleanup_local_source_after_package, jit_prepare_on_ingest, metadata_providers, image_providers, metadata_refresh_policy, scraper) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		body.Name, body.Type, rootPath, auto, enabled, realtime, preview, drmEnabled, encryptionMode, cleanupLocal, jitIngest, metadataProviders, imageProviders, refreshPolicy, scraper,
+		`INSERT INTO library (name, type, path, auto_scan, enabled, realtime_monitor, preview_extract, drm_enabled, encryption_mode, cleanup_local_source_after_package, jit_prepare_on_ingest, encrypted_assets_enabled, encrypted_assets_cleanup_plaintext, encrypted_assets_dir_mode, encrypted_assets_custom_dir, metadata_providers, image_providers, metadata_refresh_policy, scraper) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		body.Name, body.Type, rootPath, auto, enabled, realtime, preview, drmEnabled, encryptionMode, cleanupLocal, jitIngest, encAssets, encCleanupPlain, encDirMode, encCustomDir, metadataProviders, imageProviders, refreshPolicy, scraper,
 	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -235,9 +262,23 @@ func (h *Handler) UpdateLibrary(c *gin.Context) {
 	if body.JITPrepareOnIngest != nil {
 		jitIngest = *body.JITPrepareOnIngest
 	}
+	encAssets := 0
+	if body.EncryptedAssetsEnabled != nil {
+		encAssets = *body.EncryptedAssetsEnabled
+	}
+	encCleanupPlain := 0
+	if body.EncryptedAssetsCleanupPlaintext != nil {
+		encCleanupPlain = *body.EncryptedAssetsCleanupPlaintext
+	}
+	encDirMode := storage.NormalizeEncDirMode(body.EncryptedAssetsDirMode)
+	encCustomDir := strings.TrimSpace(body.EncryptedAssetsCustomDir)
+	if err := h.validateEncryptedAssetsSettings(encAssets, encDirMode, encCustomDir, folders); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 	_, err = h.App.DB.Exec(
-		`UPDATE library SET name = ?, type = ?, path = ?, auto_scan = ?, enabled = ?, realtime_monitor = ?, preview_extract = ?, drm_enabled = ?, encryption_mode = ?, cleanup_local_source_after_package = ?, jit_prepare_on_ingest = ?, metadata_providers = ?, image_providers = ?, metadata_refresh_policy = ?, scraper = ?, scan_exclude_patterns = COALESCE(NULLIF(?, ''), scan_exclude_patterns) WHERE id = ?`,
-		body.Name, body.Type, folders[0], auto, enabled, realtime, preview, drmEnabled, encryptionMode, cleanupLocal, jitIngest, metadataProviders, imageProviders, refreshPolicy, scraper, strings.TrimSpace(body.ScanExcludePatterns), id,
+		`UPDATE library SET name = ?, type = ?, path = ?, auto_scan = ?, enabled = ?, realtime_monitor = ?, preview_extract = ?, drm_enabled = ?, encryption_mode = ?, cleanup_local_source_after_package = ?, jit_prepare_on_ingest = ?, encrypted_assets_enabled = ?, encrypted_assets_cleanup_plaintext = ?, encrypted_assets_dir_mode = ?, encrypted_assets_custom_dir = ?, metadata_providers = ?, image_providers = ?, metadata_refresh_policy = ?, scraper = ?, scan_exclude_patterns = COALESCE(NULLIF(?, ''), scan_exclude_patterns) WHERE id = ?`,
+		body.Name, body.Type, folders[0], auto, enabled, realtime, preview, drmEnabled, encryptionMode, cleanupLocal, jitIngest, encAssets, encCleanupPlain, encDirMode, encCustomDir, metadataProviders, imageProviders, refreshPolicy, scraper, strings.TrimSpace(body.ScanExcludePatterns), id,
 	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -475,4 +516,27 @@ func (h *Handler) normalizeEncryptionMode(v string) string {
 	default:
 		return "standard"
 	}
+}
+
+func (h *Handler) dataEncryptedDotDir() string {
+	if h == nil || h.App == nil || h.App.Config == nil {
+		return ""
+	}
+	return h.App.Config.DataEncryptedDotDir()
+}
+
+func (h *Handler) validateEncryptedAssetsSettings(encEnabled int, mode, customDir string, folders []string) error {
+	if encEnabled != 1 {
+		return nil
+	}
+	mode = storage.NormalizeEncDirMode(mode)
+	switch mode {
+	case storage.EncDirModeCustom:
+		return storage.ValidateCustomEncDir(customDir)
+	case storage.EncDirModeLibrary:
+		if len(folders) == 0 || strings.TrimSpace(folders[0]) == "" {
+			return errors.New("library folder required for encrypted directory")
+		}
+	}
+	return nil
 }

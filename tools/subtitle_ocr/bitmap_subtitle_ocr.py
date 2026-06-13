@@ -25,20 +25,28 @@ from pathlib import Path
 
 
 def run(cmd: list[str], env: dict | None = None, cwd: str | None = None) -> None:
-    p = subprocess.run(cmd, capture_output=True, text=True, env=env, cwd=cwd)
+    run_with_stdin(cmd, None, env, cwd)
+
+
+def run_with_stdin(cmd: list[str], stdin_src, env: dict | None = None, cwd: str | None = None) -> None:
+    p = subprocess.run(cmd, capture_output=True, stdin=stdin_src, env=env, cwd=cwd)
     if p.returncode != 0:
-        raise RuntimeError((p.stderr or p.stdout or "").strip() or f"command failed: {cmd}")
+        err = (p.stderr or p.stdout or b"")
+        if isinstance(err, bytes):
+            err = err.decode("utf-8", errors="replace")
+        raise RuntimeError(str(err).strip() or f"command failed: {cmd}")
 
 
 def ffprobe_json(ffprobe: str, path: str) -> dict:
-    p = subprocess.run(
-        [ffprobe, "-v", "quiet", "-print_format", "json", "-show_streams", path],
-        capture_output=True,
-        text=True,
-    )
+    cmd = [ffprobe, "-v", "quiet", "-print_format", "json", "-show_streams", path]
+    stdin_src = None
+    if path == "pipe:0":
+        import sys
+        stdin_src = sys.stdin.buffer
+    p = subprocess.run(cmd, capture_output=True, stdin=stdin_src)
     if p.returncode != 0:
-        raise RuntimeError(p.stderr or "ffprobe failed")
-    return json.loads(p.stdout)
+        raise RuntimeError((p.stderr or b"").decode("utf-8", errors="replace") or "ffprobe failed")
+    return json.loads(p.stdout.decode("utf-8", errors="replace"))
 
 
 def subtitle_ordinal(streams: list[dict], global_index: int) -> int:
@@ -139,7 +147,12 @@ def run_pgsrip_on_sup(
 
 
 def extract_sup(ffmpeg: str, src: str, stream_index: int, out_sup: Path) -> None:
-    run([ffmpeg, "-y", "-i", src, "-map", f"0:{stream_index}", "-c", "copy", str(out_sup)])
+    cmd = [ffmpeg, "-y", "-i", src, "-map", f"0:{stream_index}", "-c", "copy", str(out_sup)]
+    stdin_src = None
+    if src == "pipe:0":
+        import sys
+        stdin_src = sys.stdin.buffer
+    run_with_stdin(cmd, stdin_src)
 
 
 def extract_dvd_vobsub(
@@ -305,7 +318,7 @@ def process_vobsub_sidecar(
 def main() -> int:
     ap = argparse.ArgumentParser(description="Bitmap subtitles → WebVTT (Tesseract / pgsrip)")
     ap.add_argument("--mode", choices=("embedded", "vobsub"), default="embedded")
-    ap.add_argument("--input", default="", help="Video file (embedded mode)")
+    ap.add_argument("--input", default="", help="Video file or pipe:0 (stdin = decrypted stream)")
     ap.add_argument("--stream-index", type=int, default=-1)
     ap.add_argument("--vobsub-idx", default="", help="VobSub .idx path (vobsub mode)")
     ap.add_argument("--output-vtt", required=True)

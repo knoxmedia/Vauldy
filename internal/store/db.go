@@ -625,6 +625,23 @@ func OpenSQLite(path string) (*sql.DB, error) {
 	_, _ = db.Exec(`ALTER TABLE library ADD COLUMN encryption_mode TEXT DEFAULT 'drm'`)
 	_, _ = db.Exec(`ALTER TABLE library ADD COLUMN cleanup_local_source_after_package INTEGER DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE library ADD COLUMN jit_prepare_on_ingest INTEGER DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE library ADD COLUMN encrypted_assets_enabled INTEGER DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE library ADD COLUMN encrypted_assets_cleanup_plaintext INTEGER DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE library ADD COLUMN encrypted_assets_dir_mode TEXT DEFAULT 'library'`)
+	_, _ = db.Exec(`ALTER TABLE library ADD COLUMN encrypted_assets_custom_dir TEXT DEFAULT ''`)
+	_, _ = db.Exec(`
+		CREATE TABLE IF NOT EXISTS media_encrypted_assets (
+			media_id INTEGER PRIMARY KEY,
+			enc_path TEXT NOT NULL,
+			wrapped_dek TEXT NOT NULL,
+			iv TEXT NOT NULL,
+			plain_path TEXT,
+			status TEXT NOT NULL DEFAULT 'encrypted',
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
+		)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_media_encrypted_status ON media_encrypted_assets(status)`)
 	_, _ = db.Exec(`ALTER TABLE media ADD COLUMN file_mtime INTEGER DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE scheduled_task ADD COLUMN category TEXT NOT NULL DEFAULT 'media'`)
 	_, _ = db.Exec(`ALTER TABLE play_progress ADD COLUMN play_start_at TIMESTAMP`)

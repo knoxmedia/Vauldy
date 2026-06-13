@@ -811,6 +811,9 @@ export default function BrowsePage() {
     return buildMediaMenuItems(r, nav, {
       ...extra,
       isWatched,
+      showEncryptAsset: r.file_type === "video",
+      encryptedAsset: !!r.encrypted_asset,
+      afterEncryptAsset: () => load(),
       afterToggleWatched: () => load(),
       scraped: r.scraped,
       onOpenMatch: (mediaId) => {

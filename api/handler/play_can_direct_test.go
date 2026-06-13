@@ -74,7 +74,7 @@ func TestHLSInfoMkvNativeWhenClientListsMkvContainer(t *testing.T) {
 		t.Fatalf("insert media: %v", err)
 	}
 
-	sm, err := session.NewManager("ffmpeg", "ffprobe", base)
+	sm, err := session.NewManager("ffmpeg", "ffprobe", base, nil, nil)
 	if err != nil {
 		t.Fatalf("create session manager: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestHLSInfoWebmNativeWhenFfprobeMatroskaWebmAndClientListsWebm(t *testing.T
 		t.Fatalf("insert media: %v", err)
 	}
 
-	sm, err := session.NewManager("ffmpeg", "ffprobe", base)
+	sm, err := session.NewManager("ffmpeg", "ffprobe", base, nil, nil)
 	if err != nil {
 		t.Fatalf("create session manager: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestHLSInfoMkvNotNativeWhenClientContainersExcludeMkv(t *testing.T) {
 		t.Fatalf("insert media: %v", err)
 	}
 
-	sm, err := session.NewManager("ffmpeg", "ffprobe", base)
+	sm, err := session.NewManager("ffmpeg", "ffprobe", base, nil, nil)
 	if err != nil {
 		t.Fatalf("create session manager: %v", err)
 	}

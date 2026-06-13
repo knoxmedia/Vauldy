@@ -1,12 +1,15 @@
 package docparse
 
 import (
+	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"knox-media/internal/keystore"
+	"knox-media/internal/storage"
 	"knox-media/pkg/fileutil"
 )
 
@@ -90,6 +93,27 @@ func ParseFromFile(filePath string) DocumentMeta {
 		meta.Author = SanitizeMetadataText(meta.Author)
 	}
 	return meta
+}
+
+// ParseForMedia extracts document metadata, materializing Knox .enc to a temp file when needed.
+func ParseForMedia(db *sql.DB, vault *keystore.Vault, mediaID int64, filePath string) DocumentMeta {
+	filePath = strings.TrimSpace(filePath)
+	if filePath == "" {
+		return DocumentMeta{}
+	}
+	work := filePath
+	if storage.InputNeedsPipe(db, mediaID, filePath) {
+		tmp, cleanup, err := storage.MaterializePlaintextTemp(db, vault, mediaID, filePath)
+		if err != nil {
+			return DocumentMeta{
+				Title:  strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filePath)),
+				Format: fileutil.GuessDocumentFormat(filePath),
+			}
+		}
+		defer cleanup()
+		work = tmp
+	}
+	return ParseFromFile(work)
 }
 
 // MergeDocumentMetaJSON merges document metadata into existing meta_json.

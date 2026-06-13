@@ -1,4 +1,5 @@
-import { Button, Col, Divider, Drawer, Form, Grid, Input, Modal, Radio, Row, Select, Space, Switch, Table, Tag, message } from "antd";
+import { QuestionCircleOutlined } from "@ant-design/icons";
+import { Button, Col, Divider, Drawer, Form, Grid, Input, Modal, Radio, Row, Select, Space, Switch, Table, Tag, Tooltip, message } from "antd";
 import { useEffect, useState } from "react";
 import LibraryProviderSourceTabs from "../components/LibraryProviderSourceTabs";
 import {
@@ -30,9 +31,24 @@ export default function LibraryPage() {
     widevine_enabled: true,
     powerdrm_enabled: true,
   });
+  const [encryptedAssetsConfig, setEncryptedAssetsConfig] = useState<{ data_dot_encrypted_dir?: string }>({});
   const [form] = Form.useForm();
   const [providerSourceTab, setProviderSourceTab] = useState("metadata");
   const screens = Grid.useBreakpoint();
+
+  function encDirRadioLabel(label: string, path: string) {
+    return (
+      <Space size={4}>
+        {label}
+        <Tooltip title={path}>
+          <QuestionCircleOutlined
+            style={{ color: "rgba(255, 255, 255, 0.45)", fontSize: 14 }}
+            onClick={(e) => e.stopPropagation()}
+          />
+        </Tooltip>
+      </Space>
+    );
+  }
 
   function defaultEncryptionMode(caps: DRMCapabilities): "standard" | "powerdrm" | "drm" {
     if (!caps.widevine_enabled && !caps.powerdrm_enabled) return "standard";
@@ -56,6 +72,7 @@ export default function LibraryPage() {
       const data = await fetchLibrariesWithCapabilities();
       setRows(data.items);
       setDrmCapabilities(data.drmCapabilities);
+      setEncryptedAssetsConfig(data.encryptedAssetsConfig);
     } catch (e: unknown) {
       message.error((e as Error).message || t("pages.library.load_failed"));
     } finally {
@@ -96,7 +113,15 @@ export default function LibraryPage() {
         encryption_mode: v.drm_enabled
           ? normalizeEncryptionModeForCapabilities(v.encryption_mode, drmCapabilities)
           : "standard",
-        cleanup_local_source_after_package: v.cleanup_local_source_after_package ? 1 : 0,
+        encrypted_assets_enabled: v.encrypted_assets_enabled ? 1 : 0,
+        encrypted_assets_cleanup_plaintext: v.encrypted_assets_cleanup_plaintext ? 1 : 0,
+        encrypted_assets_dir_mode: v.encrypted_assets_enabled
+          ? (v.encrypted_assets_dir_mode || "library")
+          : "library",
+        encrypted_assets_custom_dir:
+          v.encrypted_assets_enabled && v.encrypted_assets_dir_mode === "custom"
+            ? String(v.encrypted_assets_custom_dir || "").trim()
+            : "",
         metadata_providers: metadataProviders,
         image_providers: imageProviders,
         metadata_refresh_policy: editing?.metadata_refresh_policy ?? "never",
@@ -135,7 +160,10 @@ export default function LibraryPage() {
               preview_extract: false,
               drm_enabled: false,
               encryption_mode: defaultEncryptionMode(drmCapabilities),
-              cleanup_local_source_after_package: false,
+              encrypted_assets_enabled: false,
+              encrypted_assets_cleanup_plaintext: false,
+              encrypted_assets_dir_mode: "library",
+              encrypted_assets_custom_dir: "",
               metadata_providers: [...DEFAULT_METADATA_PROVIDERS],
               image_providers: [...DEFAULT_IMAGE_PROVIDERS],
             });
@@ -209,7 +237,10 @@ export default function LibraryPage() {
                         r.encryption_mode || "drm",
                         drmCapabilities
                       ),
-                      cleanup_local_source_after_package: (r.cleanup_local_source_after_package ?? 0) === 1,
+                      encrypted_assets_enabled: (r.encrypted_assets_enabled ?? 0) === 1,
+                      encrypted_assets_cleanup_plaintext: (r.encrypted_assets_cleanup_plaintext ?? 0) === 1,
+                      encrypted_assets_dir_mode: r.encrypted_assets_dir_mode || "library",
+                      encrypted_assets_custom_dir: r.encrypted_assets_custom_dir || "",
                       metadata_providers: r.metadata_providers?.length
                         ? [...r.metadata_providers]
                         : [...DEFAULT_METADATA_PROVIDERS],
@@ -361,14 +392,107 @@ export default function LibraryPage() {
               </Form.Item>
             </Col>
             <Col xs={24} sm={12} md={8}>
+              <Form.Item
+                name="encrypted_assets_enabled"
+                label={t("pages.library.field_encrypted_assets")}
+                tooltip={t("pages.library.field_encrypted_assets_hint")}
+                valuePropName="checked"
+                initialValue={false}
+              >
+                <Switch />
+              </Form.Item>
+            </Col>
+            <Col xs={24} sm={12} md={8}>
               <Form.Item name="drm_enabled" label={t("pages.library.field_drm_enabled")} valuePropName="checked" initialValue={false}>
                 <Switch />
               </Form.Item>
             </Col>
-            <Form.Item noStyle shouldUpdate={(prev, next) => prev.drm_enabled !== next.drm_enabled}>
-              {({ getFieldValue }) =>
-                getFieldValue("drm_enabled") ? (
+          </Row>
+
+          <Form.Item
+            noStyle
+            shouldUpdate={(prev, next) =>
+              prev.encrypted_assets_enabled !== next.encrypted_assets_enabled ||
+              prev.folders !== next.folders ||
+              prev.encrypted_assets_dir_mode !== next.encrypted_assets_dir_mode
+            }
+          >
+            {({ getFieldValue }) => {
+              if (!getFieldValue("encrypted_assets_enabled")) {
+                return null;
+              }
+              const folderRoot =
+                String(getFieldValue("folders") || "")
+                  .split(/\r?\n/)[0]
+                  ?.trim() || t("pages.library.encrypted_assets_dir_library_placeholder");
+              const libraryEncPath = `${folderRoot}/.encrypted/`;
+              const dataEncPath = `${encryptedAssetsConfig.data_dot_encrypted_dir || "…"}/`;
+              return (
+                <Row gutter={16}>
+                  <Col xs={24}>
+                    <Form.Item
+                      name="encrypted_assets_dir_mode"
+                      label={t("pages.library.field_encrypted_assets_dir_mode")}
+                      initialValue="library"
+                    >
+                      <Radio.Group>
+                        <Radio value="library">
+                          {encDirRadioLabel(t("pages.library.encrypted_assets_dir_library"), libraryEncPath)}
+                        </Radio>
+                        <Radio value="data">
+                          {encDirRadioLabel(t("pages.library.encrypted_assets_dir_data"), dataEncPath)}
+                        </Radio>
+                        <Radio value="custom">{t("pages.library.encrypted_assets_dir_custom")}</Radio>
+                      </Radio.Group>
+                    </Form.Item>
+                  </Col>
+                  <Form.Item noStyle shouldUpdate={(prev, next) => prev.encrypted_assets_dir_mode !== next.encrypted_assets_dir_mode}>
+                    {({ getFieldValue: getDirMode }) =>
+                      getDirMode("encrypted_assets_dir_mode") === "custom" ? (
+                        <Col xs={24}>
+                          <Form.Item
+                            name="encrypted_assets_custom_dir"
+                            label={t("pages.library.field_encrypted_assets_custom_dir")}
+                            rules={[
+                              {
+                                validator: async (_, value) => {
+                                  if (getDirMode("encrypted_assets_dir_mode") !== "custom") return;
+                                  if (!String(value || "").trim()) {
+                                    throw new Error(t("pages.library.encrypted_assets_custom_dir_required"));
+                                  }
+                                },
+                              },
+                            ]}
+                          >
+                            <Input placeholder={t("pages.library.field_encrypted_assets_custom_dir_placeholder")} />
+                          </Form.Item>
+                        </Col>
+                      ) : null
+                    }
+                  </Form.Item>
                   <Col xs={24} sm={12} md={8}>
+                    <Form.Item
+                      name="encrypted_assets_cleanup_plaintext"
+                      label={t("pages.library.field_encrypted_assets_cleanup")}
+                      valuePropName="checked"
+                      initialValue={false}
+                    >
+                      <Switch />
+                    </Form.Item>
+                  </Col>
+                </Row>
+              );
+            }}
+          </Form.Item>
+
+          <Form.Item
+            noStyle
+            shouldUpdate={(prev, next) => prev.drm_enabled !== next.drm_enabled}
+          >
+            {({ getFieldValue }) =>
+              getFieldValue("drm_enabled") ? (
+                <Row gutter={16}>
+                  <Col xs={24}>
                     <Form.Item
                       name="encryption_mode"
                       label={t("pages.library.field_encryption_mode")}
@@ -383,26 +507,10 @@ export default function LibraryPage() {
                       />
                     </Form.Item>
                   </Col>
-                ) : null
-              }
-            </Form.Item>
-            <Form.Item noStyle shouldUpdate={(prev, next) => prev.drm_enabled !== next.drm_enabled}>
-              {({ getFieldValue }) =>
-                getFieldValue("drm_enabled") ? (
-                  <Col xs={24} sm={12} md={8}>
-                    <Form.Item
-                      name="cleanup_local_source_after_package"
-                      label={t("pages.library.field_cleanup_after_package")}
-                      valuePropName="checked"
-                      initialValue={true}
-                    >
-                      <Switch />
-                    </Form.Item>
-                  </Col>
-                ) : null
-              }
-            </Form.Item>
-          </Row>
+                </Row>
+              ) : null
+            }
+          </Form.Item>
 
           <Divider>{t("pages.library.section_metadata_policy")}</Divider>
           <Row gutter={16}>

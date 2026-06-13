@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"knox-media/internal/storage"
 )
 
 // TranscodeConfig holds the parameters for session-scoped ffmpeg.
@@ -52,11 +55,28 @@ func (s *Session) runTranscode(cfg TranscodeConfig) error {
 	startSeg := s.NextSegmentToEmit()
 
 	args := []string{"-hide_banner", "-loglevel", "error"}
-	if cfg.StartTime > 0.01 {
+	var ffmpegIn *storage.FFmpegInput
+	var ffmpegInErr error
+	if s.mgr != nil && s.mgr.DB != nil && s.mgr.Vault != nil {
+		ffmpegIn, ffmpegInErr = storage.OpenFFmpegInput(s.mgr.DB, s.mgr.Vault, s.MediaID, cfg.SourcePath, cfg.StartTime, s.Duration)
+	}
+	if ffmpegInErr != nil {
+		return ffmpegInErr
+	}
+	if ffmpegIn == nil {
+		ffmpegIn = &storage.FFmpegInput{Path: cfg.SourcePath}
+	}
+	if cfg.StartTime > 0.01 && ffmpegIn.Path != "" && !ffmpegIn.FromEnc {
 		args = append(args, "-y", "-copyts", "-start_at_zero")
 		args = append(args, "-ss", formatSeconds(cfg.StartTime))
+	} else if cfg.StartTime > 0.01 && ffmpegIn.FromEnc {
+		args = append(args, "-y", "-copyts", "-start_at_zero")
 	}
-	args = append(args, "-i", cfg.SourcePath)
+	var stdin io.Reader
+	args, stdin = storage.ApplyFFmpegInput(args, ffmpegIn)
+	if ffmpegIn.Cleanup != nil {
+		defer ffmpegIn.Cleanup()
+	}
 
 	// Video stream selection.
 	args = append(args, "-map", "0:v:0")
@@ -113,6 +133,9 @@ func (s *Session) runTranscode(cfg TranscodeConfig) error {
 	}
 	cmd := exec.CommandContext(ctx, ffmpeg, args...)
 	s.SetCmd(cmd)
+	if stdin != nil {
+		cmd.Stdin = stdin
+	}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 

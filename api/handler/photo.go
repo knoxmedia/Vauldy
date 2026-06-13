@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"net/http"
@@ -134,7 +135,7 @@ func (h *Handler) ensurePhotoVariants(mediaID int64, srcPath string) error {
 	if h.App != nil && h.App.Config != nil {
 		ffmpegPath = strings.TrimSpace(h.App.Config.FFmpeg.FFmpegPath)
 	}
-	paths, err := imagethumb.Ensure(ffmpegPath, srcPath, h.photoCacheDir(), mediaID)
+	paths, err := imagethumb.Ensure(context.Background(), h.App.DB, h.KeyVault, ffmpegPath, srcPath, h.photoCacheDir(), mediaID)
 	if err != nil {
 		return err
 	}

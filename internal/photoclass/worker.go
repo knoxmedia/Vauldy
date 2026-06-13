@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"knox-media/internal/config"
+	"knox-media/internal/keystore"
 	"knox-media/internal/imagethumb"
 	"knox-media/internal/photoparse"
 )
@@ -17,6 +18,7 @@ import (
 // Worker classifies photo library images asynchronously.
 type Worker struct {
 	DB         *sql.DB
+	Vault      *keystore.Vault
 	MediaRoot  string
 	FFmpegPath string
 	PreviewDir string
@@ -25,9 +27,9 @@ type Worker struct {
 	running    map[int64]bool
 }
 
-func NewWorker(db *sql.DB, mediaRoot, ffmpegPath, previewDir string, cfgFn func() config.PhotoClassifyConfig) *Worker {
+func NewWorker(db *sql.DB, vault *keystore.Vault, mediaRoot, ffmpegPath, previewDir string, cfgFn func() config.PhotoClassifyConfig) *Worker {
 	return &Worker{
-		DB: db, MediaRoot: mediaRoot, FFmpegPath: ffmpegPath, PreviewDir: previewDir,
+		DB: db, Vault: vault, MediaRoot: mediaRoot, FFmpegPath: ffmpegPath, PreviewDir: previewDir,
 		Cfg: cfgFn, running: map[int64]bool{},
 	}
 }
@@ -162,7 +164,7 @@ func (w *Worker) Process(ctx context.Context, mediaID int64) error {
 	photoCache := filepath.Join(w.PreviewDir, "photos")
 	thumbPath := imagethumb.ExpectedPaths(photoCache, mediaID).Thumb
 	if w.FFmpegPath != "" && strings.TrimSpace(filePath.String) != "" {
-		if _, err := imagethumb.Ensure(w.FFmpegPath, filePath.String, photoCache, mediaID); err == nil {
+		if _, err := imagethumb.Ensure(context.Background(), w.DB, w.Vault, w.FFmpegPath, filePath.String, photoCache, mediaID); err == nil {
 			thumbPath = imagethumb.ExpectedPaths(photoCache, mediaID).Thumb
 		}
 	}

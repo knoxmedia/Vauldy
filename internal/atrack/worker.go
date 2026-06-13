@@ -11,6 +11,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"knox-media/internal/keystore"
+	"knox-media/internal/storage"
 )
 
 // Info represents the current state of an audio track extraction task.
@@ -31,6 +34,7 @@ type AudioTrackInfo struct {
 // Worker extracts audio tracks from video files as HLS/AAC.
 type Worker struct {
 	DB          *sql.DB
+	Vault       *keystore.Vault
 	FFmpegPath  string
 	FFprobePath string
 	OutputDir   string
@@ -39,9 +43,10 @@ type Worker struct {
 }
 
 // NewWorker creates a new audio track extraction worker.
-func NewWorker(db *sql.DB, ffmpegPath, ffprobePath, outputDir string) *Worker {
+func NewWorker(db *sql.DB, vault *keystore.Vault, ffmpegPath, ffprobePath, outputDir string) *Worker {
 	return &Worker{
 		DB:          db,
+		Vault:       vault,
 		FFmpegPath:  ffmpegPath,
 		FFprobePath: ffprobePath,
 		OutputDir:   outputDir,
@@ -134,17 +139,30 @@ type rawProbe struct {
 }
 
 // probeAudioStreams returns all audio streams from the source file.
-func (w *Worker) probeAudioStreams(ctx context.Context, inputPath string) ([]rawStream, error) {
-	cmd := exec.CommandContext(ctx, w.FFprobePath,
+func (w *Worker) probeAudioStreams(ctx context.Context, mediaID int64, inputPath string) ([]rawStream, error) {
+	args := []string{
 		"-v", "quiet",
 		"-print_format", "json",
 		"-show_streams",
 		"-select_streams", "a",
-		inputPath,
-	)
-	out, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("ffprobe audio streams: %w", err)
+	}
+	var out []byte
+	var err error
+	if storage.InputNeedsPipe(w.DB, mediaID, inputPath) {
+		raw, cleanup, perr := storage.FFprobeOutput(w.DB, w.Vault, w.FFprobePath, mediaID, inputPath, 0, 0, args)
+		if cleanup != nil {
+			defer cleanup()
+		}
+		if perr != nil {
+			return nil, fmt.Errorf("ffprobe audio streams: %w", perr)
+		}
+		out = raw
+	} else {
+		cmd := exec.CommandContext(ctx, w.FFprobePath, append(args, inputPath)...)
+		out, err = cmd.Output()
+		if err != nil {
+			return nil, fmt.Errorf("ffprobe audio streams: %w", err)
+		}
 	}
 	var probe rawProbe
 	if err := json.Unmarshal(out, &probe); err != nil {
@@ -187,7 +205,7 @@ func (w *Worker) run(ctx context.Context, mediaID int64, inputPath string) error
 	)
 
 	// Probe source for audio streams.
-	streams, err := w.probeAudioStreams(ctx, inputPath)
+	streams, err := w.probeAudioStreams(ctx, mediaID, inputPath)
 	if err != nil {
 		w.markFailed(mediaID, err.Error())
 		return err
@@ -210,7 +228,7 @@ func (w *Worker) run(ctx context.Context, mediaID int64, inputPath string) error
 		}
 
 		isAAC := strings.ToLower(st.CodecName) == "aac"
-		if err := w.extractStream(ctx, inputPath, st.Index, isAAC, streamDir, lang); err != nil {
+		if err := w.extractStream(ctx, mediaID, inputPath, st.Index, isAAC, streamDir, lang); err != nil {
 			errs = append(errs, fmt.Sprintf("stream %d: %v", st.Index, err))
 			continue
 		}
@@ -236,35 +254,27 @@ func (w *Worker) run(ctx context.Context, mediaID int64, inputPath string) error
 }
 
 // extractStream runs ffmpeg to extract one audio stream as HLS in MPEG-TS container.
-func (w *Worker) extractStream(ctx context.Context, inputPath string, streamIdx int, isAAC bool, outDir string, lang string) error {
+func (w *Worker) extractStream(ctx context.Context, mediaID int64, inputPath string, streamIdx int, isAAC bool, outDir string, lang string) error {
 	playlistPath := filepath.Join(outDir, "index.m3u8")
 	segPattern := filepath.Join(outDir, "seg_%03d.ts")
 
-	args := []string{
-		"-y",
-		"-i", inputPath,
+	post := []string{
 		"-map", fmt.Sprintf("0:%d", streamIdx),
-		"-vn", // no video
-		"-sn", // no subtitles
+		"-vn",
+		"-sn",
 	}
 	if isAAC {
-		args = append(args, "-c:a", "copy")
+		post = append(post, "-c:a", "copy")
 	} else {
-		args = append(args,
-			"-c:a", "aac",
-			"-b:a", "128k",
-			"-ac", "2",
-		)
+		post = append(post, "-c:a", "aac", "-b:a", "128k", "-ac", "2")
 	}
-	args = append(args,
+	post = append(post,
 		"-hls_time", "6",
 		"-hls_list_size", "0",
 		"-hls_segment_filename", segPattern,
 		playlistPath,
 	)
-
-	cmd := exec.CommandContext(ctx, w.FFmpegPath, args...)
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if out, err := storage.RunFFmpeg(ctx, w.DB, w.Vault, w.FFmpegPath, mediaID, inputPath, 0, 0, nil, post, ""); err != nil {
 		return fmt.Errorf("%w: %s", err, trimErr(string(out), err))
 	}
 

@@ -1658,7 +1658,7 @@
       "field_realtime_monitor": "即時監控（自動同步新增/修改/刪除）",
       "field_preview_extract": "啟用進度條預覽圖擷取",
       "field_drm_enabled": "影片加密",
-      "field_encryption_mode": "加密方式",
+      "field_encryption_mode": "即時加密方式",
       "encryption_standard": "標準加密",
       "encryption_powerdrm": "私有加密",
       "encryption_drm": "DRM 加密",

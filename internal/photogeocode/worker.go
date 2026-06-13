@@ -7,19 +7,21 @@ import (
 	"strings"
 	"sync"
 
+	"knox-media/internal/keystore"
 	"knox-media/internal/photoparse"
 )
 
 // Worker resolves GPS locations for photo library images asynchronously.
 type Worker struct {
-	DB   *sql.DB
-	Geo  *Service
+	DB    *sql.DB
+	Vault *keystore.Vault
+	Geo   *Service
 	mu   sync.Mutex
 	busy map[int64]bool
 }
 
-func NewWorker(db *sql.DB, geo *Service) *Worker {
-	return &Worker{DB: db, Geo: geo, busy: map[int64]bool{}}
+func NewWorker(db *sql.DB, vault *keystore.Vault, geo *Service) *Worker {
+	return &Worker{DB: db, Vault: vault, Geo: geo, busy: map[int64]bool{}}
 }
 
 func (w *Worker) Enqueue(mediaID, libraryID int64) error {
@@ -163,7 +165,7 @@ func (w *Worker) Process(ctx context.Context, mediaID int64) error {
 		return fmt.Errorf("empty file path")
 	}
 
-	meta := photoparse.ParseFromFile(path)
+	meta := photoparse.ParseForMedia(w.DB, w.Vault, mediaID, path)
 	if !meta.HasGPS {
 		w.complete(mediaID, "no gps")
 		return nil

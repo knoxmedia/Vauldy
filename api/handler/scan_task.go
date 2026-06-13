@@ -152,6 +152,7 @@ func (h *Handler) runLibraryScanTask(ctx context.Context, taskID, libraryID int6
 	}
 	s := &scanner.Scanner{
 		DB:           h.App.DB,
+		Vault:        h.KeyVault,
 		FFprobePath:  h.App.Config.FFmpeg.FFprobePath,
 		SkipHash:     !h.App.Config.LibraryScanFileHash(),
 		PhotoGeocode: h.PhotoGeocode,
@@ -240,6 +241,7 @@ func (h *Handler) EnqueuePostIngestForNewMedia(mediaID int64, fileType string) {
 		if ft == "document" {
 			h.GenerateDocumentCover(mid)
 		}
+		h.KickEncryptMediaAsset(mid)
 	}(mediaID, fileType)
 }
 

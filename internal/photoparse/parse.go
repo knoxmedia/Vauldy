@@ -1,6 +1,7 @@
 package photoparse
 
 import (
+	"database/sql"
 	"encoding/json"
 	"image"
 	_ "image/gif"
@@ -12,6 +13,9 @@ import (
 	"time"
 
 	"github.com/rwcarlsen/goexif/exif"
+
+	"knox-media/internal/keystore"
+	"knox-media/internal/storage"
 )
 
 // PhotoMeta holds normalized image metadata extracted during library scan.
@@ -85,6 +89,24 @@ func ParseFromFile(filePath string) PhotoMeta {
 		}
 	}
 	return meta
+}
+
+// ParseForMedia extracts photo metadata, materializing Knox .enc to a temp file when needed.
+func ParseForMedia(db *sql.DB, vault *keystore.Vault, mediaID int64, filePath string) PhotoMeta {
+	filePath = strings.TrimSpace(filePath)
+	if filePath == "" {
+		return PhotoMeta{}
+	}
+	work := filePath
+	if storage.InputNeedsPipe(db, mediaID, filePath) {
+		tmp, cleanup, err := storage.MaterializePlaintextTemp(db, vault, mediaID, filePath)
+		if err != nil {
+			return PhotoMeta{Title: strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filePath))}
+		}
+		defer cleanup()
+		work = tmp
+	}
+	return ParseFromFile(work)
 }
 
 func decodeDimensions(filePath string) (int, int, bool) {

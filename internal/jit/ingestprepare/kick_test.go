@@ -65,7 +65,7 @@ func TestKick_IngestPrepareAnalyzesCodecAndTriggersSlicing(t *testing.T) {
 	}
 
 	spy := &schedulerSpy{}
-	Kick(db, spy, nil, 101)
+	Kick(db, spy, 101)
 
 	if spy.prepareCalls != 1 {
 		t.Fatalf("prepare calls=%d, want 1", spy.prepareCalls)
@@ -76,7 +76,7 @@ func TestKick_IngestPrepareAnalyzesCodecAndTriggersSlicing(t *testing.T) {
 	if spy.fileID != "f-101" {
 		t.Fatalf("file_id=%q, want f-101", spy.fileID)
 	}
-	if spy.filePath != "/mnt/media/a.mkv" {
+	if spy.filePath != filepath.Clean("/mnt/media/a.mkv") && spy.filePath != "/mnt/media/a.mkv" {
 		t.Fatalf("file_path=%q, want /mnt/media/a.mkv", spy.filePath)
 	}
 	if spy.format != "matroska,webm" {
@@ -87,6 +87,29 @@ func TestKick_IngestPrepareAnalyzesCodecAndTriggersSlicing(t *testing.T) {
 	}
 	if spy.sessionID != "ingest:101" {
 		t.Fatalf("session_id=%q, want ingest:101", spy.sessionID)
+	}
+}
+
+func TestKick_SkipsWhenOnlyDRMEnabled(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "kick-drm.sqlite")
+	db, err := store.OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	if _, err := db.Exec(`INSERT INTO library (id, name, type, path, drm_enabled, jit_prepare_on_ingest) VALUES (1, 'lib', 'movie', '/data', 1, 1)`); err != nil {
+		t.Fatalf("insert library: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO media (id, library_id, file_id, file_path, format) VALUES (103, 1, 'f-103', '/mnt/media/c.mkv', 'matroska')`); err != nil {
+		t.Fatalf("insert media: %v", err)
+	}
+
+	spy := &schedulerSpy{}
+	Kick(db, spy, 103)
+
+	if spy.prepareCalls != 0 || spy.triggerCalls != 0 {
+		t.Fatalf("expected no ingest prepare when only drm_enabled, got prepare=%d trigger=%d", spy.prepareCalls, spy.triggerCalls)
 	}
 }
 
@@ -106,7 +129,7 @@ func TestKick_SkipsWhenIngestPrepareDisabled(t *testing.T) {
 	}
 
 	spy := &schedulerSpy{}
-	Kick(db, spy, nil, 102)
+	Kick(db, spy, 102)
 
 	if spy.prepareCalls != 0 || spy.triggerCalls != 0 {
 		t.Fatalf("expected no ingest prepare calls, got prepare=%d trigger=%d", spy.prepareCalls, spy.triggerCalls)

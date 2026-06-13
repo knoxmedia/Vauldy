@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 
+	"knox-media/internal/keystore"
 	jitkeyframes "knox-media/internal/jit/keyframes"
 )
 
@@ -22,6 +23,7 @@ type Info struct {
 // producing JSON cache files compatible with the JIT transcode scheduler.
 type Worker struct {
 	DB          *sql.DB
+	Vault       *keystore.Vault
 	FFprobePath string
 	OutputDir   string
 	mu          sync.Mutex
@@ -29,9 +31,10 @@ type Worker struct {
 }
 
 // NewWorker creates a new keyframe extraction worker.
-func NewWorker(db *sql.DB, ffprobePath, outputDir string) *Worker {
+func NewWorker(db *sql.DB, vault *keystore.Vault, ffprobePath, outputDir string) *Worker {
 	return &Worker{
 		DB:          db,
+		Vault:       vault,
 		FFprobePath: ffprobePath,
 		OutputDir:   outputDir,
 		running:     map[int64]bool{},
@@ -148,7 +151,7 @@ func (w *Worker) run(ctx context.Context, mediaID int64, fileID, filePath string
 		return err
 	}
 
-	meta, err := cache.Extract(ctx, fileID, filePath, duration)
+	meta, err := cache.ExtractForMedia(ctx, w.DB, w.Vault, mediaID, fileID, filePath, duration)
 	if err != nil {
 		w.markFailed(mediaID, trimErr("", err))
 		return err
@@ -191,7 +194,7 @@ func (w *Worker) EnsureCached(ctx context.Context, mediaID int64) (*jitkeyframes
 		return nil, err
 	}
 
-	return cache.EnsureCached(ctx, fileID.String, filePath.String, float64(duration.Int64))
+	return cache.EnsureCachedForMedia(ctx, w.DB, w.Vault, mediaID, fileID.String, filePath.String, float64(duration.Int64))
 }
 
 func trimErr(out string, err error) string {

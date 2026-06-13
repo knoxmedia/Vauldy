@@ -63,7 +63,7 @@ func newUploadDRMHandler(t *testing.T, drmEnabled int) *Handler {
 
 	return &Handler{
 		App:           &app.App{DB: db, Config: cfg},
-		PackageWorker: transcode.NewPackageWorker(db, cfg),
+		PackageWorker: transcode.NewPackageWorker(db, cfg, nil),
 		Upload:        &upload.Service{UploadDir: cfg.Data.Upload, ChunksDir: cfg.Data.Chunks},
 		runningScans:  map[int64]scanRuntime{},
 	}
@@ -107,7 +107,7 @@ func waitForPackageTask(t *testing.T, db *sql.DB, mediaID int64) int {
 	return 0
 }
 
-func TestUploadSingleEnqueuesDRMForDRMEnabledLibrary(t *testing.T) {
+func TestUploadSingleSkipsIngestPackageForDRMEnabledLibrary(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	h := newUploadDRMHandler(t, 1)
 
@@ -129,8 +129,8 @@ func TestUploadSingleEnqueuesDRMForDRMEnabledLibrary(t *testing.T) {
 	if mediaID <= 0 {
 		t.Fatalf("invalid media id in response: %s", w.Body.String())
 	}
-	if got := waitForPackageTask(t, h.App.DB, int64(mediaID)); got == 0 {
-		t.Fatalf("expected package_task created for media_id=%d", int64(mediaID))
+	if got := waitForPackageTask(t, h.App.DB, int64(mediaID)); got != 0 {
+		t.Fatalf("expected no ingest package_task when stream drm enabled, got %d", got)
 	}
 }
 
@@ -167,7 +167,7 @@ func TestUploadSingleSkipsDRMWhenLibraryDRMDisabled(t *testing.T) {
 	}
 }
 
-func TestUploadMergeEnqueuesDRMForDRMEnabledLibrary(t *testing.T) {
+func TestUploadMergeSkipsIngestPackageForDRMEnabledLibrary(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	h := newUploadDRMHandler(t, 1)
 
@@ -202,7 +202,7 @@ func TestUploadMergeEnqueuesDRMForDRMEnabledLibrary(t *testing.T) {
 	if mediaID <= 0 {
 		t.Fatalf("invalid media id in response: %s", w.Body.String())
 	}
-	if got := waitForPackageTask(t, h.App.DB, int64(mediaID)); got == 0 {
-		t.Fatalf("expected package_task created for merged media_id=%d", int64(mediaID))
+	if got := waitForPackageTask(t, h.App.DB, int64(mediaID)); got != 0 {
+		t.Fatalf("expected no ingest package_task for merged upload when stream drm enabled, got %d", got)
 	}
 }

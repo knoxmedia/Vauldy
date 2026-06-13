@@ -60,6 +60,10 @@ export type Library = {
   drm_enabled?: number;
   encryption_mode?: "standard" | "powerdrm" | "drm";
   cleanup_local_source_after_package?: number;
+  encrypted_assets_enabled?: number;
+  encrypted_assets_cleanup_plaintext?: number;
+  encrypted_assets_dir_mode?: "library" | "data" | "custom";
+  encrypted_assets_custom_dir?: string;
   metadata_providers?: string[];
   image_providers?: string[];
   metadata_refresh_policy?: string;
@@ -113,6 +117,8 @@ export type MediaItem = {
   photo_tag_ids?: string[];
   /** True when meaningful scrape metadata exists. */
   scraped?: boolean;
+  /** Knox 9527 envelope encryption at rest. */
+  encrypted_asset?: boolean;
   /** Populated for audio tracks linked in music_track. */
   music_album_id?: number;
   music_album_title?: string;
@@ -288,11 +294,20 @@ export async function fetchLibraries() {
   return data?.items ?? [];
 }
 
+export type EncryptedAssetsConfig = {
+  data_dot_encrypted_dir?: string;
+};
+
 export async function fetchLibrariesWithCapabilities() {
-  const { data } = await api.get<{ items?: Library[]; drm_capabilities?: DRMCapabilities }>("/api/v1/library");
+  const { data } = await api.get<{
+    items?: Library[];
+    drm_capabilities?: DRMCapabilities;
+    encrypted_assets_config?: EncryptedAssetsConfig;
+  }>("/api/v1/library");
   return {
     items: data?.items ?? [],
     drmCapabilities: data?.drm_capabilities ?? { widevine_enabled: true, powerdrm_enabled: true },
+    encryptedAssetsConfig: data?.encrypted_assets_config ?? {},
   };
 }
 
@@ -308,6 +323,10 @@ export async function createLibrary(payload: {
   drm_enabled?: number;
   encryption_mode?: "standard" | "powerdrm" | "drm";
   cleanup_local_source_after_package?: number;
+  encrypted_assets_enabled?: number;
+  encrypted_assets_cleanup_plaintext?: number;
+  encrypted_assets_dir_mode?: "library" | "data" | "custom";
+  encrypted_assets_custom_dir?: string;
   metadata_providers?: string[];
   image_providers?: string[];
   metadata_refresh_policy?: string;
@@ -331,6 +350,10 @@ export async function updateLibrary(
     drm_enabled?: number;
     encryption_mode?: "standard" | "powerdrm" | "drm";
     cleanup_local_source_after_package?: number;
+    encrypted_assets_enabled?: number;
+    encrypted_assets_cleanup_plaintext?: number;
+    encrypted_assets_dir_mode?: "library" | "data" | "custom";
+    encrypted_assets_custom_dir?: string;
     metadata_providers?: string[];
     image_providers?: string[];
     metadata_refresh_policy?: string;
@@ -2014,6 +2037,11 @@ export type KeyframeTask = {
 
 export async function extractKeyframes(mediaId: number) {
   await api.post(`/api/v1/media/${mediaId}/keyframe`);
+}
+
+/** Queue Knox 9527 envelope encryption for a single media item. */
+export async function encryptMediaAssets(mediaId: number) {
+  await api.post(`/api/v1/media/${mediaId}/encrypt-assets`);
 }
 
 export async function retryKeyframeExtraction(mediaId: number) {

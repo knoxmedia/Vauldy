@@ -27,6 +27,10 @@ func TestOpenSQLiteAddsDRMColumns(t *testing.T) {
 
 	assertColumn("library", "drm_enabled")
 	assertColumn("library", "encryption_mode")
+	assertColumn("library", "encrypted_assets_enabled")
+	assertColumn("library", "encrypted_assets_cleanup_plaintext")
+	assertColumn("library", "encrypted_assets_dir_mode")
+	assertColumn("library", "encrypted_assets_custom_dir")
 	assertColumn("library", "cleanup_local_source_after_package")
 	assertColumn("package_task", "pipeline_type")
 	assertColumn("drm_asset", "kid")

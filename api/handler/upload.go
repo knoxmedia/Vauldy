@@ -229,6 +229,10 @@ func (h *Handler) enqueuePackageTaskForUploadedMedia(mediaID int64, fileType str
 	if lid == nil || !lid.Valid || lid.Int64 <= 0 {
 		return
 	}
+	var drm int
+	if err := h.App.DB.QueryRow(`SELECT COALESCE(drm_enabled,0) FROM library WHERE id = ?`, lid.Int64).Scan(&drm); err != nil || drm == 1 {
+		return
+	}
 	go func(id int64) {
 		_, _ = h.PackageWorker.EnqueueForMedia(id)
 	}(mediaID)

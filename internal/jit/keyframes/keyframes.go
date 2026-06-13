@@ -9,6 +9,7 @@ package keyframes
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +19,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"knox-media/internal/keystore"
+	"knox-media/internal/storage"
 )
 
 // Cache 表示一个本地关键帧列表缓存目录。
@@ -118,6 +122,50 @@ func (c *Cache) Save(m *Meta) error {
 	return os.Rename(tmp, final)
 }
 
+// ExtractForMedia probes keyframes, using decrypt pipe for Knox .enc when needed.
+func (c *Cache) ExtractForMedia(ctx context.Context, db *sql.DB, vault *keystore.Vault, mediaID int64, fileID, srcPath string, duration float64) (*Meta, error) {
+	if c == nil || strings.TrimSpace(c.FFprobePath) == "" {
+		return nil, errors.New("keyframes: ffprobe path not configured")
+	}
+	if strings.TrimSpace(srcPath) == "" {
+		return nil, errors.New("keyframes: empty source path")
+	}
+	st, err := os.Stat(srcPath)
+	if err != nil {
+		return nil, err
+	}
+	var pts []float64
+	if storage.InputNeedsPipe(db, mediaID, srcPath) {
+		out, cleanup, perr := storage.FFprobeOutput(db, vault, c.FFprobePath, mediaID, srcPath, 0, duration, []string{
+			"-v", "error",
+			"-select_streams", "v:0",
+			"-show_packets",
+			"-show_entries", "packet=pts_time,flags",
+			"-of", "csv=print_section=0",
+		})
+		if cleanup != nil {
+			defer cleanup()
+		}
+		if perr != nil {
+			return nil, perr
+		}
+		pts = parseKeyframePackets(string(out))
+	} else {
+		pts, err = probeKeyframes(ctx, c.FFprobePath, srcPath)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &Meta{
+		FileID:   fileID,
+		FilePath: srcPath,
+		SrcMTime: st.ModTime().Unix(),
+		SrcSize:  st.Size(),
+		Duration: duration,
+		PTS:      pts,
+	}, nil
+}
+
 // Extract probes the source file and returns the keyframe PTS list. Costly for long videos
 // so callers should cache the result via Save().
 //
@@ -201,6 +249,24 @@ func parseKeyframePackets(s string) []float64 {
 		out = append(out, v)
 	}
 	return out
+}
+
+// EnsureCached returns cached keyframes or extracts + saves them now.
+func (c *Cache) EnsureCachedForMedia(ctx context.Context, db *sql.DB, vault *keystore.Vault, mediaID int64, fileID, srcPath string, duration float64) (*Meta, error) {
+	if c == nil {
+		return nil, errors.New("keyframes: nil cache")
+	}
+	if got, err := c.Load(fileID, srcPath); err == nil && got != nil && len(got.PTS) > 0 {
+		return got, nil
+	}
+	m, err := c.ExtractForMedia(ctx, db, vault, mediaID, fileID, srcPath, duration)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.Save(m); err != nil {
+		return m, err
+	}
+	return m, nil
 }
 
 // EnsureCached returns cached keyframes or extracts + saves them now.

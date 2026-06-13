@@ -9,11 +9,13 @@ import (
 	"time"
 
 	"knox-media/internal/config"
+	"knox-media/internal/keystore"
 )
 
 // WorkerConfig supplies runtime paths for cover generation.
 type WorkerConfig struct {
 	DB         *sql.DB
+	Vault      *keystore.Vault
 	MediaRoot  string
 	PreviewDir string
 	FFmpegPath string
@@ -187,6 +189,8 @@ func (w *Worker) runOne(mediaID int64) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
 	defer cancel()
 	opts := Options{
+		DB:         w.cfg.DB,
+		Vault:      w.cfg.Vault,
 		FFmpegPath: w.cfg.FFmpegPath,
 		PreviewDir: preview,
 		MediaRoot:  w.cfg.MediaRoot,

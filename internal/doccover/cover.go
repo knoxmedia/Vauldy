@@ -2,6 +2,7 @@ package doccover
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,12 +11,16 @@ import (
 
 	"knox-media/internal/config"
 	"knox-media/internal/doctrans"
+	"knox-media/internal/keystore"
+	"knox-media/internal/storage"
 )
 
 const CoverMaxEdge = 480
 
 // Options configures document cover generation.
 type Options struct {
+	DB         *sql.DB
+	Vault      *keystore.Vault
 	FFmpegPath string
 	PreviewDir string
 	MediaRoot  string
@@ -69,6 +74,12 @@ func Ensure(ctx context.Context, opts Options, mediaID int64, sourcePath string,
 	if _, err := os.Stat(sourcePath); err != nil {
 		return fmt.Errorf("source missing: %w", err)
 	}
+	workPath, cleanup, err := storage.MaterializePlaintextTemp(opts.DB, opts.Vault, mediaID, sourcePath)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
 	outPath := Path(opts.PreviewDir, mediaID)
 	if coverFresh(outPath, fileMtime) {
 		return nil
@@ -80,23 +91,23 @@ func Ensure(ctx context.Context, opts Options, mediaID int64, sourcePath string,
 	var genErr error
 	switch coverStrategyFor(sourcePath) {
 	case strategyEPUB:
-		if ExtractEPUBCover(sourcePath, outPath) == "" {
+		if ExtractEPUBCover(workPath, outPath) == "" {
 			genErr = fmt.Errorf("epub cover not found")
 		}
 	case strategyPDF:
-		genErr = renderPageCover(ctx, opts, sourcePath, outPath)
+		genErr = renderPageCover(ctx, opts, mediaID, workPath, outPath)
 	case strategyImage:
-		genErr = renderJPEG(ctx, opts.FFmpegPath, sourcePath, outPath)
+		genErr = renderJPEG(ctx, opts, mediaID, workPath, outPath)
 	case strategyOffice:
 		if !docTransEnabled(opts.DocTrans) {
 			genErr = fmt.Errorf("office cover requires document conversion")
 		} else {
 			conv := doctrans.NewConverter(opts.MediaRoot, opts.PreviewDir, opts.DocTrans)
-			pdfPath, err := conv.EnsurePreviewPDF(ctx, mediaID, sourcePath, fileMtime)
+			pdfPath, err := conv.EnsurePreviewPDF(ctx, mediaID, workPath, fileMtime)
 			if err != nil {
 				genErr = err
 			} else {
-				genErr = renderPageCover(ctx, opts, pdfPath, outPath)
+				genErr = renderPageCover(ctx, opts, mediaID, pdfPath, outPath)
 			}
 		}
 	default:

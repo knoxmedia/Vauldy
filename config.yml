@@ -56,6 +56,10 @@ playback:
     progressive_hls: ["powerplayer", "xgplayer"] # native + clear HLS (hls, jit_hls, hls_aes_128)
     hls_powerdrm: ["powerplayer"]
     drm: ["powerplayer", "shaka", "xgplayer"] # Widevine/FairPlay HLS or DASH
+# Knox 9527 envelope encryption at rest (per-library encrypted_assets_enabled).
+encrypted_assets:
+  enabled: true
+  cleanup_plaintext_default: false
 # Library scan: default skips full-file MD5 (very slow) and uses shorter ffprobe analysis.
 scan:
   file_hash_on_scan: false

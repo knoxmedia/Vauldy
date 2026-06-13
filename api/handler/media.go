@@ -94,7 +94,11 @@ func (h *Handler) ListMedia(c *gin.Context) {
 				OR NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.extra.tmdb_id')), '') IS NOT NULL
 				OR NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.extra.imdb_id')), '') IS NOT NULL
 			)
-		THEN 1 ELSE 0 END AS scraped
+		THEN 1 ELSE 0 END AS scraped,
+		CASE WHEN EXISTS (
+			SELECT 1 FROM media_encrypted_assets mea
+			WHERE mea.media_id = m.id AND mea.status = 'encrypted'
+		) OR lower(m.file_path) LIKE '%.enc' THEN 1 ELSE 0 END AS encrypted_asset
 	FROM media m WHERE 1=1`
 	args := []any{listUID}
 	if lib != "" {
@@ -142,8 +146,8 @@ func (h *Handler) ListMedia(c *gin.Context) {
 		var mid int64
 		var libID sql.NullInt64
 		var fileID, title, orig, path, ftype, format, status, created, lastPlayAt, releaseDate, posterURL, backdropURL, photoTakenAt, photoTagsRaw, musicAlbumTitle, musicArtist sql.NullString
-		var dur, w, h, br, releaseYear, scraped, musicAlbumID, playCompleted sql.NullInt64
-		if err := rows.Scan(&mid, &libID, &fileID, &title, &orig, &path, &ftype, &dur, &w, &h, &br, &format, &status, &created, &lastPlayAt, &playCompleted, &releaseDate, &releaseYear, &posterURL, &backdropURL, &photoTakenAt, &photoTagsRaw, &musicAlbumID, &musicAlbumTitle, &musicArtist, &scraped); err != nil {
+		var dur, w, h, br, releaseYear, scraped, encryptedAsset, musicAlbumID, playCompleted sql.NullInt64
+		if err := rows.Scan(&mid, &libID, &fileID, &title, &orig, &path, &ftype, &dur, &w, &h, &br, &format, &status, &created, &lastPlayAt, &playCompleted, &releaseDate, &releaseYear, &posterURL, &backdropURL, &photoTakenAt, &photoTagsRaw, &musicAlbumID, &musicAlbumTitle, &musicArtist, &scraped, &encryptedAsset); err != nil {
 			continue
 		}
 		if strings.EqualFold(profile.LibraryScope, "selected") {
@@ -166,6 +170,7 @@ func (h *Handler) ListMedia(c *gin.Context) {
 			"bitrate": br.Int64, "format": format.String, "status": status.String, "created_at": created.String,
 			"last_play_at": lastPlayAt.String, "completed": playCompleted.Int64, "release_date": releaseDate.String, "year": releaseYear.Int64,
 			"poster_url": posterURL.String, "backdrop_url": backdropURL.String, "scraped": scraped.Int64 == 1,
+			"encrypted_asset": encryptedAsset.Int64 == 1,
 			"photo_taken_at": photoTakenAt.String,
 			"photo_tags":     photoTags,
 			"photo_tag_ids":  photoTagIDs,

@@ -5,6 +5,7 @@ import {
   addFavorite,
   createScrapeTasks,
   deleteMedia,
+  encryptMediaAssets,
   extractAudioTrack,
   extractKeyframes,
   fetchMediaDeletionPlan,
@@ -112,6 +113,12 @@ export function buildMediaMenuItems(
     afterUnmatch?: () => void | Promise<void>;
     /** 详情页「查看信息」：滚动到信息区而非跳转 */
     onGetInfo?: () => void;
+    /** 媒体库视频：显示「加密资源」菜单项 */
+    showEncryptAsset?: boolean;
+    /** 已加密则禁用「加密资源」 */
+    encryptedAsset?: boolean;
+    /** 加密完成后刷新列表 */
+    afterEncryptAsset?: () => void | Promise<void>;
   },
 ): MenuProps {
   const preset = extra?.preset ?? "full";
@@ -134,6 +141,9 @@ export function buildMediaMenuItems(
   const onOpenMatch = extra?.onOpenMatch;
   const afterUnmatch = extra?.afterUnmatch;
   const onGetInfo = extra?.onGetInfo;
+  const showEncryptAsset = extra?.showEncryptAsset ?? false;
+  const encryptedAsset = extra?.encryptedAsset ?? false;
+  const afterEncryptAsset = extra?.afterEncryptAsset;
 
   const addToChildren: MenuProps["items"] = [
     {
@@ -202,6 +212,15 @@ export function buildMediaMenuItems(
       { key: "recognizeSubtitles", label: t("components.media_menu.recognize_subtitles") },
       { key: "extractAudio", label: atrackDone ? t("components.media_menu.reextract_audio") : t("components.media_menu.extract_audio") },
       { key: "extractKeyframes", label: keyframeDone ? t("components.media_menu.reextract_keyframes") : t("components.media_menu.extract_keyframes") },
+      ...(showEncryptAsset
+        ? [
+            {
+              key: "encryptAsset",
+              label: t("components.media_menu.encrypt_asset"),
+              disabled: encryptedAsset,
+            },
+          ]
+        : []),
       { type: "divider" as const },
       { key: "viewHistory", label: t("components.media_menu.view_history") },
       { key: "getInfo", label: preset === "detailMore" ? t("components.media_menu.get_info_view") : t("components.media_menu.get_info_get") },
@@ -354,6 +373,27 @@ export function buildMediaMenuItems(
           extractKeyframes(r.id)
             .then(() => message.success(t("components.media_menu.keyframe_task_created")))
             .catch(() => message.error(t("components.media_menu.operation_failed")));
+          break;
+        case "encryptAsset":
+          if (encryptedAsset) {
+            break;
+          }
+          encryptMediaAssets(r.id)
+            .then(() => {
+              message.success(t("components.media_menu.encrypt_asset_queued"));
+              void afterEncryptAsset?.();
+              window.setTimeout(() => void afterEncryptAsset?.(), 8000);
+              window.setTimeout(() => void afterEncryptAsset?.(), 25000);
+            })
+            .catch((err: unknown) => {
+              const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error;
+              if (msg === "already encrypted") {
+                message.info(t("components.media_menu.encrypt_asset_already"));
+                void afterEncryptAsset?.();
+                return;
+              }
+              message.error(msg || t("components.media_menu.operation_failed"));
+            });
           break;
         case "viewHistory":
           nav(`/playback-history?media_id=${r.id}`);

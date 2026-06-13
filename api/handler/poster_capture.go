@@ -1,18 +1,18 @@
 package handler
 
 import (
-	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"knox-media/internal/scraper"
+	"knox-media/internal/storage"
+	"knox-media/pkg/ffprobe"
 )
 
 // applyScrapeLocalImages fills poster from embedded cover or ffmpeg frame capture when configured
@@ -76,12 +76,12 @@ func (h *Handler) captureLocalPoster(mediaID, libraryID int64, cfg scraper.Confi
 	posterURL = "/uploads/posters/" + fmt.Sprintf("%d.jpg", mediaID)
 
 	if imageSourceEnabled(cfg, "embedded") {
-		if ffprobePath != "" && extractEmbeddedCover(ffprobePath, ffmpegPath, absPath, posterFile) {
+		if ffprobePath != "" && h.extractEmbeddedCover(ffprobePath, ffmpegPath, mediaID, absPath, posterFile) {
 			return posterURL, "embedded"
 		}
 	}
 	if !skipScreenGrabber && imageSourceEnabled(cfg, "screen_grabber") {
-		if extractFramePoster(ffmpegPath, absPath, posterFile, duration) {
+		if h.extractFramePoster(ffmpegPath, mediaID, absPath, posterFile, duration) {
 			return posterURL, "screen_grabber"
 		}
 	}
@@ -133,7 +133,7 @@ func (h *Handler) resolveMediaAbsolutePath(libraryID int64, filePath string) str
 	return filepath.Clean(filepath.Join(libPath, filepath.FromSlash(filePath)))
 }
 
-func extractEmbeddedCover(ffprobePath, ffmpegPath, videoPath, outFile string) bool {
+func (h *Handler) extractEmbeddedCover(ffprobePath, ffmpegPath string, mediaID int64, videoPath, outFile string) bool {
 	type disposition struct {
 		AttachedPic int `json:"attached_pic"`
 	}
@@ -150,11 +150,23 @@ func extractEmbeddedCover(ffprobePath, ffmpegPath, videoPath, outFile string) bo
 		"-select_streams", "v",
 		"-show_entries", "stream=index,codec_type:stream_disposition=attached_pic",
 		"-of", "json",
-		videoPath,
 	}
-	out, err := exec.Command(ffprobePath, args...).Output()
-	if err != nil {
-		return false
+	var out []byte
+	var err error
+	if storage.InputNeedsPipe(h.App.DB, mediaID, videoPath) {
+		raw, cleanup, perr := storage.FFprobeOutput(h.App.DB, h.KeyVault, ffprobePath, mediaID, videoPath, 0, 0, args)
+		if cleanup != nil {
+			defer cleanup()
+		}
+		if perr != nil {
+			return false
+		}
+		out = raw
+	} else {
+		out, err = ffprobe.Output(ffprobePath, append(args, videoPath), nil)
+		if err != nil {
+			return false
+		}
 	}
 	var pr probeOut
 	if json.Unmarshal(out, &pr) != nil {
@@ -165,22 +177,26 @@ func extractEmbeddedCover(ffprobePath, ffmpegPath, videoPath, outFile string) bo
 			continue
 		}
 		mapArg := fmt.Sprintf("0:%d", st.Index)
-		if runFFmpegPoster(ffmpegPath, videoPath, outFile, []string{"-map", mapArg, "-frames:v", "1"}) {
+		if h.runFFmpegPoster(ffmpegPath, mediaID, videoPath, outFile, []string{"-map", mapArg, "-frames:v", "1"}) {
 			return true
 		}
 	}
 	return false
 }
 
-func extractFramePoster(ffmpegPath, videoPath, outFile string, durationSec int64) bool {
+func (h *Handler) extractFramePoster(ffmpegPath string, mediaID int64, videoPath, outFile string, durationSec int64) bool {
 	snapSec := posterSnapSecond(durationSec)
-	args := []string{
-		"-ss", strconv.Itoa(snapSec),
-		"-i", videoPath,
-		"-frames:v", "1",
-		"-q:v", "3",
+	post := []string{"-frames:v", "1", "-q:v", "3", outFile}
+	dur := float64(durationSec)
+	if dur <= 0 {
+		dur = 0
 	}
-	return runFFmpegPoster(ffmpegPath, videoPath, outFile, args)
+	if _, err := storage.RunFFmpeg(context.Background(), h.App.DB, h.KeyVault, ffmpegPath, mediaID, videoPath, float64(snapSec), dur, nil, post, ""); err != nil {
+		log.Printf("ffmpeg poster frame media=%d %q: %v", mediaID, videoPath, err)
+		return false
+	}
+	info, err := os.Stat(outFile)
+	return err == nil && info.Size() > 0
 }
 
 func posterSnapSecond(durationSec int64) int {
@@ -198,15 +214,10 @@ func posterSnapSecond(durationSec int64) int {
 	return snapSec
 }
 
-func runFFmpegPoster(ffmpegPath, videoPath, outFile string, extraArgs []string) bool {
-	args := []string{"-y"}
-	args = append(args, extraArgs...)
-	args = append(args, outFile)
-	cmd := exec.Command(ffmpegPath, args...)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		log.Printf("ffmpeg poster %q: %v (%s)", videoPath, err, strings.TrimSpace(stderr.String()))
+func (h *Handler) runFFmpegPoster(ffmpegPath string, mediaID int64, videoPath, outFile string, extraArgs []string) bool {
+	post := append(append([]string{}, extraArgs...), outFile)
+	if _, err := storage.RunFFmpeg(context.Background(), h.App.DB, h.KeyVault, ffmpegPath, mediaID, videoPath, 0, 0, nil, post, ""); err != nil {
+		log.Printf("ffmpeg poster %q: %v", videoPath, err)
 		return false
 	}
 	info, err := os.Stat(outFile)

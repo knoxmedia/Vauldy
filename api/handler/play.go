@@ -18,6 +18,7 @@ import (
 
 	"knox-media/api/middleware"
 	"knox-media/internal/mediautil"
+	"knox-media/internal/storage"
 )
 
 func (h *Handler) PlayMedia(c *gin.Context) {
@@ -57,53 +58,84 @@ func (h *Handler) PlayMedia(c *gin.Context) {
 		return
 	}
 	preferSource := strings.TrimSpace(c.Query("prefer_source")) == "1"
-	if fileType.String != "document" {
-		if ready, _, _ := h.latestEncryptedManifest(id); ready {
-			if preferSource {
-				goto serveSource
+	pol := h.loadStreamPolicy(id)
+	if preferSource {
+		goto serveSource
+	}
+	if fileType.String != "document" && !preferSource {
+		if pol.DRMEnabled {
+			if ready, _, _ := h.latestEncryptedManifest(id); ready {
+				target := "/api/v1/media/" + c.Param("id") + "/hls/master.m3u8"
+				if q := strings.TrimSpace(c.Request.URL.RawQuery); q != "" {
+					target += "?" + q
+				}
+				c.Redirect(http.StatusTemporaryRedirect, target)
+				return
 			}
-			target := "/api/v1/media/" + c.Param("id") + "/hls/master.m3u8"
-			if q := strings.TrimSpace(c.Request.URL.RawQuery); q != "" {
-				target += "?" + q
+		} else {
+			if ready, _, _ := h.latestEncryptedManifest(id); ready {
+				target := "/api/v1/media/" + c.Param("id") + "/hls/master.m3u8"
+				if q := strings.TrimSpace(c.Request.URL.RawQuery); q != "" {
+					target += "?" + q
+				}
+				c.Redirect(http.StatusTemporaryRedirect, target)
+				return
 			}
-			c.Redirect(http.StatusTemporaryRedirect, target)
-			return
-		}
-		if ready, _, _, _ := h.latestTranscodeManifestByMediaID(id); ready {
-			if preferSource {
-				goto serveSource
+			if ready, _, _, _ := h.latestTranscodeManifestByMediaID(id); ready {
+				target := "/api/v1/media/" + c.Param("id") + "/hls/master.m3u8"
+				if q := strings.TrimSpace(c.Request.URL.RawQuery); q != "" {
+					target += "?" + q
+				}
+				c.Redirect(http.StatusTemporaryRedirect, target)
+				return
 			}
-			target := "/api/v1/media/" + c.Param("id") + "/hls/master.m3u8"
-			if q := strings.TrimSpace(c.Request.URL.RawQuery); q != "" {
-				target += "?" + q
-			}
-			c.Redirect(http.StatusTemporaryRedirect, target)
-			return
 		}
 	}
 serveSource:
 	p = filepath.Clean(p)
-	if fi, err := os.Stat(p); err != nil || fi.IsDir() {
-		c.JSON(http.StatusNotFound, gin.H{"error": "file missing"})
-		return
-	}
-	name := filepath.Base(p)
-	if title.Valid {
-		if t := sanitizeContentFilename(title.String); t != "" {
-			ext := filepath.Ext(p)
-			if strings.EqualFold(filepath.Ext(t), ext) {
-				name = t
-			} else {
-				name = t + ext
-			}
-		}
-	}
+	name := playbackDownloadName(p, title)
 	disposition := "inline"
 	if strings.TrimSpace(c.Query("download")) == "1" {
 		disposition = "attachment"
 	}
 	c.Header("Content-Disposition", disposition+"; "+contentDispositionFilename(name))
-	http.ServeFile(c.Writer, c.Request, p)
+	h.serveMediaSource(c, id, p, name)
+}
+
+func playbackDownloadName(filePath string, title sql.NullString) string {
+	name := filepath.Base(filePath)
+	if title.Valid {
+		if t := sanitizeContentFilename(title.String); t != "" {
+			ext := filepath.Ext(filePath)
+			if ext == ".enc" {
+				if plainExt := plainExtFromEncPath(filePath); plainExt != "" {
+					ext = plainExt
+				} else {
+					ext = ""
+				}
+			}
+			if ext != "" && strings.EqualFold(filepath.Ext(t), ext) {
+				name = t
+			} else if ext != "" {
+				name = t + ext
+			} else {
+				name = t
+			}
+		}
+	}
+	return name
+}
+
+func plainExtFromEncPath(encPath string) string {
+	base := filepath.Base(encPath)
+	if !strings.HasSuffix(strings.ToLower(base), ".enc") {
+		return ""
+	}
+	stem := strings.TrimSuffix(base, filepath.Ext(base))
+	if i := strings.LastIndex(stem, "."); i > 0 {
+		return stem[i:]
+	}
+	return ""
 }
 
 // sanitizeContentFilename drops titles that are empty, invalid UTF-8, or contain
@@ -416,6 +448,91 @@ func (h *Handler) HLSInfo(c *gin.Context) {
 			widevineServiceCertURL = appendQueryValue(widevineServiceCertURL, "access_token", accessToken)
 		}
 	}
+
+	pol := h.loadStreamPolicy(id)
+	if pol.DRMEnabled {
+		if encReady, _, encType := h.latestEncryptedManifest(id); encReady {
+			switch encType {
+			case "hls_aes_128":
+				c.JSON(http.StatusOK, h.withPlaybackPlanForMode("hls_aes_128", gin.H{
+					"mode":       "hls_aes_128",
+					"hls_master": fmt.Sprintf("%s/api/v1/media/%s/hls/master.m3u8", base, c.Param("id")),
+					"status":     "done",
+					"fallback":   playURL,
+				}))
+				return
+			case "hls_powerdrm":
+				c.JSON(http.StatusOK, h.withPlaybackPlanForMode("hls_powerdrm", gin.H{
+					"mode":       "hls_powerdrm",
+					"hls_master": fmt.Sprintf("%s/api/v1/media/%s/hls/master.m3u8", base, c.Param("id")),
+					"status":     "done",
+					"drm": gin.H{
+						"powerdrm_key_url": powerDRMKeyURL,
+					},
+					"fallback": playURL,
+				}))
+				return
+			}
+			dashURL := ""
+			if ok, _ := h.drmDashManifestByMediaID(id); ok {
+				dashURL = fmt.Sprintf("%s/api/v1/media/%s/dash/manifest.mpd", base, c.Param("id"))
+			}
+			clearKeys, _ := h.clearkeyMapByMediaID(id)
+			widevineTransport := "json_local"
+			if h != nil && h.App != nil && h.App.Config != nil && strings.TrimSpace(h.App.Config.DRM.Widevine.PrivateModuleURL) != "" {
+				widevineTransport = "raw"
+			}
+			drmPayload := gin.H{
+				"widevine_license_url": widevineURL,
+				"widevine_transport":   widevineTransport,
+				"powerdrm_key_url":     powerDRMKeyURL,
+				"fairplay_cert_url":    fairplayCertURL,
+				"fairplay_license_url": fairplayLicenseURL,
+				"dash_mpd_url":         dashURL,
+				"clearkey_keys":        clearKeys,
+			}
+			if widevineServiceCertURL != "" {
+				drmPayload["widevine_service_cert_url"] = widevineServiceCertURL
+			}
+			c.JSON(http.StatusOK, h.withPlaybackPlanForMode("hls_drm", gin.H{
+				"mode":       "hls_drm",
+				"hls_master": fmt.Sprintf("%s/api/v1/media/%s/hls/master.m3u8", base, c.Param("id")),
+				"status":     "done",
+				"drm":        drmPayload,
+				"fallback":   playURL,
+			}))
+			return
+		}
+		if h.PackageWorker != nil {
+			go func(mid int64) {
+				_, _ = h.PackageWorker.EnqueueForMedia(mid)
+			}(id)
+		}
+		planMode := pol.PlaybackPlanMode()
+		payload := gin.H{
+			"mode":            planMode,
+			"hls_master":      fmt.Sprintf("%s/api/v1/media/%s/hls/master.m3u8", base, c.Param("id")),
+			"status":          "processing",
+			"fallback":        playURL,
+			"stream_drm":      true,
+			"encryption_mode": pol.EncryptionMode,
+			"message":         "Real-time stream encryption at playback",
+		}
+		switch planMode {
+		case "hls_powerdrm":
+			payload["drm"] = gin.H{"powerdrm_key_url": powerDRMKeyURL}
+		case "hls_drm":
+			payload["drm"] = gin.H{
+				"widevine_license_url": widevineURL,
+				"powerdrm_key_url":     powerDRMKeyURL,
+				"fairplay_cert_url":    fairplayCertURL,
+				"fairplay_license_url": fairplayLicenseURL,
+			}
+		}
+		c.JSON(http.StatusOK, h.withPlaybackPlanForMode(planMode, payload))
+		return
+	}
+
 	if encReady, encMaster, encType := h.latestEncryptedManifest(id); encReady {
 		switch encType {
 		case "hls_aes_128":
@@ -471,22 +588,52 @@ func (h *Handler) HLSInfo(c *gin.Context) {
 	}
 	caps := readClientCaps(c)
 	media := detectMediaProfile(metaJSON.String)
+	atRestEnc := h.KeyVault != nil && storage.IsMediaEncrypted(h.App.DB, id, filePath.String)
 
-	// Check for existing optimized batch transcode output.
-	if hlsReady, _, hlsStatus, hlsTaskID := h.latestTranscodeManifestByMediaID(id); hlsReady {
-		c.JSON(http.StatusOK, h.withPlaybackPlanForMode("hls", gin.H{
-			"mode":       "hls",
-			"hls_master": fmt.Sprintf("%s/api/v1/media/%s/hls/master.m3u8", base, c.Param("id")),
-			"status":     hlsStatus,
-			"task_id":    hlsTaskID,
-			"fallback":   playURL,
-			"message":    "Use transcoded stream",
-		}))
-		return
+	// Check for existing optimized batch transcode output (non-stream-DRM libraries only).
+	if !pol.DRMEnabled {
+		if hlsReady, _, hlsStatus, hlsTaskID := h.latestTranscodeManifestByMediaID(id); hlsReady {
+			c.JSON(http.StatusOK, h.withPlaybackPlanForMode("hls", gin.H{
+				"mode":       "hls",
+				"hls_master": fmt.Sprintf("%s/api/v1/media/%s/hls/master.m3u8", base, c.Param("id")),
+				"status":     hlsStatus,
+				"task_id":    hlsTaskID,
+				"fallback":   playURL,
+				"message":    "Use transcoded stream",
+			}))
+			return
+		}
 	}
 
-	// Check if client can decode the source directly.
-	if canDirectPlay(media, caps) {
+	// Knox .enc at rest: prefer JIT (pipe decrypt) when the client cannot direct-play; otherwise native decrypt stream.
+	if atRestEnc && !canDirectPlay(media, caps) {
+		if h.SessionManager != nil && fileID.Valid && strings.TrimSpace(fileID.String) != "" && filePath.Valid && strings.TrimSpace(filePath.String) != "" {
+			bitrate := pickBitrate(media, int(srcWidth.Int64), int(srcHeight.Int64))
+			resolution := resolutionForBitrate(bitrate)
+			s, err := h.SessionManager.CreateSession(id, fileID.String, filePath.String, bitrate, resolution, float64(srcDuration.Int64))
+			if err == nil {
+				masterBase := fmt.Sprintf("%s/api/v1/jit/session/%s/master.m3u8", base, s.ID)
+				mq := url.Values{}
+				mq.Set("media_id", strconv.FormatInt(id, 10))
+				if accessToken != "" {
+					mq.Set("access_token", accessToken)
+				}
+				hlsMaster := masterBase + "?" + mq.Encode()
+				c.JSON(http.StatusOK, h.withPlaybackPlanForMode("jit_hls", gin.H{
+					"mode":       "jit_hls",
+					"hls_master": hlsMaster,
+					"status":     "processing",
+					"fallback":   playURL,
+					"message":    "JIT transcode from encrypted asset (pipe decrypt)",
+					"session_id": s.ID,
+				}))
+				return
+			}
+		}
+	}
+
+	// Check if client can decode the source directly (plaintext or decrypted progressive).
+	if canDirectPlay(media, caps) || (atRestEnc && !pol.DRMEnabled) {
 		c.JSON(http.StatusOK, h.withPlaybackPlanForMode("native", gin.H{
 			"mode":          "native",
 			"playUrl":       playURL,

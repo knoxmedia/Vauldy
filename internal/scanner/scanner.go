@@ -12,21 +12,24 @@ import (
 
 	"github.com/google/uuid"
 
+	kcrypto "knox-media/internal/crypto"
 	"knox-media/internal/docparse"
 	"knox-media/internal/musicparse"
 	"knox-media/internal/musicstore"
 	"knox-media/internal/photoparse"
 	"knox-media/internal/photogeocode"
+	"knox-media/internal/keystore"
 	"knox-media/internal/scraper"
+	"knox-media/internal/storage"
 	"knox-media/internal/tvparse"
 	"knox-media/internal/tvstore"
-	"knox-media/pkg/ffprobe"
 	"knox-media/pkg/fileutil"
 	"knox-media/pkg/hashutil"
 )
 
 type Scanner struct {
 	DB           *sql.DB
+	Vault        *keystore.Vault
 	FFprobePath  string
 	SkipHash     bool
 	PhotoGeocode *photogeocode.Service
@@ -116,6 +119,12 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 				if rel != "" {
 					_ = s.upsertNode(libraryID, parentPath, nodePath, nodeName, "dir", nil)
 				}
+				if shouldSkipScanDir(path) {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if shouldSkipScanFile(path) {
 				return nil
 			}
 			st, stErr := os.Stat(path)
@@ -137,6 +146,13 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 				return nil
 			}
 			seenMedia[normPath] = struct{}{}
+			if linkedID := storage.FindMediaIDByEncryptedPlainPath(s.DB, libraryID, normPath); linkedID > 0 {
+				_ = s.upsertNode(libraryID, parentPath, nodePath, nodeName, "file", &linkedID)
+				if s.OnFile != nil {
+					s.OnFile(path, nil)
+				}
+				return nil
+			}
 			curMtime := int64(0)
 			if st != nil {
 				curMtime = st.ModTime().UTC().Unix()
@@ -187,7 +203,7 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 			var photoMeta photoparse.PhotoMeta
 			var docMeta docparse.DocumentMeta
 			if ft == "video" || ft == "audio" {
-				if pr, e := ffprobe.ProbeOptions(s.FFprobePath, path, s.FFprobeExtra); e == nil {
+				if pr, e := storage.ProbePath(s.DB, s.Vault, s.FFprobePath, 0, path, s.FFprobeExtra); e == nil {
 					dur = pr.DurationSec
 					w = pr.Width
 					h = pr.Height
@@ -222,6 +238,13 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 					e2 := s.DB.QueryRow(`SELECT id, file_path FROM media WHERE md5 = ? AND library_id = ? LIMIT 1`, h, libraryID).Scan(&dupMediaID, &dupPath)
 					if e2 == nil && dupMediaID > 0 && dupPath.Valid && strings.TrimSpace(dupPath.String) != "" {
 						oldPath := dupPath.String
+						if storage.IsMediaEncrypted(s.DB, dupMediaID, oldPath) {
+							_ = s.upsertNode(libraryID, parentPath, nodePath, nodeName, "file", &dupMediaID)
+							if s.OnFile != nil {
+								s.OnFile(path, nil)
+							}
+							return nil
+						}
 						if normalizeMediaPath(oldPath) != normPath {
 							if _, statErr := os.Stat(oldPath); statErr != nil && os.IsNotExist(statErr) {
 								_, _ = s.DB.Exec(`UPDATE media SET file_path = ?, file_mtime = ?, status = 'active' WHERE id = ?`, normPath, curMtime, dupMediaID)
@@ -234,6 +257,15 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 							// Same content on disk at another path: keep existing record and insert this path as new media.
 						}
 					}
+				}
+			}
+			if md5sum.Valid {
+				if linkedID := storage.FindMediaIDByEncryptedMD5(s.DB, libraryID, md5sum.String); linkedID > 0 {
+					_ = s.upsertNode(libraryID, parentPath, nodePath, nodeName, "file", &linkedID)
+					if s.OnFile != nil {
+						s.OnFile(path, nil)
+					}
+					return nil
 				}
 			}
 			metaJSON := meta
@@ -328,6 +360,9 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 			if _, ok := seenMedia[normalizeMediaPath(p.String)]; !ok {
 				var mid int64
 				if s.DB.QueryRow(`SELECT id FROM media WHERE library_id = ? AND file_path = ?`, libraryID, p.String).Scan(&mid) == nil && mid > 0 {
+					if storage.MediaFileStillPresentAfterEncrypt(s.DB, mid, p.String, seenMedia) {
+						continue
+					}
 					tvstore.CleanupMedia(s.DB, mid)
 					musicstore.CleanupMedia(s.DB, mid)
 				}
@@ -354,6 +389,30 @@ func normalizeMediaPath(p string) string {
 		cleaned = strings.ToLower(cleaned)
 	}
 	return cleaned
+}
+
+func shouldSkipScanDir(path string) bool {
+	base := filepath.Base(filepath.Clean(path))
+	switch base {
+	case ".encrypted", ".knox-encrypted":
+		return true
+	default:
+		return false
+	}
+}
+
+func shouldSkipScanFile(path string) bool {
+	if kcrypto.IsEncFile(path) {
+		return true
+	}
+	parts := strings.Split(filepath.Clean(path), string(filepath.Separator))
+	for _, part := range parts {
+		switch part {
+		case ".encrypted", ".knox-encrypted":
+			return true
+		}
+	}
+	return false
 }
 
 func nullInt(v int) any {
@@ -422,7 +481,7 @@ func (s *Scanner) linkMusicIfTrack(libraryID, mediaID int64, path, ffprobeJSON s
 func (s *Scanner) refreshPhotoMeta(mediaID int64, path string) {
 	var metaJSON sql.NullString
 	_ = s.DB.QueryRow(`SELECT COALESCE(meta_json,'') FROM media WHERE id = ?`, mediaID).Scan(&metaJSON)
-	photoMeta := photoparse.ParseFromFile(path)
+	photoMeta := photoparse.ParseForMedia(s.DB, s.Vault, mediaID, path)
 	if s.PhotoGeocode != nil {
 		s.PhotoGeocode.EnrichMeta(&photoMeta)
 	}
@@ -437,7 +496,7 @@ func (s *Scanner) refreshPhotoMeta(mediaID int64, path string) {
 func (s *Scanner) refreshDocumentMeta(mediaID int64, path string) {
 	var metaJSON sql.NullString
 	_ = s.DB.QueryRow(`SELECT COALESCE(meta_json,'') FROM media WHERE id = ?`, mediaID).Scan(&metaJSON)
-	docMeta := docparse.ParseFromFile(path)
+	docMeta := docparse.ParseForMedia(s.DB, s.Vault, mediaID, path)
 	merged := docparse.MergeDocumentMetaJSON(metaJSON.String, docMeta)
 	title := docparse.PickDocumentTitle(path, docMeta.Title)
 	_, _ = s.DB.Exec(`

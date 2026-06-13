@@ -29,6 +29,8 @@ type Config struct {
 	PowerPlayer PowerPlayerWebConfig `yaml:"powerplayer"`
 	// Playback selects web player priority (see api/handler play.HLSInfo player_engine_order).
 	Playback PlaybackConfig `yaml:"playback"`
+	// EncryptedAssets configures Knox 9527 envelope encryption at rest for library ingest.
+	EncryptedAssets EncryptedAssetsConfig `yaml:"encrypted_assets"`
 }
 
 // PlaybackConfig controls browser player engine order in the playback plan JSON.
@@ -52,6 +54,69 @@ type PowerPlayerWebConfig struct {
 	WebURLParam      string `yaml:"weburlparam"`
 	StatisticsServer string `yaml:"statistics_server"`
 	ClientCert       string `yaml:"client_cert"`
+}
+
+// EncryptedAssetsConfig controls Knox 9527 envelope encryption at library ingest.
+type EncryptedAssetsConfig struct {
+	// Enabled is the global master switch; per-library encrypted_assets_enabled must also be on.
+	Enabled *bool `yaml:"enabled"`
+	// KEKSaltPath stores argon2 salt for KEK derivation (default: {data.dir}/kek.salt).
+	KEKSaltPath string `yaml:"kek_salt_path"`
+	// CleanupPlaintextDefault sets default for new libraries when cleanup column is unset.
+	CleanupPlaintextDefault *bool `yaml:"cleanup_plaintext_default"`
+}
+
+func (c *Config) EncryptedAssetsEnabled() bool {
+	if c == nil || c.EncryptedAssets.Enabled == nil {
+		return true
+	}
+	return *c.EncryptedAssets.Enabled
+}
+
+func (c *Config) EncryptedAssetsCleanupDefault() bool {
+	if c == nil || c.EncryptedAssets.CleanupPlaintextDefault == nil {
+		return false
+	}
+	return *c.EncryptedAssets.CleanupPlaintextDefault
+}
+
+func (c *Config) DataEncryptedDotDir() string {
+	if c == nil {
+		return "./data/.encrypted"
+	}
+	dir := strings.TrimSpace(c.Data.Dir)
+	if dir == "" {
+		dir = "./data"
+	}
+	return filepath.Join(dir, ".encrypted")
+}
+
+func (c *Config) EncryptedAssetsStoragePath() string {
+	if c == nil {
+		return "./data/encrypted"
+	}
+	if p := strings.TrimSpace(c.Data.Encrypted); p != "" {
+		return p
+	}
+	dir := strings.TrimSpace(c.Data.Dir)
+	if dir == "" {
+		dir = "./data"
+	}
+	return filepath.Join(dir, "encrypted")
+}
+
+func (c *Config) EncryptedAssetsKEKSaltPath() string {
+	if c == nil {
+		return ""
+	}
+	if p := strings.TrimSpace(c.EncryptedAssets.KEKSaltPath); p != "" {
+		return p
+	}
+	dir := strings.TrimSpace(c.Data.Dir)
+	if dir == "" {
+		dir = "./data"
+	}
+	return filepath.Join(dir, "kek.salt")
 }
 
 // ScanConfig tunes library scan performance (ffprobe / optional file hashing).
@@ -87,6 +152,8 @@ type DataConfig struct {
 	MetadataLibrary string `yaml:"metadata_library"`
 	// Static is the filesystem root for HTTP path /static/ (e.g. PowerPlayer assets under static/powerplayer6/).
 	Static string `yaml:"static"`
+	// Encrypted is the root for Knox 9527 .enc assets (default: {dir}/encrypted).
+	Encrypted string `yaml:"encrypted"`
 }
 
 // SubtitleProcessing configures post-processing (sidecar scan, embedded extract, optional ASR).
@@ -494,7 +561,7 @@ func (c *Config) Addr() string {
 }
 
 func (c *Config) EnsureDirs() error {
-	for _, d := range []string{c.Data.Dir, c.Data.Transcode, c.Data.Preview, filepath.Join(c.Data.Preview, "photos"), c.Data.Subtitle, c.Data.Upload, c.Data.Chunks, c.Data.ATracks, c.Data.Keyframes, c.Data.Static, c.Data.MetadataLibrary} {
+	for _, d := range []string{c.Data.Dir, c.Data.Transcode, c.Data.Preview, filepath.Join(c.Data.Preview, "photos"), c.Data.Subtitle, c.Data.Upload, c.Data.Chunks, c.Data.ATracks, c.Data.Keyframes, c.Data.Static, c.Data.MetadataLibrary, c.EncryptedAssetsStoragePath(), c.DataEncryptedDotDir()} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return err
 		}
@@ -531,6 +598,8 @@ func (c *Config) ResolveDataPaths(baseDir string) {
 	c.Data.Keyframes = resolveMaybeRelativePath(c.Data.Keyframes, baseDir)
 	c.Data.Static = resolveMaybeRelativePath(c.Data.Static, baseDir)
 	c.Data.MetadataLibrary = resolveMaybeRelativePath(c.Data.MetadataLibrary, baseDir)
+	c.Data.Encrypted = resolveMaybeRelativePath(c.Data.Encrypted, baseDir)
+	c.EncryptedAssets.KEKSaltPath = resolveMaybeRelativePath(c.EncryptedAssets.KEKSaltPath, baseDir)
 }
 
 func resolveMaybeRelativePath(p string, baseDir string) string {

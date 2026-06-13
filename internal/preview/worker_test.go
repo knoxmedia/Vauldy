@@ -139,7 +139,7 @@ func TestEnsureReadyReturnsExistingTask(t *testing.T) {
 		t.Fatalf("insert preview task: %v", err)
 	}
 
-	w := NewWorker(db, "ffmpeg", dir)
+	w := NewWorker(db, nil, "ffmpeg", dir)
 	info, err := w.Ensure(context.Background(), 1, "video.mp4", 120)
 	if err != nil {
 		t.Fatalf("Ensure error: %v", err)
@@ -168,7 +168,7 @@ func TestEnsureCreatesWaitingTaskAndCalculatesBounds(t *testing.T) {
 	}
 
 	db := newTestDB(t)
-	w := NewWorker(db, "ffmpeg", t.TempDir())
+	w := NewWorker(db, nil, "ffmpeg", t.TempDir())
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -243,7 +243,7 @@ func TestRunSuccessUpdatesReadyAndWritesFiles(t *testing.T) {
 
 	previewDir := t.TempDir()
 	ffmpegPath := writeFakeFFmpeg(t, t.TempDir(), true)
-	w := NewWorker(db, ffmpegPath, previewDir)
+	w := NewWorker(db, nil, ffmpegPath, previewDir)
 
 	err = w.run(context.Background(), 201, "input.mp4", 25, 10, 3)
 	if err != nil {
@@ -288,7 +288,7 @@ func TestRunFailUpdatesFailedStatus(t *testing.T) {
 
 	previewDir := t.TempDir()
 	ffmpegPath := writeFakeFFmpeg(t, t.TempDir(), false)
-	w := NewWorker(db, ffmpegPath, previewDir)
+	w := NewWorker(db, nil, ffmpegPath, previewDir)
 
 	err = w.run(context.Background(), 202, "input.mp4", 30, 10, 3)
 	if err == nil {
@@ -345,7 +345,7 @@ func TestStartOnceSameMediaIDRunsOnlyOneWorker(t *testing.T) {
 
 	counterFile := filepath.Join(t.TempDir(), "ffmpeg-count.txt")
 	ffmpegPath := writeCountingFFmpeg(t, t.TempDir(), counterFile)
-	w := NewWorker(db, ffmpegPath, t.TempDir())
+	w := NewWorker(db, nil, ffmpegPath, t.TempDir())
 
 	ctx := context.Background()
 	w.startOnce(ctx, 203, "input.mp4", 25, 10, 3)
@@ -386,7 +386,7 @@ func TestStartOnceDifferentMediaIDCanRunConcurrently(t *testing.T) {
 
 	counterFile := filepath.Join(t.TempDir(), "ffmpeg-count-all.txt")
 	ffmpegPath := writeCountingFFmpeg(t, t.TempDir(), counterFile)
-	w := NewWorker(db, ffmpegPath, t.TempDir())
+	w := NewWorker(db, nil, ffmpegPath, t.TempDir())
 
 	ctx := context.Background()
 	w.startOnce(ctx, 204, "input-a.mp4", 25, 10, 3)
