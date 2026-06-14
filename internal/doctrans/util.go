@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"syscall"
 
 	"knox-media/internal/config"
 )
@@ -98,13 +97,7 @@ func prepareLibreOfficeCmd(cmd *exec.Cmd, sofficePath string) {
 	env = append(env, "UNO_PATH="+programDir)
 	env = prependPathEnv(env, libreOfficePathDirs(programDir)...)
 	cmd.Env = env
-
-	if runtime.GOOS == "windows" {
-		cmd.SysProcAttr = &syscall.SysProcAttr{
-			HideWindow:    true,
-			CreationFlags: 0x08000000, // CREATE_NO_WINDOW
-		}
-	}
+	setHideWindow(cmd)
 }
 
 func libreOfficePathDirs(programDir string) []string {

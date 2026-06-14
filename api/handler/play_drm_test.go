@@ -558,6 +558,69 @@ func contains(s, sub string) bool {
 	return len(sub) == 0 || (len(s) >= len(sub) && indexOf(s, sub) >= 0)
 }
 
+func TestHLSInfoStreamDRMReturnsJITSession(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	base := t.TempDir()
+
+	dbPath := filepath.Join(base, "play-stream-drm-jit.sqlite")
+	db, err := store.OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	if _, err := db.Exec(`INSERT INTO library (id, name, type, path, drm_enabled, encryption_mode) VALUES (1, 'lib', 'movie', ?, 1, 'standard')`, base); err != nil {
+		t.Fatalf("insert library: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO media (id, library_id, file_id, file_path, meta_json, height, width, duration) VALUES (1, 1, 'f-1', ?, '{"format":{"format_name":"mov,mp4,m4a"},"streams":[{"codec_type":"video","codec_name":"h264"},{"codec_type":"audio","codec_name":"aac"}]}', 1080, 1920, 120)`, filepath.Join(base, "a.mp4")); err != nil {
+		t.Fatalf("insert media: %v", err)
+	}
+
+	sm, err := session.NewManager("ffmpeg", "ffprobe", base, nil, nil)
+	if err != nil {
+		t.Fatalf("create session manager: %v", err)
+	}
+	cfg := &config.Config{}
+	cfg.Data.Dir = base
+	h := &Handler{
+		App:            &app.App{DB: db, Config: cfg},
+		SessionManager: sm,
+		runningScans:   map[int64]scanRuntime{},
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/media/1/hls?video_codecs=h264&audio_codecs=aac&max_height=1080", nil)
+	req.Host = "example.com"
+	c.Request = req
+	c.Params = gin.Params{{Key: "id", Value: "1"}}
+
+	h.HLSInfo(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !containsAll(body,
+		`"mode":"hls_aes_128"`,
+		`"stream_drm":true`,
+		`"session_id":"jit-`,
+		`/api/v1/jit/session/`,
+		`/master.m3u8`,
+	) {
+		t.Fatalf("unexpected stream drm jit plan: %s", body)
+	}
+	if contains(body, `/api/v1/media/1/hls/master.m3u8`) {
+		t.Fatalf("expected jit master not batch package path: %s", body)
+	}
+	var keyCount int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM drm_key_material WHERE media_id = 1 AND mode = 'stream_jit_aes128'`).Scan(&keyCount); err != nil {
+		t.Fatalf("query drm_key_material: %v", err)
+	}
+	if keyCount != 1 {
+		t.Fatalf("expected stream jit key material persisted, got %d", keyCount)
+	}
+}
+
 func indexOf(s, sub string) int {
 	for i := 0; i+len(sub) <= len(s); i++ {
 		if s[i:i+len(sub)] == sub {

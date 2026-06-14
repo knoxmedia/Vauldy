@@ -2,10 +2,12 @@
 *.exe
 *.db
 *.7z
+bin/
 **/__pycache__/
 *.pyc
 web/node_modules/
 web/dist/
+internal/webembed/dist/
 tools/doctran/LibreOfficePortable/
 tools/doctran/fixtures/
 

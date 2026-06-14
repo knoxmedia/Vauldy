@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const powerDRMIV = "0x00000000000000000000000000000000"
+const PowerDRMIV = "0x00000000000000000000000000000000"
 
 func rewriteManifestsToPowerDRM(outDir string, kid string) error {
 	kid = strings.TrimSpace(kid)
@@ -56,7 +56,7 @@ func rewriteVariantToPowerDRM(playlistPath string, kid string) error {
 	if err != nil {
 		return err
 	}
-	tag := fmt.Sprintf(`#EXT-X-KEY:METHOD=AES-128,URI="skd://%s",KEYFORMAT="powerdrm",IV=%s`, kid, powerDRMIV)
+	tag := fmt.Sprintf(`#EXT-X-KEY:METHOD=AES-128,URI="skd://%s",KEYFORMAT="powerdrm",IV=%s`, kid, PowerDRMIV)
 	lines := strings.Split(string(raw), "\n")
 	out := make([]string, 0, len(lines)+1)
 	inserted := false

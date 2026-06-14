@@ -169,8 +169,8 @@ func copyFile(src, dst string) error {
 	return out.Close()
 }
 
-// EnqueueForMedia creates a stream-encryption package task for play-time use (drm_enabled libraries).
-// Ingest/upload must not call this; use only from playback planning when drm_enabled is on.
+// EnqueueForMedia creates a batch stream-encryption package task (legacy / repair).
+// drm_enabled libraries use play-time encrypted JIT from HLSInfo instead of this path.
 func (w *PackageWorker) EnqueueForMedia(mediaID int64) (int64, error) {
 	if w == nil || w.DB == nil || mediaID <= 0 {
 		return 0, nil
@@ -297,7 +297,7 @@ func (w *PackageWorker) RunTask(ctx context.Context, taskID int64) error {
 		fileKey = strconv.FormatInt(mediaID, 10)
 	}
 	outDir := w.encryptedOutputDir(sourcePath.String, fileKey, profileKey)
-	kidHex, keyHex, err := generateDRMMaterial()
+	kidHex, keyHex, err := GenerateDRMMaterial()
 	if err != nil {
 		_, _ = w.DB.Exec(`UPDATE package_task SET status='failed', progress=0, drm_status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE id = ?`, trimErrorMessage(err.Error()), taskID)
 		return err
@@ -613,7 +613,7 @@ func (w *PackageWorker) encryptedOutputDir(sourcePath, fileKey, profileKey strin
 	return filepath.Join(w.TranscodeDir, "drm", fileKey, profileKey)
 }
 
-func generateDRMMaterial() (kidHex string, keyHex string, err error) {
+func GenerateDRMMaterial() (kidHex string, keyHex string, err error) {
 	kid := make([]byte, 16)
 	key := make([]byte, 16)
 	if _, err := rand.Read(kid); err != nil {

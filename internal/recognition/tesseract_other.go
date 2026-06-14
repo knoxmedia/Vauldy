@@ -2,7 +2,10 @@
 
 package recognition
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+)
 
 func installTesseractWindows(ctx context.Context, destDir string) (string, string, error) {
 	_ = ctx

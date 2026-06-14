@@ -503,33 +503,64 @@ func (h *Handler) HLSInfo(c *gin.Context) {
 			}))
 			return
 		}
-		if h.PackageWorker != nil {
-			go func(mid int64) {
-				_, _ = h.PackageWorker.EnqueueForMedia(mid)
-			}(id)
-		}
-		planMode := pol.PlaybackPlanMode()
-		payload := gin.H{
-			"mode":            planMode,
-			"hls_master":      fmt.Sprintf("%s/api/v1/media/%s/hls/master.m3u8", base, c.Param("id")),
-			"status":          "processing",
-			"fallback":        playURL,
-			"stream_drm":      true,
-			"encryption_mode": pol.EncryptionMode,
-			"message":         "Real-time stream encryption at playback",
-		}
-		switch planMode {
-		case "hls_powerdrm":
-			payload["drm"] = gin.H{"powerdrm_key_url": powerDRMKeyURL}
-		case "hls_drm":
-			payload["drm"] = gin.H{
-				"widevine_license_url": widevineURL,
-				"powerdrm_key_url":     powerDRMKeyURL,
-				"fairplay_cert_url":    fairplayCertURL,
-				"fairplay_license_url": fairplayLicenseURL,
+		if h.SessionManager != nil && fileID.Valid && strings.TrimSpace(fileID.String) != "" && filePath.Valid && strings.TrimSpace(filePath.String) != "" {
+			media := detectMediaProfile(metaJSON.String)
+			bitrate := pickBitrate(media, int(srcWidth.Int64), int(srcHeight.Int64))
+			resolution := resolutionForBitrate(bitrate)
+			s, err := h.SessionManager.CreateSession(id, fileID.String, filePath.String, bitrate, resolution, float64(srcDuration.Int64))
+			if err == nil {
+				if streamEnc, encErr := h.ensureStreamJITEncryption(id, pol, s.TempDir); encErr == nil {
+					s.StreamEncryption = streamEnc
+				} else {
+					log.Printf("stream jit encryption setup failed media=%d: %v", id, encErr)
+					h.SessionManager.CancelSession(s.ID)
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "stream encryption setup failed"})
+					return
+				}
+				masterBase := fmt.Sprintf("%s/api/v1/jit/session/%s/master.m3u8", base, s.ID)
+				mq := url.Values{}
+				mq.Set("media_id", strconv.FormatInt(id, 10))
+				if accessToken != "" {
+					mq.Set("access_token", accessToken)
+				}
+				hlsMaster := masterBase + "?" + mq.Encode()
+				planMode := pol.PlaybackPlanMode()
+				payload := gin.H{
+					"mode":            planMode,
+					"hls_master":      hlsMaster,
+					"status":          "processing",
+					"fallback":        playURL,
+					"stream_drm":      true,
+					"encryption_mode": pol.EncryptionMode,
+					"session_id":      s.ID,
+					"message":         "Real-time stream encryption at playback (JIT)",
+				}
+				switch planMode {
+				case "hls_powerdrm":
+					payload["drm"] = gin.H{"powerdrm_key_url": powerDRMKeyURL}
+				case "hls_drm":
+					widevineTransport := "json_local"
+					if h.App != nil && h.App.Config != nil && strings.TrimSpace(h.App.Config.DRM.Widevine.PrivateModuleURL) != "" {
+						widevineTransport = "raw"
+					}
+					drmPayload := gin.H{
+						"widevine_license_url": widevineURL,
+						"widevine_transport":   widevineTransport,
+						"powerdrm_key_url":     powerDRMKeyURL,
+						"fairplay_cert_url":    fairplayCertURL,
+						"fairplay_license_url": fairplayLicenseURL,
+					}
+					if widevineServiceCertURL != "" {
+						drmPayload["widevine_service_cert_url"] = widevineServiceCertURL
+					}
+					payload["drm"] = drmPayload
+				}
+				c.JSON(http.StatusOK, h.withPlaybackPlanForMode(planMode, payload))
+				return
 			}
+			log.Printf("stream drm jit session create failed media=%d: %v", id, err)
 		}
-		c.JSON(http.StatusOK, h.withPlaybackPlanForMode(planMode, payload))
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "stream encryption playback unavailable"})
 		return
 	}
 

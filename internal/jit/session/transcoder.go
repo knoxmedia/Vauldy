@@ -109,21 +109,43 @@ func (s *Session) runTranscode(cfg TranscodeConfig) error {
 	// FFmpeg on Windows accepts forward slashes; segment_write_temp writes each .ts via a temp name then renames.
 	segPattern := filepath.ToSlash(filepath.Join(s.TempDir, "%d.ts"))
 
-	args = append(args,
-		"-max_delay", "5000000",
-		"-avoid_negative_ts", "disabled",
-		"-f", "segment",
-		"-segment_format", "mpegts",
-		"-segment_list", filepath.ToSlash(m3u8Path),
-		"-segment_list_type", "m3u8",
-		"-segment_time", fmt.Sprintf("%.3f", segDuration),
-		"-segment_start_number", strconv.Itoa(startSeg),
-		"-individual_header_trailer", "0",
-		"-write_header_trailer", "0",
-		"-segment_write_temp", "1",
-		"-y",
-		segPattern,
-	)
+	if s.StreamEncryption != nil && strings.TrimSpace(s.StreamEncryption.KeyInfoPath) != "" {
+		hlsArgs := []string{
+			"-max_delay", "5000000",
+			"-avoid_negative_ts", "disabled",
+			"-hls_key_info_file", filepath.ToSlash(s.StreamEncryption.KeyInfoPath),
+			"-f", "hls",
+			"-hls_time", fmt.Sprintf("%.3f", segDuration),
+			"-hls_list_size", "0",
+			"-hls_flags", "append_list+omit_endlist+temp_file",
+		}
+		if startSeg > 0 {
+			// HLS muxer exposes this as -start_number (not -hls_start_number) on common FFmpeg builds.
+			hlsArgs = append(hlsArgs, "-start_number", strconv.Itoa(startSeg))
+		}
+		hlsArgs = append(hlsArgs,
+			"-hls_segment_filename", segPattern,
+			"-y",
+			filepath.ToSlash(m3u8Path),
+		)
+		args = append(args, hlsArgs...)
+	} else {
+		args = append(args,
+			"-max_delay", "5000000",
+			"-avoid_negative_ts", "disabled",
+			"-f", "segment",
+			"-segment_format", "mpegts",
+			"-segment_list", filepath.ToSlash(m3u8Path),
+			"-segment_list_type", "m3u8",
+			"-segment_time", fmt.Sprintf("%.3f", segDuration),
+			"-segment_start_number", strconv.Itoa(startSeg),
+			"-individual_header_trailer", "0",
+			"-write_header_trailer", "0",
+			"-segment_write_temp", "1",
+			"-y",
+			segPattern,
+		)
+	}
 
 	logger.Info("starting session ffmpeg", zap.String("args", strings.Join(args, " ")))
 

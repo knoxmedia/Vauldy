@@ -93,6 +93,8 @@ type PlaybackPlan = {
   status?: string;
   task_id?: number;
   fallback?: string;
+  /** Transport stream real-time encryption (library drm_enabled): play-time JIT, not batch package wait. */
+  stream_drm?: boolean;
   player_engine_order?: string[];
   powerplayer?: PowerPlayerPlanFields;
   drm?: {
@@ -1495,14 +1497,20 @@ export default function PlayerPage() {
         plan.mode === "hls_powerdrm" ||
         plan.mode === "jit_hls"
       ) {
-        // JIT HLS: scheduler serves master playlist; per-segment transcode on the fly.
-        if (plan.mode === "jit_hls" && plan.hls_master) {
+        // JIT HLS (clear or stream DRM): scheduler serves master playlist; per-segment transcode on the fly.
+        if (
+          (plan.mode === "jit_hls" || plan.stream_drm) &&
+          plan.hls_master
+        ) {
           if (isStale()) return;
           const sid = typeof plan.session_id === "string" ? plan.session_id.trim() : "";
           jitPlaybackSessionIdRef.current = sid || null;
           setLoadingText(t("pages.player.connecting_jit"));
           const preview = await fetchPreviewPlan();
+          const drmPayload =
+            plan.mode === "hls_drm" || plan.mode === "hls_powerdrm" ? plan.drm : undefined;
           await playWithURL(appendToken(plan.hls_master), preview, {
+            drm: drmPayload,
             engineOrder: coalesceEngineOrder(plan),
             planMode: plan.mode,
             powerPlayerCfg: plan.powerplayer,

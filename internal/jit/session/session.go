@@ -77,6 +77,8 @@ type Session struct {
 	Cmd    *exec.Cmd
 	ctx    context.Context
 
+	StreamEncryption *StreamEncryption
+
 	Mu    sync.Mutex
 	runMu sync.Mutex // one runTranscode at a time per session (avoids overlapping ffmpeg)
 	done  chan struct{}

@@ -512,16 +512,10 @@ func (h *Handler) HLSAES128Key(c *gin.Context) {
 	if !h.requireDRMMediaAccess(c, mediaID, "hls_aes_128") {
 		return
 	}
-	var status, pipeline sql.NullString
-	var dbKid, keyHex sql.NullString
+	var dbKid, keyHex, dbMode sql.NullString
 	err := h.App.DB.QueryRow(`
-		SELECT pt.status, pt.pipeline_type, km.kid, km.key_hex
-		FROM package_task pt
-		LEFT JOIN drm_key_material km ON km.media_id = pt.media_id
-		WHERE pt.media_id = ?
-		ORDER BY pt.id DESC
-		LIMIT 1
-	`, mediaID).Scan(&status, &pipeline, &dbKid, &keyHex)
+		SELECT kid, key_hex, mode FROM drm_key_material WHERE media_id = ? LIMIT 1
+	`, mediaID).Scan(&dbKid, &keyHex, &dbMode)
 	if err == sql.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": "key not found"})
 		return
@@ -530,9 +524,21 @@ func (h *Handler) HLSAES128Key(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	if status.String != "done" || pipeline.String != "hls_aes_128" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "invalid package status"})
+	if dbMode.String != streamJITKeyMode && dbMode.String != "hls_aes_128" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "invalid key mode"})
 		return
+	}
+	if dbMode.String != streamJITKeyMode {
+		var status, pipeline sql.NullString
+		_ = h.App.DB.QueryRow(`
+			SELECT status, pipeline_type FROM package_task
+			WHERE media_id = ? AND pipeline_type = 'hls_aes_128'
+			ORDER BY id DESC LIMIT 1
+		`, mediaID).Scan(&status, &pipeline)
+		if status.String != "done" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "invalid package status"})
+			return
+		}
 	}
 	if !strings.EqualFold(strings.TrimSpace(dbKid.String), kid) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "kid mismatch"})

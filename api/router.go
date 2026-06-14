@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -36,8 +35,8 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 	r.Use(middleware.CORS(cfg.CORS.AllowOrigins))
 	r.Static("/uploads", cfg.Data.Upload)
 	r.Static("/atracks", cfg.Data.ATracks)
-	webDist := resolveWebDist()
-	mountStaticRoutes(r, cfg.Data.Static, bundledPowerPlayerDir(webDist))
+	webBundle := resolveWebBundle()
+	mountStaticRoutes(r, cfg.Data.Static, resolvePowerPlayerStatic(webBundle))
 	r.Static(metadatalib.PublicURLPrefix, cfg.Data.MetadataLibrary)
 
 	keyVault, assetEnc := storage.NewAssetEncryptorFromConfig(cfg, application.DB)
@@ -308,16 +307,7 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 		}
 	}
 
-	if webDist != "" {
-		r.Static("/assets", webDist+"/assets")
-		r.NoRoute(func(c *gin.Context) {
-			if strings.HasPrefix(c.Request.URL.Path, "/api/") {
-				c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
-				return
-			}
-			c.File(webDist + "/index.html")
-		})
-	}
+	mountWebFrontend(r, webBundle)
 
 	return r
 }

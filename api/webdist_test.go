@@ -5,21 +5,30 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"testing/fstest"
 
 	"github.com/gin-gonic/gin"
 )
 
-func TestBundledPowerPlayerDir(t *testing.T) {
+func TestResolvePowerPlayerStaticDisk(t *testing.T) {
 	dir := t.TempDir()
 	pp := filepath.Join(dir, "static", "powerplayer6")
 	if err := os.MkdirAll(pp, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if got := bundledPowerPlayerDir(dir); got != pp {
-		t.Fatalf("got %q want %q", got, pp)
+	got := resolvePowerPlayerStatic(webBundle{diskRoot: dir})
+	if got.diskDir != pp {
+		t.Fatalf("got %q want %q", got.diskDir, pp)
 	}
-	if got := bundledPowerPlayerDir(""); got != "" {
-		t.Fatalf("empty webDist should return empty, got %q", got)
+}
+
+func TestResolvePowerPlayerStaticEmbed(t *testing.T) {
+	fsys := fstest.MapFS{
+		"static/powerplayer6/powerplayer.min.js": {Data: []byte("js")},
+	}
+	got := resolvePowerPlayerStatic(webBundle{embedFS: fsys})
+	if got.embedFS == nil {
+		t.Fatal("expected embedded powerplayer fs")
 	}
 }
 
@@ -42,7 +51,7 @@ func TestMountStaticRoutesBundledPowerPlayer(t *testing.T) {
 	}
 
 	r := gin.New()
-	mountStaticRoutes(r, dataStatic, bundled)
+	mountStaticRoutes(r, dataStatic, powerPlayerStatic{diskDir: bundled})
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/static/powerplayer6/powerplayer.min.js", nil)
@@ -57,6 +66,31 @@ func TestMountStaticRoutesBundledPowerPlayer(t *testing.T) {
 	r.ServeHTTP(w2, req2)
 	if w2.Code != 200 || w2.Body.String() != "ok" {
 		t.Fatalf("data static response: code=%d body=%q", w2.Code, w2.Body.String())
+	}
+}
+
+func TestMountWebFrontendEmbed(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	fsys := fstest.MapFS{
+		"index.html":              {Data: []byte("<html>ok</html>")},
+		"assets/app.js":           {Data: []byte("console.log(1)")},
+		"static/powerplayer6/x.js": {Data: []byte("x")},
+	}
+	r := gin.New()
+	mountWebFrontend(r, webBundle{embedFS: fsys})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/assets/app.js", nil)
+	r.ServeHTTP(w, req)
+	if w.Code != 200 || w.Body.String() != "console.log(1)" {
+		t.Fatalf("assets: code=%d body=%q", w.Code, w.Body.String())
+	}
+
+	w2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest("GET", "/settings", nil)
+	r.ServeHTTP(w2, req2)
+	if w2.Code != 200 || w2.Body.String() != "<html>ok</html>" {
+		t.Fatalf("spa fallback: code=%d body=%q", w2.Code, w2.Body.String())
 	}
 }
 

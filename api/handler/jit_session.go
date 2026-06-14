@@ -142,6 +142,14 @@ func (h *Handler) tryReviveJITSession(c *gin.Context, sessionID, asset string) (
 		log.Printf("jit revive session %s: %v", sessionID, err)
 		return nil, false
 	}
+	if s.StreamEncryption == nil {
+		pol := h.loadStreamPolicy(mediaID)
+		if pol.DRMEnabled {
+			if streamEnc, encErr := h.ensureStreamJITEncryption(mediaID, pol, s.TempDir); encErr == nil {
+				s.StreamEncryption = streamEnc
+			}
+		}
+	}
 	isMaster := asset == "/master.m3u8" || strings.TrimPrefix(asset, "/") == "master.m3u8"
 	if isMaster {
 		return s, true
@@ -440,6 +448,9 @@ func (h *Handler) generateMasterM3U8(s *session.Session, c *gin.Context) string 
 	var sb strings.Builder
 	sb.WriteString("#EXTM3U\n")
 	sb.WriteString("#EXT-X-VERSION:3\n")
+	if keyLine := h.streamDRMPlaylistKeyLine(base, s, c); keyLine != "" {
+		sb.WriteString(keyLine + "\n")
+	}
 	sb.WriteString(fmt.Sprintf("#EXT-X-TARGETDURATION:%d\n", int(segDuration)+1))
 	sb.WriteString(fmt.Sprintf("#EXT-X-MEDIA-SEQUENCE:%d\n", s.StartSeg))
 	// For seek: the playlist is not truly VOD since we exclude earlier segments.

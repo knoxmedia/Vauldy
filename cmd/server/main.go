@@ -50,7 +50,11 @@ func main() {
 	zlog := zapglobal.MustReplaceGlobals()
 	defer func() { _ = zlog.Sync() }()
 
-	cfgPath := resolveConfigPath()
+	cfgPath := config.ResolveConfigPath()
+	cfgPath, err := config.EnsureConfigFile(cfgPath)
+	if err != nil {
+		log.Fatalf("config bootstrap: %v", err)
+	}
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		log.Fatalf("config: %v", err)
@@ -265,7 +269,6 @@ func seedUsers(db *sql.DB) error {
 	return nil
 }
 
-// resolveConfigPath finds config.yml when cwd is the repo root (e.g. VS Code debug) or media/.
 // instantMaxConcurrent picks how many ffmpeg children the embedded JIT transcode worker may run
 // in parallel. Default = max(2, NumCPU/2) so single-quality user requests never sit behind
 // prefetch tasks. Override with KNOX_MEDIA_JIT_MAX_CONCURRENT.
@@ -283,32 +286,6 @@ func instantMaxConcurrent() int {
 		n = 8
 	}
 	return n
-}
-
-func resolveConfigPath() string {
-	if p := os.Getenv("KNOX_MEDIA_CONFIG"); p != "" {
-		return p
-	}
-	candidates := []string{
-		"config.yml",
-		filepath.Join("media", "config.yml"),
-	}
-	for _, c := range candidates {
-		if _, err := os.Stat(c); err == nil {
-			if p, err := filepath.Abs(c); err == nil {
-				return p
-			}
-			return c
-		}
-	}
-	if exe, err := os.Executable(); err == nil {
-		dir := filepath.Dir(exe)
-		next := filepath.Join(dir, "config.yml")
-		if _, err := os.Stat(next); err == nil {
-			return next
-		}
-	}
-	return "config.yml"
 }
 
 func enqueueAutoTasksOnMediaAdded(db *sql.DB, vault *keystore.Vault, cfg *config.Config, assetEnc *storage.AssetEncryptor, derivedStore *storage.DerivedAssetStore, previewWorker *preview.Worker, dcw *doccover.Worker, subSvc *subtitle.Service, atw *atrack.Worker, kfw *keyframe.Worker, lw *lyrictask.Worker, pcw *photoclass.Worker, pfw *photoface.Worker, mediaID int64, fileType string) {
