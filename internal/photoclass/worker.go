@@ -164,7 +164,7 @@ func (w *Worker) Process(ctx context.Context, mediaID int64) error {
 	photoCache := filepath.Join(w.PreviewDir, "photos")
 	thumbPath := imagethumb.ExpectedPaths(photoCache, mediaID).Thumb
 	if w.FFmpegPath != "" && strings.TrimSpace(filePath.String) != "" {
-		if _, err := imagethumb.Ensure(context.Background(), w.DB, w.Vault, w.FFmpegPath, filePath.String, photoCache, mediaID); err == nil {
+		if _, err := imagethumb.Ensure(context.Background(), w.DB, w.Vault, nil, w.FFmpegPath, filePath.String, photoCache, mediaID); err == nil {
 			thumbPath = imagethumb.ExpectedPaths(photoCache, mediaID).Thumb
 		}
 	}

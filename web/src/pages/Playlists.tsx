@@ -17,6 +17,7 @@ import {
   Playlist,
   PlaylistItem,
   deletePlaylist,
+  derivedVideoPosterSrc,
   fetchPlaylist,
   fetchPlaylists,
   mediaPosterSrc,
@@ -345,7 +346,7 @@ export default function PlaylistsPage() {
   function playlistCoverSrc(pl: Playlist): string {
     if (pl.poster_url) return pl.poster_url;
     if (pl.square_art_url) return pl.square_art_url;
-    if (pl.first_media_id) return `/uploads/posters/${pl.first_media_id}.jpg`;
+    if (pl.first_media_id) return derivedVideoPosterSrc(pl.first_media_id);
     return "";
   }
 

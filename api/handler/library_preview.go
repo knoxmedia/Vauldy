@@ -16,6 +16,7 @@ import (
 	"sync"
 
 	"knox-media/internal/metadatalib"
+	"knox-media/internal/storage"
 )
 
 const (
@@ -151,6 +152,12 @@ func (h *Handler) resolvePosterFilePath(mediaID int64, posterURL string) string 
 
 	if posterURL != "" {
 		switch {
+		case strings.HasPrefix(posterURL, "/api/v1/media/") && strings.HasSuffix(posterURL, "/poster.jpg"):
+			if enc, ok := storage.LookupEncPath(h.App.DB, mediaID, "poster", "poster.jpg"); ok {
+				if p := try(enc); p != "" {
+					return p
+				}
+			}
 		case strings.HasPrefix(posterURL, "/uploads/") && uploadDir != "":
 			if p := try(filepath.Join(uploadDir, filepath.FromSlash(strings.TrimPrefix(posterURL, "/uploads/")))); p != "" {
 				return p
@@ -163,11 +170,33 @@ func (h *Handler) resolvePosterFilePath(mediaID int64, posterURL string) string 
 		}
 	}
 	if uploadDir != "" {
+		if enc, ok := storage.LookupEncPath(h.App.DB, mediaID, "poster", "poster.jpg"); ok {
+			if p := try(enc); p != "" {
+				return p
+			}
+		}
 		if p := try(filepath.Join(uploadDir, "posters", fmt.Sprintf("%d.jpg", mediaID))); p != "" {
 			return p
 		}
 	}
 	return ""
+}
+
+func (h *Handler) loadPosterImageForCompose(mediaID int64, posterURL string) (image.Image, error) {
+	if enc, ok := storage.LookupEncPath(h.App.DB, mediaID, "poster", "poster.jpg"); ok {
+		seeker, err := storage.OpenDerivedSeeker(h.App.DB, h.KeyVault, mediaID, enc)
+		if err != nil {
+			return nil, err
+		}
+		defer seeker.Close()
+		img, _, err := image.Decode(seeker)
+		return img, err
+	}
+	path := h.resolvePosterFilePath(mediaID, posterURL)
+	if path == "" {
+		return nil, os.ErrNotExist
+	}
+	return loadImageFile(path)
 }
 
 func composeLibraryPreviewImage(h *Handler, sources []libraryPreviewSource, outFile string) error {
@@ -186,12 +215,9 @@ func composeLibraryPreviewImage(h *Handler, sources []libraryPreviewSource, outF
 		}
 		rect := image.Rect(x0, 0, x1, libraryPreviewMainH)
 		if i < len(sources) {
-			path := h.resolvePosterFilePath(sources[i].mediaID, sources[i].posterURL)
-			if path != "" {
-				if img, err := loadImageFile(path); err == nil {
-					drawCover(canvas, img, rect)
-					continue
-				}
+			if img, err := h.loadPosterImageForCompose(sources[i].mediaID, sources[i].posterURL); err == nil {
+				drawCover(canvas, img, rect)
+				continue
 			}
 		}
 		fillPlaceholderSlot(canvas, rect, i)

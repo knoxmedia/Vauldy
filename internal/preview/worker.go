@@ -28,16 +28,18 @@ type Info struct {
 type Worker struct {
 	DB         *sql.DB
 	Vault      *keystore.Vault
+	Derived    *storage.DerivedAssetStore
 	FFmpegPath string
 	PreviewDir string
 	mu         sync.Mutex
 	running    map[int64]bool
 }
 
-func NewWorker(db *sql.DB, vault *keystore.Vault, ffmpegPath, previewDir string) *Worker {
+func NewWorker(db *sql.DB, vault *keystore.Vault, derived *storage.DerivedAssetStore, ffmpegPath, previewDir string) *Worker {
 	return &Worker{
 		DB:         db,
 		Vault:      vault,
+		Derived:    derived,
 		PreviewDir: previewDir,
 		FFmpegPath: ffmpegPath,
 		running:    map[int64]bool{},
@@ -120,17 +122,34 @@ func (w *Worker) run(ctx context.Context, mediaID int64, inputPath string, durat
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return err
 	}
-	spritePath := filepath.Join(outDir, "sprite.jpg")
-	vttPath := filepath.Join(outDir, "thumbs.vtt")
+	spritePlain := filepath.Join(outDir, "sprite.jpg")
+	vttPlain := filepath.Join(outDir, "thumbs.vtt")
 	_, _ = w.DB.Exec(`UPDATE preview_task SET status='running', updated_at=CURRENT_TIMESTAMP WHERE media_id = ?`, mediaID)
-	filter := fmt.Sprintf("fps=1/%d,scale=240:135:force_original_aspect_ratio=decrease,pad=240:135:(ow-iw)/2:(oh-ih)/2,tile=10x10", intervalSec)
-	post := []string{"-vf", filter, "-frames:v", "1", "-q:v", "3", spritePath}
+	filter := fmt.Sprintf("fps=1/%d,scale=240:135,tile=10x10", intervalSec)
+	post := []string{"-vf", filter, "-frames:v", "1", "-q:v", "3", spritePlain}
 	if out, err := storage.RunFFmpeg(ctx, w.DB, w.Vault, w.FFmpegPath, mediaID, inputPath, 0, float64(durationSec), nil, post, ""); err != nil {
 		_, _ = w.DB.Exec(`UPDATE preview_task SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id = ?`, trimErr(string(out), err), mediaID)
 		return err
 	}
+	spritePath := spritePlain
+	if w.Derived != nil {
+		var err error
+		spritePath, err = w.Derived.FinalizePath(ctx, mediaID, "preview_sprite", "sprite.jpg", spritePlain)
+		if err != nil {
+			_, _ = w.DB.Exec(`UPDATE preview_task SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id = ?`, err.Error(), mediaID)
+			return err
+		}
+	}
 	vtt := buildVTT(count, intervalSec, durationSec)
-	if err := os.WriteFile(vttPath, []byte(vtt), 0o644); err != nil {
+	vttPath := vttPlain
+	if w.Derived != nil && storage.NeedsDerivedEncryption(w.DB, mediaID) {
+		var err error
+		vttPath, err = w.Derived.Write(ctx, mediaID, "preview_vtt", "thumbs.vtt", strings.NewReader(vtt))
+		if err != nil {
+			_, _ = w.DB.Exec(`UPDATE preview_task SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id = ?`, err.Error(), mediaID)
+			return err
+		}
+	} else if err := os.WriteFile(vttPlain, []byte(vtt), 0o644); err != nil {
 		_, _ = w.DB.Exec(`UPDATE preview_task SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id = ?`, err.Error(), mediaID)
 		return err
 	}

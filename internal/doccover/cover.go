@@ -21,6 +21,7 @@ const CoverMaxEdge = 480
 type Options struct {
 	DB         *sql.DB
 	Vault      *keystore.Vault
+	Derived    *storage.DerivedAssetStore
 	FFmpegPath string
 	PreviewDir string
 	MediaRoot  string
@@ -117,6 +118,11 @@ func Ensure(ctx context.Context, opts Options, mediaID int64, sourcePath string,
 		return genErr
 	}
 	TouchCoverAfterWrite(outPath, fileMtime)
+	if opts.Derived != nil {
+		if _, err := opts.Derived.FinalizePath(ctx, mediaID, "doc_cover", "cover.jpg", outPath); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

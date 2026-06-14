@@ -74,6 +74,7 @@ func main() {
 
 	application := &app.App{Config: cfg, ConfigPath: cfgPath, DB: db}
 	keyVault, assetEncryptor := storage.NewAssetEncryptorFromConfig(cfg, db)
+	derivedStore := storage.NewDerivedAssetStoreFromConfig(cfg, db, keyVault)
 	worker := transcode.NewWorker(db, cfg.FFmpeg.FFmpegPath, cfg.Data.Transcode)
 	packageWorker := transcode.NewPackageWorker(db, cfg, keyVault)
 	go func() {
@@ -88,14 +89,14 @@ func main() {
 			log.Printf("drm startup self-check complete: scanned=%d fixed=0", scanned)
 		}
 	}()
-	previewWorker := preview.NewWorker(db, keyVault, cfg.FFmpeg.FFmpegPath, cfg.Data.Preview)
+	previewWorker := preview.NewWorker(db, keyVault, derivedStore, cfg.FFmpeg.FFmpegPath, cfg.Data.Preview)
 	ocrScript := strings.TrimSpace(cfg.Subtitle.GraphicalOCR.ScriptPath)
 	if ocrScript == "" {
 		if abs, err := filepath.Abs(filepath.Join(filepath.Dir(cfgPath), "tools", "subtitle_ocr", "bitmap_subtitle_ocr.py")); err == nil {
 			ocrScript = abs
 		}
 	}
-	subSvc := subtitle.NewService(db, keyVault, filepath.Dir(cfgPath), cfg.FFmpeg.FFmpegPath, cfg.FFmpeg.FFprobePath, cfg.Data.Subtitle, subtitle.ASRConfig{
+	subSvc := subtitle.NewService(db, keyVault, derivedStore, filepath.Dir(cfgPath), cfg.FFmpeg.FFmpegPath, cfg.FFmpeg.FFprobePath, cfg.Data.Subtitle, subtitle.ASRConfig{
 		Provider:    cfg.Subtitle.ASR.Provider,
 		WhisperPath: cfg.Subtitle.ASR.WhisperPath,
 		ExtraArgs:   cfg.Subtitle.ASR.ExtraArgs,
@@ -112,10 +113,10 @@ func main() {
 		MkvmergePath:   cfg.Subtitle.GraphicalOCR.MkvmergePath,
 	})
 	up := &upload.Service{UploadDir: cfg.Data.Upload, ChunksDir: cfg.Data.Chunks}
-	atrackWorker := atrack.NewWorker(db, keyVault, cfg.FFmpeg.FFmpegPath, cfg.FFmpeg.FFprobePath, cfg.Data.ATracks)
-	keyframeWorker := keyframe.NewWorker(db, keyVault, cfg.FFmpeg.FFprobePath, cfg.Data.Keyframes)
+	atrackWorker := atrack.NewWorker(db, keyVault, derivedStore, cfg.FFmpeg.FFmpegPath, cfg.FFmpeg.FFprobePath, cfg.Data.ATracks)
+	keyframeWorker := keyframe.NewWorker(db, keyVault, derivedStore, cfg.FFmpeg.FFprobePath, cfg.Data.Keyframes)
 	lyricWorkDir := filepath.Join(cfg.Data.Dir, "lyrics")
-	lyricWorker := lyrictask.NewWorker(db, lyricWorkDir, cfg.FFmpeg.FFprobePath, subSvc)
+	lyricWorker := lyrictask.NewWorker(db, derivedStore, lyricWorkDir, cfg.FFmpeg.FFprobePath, subSvc)
 	photoClassifyWorker := photoclass.NewWorker(db, keyVault, filepath.Dir(cfgPath), cfg.FFmpeg.FFmpegPath, cfg.Data.Preview, func() config.PhotoClassifyConfig {
 		return cfg.PhotoClassify
 	})
@@ -186,6 +187,7 @@ func main() {
 	docCoverWorker := doccover.NewWorker(doccover.WorkerConfig{
 		DB:         db,
 		Vault:      keyVault,
+		Derived:    derivedStore,
 		MediaRoot:  mediaRoot,
 		PreviewDir: cfg.Data.Preview,
 		FFmpegPath: cfg.FFmpeg.FFmpegPath,
@@ -203,7 +205,7 @@ func main() {
 		docCoverWorker.Enqueue(mediaID)
 	}
 	sc.OnMediaAdded = func(mediaID int64, _ string, ft string) {
-		go enqueueAutoTasksOnMediaAdded(db, keyVault, cfg, assetEncryptor, docCoverWorker, subSvc, atrackWorker, keyframeWorker, lyricWorker, photoClassifyWorker, photoFaceWorker, mediaID, ft)
+		go enqueueAutoTasksOnMediaAdded(db, keyVault, cfg, assetEncryptor, derivedStore, previewWorker, docCoverWorker, subSvc, atrackWorker, keyframeWorker, lyricWorker, photoClassifyWorker, photoFaceWorker, mediaID, ft)
 		if ft == "video" {
 			var drmEnabled int
 			_ = db.QueryRow(`
@@ -309,14 +311,15 @@ func resolveConfigPath() string {
 	return "config.yml"
 }
 
-func enqueueAutoTasksOnMediaAdded(db *sql.DB, vault *keystore.Vault, cfg *config.Config, assetEnc *storage.AssetEncryptor, dcw *doccover.Worker, subSvc *subtitle.Service, atw *atrack.Worker, kfw *keyframe.Worker, lw *lyrictask.Worker, pcw *photoclass.Worker, pfw *photoface.Worker, mediaID int64, fileType string) {
+func enqueueAutoTasksOnMediaAdded(db *sql.DB, vault *keystore.Vault, cfg *config.Config, assetEnc *storage.AssetEncryptor, derivedStore *storage.DerivedAssetStore, previewWorker *preview.Worker, dcw *doccover.Worker, subSvc *subtitle.Service, atw *atrack.Worker, kfw *keyframe.Worker, lw *lyrictask.Worker, pcw *photoclass.Worker, pfw *photoface.Worker, mediaID int64, fileType string) {
 	if db == nil || cfg == nil || mediaID <= 0 {
 		return
 	}
 	// 顺序与产品流水线对齐：本地预览图/海报 → 刮削（元数据与远端配图）。
 	// JIT 关键帧索引：仅 jit_prepare_on_ingest 时在 scanner/upload 路径触发；传输流实时加密在点播时处理。
 	enqueueAutoPreviewTask(db, mediaID, fileType)
-	capturePosterOnScan(db, vault, cfg, mediaID, fileType)
+	ensureAutoPreviewGeneration(db, previewWorker, mediaID, fileType)
+	capturePosterOnScan(db, vault, derivedStore, cfg, mediaID, fileType)
 	generatePhotoVariantsOnScan(db, vault, cfg, mediaID, fileType)
 	if fileType == "document" && dcw != nil {
 		dcw.Enqueue(mediaID)
@@ -398,7 +401,30 @@ func enqueueAutoPreviewTask(db *sql.DB, mediaID int64, fileType string) {
 	)
 }
 
-func capturePosterOnScan(db *sql.DB, vault *keystore.Vault, cfg *config.Config, mediaID int64, fileType string) {
+func ensureAutoPreviewGeneration(db *sql.DB, previewWorker *preview.Worker, mediaID int64, fileType string) {
+	if db == nil || previewWorker == nil || mediaID <= 0 || fileType != "video" {
+		return
+	}
+	var libraryID sql.NullInt64
+	var filePath sql.NullString
+	var duration sql.NullInt64
+	var enabled sql.NullInt64
+	if err := db.QueryRow(`
+		SELECT m.library_id, m.file_path, COALESCE(m.duration,0), COALESCE(l.preview_extract,0)
+		FROM media m
+		LEFT JOIN library l ON l.id = m.library_id
+		WHERE m.id = ?
+	`, mediaID).Scan(&libraryID, &filePath, &duration, &enabled); err != nil || enabled.Int64 != 1 {
+		return
+	}
+	inputPath := storage.PreferredFFmpegPath(db, mediaID, libraryID.Int64, filePath.String)
+	if inputPath == "" {
+		return
+	}
+	_, _ = previewWorker.Ensure(context.Background(), mediaID, inputPath, duration.Int64)
+}
+
+func capturePosterOnScan(db *sql.DB, vault *keystore.Vault, derivedStore *storage.DerivedAssetStore, cfg *config.Config, mediaID int64, fileType string) {
 	if fileType != "video" {
 		return
 	}
@@ -410,11 +436,13 @@ func capturePosterOnScan(db *sql.DB, vault *keystore.Vault, cfg *config.Config, 
 	var filePath sql.NullString
 	var duration sql.NullInt64
 	var metaRaw sql.NullString
-	if err := db.QueryRow(`SELECT file_path, COALESCE(duration,0), COALESCE(meta_json,'') FROM media WHERE id = ? LIMIT 1`, mediaID).
-		Scan(&filePath, &duration, &metaRaw); err != nil {
+	var libraryID sql.NullInt64
+	if err := db.QueryRow(`SELECT library_id, file_path, COALESCE(duration,0), COALESCE(meta_json,'') FROM media WHERE id = ? LIMIT 1`, mediaID).
+		Scan(&libraryID, &filePath, &duration, &metaRaw); err != nil {
 		return
 	}
-	if strings.TrimSpace(filePath.String) == "" {
+	inputPath := storage.PreferredFFmpegPath(db, mediaID, libraryID.Int64, filePath.String)
+	if inputPath == "" {
 		return
 	}
 	posterDir := filepath.Join(uploadDir, "posters")
@@ -422,7 +450,6 @@ func capturePosterOnScan(db *sql.DB, vault *keystore.Vault, cfg *config.Config, 
 		return
 	}
 	posterFile := filepath.Join(posterDir, fmt.Sprintf("%d.jpg", mediaID))
-	posterURL := "/uploads/posters/" + fmt.Sprintf("%d.jpg", mediaID)
 
 	snapSec := 10
 	if duration.Int64 > 0 {
@@ -436,7 +463,13 @@ func capturePosterOnScan(db *sql.DB, vault *keystore.Vault, cfg *config.Config, 
 		snapSec = sec
 	}
 	post := []string{"-frames:v", "1", "-q:v", "3", posterFile}
-	if _, err := storage.RunFFmpeg(context.Background(), db, vault, ffmpegPath, mediaID, filePath.String, float64(snapSec), float64(duration.Int64), nil, post, ""); err != nil {
+	pre := storage.PosterSeekPreInput(snapSec, inputPath)
+	if _, err := storage.RunFFmpeg(context.Background(), db, vault, ffmpegPath, mediaID, inputPath, 0, 0, pre, post, ""); err != nil {
+		return
+	}
+	posterURL, err := storage.FinalizeLocalPoster(context.Background(), derivedStore, db, mediaID, posterFile)
+	if err != nil {
+		_ = os.Remove(posterFile)
 		return
 	}
 
@@ -472,6 +505,7 @@ func generatePhotoVariantsOnScan(db *sql.DB, vault *keystore.Vault, cfg *config.
 	if ffmpegPath == "" {
 		return
 	}
+	derivedStore := storage.NewDerivedAssetStoreFromConfig(cfg, db, vault)
 	var filePath sql.NullString
 	var metaRaw sql.NullString
 	if err := db.QueryRow(`SELECT file_path, COALESCE(meta_json,'') FROM media WHERE id = ? LIMIT 1`, mediaID).
@@ -482,7 +516,7 @@ func generatePhotoVariantsOnScan(db *sql.DB, vault *keystore.Vault, cfg *config.
 		return
 	}
 	cacheDir := filepath.Join(cfg.Data.Preview, "photos")
-	paths, err := imagethumb.Ensure(context.Background(), db, vault, ffmpegPath, filePath.String, cacheDir, mediaID)
+	paths, err := imagethumb.Ensure(context.Background(), db, vault, derivedStore, ffmpegPath, filePath.String, cacheDir, mediaID)
 	if err != nil {
 		return
 	}

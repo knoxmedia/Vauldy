@@ -105,7 +105,7 @@ export type MediaItem = {
   completed?: number;
   release_date?: string;
   year?: number;
-  /** From scrape or empty; UI may fall back to `/uploads/posters/{id}.jpg`. */
+  /** From scrape or empty; UI may fall back to authenticated `/api/v1/media/{id}/poster.jpg`. */
   poster_url?: string;
   /** Landscape backdrop from scrape (TV / anime shelves). */
   backdrop_url?: string;
@@ -142,8 +142,24 @@ export function normalizeListPosterUrl(raw: string): string {
   return s.trim();
 }
 
+/** Append JWT for authenticated media asset URLs used in <img src>. */
+export function withAccessToken(url: string): string {
+  const u = (url || "").trim();
+  if (!u.startsWith("/api/v1/")) return u;
+  const token = useAuthStore.getState().token;
+  if (!token) return u;
+  const sep = u.includes("?") ? "&" : "?";
+  return `${u}${sep}access_token=${encodeURIComponent(token)}`;
+}
+
+/** Server-generated frame capture for encrypted libraries (auth + decrypt). */
+export function derivedVideoPosterSrc(id: number): string {
+  return withAccessToken(`/api/v1/media/${id}/poster.jpg`);
+}
+
 /** Server-generated frame capture when scrape poster is missing or failed to load. */
-export function localPosterSrc(id: number): string {
+export function localPosterSrc(id: number, encryptedAsset?: boolean | number): string {
+  if (encryptedAsset) return derivedVideoPosterSrc(id);
   return `/uploads/posters/${id}.jpg`;
 }
 
@@ -182,7 +198,7 @@ export function mediaLandscapeThumbSrc(
 
 /** Poster/thumbnail URL for grids: scraped poster or server-generated frame capture. */
 export function mediaPosterSrc(
-  r: Pick<MediaItem, "id" | "poster_url" | "music_album_id"> & { file_type?: string },
+  r: Pick<MediaItem, "id" | "poster_url" | "music_album_id" | "encrypted_asset"> & { file_type?: string },
 ): string {
   if (r.file_type === "audio") {
     return musicMediaPosterSrc({ ...r, file_type: "audio" }) ?? "";
@@ -194,8 +210,8 @@ export function mediaPosterSrc(
     return documentCoverSrc(r.id);
   }
   const u = normalizeListPosterUrl(r.poster_url || "");
-  if (u) return u;
-  return localPosterSrc(r.id);
+  if (u) return withAccessToken(u);
+  return localPosterSrc(r.id, r.encrypted_asset);
 }
 
 /** Cached photo thumbnail (480px max edge). */

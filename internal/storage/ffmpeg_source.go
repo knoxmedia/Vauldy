@@ -28,8 +28,7 @@ func OpenFFmpegInput(db *sql.DB, vault *keystore.Vault, mediaID int64, path stri
 	if path == "" {
 		return nil, fmt.Errorf("empty media path")
 	}
-	enc := kcrypto.IsEncFile(path) || IsMediaEncrypted(db, mediaID, path)
-	if !enc {
+	if !kcrypto.IsEncFile(path) {
 		if _, err := os.Stat(path); err != nil {
 			return nil, fmt.Errorf("source missing: %w", err)
 		}

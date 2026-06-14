@@ -12,12 +12,14 @@ import (
 
 	"knox-media/internal/musiclyrics"
 	"knox-media/internal/musicparse"
+	"knox-media/internal/storage"
 	"knox-media/internal/subtitle"
 )
 
 // Worker runs ASR-based lyric recognition for audio media (VTT → sidecar LRC).
 type Worker struct {
 	DB          *sql.DB
+	Derived     *storage.DerivedAssetStore
 	WorkDir     string
 	FFprobePath string
 	Subtitle    *subtitle.Service
@@ -25,9 +27,10 @@ type Worker struct {
 	running     map[int64]bool
 }
 
-func NewWorker(db *sql.DB, workDir, ffprobePath string, sub *subtitle.Service) *Worker {
+func NewWorker(db *sql.DB, derived *storage.DerivedAssetStore, workDir, ffprobePath string, sub *subtitle.Service) *Worker {
 	return &Worker{
 		DB:          db,
+		Derived:     derived,
 		WorkDir:     workDir,
 		FFprobePath: ffprobePath,
 		Subtitle:    sub,
@@ -187,13 +190,28 @@ func (w *Worker) Process(ctx context.Context, mediaID int64) (err error) {
 		return err
 	}
 
-	lrcPath := sidecarLRCPath(audioPath)
+	lrcPath := filepath.Join(outDir, "asr.lrc")
 	if err = musiclyrics.ConvertVTTFile(vttPath, lrcPath); err != nil {
 		w.markFailed(mediaID, err.Error())
 		return err
 	}
 
-	w.markDone(mediaID, vttPath, lrcPath, "")
+	finalVTT, finalLRC := vttPath, lrcPath
+	if w.Derived != nil {
+		var encErr error
+		finalVTT, encErr = w.Derived.FinalizePath(ctx, mediaID, "lyric_vtt", "asr.vtt", vttPath)
+		if encErr != nil {
+			w.markFailed(mediaID, encErr.Error())
+			return encErr
+		}
+		finalLRC, encErr = w.Derived.FinalizePath(ctx, mediaID, "lyric_lrc", "asr.lrc", lrcPath)
+		if encErr != nil {
+			w.markFailed(mediaID, encErr.Error())
+			return encErr
+		}
+	}
+
+	w.markDone(mediaID, finalVTT, finalLRC, "")
 	return nil
 }
 

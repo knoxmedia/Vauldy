@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strings"
 
+	kcrypto "knox-media/internal/crypto"
 	"knox-media/internal/keystore"
 	"knox-media/pkg/ffprobe"
 )
@@ -113,5 +114,5 @@ func InputNeedsPipe(db *sql.DB, mediaID int64, path string) bool {
 	if path == "" {
 		return false
 	}
-	return IsMediaEncrypted(db, mediaID, path)
+	return kcrypto.IsEncFile(path)
 }

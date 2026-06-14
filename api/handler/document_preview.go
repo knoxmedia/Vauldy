@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"knox-media/internal/doctrans"
+	"knox-media/internal/storage"
 )
 
 func (h *Handler) DocumentPreviewInfo(c *gin.Context) {
@@ -45,6 +46,9 @@ func (h *Handler) DocumentPreviewInfo(c *gin.Context) {
 		return
 	}
 	pdf := conv.PreviewPDFPath(id)
+	if enc, ok := storage.LookupEncPath(h.App.DB, id, "doc_preview", "preview.pdf"); ok {
+		pdf = enc
+	}
 	if st, err := os.Stat(pdf); err == nil && !st.IsDir() && st.Size() > 0 {
 		resp["preview_ready"] = true
 	}
@@ -84,9 +88,12 @@ func (h *Handler) ServeDocumentPreview(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.Header("Content-Type", "application/pdf")
-	c.Header("Cache-Control", "private, max-age=3600")
-	http.ServeFile(c.Writer, c.Request, pdfPath)
+	if h.DerivedStore != nil {
+		if encPath, encErr := h.DerivedStore.FinalizePath(c.Request.Context(), id, "doc_preview", "preview.pdf", pdfPath); encErr == nil {
+			pdfPath = encPath
+		}
+	}
+	h.serveDerivedAsset(c, id, pdfPath, "application/pdf")
 }
 
 func (h *Handler) loadDocumentSource(id int64) (filePath, format string, mtime int64, err error) {

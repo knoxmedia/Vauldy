@@ -34,6 +34,7 @@ type ASRConfig struct {
 type Service struct {
 	DB          *sql.DB
 	Vault       *keystore.Vault
+	Derived     *storage.DerivedAssetStore
 	MediaRoot   string // directory containing config.yml; resolves tools/ paths in ASR shell
 	FFmpegPath  string
 	FFprobePath string
@@ -55,7 +56,7 @@ func (s *Service) ApplyRecognition(asr ASRConfig, ocr OCRConfig) {
 	s.mu.Unlock()
 }
 
-func NewService(db *sql.DB, vault *keystore.Vault, mediaRoot, ffmpegPath, ffprobePath, subtitleDir string, asr ASRConfig, ocr OCRConfig) *Service {
+func NewService(db *sql.DB, vault *keystore.Vault, derived *storage.DerivedAssetStore, mediaRoot, ffmpegPath, ffprobePath, subtitleDir string, asr ASRConfig, ocr OCRConfig) *Service {
 	if strings.TrimSpace(ffmpegPath) == "" {
 		ffmpegPath = "ffmpeg"
 	}
@@ -65,6 +66,7 @@ func NewService(db *sql.DB, vault *keystore.Vault, mediaRoot, ffmpegPath, ffprob
 	return &Service{
 		DB:          db,
 		Vault:       vault,
+		Derived:     derived,
 		MediaRoot:   strings.TrimSpace(mediaRoot),
 		FFmpegPath:  ffmpegPath,
 		FFprobePath: ffprobePath,
@@ -229,7 +231,7 @@ func (s *Service) syncEmbedded(ctx context.Context, mediaID int64, videoPath, ou
 					trimErr(err), mediaID, dedupe)
 				continue
 			}
-			_, _ = s.DB.Exec(`UPDATE media_subtitle SET status='ready', error_message=NULL, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`, mediaID, dedupe)
+			_ = s.markSubtitleReady(ctx, mediaID, dedupe, filepath.Base(outPath), outPath)
 			continue
 		}
 
@@ -250,7 +252,7 @@ func (s *Service) syncEmbedded(ctx context.Context, mediaID int64, videoPath, ou
 				trimErr(err), mediaID, dedupe)
 			continue
 		}
-		_, _ = s.DB.Exec(`UPDATE media_subtitle SET status='ready', error_message=NULL, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`, mediaID, dedupe)
+		_ = s.markSubtitleReady(ctx, mediaID, dedupe, filepath.Base(outPath), outPath)
 	}
 	return nil
 }
@@ -338,7 +340,7 @@ func (s *Service) syncSidecars(ctx context.Context, mediaID int64, videoPath, ou
 				_, _ = s.DB.Exec(`UPDATE media_subtitle SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`, trimErr(err), mediaID, dedupe)
 				continue
 			}
-			_, _ = s.DB.Exec(`UPDATE media_subtitle SET status='ready', error_message=NULL, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`, mediaID, dedupe)
+			_ = s.markSubtitleReady(ctx, mediaID, dedupe, filepath.Base(outPath), outPath)
 			continue
 		}
 		if ext == ".sub" {
@@ -371,8 +373,22 @@ func (s *Service) syncSidecars(ctx context.Context, mediaID int64, videoPath, ou
 				continue
 			}
 		}
-		_, _ = s.DB.Exec(`UPDATE media_subtitle SET status='ready', error_message=NULL, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`, mediaID, dedupe)
+		_ = s.markSubtitleReady(ctx, mediaID, dedupe, filepath.Base(outPath), outPath)
 	}
+	return nil
+}
+
+func (s *Service) markSubtitleReady(ctx context.Context, mediaID int64, dedupe, logicalName, plainPath string) error {
+	stored := plainPath
+	if s.Derived != nil {
+		var err error
+		stored, err = s.Derived.FinalizePath(ctx, mediaID, "subtitle", logicalName, plainPath)
+		if err != nil {
+			_, _ = s.DB.Exec(`UPDATE media_subtitle SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`, trimErr(err), mediaID, dedupe)
+			return err
+		}
+	}
+	_, _ = s.DB.Exec(`UPDATE media_subtitle SET status='ready', vtt_path=?, error_message=NULL, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`, stored, mediaID, dedupe)
 	return nil
 }
 
@@ -484,8 +500,7 @@ func (s *Service) runASR(ctx context.Context, mediaID int64, videoPath, outDir s
 	default:
 		return nil
 	}
-	_, _ = s.DB.Exec(`UPDATE media_subtitle SET status='ready', error_message=NULL, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`, mediaID, dedupe)
-	return nil
+	return s.markSubtitleReady(ctx, mediaID, dedupe, filepath.Base(outPath), outPath)
 }
 
 func trimBytes(b []byte) string {

@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -56,6 +57,11 @@ func (c *Cache) path(fileID string) string {
 	return filepath.Join(c.Dir, sanitizeFileID(fileID)+".json")
 }
 
+// FilePath returns the on-disk JSON cache path for fileID.
+func (c *Cache) FilePath(fileID string) string {
+	return c.path(fileID)
+}
+
 func sanitizeFileID(s string) string {
 	out := make([]byte, 0, len(s))
 	for i := 0; i < len(s); i++ {
@@ -75,10 +81,19 @@ func sanitizeFileID(s string) string {
 
 // Load returns cached entry if mtime+size match; nil if absent or stale.
 func (c *Cache) Load(fileID, srcPath string) (*Meta, error) {
+	return c.load(fileID, srcPath, 0, nil, nil)
+}
+
+// LoadForMedia loads cache including Knox .enc derived keyframe metadata.
+func (c *Cache) LoadForMedia(db *sql.DB, vault *keystore.Vault, mediaID int64, fileID, srcPath string) (*Meta, error) {
+	return c.load(fileID, srcPath, mediaID, db, vault)
+}
+
+func (c *Cache) load(fileID, srcPath string, mediaID int64, db *sql.DB, vault *keystore.Vault) (*Meta, error) {
 	if c == nil {
 		return nil, nil
 	}
-	raw, err := os.ReadFile(c.path(fileID))
+	raw, err := c.readRaw(fileID, mediaID, db, vault)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -99,6 +114,26 @@ func (c *Cache) Load(fileID, srcPath string) (*Meta, error) {
 		}
 	}
 	return &m, nil
+}
+
+func (c *Cache) readRaw(fileID string, mediaID int64, db *sql.DB, vault *keystore.Vault) ([]byte, error) {
+	if raw, err := os.ReadFile(c.path(fileID)); err == nil {
+		return raw, nil
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+	if db != nil && mediaID > 0 {
+		logical := sanitizeFileID(fileID) + ".json"
+		if enc, ok := storage.LookupEncPath(db, mediaID, "keyframe_meta", logical); ok {
+			seeker, err := storage.OpenDerivedSeeker(db, vault, mediaID, enc)
+			if err != nil {
+				return nil, err
+			}
+			defer seeker.Close()
+			return io.ReadAll(seeker)
+		}
+	}
+	return nil, os.ErrNotExist
 }
 
 // Save persists meta to disk atomically (write tmp + rename).
@@ -256,7 +291,7 @@ func (c *Cache) EnsureCachedForMedia(ctx context.Context, db *sql.DB, vault *key
 	if c == nil {
 		return nil, errors.New("keyframes: nil cache")
 	}
-	if got, err := c.Load(fileID, srcPath); err == nil && got != nil && len(got.PTS) > 0 {
+	if got, err := c.LoadForMedia(db, vault, mediaID, fileID, srcPath); err == nil && got != nil && len(got.PTS) > 0 {
 		return got, nil
 	}
 	m, err := c.ExtractForMedia(ctx, db, vault, mediaID, fileID, srcPath, duration)

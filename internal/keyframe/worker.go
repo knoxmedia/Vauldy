@@ -4,11 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 
 	"knox-media/internal/keystore"
 	jitkeyframes "knox-media/internal/jit/keyframes"
+	"knox-media/internal/storage"
 )
 
 // Info represents the current state of a keyframe extraction task.
@@ -24,6 +26,7 @@ type Info struct {
 type Worker struct {
 	DB          *sql.DB
 	Vault       *keystore.Vault
+	Derived     *storage.DerivedAssetStore
 	FFprobePath string
 	OutputDir   string
 	mu          sync.Mutex
@@ -31,10 +34,11 @@ type Worker struct {
 }
 
 // NewWorker creates a new keyframe extraction worker.
-func NewWorker(db *sql.DB, vault *keystore.Vault, ffprobePath, outputDir string) *Worker {
+func NewWorker(db *sql.DB, vault *keystore.Vault, derived *storage.DerivedAssetStore, ffprobePath, outputDir string) *Worker {
 	return &Worker{
 		DB:          db,
 		Vault:       vault,
+		Derived:     derived,
 		FFprobePath: ffprobePath,
 		OutputDir:   outputDir,
 		running:     map[int64]bool{},
@@ -160,6 +164,13 @@ func (w *Worker) run(ctx context.Context, mediaID int64, fileID, filePath string
 	if err := cache.Save(meta); err != nil {
 		w.markFailed(mediaID, err.Error())
 		return err
+	}
+	if w.Derived != nil {
+		jsonPath := cache.FilePath(fileID)
+		if _, err := w.Derived.FinalizePath(ctx, mediaID, "keyframe_meta", filepath.Base(jsonPath), jsonPath); err != nil {
+			w.markFailed(mediaID, err.Error())
+			return err
+		}
 	}
 
 	count := len(meta.PTS)

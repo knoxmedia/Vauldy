@@ -1691,6 +1691,5 @@ func (h *Handler) servePreviewAsset(c *gin.Context, col string, contentType stri
 		c.JSON(http.StatusNotFound, gin.H{"error": "preview file missing"})
 		return
 	}
-	c.Header("Content-Type", contentType)
-	http.ServeFile(c.Writer, c.Request, fp)
+	h.serveDerivedAsset(c, id, fp, contentType)
 }

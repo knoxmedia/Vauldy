@@ -14,6 +14,7 @@ import (
 
 	"knox-media/internal/imagethumb"
 	"knox-media/internal/photoparse"
+	"knox-media/internal/storage"
 )
 
 func (h *Handler) photoCacheDir() string {
@@ -53,20 +54,28 @@ func (h *Handler) servePhotoVariant(c *gin.Context, variant string) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "not an image"})
 		return
 	}
-	paths := imagethumb.ExpectedPaths(h.photoCacheDir(), id)
+	paths := imagethumb.ResolvedPaths(h.App.DB, h.photoCacheDir(), id)
 	target := paths.Thumb
 	if variant == "medium" {
 		target = paths.Medium
+	}
+	if st, err := os.Stat(target); err != nil || st.IsDir() || st.Size() == 0 {
+		if enc, ok := storage.LookupEncPath(h.App.DB, id, map[bool]string{true: "photo_medium", false: "photo_thumb"}[variant == "medium"], map[bool]string{true: "medium.jpg", false: "thumb.jpg"}[variant == "medium"]); ok {
+			target = enc
+		}
 	}
 	if st, err := os.Stat(target); err != nil || st.IsDir() || st.Size() == 0 {
 		if genErr := h.ensurePhotoVariants(id, filePath.String); genErr != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": genErr.Error()})
 			return
 		}
+		paths = imagethumb.ResolvedPaths(h.App.DB, h.photoCacheDir(), id)
+		target = paths.Thumb
+		if variant == "medium" {
+			target = paths.Medium
+		}
 	}
-	c.Header("Content-Type", "image/jpeg")
-	c.Header("Cache-Control", "public, max-age=86400")
-	http.ServeFile(c.Writer, c.Request, target)
+	h.serveDerivedAsset(c, id, target, "image/jpeg")
 }
 
 func (h *Handler) PhotoPreviewInfo(c *gin.Context) {
@@ -135,7 +144,7 @@ func (h *Handler) ensurePhotoVariants(mediaID int64, srcPath string) error {
 	if h.App != nil && h.App.Config != nil {
 		ffmpegPath = strings.TrimSpace(h.App.Config.FFmpeg.FFmpegPath)
 	}
-	paths, err := imagethumb.Ensure(context.Background(), h.App.DB, h.KeyVault, ffmpegPath, srcPath, h.photoCacheDir(), mediaID)
+	paths, err := imagethumb.Ensure(context.Background(), h.App.DB, h.KeyVault, h.DerivedStore, ffmpegPath, srcPath, h.photoCacheDir(), mediaID)
 	if err != nil {
 		return err
 	}

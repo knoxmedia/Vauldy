@@ -358,7 +358,7 @@ func (w *Worker) ensureDetectImage(mediaID int64, srcPath string) (string, error
 	if strings.TrimSpace(w.FFmpegPath) == "" {
 		return "", fmt.Errorf("ffmpeg path empty")
 	}
-	out, err := imagethumb.Ensure(context.Background(), w.DB, w.Vault, w.FFmpegPath, srcPath, cacheDir, mediaID)
+	out, err := imagethumb.Ensure(context.Background(), w.DB, w.Vault, nil, w.FFmpegPath, srcPath, cacheDir, mediaID)
 	if err != nil {
 		return "", err
 	}

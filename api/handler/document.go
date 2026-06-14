@@ -18,6 +18,7 @@ import (
 	"knox-media/api/middleware"
 	"knox-media/internal/doccover"
 	"knox-media/internal/doctrans"
+	"knox-media/internal/storage"
 )
 
 type documentListQuery struct {
@@ -334,19 +335,15 @@ func (h *Handler) ServeDocumentCover(c *gin.Context) {
 	if _, ok := h.requireMediaAccess(c, id, false); !ok {
 		return
 	}
-	cache := h.documentCoverPath(id)
+	cache := h.resolvedDocumentCoverPath(id)
 	if st, err := os.Stat(cache); err == nil && !st.IsDir() && st.Size() > 0 {
-		c.Header("Content-Type", "image/jpeg")
-		c.Header("Cache-Control", "public, max-age=86400")
-		http.ServeFile(c.Writer, c.Request, cache)
+		h.serveDerivedAsset(c, id, cache, "image/jpeg")
 		return
 	}
 	// LibreOffice may write preview.jpg before copy/rename completes.
-	previewJPEG := filepath.Join(filepath.Dir(cache), "preview.jpg")
+	previewJPEG := filepath.Join(filepath.Dir(h.documentCoverPath(id)), "preview.jpg")
 	if st, err := os.Stat(previewJPEG); err == nil && !st.IsDir() && st.Size() > 0 {
-		c.Header("Content-Type", "image/jpeg")
-		c.Header("Cache-Control", "public, max-age=86400")
-		http.ServeFile(c.Writer, c.Request, previewJPEG)
+		h.serveDerivedAsset(c, id, previewJPEG, "image/jpeg")
 		return
 	}
 	var filePath, format sql.NullString
@@ -355,14 +352,20 @@ func (h *Handler) ServeDocumentCover(c *gin.Context) {
 		return
 	}
 	if strings.EqualFold(format.String, "epub") {
-		if cover := extractEPUBCover(filePath.String, cache); cover != "" {
-			c.Header("Content-Type", "image/jpeg")
-			http.ServeFile(c.Writer, c.Request, cover)
+		if cover := extractEPUBCover(filePath.String, h.documentCoverPath(id)); cover != "" {
+			h.serveDerivedAsset(c, id, cover, "image/jpeg")
 			return
 		}
 	}
 	h.GenerateDocumentCover(id)
 	h.serveDocumentPlaceholder(c, format.String)
+}
+
+func (h *Handler) resolvedDocumentCoverPath(id int64) string {
+	if enc, ok := storage.LookupEncPath(h.App.DB, id, "doc_cover", "cover.jpg"); ok {
+		return enc
+	}
+	return h.documentCoverPath(id)
 }
 
 func (h *Handler) documentCoverPath(id int64) string {

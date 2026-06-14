@@ -44,13 +44,14 @@ type Handler struct {
 	DocCoverWorker      *doccover.Worker
 	KeyVault            *keystore.Vault
 	AssetEncryptor      *storage.AssetEncryptor
+	DerivedStore        *storage.DerivedAssetStore
 	scanMu              sync.Mutex
 	scrapeRunMu    sync.Mutex
 	runningScans   map[int64]scanRuntime
 }
 
-func New(a *app.App, w *transcode.Worker, pkgw *transcode.PackageWorker, pw *preview.Worker, sub *subtitle.Service, u *upload.Service, instant *scheduler.Scheduler, sm *session.Manager, atw *atrack.Worker, kfw *keyframe.Worker, lw *lyrictask.Worker, pcw *photoclass.Worker, dcw *doccover.Worker, keyVault *keystore.Vault, assetEnc *storage.AssetEncryptor) *Handler {
-	h := &Handler{App: a, Worker: w, PackageWorker: pkgw, PreviewWorker: pw, Subtitle: sub, Upload: u, Instant: instant, SessionManager: sm, AtrackWorker: atw, KeyframeWorker: kfw, LyricWorker: lw, PhotoClassifyWorker: pcw, DocCoverWorker: dcw, KeyVault: keyVault, AssetEncryptor: assetEnc, PhotoGeocode: photogeocode.New(a.DB), runningScans: map[int64]scanRuntime{}}
+func New(a *app.App, w *transcode.Worker, pkgw *transcode.PackageWorker, pw *preview.Worker, sub *subtitle.Service, u *upload.Service, instant *scheduler.Scheduler, sm *session.Manager, atw *atrack.Worker, kfw *keyframe.Worker, lw *lyrictask.Worker, pcw *photoclass.Worker, dcw *doccover.Worker, keyVault *keystore.Vault, assetEnc *storage.AssetEncryptor, derived *storage.DerivedAssetStore) *Handler {
+	h := &Handler{App: a, Worker: w, PackageWorker: pkgw, PreviewWorker: pw, Subtitle: sub, Upload: u, Instant: instant, SessionManager: sm, AtrackWorker: atw, KeyframeWorker: kfw, LyricWorker: lw, PhotoClassifyWorker: pcw, DocCoverWorker: dcw, KeyVault: keyVault, AssetEncryptor: assetEnc, DerivedStore: derived, PhotoGeocode: photogeocode.New(a.DB), runningScans: map[int64]scanRuntime{}}
 	_ = h.PhotoGeocode.EnsureSchema()
 	h.PhotoLocationWorker = photogeocode.NewWorker(a.DB, keyVault, h.PhotoGeocode)
 	h.PhotoFaceWorker = photoface.NewWorker(a.DB, keyVault, filepath.Dir(a.ConfigPath), a.Config.FFmpeg.FFmpegPath, a.Config.Data.Preview, func() config.PhotoFaceConfig {

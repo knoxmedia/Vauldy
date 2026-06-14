@@ -642,6 +642,20 @@ func OpenSQLite(path string) (*sql.DB, error) {
 			FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
 		)`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_media_encrypted_status ON media_encrypted_assets(status)`)
+	_, _ = db.Exec(`
+		CREATE TABLE IF NOT EXISTS media_derived_assets (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			media_id INTEGER NOT NULL,
+			artifact_kind TEXT NOT NULL,
+			logical_name TEXT NOT NULL,
+			enc_path TEXT NOT NULL,
+			wrapped_dek TEXT NOT NULL,
+			iv TEXT NOT NULL,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE,
+			UNIQUE(media_id, artifact_kind, logical_name)
+		)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_derived_media ON media_derived_assets(media_id)`)
 	_, _ = db.Exec(`ALTER TABLE media ADD COLUMN file_mtime INTEGER DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE scheduled_task ADD COLUMN category TEXT NOT NULL DEFAULT 'media'`)
 	_, _ = db.Exec(`ALTER TABLE play_progress ADD COLUMN play_start_at TIMESTAMP`)

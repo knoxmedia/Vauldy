@@ -10,12 +10,14 @@ import (
 
 	"knox-media/internal/config"
 	"knox-media/internal/keystore"
+	"knox-media/internal/storage"
 )
 
 // WorkerConfig supplies runtime paths for cover generation.
 type WorkerConfig struct {
 	DB         *sql.DB
 	Vault      *keystore.Vault
+	Derived    *storage.DerivedAssetStore
 	MediaRoot  string
 	PreviewDir string
 	FFmpegPath string
@@ -191,6 +193,7 @@ func (w *Worker) runOne(mediaID int64) {
 	opts := Options{
 		DB:         w.cfg.DB,
 		Vault:      w.cfg.Vault,
+		Derived:    w.cfg.Derived,
 		FFmpegPath: w.cfg.FFmpegPath,
 		PreviewDir: preview,
 		MediaRoot:  w.cfg.MediaRoot,

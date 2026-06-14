@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -47,6 +48,22 @@ func KickEncryptMedia(enc *AssetEncryptor, cfg *config.Config, mediaID int64) {
 			log.Printf("asset encrypt failed media=%d: %v", mid, err)
 		}
 	}(mediaID)
+}
+
+// NewDerivedAssetStoreFromConfig builds derived artifact encryption store when global encrypted assets are enabled.
+func NewDerivedAssetStoreFromConfig(cfg *config.Config, db *sql.DB, vault *keystore.Vault) *DerivedAssetStore {
+	if cfg == nil || db == nil || vault == nil || !cfg.EncryptedAssetsEnabled() {
+		return nil
+	}
+	dir := strings.TrimSpace(cfg.Data.Dir)
+	if dir == "" {
+		dir = "./data"
+	}
+	return &DerivedAssetStore{
+		DB:      db,
+		Vault:   vault,
+		BaseDir: filepath.Join(dir, ".derived"),
+	}
 }
 
 // KickEncryptMediaManual runs on-demand encryption for one media item (menu action).

@@ -16,6 +16,7 @@ import (
 
 	"knox-media/internal/photoparse"
 	"knox-media/internal/scanner"
+	"knox-media/internal/storage"
 	"knox-media/pkg/ffprobe"
 	"knox-media/pkg/fileutil"
 )
@@ -222,6 +223,7 @@ func (h *Handler) EnqueuePostIngestForNewMedia(mediaID int64, fileType string) {
 			h.enqueueScrapeTask(mid, 0, "auto-scan")
 		}
 		h.enqueuePreviewTask(mid, ft)
+		h.ensurePreviewGeneration(mid, ft)
 		h.capturePosterFromVideo(mid, ft)
 		if ft == "image" {
 			h.GeneratePhotoVariants(mid)
@@ -289,6 +291,29 @@ func (h *Handler) enqueuePreviewTask(mediaID int64, fileType string) {
 		   error_message=NULL`,
 		mediaID, intervalSec, countNum,
 	)
+}
+
+func (h *Handler) ensurePreviewGeneration(mediaID int64, fileType string) {
+	if h == nil || h.PreviewWorker == nil || h.App == nil || h.App.DB == nil || mediaID <= 0 || fileType != "video" {
+		return
+	}
+	var libraryID sql.NullInt64
+	var filePath sql.NullString
+	var duration sql.NullInt64
+	var enabled sql.NullInt64
+	if err := h.App.DB.QueryRow(`
+		SELECT m.library_id, m.file_path, COALESCE(m.duration,0), COALESCE(l.preview_extract,0)
+		FROM media m
+		LEFT JOIN library l ON l.id = m.library_id
+		WHERE m.id = ?
+	`, mediaID).Scan(&libraryID, &filePath, &duration, &enabled); err != nil || enabled.Int64 != 1 {
+		return
+	}
+	inputPath := storage.PreferredFFmpegPath(h.App.DB, mediaID, libraryID.Int64, filePath.String)
+	if inputPath == "" {
+		return
+	}
+	_, _ = h.PreviewWorker.Ensure(context.Background(), mediaID, inputPath, duration.Int64)
 }
 
 func countScannableFiles(roots []string, libraryType string) int64 {

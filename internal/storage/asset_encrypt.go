@@ -213,13 +213,13 @@ func WaitForPlaintextConsumers(db *sql.DB, mediaID int64, timeout time.Duration)
 		busy := false
 		if previewStatus.Valid {
 			switch strings.ToLower(previewStatus.String) {
-			case "waiting", "running", "processing":
+			case "running", "processing":
 				busy = true
 			}
 		}
 		if packageStatus.Valid {
 			switch strings.ToLower(packageStatus.String) {
-			case "waiting", "running":
+			case "running":
 				busy = true
 			}
 		}

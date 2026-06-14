@@ -59,7 +59,7 @@ func (h *Handler) SubtitleVTT(c *gin.Context) {
 		return
 	}
 	c.Header("Content-Type", "text/vtt; charset=utf-8")
-	http.ServeFile(c.Writer, c.Request, p)
+	h.serveDerivedAsset(c, mid, p, "text/vtt; charset=utf-8")
 }
 
 func (h *Handler) ProcessMediaSubtitles(c *gin.Context) {

@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"database/sql"
 	"net/http"
 	"os"
@@ -186,6 +187,10 @@ func (h *Handler) collectMediaDeletionDirs(info mediaDeleteInfo) []string {
 	if manifestPath.Valid && strings.TrimSpace(manifestPath.String) != "" {
 		dirs = append(dirs, filepath.Dir(filepath.Clean(manifestPath.String)))
 	}
+	derivedBase := filepath.Join(strings.TrimSpace(cfg.Dir), ".derived", idStr)
+	if st, err := os.Stat(derivedBase); err == nil && st.IsDir() {
+		dirs = append(dirs, derivedBase)
+	}
 	return dirs
 }
 
@@ -211,6 +216,7 @@ func (h *Handler) deleteMediaRecords(id int64, fileID string) error {
 		{`DELETE FROM atrack_task WHERE media_id = ?`, []any{id}},
 		{`DELETE FROM keyframe_task WHERE media_id = ?`, []any{id}},
 		{`DELETE FROM preview_task WHERE media_id = ?`, []any{id}},
+		{`DELETE FROM media_derived_assets WHERE media_id = ?`, []any{id}},
 		{`DELETE FROM package_task WHERE media_id = ?`, []any{id}},
 		{`DELETE FROM drm_license_audit WHERE media_id = ?`, []any{id}},
 		{`DELETE FROM drm_key_material WHERE media_id = ?`, []any{id}},
@@ -234,6 +240,9 @@ func (h *Handler) deleteMediaRecords(id int64, fileID string) error {
 }
 
 func (h *Handler) purgeMediaFiles(info mediaDeleteInfo) {
+	if h.DerivedStore != nil {
+		_ = h.DerivedStore.DeleteForMedia(context.Background(), info.ID)
+	}
 	for _, p := range h.collectMediaDeletionAbsPaths(info) {
 		_ = os.Remove(p)
 	}

@@ -41,7 +41,7 @@ INSERT INTO media (id, library_id, file_type, file_path, meta_json) VALUES (10, 
 		t.Fatal(err)
 	}
 
-	w := NewWorker(db, dir, "", nil)
+	w := NewWorker(db, nil, dir, "", nil)
 	if err := w.EnsurePendingIfNoLyrics(10, "audio"); err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ INSERT INTO media (id, library_id, file_type, file_path, meta_json) VALUES (11, 
 		t.Fatal(err)
 	}
 
-	w := NewWorker(db, dir, "", nil)
+	w := NewWorker(db, nil, dir, "", nil)
 	if err := w.EnsurePendingIfNoLyrics(11, "audio"); err != nil {
 		t.Fatal(err)
 	}

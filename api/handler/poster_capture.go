@@ -73,20 +73,29 @@ func (h *Handler) captureLocalPoster(mediaID, libraryID int64, cfg scraper.Confi
 		return "", ""
 	}
 	posterFile := filepath.Join(posterDir, fmt.Sprintf("%d.jpg", mediaID))
-	posterURL = "/uploads/posters/" + fmt.Sprintf("%d.jpg", mediaID)
 
 	if imageSourceEnabled(cfg, "embedded") {
 		if ffprobePath != "" && h.extractEmbeddedCover(ffprobePath, ffmpegPath, mediaID, absPath, posterFile) {
-			return posterURL, "embedded"
+			return h.finalizeCapturedPosterURL(mediaID, posterFile, "embedded")
 		}
 	}
 	if !skipScreenGrabber && imageSourceEnabled(cfg, "screen_grabber") {
 		if h.extractFramePoster(ffmpegPath, mediaID, absPath, posterFile, duration) {
-			return posterURL, "screen_grabber"
+			return h.finalizeCapturedPosterURL(mediaID, posterFile, "screen_grabber")
 		}
 	}
 	_ = os.Remove(posterFile)
 	return "", ""
+}
+
+func (h *Handler) finalizeCapturedPosterURL(mediaID int64, plainPosterFile, source string) (posterURL, src string) {
+	posterURL, err := storage.FinalizeLocalPoster(context.Background(), h.DerivedStore, h.App.DB, mediaID, plainPosterFile)
+	if err != nil {
+		log.Printf("poster finalize media=%d: %v", mediaID, err)
+		_ = os.Remove(plainPosterFile)
+		return "", ""
+	}
+	return posterURL, source
 }
 
 func (h *Handler) mediaVideoPath(mediaID, libraryID int64) (absPath string, durationSec int64, err error) {
@@ -98,39 +107,15 @@ func (h *Handler) mediaVideoPath(mediaID, libraryID int64) (absPath string, dura
 	).Scan(&filePath, &duration); err != nil {
 		return "", 0, err
 	}
-	absPath = h.resolveMediaAbsolutePath(libraryID, filePath.String)
+	absPath = storage.PreferredFFmpegPath(h.App.DB, mediaID, libraryID, filePath.String)
 	if absPath == "" {
 		return "", 0, fmt.Errorf("empty file path")
-	}
-	if _, statErr := os.Stat(absPath); statErr != nil {
-		if !os.IsNotExist(statErr) {
-			log.Printf("poster capture media=%d: file not accessible %q: %v", mediaID, absPath, statErr)
-		}
-		return "", 0, nil
 	}
 	return absPath, duration.Int64, nil
 }
 
 func (h *Handler) resolveMediaAbsolutePath(libraryID int64, filePath string) string {
-	filePath = strings.TrimSpace(filePath)
-	if filePath == "" {
-		return ""
-	}
-	if filepath.IsAbs(filePath) {
-		return filepath.Clean(filePath)
-	}
-	if libraryID <= 0 {
-		return filepath.Clean(filePath)
-	}
-	var libPath string
-	if err := h.App.DB.QueryRow(`SELECT path FROM library WHERE id = ?`, libraryID).Scan(&libPath); err != nil {
-		return filepath.Clean(filePath)
-	}
-	libPath = strings.TrimSpace(libPath)
-	if libPath == "" {
-		return filepath.Clean(filePath)
-	}
-	return filepath.Clean(filepath.Join(libPath, filepath.FromSlash(filePath)))
+	return storage.ResolveMediaAbsolutePath(h.App.DB, libraryID, filePath)
 }
 
 func (h *Handler) extractEmbeddedCover(ffprobePath, ffmpegPath string, mediaID int64, videoPath, outFile string) bool {
@@ -187,11 +172,8 @@ func (h *Handler) extractEmbeddedCover(ffprobePath, ffmpegPath string, mediaID i
 func (h *Handler) extractFramePoster(ffmpegPath string, mediaID int64, videoPath, outFile string, durationSec int64) bool {
 	snapSec := posterSnapSecond(durationSec)
 	post := []string{"-frames:v", "1", "-q:v", "3", outFile}
-	dur := float64(durationSec)
-	if dur <= 0 {
-		dur = 0
-	}
-	if _, err := storage.RunFFmpeg(context.Background(), h.App.DB, h.KeyVault, ffmpegPath, mediaID, videoPath, float64(snapSec), dur, nil, post, ""); err != nil {
+	pre := storage.PosterSeekPreInput(snapSec, videoPath)
+	if _, err := storage.RunFFmpeg(context.Background(), h.App.DB, h.KeyVault, ffmpegPath, mediaID, videoPath, 0, 0, pre, post, ""); err != nil {
 		log.Printf("ffmpeg poster frame media=%d %q: %v", mediaID, videoPath, err)
 		return false
 	}

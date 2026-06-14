@@ -1,6 +1,6 @@
 import { Button, Input, List, message, Modal, Spin } from "antd";
 import { useEffect, useMemo, useState } from "react";
-import { addPlaylistItem, createPlaylist, fetchPlaylists, Playlist } from "../api/client";
+import { addPlaylistItem, createPlaylist, derivedVideoPosterSrc, fetchPlaylists, Playlist } from "../api/client";
 import { useT } from "../i18n";
 
 export interface PlaylistAddedInfo {
@@ -143,7 +143,7 @@ export default function AddToPlaylistModal({
                 >
                   {pl.first_media_id ? (
                     <img
-                      src={`/uploads/posters/${pl.first_media_id}.jpg`}
+                      src={derivedVideoPosterSrc(pl.first_media_id)}
                       alt=""
                       style={{ width: "100%", height: "100%", objectFit: "cover" }}
                     />

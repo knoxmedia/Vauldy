@@ -35,6 +35,7 @@ type AudioTrackInfo struct {
 type Worker struct {
 	DB          *sql.DB
 	Vault       *keystore.Vault
+	Derived     *storage.DerivedAssetStore
 	FFmpegPath  string
 	FFprobePath string
 	OutputDir   string
@@ -43,10 +44,11 @@ type Worker struct {
 }
 
 // NewWorker creates a new audio track extraction worker.
-func NewWorker(db *sql.DB, vault *keystore.Vault, ffmpegPath, ffprobePath, outputDir string) *Worker {
+func NewWorker(db *sql.DB, vault *keystore.Vault, derived *storage.DerivedAssetStore, ffmpegPath, ffprobePath, outputDir string) *Worker {
 	return &Worker{
 		DB:          db,
 		Vault:       vault,
+		Derived:     derived,
 		FFmpegPath:  ffmpegPath,
 		FFprobePath: ffprobePath,
 		OutputDir:   outputDir,
@@ -280,8 +282,38 @@ func (w *Worker) extractStream(ctx context.Context, mediaID int64, inputPath str
 
 	// Write a small metadata file so the handler can read language info later.
 	meta := fmt.Sprintf(`{"language":"%s","codec":"%s"}`, lang, map[bool]string{true: "aac", false: "aac"}[isAAC])
-	_ = os.WriteFile(filepath.Join(outDir, "meta.json"), []byte(meta), 0o644)
+	metaPath := filepath.Join(outDir, "meta.json")
+	_ = os.WriteFile(metaPath, []byte(meta), 0o644)
 
+	return w.encryptStreamOutputs(ctx, mediaID, streamIdx, outDir)
+}
+
+func (w *Worker) encryptStreamOutputs(ctx context.Context, mediaID int64, streamIdx int, outDir string) error {
+	if w.Derived == nil || !storage.NeedsDerivedEncryption(w.DB, mediaID) {
+		return nil
+	}
+	streamKey := strconv.Itoa(streamIdx)
+	files, err := os.ReadDir(outDir)
+	if err != nil {
+		return err
+	}
+	for _, ent := range files {
+		if ent.IsDir() {
+			continue
+		}
+		name := ent.Name()
+		full := filepath.Join(outDir, name)
+		kind := "atrack_segment"
+		if strings.EqualFold(name, "index.m3u8") {
+			kind = "atrack_playlist"
+		} else if strings.EqualFold(name, "meta.json") {
+			kind = "atrack_meta"
+		}
+		logical := streamKey + "/" + name
+		if _, err := w.Derived.FinalizePath(ctx, mediaID, kind, logical, full); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
