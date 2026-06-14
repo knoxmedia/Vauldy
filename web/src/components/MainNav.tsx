@@ -11,6 +11,7 @@ import {
   FolderOpenOutlined,
   HomeOutlined,
   HistoryOutlined,
+  LoadingOutlined,
   TeamOutlined,
   ScheduleOutlined,
   SearchOutlined,
@@ -19,11 +20,12 @@ import {
   UnorderedListOutlined,
 } from "@ant-design/icons";
 import { Link, useLocation, useNavigate } from "react-router-dom";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { fetchLibraries, type Library } from "../api/client";
 import { libraryTypeIcon } from "../lib/libraryTypeIcon";
 import { isAdminRole, useAuthStore } from "../store/auth";
 import { useT } from "../i18n";
+import CollapsedMainNavMenu, { flattenNavMenuItems } from "./CollapsedMainNavMenu";
 
 type MainNavProps = {
   /** 关闭抽屉（侧栏隐藏模式下的浮动菜单） */
@@ -115,52 +117,177 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
     return keys;
   }, [path, selectedKeys, admin]);
 
-  const [openKeys, setOpenKeys] = useState<string[]>(["my-media"]);
-
-  const firstLibrary = libs.length > 0 ? libs[0] : undefined;
-
-  useEffect(() => {
-    if (openKeysDefault.length) {
-      setOpenKeys((prev) => Array.from(new Set([...prev, ...openKeysDefault])));
+  const libraryChildren: NonNullable<MenuProps["items"]> = useMemo(() => {
+    if (libsLoading && libs.length === 0) {
+      return [
+        {
+          key: "lib-loading",
+          disabled: true,
+          icon: <LoadingOutlined />,
+          title: t("common.loading"),
+          label: (
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+              <Spin size="small" /> {t("common.loading")}
+            </span>
+          ),
+        },
+      ];
     }
-  }, [openKeysDefault]);
+    if (libs.length === 0) {
+      return [
+        {
+          key: "lib-empty",
+          disabled: true,
+          icon: <FolderOpenOutlined />,
+          title: t("nav.no_library"),
+          label: <span style={{ color: "#666" }}>{t("nav.no_library")}</span>,
+        },
+      ];
+    }
+    return libs.map((lib) => ({
+      key: `lib-${lib.id}`,
+      icon: libraryTypeIcon(lib.type),
+      title: lib.name,
+      label: (
+        <Link to={`/browse?library_id=${lib.id}`} onClick={onNavigate}>
+          {lib.name}
+        </Link>
+      ),
+    }));
+  }, [libs, libsLoading, onNavigate, t]);
+
+  const adminChildren: NonNullable<MenuProps["items"]> = useMemo(
+    () => [
+      {
+        key: "console",
+        icon: <ControlOutlined />,
+        title: t("nav.console"),
+        label: (
+          <Link to="/console" onClick={onNavigate}>
+            {t("nav.console")}
+          </Link>
+        ),
+      },
+      {
+        key: "system-options",
+        icon: <SettingOutlined />,
+        title: t("nav.system_options"),
+        label: (
+          <Link to="/system-options" onClick={onNavigate}>
+            {t("nav.system_options")}
+          </Link>
+        ),
+      },
+      {
+        key: "library",
+        icon: <FolderOpenOutlined />,
+        title: t("nav.library"),
+        label: (
+          <Link to="/library" onClick={onNavigate}>
+            {t("nav.library")}
+          </Link>
+        ),
+      },
+      {
+        key: "upload",
+        icon: <CloudUploadOutlined />,
+        title: t("nav.upload"),
+        label: (
+          <Link to="/upload" onClick={onNavigate}>
+            {t("nav.upload")}
+          </Link>
+        ),
+      },
+      {
+        key: "media-manager",
+        icon: <EditOutlined />,
+        title: t("nav.media_manager"),
+        label: (
+          <Link to="/media-manager" onClick={onNavigate}>
+            {t("nav.media_manager")}
+          </Link>
+        ),
+      },
+      {
+        key: "tasks",
+        icon: <ScheduleOutlined />,
+        title: t("nav.tasks"),
+        label: (
+          <Link to="/tasks" onClick={onNavigate}>
+            {t("nav.tasks")}
+          </Link>
+        ),
+      },
+      {
+        key: "drm-license-audit",
+        icon: <HistoryOutlined />,
+        title: t("nav.drm_audit"),
+        label: (
+          <Link to="/drm-license-audit" onClick={onNavigate}>
+            {t("nav.drm_audit")}
+          </Link>
+        ),
+      },
+      {
+        key: "access-logs",
+        icon: <HistoryOutlined />,
+        title: t("nav.access_logs"),
+        label: (
+          <Link to="/access-logs" onClick={onNavigate}>
+            {t("nav.access_logs")}
+          </Link>
+        ),
+      },
+      {
+        key: "users",
+        icon: <TeamOutlined />,
+        title: t("nav.users"),
+        label: (
+          <Link to="/users" onClick={onNavigate}>
+            {t("nav.users")}
+          </Link>
+        ),
+      },
+      {
+        key: "api-credentials",
+        icon: <ApiOutlined />,
+        title: t("nav.api_credentials"),
+        label: (
+          <Link to="/api-credentials" onClick={onNavigate}>
+            {t("nav.api_credentials")}
+          </Link>
+        ),
+      },
+      {
+        key: "scrape-config",
+        icon: <DatabaseOutlined />,
+        title: t("nav.scrape_config"),
+        label: (
+          <Link to="/scrape-config" onClick={onNavigate}>
+            {t("nav.scrape_config")}
+          </Link>
+        ),
+      },
+      {
+        key: "ai-provider",
+        icon: <RobotOutlined />,
+        title: t("nav.ai_provider"),
+        label: (
+          <Link to="/ai-provider" onClick={onNavigate}>
+            {t("nav.ai_provider")}
+          </Link>
+        ),
+      },
+    ],
+    [onNavigate, t],
+  );
 
   const menuItems: MenuProps["items"] = useMemo(() => {
-    const libraryChildren: NonNullable<MenuProps["items"]> =
-      libsLoading && libs.length === 0
-        ? [
-            {
-              key: "lib-loading",
-              disabled: true,
-              label: (
-                <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-                  <Spin size="small" /> {t("common.loading")}
-                </span>
-              ),
-            },
-          ]
-        : libs.length === 0
-          ? [
-              {
-                key: "lib-empty",
-                disabled: true,
-                label: <span style={{ color: "#666" }}>{t("nav.no_library")}</span>,
-              },
-            ]
-          : libs.map((lib) => ({
-              key: `lib-${lib.id}`,
-              icon: libraryTypeIcon(lib.type),
-              label: (
-                <Link to={`/browse?library_id=${lib.id}`} onClick={onNavigate}>
-                  {lib.name}
-                </Link>
-              ),
-            }));
-
-    const items: MenuProps["items"] = [
+    const topLevelItems: MenuProps["items"] = [
       {
         key: "home",
         icon: <HomeOutlined />,
+        title: t("nav.home"),
         label: (
           <Link to="/" onClick={onNavigate}>
             {t("nav.home")}
@@ -170,38 +297,31 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
       {
         key: "favorites",
         icon: <StarOutlined />,
+        title: t("nav.favorites"),
         label: (
           <Link to="/favorites" onClick={onNavigate}>
             {t("nav.favorites")}
           </Link>
         ),
       },
-      ...(inlineCollapsed
-        ? [
-            {
-              key: "my-media",
-              icon: firstLibrary ? libraryTypeIcon(firstLibrary.type) : <FolderOpenOutlined />,
-              label: (
-                <Link
-                  to={firstLibrary ? `/browse?library_id=${firstLibrary.id}` : "/browse"}
-                  onClick={onNavigate}
-                >
-                  {t("nav.my_media")}
-                </Link>
-              ),
-            },
-          ]
-        : [
-            {
-              key: "my-media",
-              icon: <AppstoreOutlined />,
-              label: t("nav.my_media"),
-              children: [...libraryChildren],
-            },
-          ]),
+    ];
+
+    if (inlineCollapsed) {
+      topLevelItems.push(...libraryChildren);
+    } else {
+      topLevelItems.push({
+        key: "my-media",
+        icon: <AppstoreOutlined />,
+        label: t("nav.my_media"),
+        children: [...libraryChildren],
+      });
+    }
+
+    topLevelItems.push(
       {
         key: "playlists",
         icon: <UnorderedListOutlined />,
+        title: t("nav.playlists"),
         label: (
           <Link to="/playlists" onClick={onNavigate}>
             {t("nav.playlists")}
@@ -211,144 +331,48 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
       {
         key: "playback-history",
         icon: <HistoryOutlined />,
+        title: t("nav.playback_history"),
         label: (
           <Link to="/playback-history" onClick={onNavigate}>
             {t("nav.playback_history")}
           </Link>
         ),
       },
-    ];
+    );
 
     if (admin) {
-      items.push({
-        type: "divider",
-      });
-      items.push({
-        key: "admin-section",
-        icon: <ControlOutlined />,
-        label: (
-          <Link to="/console" onClick={onNavigate}>
-            {t("nav.management")}
-          </Link>
-        ),
-        children: [
-          {
-            key: "console",
-            icon: <ControlOutlined />,
-            label: (
-              <Link to="/console" onClick={onNavigate}>
-                {t("nav.console")}
-              </Link>
-            ),
-          },
-          {
-            key: "system-options",
-            icon: <SettingOutlined />,
-            label: (
-              <Link to="/system-options" onClick={onNavigate}>
-                {t("nav.system_options")}
-              </Link>
-            ),
-          },
-          {
-            key: "library",
-            icon: <FolderOpenOutlined />,
-            label: (
-              <Link to="/library" onClick={onNavigate}>
-                {t("nav.library")}
-              </Link>
-            ),
-          },
-          {
-            key: "upload",
-            icon: <CloudUploadOutlined />,
-            label: (
-              <Link to="/upload" onClick={onNavigate}>
-                {t("nav.upload")}
-              </Link>
-            ),
-          },
-          {
-            key: "media-manager",
-            icon: <EditOutlined />,
-            label: (
-              <Link to="/media-manager" onClick={onNavigate}>
-                {t("nav.media_manager")}
-              </Link>
-            ),
-          },
-          {
-            key: "tasks",
-            icon: <ScheduleOutlined />,
-            label: (
-              <Link to="/tasks" onClick={onNavigate}>
-                {t("nav.tasks")}
-              </Link>
-            ),
-          },
-          {
-            key: "drm-license-audit",
-            icon: <HistoryOutlined />,
-            label: (
-              <Link to="/drm-license-audit" onClick={onNavigate}>
-                {t("nav.drm_audit")}
-              </Link>
-            ),
-          },
-          {
-            key: "access-logs",
-            icon: <HistoryOutlined />,
-            label: (
-              <Link to="/access-logs" onClick={onNavigate}>
-                {t("nav.access_logs")}
-              </Link>
-            ),
-          },
-          {
-            key: "users",
-            icon: <TeamOutlined />,
-            label: (
-              <Link to="/users" onClick={onNavigate}>
-                {t("nav.users")}
-              </Link>
-            ),
-          },
-          {
-            key: "api-credentials",
-            icon: <ApiOutlined />,
-            label: (
-              <Link to="/api-credentials" onClick={onNavigate}>
-                {t("nav.api_credentials")}
-              </Link>
-            ),
-          },
-          {
-            key: "scrape-config",
-            icon: <DatabaseOutlined />,
-            label: (
-              <Link to="/scrape-config" onClick={onNavigate}>
-                {t("nav.scrape_config")}
-              </Link>
-            ),
-          },
-          {
-            key: "ai-provider",
-            icon: <RobotOutlined />,
-            label: (
-              <Link to="/ai-provider" onClick={onNavigate}>
-                {t("nav.ai_provider")}
-              </Link>
-            ),
-          },
-        ],
-      });
+      topLevelItems.push({ type: "divider" });
+      if (inlineCollapsed) {
+        topLevelItems.push(...adminChildren);
+      } else {
+        topLevelItems.push({
+          key: "admin-section",
+          icon: <ControlOutlined />,
+          label: t("nav.management"),
+          children: [...adminChildren],
+        });
+      }
     }
 
-    return items;
-  }, [libs, libsLoading, admin, onNavigate, t]);
+    return topLevelItems;
+  }, [admin, adminChildren, inlineCollapsed, libraryChildren, onNavigate, t]);
+
+  const [openKeys, setOpenKeys] = useState<string[]>(["my-media"]);
+
+  useEffect(() => {
+    if (openKeysDefault.length) {
+      setOpenKeys((prev) => Array.from(new Set([...prev, ...openKeysDefault])));
+    }
+  }, [openKeysDefault]);
+
+  const navBodyRef = useRef<HTMLDivElement>(null);
+  const flatCollapsedItems = useMemo(
+    () => (inlineCollapsed ? flattenNavMenuItems(menuItems) : []),
+    [inlineCollapsed, menuItems],
+  );
 
   return (
-    <div className="app-main-nav">
+    <div className={`app-main-nav${inlineCollapsed ? "" : " app-main-nav-expanded"}`}>
       <div className="app-main-nav-search">
         {inlineCollapsed ? (
           <Button
@@ -376,16 +400,27 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
           />
         )}
       </div>
-      <Menu
-        theme="dark"
-        mode="inline"
-        inlineCollapsed={inlineCollapsed}
-        style={{ border: 0, background: "transparent", flex: 1 }}
-        selectedKeys={selectedKeys}
-        openKeys={inlineCollapsed ? [] : openKeys}
-        onOpenChange={setOpenKeys}
-        items={menuItems}
-      />
+      <div ref={navBodyRef} className="app-main-nav-body">
+        {inlineCollapsed ? (
+          <CollapsedMainNavMenu
+            items={flatCollapsedItems}
+            selectedKeys={selectedKeys}
+            containerRef={navBodyRef}
+          />
+        ) : (
+          <Menu
+            theme="dark"
+            mode="inline"
+            inlineCollapsed={false}
+            className="app-main-nav-menu"
+            style={{ border: 0, background: "transparent", flex: 1 }}
+            selectedKeys={selectedKeys}
+            openKeys={openKeys}
+            onOpenChange={setOpenKeys}
+            items={menuItems}
+          />
+        )}
+      </div>
     </div>
   );
 }

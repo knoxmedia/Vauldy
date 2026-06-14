@@ -12,6 +12,7 @@ WORKDIR /web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
 COPY web/ ./
+COPY static/powerplayer6 /static/powerplayer6
 RUN npm run build
 
 FROM debian:bookworm-slim

@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -37,7 +36,8 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 	r.Use(middleware.CORS(cfg.CORS.AllowOrigins))
 	r.Static("/uploads", cfg.Data.Upload)
 	r.Static("/atracks", cfg.Data.ATracks)
-	r.Static("/static", cfg.Data.Static)
+	webDist := resolveWebDist()
+	mountStaticRoutes(r, cfg.Data.Static, bundledPowerPlayerDir(webDist))
 	r.Static(metadatalib.PublicURLPrefix, cfg.Data.MetadataLibrary)
 
 	keyVault, assetEnc := storage.NewAssetEncryptorFromConfig(cfg, application.DB)
@@ -308,8 +308,7 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 		}
 	}
 
-	webDist := "web/dist"
-	if fi, err := os.Stat(webDist); err == nil && fi.IsDir() {
+	if webDist != "" {
 		r.Static("/assets", webDist+"/assets")
 		r.NoRoute(func(c *gin.Context) {
 			if strings.HasPrefix(c.Request.URL.Path, "/api/") {

@@ -314,6 +314,118 @@ body.photo-lightbox-open .app-shell-content {
   overflow: hidden;
 }
 
+.app-main-nav-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.app-main-nav-expanded .app-main-nav-menu.ant-menu-root {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.app-collapsed-nav {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.app-collapsed-nav-items {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.app-collapsed-nav-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 40px;
+  margin: 0;
+  color: rgba(255, 255, 255, 0.65);
+  cursor: pointer;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+.app-collapsed-nav-item:hover:not(.app-collapsed-nav-item-disabled) {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.app-collapsed-nav-item-selected {
+  color: #fff;
+  background: #1677ff;
+}
+
+.app-collapsed-nav-item-selected:hover {
+  background: #1677ff;
+}
+
+.app-collapsed-nav-item-disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.app-collapsed-nav-item-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  line-height: 0;
+}
+
+.app-collapsed-nav-item-label {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  opacity: 0;
+}
+
+.app-collapsed-nav-item-label a {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.app-collapsed-nav-more {
+  flex-shrink: 0;
+}
+
+.app-collapsed-nav-popover .ant-popover-inner {
+  padding: 6px;
+  background: #141414;
+  border: 1px solid #303030;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.45);
+}
+
+.app-collapsed-nav-popover-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: min(60vh, 360px);
+  overflow-y: auto;
+}
+
+.app-collapsed-nav-popover-list .app-collapsed-nav-item {
+  position: relative;
+  width: 40px;
+  border-radius: 6px;
+}
+
+.app-collapsed-nav-popover-list .app-collapsed-nav-item-label {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+}
+
 .app-main-nav-search {
   padding: 12px 10px 8px;
   flex-shrink: 0;
@@ -333,12 +445,6 @@ body.photo-lightbox-open .app-shell-content {
 .app-main-nav-search-icon.ant-btn:hover {
   border-color: #3a3a3a !important;
   background: #171717 !important;
-}
-
-.app-main-nav .ant-menu-root {
-  flex: 1;
-  overflow-y: auto;
-  overflow-x: hidden;
 }
 
 .app-shell-header-bar {
