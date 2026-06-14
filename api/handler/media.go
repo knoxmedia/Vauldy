@@ -117,6 +117,10 @@ func (h *Handler) ListMedia(c *gin.Context) {
 		q += ` AND EXISTS (SELECT 1 FROM photo_face pf WHERE pf.media_id = m.id AND pf.person_id = ?)`
 		args = append(args, photoPersonID)
 	}
+	searchQ := strings.TrimSpace(c.Query("q"))
+	if searchQ != "" {
+		q, args = appendMediaTextSearchFilter(q, args, searchQ)
+	}
 	maxLimit := 500
 	if fileType == "image" {
 		maxLimit = 5000

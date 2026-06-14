@@ -11,9 +11,7 @@ import {
 import type { MenuProps } from "antd";
 import {
   CloseOutlined,
-  MenuFoldOutlined,
   MenuOutlined,
-  MenuUnfoldOutlined,
   PlayCircleOutlined,
   PushpinOutlined,
   SettingOutlined,
@@ -64,6 +62,7 @@ import { isAdminRole, useAuthStore } from "./store/auth";
 import MainNav from "./components/MainNav";
 import MusicPlayerBar from "./components/MusicPlayerBar";
 import ScrollToTopFab from "./components/ScrollToTopFab";
+import SearchHeaderControls from "./components/SearchHeaderControls";
 import { useMusicPlayerStore } from "./store/musicPlayer";
 import { useT } from "./i18n";
 
@@ -123,6 +122,7 @@ function MainShell() {
   const isReaderRoute = loc.pathname.startsWith("/reader");
   const isImmersiveRoute = isPlayerRoute || isReaderRoute;
   const isHomeRoute = loc.pathname === "/" || loc.pathname === "";
+  const isSearchRoute = loc.pathname.startsWith("/search");
   const musicPlayerActive = useMusicPlayerStore((s) => s.active);
   const contentRef = useRef<HTMLElement>(null);
 
@@ -211,7 +211,7 @@ function MainShell() {
   })();
 
   return (
-    <Layout className="app-shell" style={{ minHeight: "100vh", background: "#000" }}>
+    <Layout className="app-shell" style={{ background: "#000" }}>
       <ProfileSync />
       {!isImmersiveRoute && mode !== "hidden" && (
         <Sider
@@ -229,20 +229,16 @@ function MainShell() {
             setMode("expanded");
           }}
           theme="dark"
-          trigger={
-            siderCollapsed ? (
-              <MenuUnfoldOutlined style={{ color: "#fff" }} />
-            ) : (
-              <MenuFoldOutlined style={{ color: "#fff" }} />
-            )
-          }
+          trigger={null}
           onMouseLeave={() => {
             if (autoCollapseOnLeave && mode === "expanded") {
               setMode("collapsed");
             }
           }}
         >
-          <div className="app-sider-brand">
+          <div
+            className={`app-sider-brand${autoCollapseOnLeave ? " app-sider-brand-pending-pin" : ""}`}
+          >
             {siderCollapsed ? (
               <Button
                 type="text"
@@ -273,6 +269,21 @@ function MainShell() {
                     <span>Knox-Media</span>
                   </>
                 </Link>
+                {autoCollapseOnLeave ? (
+                  <Tooltip title={t("shell.pin_sider")}>
+                    <Button
+                      type="text"
+                      size="small"
+                      className="app-sider-pin-btn"
+                      icon={<PushpinOutlined style={{ color: "#aaa" }} />}
+                      onClick={() => {
+                        setAutoCollapseOnLeave(false);
+                        setMode("expanded");
+                      }}
+                      aria-label={t("shell.pin_sider")}
+                    />
+                  </Tooltip>
+                ) : null}
                 <Tooltip title={t("shell.hide_sider")}>
                   <Button
                     type="text"
@@ -328,6 +339,13 @@ function MainShell() {
                     >
                       <span>Knox-Media</span>
                     </Link>
+                  ) : isSearchRoute && pathTitle ? (
+                    <div className="app-shell-header-search-row app-shell-header-search-row-compact">
+                      <Typography.Text className="app-shell-header-title" ellipsis>
+                        {pathTitle}
+                      </Typography.Text>
+                      <SearchHeaderControls />
+                    </div>
                   ) : pathTitle ? (
                     <Typography.Text className="app-shell-header-title" ellipsis>
                       {pathTitle}
@@ -335,7 +353,14 @@ function MainShell() {
                   ) : null}
                 </span>
               ) : null}
-              {pathTitle && mode !== "hidden" ? (
+              {isSearchRoute && pathTitle && mode !== "hidden" ? (
+                <div className="app-shell-header-search-row">
+                  <Typography.Text className="app-shell-header-title" ellipsis>
+                    {pathTitle}
+                  </Typography.Text>
+                  <SearchHeaderControls />
+                </div>
+              ) : pathTitle && mode !== "hidden" && !isSearchRoute ? (
                 <Typography.Text className="app-shell-header-title" ellipsis>
                   {pathTitle}
                 </Typography.Text>
@@ -420,8 +445,7 @@ function MainShell() {
           className={`app-shell-content${isImmersiveRoute ? " app-shell-content-player" : ""}${musicPlayerActive && !isImmersiveRoute ? " app-shell-content-music-player" : ""}`}
           style={{
             background: "#000",
-            minHeight: isImmersiveRoute ? "100vh" : "calc(100vh - 64px)",
-            overflow: isImmersiveRoute ? "hidden" : "auto",
+            ...(isImmersiveRoute ? { minHeight: "100vh", overflow: "hidden" } : {}),
           }}
         >
           <div className={`app-main-centered${isImmersiveRoute ? " app-main-centered-player" : ""}`}>

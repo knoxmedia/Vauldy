@@ -117,10 +117,20 @@ body {
   height: 0;
 }
 
+/* 主壳：固定视口高度，避免整页滚动导致顶栏/侧栏被卷走 */
+.app-shell {
+  height: 100vh;
+  overflow: hidden;
+}
+
 /* 覆盖 antd Header 默认左右内边距，保证贴边 */
 .app-top-header.ant-layout-header {
   padding-inline: 0 !important;
   padding-block: 0 !important;
+  flex-shrink: 0;
+  position: sticky;
+  top: 0;
+  z-index: 200;
 }
 
 /* 顶栏：全宽铺满视口，左/右区贴页面两侧，中间为导航 */
@@ -203,18 +213,28 @@ body.photo-lightbox-open .app-shell-content {
 .app-shell-inner {
   flex: 1 1 auto;
   min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
 /* 侧栏展开/收起时，主列始终吃掉剩余宽度 */
 .app-shell-content {
   flex: 1 1 auto;
   min-width: 0;
+  min-height: 0;
+  overflow: auto;
 }
 
 .app-shell-sider {
   border-right: 1px solid #1f1f1f !important;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.app-shell-sider .ant-layout-sider-trigger {
+  display: none !important;
 }
 
 .app-shell-sider .ant-layout-sider-children {
@@ -253,6 +273,7 @@ body.photo-lightbox-open .app-shell-content {
 }
 
 .app-sider-mode-btn.ant-btn,
+.app-sider-pin-btn.ant-btn,
 .app-sider-close-btn.ant-btn {
   flex-shrink: 0;
 }
@@ -267,7 +288,20 @@ body.photo-lightbox-open .app-shell-content {
   transition: opacity 0.2s ease;
 }
 
-.app-sider-brand:hover .app-sider-close-btn.ant-btn {
+.app-sider-pin-btn.ant-btn {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+}
+
+.app-sider-brand:hover .app-sider-close-btn.ant-btn,
+.app-sider-brand:hover .app-sider-pin-btn.ant-btn {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.app-sider-brand-pending-pin .app-sider-close-btn.ant-btn,
+.app-sider-brand-pending-pin .app-sider-pin-btn.ant-btn {
   opacity: 1;
   pointer-events: auto;
 }
@@ -369,6 +403,54 @@ body.photo-lightbox-open .app-shell-content {
   color: #e6edf3 !important;
   font-size: 16px;
   max-width: min(50vw, 360px);
+}
+
+.app-shell-header-search-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  flex: 1;
+}
+
+.app-shell-header-search-row-compact {
+  flex: 1;
+  min-width: 0;
+}
+
+.app-shell-header-search-row-compact .app-shell-header-title {
+  flex-shrink: 0;
+  max-width: 72px;
+}
+
+.app-shell-header-search-row .app-shell-header-title {
+  flex-shrink: 0;
+  max-width: none;
+}
+
+.app-header-search-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+  max-width: min(480px, 52vw);
+}
+
+.app-header-search-input {
+  flex: 1;
+  min-width: 140px;
+}
+
+.app-header-search-clear {
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 14px;
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+
+.app-header-search-clear:hover {
+  color: rgba(255, 255, 255, 0.85);
 }
 
 .app-shell-header-right {

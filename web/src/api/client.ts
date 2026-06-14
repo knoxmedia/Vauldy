@@ -423,6 +423,8 @@ export async function fetchMedia(
     photo_tag?: string;
     photo_place?: string;
     photo_person?: string;
+    /** Full-text fuzzy search across title, overview, genres, tags, etc. */
+    q?: string;
   },
 ) {
   const params: Record<string, string | number> = {};
@@ -433,6 +435,7 @@ export async function fetchMedia(
   if (opts?.photo_tag) params.photo_tag = opts.photo_tag;
   if (opts?.photo_place) params.photo_place = opts.photo_place;
   if (opts?.photo_person) params.photo_person = opts.photo_person;
+  if (opts?.q) params.q = opts.q;
   const { data } = await api.get<{ items?: MediaItem[] }>("/api/v1/media", { params });
   return data?.items ?? [];
 }

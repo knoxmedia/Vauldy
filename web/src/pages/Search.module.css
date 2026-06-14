@@ -1,0 +1,119 @@
+.page {
+  padding: 16px 0 32px;
+}
+
+.resultsTitle {
+  color: #fff;
+  font-size: 22px;
+  font-weight: 600;
+  margin: 0 0 12px;
+}
+
+.filterBar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.filterChips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.filterChip {
+  border: none;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 14px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+
+.filterChip:hover {
+  color: #fff;
+}
+
+.filterChipActive {
+  color: #e5a00d;
+  font-weight: 600;
+}
+
+.loadingWrap {
+  display: flex;
+  justify-content: center;
+  padding: 48px 0;
+}
+
+.searchListWrap .searchListRow:hover {
+  padding-right: 76px;
+}
+
+.listActionsSlot {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.searchListRow:hover .listActionsSlot {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.listMoreBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: rgba(255, 255, 255, 0.72);
+  line-height: 0;
+  transition: color 0.12s ease;
+}
+
+.listMoreBtn:hover {
+  color: #ed6d00;
+}
+
+.listMoreIcon {
+  display: block;
+  flex-shrink: 0;
+}
+
+.listPlayBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: rgba(255, 255, 255, 0.88);
+  line-height: 0;
+  transition: color 0.12s ease;
+}
+
+.listPlayBtn:hover {
+  color: #ed6d00;
+}
+
+.listPlayIcon {
+  display: block;
+  flex-shrink: 0;
+}
