@@ -277,8 +277,8 @@ func entriesToPTSPos(entries []packetEntry) (pts []float64, pos []int64) {
 	return pts, pos
 }
 
-// PlanEncryptedSeek picks the nearest keyframe at or before targetSec. When byte offsets are
-// indexed, returns pipe start offset and the remaining ffmpeg -ss delta (no plaintext on disk).
+// PlanEncryptedSeek picks the nearest keyframe at or before targetSec. Byte offsets are indexed
+// for metadata only; MP4 decrypt pipes must start at 0 and seek by time (see session/transcoder).
 func (m *Meta) PlanEncryptedSeek(targetSec float64) (pipeOffset int64, ffmpegSS float64, ok bool) {
 	if m == nil || len(m.PTS) == 0 || targetSec <= 0.01 || !m.hasPosIndex() {
 		return 0, targetSec, false

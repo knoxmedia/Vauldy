@@ -17,19 +17,16 @@ import (
 	"knox-media/internal/storage"
 )
 
-func encSeekPlan(s *Session, targetSec float64) (pipeOffset int64, ffmpegSS float64) {
-	ffmpegSS = targetSec
-	if targetSec <= 0.01 || s == nil || s.mgr == nil {
-		return 0, ffmpegSS
+func seekTimeForTranscode(s *Session, targetSec float64, in *storage.FFmpegInput) float64 {
+	if targetSec <= 0.01 {
+		return targetSec
 	}
-	kf := s.mgr.loadKeyframeMeta(s)
-	if kf == nil {
-		return 0, ffmpegSS
+	// Decrypt pipe must start at byte 0 so ffmpeg reads the container header (moov).
+	// Byte-offset pipe seek skips moov and breaks MP4 demux even with faststart layout.
+	if in != nil && (in.FromEnc || in.PlainFallback) {
+		return plainFileSeekPlan(s, targetSec)
 	}
-	if off, ss, ok := kf.PlanEncryptedSeek(targetSec); ok {
-		return off, ss
-	}
-	return 0, ffmpegSS
+	return targetSec
 }
 
 func plainFileSeekPlan(s *Session, targetSec float64) float64 {
@@ -86,11 +83,10 @@ func (s *Session) runTranscode(cfg TranscodeConfig) error {
 	startSeg := s.NextSegmentToEmit()
 
 	args := []string{"-hide_banner", "-loglevel", "error"}
-	pipeOffset, seekTime := encSeekPlan(s, cfg.StartTime)
 	var ffmpegIn *storage.FFmpegInput
 	var ffmpegInErr error
 	if s.mgr != nil && s.mgr.DB != nil && s.mgr.Vault != nil {
-		ffmpegIn, ffmpegInErr = storage.OpenFFmpegInput(s.mgr.DB, s.mgr.Vault, s.MediaID, cfg.SourcePath, pipeOffset)
+		ffmpegIn, ffmpegInErr = storage.OpenFFmpegInput(s.mgr.DB, s.mgr.Vault, s.MediaID, cfg.SourcePath, 0)
 	}
 	if ffmpegInErr != nil {
 		return ffmpegInErr
@@ -98,9 +94,7 @@ func (s *Session) runTranscode(cfg TranscodeConfig) error {
 	if ffmpegIn == nil {
 		ffmpegIn = &storage.FFmpegInput{Path: cfg.SourcePath}
 	}
-	if ffmpegIn.PlainFallback {
-		seekTime = plainFileSeekPlan(s, cfg.StartTime)
-	}
+	seekTime := seekTimeForTranscode(s, cfg.StartTime, ffmpegIn)
 	if seekTime > 0.01 {
 		args = append(args, "-y", "-copyts", "-start_at_zero")
 		args = append(args, "-ss", formatSeconds(seekTime))

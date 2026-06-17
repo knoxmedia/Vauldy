@@ -43,6 +43,9 @@ func KickEncryptMedia(enc *AssetEncryptor, cfg *config.Config, mediaID int64) {
 		return
 	}
 	go func(mid int64) {
+		if !LibraryEncryptEnabled(enc.DB, mid) {
+			return
+		}
 		WaitForPlaintextConsumers(enc.DB, mid, 45*time.Minute)
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
 		defer cancel()
@@ -50,6 +53,63 @@ func KickEncryptMedia(enc *AssetEncryptor, cfg *config.Config, mediaID int64) {
 			log.Printf("asset encrypt failed media=%d: %v", mid, err)
 		}
 	}(mediaID)
+}
+
+// LibraryEncryptEnabled reports whether the media row's library has encrypted_assets_enabled.
+func LibraryEncryptEnabled(db *sql.DB, mediaID int64) bool {
+	if db == nil || mediaID <= 0 {
+		return false
+	}
+	var enabled int
+	err := db.QueryRow(`
+		SELECT COALESCE(l.encrypted_assets_enabled, 0)
+		FROM media m
+		JOIN library l ON l.id = m.library_id
+		WHERE m.id = ?
+	`, mediaID).Scan(&enabled)
+	return err == nil && enabled == 1
+}
+
+// KickPendingMediaEncryption periodically encrypts plaintext catalog rows in libraries
+// that have encrypted_assets_enabled (covers missed ingest hooks).
+func KickPendingMediaEncryption(enc *AssetEncryptor, cfg *config.Config) {
+	if enc == nil || cfg == nil || !cfg.EncryptedAssetsEnabled() {
+		return
+	}
+	sweep := func() {
+		rows, err := enc.DB.Query(`
+			SELECT m.id
+			FROM media m
+			JOIN library l ON l.id = m.library_id
+			WHERE COALESCE(l.encrypted_assets_enabled, 0) = 1
+			  AND COALESCE(m.status, 'active') = 'active'
+			  AND NOT EXISTS (
+			    SELECT 1 FROM media_encrypted_assets e
+			    WHERE e.media_id = m.id AND e.status = 'encrypted'
+			  )
+			LIMIT 100
+		`)
+		if err != nil {
+			log.Printf("asset encrypt: pending sweep query: %v", err)
+			return
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var mediaID int64
+			if err := rows.Scan(&mediaID); err != nil || mediaID <= 0 {
+				continue
+			}
+			KickEncryptMedia(enc, cfg, mediaID)
+		}
+	}
+	go sweep()
+	go func() {
+		tk := time.NewTicker(3 * time.Minute)
+		defer tk.Stop()
+		for range tk.C {
+			sweep()
+		}
+	}()
 }
 
 // NewDerivedAssetStoreFromConfig builds derived artifact encryption store when global encrypted assets are enabled.

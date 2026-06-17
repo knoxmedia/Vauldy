@@ -21,8 +21,12 @@ func TestPlaintextConsumersBusyKeyframeWaiting(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO keyframe_task (media_id, status) VALUES (7, 'waiting')`); err != nil {
 		t.Fatal(err)
 	}
+	if plaintextConsumersBusy(db, 7) {
+		t.Fatal("waiting keyframe must not block encrypt")
+	}
+	_, _ = db.Exec(`UPDATE keyframe_task SET status='running' WHERE media_id=7`)
 	if !plaintextConsumersBusy(db, 7) {
-		t.Fatal("expected busy for waiting keyframe")
+		t.Fatal("expected busy for running keyframe")
 	}
 	_, _ = db.Exec(`UPDATE keyframe_task SET status='done' WHERE media_id=7`)
 	if plaintextConsumersBusy(db, 7) {

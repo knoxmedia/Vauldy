@@ -243,6 +243,9 @@ func (h *Handler) EnqueuePostIngestForNewMedia(mediaID int64, fileType string) {
 		if ft == "document" {
 			h.GenerateDocumentCover(mid)
 		}
+		if ft == "video" && h.KeyframeWorker != nil {
+			h.KeyframeWorker.Enqueue(mid)
+		}
 		h.KickEncryptMediaAsset(mid)
 	}(mediaID, fileType)
 }

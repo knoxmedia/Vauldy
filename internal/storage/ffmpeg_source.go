@@ -23,10 +23,10 @@ type FFmpegInput struct {
 }
 
 // OpenFFmpegInput resolves media for ffmpeg. Knox .enc streams decrypted bytes on Stdin (pipe:0)
-// when no plaintext is available. pipeByteOffset seeks the decrypt reader before piping (CTR
-// random access); ffmpeg -ss handles the remaining time delta. When media_encrypted_assets still
-// references an on-disk plain_path, that file is used read-only instead of pipe:0 because typical
-// MP4 moov-at-end inputs fail on non-seekable decrypt pipes.
+// when no plaintext is available. pipeByteOffset may seek the decrypt reader for non-container
+// payloads; MP4/MOV JIT playback must pass 0 and use ffmpeg -ss because container headers live at
+// the start of the stream. When media_encrypted_assets still references an on-disk plain_path,
+// that file is used read-only instead of pipe:0.
 func OpenFFmpegInput(db *sql.DB, vault *keystore.Vault, mediaID int64, path string, pipeByteOffset int64) (*FFmpegInput, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {

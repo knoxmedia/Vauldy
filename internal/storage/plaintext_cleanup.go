@@ -40,7 +40,7 @@ func plaintextConsumersBusy(db *sql.DB, mediaID int64) bool {
 	}
 	if keyframeStatus.Valid {
 		switch strings.ToLower(keyframeStatus.String) {
-		case "waiting", "running":
+		case "running":
 			return true
 		}
 	}

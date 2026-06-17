@@ -157,6 +157,7 @@ func main() {
 	storage.SetMediaPlaintextBusy(sessionMgr.HasActiveMedia)
 	go storage.KickPendingPlaintextCleanups(db)
 	go storage.KickEncryptedMP4PipeRepairs(assetEncryptor)
+	go storage.KickPendingMediaEncryption(assetEncryptor, cfg)
 
 	instantSliceWorker := sliceworker.NewSliceWorker(&sliceworker.Config{
 		RedisAddr:   redisAddr,

@@ -57,6 +57,11 @@ func (s *AssetEncryptor) encryptMedia(ctx context.Context, mediaID int64, manual
 		}
 		return nil
 	}
+	if !tryAcquireEncrypt(mediaID) {
+		return nil
+	}
+	defer releaseEncrypt(mediaID)
+
 	var libraryID sql.NullInt64
 	var filePath, fileType, fileID string
 	if err := s.DB.QueryRowContext(ctx, `
@@ -141,15 +146,10 @@ func (s *AssetEncryptor) encryptMedia(ctx context.Context, mediaID int64, manual
 	dst, err := os.OpenFile(encPath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
 	if err != nil {
 		if os.IsExist(err) {
-			encPath, err = uniqueEncPath(encDir, fileID)
-			if err != nil {
-				return err
-			}
-			dst, err = os.OpenFile(encPath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
+			// Another encrypt goroutine is writing the canonical path; do not allocate -1/-2 copies.
+			return nil
 		}
-		if err != nil {
-			return err
-		}
+		return err
 	}
 	result, err := kcrypto.EncryptFile(src, dst, kek)
 	closeErr := dst.Close()
@@ -189,20 +189,6 @@ func (s *AssetEncryptor) encryptMedia(ctx context.Context, mediaID int64, manual
 		markKeyframeReindex(s.DB, mediaID)
 	}
 	return nil
-}
-
-func uniqueEncPath(dir, fileID string) (string, error) {
-	for i := 0; i < 100; i++ {
-		name := fileID
-		if i > 0 {
-			name = fmt.Sprintf("%s-%d", fileID, i)
-		}
-		p := filepath.Join(dir, name+".enc")
-		if _, err := os.Stat(p); os.IsNotExist(err) {
-			return p, nil
-		}
-	}
-	return "", fmt.Errorf("could not allocate enc path for %s", fileID)
 }
 
 // OpenPlaintext returns a reader for media content, decrypting .enc when needed.

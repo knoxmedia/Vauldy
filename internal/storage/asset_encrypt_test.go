@@ -6,12 +6,62 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 
 	"knox-media/internal/crypto"
 	"knox-media/internal/keystore"
 	"knox-media/internal/store"
 )
+
+func TestEncryptMediaConcurrentSingleOutput(t *testing.T) {
+	db, err := store.OpenSQLite(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	kek := bytes.Repeat([]byte{0x42}, 32)
+	vault, err := keystore.NewVault(string(kek), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	plain := filepath.Join(dir, "clip.mp4")
+	payload := bytes.Repeat([]byte("video-bytes"), 4096)
+	if err := os.WriteFile(plain, payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = db.Exec(`INSERT INTO library (id, name, type, path, encrypted_assets_enabled) VALUES (1, 'lib', 'video', ?, 1)`, dir)
+	_, _ = db.Exec(`INSERT INTO media (id, library_id, file_id, title, file_path, file_type, status) VALUES (10, 1, 'fid-1', 't', ?, 'video', 'active')`, plain)
+
+	enc := &AssetEncryptor{DB: db, Vault: vault, BasePath: filepath.Join(dir, "encrypted")}
+	var wg sync.WaitGroup
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = enc.EncryptMedia(context.Background(), 10)
+		}()
+	}
+	wg.Wait()
+
+	encDir := filepath.Join(dir, ".encrypted", "video")
+	entries, err := os.ReadDir(encDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var encFiles int
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".enc") {
+			encFiles++
+		}
+	}
+	if encFiles != 1 {
+		t.Fatalf("expected 1 .enc file, got %d (%v)", encFiles, entries)
+	}
+}
 
 func TestEncryptMediaRoundTrip(t *testing.T) {
 	db, err := store.OpenSQLite(":memory:")
