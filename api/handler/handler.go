@@ -54,7 +54,7 @@ func New(a *app.App, w *transcode.Worker, pkgw *transcode.PackageWorker, pw *pre
 	h := &Handler{App: a, Worker: w, PackageWorker: pkgw, PreviewWorker: pw, Subtitle: sub, Upload: u, Instant: instant, SessionManager: sm, AtrackWorker: atw, KeyframeWorker: kfw, LyricWorker: lw, PhotoClassifyWorker: pcw, DocCoverWorker: dcw, KeyVault: keyVault, AssetEncryptor: assetEnc, DerivedStore: derived, PhotoGeocode: photogeocode.New(a.DB), runningScans: map[int64]scanRuntime{}}
 	_ = h.PhotoGeocode.EnsureSchema()
 	h.PhotoLocationWorker = photogeocode.NewWorker(a.DB, keyVault, h.PhotoGeocode)
-	h.PhotoFaceWorker = photoface.NewWorker(a.DB, keyVault, filepath.Dir(a.ConfigPath), a.Config.FFmpeg.FFmpegPath, a.Config.Data.Preview, func() config.PhotoFaceConfig {
+	h.PhotoFaceWorker = photoface.NewWorker(a.DB, keyVault, derived, filepath.Dir(a.ConfigPath), a.Config.FFmpeg.FFmpegPath, a.Config.Data.Preview, func() config.PhotoFaceConfig {
 		cfg := a.Config.PhotoFace
 		if strings.TrimSpace(cfg.PythonPath) == "" {
 			cfg.PythonPath = a.Config.PhotoClassify.PythonPath

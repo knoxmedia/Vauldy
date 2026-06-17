@@ -474,7 +474,7 @@ func TestHLSInfoNativeSkipJITWhenClientSupportsSource(t *testing.T) {
 		t.Fatalf("insert media: %v", err)
 	}
 
-	sm, err := session.NewManager("ffmpeg", "ffprobe", base, nil, nil)
+	sm, err := session.NewManager("ffmpeg", "ffprobe", base, "", nil, nil)
 	if err != nil {
 		t.Fatalf("create session manager: %v", err)
 	}
@@ -519,7 +519,7 @@ func TestHLSInfoJITWhenClientCannotPlaySource(t *testing.T) {
 		t.Fatalf("insert media: %v", err)
 	}
 
-	sm, err := session.NewManager("ffmpeg", "ffprobe", base, nil, nil)
+	sm, err := session.NewManager("ffmpeg", "ffprobe", base, "", nil, nil)
 	if err != nil {
 		t.Fatalf("create session manager: %v", err)
 	}
@@ -576,7 +576,7 @@ func TestHLSInfoStreamDRMReturnsJITSession(t *testing.T) {
 		t.Fatalf("insert media: %v", err)
 	}
 
-	sm, err := session.NewManager("ffmpeg", "ffprobe", base, nil, nil)
+	sm, err := session.NewManager("ffmpeg", "ffprobe", base, "", nil, nil)
 	if err != nil {
 		t.Fatalf("create session manager: %v", err)
 	}

@@ -161,6 +161,21 @@ func (w *Worker) run(ctx context.Context, mediaID int64, fileID, filePath string
 		return err
 	}
 
+	count := len(meta.PTS)
+	if count == 0 {
+		msg := "no keyframes extracted"
+		if storage.InputNeedsPipe(w.DB, mediaID, filePath) {
+			probePath := storage.ResolveKeyframeProbePath(w.DB, mediaID, filePath)
+			if probePath == filePath {
+				msg = "no keyframes from encrypted pipe; plaintext source missing (extract before deleting plain file)"
+			} else {
+				msg = "no keyframes from probe path"
+			}
+		}
+		w.markFailed(mediaID, msg)
+		return fmt.Errorf("%s", msg)
+	}
+
 	if err := cache.Save(meta); err != nil {
 		w.markFailed(mediaID, err.Error())
 		return err
@@ -173,7 +188,6 @@ func (w *Worker) run(ctx context.Context, mediaID int64, fileID, filePath string
 		}
 	}
 
-	count := len(meta.PTS)
 	_, _ = w.DB.Exec(
 		`UPDATE keyframe_task SET status='done', output_dir=?, keyframe_count=?, updated_at=CURRENT_TIMESTAMP, error_message=NULL WHERE media_id = ?`,
 		w.OutputDir, count, mediaID,

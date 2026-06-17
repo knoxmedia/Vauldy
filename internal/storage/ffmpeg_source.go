@@ -15,15 +15,19 @@ import (
 
 // FFmpegInput is a decrypted view of media suitable for ffmpeg -i.
 type FFmpegInput struct {
-	Path    string
-	Stdin   io.Reader
-	Cleanup func()
-	FromEnc bool
+	Path          string
+	Stdin         io.Reader
+	Cleanup       func()
+	FromEnc       bool
+	PlainFallback bool // read-only plaintext path for .enc catalog entries (no decrypt pipe)
 }
 
-// OpenFFmpegInput resolves media for ffmpeg. Knox .enc uses pipe:0 (Stdin); plaintext uses Path.
-// startSec seeks into encrypted plaintext when durationSec > 0.
-func OpenFFmpegInput(db *sql.DB, vault *keystore.Vault, mediaID int64, path string, startSec, durationSec float64) (*FFmpegInput, error) {
+// OpenFFmpegInput resolves media for ffmpeg. Knox .enc streams decrypted bytes on Stdin (pipe:0)
+// when no plaintext is available. pipeByteOffset seeks the decrypt reader before piping (CTR
+// random access); ffmpeg -ss handles the remaining time delta. When media_encrypted_assets still
+// references an on-disk plain_path, that file is used read-only instead of pipe:0 because typical
+// MP4 moov-at-end inputs fail on non-seekable decrypt pipes.
+func OpenFFmpegInput(db *sql.DB, vault *keystore.Vault, mediaID int64, path string, pipeByteOffset int64) (*FFmpegInput, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return nil, fmt.Errorf("empty media path")
@@ -36,6 +40,12 @@ func OpenFFmpegInput(db *sql.DB, vault *keystore.Vault, mediaID int64, path stri
 	}
 	if db == nil || vault == nil {
 		return nil, fmt.Errorf("encrypted source requires keystore")
+	}
+	if plain := ResolveKeyframeProbePath(db, mediaID, path); plain != path {
+		if _, err := os.Stat(plain); err != nil {
+			return nil, fmt.Errorf("plaintext fallback missing: %w", err)
+		}
+		return &FFmpegInput{Path: plain, PlainFallback: true}, nil
 	}
 	var wrappedHex string
 	if err := db.QueryRow(`
@@ -61,16 +71,10 @@ func OpenFFmpegInput(db *sql.DB, vault *keystore.Vault, mediaID int64, path stri
 	if err != nil {
 		return nil, err
 	}
-	if startSec > 0.01 {
-		off := int64(0)
-		if durationSec > 0.01 {
-			if plainSize, perr := kcrypto.PlaintextSize(path); perr == nil && plainSize > 0 {
-				off = int64(float64(plainSize) * (startSec / durationSec))
-			}
-		}
-		if _, err := seeker.Seek(off, io.SeekStart); err != nil {
+	if pipeByteOffset > 0 {
+		if _, err := seeker.Seek(pipeByteOffset, io.SeekStart); err != nil {
 			_ = seeker.Close()
-			return nil, fmt.Errorf("encrypted seek: %w", err)
+			return nil, fmt.Errorf("encrypted pipe seek: %w", err)
 		}
 	}
 

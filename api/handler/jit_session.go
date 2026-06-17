@@ -207,6 +207,9 @@ func (h *Handler) ServeJITAsset(c *gin.Context) {
 
 	latest := s.LatestSegment()
 
+	// Record player interest before waiting so seek transcodes keep the session alive.
+	s.RecordRequest(segID)
+
 	// Rollback before the current encode window: ffmpeg only emits segment_start_number..N;
 	// requesting seg < StartSeg cannot be satisfied without a new transcode from that seg.
 	if segID < s.StartSeg {
@@ -235,9 +238,6 @@ func (h *Handler) ServeJITAsset(c *gin.Context) {
 	deadline := time.Now().Add(60 * time.Second)
 	for {
 		if _, err := os.Stat(filePath); err == nil {
-			// Record position only when serving a completed segment.
-			// Prefetch requests for not-yet-produced segments won't skew scheduling.
-			s.RecordRequest(segID)
 			if ct := jitServedContentType(filePath); ct != "" {
 				c.Header("Content-Type", ct)
 			}

@@ -28,10 +28,12 @@ func NewAssetEncryptorFromConfig(cfg *config.Config, db *sql.DB) (*keystore.Vaul
 		return nil, nil
 	}
 	return vault, &AssetEncryptor{
-		DB:       db,
-		Vault:    vault,
-		BasePath: cfg.EncryptedAssetsStoragePath(),
-		DataDir:  strings.TrimSpace(cfg.Data.Dir),
+		DB:          db,
+		Vault:       vault,
+		BasePath:    cfg.EncryptedAssetsStoragePath(),
+		DataDir:     strings.TrimSpace(cfg.Data.Dir),
+		FFmpegPath:  strings.TrimSpace(cfg.FFmpeg.FFmpegPath),
+		FFprobePath: strings.TrimSpace(cfg.FFmpeg.FFprobePath),
 	}
 }
 

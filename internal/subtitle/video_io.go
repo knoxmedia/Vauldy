@@ -41,7 +41,7 @@ func (s *Service) openVideoPipeInput(mediaID int64, videoPath string) (input str
 	if !storage.InputNeedsPipe(s.DB, mediaID, videoPath) {
 		return videoPath, nil, func() {}, nil
 	}
-	in, err := storage.OpenFFmpegInput(s.DB, s.Vault, mediaID, videoPath, 0, 0)
+	in, err := storage.OpenFFmpegInput(s.DB, s.Vault, mediaID, videoPath, 0)
 	if err != nil {
 		return "", nil, nil, err
 	}

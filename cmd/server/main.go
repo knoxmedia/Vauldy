@@ -124,7 +124,7 @@ func main() {
 	photoClassifyWorker := photoclass.NewWorker(db, keyVault, filepath.Dir(cfgPath), cfg.FFmpeg.FFmpegPath, cfg.Data.Preview, func() config.PhotoClassifyConfig {
 		return cfg.PhotoClassify
 	})
-	photoFaceWorker := photoface.NewWorker(db, keyVault, filepath.Dir(cfgPath), cfg.FFmpeg.FFmpegPath, cfg.Data.Preview, func() config.PhotoFaceConfig {
+	photoFaceWorker := photoface.NewWorker(db, keyVault, derivedStore, filepath.Dir(cfgPath), cfg.FFmpeg.FFmpegPath, cfg.Data.Preview, func() config.PhotoFaceConfig {
 		faceCfg := cfg.PhotoFace
 		if strings.TrimSpace(faceCfg.PythonPath) == "" {
 			faceCfg.PythonPath = cfg.PhotoClassify.PythonPath
@@ -150,10 +150,13 @@ func main() {
 	instantScheduler.SetHLSContinuous(cfg.JITContinuousHLSEnabled())
 
 	// New Redis-free session manager (clears dataDir/jit from previous runs).
-	sessionMgr, err := jitsession.NewManager(cfg.FFmpeg.FFmpegPath, cfg.FFmpeg.FFprobePath, cfg.Data.Dir, db, keyVault)
+	sessionMgr, err := jitsession.NewManager(cfg.FFmpeg.FFmpegPath, cfg.FFmpeg.FFprobePath, cfg.Data.Dir, cfg.Data.Keyframes, db, keyVault)
 	if err != nil {
 		log.Fatalf("jit session manager: %v", err)
 	}
+	storage.SetMediaPlaintextBusy(sessionMgr.HasActiveMedia)
+	go storage.KickPendingPlaintextCleanups(db)
+	go storage.KickEncryptedMP4PipeRepairs(assetEncryptor)
 
 	instantSliceWorker := sliceworker.NewSliceWorker(&sliceworker.Config{
 		RedisAddr:   redisAddr,

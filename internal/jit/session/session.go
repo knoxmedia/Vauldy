@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,27 +27,29 @@ type Manager struct {
 	mu       sync.RWMutex
 	sessions map[string]*Session
 
-	ffmpegPath  string
-	ffprobePath string
-	dataDir     string
-	DB          *sql.DB
-	Vault       *keystore.Vault
+	ffmpegPath    string
+	ffprobePath   string
+	dataDir       string
+	keyframesDir  string
+	DB            *sql.DB
+	Vault         *keystore.Vault
 }
 
 // NewManager creates a new session manager and removes any leftover files under
 // dataDir/jit from prior runs.
-func NewManager(ffmpegPath, ffprobePath, dataDir string, db *sql.DB, vault *keystore.Vault) (*Manager, error) {
+func NewManager(ffmpegPath, ffprobePath, dataDir, keyframesDir string, db *sql.DB, vault *keystore.Vault) (*Manager, error) {
 	jitDir := filepath.Join(dataDir, "jit")
 	if err := os.RemoveAll(jitDir); err != nil {
 		return nil, fmt.Errorf("clear jit temp dir: %w", err)
 	}
 	m := &Manager{
-		sessions:    make(map[string]*Session),
-		ffmpegPath:  ffmpegPath,
-		ffprobePath: ffprobePath,
-		dataDir:     dataDir,
-		DB:          db,
-		Vault:       vault,
+		sessions:     make(map[string]*Session),
+		ffmpegPath:   ffmpegPath,
+		ffprobePath:  ffprobePath,
+		dataDir:      dataDir,
+		keyframesDir: keyframesDir,
+		DB:           db,
+		Vault:        vault,
 	}
 	return m, nil
 }
@@ -214,6 +217,21 @@ func (m *Manager) Get(id string) *Session {
 	return m.sessions[id]
 }
 
+// HasActiveMedia reports whether any JIT session is using the given media id.
+func (m *Manager) HasActiveMedia(mediaID int64) bool {
+	if m == nil || mediaID <= 0 {
+		return false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, s := range m.sessions {
+		if s != nil && s.MediaID == mediaID {
+			return true
+		}
+	}
+	return false
+}
+
 // CancelSession stops the ffmpeg process and removes the temp directory.
 func (m *Manager) CancelSession(id string) {
 	m.mu.Lock()
@@ -370,16 +388,20 @@ func (s *Session) LastRequestedSeg() int {
 }
 
 // TimeSinceLastRequest returns how long since the player last requested a segment.
+// When no segment has been served yet, uses CreatedAt so the scheduler does not treat
+// a new session as idle for a full hour (which would trip the 120s timeout immediately).
 func (s *Session) TimeSinceLastRequest() time.Duration {
 	v := s.lastRequestTime.Load()
 	if v == nil {
-		return time.Hour // never requested
+		return time.Since(s.CreatedAt)
 	}
 	return time.Since(v.(time.Time))
 }
 
 // ResetForSeek cancels the current ffmpeg, resets context, and updates StartSeg.
-// The temp dir is preserved. Caller must restart transcode with new start time.
+// The temp dir is preserved but encoder outputs from startSeg onward are removed so
+// a restarted HLS muxer (append_list) does not conflict with stale playlists/segments.
+// Caller must restart transcode with new start time.
 func (s *Session) ResetForSeek(startSeg int) {
 	s.BumpResumeWatchEpoch()
 	// Cancel existing ffmpeg.
@@ -388,6 +410,7 @@ func (s *Session) ResetForSeek(startSeg int) {
 	case <-s.done:
 	case <-time.After(5 * time.Second):
 	}
+	_ = cleanupEncoderOutputFromSeg(s.TempDir, startSeg)
 	// Reset context and done channel.
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	s.done = make(chan struct{})
@@ -395,6 +418,38 @@ func (s *Session) ResetForSeek(startSeg int) {
 	s.latestSeg.Store(int64(startSeg - 1))
 	s.Cmd = nil
 	s.paused.Store(false)
+}
+
+// cleanupEncoderOutputFromSeg removes ffmpeg segment-list and segment files at or after
+// startSeg. Encryption key material (enc.key, enc.keyinfo) is left intact.
+func cleanupEncoderOutputFromSeg(tempDir string, startSeg int) error {
+	if strings.TrimSpace(tempDir) == "" {
+		return nil
+	}
+	_ = os.Remove(filepath.Join(tempDir, "master.m3u8"))
+	entries, err := os.ReadDir(tempDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	for _, ent := range entries {
+		if ent.IsDir() {
+			continue
+		}
+		name := ent.Name()
+		if !strings.HasSuffix(strings.ToLower(name), ".ts") {
+			continue
+		}
+		idStr := strings.TrimSuffix(name, filepath.Ext(name))
+		segID, perr := strconv.Atoi(idStr)
+		if perr != nil || segID < startSeg {
+			continue
+		}
+		_ = os.Remove(filepath.Join(tempDir, name))
+	}
+	return nil
 }
 
 func newSessionID() string {

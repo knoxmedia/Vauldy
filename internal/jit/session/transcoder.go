@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -15,6 +16,36 @@ import (
 
 	"knox-media/internal/storage"
 )
+
+func encSeekPlan(s *Session, targetSec float64) (pipeOffset int64, ffmpegSS float64) {
+	ffmpegSS = targetSec
+	if targetSec <= 0.01 || s == nil || s.mgr == nil {
+		return 0, ffmpegSS
+	}
+	kf := s.mgr.loadKeyframeMeta(s)
+	if kf == nil {
+		return 0, ffmpegSS
+	}
+	if off, ss, ok := kf.PlanEncryptedSeek(targetSec); ok {
+		return off, ss
+	}
+	return 0, ffmpegSS
+}
+
+func plainFileSeekPlan(s *Session, targetSec float64) float64 {
+	if targetSec <= 0.01 || s == nil || s.mgr == nil {
+		return targetSec
+	}
+	kf := s.mgr.loadKeyframeMeta(s)
+	if kf == nil || len(kf.PTS) == 0 {
+		return targetSec
+	}
+	idx := sort.Search(len(kf.PTS), func(i int) bool { return kf.PTS[i] > targetSec }) - 1
+	if idx < 0 {
+		idx = 0
+	}
+	return kf.PTS[idx]
+}
 
 // TranscodeConfig holds the parameters for session-scoped ffmpeg.
 type TranscodeConfig struct {
@@ -55,10 +86,11 @@ func (s *Session) runTranscode(cfg TranscodeConfig) error {
 	startSeg := s.NextSegmentToEmit()
 
 	args := []string{"-hide_banner", "-loglevel", "error"}
+	pipeOffset, seekTime := encSeekPlan(s, cfg.StartTime)
 	var ffmpegIn *storage.FFmpegInput
 	var ffmpegInErr error
 	if s.mgr != nil && s.mgr.DB != nil && s.mgr.Vault != nil {
-		ffmpegIn, ffmpegInErr = storage.OpenFFmpegInput(s.mgr.DB, s.mgr.Vault, s.MediaID, cfg.SourcePath, cfg.StartTime, s.Duration)
+		ffmpegIn, ffmpegInErr = storage.OpenFFmpegInput(s.mgr.DB, s.mgr.Vault, s.MediaID, cfg.SourcePath, pipeOffset)
 	}
 	if ffmpegInErr != nil {
 		return ffmpegInErr
@@ -66,11 +98,12 @@ func (s *Session) runTranscode(cfg TranscodeConfig) error {
 	if ffmpegIn == nil {
 		ffmpegIn = &storage.FFmpegInput{Path: cfg.SourcePath}
 	}
-	if cfg.StartTime > 0.01 && ffmpegIn.Path != "" && !ffmpegIn.FromEnc {
+	if ffmpegIn.PlainFallback {
+		seekTime = plainFileSeekPlan(s, cfg.StartTime)
+	}
+	if seekTime > 0.01 {
 		args = append(args, "-y", "-copyts", "-start_at_zero")
-		args = append(args, "-ss", formatSeconds(cfg.StartTime))
-	} else if cfg.StartTime > 0.01 && ffmpegIn.FromEnc {
-		args = append(args, "-y", "-copyts", "-start_at_zero")
+		args = append(args, "-ss", formatSeconds(seekTime))
 	}
 	var stdin io.Reader
 	args, stdin = storage.ApplyFFmpegInput(args, ffmpegIn)
@@ -117,6 +150,7 @@ func (s *Session) runTranscode(cfg TranscodeConfig) error {
 			"-f", "hls",
 			"-hls_time", fmt.Sprintf("%.3f", segDuration),
 			"-hls_list_size", "0",
+			"-hls_playlist_type", "segment", // this is required for the segment muxer to work
 			"-hls_flags", "append_list+omit_endlist+temp_file",
 		}
 		if startSeg > 0 {
@@ -141,7 +175,7 @@ func (s *Session) runTranscode(cfg TranscodeConfig) error {
 			"-segment_start_number", strconv.Itoa(startSeg),
 			"-individual_header_trailer", "0",
 			"-write_header_trailer", "0",
-			"-segment_write_temp", "1",
+			"-segment_write_temp", "1", // this is required for the segment muxer to work
 			"-y",
 			segPattern,
 		)

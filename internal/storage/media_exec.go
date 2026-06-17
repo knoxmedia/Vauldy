@@ -20,7 +20,7 @@ type MediaProbe struct {
 
 // ProbeMediaFile probes media, decrypting Knox .enc via pipe when needed.
 func ProbeMediaFile(db *sql.DB, vault *keystore.Vault, ffprobePath string, mediaID int64, path string, beforeInput []string) (*MediaProbe, error) {
-	in, err := OpenFFmpegInput(db, vault, mediaID, path, 0, 0)
+	in, err := OpenFFmpegInput(db, vault, mediaID, path, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -37,7 +37,7 @@ func ProbeMediaFile(db *sql.DB, vault *keystore.Vault, ffprobePath string, media
 
 // FFprobeOutput runs ffprobe with caller-built args; the final argument must be the input path or pipe:0.
 func FFprobeOutput(db *sql.DB, vault *keystore.Vault, ffprobePath string, mediaID int64, path string, startSec, durationSec float64, argsBeforeInput []string) ([]byte, func(), error) {
-	in, err := OpenFFmpegInput(db, vault, mediaID, path, startSec, durationSec)
+	in, err := OpenFFmpegInput(db, vault, mediaID, path, 0)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -72,7 +72,7 @@ func ProbePath(db *sql.DB, vault *keystore.Vault, ffprobePath string, mediaID in
 // preInput is inserted before -i (e.g. -ss for plaintext seek); postInput follows -i.
 // workDir sets cmd.Dir when non-empty (e.g. CMAF init segment output).
 func RunFFmpeg(ctx context.Context, db *sql.DB, vault *keystore.Vault, ffmpegPath string, mediaID int64, path string, startSec, durationSec float64, preInput, postInput []string, workDir string) ([]byte, error) {
-	in, err := OpenFFmpegInput(db, vault, mediaID, path, startSec, durationSec)
+	in, err := OpenFFmpegInput(db, vault, mediaID, path, 0)
 	if err != nil {
 		return nil, err
 	}

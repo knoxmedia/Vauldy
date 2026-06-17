@@ -7,11 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	kcrypto "knox-media/internal/crypto"
 	"knox-media/internal/keystore"
@@ -21,10 +19,12 @@ var ErrAlreadyEncrypted = errors.New("media already encrypted")
 
 // AssetEncryptor encrypts library media to Knox 9527 .enc files at rest.
 type AssetEncryptor struct {
-	DB       *sql.DB
-	Vault    *keystore.Vault
-	BasePath string // legacy default; prefer ResolveEncBase per library
-	DataDir  string
+	DB          *sql.DB
+	Vault       *keystore.Vault
+	BasePath    string // legacy default; prefer ResolveEncBase per library
+	DataDir     string
+	FFmpegPath  string
+	FFprobePath string
 }
 
 // IsMediaEncrypted reports whether the media item is already stored as an encrypted asset.
@@ -126,7 +126,13 @@ func (s *AssetEncryptor) encryptMedia(ctx context.Context, mediaID int64, manual
 	}
 	encPath := filepath.Join(encDir, fileID+".enc")
 
-	src, err := os.Open(plainPath)
+	encryptSource, prepCleanup, remuxed, err := s.resolveEncryptSource(ctx, mediaID, plainPath, cleanupPlain == 1)
+	if err != nil {
+		return err
+	}
+	defer prepCleanup()
+
+	src, err := os.Open(encryptSource)
 	if err != nil {
 		return err
 	}
@@ -177,9 +183,10 @@ func (s *AssetEncryptor) encryptMedia(ctx context.Context, mediaID int64, manual
 		return err
 	}
 	if cleanupPlain == 1 {
-		if err := os.Remove(plainPath); err != nil && !os.IsNotExist(err) {
-			log.Printf("asset encrypt: cleanup plain media=%d path=%s err=%v", mediaID, plainPath, err)
-		}
+		cleanupPlaintextAfterEncrypt(s.DB, mediaID, plainPath)
+	}
+	if remuxed && ft == "video" {
+		markKeyframeReindex(s.DB, mediaID)
 	}
 	return nil
 }
@@ -196,38 +203,6 @@ func uniqueEncPath(dir, fileID string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("could not allocate enc path for %s", fileID)
-}
-
-// WaitForPlaintextConsumers blocks until preview/package tasks finish or timeout.
-func WaitForPlaintextConsumers(db *sql.DB, mediaID int64, timeout time.Duration) {
-	if db == nil || mediaID <= 0 {
-		return
-	}
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		var previewStatus, packageStatus sql.NullString
-		_ = db.QueryRow(`
-			SELECT (SELECT status FROM preview_task WHERE media_id = ? LIMIT 1),
-			       (SELECT status FROM package_task WHERE media_id = ? ORDER BY id DESC LIMIT 1)
-		`, mediaID, mediaID).Scan(&previewStatus, &packageStatus)
-		busy := false
-		if previewStatus.Valid {
-			switch strings.ToLower(previewStatus.String) {
-			case "running", "processing":
-				busy = true
-			}
-		}
-		if packageStatus.Valid {
-			switch strings.ToLower(packageStatus.String) {
-			case "running":
-				busy = true
-			}
-		}
-		if !busy {
-			return
-		}
-		time.Sleep(2 * time.Second)
-	}
 }
 
 // OpenPlaintext returns a reader for media content, decrypting .enc when needed.

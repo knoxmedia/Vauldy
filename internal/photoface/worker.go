@@ -10,15 +10,17 @@ import (
 	"sync"
 
 	"knox-media/internal/config"
-	"knox-media/internal/keystore"
 	"knox-media/internal/imagethumb"
+	"knox-media/internal/keystore"
 	"knox-media/internal/photoparse"
+	"knox-media/internal/storage"
 )
 
 // Worker detects faces and assigns person clusters asynchronously.
 type Worker struct {
 	DB         *sql.DB
 	Vault      *keystore.Vault
+	Derived    *storage.DerivedAssetStore
 	MediaRoot  string
 	PreviewDir string
 	FFmpegPath string
@@ -27,9 +29,9 @@ type Worker struct {
 	busy       map[int64]bool
 }
 
-func NewWorker(db *sql.DB, vault *keystore.Vault, mediaRoot, ffmpegPath, previewDir string, cfgFn func() config.PhotoFaceConfig) *Worker {
+func NewWorker(db *sql.DB, vault *keystore.Vault, derived *storage.DerivedAssetStore, mediaRoot, ffmpegPath, previewDir string, cfgFn func() config.PhotoFaceConfig) *Worker {
 	return &Worker{
-		DB: db, Vault: vault, MediaRoot: mediaRoot, FFmpegPath: ffmpegPath, PreviewDir: previewDir,
+		DB: db, Vault: vault, Derived: derived, MediaRoot: mediaRoot, FFmpegPath: ffmpegPath, PreviewDir: previewDir,
 		Cfg: cfgFn, busy: map[int64]bool{},
 	}
 }
@@ -219,7 +221,10 @@ func (w *Worker) Process(ctx context.Context, mediaID int64) error {
 		return fmt.Errorf("empty file path")
 	}
 
-	detectPath, err := w.ensureDetectImage(mediaID, path)
+	detectPath, cleanup, err := w.ensureDetectImage(ctx, mediaID, libraryID, path)
+	if cleanup != nil {
+		defer cleanup()
+	}
 	if err != nil {
 		w.fail(mediaID, err.Error())
 		return err
@@ -342,27 +347,38 @@ func (w *Worker) photoCacheDir() string {
 	return filepath.Join(w.PreviewDir, "photos")
 }
 
-func (w *Worker) ensureDetectImage(mediaID int64, srcPath string) (string, error) {
+func (w *Worker) ensureDetectImage(ctx context.Context, mediaID, libraryID int64, srcPath string) (detectPath string, cleanup func(), err error) {
+	cleanup = func() {}
 	cacheDir := w.photoCacheDir()
-	paths := imagethumb.ExpectedPaths(cacheDir, mediaID)
-	if st, err := os.Stat(paths.Thumb); err == nil && !st.IsDir() && st.Size() > 0 {
-		return filepath.Abs(paths.Thumb)
+	paths := imagethumb.ResolvedPaths(w.DB, cacheDir, mediaID)
+	if thumb := strings.TrimSpace(paths.Thumb); thumb != "" {
+		if st, statErr := os.Stat(thumb); statErr == nil && !st.IsDir() && st.Size() > 0 {
+			return storage.MaterializeCLIFile(w.DB, w.Vault, mediaID, thumb)
+		}
 	}
 	srcPath = strings.TrimSpace(srcPath)
 	if srcPath == "" {
-		return "", fmt.Errorf("empty file path")
+		return "", cleanup, fmt.Errorf("empty file path")
 	}
-	if _, err := os.Stat(srcPath); err != nil {
-		return "", fmt.Errorf("source image missing: %w", err)
+	inputPath := storage.PreferredFFmpegPath(w.DB, mediaID, libraryID, srcPath)
+	if inputPath == "" {
+		return "", cleanup, fmt.Errorf("source image missing")
 	}
 	if strings.TrimSpace(w.FFmpegPath) == "" {
-		return "", fmt.Errorf("ffmpeg path empty")
+		return "", cleanup, fmt.Errorf("ffmpeg path empty")
 	}
-	out, err := imagethumb.Ensure(context.Background(), w.DB, w.Vault, nil, w.FFmpegPath, srcPath, cacheDir, mediaID)
+	out, err := imagethumb.Ensure(ctx, w.DB, w.Vault, w.Derived, w.FFmpegPath, inputPath, cacheDir, mediaID)
 	if err != nil {
-		return "", err
+		return "", cleanup, err
 	}
-	return filepath.Abs(out.Thumb)
+	thumb := imagethumb.ResolvedPaths(w.DB, cacheDir, mediaID).Thumb
+	if strings.TrimSpace(thumb) == "" {
+		thumb = out.Thumb
+	}
+	if strings.TrimSpace(thumb) == "" {
+		return "", cleanup, fmt.Errorf("thumb path empty")
+	}
+	return storage.MaterializeCLIFile(w.DB, w.Vault, mediaID, thumb)
 }
 
 func (w *Worker) complete(mediaID int64, msg string) {

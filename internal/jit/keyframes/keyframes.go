@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -32,6 +33,7 @@ type Cache struct {
 }
 
 // Meta 是缓存条目结构。SrcMTime+SrcSize 作为缓存失效依据：源文件被替换 / 切片大小变化时丢弃缓存。
+// Pos 与 PTS 等长时为明文流字节偏移（ffprobe packet.pos），用于加密源 JIT seek 时 pipe 起点优化。
 type Meta struct {
 	FileID    string    `json:"file_id"`
 	FilePath  string    `json:"file_path"`
@@ -39,6 +41,7 @@ type Meta struct {
 	SrcSize   int64     `json:"src_size"`
 	Duration  float64   `json:"duration"`
 	PTS       []float64 `json:"pts"`
+	Pos       []int64   `json:"pos,omitempty"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
@@ -169,13 +172,15 @@ func (c *Cache) ExtractForMedia(ctx context.Context, db *sql.DB, vault *keystore
 	if err != nil {
 		return nil, err
 	}
+	probePath := storage.ResolveKeyframeProbePath(db, mediaID, srcPath)
 	var pts []float64
-	if storage.InputNeedsPipe(db, mediaID, srcPath) {
-		out, cleanup, perr := storage.FFprobeOutput(db, vault, c.FFprobePath, mediaID, srcPath, 0, duration, []string{
+	var pos []int64
+	if storage.InputNeedsPipe(db, mediaID, probePath) {
+		out, cleanup, perr := storage.FFprobeOutput(db, vault, c.FFprobePath, mediaID, probePath, 0, duration, []string{
 			"-v", "error",
 			"-select_streams", "v:0",
 			"-show_packets",
-			"-show_entries", "packet=pts_time,flags",
+			"-show_entries", "packet=pts_time,pos,flags",
 			"-of", "csv=print_section=0",
 		})
 		if cleanup != nil {
@@ -184,11 +189,12 @@ func (c *Cache) ExtractForMedia(ctx context.Context, db *sql.DB, vault *keystore
 		if perr != nil {
 			return nil, perr
 		}
-		pts = parseKeyframePackets(string(out))
+		pts, pos = entriesToPTSPos(parseKeyframePacketEntries(string(out)))
 	} else {
-		pts, err = probeKeyframes(ctx, c.FFprobePath, srcPath)
-		if err != nil {
-			return nil, err
+		var perr error
+		pts, pos, perr = probeKeyframeEntries(ctx, c.FFprobePath, probePath)
+		if perr != nil {
+			return nil, perr
 		}
 	}
 	return &Meta{
@@ -198,14 +204,15 @@ func (c *Cache) ExtractForMedia(ctx context.Context, db *sql.DB, vault *keystore
 		SrcSize:  st.Size(),
 		Duration: duration,
 		PTS:      pts,
+		Pos:      pos,
 	}, nil
 }
 
 // Extract probes the source file and returns the keyframe PTS list. Costly for long videos
 // so callers should cache the result via Save().
 //
-// 实现：使用 `ffprobe -select_streams v:0 -show_packets -show_entries packet=pts_time,flags`
-// 解析出 flags 含 'K' 的包的 pts_time。`-show_packets` 不会解码任何帧，性能远好于 `-show_frames`.
+// 实现：使用 `ffprobe -select_streams v:0 -show_packets -show_entries packet=pts_time,pos,flags`
+// 解析出 flags 含 'K' 的包的 pts_time 与 pos（明文字节偏移）。
 func (c *Cache) Extract(ctx context.Context, fileID, srcPath string, duration float64) (*Meta, error) {
 	if c == nil || strings.TrimSpace(c.FFprobePath) == "" {
 		return nil, errors.New("keyframes: ffprobe path not configured")
@@ -217,7 +224,7 @@ func (c *Cache) Extract(ctx context.Context, fileID, srcPath string, duration fl
 	if err != nil {
 		return nil, err
 	}
-	pts, err := probeKeyframes(ctx, c.FFprobePath, srcPath)
+	pts, pos, err := probeKeyframeEntries(ctx, c.FFprobePath, srcPath)
 	if err != nil {
 		return nil, err
 	}
@@ -228,15 +235,16 @@ func (c *Cache) Extract(ctx context.Context, fileID, srcPath string, duration fl
 		SrcSize:  st.Size(),
 		Duration: duration,
 		PTS:      pts,
+		Pos:      pos,
 	}, nil
 }
 
-func probeKeyframes(ctx context.Context, ffprobe, srcPath string) ([]float64, error) {
+func probeKeyframeEntries(ctx context.Context, ffprobe, srcPath string) (pts []float64, pos []int64, err error) {
 	cmd := exec.CommandContext(ctx, ffprobe,
 		"-v", "error",
 		"-select_streams", "v:0",
 		"-show_packets",
-		"-show_entries", "packet=pts_time,flags",
+		"-show_entries", "packet=pts_time,pos,flags",
 		"-of", "csv=print_section=0",
 		srcPath,
 	)
@@ -248,42 +256,147 @@ func probeKeyframes(ctx context.Context, ffprobe, srcPath string) ([]float64, er
 			stderr = strings.TrimSpace(string(ee.Stderr))
 		}
 		if stderr != "" {
-			return nil, fmt.Errorf("ffprobe show_packets failed: %v: %s", err, stderr)
+			return nil, nil, fmt.Errorf("ffprobe show_packets failed: %v: %s", err, stderr)
 		}
-		return nil, fmt.Errorf("ffprobe show_packets failed: %w", err)
+		return nil, nil, fmt.Errorf("ffprobe show_packets failed: %w", err)
 	}
-	return parseKeyframePackets(string(out)), nil
+	pts, pos = entriesToPTSPos(parseKeyframePacketEntries(string(out)))
+	return pts, pos, nil
 }
 
-// parseKeyframePackets accepts CSV lines `pts_time,flags` (e.g. `1.234000,K_`) and
-// returns the pts_time values whose flag string contains 'K' (keyframe).
-func parseKeyframePackets(s string) []float64 {
-	out := make([]float64, 0, 256)
+func entriesToPTSPos(entries []packetEntry) (pts []float64, pos []int64) {
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	pts = make([]float64, len(entries))
+	pos = make([]int64, len(entries))
+	for i, e := range entries {
+		pts[i] = e.PTS
+		pos[i] = e.Pos
+	}
+	return pts, pos
+}
+
+// PlanEncryptedSeek picks the nearest keyframe at or before targetSec. When byte offsets are
+// indexed, returns pipe start offset and the remaining ffmpeg -ss delta (no plaintext on disk).
+func (m *Meta) PlanEncryptedSeek(targetSec float64) (pipeOffset int64, ffmpegSS float64, ok bool) {
+	if m == nil || len(m.PTS) == 0 || targetSec <= 0.01 || !m.hasPosIndex() {
+		return 0, targetSec, false
+	}
+	idx := sort.Search(len(m.PTS), func(i int) bool { return m.PTS[i] > targetSec }) - 1
+	if idx < 0 {
+		idx = 0
+	}
+	if m.Pos[idx] < 0 {
+		return 0, targetSec, false
+	}
+	ffmpegSS = targetSec - m.PTS[idx]
+	if ffmpegSS < 0 {
+		ffmpegSS = 0
+	}
+	return m.Pos[idx], ffmpegSS, true
+}
+
+func (m *Meta) hasPosIndex() bool {
+	if len(m.Pos) != len(m.PTS) || len(m.PTS) == 0 {
+		return false
+	}
+	for _, p := range m.Pos {
+		if p < 0 {
+			return false
+		}
+	}
+	return true
+}
+
+type packetEntry struct {
+	PTS float64
+	Pos int64
+}
+
+func probeKeyframes(ctx context.Context, ffprobe, srcPath string) ([]float64, error) {
+	pts, _, err := probeKeyframeEntries(ctx, ffprobe, srcPath)
+	return pts, err
+}
+
+// parseKeyframePacketEntries accepts CSV `pts_time,pos,flags` and returns keyframe rows.
+func parseKeyframePacketEntries(s string) []packetEntry {
+	out := make([]packetEntry, 0, 256)
 	for _, line := range strings.Split(s, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
-		// CSV format yields "pts_time,flags". Some packets have empty pts_time.
-		comma := strings.IndexByte(line, ',')
-		if comma < 0 {
+		fields := strings.Split(line, ",")
+		if len(fields) < 2 {
 			continue
 		}
-		ptsField := strings.TrimSpace(line[:comma])
-		flags := strings.TrimSpace(line[comma+1:])
+		ptsField := strings.TrimSpace(fields[0])
+		posField := ""
+		flags := ""
+		if len(fields) == 2 {
+			flags = strings.TrimSpace(fields[1])
+		} else {
+			posField = strings.TrimSpace(fields[1])
+			flags = strings.TrimSpace(fields[2])
+		}
 		if !strings.ContainsAny(flags, "Kk") {
 			continue
 		}
 		if ptsField == "" || ptsField == "N/A" {
 			continue
 		}
-		v, err := strconv.ParseFloat(ptsField, 64)
+		pts, err := strconv.ParseFloat(ptsField, 64)
 		if err != nil {
 			continue
 		}
-		out = append(out, v)
+		pos := int64(-1)
+		if posField != "" && posField != "N/A" {
+			if p, perr := strconv.ParseInt(posField, 10, 64); perr == nil {
+				pos = p
+			}
+		}
+		out = append(out, packetEntry{PTS: pts, Pos: pos})
 	}
 	return out
+}
+
+// parseKeyframePackets accepts legacy CSV `pts_time,flags` or `pts_time,pos,flags`.
+func parseKeyframePackets(s string) []float64 {
+	entries := parseKeyframePacketEntries(s)
+	if len(entries) == 0 {
+		// Legacy two-field lines without pos column.
+		out := make([]float64, 0, 256)
+		for _, line := range strings.Split(s, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			comma := strings.IndexByte(line, ',')
+			if comma < 0 {
+				continue
+			}
+			ptsField := strings.TrimSpace(line[:comma])
+			flags := strings.TrimSpace(line[comma+1:])
+			if !strings.ContainsAny(flags, "Kk") {
+				continue
+			}
+			if ptsField == "" || ptsField == "N/A" {
+				continue
+			}
+			v, err := strconv.ParseFloat(ptsField, 64)
+			if err != nil {
+				continue
+			}
+			out = append(out, v)
+		}
+		return out
+	}
+	pts := make([]float64, len(entries))
+	for i, e := range entries {
+		pts[i] = e.PTS
+	}
+	return pts
 }
 
 // EnsureCached returns cached keyframes or extracts + saves them now.
