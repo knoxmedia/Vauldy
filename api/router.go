@@ -172,6 +172,7 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 			play.GET("/media/:id/document/preview.pdf", h.ServeDocumentPreview)
 			play.GET("/photo/face/:id/thumb.jpg", h.ServePhotoFaceThumb)
 			play.GET("/media/:id/subtitles/:sid/vtt", h.SubtitleVTT)
+			play.POST("/subtitles/translate", h.TranslateSubtitle)
 			play.GET("/media/:id/atrack/:stream/index.m3u8", h.ServeAtrackPlaylist)
 			play.GET("/media/:id/atrack/:stream/seg/:seg", h.ServeAtrackSegment)
 			play.GET("/transcode/task/:id/status", h.GetTranscodeTaskStatus)

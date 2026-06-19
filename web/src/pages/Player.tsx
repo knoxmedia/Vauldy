@@ -34,8 +34,12 @@ import {
   navigateSeriesNext,
   buildSeriesPageUrl,
 } from "../lib/seriesPlayback";
-import { buildTextTrackListWithPrefs, normalizePlayerPrefs } from "../lib/playerPrefs";
-import { applyKnoxSubtitleCssVars, buildXgTexttrackStyle } from "../lib/subtitleAppearance";
+import { buildTextTrackListWithPrefs, buildPowerPlayerSubtitleList, normalizePlayerPrefs } from "../lib/playerPrefs";
+import {
+  applyKnoxSubtitleCssVars,
+  buildPowerPlayerSubtitleStyle,
+  buildXgTexttrackStyle,
+} from "../lib/subtitleAppearance";
 import { tGlobal, useT } from "../i18n";
 
 /** fetch that aborts after timeoutMs (clears hung UI when backend blocks). */
@@ -1123,6 +1127,26 @@ export default function PlayerPage() {
         powerDRMOnly,
       });
 
+      const playerPrefs = normalizePlayerPrefs(useAuthStore.getState().playerPrefs);
+      let textTrackList: ReturnType<typeof buildTextTrackListWithPrefs>["list"] = [];
+      let textTrackDefaultOpen = false;
+      if (mid) {
+        try {
+          const rows = await withTimeout(fetchMediaSubtitles(mid), 12_000, "subtitles");
+          const built = buildTextTrackListWithPrefs(mid, token, rows, playerPrefs);
+          textTrackList = built.list;
+          textTrackDefaultOpen = built.isDefaultOpen;
+        } catch {
+          textTrackList = [];
+          textTrackDefaultOpen = false;
+        }
+      }
+      const powerPlayerSubtitles = buildPowerPlayerSubtitleList(textTrackList);
+      const powerPlayerSubtitleStyle = buildPowerPlayerSubtitleStyle(playerPrefs.subtitle_appearance, {
+        autoSelect: playerPrefs.auto_select && playerPrefs.subtitle_mode !== "off",
+      });
+      const powerPlayerTranslateApi = `/api/v1/subtitles/translate?access_token=${encodeURIComponent(token)}`;
+
       if (chosen === "powerplayer") {
         const host = resolvePlayerHost();
         if (!host) throw new Error("player mount missing");
@@ -1177,6 +1201,13 @@ export default function PlayerPage() {
             clientcert,
             powerdrmurl,
             ...(mimeType ? { mimeType } : {}),
+            ...(powerPlayerSubtitles.length > 0
+              ? {
+                  subtitle: powerPlayerSubtitles,
+                  subtitleStyle: powerPlayerSubtitleStyle,
+                  translateApi: powerPlayerTranslateApi,
+                }
+              : {}),
           });
           powerPlayerRef.current = pp;
           attachPowerPlayerEvents(pp);
@@ -1195,6 +1226,13 @@ export default function PlayerPage() {
           playsinline: true,
           width: "100%",
           height: "100%",
+          ...(powerPlayerSubtitles.length > 0
+            ? {
+                subtitle: powerPlayerSubtitles,
+                subtitleStyle: powerPlayerSubtitleStyle,
+                translateApi: powerPlayerTranslateApi,
+              }
+            : {}),
         });
         powerPlayerRef.current = pp;
         attachPowerPlayerEvents(pp);
@@ -1248,20 +1286,6 @@ export default function PlayerPage() {
       // Clear progressive / AES-128 HLS: xgplayer (+ hls.js when needed).
       const useXgHlsPlugin =
         planMode === "hls_aes_128" || /\.m3u8(\?|#|$)/i.test(url) || /\/jit\/master\//i.test(url);
-      let textTrackList: ReturnType<typeof buildTextTrackListWithPrefs>["list"] = [];
-      let textTrackDefaultOpen = false;
-      if (mid) {
-        try {
-          const rows = await withTimeout(fetchMediaSubtitles(mid), 12_000, "subtitles");
-          const prefs = normalizePlayerPrefs(useAuthStore.getState().playerPrefs);
-          const built = buildTextTrackListWithPrefs(mid, token, rows, prefs);
-          textTrackList = built.list;
-          textTrackDefaultOpen = built.isDefaultOpen;
-        } catch {
-          textTrackList = [];
-          textTrackDefaultOpen = false;
-        }
-      }
       const options: any = {
         id: domId,
         url,
@@ -1279,11 +1303,10 @@ export default function PlayerPage() {
       }
       if (textTrackList.length > 0) {
         options.plugins = [TextTrack];
-        const pp = normalizePlayerPrefs(useAuthStore.getState().playerPrefs);
         options.texttrack = {
           list: textTrackList,
           isDefaultOpen: textTrackDefaultOpen,
-          style: buildXgTexttrackStyle(pp.subtitle_appearance),
+          style: buildXgTexttrackStyle(playerPrefs.subtitle_appearance),
         };
       }
       if (useXgHlsPlugin) {
@@ -1304,8 +1327,7 @@ export default function PlayerPage() {
       if (!xg) throw new Error("xgplayer init failed");
       const applySubtitleLook = () => {
         const root = (xg as { root?: HTMLElement }).root;
-        const pp = normalizePlayerPrefs(useAuthStore.getState().playerPrefs);
-        applyKnoxSubtitleCssVars(root ?? null, pp.subtitle_appearance);
+        applyKnoxSubtitleCssVars(root ?? null, playerPrefs.subtitle_appearance);
       };
       applySubtitleLook();
       xg.on("resize", applySubtitleLook);

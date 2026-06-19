@@ -76,6 +76,42 @@ export type TextTrackItem = {
   isDefault: boolean;
 };
 
+export type PowerPlayerSubtitleTrack = {
+  src: string;
+  srclang: string;
+  label: string;
+  default: boolean;
+};
+
+function absoluteMediaUrl(relativeOrAbsolute: string, baseOrigin: string): string {
+  if (!relativeOrAbsolute) return relativeOrAbsolute;
+  if (/^https?:\/\//i.test(relativeOrAbsolute)) return relativeOrAbsolute;
+  try {
+    return new URL(relativeOrAbsolute, baseOrigin || "http://localhost").href;
+  } catch {
+    return relativeOrAbsolute;
+  }
+}
+
+/** PowerPlayer 6 `subtitle: [{ src, srclang, label, default }]` */
+export function buildPowerPlayerSubtitleList(
+  tracks: TextTrackItem[],
+  baseOrigin = typeof window !== "undefined" ? window.location.origin : ""
+): PowerPlayerSubtitleTrack[] {
+  return tracks.map((item) => {
+    let src = absoluteMediaUrl(item.url, baseOrigin);
+    if (!src.includes("format=")) {
+      src += `${src.includes("?") ? "&" : "?"}format=powerplayer`;
+    }
+    return {
+      src,
+      srclang: item.language || "und",
+      label: item.text,
+      default: item.isDefault,
+    };
+  });
+}
+
 export function buildTextTrackListWithPrefs(
   mediaId: number,
   token: string,

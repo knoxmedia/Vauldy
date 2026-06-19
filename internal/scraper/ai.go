@@ -152,6 +152,16 @@ func scrapeAIWithProvider(p AIProviderConfig, userPrompt string) (*ScrapeResult,
 }
 
 func aiChatCompletion(p AIProviderConfig, system, user string) (string, error) {
+	return chatCompletion(p, system, user, true)
+}
+
+// ChatCompletion calls an OpenAI-compatible chat/completions endpoint.
+// When jsonMode is false, response_format json_object is not requested (for plain-text tasks like translation).
+func ChatCompletion(p AIProviderConfig, system, user string, jsonMode bool) (string, error) {
+	return chatCompletion(p, system, user, jsonMode)
+}
+
+func chatCompletion(p AIProviderConfig, system, user string, jsonMode bool) (string, error) {
 	model := strings.TrimSpace(p.Model)
 	if model == "" && isLocalAIEndpoint(p.APIURL) {
 		model = "llama3"
@@ -162,8 +172,10 @@ func aiChatCompletion(p AIProviderConfig, system, user string) (string, error) {
 			{Role: "system", Content: system},
 			{Role: "user", Content: user},
 		},
-		Temperature:    0.2,
-		ResponseFormat: &aiRespFormat{Type: "json_object"},
+		Temperature: 0.2,
+	}
+	if jsonMode {
+		reqBody.ResponseFormat = &aiRespFormat{Type: "json_object"}
 	}
 	body, err := json.Marshal(reqBody)
 	if err != nil {
@@ -171,7 +183,7 @@ func aiChatCompletion(p AIProviderConfig, system, user string) (string, error) {
 	}
 	endpoint := aiChatCompletionsURL(p.APIURL)
 	resp, err := postAIJSON(endpoint, p.APIKey, body)
-	if err != nil && strings.Contains(strings.ToLower(err.Error()), "response_format") {
+	if err != nil && jsonMode && strings.Contains(strings.ToLower(err.Error()), "response_format") {
 		reqBody.ResponseFormat = nil
 		body, _ = json.Marshal(reqBody)
 		resp, err = postAIJSON(endpoint, p.APIKey, body)

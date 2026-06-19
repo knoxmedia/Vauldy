@@ -159,6 +159,46 @@ function shadowCss(shadow: SubtitleAppearance["shadow"]): string {
   }
 }
 
+function subtitleFontSizePx(textSize: SubtitleTextSize): string {
+  switch (textSize) {
+    case "small":
+      return "14px";
+    case "large":
+      return "20px";
+    case "xlarge":
+      return "24px";
+    default:
+      return "17px";
+  }
+}
+
+/** PowerPlayer 6 subtitleStyle（合并进播放器默认样式） */
+export function buildPowerPlayerSubtitleStyle(
+  appearance: SubtitleAppearance | null | undefined,
+  opts?: { autoSelect?: boolean }
+): Record<string, string | boolean> {
+  const a = normalizeSubtitleAppearance(appearance);
+  let textShadow = "1px 1px #000";
+  switch (a.shadow) {
+    case "none":
+      textShadow = "none";
+      break;
+    case "strong":
+      textShadow = "0 0 6px #000, 1px 1px #000";
+      break;
+    default:
+      break;
+  }
+  return {
+    auto: opts?.autoSelect !== false,
+    backgroundColor: bgRgba(a.bg_color, a.bg_color === "transparent" ? 0 : a.bg_opacity),
+    fontWeight: "normal",
+    fontSize: subtitleFontSizePx(a.text_size),
+    color: textHex(a.text_color),
+    textShadow,
+  };
+}
+
 /** xgplayer TextTrack 的 style，会并入 xgplayer-subtitles 配置 */
 export function buildXgTexttrackStyle(appearance: SubtitleAppearance | null | undefined): Record<string, unknown> {
   const a = normalizeSubtitleAppearance(appearance);
@@ -182,15 +222,7 @@ export function applyKnoxSubtitleCssVars(root: HTMLElement | null, appearance: S
   root.style.setProperty("--knox-sub-fg", textHex(a.text_color));
   root.style.setProperty("--knox-sub-bg", bg);
   root.style.setProperty("--knox-sub-shadow", shadowCss(a.shadow));
-  const fs =
-    a.text_size === "small"
-      ? "14px"
-      : a.text_size === "large"
-        ? "20px"
-        : a.text_size === "xlarge"
-          ? "24px"
-          : "17px";
-  root.style.setProperty("--knox-sub-font-size", fs);
+  root.style.setProperty("--knox-sub-font-size", subtitleFontSizePx(a.text_size));
   root.style.setProperty("--knox-sub-top-safe", `${a.pos_top}%`);
 }
 
