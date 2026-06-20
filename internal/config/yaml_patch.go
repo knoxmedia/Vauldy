@@ -8,9 +8,9 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// SaveSubtitleRecognition updates subtitle.asr and subtitle.graphical_ocr in config.yml,
+// SaveSubtitleRecognition updates subtitle.auto_on_scan, subtitle.asr and subtitle.graphical_ocr in config.yml,
 // preserving other keys and comments where possible.
-func SaveSubtitleRecognition(path string, asr ASRConfig, ocr GraphicalOCRConfig) error {
+func SaveSubtitleRecognition(path string, autoOnScan bool, asr ASRConfig, ocr GraphicalOCRConfig) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("read config: %w", err)
@@ -24,6 +24,9 @@ func SaveSubtitleRecognition(path string, asr ASRConfig, ocr GraphicalOCRConfig)
 		return err
 	}
 	subtitle := ensureMapKey(root, "subtitle")
+	if err := setScalarKey(subtitle, "auto_on_scan", autoOnScan); err != nil {
+		return fmt.Errorf("patch auto_on_scan: %w", err)
+	}
 	if err := setStructKey(subtitle, "asr", asr); err != nil {
 		return fmt.Errorf("patch asr: %w", err)
 	}
@@ -186,5 +189,17 @@ func setStructKey(parent *yaml.Node, key string, v any) error {
 	}
 	keyNode := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}
 	parent.Content = append(parent.Content, keyNode, mapping)
+	return nil
+}
+
+func setScalarKey(parent *yaml.Node, key string, v bool) error {
+	idx := mapKeyIndex(parent, key)
+	valNode := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!bool", Value: fmt.Sprintf("%t", v)}
+	if idx >= 0 {
+		parent.Content[idx+1] = valNode
+		return nil
+	}
+	keyNode := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}
+	parent.Content = append(parent.Content, keyNode, valNode)
 	return nil
 }

@@ -84,3 +84,27 @@ func TestRecoverStalePhotoTasksResetsRunning(t *testing.T) {
 		t.Fatalf("status = %q, want pending", status)
 	}
 }
+
+func TestOpenSQLiteDoesNotSeedScheduledTasks(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "db.sqlite")
+	for i := 0; i < 3; i++ {
+		db, err := OpenSQLite(dbPath)
+		if err != nil {
+			t.Fatalf("OpenSQLite run %d: %v", i+1, err)
+		}
+		_ = db.Close()
+	}
+	db, err := OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatalf("OpenSQLite final: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM scheduled_task`).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("scheduled_task count = %d, want 0 (no auto-seed on startup)", n)
+	}
+}

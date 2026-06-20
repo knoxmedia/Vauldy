@@ -439,3 +439,59 @@ func TestStartOnceDifferentMediaIDCanRunConcurrently(t *testing.T) {
 		t.Fatalf("media205 vtt missing: %v", err)
 	}
 }
+
+func TestEnsurePreservesFailedTask(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	if _, err := db.Exec(`INSERT INTO media (id) VALUES (301)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO preview_task (media_id, status, interval_sec, thumb_count, error_message)
+		VALUES (301, 'failed', 10, 5, 'ffmpeg error')`); err != nil {
+		t.Fatal(err)
+	}
+
+	w := &Worker{DB: db, PreviewDir: t.TempDir(), FFmpegPath: "ffmpeg"}
+	info, err := w.Ensure(context.Background(), 301, "video.mp4", 600)
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if info.Status != "failed" || info.Error != "ffmpeg error" {
+		t.Fatalf("Ensure=%+v want failed preserved", info)
+	}
+	var status, errMsg string
+	if err := db.QueryRow(`SELECT status, COALESCE(error_message,'') FROM preview_task WHERE media_id = 301`).Scan(&status, &errMsg); err != nil {
+		t.Fatal(err)
+	}
+	if status != "failed" || errMsg != "ffmpeg error" {
+		t.Fatalf("db status=%s err=%q", status, errMsg)
+	}
+}
+
+func TestUpsertWaitingPreviewTaskPreservesFailed(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	if _, err := db.Exec(`
+		INSERT INTO preview_task (media_id, status, interval_sec, thumb_count, error_message)
+		VALUES (401, 'failed', 10, 5, 'boom')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpsertWaitingPreviewTask(db, 401, 20, 8); err != nil {
+		t.Fatal(err)
+	}
+	var status, errMsg string
+	var interval, count int
+	if err := db.QueryRow(`SELECT status, interval_sec, thumb_count, COALESCE(error_message,'') FROM preview_task WHERE media_id = 401`).
+		Scan(&status, &interval, &count, &errMsg); err != nil {
+		t.Fatal(err)
+	}
+	if status != "failed" || errMsg != "boom" {
+		t.Fatalf("failed row mutated: status=%s err=%q", status, errMsg)
+	}
+	if interval != 20 || count != 8 {
+		t.Fatalf("interval/count updated: %d %d", interval, count)
+	}
+}

@@ -109,11 +109,16 @@ export default function PhotoBrowse({ libraryId, libraryName, onEmpty }: Props) 
         (prev.classify > 0 && next.classify <= 0) ||
         (prev.location > 0 && next.location <= 0) ||
         (prev.face > 0 && next.face <= 0);
+
       taskPendingRef.current = next;
 
       setClassifyProgress({ percent: classifyProg.percent, pending: classifyProg.pending });
       setLocationProgress({ percent: locationProg.percent, pending: locationProg.pending });
       setFaceProgress({ percent: faceProg.percent, pending: faceProg.pending });
+
+      if (prev.face > 0 && next.face <= 0 && (faceProg.failed ?? 0) > 0) {
+        message.warning(t("pages.photo_browse.face_partial_failed", { count: faceProg.failed }));
+      }
 
       if (taskFinished) {
         await refreshSmartMeta();
@@ -121,7 +126,7 @@ export default function PhotoBrowse({ libraryId, libraryName, onEmpty }: Props) 
     } catch {
       /* optional */
     }
-  }, [libraryId, refreshSmartMeta]);
+  }, [libraryId, refreshSmartMeta, t]);
 
   const refreshMeta = useCallback(async () => {
     await Promise.all([refreshSmartMeta(), refreshProgress()]);

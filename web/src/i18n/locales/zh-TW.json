@@ -418,7 +418,9 @@
       }
     },
     "asr": {
-      "intro": "语音识别（ASR）配置保存在 config.yml 的 subtitle.asr 段。若未安装依赖，可使用「一键安装」自动部署到 tools/recognition/（Python 虚拟环境）。",
+      "intro": "語音識別（ASR）配置保存在 config.yml 的 subtitle.asr 段。若未安裝依賴，可使用「一鍵安裝」自動部署到 tools/recognition/（Python 虛擬環境）。",
+      "auto_on_scan": "掃描時自動識別語音",
+      "auto_on_scan_desc": "匯入或掃描媒體庫時，為新影片自動加入 subtitle_task 佇列（提取內嵌/外掛字幕，無字幕時依 ASR 配置識別）。",
       "provider": "Provider",
       "provider_desc": "无字幕时可选自动语音识别。Whisper CLI 直接调用 whisper 命令；Shell 使用自定义脚本（支持 {input}、{output_dir}、{output_vtt} 占位符）。",
       "whisper_path": "Whisper 路径",
@@ -641,6 +643,7 @@
       "col_note": "備註",
       "tooltip_reset": "重設",
       "confirm_subtitle_reset": "將清除該媒體的字幕快取與資料庫紀錄，並標記為待處理。確定？",
+      "confirm_subtitle_delete": "從任務列表移除此字幕任務？（不刪除已產生的字幕檔案）",
       "reset_success": "已重設",
       "reset_failed": "重設失敗",
       "tooltip_reprocess": "重新處理",
@@ -1348,6 +1351,7 @@
       "queued_faces": "已加入 {count} 張待人臉偵測",
       "no_faces": "目前沒有可偵測的圖片",
       "face_failed": "人臉偵測失敗",
+      "face_partial_failed": "{count} 張照片人臉偵測失敗（請查看伺服器日誌）",
       "queued_places": "已加入 {count} 張待解析 GPS 位置",
       "no_places": "目前沒有可解析的圖片",
       "geo_failed": "解析位置失敗",

@@ -54,6 +54,53 @@ INSERT INTO media (id, library_id, file_type, file_path, meta_json) VALUES (10, 
 	}
 }
 
+func TestEnqueuePreservesFailed(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`
+CREATE TABLE lyric_task (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  media_id INTEGER NOT NULL UNIQUE,
+  status TEXT NOT NULL DEFAULT 'pending',
+  message TEXT,
+  vtt_path TEXT,
+  lrc_path TEXT,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  started_at TIMESTAMP,
+  finished_at TIMESTAMP
+);
+INSERT INTO lyric_task (media_id, status, message) VALUES (1, 'failed', 'asr error');
+`); err != nil {
+		t.Fatal(err)
+	}
+
+	w := NewWorker(db, nil, t.TempDir(), "", nil)
+	if err := w.Enqueue(1); err != nil {
+		t.Fatal(err)
+	}
+	var status, msg string
+	if err := db.QueryRow(`SELECT status, COALESCE(message,'') FROM lyric_task WHERE media_id = 1`).Scan(&status, &msg); err != nil {
+		t.Fatal(err)
+	}
+	if status != "failed" || msg != "asr error" {
+		t.Fatalf("status=%q msg=%q want failed preserved", status, msg)
+	}
+
+	if err := w.EnqueueRetry(1); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT status, COALESCE(message,'') FROM lyric_task WHERE media_id = 1`).Scan(&status, &msg); err != nil {
+		t.Fatal(err)
+	}
+	if status != "pending" || msg != "" {
+		t.Fatalf("after retry status=%q msg=%q want pending", status, msg)
+	}
+}
+
 func TestEnsurePendingIfNoLyrics_enqueuesForMusicAudio(t *testing.T) {
 	dir := t.TempDir()
 	audio := filepath.Join(dir, "song.mp3")

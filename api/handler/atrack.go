@@ -38,7 +38,7 @@ func (h *Handler) EnqueueAudioTrackExtraction(c *gin.Context) {
 		return
 	}
 
-	h.AtrackWorker.Enqueue(mediaID)
+	h.AtrackWorker.EnqueueRetry(mediaID)
 	go func() {
 		err := h.AtrackWorker.Run(context.Background(), mediaID, filePath.String)
 		if err == nil && h.Instant != nil && fileID.String != "" && h.App.Config.HLSMultiAudioEnabled() {
@@ -106,7 +106,7 @@ func (h *Handler) RetryAudioTrackTask(c *gin.Context) {
 		return
 	}
 
-	h.AtrackWorker.Enqueue(mediaID)
+	h.AtrackWorker.EnqueueRetry(mediaID)
 	go func() {
 		err := h.AtrackWorker.Run(context.Background(), mediaID, filePath.String)
 		if err == nil && h.Instant != nil && fileID.String != "" && h.App.Config.HLSMultiAudioEnabled() {

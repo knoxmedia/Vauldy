@@ -85,7 +85,7 @@ func KickPendingMediaEncryption(enc *AssetEncryptor, cfg *config.Config) {
 			  AND COALESCE(m.status, 'active') = 'active'
 			  AND NOT EXISTS (
 			    SELECT 1 FROM media_encrypted_assets e
-			    WHERE e.media_id = m.id AND e.status = 'encrypted'
+			    WHERE e.media_id = m.id AND e.status IN ('encrypted', 'plain_missing')
 			  )
 			LIMIT 100
 		`)

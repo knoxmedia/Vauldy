@@ -15,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"knox-media/internal/photoparse"
+	"knox-media/internal/preview"
 	"knox-media/internal/scanner"
 	"knox-media/internal/storage"
 	"knox-media/pkg/ffprobe"
@@ -283,17 +284,7 @@ func (h *Handler) enqueuePreviewTask(mediaID int64, fileType string) {
 	if countNum > 100 {
 		countNum = 100
 	}
-	_, _ = h.App.DB.Exec(
-		`INSERT INTO preview_task (media_id, status, interval_sec, thumb_count, thumb_width, thumb_height, updated_at)
-		 VALUES (?, 'waiting', ?, ?, 240, 135, CURRENT_TIMESTAMP)
-		 ON CONFLICT(media_id) DO UPDATE SET
-		   status='waiting',
-		   interval_sec=excluded.interval_sec,
-		   thumb_count=excluded.thumb_count,
-		   updated_at=CURRENT_TIMESTAMP,
-		   error_message=NULL`,
-		mediaID, intervalSec, countNum,
-	)
+	_ = preview.UpsertWaitingPreviewTask(h.App.DB, mediaID, intervalSec, countNum)
 }
 
 func (h *Handler) ensurePreviewGeneration(mediaID int64, fileType string) {

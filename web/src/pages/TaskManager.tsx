@@ -1,10 +1,6 @@
 import {
   Button,
   Card,
-  Form,
-  Input,
-  InputNumber,
-  Modal,
   Popconfirm,
   Select,
   Space,
@@ -17,10 +13,8 @@ import {
 } from "antd";
 import {
   DeleteOutlined,
-  EditOutlined,
   RedoOutlined,
   RollbackOutlined,
-  ThunderboltOutlined,
   StopOutlined,
   SyncOutlined,
 } from "@ant-design/icons";
@@ -32,16 +26,13 @@ import {
   cleanupFailedTranscodeTasksBefore,
   cleanupFailedSubtitleTasks,
   cleanupSubtitleTasksBefore,
+  deleteSubtitleTask,
   cleanupFailedLyricTasks,
   cleanupLyricTasksBefore,
-  createScheduledTask,
-  deleteScheduledTask,
   fetchAtrackTasks,
   fetchKeyframeTasks,
-  fetchLibraries,
   fetchLyricTasks,
   fetchPreviewTasks,
-  fetchScheduledTasks,
   fetchScanTasks,
   fetchScrapeTasks,
   fetchSubtitleTasks,
@@ -53,31 +44,16 @@ import {
   retryLyricTask,
   retryTranscodeTask,
   retrySubtitleTask,
-  runScheduledTask,
   type AtrackTask,
   type KeyframeTask,
-  type Library,
   type LyricTask,
-  updateScheduledTask,
   type PreviewTask,
-  type ScheduledTask,
   type ScrapeTask,
   type ScanTask,
   type SubtitleTask,
   type TranscodeTask,
 } from "../api/client";
 import { useT } from "../i18n";
-
-type ScheduledTaskForm = {
-  name: string;
-  category: string;
-  task_type: string;
-  interval_min: number;
-  enabled: boolean;
-  library_id?: number;
-  limit?: number;
-  days?: number;
-};
 
 function ActionIconButton({
   title,
@@ -159,17 +135,8 @@ export default function TaskManagerPage() {
   const [scanTasks, setScanTasks] = useState<ScanTask[]>([]);
   const [scanLoading, setScanLoading] = useState(false);
   const [cancellingScanId, setCancellingScanId] = useState<number | null>(null);
-  const [scheduledTasks, setScheduledTasks] = useState<ScheduledTask[]>([]);
-  const [scheduledLoading, setScheduledLoading] = useState(false);
-  const [runningScheduledId, setRunningScheduledId] = useState<number | null>(null);
-  const [creatingSchedule, setCreatingSchedule] = useState(false);
-  const [updatingSchedule, setUpdatingSchedule] = useState(false);
-  const [editingTask, setEditingTask] = useState<ScheduledTask | null>(null);
-  const [createModalOpen, setCreateModalOpen] = useState(false);
-  const [libraries, setLibraries] = useState<Library[]>([]);
   const [autoRefresh, setAutoRefresh] = useState(true);
-  const [activeTab, setActiveTab] = useState("scheduled");
-  const [scheduledStatusFilter, setScheduledStatusFilter] = useState("all");
+  const [activeTab, setActiveTab] = useState("transcode");
   const [transcodeStatusFilter, setTranscodeStatusFilter] = useState("all");
   const [scrapeStatusFilter, setScrapeStatusFilter] = useState("all");
   const [scanStatusFilter, setScanStatusFilter] = useState("all");
@@ -179,6 +146,7 @@ export default function TaskManagerPage() {
   const [subtitleStatusFilter, setSubtitleStatusFilter] = useState("all");
   const [resettingSubtitleId, setResettingSubtitleId] = useState<number | null>(null);
   const [retryingSubtitleId, setRetryingSubtitleId] = useState<number | null>(null);
+  const [deletingSubtitleId, setDeletingSubtitleId] = useState<number | null>(null);
   const [cleaningSubtitleFailed, setCleaningSubtitleFailed] = useState(false);
   const [cleaningSubtitleOld, setCleaningSubtitleOld] = useState(false);
   const [atrackTasks, setAtrackTasks] = useState<AtrackTask[]>([]);
@@ -195,10 +163,6 @@ export default function TaskManagerPage() {
   const [retryingLyricId, setRetryingLyricId] = useState<number | null>(null);
   const [cleaningLyricFailed, setCleaningLyricFailed] = useState(false);
   const [cleaningLyricOld, setCleaningLyricOld] = useState(false);
-  const [form] = Form.useForm<ScheduledTaskForm>();
-  const [editForm] = Form.useForm<ScheduledTaskForm>();
-  const createTaskType = Form.useWatch("task_type", form);
-  const editTaskType = Form.useWatch("task_type", editForm);
 
   const loadTranscode = async (silent = false) => {
     if (!silent) setTranscodeLoading(true);
@@ -229,17 +193,6 @@ export default function TaskManagerPage() {
       }
     } finally {
       if (!silent) setScrapeLoading(false);
-    }
-  };
-
-  const loadScheduled = async () => {
-    setScheduledLoading(true);
-    try {
-      setScheduledTasks(await fetchScheduledTasks());
-    } catch {
-      setScheduledTasks([]);
-    } finally {
-      setScheduledLoading(false);
     }
   };
 
@@ -298,31 +251,20 @@ export default function TaskManagerPage() {
     }
   };
 
-  const loadLibraries = async () => {
-    try {
-      setLibraries(await fetchLibraries());
-    } catch {
-      setLibraries([]);
-    }
-  };
-
   useEffect(() => {
     void loadTranscode();
     void loadPreview();
     void loadScrape();
-    void loadScheduled();
     void loadScanTasks();
     void loadSubtitleTasks();
     void loadAtrackTasks();
     void loadKeyframeTasks();
     void loadLyricTasks();
-    void loadLibraries();
   }, []);
 
   useEffect(() => {
     if (!autoRefresh) return;
     const timer = window.setInterval(() => {
-      if (activeTab === "scheduled") void loadScheduled();
       if (activeTab === "transcode") void loadTranscode(true);
       if (activeTab === "scrape") void loadScrape(true);
       if (activeTab === "preview") void loadPreview(true);
@@ -335,34 +277,6 @@ export default function TaskManagerPage() {
     return () => window.clearInterval(timer);
   }, [autoRefresh, activeTab]);
 
-  useEffect(() => {
-    if (createTaskType !== "library_scan" && createTaskType !== "subtitle_process") {
-      form.setFieldValue("library_id", undefined);
-    }
-    if (createTaskType !== "scrape_run" && createTaskType !== "subtitle_process" && createTaskType !== "lyric_process") {
-      form.setFieldValue("limit", undefined);
-    }
-    if (createTaskType !== "transcode_cleanup_failed_before" && createTaskType !== "activity_cleanup") {
-      form.setFieldValue("days", undefined);
-    }
-  }, [createTaskType, form]);
-
-  useEffect(() => {
-    if (editTaskType !== "library_scan" && editTaskType !== "subtitle_process") {
-      editForm.setFieldValue("library_id", undefined);
-    }
-    if (editTaskType !== "scrape_run" && editTaskType !== "subtitle_process" && editTaskType !== "lyric_process") {
-      editForm.setFieldValue("limit", undefined);
-    }
-    if (editTaskType !== "transcode_cleanup_failed_before" && editTaskType !== "activity_cleanup") {
-      editForm.setFieldValue("days", undefined);
-    }
-  }, [editTaskType, editForm]);
-
-  const filteredScheduled = useMemo(
-    () => scheduledTasks.filter((x) => (scheduledStatusFilter === "all" ? true : (x.last_status || "none") === scheduledStatusFilter)),
-    [scheduledTasks, scheduledStatusFilter]
-  );
   const filteredTranscode = useMemo(
     () => transcodeTasks.filter((x) => (transcodeStatusFilter === "all" ? true : x.status === transcodeStatusFilter)),
     [transcodeTasks, transcodeStatusFilter]
@@ -397,14 +311,6 @@ export default function TaskManagerPage() {
   );
   const getStatusOptionsForTab = (tab: string) => {
     const commonAll = [{ value: "all", label: t("pages.task_manager.all_statuses") }];
-    if (tab === "scheduled") {
-      return [
-        ...commonAll,
-        { value: "none", label: "none" },
-        { value: "done", label: "done" },
-        { value: "failed", label: "failed" },
-      ];
-    }
     if (tab === "transcode") {
       return [
         ...commonAll,
@@ -474,89 +380,6 @@ export default function TaskManagerPage() {
       </Button>
     </>
   );
-  const libraryOptions = useMemo(
-    () => libraries.map((lib) => ({ value: lib.id, label: `${lib.name} (#${lib.id})` })),
-    [libraries]
-  );
-
-  const onCreateScheduled = async () => {
-    try {
-      const v = await form.validateFields();
-      const payload: Record<string, unknown> = {};
-      if (v.task_type === "library_scan" && v.library_id) payload.library_id = v.library_id;
-      if (v.task_type === "scrape_run" && v.limit) payload.limit = v.limit;
-      if (v.task_type === "subtitle_process") {
-        if (v.library_id != null && Number(v.library_id) > 0) payload.library_id = Number(v.library_id);
-        if (v.limit) payload.limit = v.limit;
-      }
-      if (v.task_type === "lyric_process" && v.limit) payload.limit = v.limit;
-      if ((v.task_type === "transcode_cleanup_failed_before" || v.task_type === "activity_cleanup") && v.days) payload.days = v.days;
-      setCreatingSchedule(true);
-      await createScheduledTask({
-        name: v.name,
-        category: v.category,
-        task_type: v.task_type,
-        interval_min: v.interval_min,
-        enabled: v.enabled ? 1 : 0,
-        payload,
-      });
-      message.success(t("pages.task_manager.scheduled_created"));
-      setCreateModalOpen(false);
-      form.resetFields();
-      await loadScheduled();
-    } catch {
-      message.error(t("pages.task_manager.scheduled_create_failed"));
-    } finally {
-      setCreatingSchedule(false);
-    }
-  };
-
-  const fillEditForm = (task: ScheduledTask) => {
-    const payload = task.payload || {};
-    editForm.setFieldsValue({
-      name: task.name,
-      category: task.category || "media",
-      task_type: task.task_type,
-      interval_min: task.interval_min || 60,
-      enabled: task.enabled === 1,
-      library_id: Number(payload.library_id || 0) || undefined,
-      limit: Number(payload.limit || 0) || undefined,
-      days: Number(payload.days || 0) || undefined,
-    });
-    setEditingTask(task);
-  };
-
-  const onUpdateScheduled = async () => {
-    if (!editingTask) return;
-    try {
-      const v = await editForm.validateFields();
-      const payload: Record<string, unknown> = {};
-      if (v.task_type === "library_scan" && v.library_id) payload.library_id = v.library_id;
-      if (v.task_type === "scrape_run" && v.limit) payload.limit = v.limit;
-      if (v.task_type === "subtitle_process") {
-        if (v.library_id != null && Number(v.library_id) > 0) payload.library_id = Number(v.library_id);
-        if (v.limit) payload.limit = v.limit;
-      }
-      if (v.task_type === "lyric_process" && v.limit) payload.limit = v.limit;
-      if ((v.task_type === "transcode_cleanup_failed_before" || v.task_type === "activity_cleanup") && v.days) payload.days = v.days;
-      setUpdatingSchedule(true);
-      await updateScheduledTask(editingTask.id, {
-        name: v.name,
-        category: v.category,
-        task_type: v.task_type,
-        interval_min: v.interval_min,
-        enabled: v.enabled ? 1 : 0,
-        payload,
-      });
-      message.success(t("pages.task_manager.scheduled_updated"));
-      setEditingTask(null);
-      await loadScheduled();
-    } catch {
-      message.error(t("pages.task_manager.scheduled_update_failed"));
-    } finally {
-      setUpdatingSchedule(false);
-    }
-  };
 
   return (
     <>
@@ -564,107 +387,6 @@ export default function TaskManagerPage() {
       activeKey={activeTab}
       onChange={setActiveTab}
       items={[
-        {
-          key: "scheduled",
-          label: t("pages.task_manager.tab_scheduled"),
-          children: (
-            <Space direction="vertical" size="large" style={{ width: "100%" }}>
-              <Card
-                title={t("pages.task_manager.scheduled_card_title")}
-                extra={(
-                  <Space>
-                    <Button
-                      type="primary"
-                      onClick={() => {
-                        form.setFieldsValue({ category: "media", interval_min: 60, enabled: true, task_type: "library_scan" });
-                        form.setFieldValue("library_id", undefined);
-                        setCreateModalOpen(true);
-                      }}
-                    >
-                      {t("pages.task_manager.create_scheduled_btn")}
-                    </Button>
-                    {renderListHeaderControls("scheduled", scheduledStatusFilter, setScheduledStatusFilter, loadScheduled)}
-                  </Space>
-                )}
-              >
-                <Table
-                  rowKey="id"
-                  loading={scheduledLoading}
-                  dataSource={filteredScheduled}
-                  pagination={{ pageSize: 10 }}
-                  scroll={{ x: 1350 }}
-                  columns={[
-                    { title: "ID", dataIndex: "id", width: 70 },
-                    {
-                      title: t("pages.task_manager.col_name"),
-                      dataIndex: "name",
-                      width: 180,
-                      ellipsis: true,
-                      render: (v?: string) => (
-                        <Tooltip title={v || "-"}>
-                          <span
-                            style={{
-                              display: "inline-block",
-                              maxWidth: "100%",
-                              overflow: "hidden",
-                              textOverflow: "ellipsis",
-                              whiteSpace: "nowrap",
-                              verticalAlign: "bottom",
-                            }}
-                          >
-                            {v || "-"}
-                          </span>
-                        </Tooltip>
-                      ),
-                    },
-                    { title: t("pages.task_manager.col_category"), dataIndex: "category", width: 110 },
-                    { title: t("pages.task_manager.col_type"), dataIndex: "task_type", width: 220 },
-                    { title: t("pages.task_manager.col_interval_min"), dataIndex: "interval_min", width: 90 },
-                    { title: t("pages.task_manager.col_enabled"), dataIndex: "enabled", width: 80, render: (v: number) => (v === 1 ? <Tag color="green">{t("pages.task_manager.enabled_tag")}</Tag> : <Tag>{t("pages.task_manager.disabled_tag")}</Tag>) },
-                    { title: t("pages.task_manager.col_last_status"), dataIndex: "last_status", width: 110, render: (v?: string) => v || "-" },
-                    { title: t("pages.task_manager.col_last_run"), dataIndex: "last_run_at", width: 170, render: (v?: string) => v || "-" },
-                    { title: t("pages.task_manager.col_last_message"), dataIndex: "last_message", ellipsis: true },
-                    {
-                      title: t("pages.task_manager.col_actions"),
-                      key: "actions",
-                      width: 120,
-                      align: "center",
-                      fixed: "right",
-                      render: (_: unknown, r: ScheduledTask) => (
-                        <Space size={4}>
-                          <ActionIconButton
-                            title={t("pages.task_manager.tooltip_run_now")}
-                            icon={<ThunderboltOutlined />}
-                            loading={runningScheduledId === r.id}
-                            onClick={() => {
-                              setRunningScheduledId(r.id);
-                              void runScheduledTask(r.id).then(() => message.success(t("pages.task_manager.task_run_success"))).catch(() => message.error(t("pages.task_manager.task_run_failed"))).finally(async () => {
-                                setRunningScheduledId(null);
-                                await loadScheduled();
-                              });
-                            }}
-                          />
-                          <ActionIconButton
-                            title={t("pages.task_manager.tooltip_edit")}
-                            icon={<EditOutlined />}
-                            onClick={() => fillEditForm(r)}
-                          />
-                          <ActionIconConfirmButton
-                            title={t("pages.task_manager.tooltip_delete")}
-                            confirmTitle={t("pages.task_manager.confirm_delete_task")}
-                            icon={<DeleteOutlined />}
-                            danger
-                            onConfirm={() => void deleteScheduledTask(r.id).then(loadScheduled)}
-                          />
-                        </Space>
-                      ),
-                    },
-                  ]}
-                />
-              </Card>
-            </Space>
-          ),
-        },
         {
           key: "transcode",
           label: t("pages.task_manager.tab_transcode"),
@@ -944,7 +666,7 @@ export default function TaskManagerPage() {
                   {
                     title: t("pages.task_manager.col_actions"),
                     key: "subactions",
-                    width: 90,
+                    width: 120,
                     align: "center",
                     fixed: "right",
                     render: (_: unknown, r: SubtitleTask) => (
@@ -977,6 +699,27 @@ export default function TaskManagerPage() {
                               .catch(() => message.error(t("pages.task_manager.retry_failed")))
                               .finally(async () => {
                                 setRetryingSubtitleId(null);
+                                await loadSubtitleTasks();
+                              });
+                          }}
+                        />
+                        <ActionIconConfirmButton
+                          title={t("pages.task_manager.tooltip_delete")}
+                          confirmTitle={t("pages.task_manager.confirm_subtitle_delete")}
+                          icon={<DeleteOutlined />}
+                          danger
+                          disabled={r.status === "running"}
+                          loading={deletingSubtitleId === r.media_id}
+                          onConfirm={() => {
+                            setDeletingSubtitleId(r.media_id);
+                            void deleteSubtitleTask(r.media_id)
+                              .then(() => message.success(t("common.delete_success")))
+                              .catch((err: unknown) => {
+                                const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error;
+                                message.error(msg || t("common.delete_failed"));
+                              })
+                              .finally(async () => {
+                                setDeletingSubtitleId(null);
                                 await loadSubtitleTasks();
                               });
                           }}
@@ -1243,129 +986,6 @@ export default function TaskManagerPage() {
         },
       ]}
       />
-      <Modal
-        title={t("pages.task_manager.scheduled_modal_create")}
-        open={createModalOpen}
-        onCancel={() => {
-          setCreateModalOpen(false);
-          form.resetFields();
-        }}
-        onOk={() => void onCreateScheduled()}
-        confirmLoading={creatingSchedule}
-      >
-        <Form form={form} layout="vertical" initialValues={{ category: "media", interval_min: 60, enabled: true, task_type: "library_scan" }}>
-          <Form.Item name="name" label={t("pages.task_manager.form_task_name")} rules={[{ required: true }]}><Input /></Form.Item>
-          <Form.Item name="category" label={t("pages.task_manager.form_category")} rules={[{ required: true }]}>
-            <Select options={[{ value: "media", label: t("pages.task_manager.category_media") }, { value: "maintenance", label: t("pages.task_manager.category_maintenance") }]} />
-          </Form.Item>
-          <Form.Item name="task_type" label={t("pages.task_manager.task_type_label")} rules={[{ required: true }]}>
-            <Select
-              options={[
-                { value: "library_scan", label: t("pages.task_manager.task_type_library_scan") },
-                { value: "subtitle_process", label: t("pages.task_manager.task_type_subtitle_process") },
-                { value: "lyric_process", label: t("pages.task_manager.task_type_lyric_process") },
-                { value: "scrape_run", label: t("pages.task_manager.task_type_scrape_run") },
-                { value: "transcode_cleanup_failed_before", label: t("pages.task_manager.task_type_transcode_cleanup") },
-                { value: "activity_cleanup", label: t("pages.task_manager.task_type_activity_cleanup") },
-                { value: "db_optimize", label: t("pages.task_manager.task_type_db_optimize") },
-              ]}
-            />
-          </Form.Item>
-          <Form.Item name="interval_min" label={t("pages.task_manager.form_interval_minutes")} rules={[{ required: true }]}><InputNumber min={1} style={{ width: "100%" }} /></Form.Item>
-          <Form.Item name="enabled" label={t("pages.task_manager.form_enabled")} valuePropName="checked"><Switch /></Form.Item>
-          <Space wrap>
-            {createTaskType === "library_scan" ? (
-              <Form.Item name="library_id" label={t("pages.task_manager.form_library_scan")}>
-                <Select
-                  allowClear
-                  showSearch
-                  placeholder={t("pages.task_manager.form_library_pick")}
-                  options={libraryOptions}
-                  optionFilterProp="label"
-                  style={{ width: 240 }}
-                />
-              </Form.Item>
-            ) : null}
-            {createTaskType === "scrape_run" ? (
-              <Form.Item name="limit" label={t("pages.task_manager.form_limit_scrape")}><InputNumber min={1} max={200} /></Form.Item>
-            ) : null}
-            {createTaskType === "subtitle_process" ? (
-              <>
-                <Form.Item name="library_id" label={t("pages.task_manager.form_library_all_0")}>
-                  <Select allowClear showSearch placeholder={t("pages.task_manager.form_library_all_placeholder")} options={[{ value: 0, label: t("pages.task_manager.form_library_all_label") }, ...libraryOptions]} optionFilterProp="label" style={{ width: 280 }} />
-                </Form.Item>
-                <Form.Item name="limit" label={t("pages.task_manager.form_limit_videos")}><InputNumber min={1} max={500} placeholder={t("pages.task_manager.form_limit_videos_default")} style={{ width: 200 }} /></Form.Item>
-              </>
-            ) : null}
-            {createTaskType === "lyric_process" ? (
-              <Form.Item name="limit" label={t("pages.task_manager.form_limit_audios")}><InputNumber min={1} max={200} placeholder={t("pages.task_manager.form_limit_audios_default")} style={{ width: 200 }} /></Form.Item>
-            ) : null}
-            {createTaskType === "transcode_cleanup_failed_before" || createTaskType === "activity_cleanup" ? (
-              <Form.Item name="days" label={t("pages.task_manager.form_days_cleanup")}><InputNumber min={1} max={3650} /></Form.Item>
-            ) : null}
-          </Space>
-        </Form>
-      </Modal>
-      <Modal
-        title={t("pages.task_manager.scheduled_modal_edit")}
-        open={!!editingTask}
-        onCancel={() => setEditingTask(null)}
-        onOk={() => void onUpdateScheduled()}
-        confirmLoading={updatingSchedule}
-      >
-        <Form form={editForm} layout="vertical">
-          <Form.Item name="name" label={t("pages.task_manager.form_task_name")} rules={[{ required: true }]}><Input /></Form.Item>
-          <Form.Item name="category" label={t("pages.task_manager.form_category")} rules={[{ required: true }]}>
-            <Select options={[{ value: "media", label: t("pages.task_manager.category_media") }, { value: "maintenance", label: t("pages.task_manager.category_maintenance") }]} />
-          </Form.Item>
-          <Form.Item name="task_type" label={t("pages.task_manager.task_type_label")} rules={[{ required: true }]}>
-            <Select
-              options={[
-                { value: "library_scan", label: t("pages.task_manager.task_type_library_scan") },
-                { value: "subtitle_process", label: t("pages.task_manager.task_type_subtitle_process") },
-                { value: "lyric_process", label: t("pages.task_manager.task_type_lyric_process") },
-                { value: "scrape_run", label: t("pages.task_manager.task_type_scrape_run") },
-                { value: "transcode_cleanup_failed_before", label: t("pages.task_manager.task_type_transcode_cleanup") },
-                { value: "activity_cleanup", label: t("pages.task_manager.task_type_activity_cleanup") },
-                { value: "db_optimize", label: t("pages.task_manager.task_type_db_optimize") },
-              ]}
-            />
-          </Form.Item>
-          <Form.Item name="interval_min" label={t("pages.task_manager.form_interval_minutes")} rules={[{ required: true }]}><InputNumber min={1} style={{ width: "100%" }} /></Form.Item>
-          <Form.Item name="enabled" label={t("pages.task_manager.form_enabled")} valuePropName="checked"><Switch /></Form.Item>
-          <Space wrap>
-            {editTaskType === "library_scan" ? (
-              <Form.Item name="library_id" label={t("pages.task_manager.form_library_scan")}>
-                <Select
-                  allowClear
-                  showSearch
-                  placeholder={t("pages.task_manager.form_library_pick")}
-                  options={libraryOptions}
-                  optionFilterProp="label"
-                  style={{ width: 240 }}
-                />
-              </Form.Item>
-            ) : null}
-            {editTaskType === "scrape_run" ? (
-              <Form.Item name="limit" label={t("pages.task_manager.form_limit_scrape")}><InputNumber min={1} max={200} /></Form.Item>
-            ) : null}
-            {editTaskType === "subtitle_process" ? (
-              <>
-                <Form.Item name="library_id" label={t("pages.task_manager.form_library_all_0")}>
-                  <Select allowClear showSearch placeholder={t("pages.task_manager.form_library_all_placeholder")} options={[{ value: 0, label: t("pages.task_manager.form_library_all_label") }, ...libraryOptions]} optionFilterProp="label" style={{ width: 280 }} />
-                </Form.Item>
-                <Form.Item name="limit" label={t("pages.task_manager.form_limit_videos")}><InputNumber min={1} max={500} placeholder={t("pages.task_manager.form_limit_videos_default")} style={{ width: 200 }} /></Form.Item>
-              </>
-            ) : null}
-            {editTaskType === "lyric_process" ? (
-              <Form.Item name="limit" label={t("pages.task_manager.form_limit_audios")}><InputNumber min={1} max={200} placeholder={t("pages.task_manager.form_limit_audios_default")} style={{ width: 200 }} /></Form.Item>
-            ) : null}
-            {editTaskType === "transcode_cleanup_failed_before" || editTaskType === "activity_cleanup" ? (
-              <Form.Item name="days" label={t("pages.task_manager.form_days_cleanup")}><InputNumber min={1} max={3650} /></Form.Item>
-            ) : null}
-          </Space>
-        </Form>
-      </Modal>
     </>
   );
 }

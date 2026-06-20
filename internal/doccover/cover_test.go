@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"knox-media/internal/store"
 )
 
 func TestPath(t *testing.T) {
@@ -83,6 +85,57 @@ func writeMiniEPUB(path, coverName string, coverData []byte) error {
 		return err
 	}
 	return zw.Close()
+}
+
+func TestCachedCoverPlaintext(t *testing.T) {
+	dir := t.TempDir()
+	preview := filepath.Join(dir, "preview")
+	id := int64(42)
+	cover := Path(preview, id)
+	if err := os.MkdirAll(filepath.Dir(cover), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cover, []byte("jpg"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !CachedCover(nil, preview, id, 0) {
+		t.Fatal("expected plaintext cover")
+	}
+}
+
+func TestCachedCoverEncryptedDerived(t *testing.T) {
+	dir := t.TempDir()
+	preview := filepath.Join(dir, "preview")
+	id := int64(99)
+	enc := filepath.Join(dir, "derived", "99", "doc_cover", "cover.jpg.enc")
+	if err := os.MkdirAll(filepath.Dir(enc), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(enc, []byte("enc-jpg"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.OpenSQLite(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`INSERT INTO library (id, name, type, path) VALUES (1, 'docs', 'document', ?)`, dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO media (id, library_id, file_id, title, file_path, file_type, status) VALUES (?, 1, 'f1', 'doc', 'x.pdf', 'document', 'active')`, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO media_derived_assets (media_id, artifact_kind, logical_name, enc_path, wrapped_dek, iv)
+		VALUES (?, ?, ?, ?, 'aa', 'bb')`, id, docCoverKind, docCoverLogicalName, enc); err != nil {
+		t.Fatal(err)
+	}
+	if Exists(preview, id) {
+		t.Fatal("plaintext should be absent")
+	}
+	if !CachedCover(db, preview, id, 0) {
+		t.Fatal("expected encrypted derived cover")
+	}
 }
 
 func TestCoverStrategy(t *testing.T) {

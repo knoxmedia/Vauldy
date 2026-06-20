@@ -38,8 +38,25 @@ func NewWorker(db *sql.DB, derived *storage.DerivedAssetStore, workDir, ffprobeP
 	}
 }
 
-// Enqueue upserts a pending lyric_task for media_id.
+// Enqueue upserts a pending lyric_task; existing failed rows are left unchanged.
 func (w *Worker) Enqueue(mediaID int64) error {
+	_, err := w.DB.Exec(`
+		INSERT INTO lyric_task (media_id, status, created_at, updated_at)
+		VALUES (?, 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		ON CONFLICT(media_id) DO UPDATE SET
+			status = CASE WHEN lyric_task.status = 'failed' THEN lyric_task.status ELSE 'pending' END,
+			message = CASE WHEN lyric_task.status = 'failed' THEN lyric_task.message ELSE NULL END,
+			vtt_path = CASE WHEN lyric_task.status = 'failed' THEN lyric_task.vtt_path ELSE NULL END,
+			lrc_path = CASE WHEN lyric_task.status = 'failed' THEN lyric_task.lrc_path ELSE NULL END,
+			started_at = CASE WHEN lyric_task.status = 'failed' THEN lyric_task.started_at ELSE NULL END,
+			finished_at = CASE WHEN lyric_task.status = 'failed' THEN lyric_task.finished_at ELSE NULL END,
+			updated_at = CURRENT_TIMESTAMP
+	`, mediaID)
+	return err
+}
+
+// EnqueueRetry resets a lyric task to pending for manual retry.
+func (w *Worker) EnqueueRetry(mediaID int64) error {
 	_, err := w.DB.Exec(`
 		INSERT INTO lyric_task (media_id, status, created_at, updated_at)
 		VALUES (?, 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
@@ -91,14 +108,14 @@ func (w *Worker) EnsurePendingIfNoLyrics(mediaID int64, fileType string) error {
 	return w.EnsurePendingLyricTask(mediaID)
 }
 
-// RunBatch processes up to limit pending/failed lyric tasks.
+// RunBatch processes up to limit pending lyric tasks.
 func (w *Worker) RunBatch(ctx context.Context, limit int) (done, failed int) {
 	if limit <= 0 {
 		limit = 20
 	}
 	rows, err := w.DB.Query(`
 		SELECT media_id FROM lyric_task
-		WHERE status IN ('pending', 'failed')
+		WHERE status = 'pending'
 		ORDER BY updated_at ASC
 		LIMIT ?
 	`, limit)
@@ -142,6 +159,11 @@ func (w *Worker) Process(ctx context.Context, mediaID int64) (err error) {
 		delete(w.running, mediaID)
 		w.mu.Unlock()
 	}()
+
+	var taskStatus string
+	if qerr := w.DB.QueryRow(`SELECT status FROM lyric_task WHERE media_id = ?`, mediaID).Scan(&taskStatus); qerr == nil && taskStatus == "failed" {
+		return nil
+	}
 
 	var fileType, filePath, metaJSON sql.NullString
 	if err = w.DB.QueryRow(`

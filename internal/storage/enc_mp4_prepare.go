@@ -105,8 +105,8 @@ func markKeyframeReindex(db *sql.DB, mediaID int64) {
 		INSERT INTO keyframe_task (media_id, status, updated_at)
 		VALUES (?, 'waiting', CURRENT_TIMESTAMP)
 		ON CONFLICT(media_id) DO UPDATE SET
-		  status = 'waiting',
-		  error_message = NULL,
+		  status = CASE WHEN keyframe_task.status = 'failed' THEN keyframe_task.status ELSE 'waiting' END,
+		  error_message = CASE WHEN keyframe_task.status = 'failed' THEN keyframe_task.error_message ELSE NULL END,
 		  updated_at = CURRENT_TIMESTAMP
 	`, mediaID)
 }

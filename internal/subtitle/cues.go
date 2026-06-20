@@ -22,13 +22,18 @@ type Cue struct {
 }
 
 var (
-	vttTSLine = regexp.MustCompile(`^(\d{2}:\d{2}:\d{2}(?:[.,]\d{3})?)\s*-->\s*(\d{2}:\d{2}:\d{2}(?:[.,]\d{3})?)\s*(.*)$`)
-	srtTSLine = regexp.MustCompile(`^(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})\s*(.*)$`)
-	assDialogue = regexp.MustCompile(`(?i)^Dialogue:\s*\d+,([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),(.*)$`)
+	vttTimeArrow = regexp.MustCompile(`^\s*(\d[\d:.,]*)\s*-->\s*(\d[\d:.,]*)(?:\s+(.*))?$`)
+	srtTSLine    = regexp.MustCompile(`^(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})\s*(.*)$`)
+	assDialogue  = regexp.MustCompile(`(?i)^Dialogue:\s*\d+,([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),(.*)$`)
+	cueIndexLine = regexp.MustCompile(`^\d+$`)
 )
 
+func stripUTF8BOM(s string) string {
+	return strings.TrimPrefix(s, "\ufeff")
+}
+
 func DetectFormat(content, srcURL string) Format {
-	trim := strings.TrimSpace(content)
+	trim := strings.TrimSpace(stripUTF8BOM(content))
 	lowerURL := strings.ToLower(srcURL)
 	switch {
 	case strings.HasPrefix(trim, "WEBVTT"):
@@ -67,38 +72,42 @@ func ParseCues(content string, format Format) ([]Cue, Format, error) {
 }
 
 func parseVTTCues(content string) ([]Cue, error) {
+	content = stripUTF8BOM(content)
 	lines := splitLines(content)
 	var cues []Cue
 	i := 0
-	if len(lines) > 0 && strings.HasPrefix(lines[0], "WEBVTT") {
-		i = 1
-		for i < len(lines) && strings.TrimSpace(lines[i]) == "" {
-			i++
+	if len(lines) > 0 {
+		first := strings.TrimSpace(lines[0])
+		if strings.HasPrefix(first, "WEBVTT") {
+			i = 1
+			for i < len(lines) && strings.TrimSpace(lines[i]) == "" {
+				i++
+			}
 		}
 	}
 	for i < len(lines) {
-		line := lines[i]
+		line := strings.TrimSpace(lines[i])
 		if line == "" || strings.HasPrefix(line, "NOTE") || strings.HasPrefix(line, "STYLE") || strings.HasPrefix(line, "REGION") {
 			i++
 			continue
 		}
-		if regexp.MustCompile(`^\d+$`).MatchString(line) && i+1 < len(lines) {
+		if cueIndexLine.MatchString(line) && i+1 < len(lines) {
 			i++
-			line = lines[i]
+			line = strings.TrimSpace(lines[i])
 		}
-		m := vttTSLine.FindStringSubmatch(line)
+		m := vttTimeArrow.FindStringSubmatch(line)
 		if m == nil {
 			i++
 			continue
 		}
 		i++
 		var textLines []string
-		for i < len(lines) && lines[i] != "" {
+		for i < len(lines) && strings.TrimSpace(lines[i]) != "" {
 			textLines = append(textLines, lines[i])
 			i++
 		}
-		cues = append(cues, Cue{Start: m[1], End: m[2], Text: strings.Join(textLines, "\n")})
-		for i < len(lines) && lines[i] == "" {
+		cues = append(cues, Cue{Start: strings.TrimSpace(m[1]), End: strings.TrimSpace(m[2]), Text: strings.Join(textLines, "\n")})
+		for i < len(lines) && strings.TrimSpace(lines[i]) == "" {
 			i++
 		}
 	}
@@ -217,6 +226,7 @@ func splitLines(s string) []string {
 
 // NormalizeForPowerPlayer rewrites WebVTT/SRT cues with numeric indices for PowerPlayer 6 parser.
 func NormalizeForPowerPlayer(content string) (string, error) {
+	content = stripUTF8BOM(content)
 	format := DetectFormat(content, "")
 	cues, _, err := ParseCues(content, format)
 	if err != nil {

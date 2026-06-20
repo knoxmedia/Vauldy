@@ -107,3 +107,33 @@ func TestEncryptMediaRoundTrip(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestEncryptPlainMissingMarksRow(t *testing.T) {
+	db, err := store.OpenSQLite(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	kek := bytes.Repeat([]byte{0x42}, 32)
+	vault, err := keystore.NewVault(string(kek), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "gone.mp4")
+	_, _ = db.Exec(`INSERT INTO library (id, name, type, path, encrypted_assets_enabled) VALUES (1, 'lib', 'video', ?, 1)`, dir)
+	_, _ = db.Exec(`INSERT INTO media (id, library_id, file_id, title, file_path, file_type, status) VALUES (400, 1, 'fid-1', 't', ?, 'video', 'active')`, missing)
+
+	enc := &AssetEncryptor{DB: db, Vault: vault, BasePath: filepath.Join(dir, "encrypted")}
+	if err := enc.EncryptMedia(context.Background(), 400); err == nil {
+		t.Fatal("expected error for missing plain file")
+	}
+	var status string
+	if err := db.QueryRow(`SELECT status FROM media_encrypted_assets WHERE media_id = 400`).Scan(&status); err != nil {
+		t.Fatalf("missing row: %v", err)
+	}
+	if status != "plain_missing" {
+		t.Fatalf("status=%q want plain_missing", status)
+	}
+}

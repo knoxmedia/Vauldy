@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"knox-media/internal/config"
 	"knox-media/internal/imagethumb"
@@ -27,6 +28,7 @@ type Worker struct {
 	Cfg        func() config.PhotoFaceConfig
 	mu         sync.Mutex
 	busy       map[int64]bool
+	activeJobs atomic.Int32
 }
 
 func NewWorker(db *sql.DB, vault *keystore.Vault, derived *storage.DerivedAssetStore, mediaRoot, ffmpegPath, previewDir string, cfgFn func() config.PhotoFaceConfig) *Worker {
@@ -53,6 +55,55 @@ func (w *Worker) similarityThreshold() float32 {
 		return cfg.SimilarityThreshold
 	}
 	return 0.45
+}
+
+func (w *Worker) maxConcurrent() int {
+	cfg := config.PhotoFaceConfig{}
+	if w.Cfg != nil {
+		cfg = w.Cfg()
+	}
+	if cfg.MaxConcurrent > 0 {
+		return cfg.MaxConcurrent
+	}
+	return 1
+}
+
+func (w *Worker) batchLimit() int {
+	cfg := config.PhotoFaceConfig{}
+	if w.Cfg != nil {
+		cfg = w.Cfg()
+	}
+	if cfg.BatchLimit > 0 {
+		return cfg.BatchLimit
+	}
+	return 1
+}
+
+func (w *Worker) failedRetryMinutes() int {
+	cfg := config.PhotoFaceConfig{}
+	if w.Cfg != nil {
+		cfg = w.Cfg()
+	}
+	if cfg.FailedRetryMinutes > 0 {
+		return cfg.FailedRetryMinutes
+	}
+	return 60
+}
+
+// ActiveCount returns in-flight face detection jobs.
+func (w *Worker) ActiveCount() int {
+	if w == nil {
+		return 0
+	}
+	return int(w.activeJobs.Load())
+}
+
+// MaxConcurrent returns configured simultaneous job limit.
+func (w *Worker) MaxConcurrent() int {
+	if w == nil {
+		return 1
+	}
+	return w.maxConcurrent()
 }
 
 func (w *Worker) Enqueue(mediaID, libraryID int64) error {
@@ -95,9 +146,9 @@ func (w *Worker) EnqueueLibraryAll(libraryID int64) (int64, error) {
 	return n, nil
 }
 
-func (w *Worker) LibraryProgress(libraryID int64) (total, processed, withFaces, pending int64, err error) {
+func (w *Worker) LibraryProgress(libraryID int64) (total, processed, withFaces, pending, failed int64, err error) {
 	if w == nil || w.DB == nil {
-		return 0, 0, 0, 0, fmt.Errorf("worker unavailable")
+		return 0, 0, 0, 0, 0, fmt.Errorf("worker unavailable")
 	}
 	if err = w.DB.QueryRow(`
 		SELECT COUNT(1) FROM media WHERE library_id = ? AND file_type = 'image' AND status = 'active'
@@ -115,10 +166,16 @@ func (w *Worker) LibraryProgress(libraryID int64) (total, processed, withFaces, 
 	`, libraryID).Scan(&withFaces); err != nil {
 		return
 	}
+	if err = w.DB.QueryRow(`
+		SELECT COUNT(1) FROM photo_face_task
+		WHERE library_id = ? AND status IN ('pending', 'running')
+	`, libraryID).Scan(&pending); err != nil {
+		return
+	}
 	err = w.DB.QueryRow(`
 		SELECT COUNT(1) FROM photo_face_task
-		WHERE library_id = ? AND status IN ('pending', 'running', 'failed')
-	`, libraryID).Scan(&pending)
+		WHERE library_id = ? AND status = 'failed'
+	`, libraryID).Scan(&failed)
 	return
 }
 
@@ -148,12 +205,27 @@ func (w *Worker) RunBatch(ctx context.Context, limit int) (done, failed int) {
 	if w == nil || w.DB == nil || limit <= 0 {
 		return 0, 0
 	}
+	maxConc := w.maxConcurrent()
+	if w.ActiveCount() >= maxConc {
+		return 0, 0
+	}
+	if limit > maxConc {
+		limit = maxConc
+	}
+	if batchCap := w.batchLimit(); limit > batchCap {
+		limit = batchCap
+	}
+	retryMin := w.failedRetryMinutes()
 	rows, err := w.DB.Query(`
 		SELECT media_id FROM photo_face_task
-		WHERE status IN ('pending', 'failed', 'running')
-		ORDER BY updated_at ASC
+		WHERE status = 'pending'
+		   OR (status = 'running' AND started_at IS NOT NULL AND started_at < datetime('now', '-20 minutes'))
+		   OR (status = 'failed' AND updated_at < datetime('now', printf('-%d minutes', ?)))
+		ORDER BY
+		  CASE status WHEN 'pending' THEN 0 WHEN 'running' THEN 1 ELSE 2 END,
+		  updated_at ASC
 		LIMIT ?
-	`, limit)
+	`, retryMin, limit)
 	if err != nil {
 		return 0, 0
 	}
@@ -165,18 +237,37 @@ func (w *Worker) RunBatch(ctx context.Context, limit int) (done, failed int) {
 			ids = append(ids, id)
 		}
 	}
+	if len(ids) == 0 {
+		return 0, 0
+	}
+
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, maxConc)
 	for _, id := range ids {
 		select {
 		case <-ctx.Done():
+			wg.Wait()
 			return done, failed
 		default:
 		}
-		if err := w.Process(ctx, id); err != nil {
-			failed++
-		} else {
-			done++
-		}
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(mediaID int64) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			if err := w.Process(ctx, mediaID); err != nil {
+				mu.Lock()
+				failed++
+				mu.Unlock()
+			} else {
+				mu.Lock()
+				done++
+				mu.Unlock()
+			}
+		}(id)
 	}
+	wg.Wait()
 	return done, failed
 }
 
@@ -191,7 +282,9 @@ func (w *Worker) Process(ctx context.Context, mediaID int64) error {
 	}
 	w.busy[mediaID] = true
 	w.mu.Unlock()
+	w.activeJobs.Add(1)
 	defer func() {
+		w.activeJobs.Add(-1)
 		w.mu.Lock()
 		delete(w.busy, mediaID)
 		w.mu.Unlock()

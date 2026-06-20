@@ -71,6 +71,7 @@ function defaultSystemOptions(): SystemOptions {
     },
     recognition: {
       asr: {
+        auto_on_scan: true,
         provider: "none",
         whisper_path: "whisper",
         extra_args: [],
@@ -953,6 +954,20 @@ export default function SystemOptionsPage() {
           {asrTestResult.message}
         </Typography.Text>
       ) : null}
+      <SettingRow
+        title={t("system_options.asr.auto_on_scan")}
+        description={t("system_options.asr.auto_on_scan_desc")}
+      >
+        <Switch
+          checked={opts.recognition.asr.auto_on_scan}
+          onChange={(v) =>
+            setOpts((p) => ({
+              ...p,
+              recognition: { ...p.recognition, asr: { ...p.recognition.asr, auto_on_scan: v } },
+            }))
+          }
+        />
+      </SettingRow>
       <SettingRow title={t("system_options.asr.provider")} description={t("system_options.asr.provider_desc")}>
         <Select
           style={{ minWidth: 220 }}

@@ -31,6 +31,21 @@ func TestNormalizeForPowerPlayer(t *testing.T) {
 	}
 }
 
+func TestParseVTTCuesFlexibleTimestamps(t *testing.T) {
+	cases := []string{
+		"WEBVTT\n\n00:01.000 --> 00:04.000\nShort hours\n",
+		"\ufeffWEBVTT\n\n00:00:01,000 --> 00:00:04,000\nComma millis\n",
+		"WEBVTT\n\n1\n00:00:01.000 --> 00:00:04.000 align:start\nSettings line\n",
+		"WEBVTT\n\n0:01:02.003 --> 0:01:05.500\nSingle digit hour\n",
+	}
+	for _, raw := range cases {
+		cues, err := parseVTTCues(raw)
+		if err != nil || len(cues) == 0 {
+			t.Fatalf("parse failed for %q: err=%v cues=%d", raw, err, len(cues))
+		}
+	}
+}
+
 func TestParseMediaSubtitleVTTURL(t *testing.T) {
 	mid, sid, ok := ParseMediaSubtitleVTTURL("/api/v1/media/12/subtitles/34/vtt?access_token=x")
 	if !ok || mid != 12 || sid != 34 {

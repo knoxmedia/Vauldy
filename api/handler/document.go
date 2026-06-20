@@ -357,7 +357,13 @@ func (h *Handler) ServeDocumentCover(c *gin.Context) {
 			return
 		}
 	}
-	h.GenerateDocumentCover(id)
+	previewDir := ""
+	if h.App != nil && h.App.Config != nil {
+		previewDir = h.App.Config.Data.Preview
+	}
+	if doccover.NeedsCoverWork(h.App.DB, previewDir, id, 0) {
+		h.GenerateDocumentCover(id)
+	}
 	h.serveDocumentPlaceholder(c, format.String)
 }
 

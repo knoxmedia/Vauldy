@@ -45,8 +45,21 @@ func NewWorker(db *sql.DB, vault *keystore.Vault, derived *storage.DerivedAssetS
 	}
 }
 
-// Enqueue upserts a keyframe_task row with status='waiting' for the given media.
+// Enqueue upserts a waiting keyframe_task; existing failed rows are left unchanged.
 func (w *Worker) Enqueue(mediaID int64) {
+	_, _ = w.DB.Exec(
+		`INSERT INTO keyframe_task (media_id, status, updated_at) VALUES (?, 'waiting', CURRENT_TIMESTAMP)
+		 ON CONFLICT(media_id) DO UPDATE SET
+		   status = CASE WHEN keyframe_task.status = 'failed' THEN keyframe_task.status ELSE 'waiting' END,
+		   updated_at = CURRENT_TIMESTAMP,
+		   error_message = CASE WHEN keyframe_task.status = 'failed' THEN keyframe_task.error_message ELSE NULL END,
+		   keyframe_count = CASE WHEN keyframe_task.status = 'failed' THEN keyframe_task.keyframe_count ELSE 0 END`,
+		mediaID,
+	)
+}
+
+// EnqueueRetry resets a keyframe task to waiting for manual retry.
+func (w *Worker) EnqueueRetry(mediaID int64) {
 	_, _ = w.DB.Exec(
 		`INSERT INTO keyframe_task (media_id, status, updated_at) VALUES (?, 'waiting', CURRENT_TIMESTAMP)
 		 ON CONFLICT(media_id) DO UPDATE SET status='waiting', updated_at=CURRENT_TIMESTAMP, error_message=NULL, keyframe_count=0`,
@@ -134,6 +147,11 @@ func (w *Worker) run(ctx context.Context, mediaID int64, fileID, filePath string
 		delete(w.running, mediaID)
 		w.mu.Unlock()
 	}()
+
+	var taskStatus string
+	if qerr := w.DB.QueryRow(`SELECT status FROM keyframe_task WHERE media_id = ?`, mediaID).Scan(&taskStatus); qerr == nil && taskStatus == "failed" {
+		return nil
+	}
 
 	// Determine file_id from media row if not provided.
 	if strings.TrimSpace(fileID) == "" {

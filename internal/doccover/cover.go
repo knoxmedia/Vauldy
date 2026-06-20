@@ -15,7 +15,11 @@ import (
 	"knox-media/internal/storage"
 )
 
-const CoverMaxEdge = 480
+const (
+	CoverMaxEdge         = 480
+	docCoverKind         = "doc_cover"
+	docCoverLogicalName  = "cover.jpg"
+)
 
 // Options configures document cover generation.
 type Options struct {
@@ -33,10 +37,28 @@ func Path(previewDir string, mediaID int64) string {
 	return filepath.Join(previewDir, "documents", fmt.Sprintf("%d", mediaID), "cover.jpg")
 }
 
-// Exists reports whether a non-empty cover cache file is present.
+// Exists reports whether a non-empty plaintext cover cache file is present.
 func Exists(previewDir string, mediaID int64) bool {
 	st, err := os.Stat(Path(previewDir, mediaID))
 	return err == nil && !st.IsDir() && st.Size() > 0
+}
+
+// CachedCover reports whether a usable cover exists (plaintext or encrypted derived asset).
+// When sourceMtime <= 0, any non-empty cover file is accepted.
+func CachedCover(db *sql.DB, previewDir string, mediaID int64, sourceMtime int64) bool {
+	if mediaID <= 0 {
+		return false
+	}
+	if coverFresh(Path(previewDir, mediaID), sourceMtime) {
+		return true
+	}
+	if db == nil {
+		return false
+	}
+	if enc, ok := storage.LookupEncPath(db, mediaID, docCoverKind, docCoverLogicalName); ok {
+		return coverFresh(enc, sourceMtime)
+	}
+	return false
 }
 
 type coverStrategy int
@@ -82,7 +104,7 @@ func Ensure(ctx context.Context, opts Options, mediaID int64, sourcePath string,
 	defer cleanup()
 
 	outPath := Path(opts.PreviewDir, mediaID)
-	if coverFresh(outPath, fileMtime) {
+	if CachedCover(opts.DB, opts.PreviewDir, mediaID, fileMtime) {
 		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {

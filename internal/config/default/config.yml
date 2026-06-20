@@ -79,6 +79,10 @@ photo_face:
   python_path: "tools/recognition/.venv/bin/python"
   script_path: "tools/photo_face/detect.py"
   similarity_threshold: 0.45
+  max_concurrent: 1
+  batch_limit: 1
+  poll_interval_seconds: 10
+  failed_retry_minutes: 60
 doc_trans:
   enabled: true
   engine_order:

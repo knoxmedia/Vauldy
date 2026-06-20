@@ -39,6 +39,17 @@ def _which_or_env(name: str, env_key: str) -> str:
     return name
 
 
+def _run_cmd(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+    """Run a subprocess; decode stdout/stderr as UTF-8 (Windows GBK-safe)."""
+    return subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+
 def extract_wav_16k_mono(src: Path, dst_wav: Path) -> None:
     ffmpeg = _which_or_env("ffmpeg", "FFMPEG_PATH")
     cmd = [
@@ -55,7 +66,7 @@ def extract_wav_16k_mono(src: Path, dst_wav: Path) -> None:
         "wav",
         str(dst_wav),
     ]
-    p = subprocess.run(cmd, capture_output=True, text=True)
+    p = _run_cmd(cmd)
     if p.returncode != 0:
         raise RuntimeError(f"ffmpeg failed: {p.stderr or p.stdout}")
 
@@ -72,7 +83,7 @@ def probe_duration_sec(path: Path) -> float:
         "default=noprint_wrappers=1:nokey=1",
         str(path),
     ]
-    p = subprocess.run(cmd, capture_output=True, text=True)
+    p = _run_cmd(cmd)
     if p.returncode != 0:
         return 0.0
     try:
@@ -115,6 +126,9 @@ def run_whisper(
     language: str | None,
     device: str | None,
 ) -> None:
+    if os.name == "nt":
+        os.environ.setdefault("PYTHONUTF8", "1")
+        os.environ.setdefault("PYTHONIOENCODING", "utf-8")
     import whisper
 
     model = whisper.load_model(model_name, device=device or None)
@@ -217,6 +231,9 @@ def run_paraformer(
 
 
 def main() -> int:
+    if os.name == "nt":
+        os.environ.setdefault("PYTHONUTF8", "1")
+        os.environ.setdefault("PYTHONIOENCODING", "utf-8")
     ap = argparse.ArgumentParser(description="ASR (Whisper / Paraformer) → WebVTT")
     ap.add_argument("--engine", choices=("whisper", "paraformer"), required=True)
     ap.add_argument("--input", required=True, help="Video or audio file")

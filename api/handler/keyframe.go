@@ -31,7 +31,7 @@ func (h *Handler) EnqueueKeyframeExtraction(c *gin.Context) {
 		return
 	}
 
-	h.KeyframeWorker.Enqueue(mediaID)
+	h.KeyframeWorker.EnqueueRetry(mediaID)
 	go func() {
 		_ = h.KeyframeWorker.Run(context.Background(), mediaID, fileID.String, filePath.String, float64(duration.Int64))
 	}()
@@ -99,7 +99,7 @@ func (h *Handler) RetryKeyframeTask(c *gin.Context) {
 		return
 	}
 
-	h.KeyframeWorker.Enqueue(mediaID)
+	h.KeyframeWorker.EnqueueRetry(mediaID)
 	go func() {
 		_ = h.KeyframeWorker.Run(context.Background(), mediaID, fileID.String, filePath.String, float64(duration.Int64))
 	}()

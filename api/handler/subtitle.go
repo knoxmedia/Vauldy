@@ -2,6 +2,7 @@ package handler
 
 import (
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -70,7 +71,10 @@ func (h *Handler) SubtitleVTT(c *gin.Context) {
 		}
 		normalized, err := subtitle.NormalizeForPowerPlayer(content)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			log.Printf("subtitle powerplayer normalize media=%d sid=%d: %v", mid, sid, err)
+			c.Header("Content-Type", "text/vtt; charset=utf-8")
+			c.Header("Cache-Control", "private, no-store")
+			_, _ = io.WriteString(c.Writer, content)
 			return
 		}
 		c.Header("Content-Type", "text/vtt; charset=utf-8")

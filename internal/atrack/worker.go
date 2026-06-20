@@ -56,8 +56,20 @@ func NewWorker(db *sql.DB, vault *keystore.Vault, derived *storage.DerivedAssetS
 	}
 }
 
-// Enqueue upserts an atrack_task row with status='waiting' for the given media.
+// Enqueue upserts a waiting atrack_task; existing failed rows are left unchanged.
 func (w *Worker) Enqueue(mediaID int64) {
+	_, _ = w.DB.Exec(
+		`INSERT INTO atrack_task (media_id, status, updated_at) VALUES (?, 'waiting', CURRENT_TIMESTAMP)
+		 ON CONFLICT(media_id) DO UPDATE SET
+		   status = CASE WHEN atrack_task.status = 'failed' THEN atrack_task.status ELSE 'waiting' END,
+		   updated_at = CURRENT_TIMESTAMP,
+		   error_message = CASE WHEN atrack_task.status = 'failed' THEN atrack_task.error_message ELSE NULL END`,
+		mediaID,
+	)
+}
+
+// EnqueueRetry resets an atrack task to waiting for manual retry.
+func (w *Worker) EnqueueRetry(mediaID int64) {
 	_, _ = w.DB.Exec(
 		`INSERT INTO atrack_task (media_id, status, updated_at) VALUES (?, 'waiting', CURRENT_TIMESTAMP)
 		 ON CONFLICT(media_id) DO UPDATE SET status='waiting', updated_at=CURRENT_TIMESTAMP, error_message=NULL`,
@@ -192,6 +204,11 @@ func (w *Worker) run(ctx context.Context, mediaID int64, inputPath string) error
 		delete(w.running, mediaID)
 		w.mu.Unlock()
 	}()
+
+	var taskStatus string
+	if qerr := w.DB.QueryRow(`SELECT status FROM atrack_task WHERE media_id = ?`, mediaID).Scan(&taskStatus); qerr == nil && taskStatus == "failed" {
+		return nil
+	}
 
 	outDir := filepath.Join(w.OutputDir, strconv.FormatInt(mediaID, 10))
 	// Remove old output to enable re-extraction.

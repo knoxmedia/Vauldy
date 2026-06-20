@@ -39,7 +39,7 @@ subtitle:
 		Languages:     "chi_sim",
 		ScriptPath:    "tools/subtitle_ocr/bitmap_subtitle_ocr.py",
 	}
-	if err := SaveSubtitleRecognition(path, asr, ocr); err != nil {
+	if err := SaveSubtitleRecognition(path, false, asr, ocr); err != nil {
 		t.Fatalf("SaveSubtitleRecognition: %v", err)
 	}
 
@@ -51,13 +51,16 @@ subtitle:
 	if !strings.Contains(text, "port: 8200") {
 		t.Fatalf("expected server.port preserved, got:\n%s", text)
 	}
-	if !strings.Contains(text, "auto_on_scan: true") {
-		t.Fatalf("expected auto_on_scan preserved, got:\n%s", text)
+	if !strings.Contains(text, "auto_on_scan: false") {
+		t.Fatalf("expected auto_on_scan patched to false, got:\n%s", text)
 	}
 
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("reload: %v", err)
+	}
+	if cfg.SubtitleAutoOnScan() {
+		t.Fatal("auto_on_scan should be false after patch")
 	}
 	if cfg.Subtitle.ASR.Provider != "shell" {
 		t.Fatalf("asr provider=%q want shell", cfg.Subtitle.ASR.Provider)

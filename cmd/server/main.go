@@ -369,17 +369,7 @@ func enqueueAutoPreviewTask(db *sql.DB, mediaID int64, fileType string) {
 	if countNum > 100 {
 		countNum = 100
 	}
-	_, _ = db.Exec(
-		`INSERT INTO preview_task (media_id, status, interval_sec, thumb_count, thumb_width, thumb_height, updated_at)
-		 VALUES (?, 'waiting', ?, ?, 240, 135, CURRENT_TIMESTAMP)
-		 ON CONFLICT(media_id) DO UPDATE SET
-		   status='waiting',
-		   interval_sec=excluded.interval_sec,
-		   thumb_count=excluded.thumb_count,
-		   updated_at=CURRENT_TIMESTAMP,
-		   error_message=NULL`,
-		mediaID, intervalSec, countNum,
-	)
+	_ = preview.UpsertWaitingPreviewTask(db, mediaID, intervalSec, countNum)
 }
 
 func ensureAutoPreviewGeneration(db *sql.DB, previewWorker *preview.Worker, mediaID int64, fileType string) {

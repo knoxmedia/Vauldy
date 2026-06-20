@@ -173,9 +173,6 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 					}
 					if documentLibrary && ft == "document" {
 						s.refreshDocumentMeta(existingMediaID, path)
-						if s.OnDocumentScanned != nil {
-							s.OnDocumentScanned(existingMediaID)
-						}
 					}
 					if s.OnFile != nil {
 						s.OnFile(path, nil)

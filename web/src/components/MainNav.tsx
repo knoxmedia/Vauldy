@@ -21,7 +21,7 @@ import {
 } from "@ant-design/icons";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { fetchLibraries, type Library } from "../api/client";
+import { fetchLibrariesWithCapabilities, type Library } from "../api/client";
 import { libraryTypeIcon } from "../lib/libraryTypeIcon";
 import { isAdminRole, useAuthStore } from "../store/auth";
 import { useT } from "../i18n";
@@ -45,13 +45,17 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
 
   const [libs, setLibs] = useState<Library[]>([]);
   const [libsLoading, setLibsLoading] = useState(true);
+  const [widevineEnabled, setWidevineEnabled] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     setLibsLoading(true);
-    void fetchLibraries()
-      .then((items) => {
-        if (!cancelled) setLibs(Array.isArray(items) ? items : []);
+    void fetchLibrariesWithCapabilities()
+      .then(({ items, drmCapabilities }) => {
+        if (!cancelled) {
+          setLibs(Array.isArray(items) ? items : []);
+          setWidevineEnabled(!!drmCapabilities.widevine_enabled);
+        }
       })
       .catch(() => {
         if (!cancelled) setLibs([]);
@@ -157,7 +161,8 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
   }, [libs, libsLoading, onNavigate, t]);
 
   const adminChildren: NonNullable<MenuProps["items"]> = useMemo(
-    () => [
+    () => {
+      const items: NonNullable<MenuProps["items"]> = [
       {
         key: "console",
         icon: <ControlOutlined />,
@@ -218,16 +223,20 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
           </Link>
         ),
       },
-      {
-        key: "drm-license-audit",
-        icon: <HistoryOutlined />,
-        title: t("nav.drm_audit"),
-        label: (
-          <Link to="/drm-license-audit" onClick={onNavigate}>
-            {t("nav.drm_audit")}
-          </Link>
-        ),
-      },
+      ];
+      if (widevineEnabled) {
+        items.push({
+          key: "drm-license-audit",
+          icon: <HistoryOutlined />,
+          title: t("nav.drm_audit"),
+          label: (
+            <Link to="/drm-license-audit" onClick={onNavigate}>
+              {t("nav.drm_audit")}
+            </Link>
+          ),
+        });
+      }
+      items.push(
       {
         key: "access-logs",
         icon: <HistoryOutlined />,
@@ -278,8 +287,10 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
           </Link>
         ),
       },
-    ],
-    [onNavigate, t],
+      );
+      return items;
+    },
+    [onNavigate, t, widevineEnabled],
   );
 
   const menuItems: MenuProps["items"] = useMemo(() => {

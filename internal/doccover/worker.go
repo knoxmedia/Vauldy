@@ -98,10 +98,11 @@ func (w *Worker) BackfillLibrary(libraryID int64) {
 		if rows.Scan(&id) != nil || id <= 0 {
 			continue
 		}
-		if !Exists(preview, id) {
-			w.Enqueue(id)
-			queued++
+		if !NeedsCoverWork(w.cfg.DB, preview, id, 0) {
+			continue
 		}
+		w.Enqueue(id)
+		queued++
 	}
 	if queued > 0 {
 		log.Printf("document cover backfill library=%d queued=%d", libraryID, queued)
@@ -183,7 +184,7 @@ func (w *Worker) runOne(mediaID int64) {
 		}
 	}
 	preview := w.cfg.PreviewDir
-	if Exists(preview, mediaID) && coverFresh(Path(preview, mediaID), mtime) {
+	if !NeedsCoverWork(w.cfg.DB, preview, mediaID, mtime) {
 		return
 	}
 	log.Printf("document cover generating media=%d", mediaID)
@@ -200,8 +201,10 @@ func (w *Worker) runOne(mediaID int64) {
 		DocTrans:   w.cfg.DocTrans,
 	}
 	if err := Ensure(ctx, opts, mediaID, filePath.String, mtime); err != nil {
+		MarkCoverFailed(preview, mediaID, err)
 		log.Printf("document cover failed media=%d path=%s: %v", mediaID, filePath.String, err)
 		return
 	}
+	_ = os.Remove(coverSkipPath(preview, mediaID))
 	log.Printf("document cover ready media=%d", mediaID)
 }

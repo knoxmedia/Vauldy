@@ -101,6 +101,9 @@ func (s *AssetEncryptor) encryptMedia(ctx context.Context, mediaID int64, manual
 		return nil
 	}
 	if _, err := os.Stat(plainPath); err != nil {
+		if os.IsNotExist(err) {
+			markEncryptPlainMissing(s.DB, mediaID, plainPath)
+		}
 		return fmt.Errorf("plain file missing: %w", err)
 	}
 
@@ -228,4 +231,19 @@ func OpenPlaintext(db *sql.DB, vault *keystore.Vault, mediaID int64, path string
 		}
 	}()
 	return kcrypto.OpenDecryptSeeker(path, wrapped, kek)
+}
+
+func markEncryptPlainMissing(db *sql.DB, mediaID int64, plainPath string) {
+	if db == nil || mediaID <= 0 || strings.TrimSpace(plainPath) == "" {
+		return
+	}
+	_, _ = db.Exec(`
+		INSERT INTO media_encrypted_assets (media_id, enc_path, wrapped_dek, iv, plain_path, status, updated_at)
+		VALUES (?, ?, '00', '00', ?, 'plain_missing', CURRENT_TIMESTAMP)
+		ON CONFLICT(media_id) DO UPDATE SET
+		  enc_path = excluded.enc_path,
+		  plain_path = excluded.plain_path,
+		  status = 'plain_missing',
+		  updated_at = CURRENT_TIMESTAMP
+	`, mediaID, plainPath, plainPath)
 }

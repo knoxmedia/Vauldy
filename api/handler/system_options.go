@@ -31,6 +31,7 @@ type SystemOptionsRecognition struct {
 }
 
 type SystemOptionsASR struct {
+	AutoOnScan  bool     `json:"auto_on_scan"`
 	Provider    string   `json:"provider"`
 	WhisperPath string   `json:"whisper_path"`
 	ExtraArgs   []string `json:"extra_args"`
@@ -108,6 +109,7 @@ func defaultSystemOptions() SystemOptionsJSON {
 func defaultRecognitionOptions() SystemOptionsRecognition {
 	return SystemOptionsRecognition{
 		ASR: SystemOptionsASR{
+			AutoOnScan:  true,
 			Provider:    "none",
 			WhisperPath: "whisper",
 			ExtraArgs:   nil,
@@ -349,6 +351,7 @@ func recognitionFromConfig(cfg *config.Config) SystemOptionsRecognition {
 	}
 	return SystemOptionsRecognition{
 		ASR: SystemOptionsASR{
+			AutoOnScan:  cfg.SubtitleAutoOnScan(),
 			Provider:    cfg.Subtitle.ASR.Provider,
 			WhisperPath: cfg.Subtitle.ASR.WhisperPath,
 			ExtraArgs:   append([]string(nil), cfg.Subtitle.ASR.ExtraArgs...),
@@ -399,9 +402,11 @@ func (h *Handler) applyRecognitionConfig(r SystemOptionsRecognition) error {
 	if cfgPath == "" {
 		return fmt.Errorf("config path not set")
 	}
-	if err := config.SaveSubtitleRecognition(cfgPath, asr, ocr); err != nil {
+	if err := config.SaveSubtitleRecognition(cfgPath, r.ASR.AutoOnScan, asr, ocr); err != nil {
 		return err
 	}
+	autoOnScan := r.ASR.AutoOnScan
+	h.App.Config.Subtitle.AutoOnScan = &autoOnScan
 	h.App.Config.Subtitle.ASR = asr
 	h.App.Config.Subtitle.GraphicalOCR = ocr
 	if h.Subtitle != nil {

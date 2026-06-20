@@ -66,12 +66,124 @@ func NewWorker(db *sql.DB, ffmpegPath, transcodeDir string) *Worker {
 }
 
 func (w *Worker) RunTask(ctx context.Context, taskID int64, inputPath, quality string) error {
-	ladder := selectRenditions(quality, 1080)
-	if len(ladder) == 0 {
-		ladder = selectRenditions("720p", 1080)
+	if taskID <= 0 {
+		return nil
 	}
-	outDir := filepath.Join(w.TranscodeDir, strconv.FormatInt(taskID, 10))
+	w.mu.Lock()
+	if _, ok := w.running[taskID]; ok {
+		w.mu.Unlock()
+		return nil
+	}
+	w.mu.Unlock()
+
+	res, err := w.DB.Exec(`UPDATE transcode_task SET status='running', progress=1 WHERE id=? AND status='waiting'`, taskID)
+	if err != nil {
+		return err
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return nil
+	}
+
+	var fileID string
+	var sourceHeight int
+	_ = w.DB.QueryRow(`SELECT file_id, COALESCE(height,0) FROM media WHERE file_path = ? ORDER BY id DESC LIMIT 1`, inputPath).Scan(&fileID, &sourceHeight)
+	if fileID == "" {
+		_ = w.DB.QueryRow(`
+			SELECT t.file_id, COALESCE(m.height,0)
+			FROM transcode_task t
+			LEFT JOIN media m ON m.file_id = t.file_id
+			WHERE t.id = ?
+			LIMIT 1
+		`, taskID).Scan(&fileID, &sourceHeight)
+	}
+
+	ladder := ladderFromTaskQuality(quality, sourceHeight)
+	if len(ladder) == 0 {
+		ladder = selectRenditions("720p", sourceHeight)
+	}
+	outDir := taskOutputDir(w.TranscodeDir, taskID, fileID, quality, ladder)
 	return w.runHLS(ctx, taskID, inputPath, outDir, ladder)
+}
+
+// StartWaiting launches up to limit waiting transcode tasks in background goroutines.
+func (w *Worker) StartWaiting(ctx context.Context, limit int) int {
+	if w == nil || w.DB == nil || limit <= 0 {
+		return 0
+	}
+	rows, err := w.DB.Query(`
+		SELECT t.id, COALESCE(m.file_path,''), t.quality
+		FROM transcode_task t
+		LEFT JOIN media m ON m.file_id = t.file_id
+		WHERE t.status = 'waiting' AND COALESCE(m.file_path,'') != ''
+		ORDER BY t.id ASC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return 0
+	}
+	defer rows.Close()
+
+	started := 0
+	for rows.Next() {
+		if started >= limit {
+			break
+		}
+		var taskID int64
+		var filePath, quality string
+		if rows.Scan(&taskID, &filePath, &quality) != nil {
+			continue
+		}
+		w.mu.Lock()
+		already := w.running[taskID] != nil
+		w.mu.Unlock()
+		if already {
+			continue
+		}
+		started++
+		id, fp, q := taskID, filePath, quality
+		go func() {
+			_ = w.RunTask(context.Background(), id, fp, q)
+		}()
+	}
+	return started
+}
+
+func ladderFromTaskQuality(quality string, sourceHeight int) []Rendition {
+	q := strings.TrimSpace(quality)
+	if strings.HasPrefix(q, "abr:") {
+		profile := strings.TrimPrefix(q, "abr:")
+		allowed := make(map[string]struct{})
+		for _, name := range strings.Split(profile, "+") {
+			name = strings.ToLower(strings.TrimSpace(name))
+			if name != "" {
+				allowed[name] = struct{}{}
+			}
+		}
+		maxH := sourceHeight
+		if maxH <= 0 {
+			maxH = 1080
+		}
+		var out []Rendition
+		for _, r := range allRenditions {
+			if r.Height > maxH {
+				continue
+			}
+			if _, ok := allowed[strings.ToLower(r.Name)]; ok {
+				out = append(out, r)
+			}
+		}
+		sort.Slice(out, func(i, j int) bool { return out[i].Height < out[j].Height })
+		return out
+	}
+	return selectRenditions(quality, sourceHeight)
+}
+
+func taskOutputDir(transcodeDir string, taskID int64, fileID, quality string, ladder []Rendition) string {
+	if strings.HasPrefix(strings.TrimSpace(quality), "abr:") && strings.TrimSpace(fileID) != "" {
+		return filepath.Join(transcodeDir, fileID, ladderKey(ladder))
+	}
+	return filepath.Join(transcodeDir, strconv.FormatInt(taskID, 10))
 }
 
 // EnsureHLS starts or resumes full-ladder HLS transcoding in a background goroutine.

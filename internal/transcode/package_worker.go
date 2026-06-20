@@ -226,6 +226,40 @@ func (w *PackageWorker) EnqueueForMedia(mediaID int64) (int64, error) {
 	return tid, nil
 }
 
+// StartWaiting launches up to limit waiting package tasks in background goroutines.
+func (w *PackageWorker) StartWaiting(ctx context.Context, limit int) int {
+	if w == nil || w.DB == nil || limit <= 0 {
+		return 0
+	}
+	rows, err := w.DB.Query(`
+		SELECT id FROM package_task
+		WHERE status = 'waiting'
+		ORDER BY id ASC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return 0
+	}
+	defer rows.Close()
+
+	started := 0
+	for rows.Next() {
+		if started >= limit {
+			break
+		}
+		var taskID int64
+		if rows.Scan(&taskID) != nil {
+			continue
+		}
+		started++
+		id := taskID
+		go func() {
+			_ = w.RunTask(context.Background(), id)
+		}()
+	}
+	return started
+}
+
 func (w *PackageWorker) RunTask(ctx context.Context, taskID int64) error {
 	if w == nil || w.DB == nil || taskID <= 0 {
 		return nil

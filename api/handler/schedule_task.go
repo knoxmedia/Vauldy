@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	"knox-media/internal/store"
 )
 
 type scheduleTaskBody struct {
@@ -151,6 +153,15 @@ func (h *Handler) DeleteScheduledTask(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (h *Handler) CleanupDuplicateScheduledTasks(c *gin.Context) {
+	n, err := store.DedupeScheduledTasks(h.App.DB)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "deleted": n})
 }
 
 func (h *Handler) RunScheduledTask(c *gin.Context) {

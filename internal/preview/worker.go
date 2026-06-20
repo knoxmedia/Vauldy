@@ -72,6 +72,9 @@ func (w *Worker) Ensure(ctx context.Context, mediaID int64, inputPath string, du
 				}
 			}
 		}
+		if info.Status == "failed" {
+			return info, nil
+		}
 	}
 	if qerr != nil && qerr != sql.ErrNoRows {
 		return info, qerr
@@ -90,13 +93,75 @@ func (w *Worker) Ensure(ctx context.Context, mediaID int64, inputPath string, du
 	if countNum > 100 {
 		countNum = 100
 	}
-	_, _ = w.DB.Exec(
-		`INSERT INTO preview_task (media_id, status, interval_sec, thumb_count, thumb_width, thumb_height, updated_at) VALUES (?, 'waiting', ?, ?, 240, 135, CURRENT_TIMESTAMP)
-         ON CONFLICT(media_id) DO UPDATE SET status='waiting', interval_sec=excluded.interval_sec, thumb_count=excluded.thumb_count, updated_at=CURRENT_TIMESTAMP, error_message=NULL`,
-		mediaID, intervalSec, countNum,
-	)
+	if err := UpsertWaitingPreviewTask(w.DB, mediaID, intervalSec, countNum); err != nil {
+		return info, err
+	}
 	w.startOnce(ctx, mediaID, inputPath, durationSec, intervalSec, countNum)
 	return Info{Status: "waiting", Interval: intervalSec, ThumbCount: countNum, Width: 240, Height: 135}, nil
+}
+
+// UpsertWaitingPreviewTask queues preview work for media_id. Existing failed rows are left unchanged.
+func UpsertWaitingPreviewTask(db *sql.DB, mediaID int64, intervalSec, countNum int) error {
+	if db == nil || mediaID <= 0 {
+		return nil
+	}
+	_, err := db.Exec(`
+		INSERT INTO preview_task (media_id, status, interval_sec, thumb_count, thumb_width, thumb_height, updated_at)
+		VALUES (?, 'waiting', ?, ?, 240, 135, CURRENT_TIMESTAMP)
+		ON CONFLICT(media_id) DO UPDATE SET
+		  status = CASE WHEN preview_task.status = 'failed' THEN preview_task.status ELSE 'waiting' END,
+		  interval_sec = excluded.interval_sec,
+		  thumb_count = excluded.thumb_count,
+		  updated_at = CURRENT_TIMESTAMP,
+		  error_message = CASE WHEN preview_task.status = 'failed' THEN preview_task.error_message ELSE NULL END`,
+		mediaID, intervalSec, countNum,
+	)
+	return err
+}
+
+// RunBatch processes up to limit waiting preview tasks synchronously.
+func (w *Worker) RunBatch(limit int) (done, failed int) {
+	if w == nil || w.DB == nil || limit <= 0 {
+		return 0, 0
+	}
+	rows, err := w.DB.Query(`
+		SELECT t.media_id, m.file_path, COALESCE(m.duration,0),
+		       COALESCE(NULLIF(t.interval_sec,0),5), COALESCE(NULLIF(t.thumb_count,0),1)
+		FROM preview_task t
+		JOIN media m ON m.id = t.media_id
+		WHERE t.status = 'waiting'
+		  AND m.file_type = 'video'
+		  AND m.file_path IS NOT NULL AND trim(m.file_path) != ''
+		ORDER BY t.updated_at ASC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return 0, 0
+	}
+	defer rows.Close()
+
+	type job struct {
+		mediaID     int64
+		inputPath   string
+		durationSec int64
+		intervalSec int
+		count       int
+	}
+	var jobs []job
+	for rows.Next() {
+		var j job
+		if rows.Scan(&j.mediaID, &j.inputPath, &j.durationSec, &j.intervalSec, &j.count) == nil {
+			jobs = append(jobs, j)
+		}
+	}
+	for _, j := range jobs {
+		if err := w.run(context.Background(), j.mediaID, j.inputPath, j.durationSec, j.intervalSec, j.count); err != nil {
+			failed++
+		} else {
+			done++
+		}
+	}
+	return done, failed
 }
 
 func (w *Worker) startOnce(ctx context.Context, mediaID int64, inputPath string, durationSec int64, intervalSec int, count int) {
@@ -105,19 +170,26 @@ func (w *Worker) startOnce(ctx context.Context, mediaID int64, inputPath string,
 		w.mu.Unlock()
 		return
 	}
-	w.running[mediaID] = true
 	w.mu.Unlock()
 	go func() {
-		defer func() {
-			w.mu.Lock()
-			delete(w.running, mediaID)
-			w.mu.Unlock()
-		}()
 		_ = w.run(ctx, mediaID, inputPath, durationSec, intervalSec, count)
 	}()
 }
 
 func (w *Worker) run(ctx context.Context, mediaID int64, inputPath string, durationSec int64, intervalSec int, count int) error {
+	w.mu.Lock()
+	if w.running[mediaID] {
+		w.mu.Unlock()
+		return fmt.Errorf("already running for media %d", mediaID)
+	}
+	w.running[mediaID] = true
+	w.mu.Unlock()
+	defer func() {
+		w.mu.Lock()
+		delete(w.running, mediaID)
+		w.mu.Unlock()
+	}()
+
 	outDir := filepath.Join(w.PreviewDir, strconv.FormatInt(mediaID, 10))
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return err

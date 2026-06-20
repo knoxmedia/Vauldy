@@ -28,6 +28,10 @@ func (s *Service) applyToolEnv(cmd *exec.Cmd) {
 		return
 	}
 	cmd.Env = os.Environ()
+	cmd.Env = append(cmd.Env,
+		"PYTHONUTF8=1",
+		"PYTHONIOENCODING=utf-8",
+	)
 	if ff := s.resolveMediaPath(s.FFmpegPath); ff != "" {
 		cmd.Env = append(cmd.Env, "FFMPEG_PATH="+ff)
 	}

@@ -710,12 +710,18 @@ export async function fetchPhotoFaceProgress(libraryId: number): Promise<{
   processed: number;
   detected: number;
   pending: number;
+  failed: number;
   percent: number;
 }> {
-  const { data } = await api.get<{ total: number; processed: number; detected: number; pending: number; percent: number }>(
-    `/api/v1/library/${libraryId}/photo/faces/progress`,
-  );
-  return data ?? { total: 0, processed: 0, detected: 0, pending: 0, percent: 0 };
+  const { data } = await api.get<{
+    total: number;
+    processed: number;
+    detected: number;
+    pending: number;
+    failed?: number;
+    percent: number;
+  }>(`/api/v1/library/${libraryId}/photo/faces/progress`);
+  return data ?? { total: 0, processed: 0, detected: 0, pending: 0, failed: 0, percent: 0 };
 }
 
 export async function backfillPhotoLocations(libraryId: number): Promise<{ ok: boolean; queued: number }> {
@@ -1693,6 +1699,10 @@ export async function retrySubtitleTask(mediaId: number) {
   await api.post(`/api/v1/subtitle/task/${mediaId}/retry`);
 }
 
+export async function deleteSubtitleTask(mediaId: number) {
+  await api.delete(`/api/v1/subtitle/task/${mediaId}`);
+}
+
 /** Reset subtitle output and re-run sidecar / embedded / ASR / OCR processing. */
 export async function recognizeMediaSubtitles(mediaId: number) {
   await api.post(`/api/v1/media/${mediaId}/subtitle`);
@@ -2100,6 +2110,7 @@ export type SystemOptionsTranscoder = {
 };
 
 export type SystemOptionsASR = {
+  auto_on_scan: boolean;
   provider: string;
   whisper_path: string;
   extra_args: string[];

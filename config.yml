@@ -105,6 +105,10 @@ photo_face:
   python_path: tools/recognition/.venv/Scripts/python.exe
   script_path: tools/photo_face/detect.py
   similarity_threshold: 0.45
+  max_concurrent: 1
+  batch_limit: 1
+  poll_interval_seconds: 10
+  failed_retry_minutes: 60
 # Office document preview via LibreOffice headless (DOC/DOCX/XLS/XLSX/PPT/PPTX -> PDF).
 doc_trans:
   enabled: true

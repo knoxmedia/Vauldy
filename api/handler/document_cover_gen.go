@@ -1,8 +1,17 @@
 package handler
 
+import "knox-media/internal/doccover"
+
 // GenerateDocumentCover queues cover.jpg generation for one document.
 func (h *Handler) GenerateDocumentCover(mediaID int64) {
-	if h == nil || h.DocCoverWorker == nil || mediaID <= 0 {
+	if h == nil || h.DocCoverWorker == nil || mediaID <= 0 || h.App == nil || h.App.DB == nil {
+		return
+	}
+	previewDir := ""
+	if h.App.Config != nil {
+		previewDir = h.App.Config.Data.Preview
+	}
+	if !doccover.NeedsCoverWork(h.App.DB, previewDir, mediaID, 0) {
 		return
 	}
 	h.DocCoverWorker.Enqueue(mediaID)

@@ -213,6 +213,14 @@ type PhotoFaceConfig struct {
 	PythonPath            string  `yaml:"python_path"`
 	ScriptPath            string  `yaml:"script_path"`
 	SimilarityThreshold   float32 `yaml:"similarity_threshold"`
+	// MaxConcurrent limits simultaneous face-detect jobs (ffmpeg + InsightFace).
+	MaxConcurrent int `yaml:"max_concurrent"`
+	// BatchLimit is the max tasks started per scheduler tick.
+	BatchLimit int `yaml:"batch_limit"`
+	// PollIntervalSeconds controls how often the face worker loop runs.
+	PollIntervalSeconds int `yaml:"poll_interval_seconds"`
+	// FailedRetryMinutes waits before re-queuing failed tasks (avoids CPU spin on bad inputs).
+	FailedRetryMinutes int `yaml:"failed_retry_minutes"`
 }
 
 func (c *Config) PhotoFaceAutoOnScan() bool {
@@ -227,6 +235,34 @@ func (c *Config) PhotoFaceSimilarityThreshold() float32 {
 		return 0.45
 	}
 	return c.PhotoFace.SimilarityThreshold
+}
+
+func (c *Config) PhotoFaceMaxConcurrent() int {
+	if c == nil || c.PhotoFace.MaxConcurrent <= 0 {
+		return 1
+	}
+	return c.PhotoFace.MaxConcurrent
+}
+
+func (c *Config) PhotoFaceBatchLimit() int {
+	if c == nil || c.PhotoFace.BatchLimit <= 0 {
+		return 1
+	}
+	return c.PhotoFace.BatchLimit
+}
+
+func (c *Config) PhotoFacePollIntervalSeconds() int {
+	if c == nil || c.PhotoFace.PollIntervalSeconds <= 0 {
+		return 10
+	}
+	return c.PhotoFace.PollIntervalSeconds
+}
+
+func (c *Config) PhotoFaceFailedRetryMinutes() int {
+	if c == nil || c.PhotoFace.FailedRetryMinutes <= 0 {
+		return 60
+	}
+	return c.PhotoFace.FailedRetryMinutes
 }
 
 // DocTransConfig controls document conversion for Office preview.

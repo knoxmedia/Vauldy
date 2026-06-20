@@ -821,8 +821,11 @@ func OpenSQLite(path string) (*sql.DB, error) {
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_scan_log_task ON scan_log(scan_task_id)`)
 	// Seed default AI provider configs.
 	seedAIProviders(db)
-	// Seed default scheduled tasks so scrape/subtitle/cleanup run automatically.
-	seedScheduledTasks(db)
+	// Remove duplicate scheduled tasks (legacy seed inserted on every restart).
+	if _, err := DedupeScheduledTasks(db); err != nil {
+		return nil, err
+	}
+	_, _ = db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduled_task_type_name ON scheduled_task(task_type, name)`)
 	// Clean up stale transcode tasks that failed due to transient issues (path not found, context canceled).
 	cleanupStaleTranscodeTasks(db)
 	recoverStalePhotoTasks(db)
@@ -848,29 +851,22 @@ func seedAIProviders(db *sql.DB) {
 	}
 }
 
-// seedScheduledTasks ensures default maintenance tasks exist so scrape, subtitle
-// processing, and transcode cleanup run automatically every 30 seconds (via
-// StartScheduleLoop). Uses INSERT OR IGNORE so existing tasks are preserved.
-func seedScheduledTasks(db *sql.DB) {
+// DedupeScheduledTasks keeps the oldest row per (task_type, name) and deletes duplicates.
+func DedupeScheduledTasks(db *sql.DB) (int64, error) {
 	if db == nil {
-		return
+		return 0, nil
 	}
-	_, _ = db.Exec(`
-		INSERT OR IGNORE INTO scheduled_task (name, category, task_type, interval_min, payload_json, enabled)
-		VALUES ('自动刮削', 'media', 'scrape_run', 2, '{"limit":10}', 1)
+	res, err := db.Exec(`
+		DELETE FROM scheduled_task
+		WHERE id NOT IN (
+			SELECT MIN(id) FROM scheduled_task GROUP BY task_type, name
+		)
 	`)
-	_, _ = db.Exec(`
-		INSERT OR IGNORE INTO scheduled_task (name, category, task_type, interval_min, payload_json, enabled)
-		VALUES ('自动字幕处理', 'media', 'subtitle_process', 5, '{"limit":10}', 1)
-	`)
-	_, _ = db.Exec(`
-		INSERT OR IGNORE INTO scheduled_task (name, category, task_type, interval_min, payload_json, enabled)
-		VALUES ('自动音轨提取', 'media', 'atrack_process', 5, '{"limit":10}', 1)
-	`)
-	_, _ = db.Exec(`
-		INSERT OR IGNORE INTO scheduled_task (name, category, task_type, interval_min, payload_json, enabled)
-		VALUES ('自动关键帧提取', 'media', 'keyframe_process', 5, '{"limit":10}', 1)
-	`)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }
 
 // cleanupStaleTranscodeTasks removes transcode_task rows that failed due to

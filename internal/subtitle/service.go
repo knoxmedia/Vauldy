@@ -42,7 +42,15 @@ type Service struct {
 	ASR         ASRConfig
 	OCR         OCRConfig
 
-	mu sync.Mutex
+	cfgMu      sync.RWMutex
+	mediaLocks sync.Map // mediaID -> *sync.Mutex
+}
+
+func (s *Service) lockMedia(mediaID int64) func() {
+	v, _ := s.mediaLocks.LoadOrStore(mediaID, &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
 }
 
 // ApplyRecognition updates in-memory ASR/OCR settings (e.g. after config.yml save).
@@ -50,10 +58,10 @@ func (s *Service) ApplyRecognition(asr ASRConfig, ocr OCRConfig) {
 	if s == nil {
 		return
 	}
-	s.mu.Lock()
+	s.cfgMu.Lock()
 	s.ASR = asr
 	s.OCR = ocr
-	s.mu.Unlock()
+	s.cfgMu.Unlock()
 }
 
 func NewService(db *sql.DB, vault *keystore.Vault, derived *storage.DerivedAssetStore, mediaRoot, ffmpegPath, ffprobePath, subtitleDir string, asr ASRConfig, ocr OCRConfig) *Service {
@@ -81,18 +89,36 @@ func (s *Service) RunBatch(ctx context.Context, libraryID int64, limit int) (pro
 	if limit <= 0 {
 		limit = 50
 	}
-	// Skip media that already finished successfully or is in-flight; process new rows, pending (e.g. from scan), and failed (retry).
+	// Prefer explicit subtitle_task rows; also cover legacy media without a task row.
 	q := `
+SELECT t.media_id FROM subtitle_task t
+JOIN media m ON m.id = t.media_id
+WHERE m.file_type = 'video' AND COALESCE(m.status, 'active') = 'active'
+  AND m.file_path IS NOT NULL AND trim(m.file_path) != ''
+  AND t.status = 'pending'
+UNION
 SELECT m.id FROM media m
 LEFT JOIN subtitle_task t ON t.media_id = m.id
-WHERE m.file_type = 'video' AND m.file_path IS NOT NULL AND trim(m.file_path) != ''
-  AND (t.media_id IS NULL OR t.status IN ('pending', 'failed'))`
+WHERE m.file_type = 'video' AND COALESCE(m.status, 'active') = 'active'
+  AND m.file_path IS NOT NULL AND trim(m.file_path) != ''
+  AND t.media_id IS NULL`
 	args := []any{}
 	if libraryID > 0 {
-		q += ` AND m.library_id = ?`
-		args = append(args, libraryID)
+		q = `
+SELECT t.media_id FROM subtitle_task t
+JOIN media m ON m.id = t.media_id
+WHERE m.library_id = ? AND m.file_type = 'video' AND COALESCE(m.status, 'active') = 'active'
+  AND m.file_path IS NOT NULL AND trim(m.file_path) != ''
+  AND t.status = 'pending'
+UNION
+SELECT m.id FROM media m
+LEFT JOIN subtitle_task t ON t.media_id = m.id
+WHERE m.library_id = ? AND m.file_type = 'video' AND COALESCE(m.status, 'active') = 'active'
+  AND m.file_path IS NOT NULL AND trim(m.file_path) != ''
+  AND t.media_id IS NULL`
+		args = append(args, libraryID, libraryID)
 	}
-	q += ` ORDER BY m.id DESC LIMIT ?`
+	q += ` ORDER BY media_id DESC LIMIT ?`
 	args = append(args, limit)
 	rows, err := s.DB.Query(q, args...)
 	if err != nil {
@@ -124,8 +150,13 @@ WHERE m.file_type = 'video' AND m.file_path IS NOT NULL AND trim(m.file_path) !=
 
 // ProcessMedia scans sidecars, embedded tracks, and optional ASR for one media row.
 func (s *Service) ProcessMedia(ctx context.Context, mediaID int64) (err error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	var status string
+	if qerr := s.DB.QueryRow(`SELECT status FROM subtitle_task WHERE media_id = ?`, mediaID).Scan(&status); qerr == nil && status == "failed" {
+		return nil
+	}
+
+	unlock := s.lockMedia(mediaID)
+	defer unlock()
 
 	s.upsertTaskRunning(mediaID)
 	defer func() {

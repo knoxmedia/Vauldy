@@ -3,12 +3,63 @@ package handler
 import (
 	"context"
 	"database/sql"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
+
+const (
+	subtitleWorkerInterval = 15 * time.Second
+	subtitleWorkerBatchMax = 3
+)
+
+// StartSubtitleTaskLoop drains pending subtitle tasks in the background.
+func (h *Handler) StartSubtitleTaskLoop(ctx context.Context) {
+	go h.runSubtitleWorkerOnce()
+	tk := time.NewTicker(subtitleWorkerInterval)
+	defer tk.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tk.C:
+			h.runSubtitleWorkerOnce()
+		}
+	}
+}
+
+func (h *Handler) runSubtitleWorkerOnce() {
+	if h == nil || h.Subtitle == nil || h.App == nil || h.App.DB == nil {
+		return
+	}
+	_, _ = h.App.DB.Exec(`
+		UPDATE subtitle_task SET status = 'pending', started_at = NULL, updated_at = CURRENT_TIMESTAMP
+		WHERE status = 'running'
+		  AND started_at IS NOT NULL
+		  AND started_at < datetime('now', '-20 minutes')
+	`)
+	var n int
+	_ = h.App.DB.QueryRow(`
+		SELECT COUNT(1) FROM subtitle_task
+		WHERE status = 'pending'
+	`).Scan(&n)
+	if n == 0 {
+		return
+	}
+	limit := n
+	if limit > subtitleWorkerBatchMax {
+		limit = subtitleWorkerBatchMax
+	}
+	done, failed := h.Subtitle.RunBatch(context.Background(), 0, limit)
+	if done+failed > 0 {
+		log.Printf("subtitle worker: processed=%d ok=%d fail=%d pending=%d",
+			done+failed, done, failed, n-done-failed)
+	}
+}
 
 func (h *Handler) ListSubtitleTasks(c *gin.Context) {
 	if h.Subtitle == nil {
@@ -85,10 +136,38 @@ func (h *Handler) RetrySubtitleTask(c *gin.Context) {
 	}
 	go func() {
 		ctx := context.Background()
+		if err := h.Subtitle.ResetSubtitleJob(mediaID); err != nil {
+			return
+		}
 		if err := h.Subtitle.ProcessMedia(ctx, mediaID); err != nil {
 			return
 		}
 	}()
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (h *Handler) DeleteSubtitleTask(c *gin.Context) {
+	if h.Subtitle == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "subtitle service disabled"})
+		return
+	}
+	mediaID, err := strconv.ParseInt(c.Param("mediaId"), 10, 64)
+	if err != nil || mediaID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid media id"})
+		return
+	}
+	if err := h.Subtitle.DeleteSubtitleTask(mediaID); err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return
+		}
+		if strings.Contains(err.Error(), "running") {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
@@ -148,12 +227,14 @@ func (h *Handler) EnqueueSubtitleProcessing(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "not a video"})
 		return
 	}
-	if err := h.Subtitle.ResetSubtitleJob(mediaID); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	go func() {
-		_ = h.Subtitle.ProcessMedia(context.Background(), mediaID)
-	}()
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	go func(id int64) {
+		if err := h.Subtitle.ResetSubtitleJob(id); err != nil {
+			log.Printf("subtitle enqueue media=%d reset err=%v", id, err)
+			return
+		}
+		if err := h.Subtitle.ProcessMedia(context.Background(), id); err != nil {
+			log.Printf("subtitle enqueue media=%d process err=%v", id, err)
+		}
+	}(mediaID)
+	c.JSON(http.StatusAccepted, gin.H{"ok": true, "queued": true})
 }

@@ -36,7 +36,7 @@ func (h *Handler) runLyricWorkerOnce() {
 		return
 	}
 	var n int
-	_ = h.App.DB.QueryRow(`SELECT COUNT(1) FROM lyric_task WHERE status IN ('pending', 'failed')`).Scan(&n)
+	_ = h.App.DB.QueryRow(`SELECT COUNT(1) FROM lyric_task WHERE status = 'pending'`).Scan(&n)
 	if n == 0 {
 		return
 	}
@@ -118,7 +118,7 @@ func (h *Handler) EnqueueLyricRecognition(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "not an audio track"})
 		return
 	}
-	if err := h.LyricWorker.Enqueue(mediaID); err != nil {
+	if err := h.LyricWorker.EnqueueRetry(mediaID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -138,7 +138,7 @@ func (h *Handler) RetryLyricTask(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid media id"})
 		return
 	}
-	if err := h.LyricWorker.Enqueue(mediaID); err != nil {
+	if err := h.LyricWorker.EnqueueRetry(mediaID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
