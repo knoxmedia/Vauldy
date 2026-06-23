@@ -3,6 +3,9 @@ server:
   port: 8200
   mode: "release"
   hls_multi_audio_enabled: false
+branding:
+  app_name: "Knox-Media"
+  favicon_path: ""
 data:
   dir: "./data"
   db: "./data/knox-media.db"

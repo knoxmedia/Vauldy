@@ -64,6 +64,7 @@ import MusicPlayerBar from "./components/MusicPlayerBar";
 import ScrollToTopFab from "./components/ScrollToTopFab";
 import SearchHeaderControls from "./components/SearchHeaderControls";
 import { useMusicPlayerStore } from "./store/musicPlayer";
+import { useBrandingStore, useAppName } from "./store/branding";
 import { useT } from "./i18n";
 
 const { Header, Content, Sider } = Layout;
@@ -109,10 +110,18 @@ function ProfileSync() {
   return null;
 }
 
+function BrandingBootstrap() {
+  useEffect(() => {
+    void useBrandingStore.getState().load();
+  }, []);
+  return null;
+}
+
 function MainShell() {
   const loc = useLocation();
   const nav = useNavigate();
   const t = useT();
+  const appName = useAppName();
   const role = useAuthStore((s) => s.role);
   const username = useAuthStore((s) => s.username);
   const avatarUrl = useAuthStore((s) => s.avatarUrl);
@@ -266,7 +275,7 @@ function MainShell() {
                 />
                 <Link to="/" className="app-sider-logo" title={t("shell.open_brand")}>
                   <>
-                    <span>Knox-Media</span>
+                    <span>{appName}</span>
                   </>
                 </Link>
                 {autoCollapseOnLeave ? (
@@ -337,7 +346,7 @@ function MainShell() {
                         nav("/");
                       }}
                     >
-                      <span>Knox-Media</span>
+                      <span>{appName}</span>
                     </Link>
                   ) : isSearchRoute && pathTitle ? (
                     <div className="app-shell-header-search-row app-shell-header-search-row-compact">
@@ -404,7 +413,7 @@ function MainShell() {
           title={
             <span style={{ color: "#fff", display: "inline-flex", alignItems: "center", gap: 8 }}>
               <PlayCircleOutlined style={{ color: "#00a4dc" }} />
-              Knox-Media
+              {appName}
             </span>
           }
           extra={
@@ -463,7 +472,9 @@ export default function App() {
   const token = useAuthStore((s) => s.token);
 
   return (
-    <Routes>
+    <>
+      <BrandingBootstrap />
+      <Routes>
       <Route
         path="/login"
         element={token ? <Navigate to="/" replace /> : <LoginPage />}
@@ -503,5 +514,6 @@ export default function App() {
         </Route>
       </Route>
     </Routes>
+    </>
   );
 }

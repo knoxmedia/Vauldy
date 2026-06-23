@@ -16,11 +16,12 @@ import { ApiOutlined, SettingOutlined } from "@ant-design/icons";
 import { useEffect, useState } from "react";
 import type { AIProvider as AIProviderType } from "../api/client";
 import { fetchAIProviders, saveAIProvider, testAIProvider } from "../api/client";
+import { formatServerDateTime } from "../lib/datetime";
 import { useT, type TranslateFn } from "../i18n";
 
 function formatLastUsed(v: string | undefined, t: TranslateFn) {
   if (!v) return t("pages.ai_provider.never_used");
-  return new Date(v).toLocaleString();
+  return formatServerDateTime(v);
 }
 
 interface TableRow {

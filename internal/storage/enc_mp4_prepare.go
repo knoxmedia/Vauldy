@@ -27,6 +27,47 @@ func isISOBaseMedia(path string) bool {
 	}
 }
 
+func isoFormatToken(format string) bool {
+	switch strings.ToLower(strings.TrimPrefix(strings.TrimSpace(format), ".")) {
+	case "mp4", "m4v", "mov", "3gp", "3g2":
+		return true
+	default:
+		return false
+	}
+}
+
+func isKnoxEncCatalogPath(path string) bool {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return false
+	}
+	if kcrypto.IsEncFile(path) {
+		return true
+	}
+	return strings.EqualFold(filepath.Ext(path), ".enc")
+}
+
+// isISOBaseMediaCatalog resolves ISO-BMFF for Knox catalog paths (.enc) via plain_path or media.format.
+func isISOBaseMediaCatalog(db *sql.DB, mediaID int64, catalogPath string) bool {
+	if isISOBaseMedia(catalogPath) {
+		return true
+	}
+	if !isKnoxEncCatalogPath(catalogPath) || db == nil || mediaID <= 0 {
+		return false
+	}
+	var plainPath, format sql.NullString
+	_ = db.QueryRow(`
+		SELECT COALESCE(e.plain_path,''), COALESCE(m.format,'')
+		FROM media_encrypted_assets e
+		JOIN media m ON m.id = e.media_id
+		WHERE e.media_id = ? AND e.status = 'encrypted'
+	`, mediaID).Scan(&plainPath, &format)
+	if isISOBaseMedia(plainPath.String) {
+		return true
+	}
+	return isoFormatToken(format.String)
+}
+
 // prepareMP4ForEncPipe rewrites ISO-BMFF with -movflags faststart (moov before mdat) into a temp file
 // so ffmpeg/ffprobe can demux Knox decrypt pipe:0 after the plaintext source is removed.
 func prepareMP4ForEncPipe(ctx context.Context, ffmpegPath, dataDir string, mediaID int64, plainPath string) (string, func(), error) {
@@ -68,9 +109,15 @@ func prepareMP4ForEncPipe(ctx context.Context, ffmpegPath, dataDir string, media
 	return tmpPath, cleanup, nil
 }
 
-// resolveEncryptSource picks the byte stream to envelope-encrypt. When requirePipePlayback is true
-// (library deletes plaintext), MP4/MOV inputs must be faststart-remuxed first.
-func (s *AssetEncryptor) resolveEncryptSource(ctx context.Context, mediaID int64, plainPath string, requirePipePlayback bool) (string, func(), bool, error) {
+// encryptRequiresISOFaststart reports whether encrypted video ISO-BMFF must be faststart-remuxed
+// before envelope encryption so JIT/ffmpeg can demux via decrypt pipe (no plaintext on disk).
+func encryptRequiresISOFaststart(fileType, plainPath string) bool {
+	return strings.EqualFold(strings.TrimSpace(fileType), "video") && isISOBaseMedia(plainPath)
+}
+
+// resolveEncryptSource picks the byte stream to envelope-encrypt. When requireFaststart is true,
+// MP4/MOV inputs must be faststart-remuxed first (video encrypted assets always require this).
+func (s *AssetEncryptor) resolveEncryptSource(ctx context.Context, mediaID int64, plainPath string, requireFaststart bool) (string, func(), bool, error) {
 	plainPath = strings.TrimSpace(plainPath)
 	if plainPath == "" {
 		return "", nil, false, fmt.Errorf("empty plain path")
@@ -82,7 +129,7 @@ func (s *AssetEncryptor) resolveEncryptSource(ctx context.Context, mediaID int64
 	if err == nil && prepared != plainPath {
 		return prepared, cleanup, true, nil
 	}
-	if requirePipePlayback {
+	if requireFaststart {
 		if cleanup != nil {
 			cleanup()
 		}
@@ -112,11 +159,25 @@ func markKeyframeReindex(db *sql.DB, mediaID int64) {
 }
 
 func encryptedPipeDemuxOK(db *sql.DB, vault *keystore.Vault, ffprobePath string, mediaID int64, encPath string) bool {
-	ffprobePath = strings.TrimSpace(ffprobePath)
-	if db == nil || vault == nil || ffprobePath == "" || mediaID <= 0 || !kcrypto.IsEncFile(encPath) {
+	if db == nil || vault == nil || mediaID <= 0 || !kcrypto.IsEncFile(encPath) {
 		return false
 	}
-	mp, err := ProbeMediaFile(db, vault, ffprobePath, mediaID, encPath, []string{"-t", "1"})
+	if plain := ResolveKeyframeProbePath(db, mediaID, encPath); plain != encPath {
+		if _, err := os.Stat(plain); err == nil {
+			return true
+		}
+	}
+	if encryptedISOMoovBeforeMDAT(db, vault, mediaID, encPath) {
+		return true
+	}
+	ffprobePath = strings.TrimSpace(ffprobePath)
+	if ffprobePath == "" {
+		return false
+	}
+	mp, err := ProbeMediaFile(db, vault, ffprobePath, mediaID, encPath, []string{
+		"-analyzeduration", "5000000",
+		"-probesize", "33554432",
+	})
 	if err != nil || mp == nil || mp.Summary == nil {
 		return false
 	}
@@ -139,7 +200,7 @@ func (s *AssetEncryptor) RepackEncryptedMP4ForPipe(ctx context.Context, mediaID 
 		return err
 	}
 	encPath = strings.TrimSpace(encPath)
-	if !isISOBaseMedia(encPath) {
+	if !isISOBaseMediaCatalog(s.DB, mediaID, encPath) {
 		return nil
 	}
 	if encryptedPipeDemuxOK(s.DB, s.Vault, s.FFprobePath, mediaID, encPath) {
@@ -187,6 +248,12 @@ func (s *AssetEncryptor) RepackEncryptedMP4ForPipe(ctx context.Context, mediaID 
 	}
 	defer fastCleanup()
 
+	if ok, layoutErr := isoBMFFMoovBeforeMDATFile(fastPath); layoutErr != nil {
+		return layoutErr
+	} else if !ok {
+		return fmt.Errorf("mp4 faststart remux did not place moov before mdat")
+	}
+
 	src, err := os.Open(fastPath)
 	if err != nil {
 		return err
@@ -225,6 +292,52 @@ func (s *AssetEncryptor) RepackEncryptedMP4ForPipe(ctx context.Context, mediaID 
 	return err
 }
 
+// EnsureEncryptedISOPipePlayback verifies Knox .enc ISO-BMFF can be demuxed from decrypt pipe.
+// Legacy moov-at-end assets are faststart-repacked in place (ciphertext only on disk afterward).
+func (s *AssetEncryptor) EnsureEncryptedISOPipePlayback(ctx context.Context, mediaID int64, catalogPath string) error {
+	if s == nil || s.DB == nil || s.Vault == nil || mediaID <= 0 {
+		return nil
+	}
+	catalogPath = strings.TrimSpace(catalogPath)
+	if !isISOBaseMediaCatalog(s.DB, mediaID, catalogPath) {
+		return nil
+	}
+	if encryptedPipeDemuxOK(s.DB, s.Vault, s.FFprobePath, mediaID, catalogPath) {
+		return nil
+	}
+	if !tryAcquireRepack(mediaID) {
+		return waitEncryptedPipeReady(ctx, s, mediaID, catalogPath)
+	}
+	defer releaseRepack(mediaID)
+
+	if err := s.RepackEncryptedMP4ForPipe(ctx, mediaID); err != nil {
+		return err
+	}
+	markKeyframeReindex(s.DB, mediaID)
+	if !encryptedPipeDemuxOK(s.DB, s.Vault, s.FFprobePath, mediaID, catalogPath) {
+		return fmt.Errorf("encrypted mp4 still not pipe-ready after repack")
+	}
+	return nil
+}
+
+func waitEncryptedPipeReady(ctx context.Context, s *AssetEncryptor, mediaID int64, catalogPath string) error {
+	tk := time.NewTicker(2 * time.Second)
+	defer tk.Stop()
+	for {
+		if encryptedPipeDemuxOK(s.DB, s.Vault, s.FFprobePath, mediaID, catalogPath) {
+			return nil
+		}
+		if !repackInFlight(mediaID) {
+			return fmt.Errorf("encrypted mp4 pipe playback not ready")
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-tk.C:
+		}
+	}
+}
+
 // KickEncryptedMP4PipeRepairs rewrites legacy moov-at-end encrypted MP4s in the background.
 func KickEncryptedMP4PipeRepairs(enc *AssetEncryptor) {
 	if enc == nil || enc.DB == nil || strings.TrimSpace(enc.FFmpegPath) == "" {
@@ -232,12 +345,11 @@ func KickEncryptedMP4PipeRepairs(enc *AssetEncryptor) {
 	}
 	go func() {
 		rows, err := enc.DB.Query(`
-			SELECT e.media_id, e.enc_path, COALESCE(e.plain_path,'')
+			SELECT e.media_id, e.enc_path
 			FROM media_encrypted_assets e
 			JOIN media m ON m.id = e.media_id
 			WHERE e.status = 'encrypted'
 			  AND m.file_type = 'video'
-			  AND TRIM(COALESCE(e.plain_path, '')) != ''
 		`)
 		if err != nil {
 			log.Printf("enc pipe repair query: %v", err)
@@ -246,27 +358,23 @@ func KickEncryptedMP4PipeRepairs(enc *AssetEncryptor) {
 		defer rows.Close()
 		for rows.Next() {
 			var mediaID int64
-			var encPath, plainPath string
-			if err := rows.Scan(&mediaID, &encPath, &plainPath); err != nil {
+			var encPath string
+			if err := rows.Scan(&mediaID, &encPath); err != nil {
 				continue
 			}
-			plainPath = strings.TrimSpace(plainPath)
-			if plainPath != "" {
-				if _, err := os.Stat(plainPath); err == nil {
-					continue
-				}
+			if !isISOBaseMediaCatalog(enc.DB, mediaID, encPath) {
+				continue
 			}
-			if !isISOBaseMedia(encPath) {
+			if encryptedPipeDemuxOK(enc.DB, enc.Vault, enc.FFprobePath, mediaID, encPath) {
 				continue
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Hour)
-			err := enc.RepackEncryptedMP4ForPipe(ctx, mediaID)
+			err := enc.EnsureEncryptedISOPipePlayback(ctx, mediaID, encPath)
 			cancel()
 			if err != nil {
 				log.Printf("enc pipe repair media=%d: %v", mediaID, err)
 				continue
 			}
-			markKeyframeReindex(enc.DB, mediaID)
 			log.Printf("enc pipe repair media=%d: ok", mediaID)
 		}
 	}()

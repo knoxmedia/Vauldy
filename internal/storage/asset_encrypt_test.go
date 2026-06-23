@@ -28,7 +28,7 @@ func TestEncryptMediaConcurrentSingleOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	plain := filepath.Join(dir, "clip.mp4")
+	plain := filepath.Join(dir, "clip.mkv")
 	payload := bytes.Repeat([]byte("video-bytes"), 4096)
 	if err := os.WriteFile(plain, payload, 0o644); err != nil {
 		t.Fatal(err)
@@ -76,7 +76,7 @@ func TestEncryptMediaRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	plain := filepath.Join(dir, "clip.mp4")
+	plain := filepath.Join(dir, "clip.mkv")
 	if err := os.WriteFile(plain, []byte("fake-video-bytes"), 0o644); err != nil {
 		t.Fatal(err)
 	}

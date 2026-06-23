@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"knox-media/internal/branding"
 	"gopkg.in/yaml.v3"
 )
 
@@ -31,6 +32,33 @@ type Config struct {
 	Playback PlaybackConfig `yaml:"playback"`
 	// EncryptedAssets configures Knox 9527 envelope encryption at rest for library ingest.
 	EncryptedAssets EncryptedAssetsConfig `yaml:"encrypted_assets"`
+	// Branding configures web UI title and favicon.
+	Branding BrandingConfig `yaml:"branding"`
+}
+
+// BrandingConfig controls sidebar title, document title, and favicon.
+type BrandingConfig struct {
+	// AppName shown in the sidebar and browser tab (default Knox-Media).
+	AppName string `yaml:"app_name"`
+	// FaviconPath optional custom icon (.svg/.png/.ico), relative to config.yml or absolute.
+	FaviconPath string `yaml:"favicon_path"`
+}
+
+func (c *Config) BrandingAppName() string {
+	if c == nil {
+		return "Knox-Media"
+	}
+	if name := strings.TrimSpace(c.Branding.AppName); name != "" {
+		return name
+	}
+	return "Knox-Media"
+}
+
+func (c *Config) ResolveBrandingFaviconPath(configPath string) string {
+	if c == nil {
+		return ""
+	}
+	return branding.ResolveFaviconPath(c.Branding.FaviconPath, configPath)
 }
 
 // PlaybackConfig controls browser player engine order in the playback plan JSON.

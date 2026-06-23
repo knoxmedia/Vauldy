@@ -132,6 +132,35 @@ func SaveDocTrans(path string, dt DocTransConfig) error {
 	return os.WriteFile(path, buf.Bytes(), 0o644)
 }
 
+// SaveBranding updates branding in config.yml, preserving other keys.
+func SaveBranding(path string, b BrandingConfig) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+	root, err := documentRoot(&doc)
+	if err != nil {
+		return err
+	}
+	if err := setStructKey(root, "branding", b); err != nil {
+		return fmt.Errorf("patch branding: %w", err)
+	}
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(&doc); err != nil {
+		return fmt.Errorf("encode config: %w", err)
+	}
+	if err := enc.Close(); err != nil {
+		return err
+	}
+	return os.WriteFile(path, buf.Bytes(), 0o644)
+}
+
 func documentRoot(doc *yaml.Node) (*yaml.Node, error) {
 	if doc == nil || len(doc.Content) == 0 {
 		return nil, fmt.Errorf("empty yaml document")

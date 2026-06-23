@@ -2,6 +2,7 @@ package api
 
 import (
 	"io/fs"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -11,6 +12,11 @@ import (
 
 	"knox-media/internal/webembed"
 )
+
+func init() {
+	// Browsers reject ES module workers unless served as JavaScript (Go defaults .mjs to text/plain).
+	_ = mime.AddExtensionType(".mjs", "application/javascript")
+}
 
 type webBundle struct {
 	embedFS  fs.FS

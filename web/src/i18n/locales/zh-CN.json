@@ -173,7 +173,7 @@
     "expand_sider": "展开导航栏"
   },
   "login": {
-    "title": "登录 Knox-Media",
+    "title": "登录 {{appName}}",
     "subtitle": "登录后可浏览媒体与播放。管理员可进行媒体库、上传与控制台操作。",
     "username": "用户名",
     "username_placeholder": "admin 或 viewer",

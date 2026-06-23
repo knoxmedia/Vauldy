@@ -2,6 +2,7 @@ import { Button, Card, Col, Progress, Row, Space, Statistic, Table, Tag, Tooltip
 import { useEffect, useState } from "react";
 import { ReloadOutlined } from "@ant-design/icons";
 import { fetchAdminOverview, type AdminOverview } from "../api/client";
+import { renderServerDateTime } from "../lib/datetime";
 import { useT } from "../i18n";
 import { useAuthStore } from "../store/auth";
 
@@ -131,7 +132,7 @@ export default function AdminConsolePage() {
           pagination={{ pageSize: 10 }}
           dataSource={overview?.activities ?? []}
           columns={[
-            { title: t("pages.admin_console.col_time"), dataIndex: "created_at", width: 180 },
+            { title: t("pages.admin_console.col_time"), dataIndex: "created_at", width: 180, render: renderServerDateTime },
             { title: t("pages.admin_console.col_user"), dataIndex: "username", width: 120, render: (v?: string) => v || "-" },
             { title: t("pages.admin_console.col_action"), dataIndex: "action", width: 120 },
             { title: t("pages.admin_console.col_media_id"), dataIndex: "media_id", width: 100, render: (v: number) => (v > 0 ? v : "-") },

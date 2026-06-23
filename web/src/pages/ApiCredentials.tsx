@@ -7,6 +7,7 @@ import {
   type APIClientRow,
   type CreateApiClientResult,
 } from "../api/client";
+import { renderServerDateTime } from "../lib/datetime";
 import { useT } from "../i18n";
 
 export default function ApiCredentialsPage() {
@@ -95,7 +96,7 @@ export default function ApiCredentialsPage() {
                   <Tag color="green">{t("pages.api_credentials.status_active")}</Tag>
                 ),
             },
-            { title: t("pages.api_credentials.col_created_at"), dataIndex: "created_at", width: 180 },
+            { title: t("pages.api_credentials.col_created_at"), dataIndex: "created_at", width: 180, render: renderServerDateTime },
             {
               title: t("pages.api_credentials.col_actions"),
               width: 120,

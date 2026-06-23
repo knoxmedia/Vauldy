@@ -173,7 +173,7 @@
     "expand_sider": "Expand sidebar"
   },
   "login": {
-    "title": "Sign in to Knox-Media",
+    "title": "Sign in to {{appName}}",
     "subtitle": "Sign in to browse and play media. Administrators can manage libraries, uploads, and the console.",
     "username": "Username",
     "username_placeholder": "admin or viewer",

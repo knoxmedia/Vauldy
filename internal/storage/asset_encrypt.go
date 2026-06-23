@@ -134,7 +134,8 @@ func (s *AssetEncryptor) encryptMedia(ctx context.Context, mediaID int64, manual
 	}
 	encPath := filepath.Join(encDir, fileID+".enc")
 
-	encryptSource, prepCleanup, remuxed, err := s.resolveEncryptSource(ctx, mediaID, plainPath, cleanupPlain == 1)
+	requireFaststart := cleanupPlain == 1 || encryptRequiresISOFaststart(ft, plainPath)
+	encryptSource, prepCleanup, remuxed, err := s.resolveEncryptSource(ctx, mediaID, plainPath, requireFaststart)
 	if err != nil {
 		return err
 	}

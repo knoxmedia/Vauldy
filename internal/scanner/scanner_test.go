@@ -2,7 +2,9 @@ package scanner
 
 import (
 	"context"
+	"crypto/md5"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -413,6 +415,10 @@ CREATE TABLE media_encrypted_assets (
 	if err := os.WriteFile(plain, []byte("video-bytes"), 0o644); err != nil {
 		t.Fatalf("write plain: %v", err)
 	}
+	md5, err := hashutil.MD5File(plain)
+	if err != nil {
+		t.Fatalf("md5 plain: %v", err)
+	}
 	enc := filepath.Join(root, ".encrypted", "video", "fid-1.enc")
 	if err := os.MkdirAll(filepath.Dir(enc), 0o700); err != nil {
 		t.Fatal(err)
@@ -421,7 +427,7 @@ CREATE TABLE media_encrypted_assets (
 		t.Fatal(err)
 	}
 
-	_, err = db.Exec(`INSERT INTO media (id, library_id, file_id, title, file_path, file_type, status, md5) VALUES (42, 7, 'fid-1', 'Movie', ?, 'video', 'active', ?)`, enc, "deadbeef")
+	_, err = db.Exec(`INSERT INTO media (id, library_id, file_id, title, file_path, file_type, status, md5) VALUES (42, 7, 'fid-1', 'Movie', ?, 'video', 'active', ?)`, enc, md5)
 	if err != nil {
 		t.Fatalf("insert media: %v", err)
 	}
@@ -461,5 +467,77 @@ CREATE TABLE media_encrypted_assets (
 	}
 	if keptID != 42 {
 		t.Fatalf("kept id=%d want 42", keptID)
+	}
+}
+
+func TestScanLibraryFoldersAddsWhenEncryptedPlainPathReused(t *testing.T) {
+	t.Parallel()
+
+	db := newScannerTestDB(t)
+	_, err := db.Exec(`
+CREATE TABLE media_encrypted_assets (
+	media_id INTEGER PRIMARY KEY,
+	enc_path TEXT NOT NULL,
+	wrapped_dek TEXT NOT NULL,
+	iv TEXT NOT NULL,
+	plain_path TEXT NOT NULL,
+	status TEXT NOT NULL DEFAULT 'encrypted',
+	updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);`)
+	if err != nil {
+		t.Fatalf("create encrypted assets table: %v", err)
+	}
+
+	root := t.TempDir()
+	plain := filepath.Join(root, "Movie.mp4")
+	original := []byte("original-video-content")
+	replacement := []byte("replacement-video-content")
+	if err := os.WriteFile(plain, replacement, 0o644); err != nil {
+		t.Fatalf("write replacement: %v", err)
+	}
+	sum := md5.Sum(original)
+	origMD5 := hex.EncodeToString(sum[:])
+	enc := filepath.Join(root, ".encrypted", "video", "fid-video.enc")
+	if err := os.MkdirAll(filepath.Dir(enc), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(enc, []byte("enc"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = db.Exec(`INSERT INTO media (id, library_id, file_id, title, file_path, file_type, status, md5) VALUES (42, 7, 'fid-video', 'Movie', ?, 'video', 'active', ?)`, enc, origMD5)
+	if err != nil {
+		t.Fatalf("insert media: %v", err)
+	}
+	plainStored := filepath.Join(root, "Movie.mp4")
+	_, err = db.Exec(`INSERT INTO media_encrypted_assets (media_id, enc_path, wrapped_dek, iv, plain_path, status) VALUES (42, ?, 'aa', 'bb', ?, 'encrypted')`, enc, plainStored)
+	if err != nil {
+		t.Fatalf("insert encrypted asset: %v", err)
+	}
+
+	addedCalls := 0
+	s := &Scanner{
+		DB:       db,
+		SkipHash: true,
+		OnMediaAdded: func(int64, string, string) {
+			addedCalls++
+		},
+	}
+	added, err := s.ScanLibraryFoldersWithContext(context.Background(), 7, []string{root})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if added != 1 {
+		t.Fatalf("added=%d want 1", added)
+	}
+	if addedCalls != 1 {
+		t.Fatalf("OnMediaAdded=%d want 1", addedCalls)
+	}
+	var mediaCount int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM media WHERE library_id = 7`).Scan(&mediaCount); err != nil {
+		t.Fatal(err)
+	}
+	if mediaCount != 2 {
+		t.Fatalf("media count=%d want 2", mediaCount)
 	}
 }

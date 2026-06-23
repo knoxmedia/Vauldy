@@ -147,11 +147,17 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 			}
 			seenMedia[normPath] = struct{}{}
 			if linkedID := storage.FindMediaIDByEncryptedPlainPath(s.DB, libraryID, normPath); linkedID > 0 {
-				_ = s.upsertNode(libraryID, parentPath, nodePath, nodeName, "file", &linkedID)
-				if s.OnFile != nil {
-					s.OnFile(path, nil)
+				diskMD5 := ""
+				if h, hashErr := hashutil.MD5File(path); hashErr == nil {
+					diskMD5 = h
 				}
-				return nil
+				if storage.ShouldLinkEncryptedPlainPathScan(s.DB, linkedID, normPath, diskMD5) {
+					_ = s.upsertNode(libraryID, parentPath, nodePath, nodeName, "file", &linkedID)
+					if s.OnFile != nil {
+						s.OnFile(path, nil)
+					}
+					return nil
+				}
 			}
 			curMtime := int64(0)
 			if st != nil {

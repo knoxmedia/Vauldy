@@ -1,4 +1,5 @@
 import type { MediaItem, PhotoCategory } from "../api/client";
+import { localDayKey, parseServerDateTime } from "./datetime";
 
 export type SortMode = "taken_desc" | "created_desc";
 export type MainTab = "timeline" | "smart";
@@ -64,14 +65,13 @@ const THING_IDS = new Set([
 ]);
 
 export function dayKey(v?: string): string {
-  if (!v) return "unknown";
-  return v.slice(0, 10);
+  return localDayKey(v);
 }
 
 export function fmtDayLabel(key: string): string {
   if (key === "unknown") return "未知日期";
-  const d = new Date(key + "T12:00:00");
-  if (Number.isNaN(d.getTime())) return key;
+  const d = parseServerDateTime(`${key}T12:00:00Z`);
+  if (!d || Number.isNaN(d.getTime())) return key;
   return d.toLocaleDateString("zh-CN", { year: "numeric", month: "long", day: "numeric" });
 }
 

@@ -173,7 +173,7 @@
     "expand_sider": "ナビゲーションを展開"
   },
   "login": {
-    "title": "Knox-Media にサインイン",
+    "title": "{{appName}} にサインイン",
     "subtitle": "サインインしてメディアを閲覧・再生できます。管理者はライブラリ、アップロード、コンソールを操作できます。",
     "username": "ユーザー名",
     "username_placeholder": "admin または viewer",

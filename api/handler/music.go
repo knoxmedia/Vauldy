@@ -3,7 +3,6 @@ package handler
 import (
 	"database/sql"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 
@@ -376,7 +375,7 @@ func (h *Handler) GetAlbumPlayTarget(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"media_id": mediaID, "position": position})
 }
 
-// ServeAlbumArtwork serves album cover from cache path or folder cover.
+// ServeAlbumArtwork serves album cover from cache path, folder cover, track poster, or embedded art.
 func (h *Handler) ServeAlbumArtwork(c *gin.Context) {
 	albumID, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || albumID <= 0 {
@@ -392,28 +391,12 @@ func (h *Handler) ServeAlbumArtwork(c *gin.Context) {
 	if !h.requireLibraryAccess(c, libID) {
 		return
 	}
-	if artworkPath.Valid && strings.TrimSpace(artworkPath.String) != "" {
-		if _, statErr := os.Stat(artworkPath.String); statErr == nil {
-			c.File(artworkPath.String)
-			return
-		}
+	path, serveMediaID := h.resolveAlbumArtworkPath(albumID, libID, artworkPath)
+	if path == "" {
+		c.Status(http.StatusNotFound)
+		return
 	}
-	// Try first track's folder cover
-	var filePath sql.NullString
-	_ = h.App.DB.QueryRow(`
-		SELECT m.file_path FROM music_track mt
-		JOIN media m ON m.id = mt.media_id
-		WHERE mt.album_id = ? ORDER BY mt.sort_order ASC, mt.track_number ASC LIMIT 1
-	`, albumID).Scan(&filePath)
-	if filePath.Valid {
-		for _, candidate := range musicstore.AlbumArtworkCandidates(filePath.String) {
-			if _, statErr := os.Stat(candidate); statErr == nil {
-				c.File(candidate)
-				return
-			}
-		}
-	}
-	c.Status(http.StatusNotFound)
+	h.deliverAlbumArtwork(c, path, serveMediaID)
 }
 
 // ListArtistAlbums returns albums for a specific artist.

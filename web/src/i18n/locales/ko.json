@@ -173,7 +173,7 @@
     "expand_sider": "내비게이션 펼치기"
   },
   "login": {
-    "title": "Knox-Media 로그인",
+    "title": "{{appName}} 로그인",
     "subtitle": "로그인하면 미디어를 탐색하고 재생할 수 있습니다. 관리자는 라이브러리, 업로드, 콘솔을 관리할 수 있습니다.",
     "username": "사용자 이름",
     "username_placeholder": "admin 또는 viewer",

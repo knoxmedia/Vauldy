@@ -10,7 +10,6 @@ import {
 } from "../lib/scrapeProviders";
 import {
   cancelScanTask,
-  DRMCapabilities,
   Library,
   createLibrary,
   deleteLibrary,
@@ -27,10 +26,6 @@ export default function LibraryPage() {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Library | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  const [drmCapabilities, setDrmCapabilities] = useState<DRMCapabilities>({
-    widevine_enabled: true,
-    powerdrm_enabled: true,
-  });
   const [encryptedAssetsConfig, setEncryptedAssetsConfig] = useState<{ data_dot_encrypted_dir?: string }>({});
   const [form] = Form.useForm();
   const [providerSourceTab, setProviderSourceTab] = useState("metadata");
@@ -50,28 +45,11 @@ export default function LibraryPage() {
     );
   }
 
-  function defaultEncryptionMode(caps: DRMCapabilities): "standard" | "powerdrm" | "drm" {
-    if (!caps.widevine_enabled && !caps.powerdrm_enabled) return "standard";
-    if (caps.widevine_enabled) return "drm";
-    if (caps.powerdrm_enabled) return "powerdrm";
-    return "standard";
-  }
-
-  function normalizeEncryptionModeForCapabilities(
-    mode: string | undefined,
-    caps: DRMCapabilities
-  ): "standard" | "powerdrm" | "drm" {
-    if (mode === "powerdrm") return caps.powerdrm_enabled ? "powerdrm" : defaultEncryptionMode(caps);
-    if (mode === "drm") return caps.widevine_enabled ? "drm" : defaultEncryptionMode(caps);
-    return "standard";
-  }
-
   async function load(silent = false) {
     if (!silent) setLoading(true);
     try {
       const data = await fetchLibrariesWithCapabilities();
       setRows(data.items);
-      setDrmCapabilities(data.drmCapabilities);
       setEncryptedAssetsConfig(data.encryptedAssetsConfig);
     } catch (e: unknown) {
       message.error((e as Error).message || t("pages.library.load_failed"));
@@ -110,9 +88,7 @@ export default function LibraryPage() {
         realtime_monitor: v.realtime_monitor ? 1 : 0,
         preview_extract: v.preview_extract ? 1 : 0,
         drm_enabled: v.drm_enabled ? 1 : 0,
-        encryption_mode: v.drm_enabled
-          ? normalizeEncryptionModeForCapabilities(v.encryption_mode, drmCapabilities)
-          : "standard",
+        encryption_mode: "standard" as const,
         encrypted_assets_enabled: v.encrypted_assets_enabled ? 1 : 0,
         encrypted_assets_cleanup_plaintext: v.encrypted_assets_cleanup_plaintext ? 1 : 0,
         encrypted_assets_dir_mode: v.encrypted_assets_enabled
@@ -159,7 +135,7 @@ export default function LibraryPage() {
               realtime_monitor: false,
               preview_extract: false,
               drm_enabled: false,
-              encryption_mode: defaultEncryptionMode(drmCapabilities),
+              encryption_mode: "standard",
               encrypted_assets_enabled: false,
               encrypted_assets_cleanup_plaintext: false,
               encrypted_assets_dir_mode: "library",
@@ -233,10 +209,7 @@ export default function LibraryPage() {
                       realtime_monitor: (r.realtime_monitor ?? 0) === 1,
                       preview_extract: (r.preview_extract ?? 0) === 1,
                       drm_enabled: (r.drm_enabled ?? 0) === 1,
-                      encryption_mode: normalizeEncryptionModeForCapabilities(
-                        r.encryption_mode || "drm",
-                        drmCapabilities
-                      ),
+                      encryption_mode: "standard",
                       encrypted_assets_enabled: (r.encrypted_assets_enabled ?? 0) === 1,
                       encrypted_assets_cleanup_plaintext: (r.encrypted_assets_cleanup_plaintext ?? 0) === 1,
                       encrypted_assets_dir_mode: r.encrypted_assets_dir_mode || "library",
@@ -404,10 +377,18 @@ export default function LibraryPage() {
             </Col>
             <Col xs={24} sm={12} md={8}>
               <Form.Item name="drm_enabled" label={t("pages.library.field_drm_enabled")} valuePropName="checked" initialValue={false}>
-                <Switch />
+                <Switch
+                  onChange={(checked) => {
+                    if (checked) form.setFieldValue("encryption_mode", "standard");
+                  }}
+                />
               </Form.Item>
             </Col>
           </Row>
+
+          <Form.Item name="encryption_mode" hidden initialValue="standard">
+            <Input />
+          </Form.Item>
 
           <Form.Item
             noStyle
@@ -483,33 +464,6 @@ export default function LibraryPage() {
                 </Row>
               );
             }}
-          </Form.Item>
-
-          <Form.Item
-            noStyle
-            shouldUpdate={(prev, next) => prev.drm_enabled !== next.drm_enabled}
-          >
-            {({ getFieldValue }) =>
-              getFieldValue("drm_enabled") ? (
-                <Row gutter={16}>
-                  <Col xs={24}>
-                    <Form.Item
-                      name="encryption_mode"
-                      label={t("pages.library.field_encryption_mode")}
-                      initialValue={defaultEncryptionMode(drmCapabilities)}
-                    >
-                      <Radio.Group
-                        options={[
-                          { label: t("pages.library.encryption_standard"), value: "standard" },
-                          ...(drmCapabilities.powerdrm_enabled ? [{ label: t("pages.library.encryption_powerdrm"), value: "powerdrm" }] : []),
-                          ...(drmCapabilities.widevine_enabled ? [{ label: t("pages.library.encryption_drm"), value: "drm" }] : []),
-                        ]}
-                      />
-                    </Form.Item>
-                  </Col>
-                </Row>
-              ) : null
-            }
           </Form.Item>
 
           <Divider>{t("pages.library.section_metadata_policy")}</Divider>

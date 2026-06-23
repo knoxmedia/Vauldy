@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -189,6 +190,33 @@ func decodePhotoMeta(raw string) *photoparse.PhotoMeta {
 func fileExists(path string) bool {
 	st, err := os.Stat(path)
 	return err == nil && !st.IsDir() && st.Size() > 0
+}
+
+// resolvePhotoThumbSource returns a readable JPEG path for face crop / detection.
+// Encrypted Knox .enc thumbs are materialized to a temp file when needed.
+func (h *Handler) resolvePhotoThumbSource(mediaID int64, catalogPath string) (workPath string, cleanup func(), err error) {
+	cleanup = func() {}
+	if h == nil || mediaID <= 0 {
+		return "", cleanup, fmt.Errorf("invalid media id")
+	}
+	paths := imagethumb.ResolvedPaths(h.App.DB, h.photoCacheDir(), mediaID)
+	thumb := strings.TrimSpace(paths.Thumb)
+	if thumb == "" || !fileExists(thumb) {
+		if enc, ok := storage.LookupEncPath(h.App.DB, mediaID, "photo_thumb", "thumb.jpg"); ok && fileExists(enc) {
+			thumb = enc
+		}
+	}
+	if thumb == "" || !fileExists(thumb) {
+		if genErr := h.ensurePhotoVariants(mediaID, catalogPath); genErr != nil {
+			return "", cleanup, genErr
+		}
+		paths = imagethumb.ResolvedPaths(h.App.DB, h.photoCacheDir(), mediaID)
+		thumb = strings.TrimSpace(paths.Thumb)
+	}
+	if thumb == "" || !fileExists(thumb) {
+		return "", cleanup, fmt.Errorf("photo thumb unavailable")
+	}
+	return storage.MaterializeCLIFile(h.App.DB, h.KeyVault, mediaID, thumb)
 }
 
 // GeneratePhotoVariants creates cached thumb/medium JPEGs for an image media item.

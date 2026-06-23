@@ -173,7 +173,7 @@
     "expand_sider": "展開導覽列"
   },
   "login": {
-    "title": "登入 Knox-Media",
+    "title": "登入 {{appName}}",
     "subtitle": "登入後可瀏覽媒體與播放。管理員可進行媒體庫、上傳與控制台操作。",
     "username": "使用者名稱",
     "username_placeholder": "admin 或 viewer",

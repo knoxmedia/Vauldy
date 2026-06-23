@@ -22,6 +22,7 @@ import {
   removeFavorite,
   updatePhotoTags,
 } from "../api/client";
+import { formatServerDateTime } from "../lib/datetime";
 import { useT } from "../i18n";
 import styles from "../pages/PhotoBrowse.module.css";
 
@@ -34,8 +35,7 @@ type Props = {
 };
 
 function fmtTakenAt(v?: string): string {
-  if (!v) return "";
-  return v.replace("T", " ").slice(0, 19);
+  return formatServerDateTime(v, { empty: "" });
 }
 
 function computeFitScale(imgW: number, imgH: number, stageW: number, stageH: number, rotation: number): number {

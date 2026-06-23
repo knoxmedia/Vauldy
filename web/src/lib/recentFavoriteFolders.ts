@@ -3,6 +3,8 @@ export const MAX_RECENT_FAVORITE_FOLDERS = 5;
 
 export type RecentFavoriteFolderEntry = { id: number; name: string };
 
+import { serverDateTimeToMillis } from "./datetime";
+
 type FolderLike = { id: number; name: string; updated_at?: string; created_at?: string };
 
 export function readRecentFavoriteFolders(): RecentFavoriteFolderEntry[] {
@@ -26,7 +28,7 @@ export function readRecentFavoriteFolders(): RecentFavoriteFolderEntry[] {
 
 function folderSortTime(folder: FolderLike): number {
   const t = folder.updated_at || folder.created_at;
-  return t ? Date.parse(t) : 0;
+  return t ? serverDateTimeToMillis(t) : 0;
 }
 
 /** Merge local recents with server folders (by updated_at) for menu shortcuts. */

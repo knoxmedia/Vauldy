@@ -747,6 +747,7 @@ export default function MusicBrowse({ libraryId, libraryName, onEmpty }: Props) 
 
   return (
     <div className={musicStyles.wrap}>
+      <div className={styles.browsePageStickyHead}>
       <div className={musicStyles.header}>
         <div>
           <div className={musicStyles.libraryTitle}>{libraryName || t("pages.music_browse.library_fallback")}</div>
@@ -874,6 +875,8 @@ export default function MusicBrowse({ libraryId, libraryName, onEmpty }: Props) 
           </div>
         </div>
       ) : null}
+
+      </div>
 
       {loading && albums.length === 0 && artists.length === 0 && tracks.length === 0 ? (
         <div className={styles.loadingWrap}>

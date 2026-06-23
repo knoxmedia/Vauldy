@@ -24,6 +24,7 @@ import { Button, Checkbox, Dropdown, Empty, Modal, Popover, Select, Space, Spin,
 import type { ComponentType } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
+import { formatServerDateTime, serverDateTimeToMillis } from "../lib/datetime";
 import { buildMediaMenuItems } from "../components/mediaMenuItems";
 import AddToFavoriteFolderPickerModal from "../components/AddToFavoriteFolderPickerModal";
 import AddToPlaylistModal from "../components/AddToPlaylistModal";
@@ -46,6 +47,7 @@ import {
   normalizeListPosterUrl,
   removePlayProgress,
   transcodeAsync,
+  unmatchMedia,
   type MediaMatchListUpdate,
 } from "../api/client";
 import SeriesBrowse from "./SeriesBrowse";
@@ -368,11 +370,7 @@ export default function BrowsePage() {
     const list = [...displayRows];
     const factor = sortOrder === "asc" ? 1 : -1;
 
-    const timeVal = (v?: string) => {
-      if (!v) return 0;
-      const t = Date.parse(v);
-      return Number.isNaN(t) ? 0 : t;
-    };
+    const timeVal = (v?: string) => serverDateTimeToMillis(v);
     const yearVal = (r: MediaItem) => {
       if ((r.year ?? 0) > 0) return r.year ?? 0;
       const m = (r.title ?? "").match(/(19|20)\d{2}/) || (r.file_path ?? "").match(/(19|20)\d{2}/);
@@ -407,7 +405,7 @@ export default function BrowsePage() {
     return list;
   }, [displayRows, sortField, sortOrder]);
 
-  const fmtDate = (v?: string) => (v ? v.replace("T", " ").slice(0, 19) : "—");
+  const fmtDate = (v?: string) => formatServerDateTime(v);
   const fmtReleaseDate = (v?: string) => {
     if (!v) return "—";
     const d = v.slice(0, 10);
@@ -762,19 +760,57 @@ export default function BrowsePage() {
     });
   }
 
+  function bulkUnmatchSelected(ids: number[]) {
+    const scrapedIds = ids.filter((id) => rows.some((r) => r.id === id && r.scraped));
+    if (scrapedIds.length === 0) return;
+    Modal.confirm({
+      title: t("components.media_menu.unmatch_modal_title"),
+      centered: true,
+      okText: t("components.media_menu.ok"),
+      cancelText: t("components.media_menu.cancel"),
+      content: t("components.media_menu.unmatch_modal_content"),
+      onOk: async () => {
+        let ok = 0;
+        let fail = 0;
+        for (const id of scrapedIds) {
+          try {
+            await unmatchMedia(id);
+            ok++;
+          } catch {
+            fail++;
+          }
+        }
+        await load();
+        if (ok > 0) {
+          message.success(
+            fail > 0
+              ? t("pages.browse.analyze_with_skip", { ok, fail })
+              : t("components.media_menu.unmatched"),
+          );
+        } else {
+          message.error(t("components.series_menu.unmatch_failed"));
+        }
+      },
+    });
+  }
+
   const browseBulkMoreMenuItems = useMemo((): MenuProps["items"] => {
+    const hasScrapedSelected = browseSelectedIdList.some((id) =>
+      rows.some((r) => r.id === id && r.scraped),
+    );
     return [
       { key: "play", label: t("pages.playlists.menu_play_next") },
       { key: "shuffle", label: t("pages.playlists.btn_shuffle") },
       { key: "removeFromContinue", label: t("components.media_menu.remove_from_continue") },
       { type: "divider" },
+      { key: "unmatch", label: t("components.media_menu.unmatch"), disabled: !hasScrapedSelected },
       { key: "refreshMetadata", label: t("components.media_menu.refresh_metadata") },
       { key: "analyze", label: t("components.media_menu.analyze") },
       { type: "divider" },
       { key: "merge", label: t("components.media_menu.merge") },
       { key: "delete", label: t("components.media_menu.delete"), danger: true },
     ];
-  }, [t]);
+  }, [t, browseSelectedIdList, rows]);
 
   function onBrowseBulkMoreMenuClick(key: string) {
     const ids = browseSelectedIdList;
@@ -788,6 +824,9 @@ export default function BrowsePage() {
         break;
       case "removeFromContinue":
         void bulkRemoveSelectedFromContinue(ids);
+        break;
+      case "unmatch":
+        bulkUnmatchSelected(ids);
         break;
       case "refreshMetadata":
         void bulkRefreshSelectedMetadata(ids);
@@ -907,8 +946,9 @@ export default function BrowsePage() {
   }
 
   return (
-    <div style={{ padding: "16px 0 32px" }}>
-      <div className={styles.topBar}>
+    <div style={{ padding: "16px 0 32px", ["--browse-sticky-pad-top" as string]: "16px" }}>
+      <div className={styles.browsePageStickyHead}>
+        <div className={styles.topBar}>
         <Space wrap className={styles.topLeftTools}>
           {viewMode !== "table" && (
             <>
@@ -1037,6 +1077,8 @@ export default function BrowsePage() {
           </div>
         </div>
       )}
+
+      </div>
 
       {loading ? (
         <div className={styles.loadingWrap}>

@@ -721,7 +721,14 @@ export async function fetchPhotoFaceProgress(libraryId: number): Promise<{
     failed?: number;
     percent: number;
   }>(`/api/v1/library/${libraryId}/photo/faces/progress`);
-  return data ?? { total: 0, processed: 0, detected: 0, pending: 0, failed: 0, percent: 0 };
+  return {
+    total: data?.total ?? 0,
+    processed: data?.processed ?? 0,
+    detected: data?.detected ?? 0,
+    pending: data?.pending ?? 0,
+    failed: data?.failed ?? 0,
+    percent: data?.percent ?? 0,
+  };
 }
 
 export async function backfillPhotoLocations(libraryId: number): Promise<{ ok: boolean; queued: number }> {

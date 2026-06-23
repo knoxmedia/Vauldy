@@ -1,4 +1,5 @@
 import type { MusicTrackRow } from "../api/client";
+import { formatServerDate, serverDateTimeToMillis } from "./datetime";
 import { tGlobal } from "../i18n";
 
 export type TrackColumnId =
@@ -132,7 +133,9 @@ export function compareTracks(
   const av = trackColumnValue(a, field);
   const bv = trackColumnValue(b, field);
   let cmp = 0;
-  if (typeof av === "number" && typeof bv === "number") {
+  if (field === "added_at") {
+    cmp = serverDateTimeToMillis(String(av)) - serverDateTimeToMillis(String(bv));
+  } else if (typeof av === "number" && typeof bv === "number") {
     cmp = av - bv;
   } else {
     cmp = String(av).localeCompare(String(bv), "zh");
@@ -149,11 +152,7 @@ export function fmtDuration(sec?: number): string {
 }
 
 export function fmtDate(raw?: string): string {
-  const s = str(raw);
-  if (!s) return "—";
-  const d = new Date(s);
-  if (Number.isNaN(d.getTime())) return s.slice(0, 10) || "—";
-  return d.toLocaleDateString("zh-CN");
+  return formatServerDate(raw);
 }
 
 export function fmtBitrate(kbps?: number): string {

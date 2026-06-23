@@ -137,6 +137,9 @@ func (h *Handler) tryReviveJITSession(c *gin.Context, sessionID, asset string) (
 	media := detectMediaProfile(metaJSON.String)
 	bitrate := pickBitrate(media, int(srcWidth.Int64), int(srcHeight.Int64))
 	resolution := resolutionForBitrate(bitrate)
+	if !h.ensureEncryptedISOPipePlayback(c, mediaID, filePath.String) {
+		return nil, false
+	}
 	s, err := h.SessionManager.RestoreSession(sessionID, mediaID, fileID.String, filePath.String, bitrate, resolution, float64(srcDuration.Int64))
 	if err != nil {
 		log.Printf("jit revive session %s: %v", sessionID, err)

@@ -3,13 +3,11 @@ package handler
 import (
 	"database/sql"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 
-	"knox-media/internal/imagethumb"
 	"knox-media/internal/photoface"
 )
 
@@ -123,12 +121,13 @@ func (h *Handler) ServePhotoFaceThumb(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "media not found"})
 		return
 	}
-	src := strings.TrimSpace(filePath.String)
-	paths := imagethumb.ExpectedPaths(h.photoCacheDir(), mediaID)
-	if st, err := os.Stat(paths.Thumb); err == nil && !st.IsDir() && st.Size() > 0 {
-		src = paths.Thumb
-	} else if genErr := h.ensurePhotoVariants(mediaID, filePath.String); genErr == nil {
-		src = paths.Thumb
+	src, cleanup, err := h.resolvePhotoThumbSource(mediaID, filePath.String)
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
 	}
 	data, err := photoface.CropFaceJPEG(src, bboxX, bboxY, bboxW, bboxH, 88)
 	if err != nil {

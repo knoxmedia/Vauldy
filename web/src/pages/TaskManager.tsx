@@ -53,7 +53,12 @@ import {
   type SubtitleTask,
   type TranscodeTask,
 } from "../api/client";
+import { formatServerDateTime } from "../lib/datetime";
 import { useT } from "../i18n";
+
+function fmtTaskTs(v?: string) {
+  return v ? formatServerDateTime(v) : "-";
+}
 
 function ActionIconButton({
   title,
@@ -98,6 +103,7 @@ function ActionIconConfirmButton({
   onConfirm,
   loading,
   danger,
+  disabled,
 }: {
   title: string;
   confirmTitle: string;
@@ -105,19 +111,31 @@ function ActionIconConfirmButton({
   onConfirm: () => void;
   loading?: boolean;
   danger?: boolean;
+  disabled?: boolean;
 }) {
+  const button = (
+    <Button
+      type="text"
+      size="small"
+      icon={icon}
+      loading={loading}
+      danger={danger}
+      disabled={disabled}
+      aria-label={title}
+    />
+  );
+
+  if (disabled) {
+    return (
+      <Tooltip title={title}>
+        <span>{button}</span>
+      </Tooltip>
+    );
+  }
+
   return (
     <Popconfirm title={confirmTitle} onConfirm={onConfirm}>
-      <Tooltip title={title}>
-        <Button
-          type="text"
-          size="small"
-          icon={icon}
-          loading={loading}
-          danger={danger}
-          aria-label={title}
-        />
-      </Tooltip>
+      <Tooltip title={title}>{button}</Tooltip>
     </Popconfirm>
   );
 }
@@ -432,7 +450,7 @@ export default function TaskManagerPage() {
                   { title: "Cleanup", dataIndex: "source_cleanup_status", width: 110, render: (v?: string) => v || "-" },
                   { title: t("pages.task_manager.col_progress"), dataIndex: "progress", width: 80, render: (p: number) => `${p}%` },
                   { title: t("pages.task_manager.col_error"), dataIndex: "error_message", ellipsis: true, render: (v?: string) => v || "-" },
-                  { title: t("pages.task_manager.col_created_at"), dataIndex: "created_at", width: 180 },
+                  { title: t("pages.task_manager.col_created_at"), dataIndex: "created_at", width: 180, render: fmtTaskTs },
                   {
                     title: t("pages.task_manager.col_actions"),
                     key: "ops",
@@ -534,8 +552,8 @@ export default function TaskManagerPage() {
                     },
                     { title: t("pages.task_manager.col_progress"), dataIndex: "progress", width: 90, render: (v: number) => `${v}%` },
                     { title: t("pages.task_manager.col_message"), dataIndex: "message", ellipsis: true, render: (v?: string) => v || "-" },
-                    { title: t("pages.task_manager.col_created_at"), dataIndex: "created_at", width: 180 },
-                    { title: t("pages.task_manager.col_finished_at"), dataIndex: "finished_at", width: 180, render: (v?: string) => v || "-" },
+                    { title: t("pages.task_manager.col_created_at"), dataIndex: "created_at", width: 180, render: fmtTaskTs },
+                    { title: t("pages.task_manager.col_finished_at"), dataIndex: "finished_at", width: 180, render: fmtTaskTs },
                   ]}
                 />
               </Space>
@@ -567,8 +585,8 @@ export default function TaskManagerPage() {
                   { title: t("pages.task_manager.col_source"), dataIndex: "source", width: 90 },
                   { title: t("pages.task_manager.col_processed"), dataIndex: "processed_count", width: 90 },
                   { title: t("pages.task_manager.col_added"), dataIndex: "added_count", width: 80 },
-                  { title: t("pages.task_manager.col_started_at"), dataIndex: "started_at", width: 180 },
-                  { title: t("pages.task_manager.col_finished_at"), dataIndex: "finished_at", width: 180, render: (v?: string) => v || "-" },
+                  { title: t("pages.task_manager.col_started_at"), dataIndex: "started_at", width: 180, render: fmtTaskTs },
+                  { title: t("pages.task_manager.col_finished_at"), dataIndex: "finished_at", width: 180, render: fmtTaskTs },
                   { title: t("pages.task_manager.col_error_message"), dataIndex: "error_message", ellipsis: true, render: (v?: string) => v || "-" },
                   {
                     title: t("pages.task_manager.col_actions"),
@@ -660,9 +678,9 @@ export default function TaskManagerPage() {
                     return <Tag color={c}>{v}</Tag>;
                   } },
                   { title: t("pages.task_manager.col_note"), dataIndex: "message", ellipsis: true, render: (v?: string) => v || "-" },
-                  { title: t("pages.task_manager.col_created_at"), dataIndex: "created_at", width: 170 },
-                  { title: t("pages.task_manager.col_started_at"), dataIndex: "started_at", width: 170, render: (v?: string) => v || "-" },
-                  { title: t("pages.task_manager.col_finished_at"), dataIndex: "finished_at", width: 170, render: (v?: string) => v || "-" },
+                  { title: t("pages.task_manager.col_created_at"), dataIndex: "created_at", width: 170, render: fmtTaskTs },
+                  { title: t("pages.task_manager.col_started_at"), dataIndex: "started_at", width: 170, render: fmtTaskTs },
+                  { title: t("pages.task_manager.col_finished_at"), dataIndex: "finished_at", width: 170, render: fmtTaskTs },
                   {
                     title: t("pages.task_manager.col_actions"),
                     key: "subactions",
@@ -794,9 +812,9 @@ export default function TaskManagerPage() {
                   { title: t("pages.task_manager.col_note"), dataIndex: "message", ellipsis: true, render: (v?: string) => v || "-" },
                   { title: "VTT", dataIndex: "vtt_path", ellipsis: true, render: (v?: string) => v || "-" },
                   { title: "LRC", dataIndex: "lrc_path", ellipsis: true, render: (v?: string) => v || "-" },
-                  { title: t("pages.task_manager.col_created_at"), dataIndex: "created_at", width: 170 },
-                  { title: t("pages.task_manager.col_started_at"), dataIndex: "started_at", width: 170, render: (v?: string) => v || "-" },
-                  { title: t("pages.task_manager.col_finished_at"), dataIndex: "finished_at", width: 170, render: (v?: string) => v || "-" },
+                  { title: t("pages.task_manager.col_created_at"), dataIndex: "created_at", width: 170, render: fmtTaskTs },
+                  { title: t("pages.task_manager.col_started_at"), dataIndex: "started_at", width: 170, render: fmtTaskTs },
+                  { title: t("pages.task_manager.col_finished_at"), dataIndex: "finished_at", width: 170, render: fmtTaskTs },
                   {
                     title: t("pages.task_manager.col_actions"),
                     key: "lyricactions",
@@ -852,7 +870,7 @@ export default function TaskManagerPage() {
                   { title: t("pages.task_manager.col_thumb_count"), dataIndex: "thumb_count", width: 100 },
                   { title: t("pages.task_manager.col_size"), key: "size", width: 120, render: (_: unknown, r: PreviewTask) => `${r.thumb_width}x${r.thumb_height}` },
                   { title: t("pages.task_manager.col_error_message"), dataIndex: "error_message", ellipsis: true, render: (v?: string) => v || "-" },
-                  { title: t("pages.task_manager.col_updated_at"), dataIndex: "updated_at", width: 180 },
+                  { title: t("pages.task_manager.col_updated_at"), dataIndex: "updated_at", width: 180, render: fmtTaskTs },
                   {
                     title: t("pages.task_manager.col_actions"),
                     key: "actions",
@@ -898,7 +916,7 @@ export default function TaskManagerPage() {
                   { title: t("pages.task_manager.col_status"), dataIndex: "status", width: 110 },
                   { title: t("pages.task_manager.col_output_dir"), dataIndex: "output_dir", ellipsis: true, render: (v?: string) => v || "-" },
                   { title: t("pages.task_manager.col_error_message"), dataIndex: "error_message", ellipsis: true, render: (v?: string) => v || "-" },
-                  { title: t("pages.task_manager.col_updated_at"), dataIndex: "updated_at", width: 180 },
+                  { title: t("pages.task_manager.col_updated_at"), dataIndex: "updated_at", width: 180, render: fmtTaskTs },
                   {
                     title: t("pages.task_manager.col_actions"),
                     key: "actions",
@@ -953,7 +971,7 @@ export default function TaskManagerPage() {
                   { title: t("pages.task_manager.col_keyframe_count"), dataIndex: "keyframe_count", width: 100 },
                   { title: t("pages.task_manager.col_output_dir"), dataIndex: "output_dir", ellipsis: true, render: (v?: string) => v || "-" },
                   { title: t("pages.task_manager.col_error_message"), dataIndex: "error_message", ellipsis: true, render: (v?: string) => v || "-" },
-                  { title: t("pages.task_manager.col_updated_at"), dataIndex: "updated_at", width: 180 },
+                  { title: t("pages.task_manager.col_updated_at"), dataIndex: "updated_at", width: 180, render: fmtTaskTs },
                   {
                     title: t("pages.task_manager.col_actions"),
                     key: "actions",

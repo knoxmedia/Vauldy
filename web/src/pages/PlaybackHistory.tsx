@@ -13,6 +13,7 @@ import {
   type PlaybackHistoryItem,
   type PlaybackHistoryRange,
 } from "../api/client";
+import { formatServerDateTime, serverDateTimeToMillis } from "../lib/datetime";
 import { useT, type TranslateFn } from "../i18n";
 import { isAdminRole, useAuthStore } from "../store/auth";
 import styles from "./PlaybackHistory.module.css";
@@ -44,17 +45,6 @@ function libraryTypeLabel(libType: string, fileType: string, t: TranslateFn): st
   }
   if (fileType) return fileType;
   return "—";
-}
-
-function fmtPlayedAt(v?: string): string {
-  if (!v) return "—";
-  const normalized = v.includes("T") ? v : v.replace(" ", "T");
-  const d = new Date(normalized);
-  if (Number.isNaN(d.getTime())) return v.replace("T", " ").slice(0, 16);
-  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-  const hh = String(d.getHours()).padStart(2, "0");
-  const mm = String(d.getMinutes()).padStart(2, "0");
-  return `${hh}:${mm} ${months[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
 }
 
 function FilterDropdown({
@@ -151,8 +141,8 @@ export default function PlaybackHistoryPage() {
   const sortedRows = useMemo(() => {
     const list = [...rows];
     list.sort((a, b) => {
-      const ta = Date.parse(a.played_at.replace(" ", "T"));
-      const tb = Date.parse(b.played_at.replace(" ", "T"));
+      const ta = serverDateTimeToMillis(a.played_at);
+      const tb = serverDateTimeToMillis(b.played_at);
       const av = Number.isNaN(ta) ? 0 : ta;
       const bv = Number.isNaN(tb) ? 0 : tb;
       return sortDesc ? bv - av : av - bv;
@@ -297,7 +287,7 @@ export default function PlaybackHistoryPage() {
                   ) : null}
                   <td>{r.player || "—"}</td>
                   <td>{r.platform || "—"}</td>
-                  <td>{fmtPlayedAt(r.played_at)}</td>
+                  <td>{formatServerDateTime(r.played_at)}</td>
                 </tr>
               ))}
             </tbody>

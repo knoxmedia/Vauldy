@@ -71,6 +71,7 @@ import AddToFavoriteFolderPickerModal from "../components/AddToFavoriteFolderPic
 import AddToPlaylistModal from "../components/AddToPlaylistModal";
 import MediaMatchModal from "../components/MediaMatchModal";
 import { buildMediaMenuItems } from "../components/mediaMenuItems";
+import { formatServerDateTime } from "../lib/datetime";
 import { useFavoriteFolderMenuRecents } from "../lib/useFavoriteFolderMenuRecents";
 import { readRecentPlaylists, rememberPlaylistAdded } from "../lib/recentPlaylists";
 import ToolbarPlayIcon from "../components/ToolbarPlayIcon";
@@ -1122,7 +1123,7 @@ export default function MediaDetailPage() {
             <div className={styles.stats}>
               <Statistic title={t("pages.media_detail.stat_watch_users")} value={stats?.watch_users ?? 0} />
               <Statistic title={t("pages.media_detail.stat_avg_duration")} value={fmtSeconds(Math.round(stats?.avg_position_seconds ?? 0))} />
-              <Statistic title={t("pages.media_detail.stat_latest_watch")} value={stats?.latest_watch_at || "—"} />
+              <Statistic title={t("pages.media_detail.stat_latest_watch")} value={formatServerDateTime(stats?.latest_watch_at)} />
             </div>
             <div className={styles.progressBox}>
               <div className={styles.specLabel}>{t("pages.media_detail.stat_avg_progress")}</div>
@@ -1136,8 +1137,8 @@ export default function MediaDetailPage() {
                 </Tag>
                 <Tag color="blue">{t("pages.media_detail.history_last_pos", { pos: fmtSeconds(historyItem?.position ?? 0) })}</Tag>
                 <Tag color="cyan">{t("pages.media_detail.history_play_count", { count: historyItem?.play_count ?? 0 })}</Tag>
-                <Tag>{t("pages.media_detail.history_start", { time: historyItem?.play_start_at || "—" })}</Tag>
-                <Tag>{t("pages.media_detail.history_end", { time: historyItem?.play_end_at || "—" })}</Tag>
+                <Tag>{t("pages.media_detail.history_start", { time: formatServerDateTime(historyItem?.play_start_at) })}</Tag>
+                <Tag>{t("pages.media_detail.history_end", { time: formatServerDateTime(historyItem?.play_end_at) })}</Tag>
               </div>
             </div>
             <div className={styles.directorLine}>
@@ -1507,7 +1508,7 @@ export default function MediaDetailPage() {
           <div className={styles.stats}>
             <Statistic title={t("pages.media_detail.stat_watch_users")} value={stats?.watch_users ?? 0} />
             <Statistic title={t("pages.media_detail.stat_avg_duration")} value={fmtSeconds(Math.round(stats?.avg_position_seconds ?? 0))} />
-            <Statistic title={t("pages.media_detail.stat_latest_watch")} value={stats?.latest_watch_at || "—"} />
+            <Statistic title={t("pages.media_detail.stat_latest_watch")} value={formatServerDateTime(stats?.latest_watch_at)} />
           </div>
           <div className={styles.progressBox}>
             <div className={styles.specLabel}>{t("pages.media_detail.stat_avg_progress")}</div>
@@ -1521,8 +1522,8 @@ export default function MediaDetailPage() {
               </Tag>
               <Tag color="blue">{t("pages.media_detail.history_last_pos", { pos: fmtSeconds(historyItem?.position ?? 0) })}</Tag>
               <Tag color="cyan">{t("pages.media_detail.history_play_count", { count: historyItem?.play_count ?? 0 })}</Tag>
-              <Tag>{t("pages.media_detail.history_start", { time: historyItem?.play_start_at || "—" })}</Tag>
-              <Tag>{t("pages.media_detail.history_end", { time: historyItem?.play_end_at || "—" })}</Tag>
+              <Tag>{t("pages.media_detail.history_start", { time: formatServerDateTime(historyItem?.play_start_at) })}</Tag>
+              <Tag>{t("pages.media_detail.history_end", { time: formatServerDateTime(historyItem?.play_end_at) })}</Tag>
             </div>
           </div>
         </div>

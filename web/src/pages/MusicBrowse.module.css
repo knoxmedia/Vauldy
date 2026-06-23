@@ -1,5 +1,6 @@
 .wrap {
   padding: 8px 0 32px;
+  --browse-sticky-pad-top: 8px;
 }
 
 .header {

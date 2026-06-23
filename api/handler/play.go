@@ -507,8 +507,13 @@ func (h *Handler) HLSInfo(c *gin.Context) {
 			media := detectMediaProfile(metaJSON.String)
 			bitrate := pickBitrate(media, int(srcWidth.Int64), int(srcHeight.Int64))
 			resolution := resolutionForBitrate(bitrate)
-			s, err := h.SessionManager.CreateSession(id, fileID.String, filePath.String, bitrate, resolution, float64(srcDuration.Int64))
-			if err == nil {
+			s, err := h.createJITSession(c, id, fileID.String, filePath.String, bitrate, resolution, float64(srcDuration.Int64))
+			if err != nil {
+				if c.Writer.Written() {
+					return
+				}
+				log.Printf("stream drm jit session create failed media=%d: %v", id, err)
+			} else {
 				if streamEnc, encErr := h.ensureStreamJITEncryption(id, pol, s.TempDir); encErr == nil {
 					s.StreamEncryption = streamEnc
 				} else {
@@ -558,7 +563,6 @@ func (h *Handler) HLSInfo(c *gin.Context) {
 				c.JSON(http.StatusOK, h.withPlaybackPlanForMode(planMode, payload))
 				return
 			}
-			log.Printf("stream drm jit session create failed media=%d: %v", id, err)
 		}
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "stream encryption playback unavailable"})
 		return
@@ -641,8 +645,12 @@ func (h *Handler) HLSInfo(c *gin.Context) {
 		if h.SessionManager != nil && fileID.Valid && strings.TrimSpace(fileID.String) != "" && filePath.Valid && strings.TrimSpace(filePath.String) != "" {
 			bitrate := pickBitrate(media, int(srcWidth.Int64), int(srcHeight.Int64))
 			resolution := resolutionForBitrate(bitrate)
-			s, err := h.SessionManager.CreateSession(id, fileID.String, filePath.String, bitrate, resolution, float64(srcDuration.Int64))
-			if err == nil {
+			s, err := h.createJITSession(c, id, fileID.String, filePath.String, bitrate, resolution, float64(srcDuration.Int64))
+			if err != nil {
+				if c.Writer.Written() {
+					return
+				}
+			} else {
 				masterBase := fmt.Sprintf("%s/api/v1/jit/session/%s/master.m3u8", base, s.ID)
 				mq := url.Values{}
 				mq.Set("media_id", strconv.FormatInt(id, 10))
@@ -681,8 +689,13 @@ func (h *Handler) HLSInfo(c *gin.Context) {
 	if h.SessionManager != nil && fileID.Valid && strings.TrimSpace(fileID.String) != "" && filePath.Valid && strings.TrimSpace(filePath.String) != "" {
 		bitrate := pickBitrate(media, int(srcWidth.Int64), int(srcHeight.Int64))
 		resolution := resolutionForBitrate(bitrate)
-		s, err := h.SessionManager.CreateSession(id, fileID.String, filePath.String, bitrate, resolution, float64(srcDuration.Int64))
-		if err == nil {
+		s, err := h.createJITSession(c, id, fileID.String, filePath.String, bitrate, resolution, float64(srcDuration.Int64))
+		if err != nil {
+			if c.Writer.Written() {
+				return
+			}
+			log.Printf("JIT session create failed for media=%d: %v, falling back", id, err)
+		} else {
 			masterBase := fmt.Sprintf("%s/api/v1/jit/session/%s/master.m3u8", base, s.ID)
 			mq := url.Values{}
 			mq.Set("media_id", strconv.FormatInt(id, 10))
@@ -700,7 +713,6 @@ func (h *Handler) HLSInfo(c *gin.Context) {
 			}))
 			return
 		}
-		log.Printf("JIT session create failed for media=%d: %v, falling back", id, err)
 	}
 
 	// Legacy JIT scheduler: Redis-based per-segment transcode.

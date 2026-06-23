@@ -207,7 +207,7 @@ func (w *Worker) Process(ctx context.Context, mediaID int64) (err error) {
 	}
 	vttPath := filepath.Join(outDir, "asr.vtt")
 
-	if err = w.Subtitle.TranscribeToVTT(ctx, audioPath, vttPath); err != nil {
+	if err = w.Subtitle.TranscribeToVTT(ctx, mediaID, audioPath, vttPath); err != nil {
 		w.markFailed(mediaID, err.Error())
 		return err
 	}

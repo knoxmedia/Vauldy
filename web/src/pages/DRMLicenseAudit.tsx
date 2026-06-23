@@ -2,6 +2,7 @@ import { Alert, Button, Card, Descriptions, Input, Select, Space, Switch, Table,
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { fetchDRMLicenseAudits, type DRMLicenseAuditItem, type VerifyDRMLicenseResponse, verifyDRMLicense } from "../api/client";
+import { renderServerDateTime } from "../lib/datetime";
 import { useT } from "../i18n";
 
 export default function DRMLicenseAuditPage() {
@@ -213,7 +214,7 @@ export default function DRMLicenseAuditPage() {
           { title: t("pages.drm_audit.col_result"), dataIndex: "result", width: 100 },
           { title: t("pages.drm_audit.col_reason"), dataIndex: "reason", ellipsis: true, render: (v?: string) => v || "-" },
           { title: t("pages.drm_audit.col_client_ip"), dataIndex: "client_ip", width: 140 },
-          { title: t("pages.drm_audit.col_time"), dataIndex: "created_at", width: 180 },
+          { title: t("pages.drm_audit.col_time"), dataIndex: "created_at", width: 180, render: renderServerDateTime },
           {
             title: t("pages.drm_audit.col_ops"),
             key: "ops",

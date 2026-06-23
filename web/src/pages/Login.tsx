@@ -1,6 +1,7 @@
 import { Button, Card, Form, Input, Typography, message } from "antd";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { fetchUserInfo, login } from "../api/client";
+import { useAppName } from "../store/branding";
 import { useT } from "../i18n";
 import { defaultPlayerPrefs, normalizePlayerPrefs } from "../lib/playerPrefs";
 import { useAuthStore, type UserRole } from "../store/auth";
@@ -14,6 +15,7 @@ export default function LoginPage() {
   const setToken = useAuthStore((s) => s.setToken);
   const setProfile = useAuthStore((s) => s.setProfile);
   const t = useT();
+  const appName = useAppName();
 
   return (
     <div
@@ -37,7 +39,7 @@ export default function LoginPage() {
       >
         <Card
           style={{ width: "100%", maxWidth: 400 }}
-          title={<Title level={4} style={{ margin: 0 }}>{t("login.title")}</Title>}
+          title={<Title level={4} style={{ margin: 0 }}>{t("login.title", { appName })}</Title>}
         >
           <Paragraph type="secondary" style={{ marginBottom: 16 }}>
             {t("login.subtitle")}

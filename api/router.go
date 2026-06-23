@@ -65,11 +65,14 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "knox-media"})
 	})
+	r.GET("/favicon.svg", h.ServeBrandingFavicon)
+	r.GET("/favicon.ico", h.ServeBrandingFavicon)
 
 	v1 := r.Group("/api/v1")
 	{
 		v1.POST("/user/login", h.Login)
 		v1.POST("/oauth/token", h.OAuthToken)
+		v1.GET("/branding", h.GetBranding)
 
 		// Authenticated (admin or user): account + browsing
 		auth := v1.Group("")
@@ -115,7 +118,6 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 			auth.GET("/scan-logs", h.ListScanLogs)
 			auth.GET("/album/:id", h.GetAlbum)
 			auth.GET("/album/:id/play-target", h.GetAlbumPlayTarget)
-			auth.GET("/album/:id/artwork", h.ServeAlbumArtwork)
 			auth.GET("/artist/:id/albums", h.ListArtistAlbums)
 			auth.GET("/series/:id", h.GetSeries)
 			auth.GET("/series/:id/play-target", h.GetSeriesPlayTarget)
@@ -170,6 +172,7 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 			play.GET("/media/:id/preview/sprite.jpg", h.PreviewSprite)
 			play.GET("/media/:id/preview/thumbs.vtt", h.PreviewVTT)
 			play.GET("/media/:id/poster.jpg", h.ServeMediaPoster)
+			play.GET("/album/:id/artwork", h.ServeAlbumArtwork)
 			play.GET("/media/:id/photo", h.PhotoPreviewInfo)
 			play.GET("/media/:id/photo/thumb.jpg", h.ServePhotoThumb)
 			play.GET("/media/:id/photo/medium.jpg", h.ServePhotoMedium)
@@ -285,6 +288,7 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 			adm.DELETE("/schedule/task/:id", h.DeleteScheduledTask)
 			adm.POST("/schedule/task/cleanup-duplicates", h.CleanupDuplicateScheduledTasks)
 			adm.POST("/schedule/task/:id/run", h.RunScheduledTask)
+			adm.PUT("/admin/branding", h.PutBranding)
 			adm.GET("/admin/system-options", h.GetSystemOptions)
 			adm.PUT("/admin/system-options", h.PutSystemOptions)
 			adm.POST("/admin/system-options/test/asr", h.TestSystemOptionsASR)

@@ -6,6 +6,25 @@
   margin-bottom: 16px;
 }
 
+/* 页顶工具栏 + 多选条：随主内容区滚动时固定在顶部 */
+.browsePageStickyHead {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  margin-top: calc(-1 * var(--browse-sticky-pad-top, 16px));
+  padding-top: var(--browse-sticky-pad-top, 16px);
+  margin-bottom: 12px;
+  background: #0f1419;
+}
+
+.browsePageStickyHead .topBar {
+  margin-bottom: 12px;
+}
+
+.browsePageStickyHead .browseSelectionBar {
+  margin-bottom: 0;
+}
+
 .topRightTools {
   justify-content: flex-end;
   margin-left: auto;

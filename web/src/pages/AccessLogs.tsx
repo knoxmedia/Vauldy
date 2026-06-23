@@ -1,6 +1,7 @@
 import { Button, Card, DatePicker, Select, Space, Switch, Table, Tag } from "antd";
 import { useEffect, useState } from "react";
 import { fetchAccessLogs, type AccessLogItem } from "../api/client";
+import { renderServerDateTime } from "../lib/datetime";
 import { useT } from "../i18n";
 import { type Dayjs } from "dayjs";
 
@@ -113,7 +114,7 @@ export default function AccessLogsPage() {
         dataSource={rows}
         pagination={{ pageSize: 20 }}
         columns={[
-          { title: t("pages.access_logs.col_time"), dataIndex: "created_at", width: 180 },
+          { title: t("pages.access_logs.col_time"), dataIndex: "created_at", width: 180, render: renderServerDateTime },
           { title: t("pages.access_logs.col_user"), dataIndex: "username", width: 120, render: (v?: string) => v || "-" },
           {
             title: t("pages.access_logs.col_event"),

@@ -76,6 +76,74 @@ func TestOpenFFmpegInputUsesPlainWhenEncCatalogAndPlainExists(t *testing.T) {
 	}
 }
 
+func TestOpenFFmpegInputEncryptedISOUsesPipeWhenPlainMissing(t *testing.T) {
+	db, err := store.OpenSQLite(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	vault, err := keystore.NewVault("test-main-key", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	kek, err := vault.GetKEK(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	plain := []byte("ftypmp42" + string(bytes.Repeat([]byte{0xAB}, 8192)))
+	plainPath := filepath.Join(dir, "clip.mp4")
+	if err := os.WriteFile(plainPath, plain, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	plainIn, err := os.Open(plainPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encPath := filepath.Join(dir, "clip.enc")
+	encOut, err := os.Create(encPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := crypto.EncryptFile(plainIn, encOut, kek)
+	_ = plainIn.Close()
+	_ = encOut.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Remove(plainPath)
+
+	_, _ = db.Exec(`INSERT INTO library (id, name, type, path) VALUES (1, 'lib', 'video', ?)`, dir)
+	_, _ = db.Exec(`INSERT INTO media (id, library_id, file_id, title, file_path, file_type, format, status) VALUES (9, 1, 'f', 't', ?, 'video', 'mp4', 'active')`, encPath)
+	_, _ = db.Exec(
+		`INSERT INTO media_encrypted_assets (media_id, enc_path, wrapped_dek, iv, plain_path, status)
+		 VALUES (9, ?, ?, ?, ?, 'encrypted')`,
+		encPath, hex.EncodeToString(res.WrappedDEK), hex.EncodeToString(res.IV), plainPath,
+	)
+
+	in, err := OpenFFmpegInput(db, vault, 9, encPath, 0)
+	if err != nil {
+		t.Fatalf("OpenFFmpegInput: %v", err)
+	}
+	defer func() {
+		if in.Cleanup != nil {
+			in.Cleanup()
+		}
+	}()
+	if in.Path != "" {
+		t.Fatalf("expected pipe input for encrypted iso, got path %q", in.Path)
+	}
+	if in.Stdin == nil {
+		t.Fatal("expected decrypt stdin")
+	}
+	if !in.FromEnc {
+		t.Fatal("expected FromEnc")
+	}
+}
+
 func TestOpenFFmpegInputEncryptedSeekUsesPipeFromKeyframeOffset(t *testing.T) {
 	db, err := store.OpenSQLite(":memory:")
 	if err != nil {

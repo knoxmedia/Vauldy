@@ -47,6 +47,7 @@ func OpenFFmpegInput(db *sql.DB, vault *keystore.Vault, mediaID int64, path stri
 		}
 		return &FFmpegInput{Path: plain, PlainFallback: true}, nil
 	}
+
 	var wrappedHex string
 	if err := db.QueryRow(`
 		SELECT wrapped_dek FROM media_encrypted_assets WHERE media_id = ? AND status = 'encrypted'

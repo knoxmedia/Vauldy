@@ -1,4 +1,4 @@
-import { Dropdown, Popover, Progress, Spin, Tag, Typography, message } from "antd";
+import { Dropdown, Modal, Popover, Progress, Spin, Tag, Typography, message } from "antd";
 import type { MenuProps } from "antd";
 import {
   CaretRightOutlined,
@@ -22,12 +22,19 @@ import {
   HistoryItem,
   addFavoriteFolderItem,
   addPlaylistItem,
+  createScrapeTasks,
+  deleteMedia,
+  extractAudioTrack,
+  extractKeyframes,
   fetchLibraries,
   fetchUserHistory,
+  markWatched,
   mediaLandscapeThumbSrc,
   mediaPosterSrc,
   musicMediaPosterSrc,
+  recognizeMediaSubtitles,
   removePlayProgress,
+  transcodeAsync,
 } from "../api/client";
 import { mediaItemsToMusicQueue } from "../lib/albumPlayback";
 import { useMusicPlayerStore } from "../store/musicPlayer";
@@ -879,6 +886,207 @@ export default function HomePage() {
     setMovieSelectedIds(new Set());
   }, []);
 
+  const refreshHomeAfterBulk = useCallback(async () => {
+    const [histR, recentR] = await Promise.allSettled([
+      fetchUserHistory(24, { libraryTypes: CONTINUE_WATCHING_LIBRARY_TYPES }),
+      libs.length > 0 ? loadHomeRecentBySection(libs, RECENT_SECTIONS) : Promise.resolve(new Map<string, MediaItem[]>()),
+    ]);
+    if (histR.status === "fulfilled") {
+      setHistory(histR.value.filter((h) => h.media_id > 0));
+    }
+    if (recentR.status === "fulfilled") {
+      setRecentBySection(recentR.value);
+    }
+  }, [libs, RECENT_SECTIONS]);
+
+  const homeBulkSelectedMediaIds = useMemo(() => {
+    const ids = new Set<number>();
+    for (const h of history) {
+      if (historySelectedKeys.has(historyRowKey(h))) ids.add(h.media_id);
+    }
+    for (const m of movieShelfItems) {
+      if (movieSelectedIds.has(m.id)) ids.add(m.id);
+    }
+    return [...ids];
+  }, [history, historySelectedKeys, movieShelfItems, movieSelectedIds]);
+
+  async function bulkMarkHomeSelectedWatched(ids: number[]) {
+    if (ids.length === 0) return;
+    let ok = 0;
+    let fail = 0;
+    for (const id of ids) {
+      try {
+        await markWatched(id);
+        ok++;
+      } catch {
+        fail++;
+      }
+    }
+    if (ok > 0) {
+      message.success(
+        fail > 0 ? t("pages.browse.analyze_with_skip", { ok, fail }) : t("components.media_menu.marked_watched"),
+      );
+      await refreshHomeAfterBulk();
+    } else {
+      message.error(t("components.media_menu.operation_failed"));
+    }
+  }
+
+  async function bulkRemoveHomeSelectedFromContinue(ids: number[]) {
+    if (ids.length === 0) return;
+    let ok = 0;
+    for (const id of ids) {
+      try {
+        await removePlayProgress(id);
+        ok++;
+      } catch {
+        /* skip items without progress */
+      }
+    }
+    if (ok > 0) {
+      setHistorySelectedKeys((sel) => {
+        const next = new Set(sel);
+        for (const id of ids) next.delete(String(id));
+        return next;
+      });
+      message.success(t("pages.home.removed_from_continue"));
+      await refreshHomeAfterBulk();
+    } else {
+      message.warning(t("pages.browse.remove_continue_none"));
+    }
+  }
+
+  async function bulkRefreshHomeSelectedMetadata(ids: number[]) {
+    if (ids.length === 0) return;
+    try {
+      await createScrapeTasks(ids);
+      message.success(t("components.media_menu.scrape_task_created"));
+    } catch {
+      message.error(t("components.media_menu.operation_failed"));
+    }
+  }
+
+  async function bulkTranscodeHomeSelected(ids: number[], mode: "analyze" | "optimize") {
+    if (ids.length === 0) return;
+    let ok = 0;
+    let fail = 0;
+    for (const id of ids) {
+      try {
+        await transcodeAsync(id, mode);
+        ok++;
+      } catch {
+        fail++;
+      }
+    }
+    const successKey =
+      mode === "analyze" ? "components.media_menu.analyze_task_created" : "components.media_menu.optimize_task_created";
+    if (ok > 0) {
+      message.success(
+        fail > 0 ? t("pages.browse.analyze_with_skip", { ok, fail }) : t(successKey),
+      );
+    } else {
+      message.error(t("components.media_menu.operation_failed"));
+    }
+  }
+
+  async function bulkRecognizeHomeSelectedSubtitles(ids: number[]) {
+    if (ids.length === 0) return;
+    let ok = 0;
+    let fail = 0;
+    for (const id of ids) {
+      try {
+        await recognizeMediaSubtitles(id);
+        ok++;
+      } catch {
+        fail++;
+      }
+    }
+    if (ok > 0) {
+      message.success(
+        fail > 0 ? t("pages.browse.analyze_with_skip", { ok, fail }) : t("components.media_menu.subtitle_task_created"),
+      );
+    } else {
+      message.error(t("components.media_menu.operation_failed"));
+    }
+  }
+
+  async function bulkExtractHomeSelectedAudio(ids: number[]) {
+    if (ids.length === 0) return;
+    let ok = 0;
+    let fail = 0;
+    for (const id of ids) {
+      try {
+        await extractAudioTrack(id);
+        ok++;
+      } catch {
+        fail++;
+      }
+    }
+    if (ok > 0) {
+      message.success(
+        fail > 0 ? t("pages.browse.analyze_with_skip", { ok, fail }) : t("components.media_menu.atrack_task_created"),
+      );
+    } else {
+      message.error(t("components.media_menu.operation_failed"));
+    }
+  }
+
+  async function bulkExtractHomeSelectedKeyframes(ids: number[]) {
+    if (ids.length === 0) return;
+    let ok = 0;
+    let fail = 0;
+    for (const id of ids) {
+      try {
+        await extractKeyframes(id);
+        ok++;
+      } catch {
+        fail++;
+      }
+    }
+    if (ok > 0) {
+      message.success(
+        fail > 0 ? t("pages.browse.analyze_with_skip", { ok, fail }) : t("components.media_menu.keyframe_task_created"),
+      );
+    } else {
+      message.error(t("components.media_menu.operation_failed"));
+    }
+  }
+
+  function bulkDeleteHomeSelected(ids: number[]) {
+    if (ids.length === 0) return;
+    Modal.confirm({
+      title: t("pages.browse.bulk_delete_title", { count: ids.length }),
+      centered: true,
+      okText: t("components.media_menu.ok"),
+      cancelText: t("components.media_menu.cancel"),
+      okButtonProps: { danger: true },
+      content: t("pages.browse.bulk_delete_confirm"),
+      onOk: async () => {
+        let ok = 0;
+        let fail = 0;
+        for (const id of ids) {
+          try {
+            await deleteMedia(id);
+            ok++;
+          } catch {
+            fail++;
+          }
+        }
+        clearHomeBulkSelection();
+        await refreshHomeAfterBulk();
+        if (ok > 0) {
+          message.success(
+            fail > 0
+              ? t("pages.browse.bulk_deleted_with_skip", { ok, fail })
+              : t("pages.browse.bulk_deleted", { ok }),
+          );
+        } else {
+          message.error(t("components.media_menu.delete_failed"));
+        }
+      },
+    });
+  }
+
   const selectAllHomeBulkOrClear = useCallback(() => {
     const hk = history.map(historyRowKey);
     const mids = movieShelfItems.map((m) => m.id);
@@ -929,28 +1137,72 @@ export default function HomePage() {
     );
   }, [history, historySelectedKeys, movieShelfItems, movieSelectedIds]);
 
-  const homeBulkMoreItems: MenuProps["items"] = useMemo(() => {
-    const p = firstBulkPlayTarget;
-    const detailId = firstBulkDetailMediaId;
-    return [
-      {
-        key: "play1",
-        label: t("pages.home.menu_play_first"),
-        onClick: () => {
-          if (p == null) return;
-          if (p.kind === "history") nav(`/player/${p.h.media_id}?t=${p.h.position}`);
-          else nav(`/player/${p.id}`);
-        },
-      },
-      {
-        key: "detail1",
-        label: t("pages.home.menu_view_first_detail"),
-        onClick: () => {
-          if (detailId != null) nav(`/detail/${detailId}`);
-        },
-      },
-    ];
-  }, [firstBulkPlayTarget, firstBulkDetailMediaId, nav, t]);
+  const homeBulkMoreItems: MenuProps["items"] = useMemo(
+    () => [
+      { key: "play1", label: t("pages.home.menu_play_first") },
+      { key: "detail1", label: t("pages.home.menu_view_first_detail") },
+      { type: "divider" },
+      { key: "markWatched", label: t("components.media_menu.watched_mark_as_watched") },
+      { key: "removeFromContinue", label: t("components.media_menu.remove_from_continue") },
+      { type: "divider" },
+      { key: "refreshMetadata", label: t("components.media_menu.refresh_metadata") },
+      { key: "analyze", label: t("components.media_menu.analyze") },
+      { key: "optimize", label: t("components.media_menu.optimize") },
+      { type: "divider" },
+      { key: "recognizeSubtitles", label: t("components.media_menu.recognize_subtitles") },
+      { key: "extractAudio", label: t("components.media_menu.extract_audio") },
+      { key: "extractKeyframes", label: t("components.media_menu.extract_keyframes") },
+      { type: "divider" },
+      { key: "delete", label: t("components.media_menu.delete"), danger: true },
+    ],
+    [t],
+  );
+
+  function onHomeBulkMoreMenuClick(key: string) {
+    const ids = homeBulkSelectedMediaIds;
+    switch (key) {
+      case "play1": {
+        const p = firstBulkPlayTarget;
+        if (p == null) return;
+        if (p.kind === "history") nav(`/player/${p.h.media_id}?t=${p.h.position}`);
+        else nav(`/player/${p.id}`);
+        break;
+      }
+      case "detail1": {
+        if (firstBulkDetailMediaId != null) nav(`/detail/${firstBulkDetailMediaId}`);
+        break;
+      }
+      case "markWatched":
+        void bulkMarkHomeSelectedWatched(ids);
+        break;
+      case "removeFromContinue":
+        void bulkRemoveHomeSelectedFromContinue(ids);
+        break;
+      case "refreshMetadata":
+        void bulkRefreshHomeSelectedMetadata(ids);
+        break;
+      case "analyze":
+        void bulkTranscodeHomeSelected(ids, "analyze");
+        break;
+      case "optimize":
+        void bulkTranscodeHomeSelected(ids, "optimize");
+        break;
+      case "recognizeSubtitles":
+        void bulkRecognizeHomeSelectedSubtitles(ids);
+        break;
+      case "extractAudio":
+        void bulkExtractHomeSelectedAudio(ids);
+        break;
+      case "extractKeyframes":
+        void bulkExtractHomeSelectedKeyframes(ids);
+        break;
+      case "delete":
+        bulkDeleteHomeSelected(ids);
+        break;
+      default:
+        break;
+    }
+  }
 
   useLayoutEffect(() => {
     if (!homeBulkActive) return;
@@ -1097,7 +1349,17 @@ export default function HomePage() {
                 <UnorderedListOutlined />
               </button>
             </Popover>
-            <Dropdown menu={{ items: homeBulkMoreItems }} trigger={["click"]} placement="bottomRight">
+            <Dropdown
+              menu={{
+                items: homeBulkMoreItems,
+                onClick: ({ key, domEvent }) => {
+                  domEvent.stopPropagation();
+                  onHomeBulkMoreMenuClick(String(key));
+                },
+              }}
+              trigger={["click"]}
+              placement="bottomRight"
+            >
               <button type="button" className={styles.homeShelfBulkIconBtn} aria-label={t("pages.home.aria_more_short")}>
                 <MoreOutlined />
               </button>

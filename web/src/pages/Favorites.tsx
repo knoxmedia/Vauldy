@@ -62,6 +62,7 @@ import {
   pickDefaultFavoriteCategory,
 } from "../lib/favoriteCategories";
 import { useFavoriteFolderMenuRecents } from "../lib/useFavoriteFolderMenuRecents";
+import { formatServerDateTime, serverDateTimeToMillis } from "../lib/datetime";
 import { readRecentPlaylists, rememberPlaylistAdded } from "../lib/recentPlaylists";
 import { useT, type TranslateFn } from "../i18n";
 import browseStyles from "./Browse.module.css";
@@ -270,8 +271,8 @@ export default function FavoritesPage() {
     if (sortField === "title") {
       return (a.title ?? "").localeCompare(b.title ?? "", "zh-CN") * factor;
     }
-    const timeA = a.created_at ? Date.parse(a.created_at) : 0;
-    const timeB = b.created_at ? Date.parse(b.created_at) : 0;
+    const timeA = serverDateTimeToMillis(a.created_at);
+    const timeB = serverDateTimeToMillis(b.created_at);
     return (timeA - timeB) * factor;
   });
 
@@ -839,7 +840,7 @@ export default function FavoritesPage() {
                   </div>
                   <div className={styles.browseTd}>{fmtDurationLocalized(r.duration, t)}</div>
                   <div className={styles.browseTd}>{r.width && r.height ? `${r.width}x${r.height}` : "—"}</div>
-                  <div className={styles.browseTd}>{r.created_at ? r.created_at.replace("T", " ").slice(0, 19) : "—"}</div>
+                  <div className={styles.browseTd}>{formatServerDateTime(r.created_at)}</div>
                   <div className={styles.browseTdActions}>
                     {!bulkPick ? (
                       <Dropdown
