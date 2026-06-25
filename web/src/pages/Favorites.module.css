@@ -1,0 +1,1345 @@
+.topBar {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.topRightTools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.folderActionBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.88);
+  font-size: 13px;
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease;
+}
+
+.folderActionBtn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.22);
+  color: #fff;
+}
+
+.folderActionBtnIconOnly {
+  justify-content: center;
+  width: 32px;
+  padding: 0;
+  font-size: 16px;
+}
+
+.viewModePicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.viewModeCurrentIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  color: rgba(255, 255, 255, 0.65);
+  line-height: 1;
+  padding: 0 2px;
+}
+
+.topLeftTools {
+  justify-content: flex-start;
+  flex: 1;
+  min-width: 0;
+}
+
+.categoryTabs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.categoryTab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.62);
+  font-size: 13px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition:
+    color 0.12s ease,
+    background 0.12s ease,
+    border-color 0.12s ease;
+}
+
+.categoryTab:hover {
+  color: rgba(255, 255, 255, 0.88);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.categoryTabActive {
+  color: #fff;
+  background: rgba(0, 164, 220, 0.18);
+  border-color: rgba(0, 164, 220, 0.45);
+}
+
+.categoryCount {
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+}
+
+.categoryTabActive .categoryCount {
+  background: rgba(0, 164, 220, 0.28);
+  color: #d6f3ff;
+}
+
+.folderLayout {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.folderSidebar {
+  position: sticky;
+  top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.folderSidebarBack {
+  align-self: flex-start;
+  padding: 0;
+  border: none;
+  background: none;
+  color: #00a4dc;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.folderSidebarBack:hover {
+  color: #4cc3e0;
+  text-decoration: underline;
+}
+
+.folderSidebarList {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid #2a3140;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #12151c;
+}
+
+.folderSidebarItem {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 12px;
+  border: none;
+  border-bottom: 1px solid #232a36;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.82);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.folderSidebarItem:last-child {
+  border-bottom: none;
+}
+
+.folderSidebarItem:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.folderSidebarItemActive {
+  background: rgba(0, 164, 220, 0.14);
+  color: #fff;
+}
+
+.folderSidebarName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folderSidebarCount {
+  flex-shrink: 0;
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 12px;
+}
+
+.folderMain {
+  min-width: 0;
+}
+
+.folderGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+  gap: 16px 14px;
+  align-items: start;
+}
+
+.folderCard {
+  min-width: 0;
+}
+
+.folderCover {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 2 / 3;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #1a2229;
+  border: 2px solid transparent;
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+}
+
+.folderCover:hover {
+  border-color: #ed6d00;
+}
+
+.folderCoverImg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.folderCoverFallback {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(160deg, #2a3348 0%, #151922 100%);
+}
+
+.folderCountBadge {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 2;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  font-size: 12px;
+}
+
+.folderTitle {
+  margin-top: 8px;
+  color: #fff;
+  font-size: 13px;
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.folderListPage {
+  min-height: 240px;
+}
+
+.folderListGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.folderListCard {
+  min-width: 0;
+  padding: 14px 16px 12px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease;
+}
+
+.folderListCard:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(0, 164, 220, 0.4);
+}
+
+.folderListCardHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.folderListCardTitle {
+  color: #fff;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.folderListCardMeta {
+  margin-top: 4px;
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 12px;
+}
+
+.folderListCardMenuBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.55);
+  cursor: pointer;
+}
+
+.folderListCardMenuBtn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.folderListCardPreviews {
+  display: flex;
+  gap: 8px;
+}
+
+.folderPreviewSlot {
+  flex: 1;
+  min-width: 0;
+  aspect-ratio: 1 / 1;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #1a2229;
+}
+
+.folderPreviewImg {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.folderPreviewEmpty {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.18);
+  background: linear-gradient(160deg, #252d3a 0%, #171c24 100%);
+}
+
+.folderPreviewEmptyIcon {
+  width: 42%;
+  height: 42%;
+}
+
+.folderListEnd {
+  margin-top: 28px;
+  text-align: center;
+  color: rgba(255, 255, 255, 0.35);
+  font-size: 13px;
+}
+
+.folderListEmpty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 280px;
+}
+
+.folderSidebarNew {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  border: 1px dashed rgba(255, 255, 255, 0.16);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 14px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.folderSidebarNew:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.24);
+}
+
+.folderSidebarNewIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 16px;
+}
+
+.folderSidebarCard {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  width: 100%;
+  padding: 10px 6px 10px 12px;
+  margin-bottom: 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  color: rgba(255, 255, 255, 0.82);
+}
+
+.folderSidebarCard:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.folderSidebarCardMain {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  margin: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+
+.folderSidebarCardMenuBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.55);
+  cursor: pointer;
+}
+
+.folderSidebarCardMenuBtn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.folderSidebarCardActive {
+  background: rgba(0, 164, 220, 0.12);
+  border-color: rgba(0, 164, 220, 0.35);
+}
+
+.folderSidebarCardActive::after {
+  content: "";
+  position: absolute;
+  right: -1px;
+  top: 50%;
+  transform: translateY(-50%);
+  border-top: 8px solid transparent;
+  border-bottom: 8px solid transparent;
+  border-right: 8px solid rgba(255, 255, 255, 0.06);
+}
+
+.folderSidebarThumb {
+  width: 44px;
+  height: 44px;
+  border-radius: 6px;
+  overflow: hidden;
+  flex-shrink: 0;
+  background: #1a2229;
+}
+
+.folderSidebarThumbImg {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.folderSidebarThumbFallback {
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(160deg, #2a3348 0%, #151922 100%);
+}
+
+.folderSidebarInfo {
+  min-width: 0;
+  flex: 1;
+}
+
+.folderSidebarCardTitle {
+  color: #fff;
+  font-size: 14px;
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.folderSidebarCardCount {
+  margin-top: 2px;
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 12px;
+}
+
+.loadingWrap {
+  display: flex;
+  justify-content: center;
+  padding: 48px 0;
+}
+
+/* ——— Poster / Thumb grid ——— */
+.posterGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 16px 14px;
+  align-items: start;
+}
+
+.thumbGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 16px 14px;
+  align-items: start;
+}
+
+.photoGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 12px;
+  align-items: start;
+}
+
+.posterCard,
+.thumbCard,
+.photoCard {
+  background: transparent;
+  width: 100%;
+  min-width: 0;
+}
+
+.posterImage,
+.thumbImage,
+.photoImage {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  background: #1a2229;
+  cursor: pointer;
+  overflow: hidden;
+  border: 2px solid transparent;
+  box-sizing: border-box;
+  border-radius: 6px;
+  transition:
+    border-color 0.15s ease,
+    background 0.2s ease;
+}
+
+.posterImage[data-cover-loaded],
+.thumbImage[data-cover-loaded],
+.photoImage[data-cover-loaded] {
+  background: transparent;
+}
+
+.posterImage:hover,
+.thumbImage:hover,
+.photoImage:hover {
+  border-color: #ed6d00;
+}
+
+.posterImage[data-selected],
+.thumbImage[data-selected],
+.photoImage[data-selected] {
+  border-color: #ed6d00;
+}
+
+/* 批量点选：未选中项悬停不显示黄框 */
+.posterImage[data-bulk-pick]:not([data-selected]):hover,
+.thumbImage[data-bulk-pick]:not([data-selected]):hover,
+.photoImage[data-bulk-pick]:not([data-selected]):hover {
+  border-color: transparent;
+}
+
+/* 批量点选：选择钮始终可见 */
+.posterImage[data-bulk-pick] .gridSelectBtn,
+.thumbImage[data-bulk-pick] .gridSelectBtn,
+.photoImage[data-bulk-pick] .gridSelectBtn {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.gridCoverImg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: center;
+  z-index: 1;
+}
+
+/* 海报：固定 2:3 竖幅 */
+.posterImage {
+  aspect-ratio: 2 / 3;
+  height: auto;
+}
+
+/* 缩略图：16:9 横幅 */
+.thumbImage {
+  aspect-ratio: 16 / 9;
+  height: auto;
+}
+
+/* 照片：1:1 方格，与照片库一致 */
+.photoImage {
+  aspect-ratio: 1 / 1;
+  height: auto;
+}
+
+.photoCoverImg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  z-index: 1;
+}
+
+.gridHoverShade {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+}
+
+.posterImage:hover .gridHoverShade,
+.thumbImage:hover .gridHoverShade,
+.photoImage:hover .gridHoverShade {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.gridCornerBtn {
+  position: absolute;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.4);
+  color: #fff;
+  font-size: 15px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
+}
+
+.gridCornerBtn:hover {
+  background: rgba(255, 255, 255, 0.22);
+  color: #ed6d00;
+}
+
+.gridEditBtn {
+  bottom: 8px;
+  left: 8px;
+  top: auto;
+  right: auto;
+}
+
+.gridPlayBtn {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  padding: 0 0 0 4px;
+  border: 2px solid rgba(255, 255, 255, 0.92);
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  font-size: 24px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    transform 0.15s ease,
+    background 0.15s ease,
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.gridPlayBtn:hover {
+  background: rgba(255, 255, 255, 0.34);
+  border-color: #fff;
+  box-shadow: 0 0 24px rgba(255, 255, 255, 0.5);
+  transform: scale(1.08);
+}
+
+.gridMoreCorner {
+  position: absolute;
+  bottom: 6px;
+  right: 4px;
+}
+
+.gridMoreIconBtn {
+  color: rgba(255, 255, 255, 0.92) !important;
+  width: 32px !important;
+  height: 32px !important;
+}
+
+.gridMoreIconBtn:hover {
+  color: #ed6d00 !important;
+  background: rgba(255, 255, 255, 0.12) !important;
+}
+
+.gridSelectBtn {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 5;
+  box-sizing: border-box;
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  min-height: 16px;
+  padding: 0;
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.82);
+  background: rgba(0, 0, 0, 0.3);
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 8px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 0.12s ease,
+    border-color 0.12s ease,
+    background 0.12s ease,
+    color 0.12s ease;
+}
+
+.posterImage:hover .gridSelectBtn,
+.thumbImage:hover .gridSelectBtn,
+.photoImage:hover .gridSelectBtn,
+.posterImage[data-selected] .gridSelectBtn,
+.thumbImage[data-selected] .gridSelectBtn,
+.photoImage[data-selected] .gridSelectBtn {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.gridSelectBtn:hover {
+  border-color: #fff;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}
+
+.gridSelectBtn[data-selected] {
+  background: rgba(255, 255, 255, 0.95);
+  color: #141414;
+  border-color: rgba(255, 255, 255, 0.95);
+}
+
+.cardBody {
+  padding: 10px 2px 0;
+  min-width: 0;
+  text-align: center;
+}
+
+.cardTitle {
+  color: #fff;
+  font-size: 12px;
+  line-height: 1.4;
+  font-weight: 400;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ——— List view ——— */
+.listWrap {
+  border: 1px solid #232323;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.listRow {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 72px;
+  padding: 10px 12px;
+  border-top: 1px solid #1f1f1f;
+  background: #111;
+  transition:
+    background 0.15s ease,
+    padding-left 0.15s ease,
+    padding-right 0.15s ease;
+}
+
+.listRow:first-child {
+  border-top: none;
+}
+
+.listRow:hover {
+  background: #1a1a1a;
+  padding-left: 44px;
+  padding-right: 44px;
+}
+
+.listRow[data-selected]:not(:hover) {
+  padding-left: 44px;
+}
+
+.listSelectSlot {
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.listRow:hover .listSelectSlot,
+.listRow[data-selected] .listSelectSlot {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.listRow[data-bulk-pick] .listSelectSlot {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.listSelectBtn {
+  box-sizing: border-box;
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  min-height: 16px;
+  padding: 0;
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.82);
+  background: rgba(0, 0, 0, 0.3);
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 8px;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition:
+    border-color 0.12s ease,
+    background 0.12s ease,
+    color 0.12s ease;
+}
+
+.listSelectBtn:hover {
+  border-color: #fff;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}
+
+.listSelectBtn[data-selected] {
+  background: rgba(255, 255, 255, 0.95);
+  color: #141414;
+  border-color: rgba(255, 255, 255, 0.95);
+}
+
+.listRowMain {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+  flex: 1;
+  cursor: pointer;
+  text-align: left;
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+}
+
+.listPosterBlock {
+  flex-shrink: 0;
+}
+
+.listPosterInner {
+  position: relative;
+  width: 72px;
+  aspect-ratio: 2 / 3;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 2px solid transparent;
+  background: linear-gradient(135deg, #2a2a3a 0%, #1a1a24 100%);
+  transition: border-color 0.15s ease;
+}
+
+.listPosterInnerSquare {
+  aspect-ratio: 1 / 1;
+  border-radius: 6px;
+  background: #1a1a1a;
+}
+
+.listPosterMusicPlaceholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.22);
+  pointer-events: none;
+}
+
+.listPosterMusicPlaceholder svg {
+  width: 46%;
+  height: 46%;
+}
+
+.listPosterInner:hover {
+  border-color: #ed6d00;
+}
+
+.listRow[data-bulk-pick] .listPosterInner:not([data-selected]):hover {
+  border-color: transparent;
+}
+
+.listRow[data-bulk-pick] .listPosterBlock {
+  cursor: pointer;
+}
+
+.listPosterImg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  z-index: 1;
+}
+
+.listPlayOverlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: rgba(0, 0, 0, 0.35);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.listPosterInner:hover .listPlayOverlay {
+  opacity: 1;
+}
+
+.listPlayCircle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: #ed6d00;
+  color: #111;
+  font-size: 20px;
+  padding-left: 3px;
+}
+
+.listInfo {
+  min-width: 0;
+  flex: 1;
+}
+
+.listTitle {
+  color: #e6edf3;
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.listMeta {
+  color: #8c8c8c;
+  font-size: 13px;
+  margin-top: 4px;
+}
+
+.listMoreSlot {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.listRow:hover .listMoreSlot {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.listMoreBtn {
+  color: rgba(255, 255, 255, 0.65) !important;
+}
+
+.listMoreBtn:hover {
+  color: #ed6d00 !important;
+}
+
+/* ——— Table view ——— */
+.browseTableWrap {
+  border: 1px solid #2a3140;
+  border-radius: 6px;
+  overflow: hidden;
+  overflow-x: auto;
+  background: #12151c;
+}
+
+.browseTableHead {
+  background: #1c2433;
+  border-bottom: 1px solid #2a3140;
+}
+
+.browseTableHeadRow {
+  display: grid;
+  align-items: stretch;
+  min-height: 44px;
+}
+
+.browseThGutter {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-right: 1px solid #2a3140;
+  min-width: 0;
+}
+
+.browseTh {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 6px;
+  padding: 0 10px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.82);
+  cursor: pointer;
+  user-select: none;
+  border-right: 1px solid #2a3140;
+  transition: background 0.12s ease;
+  min-width: 0;
+}
+
+.browseThActions {
+  border-right: none;
+  min-width: 0;
+}
+
+.browseTh:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.browseSortIcon {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.browseTableBody {
+  background: #12151c;
+}
+
+.browseTr {
+  display: grid;
+  align-items: center;
+  min-height: 48px;
+  padding: 4px 0;
+  border-bottom: 1px solid #232a36;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.browseTr:last-child {
+  border-bottom: none;
+}
+
+.browseTr[data-stripe] {
+  background: #161a22;
+}
+
+.browseTr:hover {
+  background: #242a35 !important;
+}
+
+.browseTr[data-selected] {
+  background: #1e2430 !important;
+}
+
+.browseTdGutter {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-right: 1px solid #232a36;
+  min-width: 0;
+  padding: 0 2px;
+  box-sizing: border-box;
+}
+
+.browseTd {
+  padding: 0 10px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.88);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border-right: 1px solid #232a36;
+  min-width: 0;
+}
+
+.browseTdTitle {
+  position: relative;
+  padding: 0 10px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.88);
+  border-right: 1px solid #232a36;
+  min-width: 0;
+}
+
+.browseTitleText {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: padding-left 0.15s ease;
+}
+
+.browseTr:hover .browseTitleText {
+  padding-left: 42px;
+}
+
+.browseTr[data-bulk-pick]:hover .browseTitleText {
+  padding-left: 0;
+}
+
+.browseTr[data-bulk-pick] .browseTitleText[data-browse-table-detail] {
+  cursor: pointer;
+  color: #8ec8ff;
+}
+
+.browseTr[data-bulk-pick] .browseTitleText[data-browse-table-detail]:hover {
+  color: #bae0ff;
+  text-decoration: underline;
+}
+
+.browseTdActions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  border-right: none;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.browseTr:hover .browseTdActions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.browseGutterSelect {
+  box-sizing: border-box;
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  min-height: 16px;
+  padding: 0;
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.82);
+  background: rgba(0, 0, 0, 0.3);
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 8px;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 0.12s ease,
+    border-color 0.12s ease,
+    background 0.12s ease,
+    color 0.12s ease;
+}
+
+.browseTr:hover .browseGutterSelect,
+.browseTr[data-selected] .browseGutterSelect {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.browseGutterSelect:hover {
+  border-color: #fff;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}
+
+.browseGutterSelect[data-selected] {
+  background: rgba(255, 255, 255, 0.95);
+  color: #141414;
+  border-color: rgba(255, 255, 255, 0.95);
+}
+
+.browseTdTitle .browseRowPlay {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0 0 0 2px;
+  margin: 0;
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.35);
+  color: #fff;
+  font-size: 14px;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 0.12s ease,
+    background 0.12s ease,
+    border-color 0.12s ease,
+    color 0.12s ease,
+    transform 0.12s ease;
+}
+
+.browseTr:hover .browseTdTitle .browseRowPlay {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.browseTdTitle .browseRowPlay:hover {
+  background: #ed6d00;
+  border-color: #ed6d00;
+  color: #111;
+  transform: translateY(-50%) scale(1.06);
+}
+
+.browseRowMoreBtn {
+  color: rgba(255, 255, 255, 0.65) !important;
+}
+
+.browseRowMoreBtn:hover {
+  color: #ed6d00 !important;
+}
+
+.browseTablePagination {
+  display: flex;
+  justify-content: flex-end;
+  padding: 12px 14px;
+  border-top: 1px solid #2a3140;
+  background: #161a22;
+}
+
+@media (max-width: 900px) {
+  .topBar {
+    flex-direction: column;
+  }
+
+  .folderLayout {
+    grid-template-columns: 1fr;
+  }
+
+  .folderSidebar {
+    position: static;
+  }
+
+  .folderListGrid {
+    grid-template-columns: 1fr;
+  }
+}

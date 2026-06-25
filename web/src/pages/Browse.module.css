@@ -1,0 +1,984 @@
+.topBar {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+/* 页顶工具栏 + 多选条：随主内容区滚动时固定在顶部 */
+.browsePageStickyHead {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  margin-top: calc(-1 * var(--browse-sticky-pad-top, 16px));
+  padding-top: var(--browse-sticky-pad-top, 16px);
+  margin-bottom: 12px;
+  background: #0f1419;
+}
+
+.browsePageStickyHead .topBar {
+  margin-bottom: 12px;
+}
+
+.browsePageStickyHead .browseSelectionBar {
+  margin-bottom: 0;
+}
+
+.topRightTools {
+  justify-content: flex-end;
+  margin-left: auto;
+}
+
+.viewModePicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.viewModeCurrentIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  color: rgba(255, 255, 255, 0.65);
+  line-height: 1;
+  padding: 0 2px;
+}
+
+.topLeftTools {
+  justify-content: flex-start;
+}
+
+.loadingWrap {
+  display: flex;
+  justify-content: center;
+  padding: 48px 0;
+}
+
+.posterGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 16px 14px;
+  align-items: start;
+}
+
+.thumbGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 16px 14px;
+  align-items: start;
+}
+
+.posterCard,
+.thumbCard {
+  background: transparent;
+  width: 100%;
+  min-width: 0;
+}
+
+.posterImage,
+.thumbImage {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  background: #1a2229;
+  cursor: pointer;
+  overflow: hidden;
+  border: 2px solid transparent;
+  box-sizing: border-box;
+  border-radius: 6px;
+  transition:
+    border-color 0.15s ease,
+    background 0.2s ease;
+}
+
+.posterImage[data-cover-loaded],
+.thumbImage[data-cover-loaded] {
+  background: transparent;
+}
+
+.posterImage:hover,
+.thumbImage:hover {
+  border-color: #ed6d00;
+}
+
+.posterImage[data-selected],
+.thumbImage[data-selected] {
+  border-color: #ed6d00;
+}
+
+/* 批量点选：未选中项不在悬停时显示黄框（仅已选中保持黄框） */
+.posterImage[data-bulk-pick]:not([data-selected]):hover,
+.thumbImage[data-bulk-pick]:not([data-selected]):hover {
+  border-color: transparent;
+}
+
+/* 批量点选：选择钮始终可见 */
+.posterImage[data-bulk-pick] .gridSelectBtn,
+.thumbImage[data-bulk-pick] .gridSelectBtn {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* 参考图：完整画幅、上下/左右留黑边 */
+.gridCoverImg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: center;
+  z-index: 1;
+}
+
+.gridWatchedBadge {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  background: #222;
+  border-radius: 3px;
+  color: #fff;
+  font-size: 11px;
+  line-height: 1;
+  pointer-events: none;
+}
+
+/* 海报：固定 2:3 竖幅（宽:高 = 2:3） */
+.posterImage {
+  aspect-ratio: 2 / 3;
+  height: auto;
+}
+
+/* 缩略图：16:9 横幅 */
+.thumbImage {
+  aspect-ratio: 16 / 9;
+  height: auto;
+}
+
+.gridHoverShade {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+}
+
+.posterImage:hover .gridHoverShade,
+.thumbImage:hover .gridHoverShade,
+.musicBrowseCover:hover .gridHoverShade {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.musicBrowseCover {
+  box-sizing: border-box;
+  cursor: pointer;
+}
+
+/* 顶层描边：避免 border 被子层盖住，圆角四角完整闭合 */
+.musicBrowseCover::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  box-sizing: border-box;
+  border: 2px solid transparent;
+  border-radius: inherit;
+  pointer-events: none;
+  transition: border-color 0.15s ease;
+}
+
+.musicBrowseCover:hover::after,
+.musicBrowseCover[data-selected]::after {
+  border-color: #ed6d00;
+}
+
+.musicBrowseCover[data-bulk-pick]:not([data-selected]):hover::after {
+  border-color: transparent;
+}
+
+.musicBrowseCover[data-bulk-pick] .gridSelectBtn {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.musicBrowseCover:hover .gridSelectBtn,
+.musicBrowseCover[data-selected] .gridSelectBtn {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.gridCornerBtn {
+  position: absolute;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.4);
+  color: #fff;
+  font-size: 15px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
+}
+
+.gridCornerBtn:hover {
+  background: rgba(255, 255, 255, 0.22);
+  color: #ed6d00;
+}
+
+.gridEditBtn {
+  bottom: 8px;
+  left: 8px;
+  top: auto;
+  right: auto;
+}
+
+.gridPlayBtn {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  padding: 0 0 0 4px;
+  border: 2px solid rgba(255, 255, 255, 0.92);
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  font-size: 24px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    transform 0.15s ease,
+    background 0.15s ease,
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.gridPlayBtn:hover {
+  background: rgba(255, 255, 255, 0.34);
+  border-color: #fff;
+  box-shadow: 0 0 24px rgba(255, 255, 255, 0.5);
+  transform: scale(1.08);
+}
+
+.gridMoreCorner {
+  position: absolute;
+  bottom: 6px;
+  right: 4px;
+}
+
+.gridMoreIconBtn {
+  color: rgba(255, 255, 255, 0.92) !important;
+  width: 32px !important;
+  height: 32px !important;
+}
+
+.gridMoreIconBtn:hover {
+  color: #ed6d00 !important;
+  background: rgba(255, 255, 255, 0.12) !important;
+}
+
+/* 与详情页「相关视频」.relatedOverlaySelect 一致：16px、细环、选中白底勾 */
+.gridSelectBtn {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 5;
+  box-sizing: border-box;
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  min-height: 16px;
+  padding: 0;
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.82);
+  background: rgba(0, 0, 0, 0.3);
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 8px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 0.12s ease,
+    border-color 0.12s ease,
+    background 0.12s ease,
+    color 0.12s ease;
+}
+
+.posterImage:hover .gridSelectBtn,
+.thumbImage:hover .gridSelectBtn,
+.posterImage[data-selected] .gridSelectBtn,
+.thumbImage[data-selected] .gridSelectBtn {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.gridSelectBtn:hover {
+  border-color: #fff;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}
+
+.gridSelectBtn[data-selected] {
+  background: rgba(255, 255, 255, 0.95);
+  color: #141414;
+  border-color: rgba(255, 255, 255, 0.95);
+}
+
+.cardBody {
+  padding: 10px 2px 0;
+  min-width: 0;
+  text-align: center;
+}
+
+.cardTitle {
+  color: #fff;
+  font-size: 12px;
+  line-height: 1.4;
+  font-weight: 400;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cardMeta {
+  color: #999;
+  font-size: 12px;
+  margin-top: 4px;
+}
+
+.listWrap {
+  border: 1px solid #232323;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.listRow {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 72px;
+  padding: 10px 12px;
+  border-top: 1px solid #1f1f1f;
+  background: #111;
+  transition:
+    background 0.15s ease,
+    padding-left 0.15s ease,
+    padding-right 0.15s ease;
+}
+
+.listRow:first-child {
+  border-top: none;
+}
+
+.listRow:hover {
+  background: #1a1a1a;
+  padding-left: 44px;
+  padding-right: 44px;
+}
+
+.listRow[data-selected]:not(:hover) {
+  padding-left: 44px;
+}
+
+.listSelectSlot {
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.listRow:hover .listSelectSlot,
+.listRow[data-selected] .listSelectSlot {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.listRow[data-bulk-pick] .listSelectSlot {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.listSelectBtn {
+  box-sizing: border-box;
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  min-height: 16px;
+  padding: 0;
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.82);
+  background: rgba(0, 0, 0, 0.3);
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 8px;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition:
+    border-color 0.12s ease,
+    background 0.12s ease,
+    color 0.12s ease;
+}
+
+.listSelectBtn:hover {
+  border-color: #fff;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}
+
+.listSelectBtn[data-selected] {
+  background: rgba(255, 255, 255, 0.95);
+  color: #141414;
+  border-color: rgba(255, 255, 255, 0.95);
+}
+
+.listRowMain {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+  flex: 1;
+  cursor: pointer;
+  text-align: left;
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+}
+
+.listPosterBlock {
+  flex-shrink: 0;
+}
+
+.listPosterInner {
+  position: relative;
+  width: 72px;
+  aspect-ratio: 2 / 3;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 2px solid transparent;
+  background: linear-gradient(135deg, #2a2a3a 0%, #1a1a24 100%);
+  transition: border-color 0.15s ease;
+}
+
+.listPosterInner:hover {
+  border-color: #ed6d00;
+}
+
+.listRow[data-bulk-pick] .listPosterInner:not([data-selected]):hover {
+  border-color: transparent;
+}
+
+.listRow[data-bulk-pick] .listPosterBlock {
+  cursor: pointer;
+}
+
+.listPosterImg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  z-index: 1;
+}
+
+.listPlayOverlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: rgba(0, 0, 0, 0.35);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.listPosterInner:hover .listPlayOverlay {
+  opacity: 1;
+}
+
+.listPlayCircle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: #ed6d00;
+  color: #111;
+  font-size: 20px;
+  padding-left: 3px;
+}
+
+.listInfo {
+  min-width: 0;
+  flex: 1;
+}
+
+.listTitle {
+  color: #e6edf3;
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.listMeta {
+  color: #8c8c8c;
+  font-size: 13px;
+  margin-top: 4px;
+}
+
+.listMoreSlot {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.listRow:hover .listMoreSlot {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.listMoreBtn {
+  color: rgba(255, 255, 255, 0.65) !important;
+}
+
+.listMoreBtn:hover {
+  color: #ed6d00 !important;
+}
+
+/* —— 多选提示条 —— */
+.browseSelectionBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  background: #141414;
+  border: 1px solid #ed6d00;
+  border-radius: 4px;
+  box-sizing: border-box;
+}
+
+.browseSelectionBarLeft {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #ed6d00;
+  font-size: 14px;
+  font-weight: 500;
+  flex-shrink: 0;
+}
+
+.browseSelectionCheckIcon {
+  font-size: 15px;
+}
+
+.browseSelectionBarCenter {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-width: 0;
+}
+
+.browseSelectionActionBtn {
+  color: rgba(255, 255, 255, 0.88) !important;
+  width: 40px !important;
+  height: 40px !important;
+  min-width: 40px !important;
+  padding: 0 !important;
+  font-size: 20px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+}
+
+.browseSelectionActionBtn :global(.anticon) {
+  font-size: 20px;
+}
+
+.browseSelectionActionBtn:hover {
+  color: #ed6d00 !important;
+  background: rgba(237, 109, 0, 0.12) !important;
+}
+
+.browseSelectionBarRight {
+  flex-shrink: 0;
+}
+
+.browseSelectionClearBtn {
+  color: rgba(255, 255, 255, 0.88) !important;
+  display: inline-flex !important;
+  align-items: center;
+  gap: 6px;
+}
+
+.browseSelectionClearBtn:hover {
+  color: #fff !important;
+}
+
+/* —— 表格视图（Browse） —— */
+.browseTableWrap {
+  border: 1px solid #2a3140;
+  border-radius: 6px;
+  overflow: hidden;
+  overflow-x: auto;
+  background: #12151c;
+}
+
+.browseTableHead {
+  background: #1c2433;
+  border-bottom: 1px solid #2a3140;
+}
+
+.browseTableHeadRow {
+  display: grid;
+  align-items: stretch;
+  min-height: 44px;
+}
+
+.browseThGutter {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-right: 1px solid #2a3140;
+  min-width: 0;
+}
+
+.browseColPickerTrigger {
+  color: rgba(255, 255, 255, 0.75) !important;
+}
+
+.browseColPickerTrigger:hover {
+  color: #ed6d00 !important;
+}
+
+.browseColPickerOverlay :global(.ant-popover-inner) {
+  padding: 10px 12px;
+  background: #141414 !important;
+  border: 1px solid #333;
+}
+
+.browseColPickerList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 200px;
+}
+
+.browseColPickerRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.browseColPickerActive {
+  color: #ed6d00;
+}
+
+.browseColPickerMuted {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.browseColPickerOverlay :global(.ant-checkbox-checked .ant-checkbox-inner) {
+  background-color: #ed6d00 !important;
+  border-color: #ed6d00 !important;
+}
+
+.browseColPickerOverlay :global(.ant-checkbox-checked::after) {
+  border-color: #fff !important;
+}
+
+.browseTh {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 6px;
+  padding: 0 10px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.82);
+  cursor: pointer;
+  user-select: none;
+  border-right: 1px solid #2a3140;
+  transition: background 0.12s ease;
+  min-width: 0;
+}
+
+.browseThActions {
+  border-right: none;
+  min-width: 0;
+}
+
+.browseTh:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.browseSortIcon {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.browseTableBody {
+  background: #12151c;
+}
+
+.browseTr {
+  display: grid;
+  align-items: center;
+  min-height: 48px;
+  padding: 4px 0;
+  border-bottom: 1px solid #232a36;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.browseTr:last-child {
+  border-bottom: none;
+}
+
+.browseTr[data-stripe] {
+  background: #161a22;
+}
+
+.browseTr:hover {
+  background: #242a35 !important;
+}
+
+.browseTr[data-selected] {
+  background: #1e2430 !important;
+}
+
+.browseTdGutter {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-right: 1px solid #232a36;
+  min-width: 0;
+  padding: 0 2px;
+  box-sizing: border-box;
+}
+
+.browseTd {
+  padding: 0 10px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.88);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border-right: 1px solid #232a36;
+  min-width: 0;
+}
+
+.browseTdTitle {
+  position: relative;
+  padding: 0 10px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.88);
+  border-right: 1px solid #232a36;
+  min-width: 0;
+}
+
+.browseTitleText {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: padding-left 0.15s ease;
+}
+
+/* 仅给标题列内「播放」按钮让位（选择钮已移至首列） */
+.browseTr:hover .browseTitleText {
+  padding-left: 42px;
+}
+
+.browseTr[data-bulk-pick]:hover .browseTitleText {
+  padding-left: 0;
+}
+
+.browseTr[data-bulk-pick] .browseTitleText[data-browse-table-detail] {
+  cursor: pointer;
+  color: #8ec8ff;
+}
+
+.browseTr[data-bulk-pick] .browseTitleText[data-browse-table-detail]:hover {
+  color: #bae0ff;
+  text-decoration: underline;
+}
+
+.browseTdActions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  border-right: none;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.browseTr:hover .browseTdActions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.browseGutterSelect {
+  box-sizing: border-box;
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  min-height: 16px;
+  padding: 0;
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.82);
+  background: rgba(0, 0, 0, 0.3);
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 8px;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 0.12s ease,
+    border-color 0.12s ease,
+    background 0.12s ease,
+    color 0.12s ease;
+}
+
+.browseTr:hover .browseGutterSelect,
+.browseTr[data-selected] .browseGutterSelect {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.browseGutterSelect:hover {
+  border-color: #fff;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}
+
+.browseGutterSelect[data-selected] {
+  background: rgba(255, 255, 255, 0.95);
+  color: #141414;
+  border-color: rgba(255, 255, 255, 0.95);
+}
+
+.browseTdTitle .browseRowPlay {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0 0 0 2px;
+  margin: 0;
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.35);
+  color: #fff;
+  font-size: 14px;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 0.12s ease,
+    background 0.12s ease,
+    border-color 0.12s ease,
+    color 0.12s ease,
+    transform 0.12s ease;
+}
+
+.browseTr:hover .browseTdTitle .browseRowPlay {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.browseTdTitle .browseRowPlay:hover {
+  background: #ed6d00;
+  border-color: #ed6d00;
+  color: #111;
+  transform: translateY(-50%) scale(1.06);
+}
+
+.browseRowMoreBtn {
+  color: rgba(255, 255, 255, 0.65) !important;
+}
+
+.browseRowMoreBtn:hover {
+  color: #ed6d00 !important;
+}
+
+.browseTablePagination {
+  display: flex;
+  justify-content: flex-end;
+  padding: 12px 14px;
+  border-top: 1px solid #2a3140;
+  background: #161a22;
+}
+
+@media (max-width: 900px) {
+  .topBar {
+    flex-direction: column;
+  }
+}

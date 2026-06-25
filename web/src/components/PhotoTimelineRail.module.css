@@ -1,0 +1,79 @@
+.rail {
+  position: sticky;
+  top: 72px;
+  align-self: flex-start;
+  width: 72px;
+  flex-shrink: 0;
+  padding: 8px 0 24px 8px;
+  user-select: none;
+}
+
+.track {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  padding-right: 10px;
+  border-right: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.mark {
+  position: relative;
+  border: none;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.42);
+  cursor: pointer;
+  padding: 2px 0;
+  text-align: right;
+  width: 100%;
+  line-height: 1.2;
+  transition: color 0.15s ease;
+}
+
+.mark:hover,
+.markActive {
+  color: #4a90d9;
+}
+
+.yearMark {
+  font-size: 12px;
+  font-weight: 600;
+  margin-top: 8px;
+}
+
+.yearMark:first-child {
+  margin-top: 0;
+}
+
+.monthMark {
+  font-size: 11px;
+  padding-left: 4px;
+}
+
+.tooltip {
+  position: absolute;
+  right: calc(100% + 8px);
+  top: 50%;
+  transform: translateY(-50%);
+  white-space: nowrap;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: rgba(74, 144, 217, 0.92);
+  color: #fff;
+  font-size: 11px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.mark:hover .tooltip,
+.markActive .tooltip {
+  opacity: 1;
+}
+
+@media (max-width: 960px) {
+  .rail {
+    display: none;
+  }
+}

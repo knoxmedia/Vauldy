@@ -1,0 +1,127 @@
+.headerBar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding: 12px 0 16px;
+  border-bottom: 1px solid #2a2a2a;
+  margin-bottom: 0;
+}
+
+.pageTitle {
+  font-size: 18px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.88);
+  margin: 0;
+  white-space: nowrap;
+}
+
+.mediaTitle {
+  font-size: 18px;
+  font-weight: 400;
+  color: rgba(255, 255, 255, 0.65);
+  max-width: 480px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.countBadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 11px;
+  background: #2a2a2a;
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 13px;
+}
+
+.filters {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-left: auto;
+}
+
+.filterSelect {
+  min-width: 120px;
+}
+
+.tableWrap {
+  overflow-x: auto;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.table thead th {
+  text-align: left;
+  padding: 12px 16px 12px 0;
+  color: rgba(255, 255, 255, 0.45);
+  font-weight: 400;
+  border-bottom: 1px solid #2a2a2a;
+  white-space: nowrap;
+}
+
+.table tbody td {
+  padding: 14px 16px 14px 0;
+  color: rgba(255, 255, 255, 0.88);
+  border-bottom: 1px solid #1a1a1a;
+  vertical-align: middle;
+}
+
+.table tbody tr:hover td {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.sortable {
+  cursor: pointer;
+  user-select: none;
+}
+
+.sortable:hover {
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.sortIcon {
+  margin-left: 4px;
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.titleCell {
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.emptyWrap {
+  padding: 48px 0;
+  text-align: center;
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.loadingWrap {
+  display: flex;
+  justify-content: center;
+  padding: 48px 0;
+}
+
+.backLink {
+  color: rgba(255, 255, 255, 0.65);
+  cursor: pointer;
+  font-size: 18px;
+  margin-right: 4px;
+}
+
+.backLink:hover {
+  color: #00a4dc;
+}

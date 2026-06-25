@@ -1,0 +1,1280 @@
+.page {
+  padding: 8px 0 40px;
+  width: 100%;
+  max-width: 100%;
+  margin: 0;
+  box-sizing: border-box;
+}
+
+.topBar {
+  margin-bottom: 12px;
+}
+
+.backBtn {
+  color: rgba(255, 255, 255, 0.88) !important;
+}
+
+/* 减小左侧留白，使箭头与下方海报左缘视觉对齐 */
+.backBtn:global(.ant-btn.ant-btn-text) {
+  padding-inline-start: 0 !important;
+  padding-inline-end: 10px !important;
+}
+
+.backBtn :global(.ant-btn-icon) {
+  margin-inline-start: 0 !important;
+  padding-inline-start: 0 !important;
+}
+
+.loadingWrap {
+  display: flex;
+  justify-content: center;
+  padding: 80px 0;
+}
+
+.block {
+  margin-bottom: 28px;
+}
+
+.blockTitle {
+  margin: 0 0 12px !important;
+  color: rgba(255, 255, 255, 0.92) !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.02em;
+}
+
+/* 横向货架：标题 + 右上角箭头，隐藏滚动条 */
+.shelfHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.shelfTitle {
+  margin: 0 !important;
+  flex: 1;
+  min-width: 0;
+  color: rgba(255, 255, 255, 0.92) !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.02em;
+}
+
+.shelfArrows {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.shelfArrowBtn {
+  color: rgba(255, 255, 255, 0.72) !important;
+}
+
+.shelfArrowBtn:hover:not(:disabled) {
+  color: #ed6d00 !important;
+}
+
+.shelfTrack {
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.shelfTrack::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+/* —— 影片介绍（无外层卡片框，与页面底融为一体） —— */
+.introCard {
+  position: relative;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  overflow: visible;
+}
+
+.introInner {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: minmax(160px, 220px) 1fr;
+  gap: 24px;
+  padding: 0;
+  align-items: start;
+}
+
+.posterPlayHit {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  border-radius: 10px;
+  outline: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  -webkit-tap-highlight-color: transparent;
+  transition: box-shadow 0.18s ease;
+}
+
+.posterPlayHit:hover,
+.posterPlayHit:focus-visible {
+  box-shadow: 0 0 0 2px #ed6d00;
+}
+
+.posterPlayHit:focus-visible {
+  box-shadow: 0 0 0 2px #ed6d00, 0 0 0 5px rgba(237, 109, 0, 0.28);
+}
+
+.poster {
+  position: relative;
+  aspect-ratio: 2 / 3;
+  border-radius: 10px;
+  border: 1px solid #2c3348;
+  background: linear-gradient(160deg, #2a2a3a 0%, #1b1b28 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 52px;
+  color: #7a8fb8;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+
+.posterHoverOverlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: inherit;
+  background: rgba(0, 0, 0, 0.52);
+  opacity: 0;
+  transition: opacity 0.18s ease;
+  pointer-events: none;
+}
+
+.posterPlayHit:hover .posterHoverOverlay,
+.posterPlayHit:focus-visible .posterHoverOverlay {
+  opacity: 1;
+}
+
+/* 实心圆 + 黑色三角播放符（与线框同色琥珀黄） */
+.posterHoverPlayBtn {
+  flex-shrink: 0;
+  width: min(26%, 68px);
+  min-width: 48px;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: linear-gradient(165deg, #f58320 0%, #ed6d00 55%, #c45a00 100%);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.posterHoverPlayTriangle {
+  display: block;
+  width: 0;
+  height: 0;
+  margin-left: 3px;
+  border-style: solid;
+  border-width: 10px 0 10px 16px;
+  border-color: transparent transparent transparent #121212;
+}
+
+.posterImg {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.posterFallback {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.posterFallback span {
+  font-size: 13px;
+  color: #9aa6bf;
+}
+
+.posterColumn {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  min-width: 0;
+}
+
+.posterWatchedBar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  color: #e8ecf5;
+  font-size: 13px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.posterWatchedIcon {
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.92);
+}
+
+.introMain {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.title {
+  margin: 0 !important;
+  color: #fff !important;
+  line-height: 1.2 !important;
+  font-weight: 600 !important;
+}
+
+.directorLine {
+  color: #9aa8c4;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.metaRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  color: #b4c0da;
+  font-size: 13px;
+}
+
+.metaDot {
+  opacity: 0.45;
+  user-select: none;
+}
+
+.genreRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.genreTag {
+  margin: 0 !important;
+  border-radius: 6px !important;
+  background: rgba(255, 255, 255, 0.06) !important;
+  border: 1px solid rgba(255, 255, 255, 0.1) !important;
+  color: #d0d8ea !important;
+}
+
+.scoreRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px 20px;
+  margin-top: 4px;
+}
+
+.criticScore {
+  color: #e8ecf5;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.criticScoreMuted {
+  color: #6b758c;
+  font-size: 14px;
+}
+
+.rateLabel {
+  color: #8b96ad;
+  font-size: 13px;
+}
+
+.starRate {
+  color: #ed6d00 !important;
+}
+
+.actionBar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  align-items: center;
+  margin-top: 6px;
+}
+
+.playBtn {
+  background: #ed6d00 !important;
+  border-color: #ed6d00 !important;
+  color: #1a1a1a !important;
+  font-weight: 600 !important;
+}
+
+.playBtn:hover {
+  background: #f0b429 !important;
+  border-color: #f0b429 !important;
+  color: #111 !important;
+}
+
+.mediaDetailPlaySvg {
+  width: 18px;
+  height: 18px;
+  display: block;
+  flex-shrink: 0;
+}
+
+.playBtn .mediaDetailPlaySvg {
+  color: #1a1a1a;
+}
+
+.playBtn:hover .mediaDetailPlaySvg {
+  color: #111;
+}
+
+.iconAction {
+  border: none !important;
+  box-shadow: none !important;
+  color: #e2e8f5 !important;
+  background: rgba(255, 255, 255, 0.06) !important;
+}
+
+/* 圆形图标按钮：比 ant large 默认略大，图标同步放大 */
+.iconActionCircle:global(.ant-btn.ant-btn-lg.ant-btn-icon-only) {
+  width: 50px !important;
+  min-width: 50px !important;
+  height: 50px !important;
+  padding: 0 !important;
+}
+
+/* 默认圆形；悬停 / 聚焦 / 按下时高亮区域为圆角方形 */
+.iconActionCircle:global(.ant-btn.ant-btn-circle.ant-btn-lg.ant-btn-icon-only):hover,
+.iconActionCircle:global(.ant-btn.ant-btn-circle.ant-btn-lg.ant-btn-icon-only):focus-visible,
+.iconActionCircle:global(.ant-btn.ant-btn-circle.ant-btn-lg.ant-btn-icon-only):active {
+  border-radius: 6px !important;
+}
+
+.iconActionCircle :global(.anticon) {
+  font-size: 21px !important;
+}
+
+.iconAction:hover,
+.iconAction:focus-visible {
+  border: none !important;
+  box-shadow: none !important;
+  color: #f0f4ff !important;
+  background: rgba(255, 255, 255, 0.1) !important;
+}
+
+/* 收藏：五星线框/实心共用同一 em 方格，切换时不缩放跳动 */
+.iconActionFavorite.iconActionCircle :global(.anticon) {
+  font-size: 28px !important;
+  line-height: 1 !important;
+}
+
+.iconActionFavorite.iconActionCircle :global(.anticon svg) {
+  width: 1em !important;
+  height: 1em !important;
+}
+
+/* 已收藏：白实心五星（StarFilled），灰底与未收藏一致 */
+.iconActionFavorited {
+  border: none !important;
+  box-shadow: none !important;
+  background: rgba(255, 255, 255, 0.06) !important;
+  color: #ffffff !important;
+}
+
+.iconActionFavorited:hover,
+.iconActionFavorited:focus-visible {
+  border: none !important;
+  box-shadow: none !important;
+  background: rgba(255, 255, 255, 0.1) !important;
+  color: #ffffff !important;
+}
+
+.iconActionFavorited:active {
+  background: rgba(255, 255, 255, 0.08) !important;
+  color: #ffffff !important;
+}
+
+/* 观看切换：白图标；未观看=线框圆+勾，已观看=实心圆镂空勾 */
+.iconActionWatch {
+  border: none !important;
+  box-shadow: none !important;
+  background: rgba(255, 255, 255, 0.06) !important;
+  color: #ffffff !important;
+}
+
+.iconActionWatch:hover,
+.iconActionWatch:focus-visible {
+  border: none !important;
+  box-shadow: none !important;
+  background: rgba(255, 255, 255, 0.1) !important;
+  color: #ffffff !important;
+}
+
+.iconActionWatch:active {
+  background: rgba(255, 255, 255, 0.08) !important;
+  color: #ffffff !important;
+}
+
+/* 自定义 SVG 不在 .anticon 内，1em 会落到 16px；与未观看的线框图标统一加大 */
+.iconActionWatch.iconActionCircle :global(.anticon) {
+  font-size: 28px !important;
+}
+
+.iconWatchCutout {
+  display: block;
+  width: 28px !important;
+  height: 28px !important;
+}
+
+.originalTitle {
+  font-size: 13px;
+  display: block;
+  margin-top: -2px;
+}
+
+.overviewBlock {
+  margin-top: 6px;
+}
+
+.overviewText {
+  color: #b8c0d4 !important;
+  margin-bottom: 0 !important;
+  white-space: pre-wrap;
+  line-height: 1.65 !important;
+  font-size: 14px;
+}
+
+.expandLink {
+  padding-left: 0 !important;
+  height: auto !important;
+  color: #ed6d00 !important;
+}
+
+.streamPickers {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  display: grid;
+  /* 第二列占满剩余宽度，保证各行数值区左边缘在同一条竖线上 */
+  grid-template-columns: max-content minmax(0, 1fr);
+  column-gap: 12px;
+  row-gap: 10px;
+  align-items: center;
+}
+
+.streamKey {
+  color: #7d8aa3;
+  font-size: 13px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.streamValueCell {
+  justify-self: stretch;
+  width: 100%;
+  min-width: 0;
+  text-align: left;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+}
+
+.streamVal {
+  color: #e8ecf5;
+  font-size: 13px;
+  line-height: 1.4;
+  text-align: left;
+}
+
+.streamSelect {
+  width: auto !important;
+  min-width: 0;
+  max-width: min(100%, 520px);
+  margin: 0 !important;
+}
+
+.streamSelect:global(.ant-select) {
+  width: auto !important;
+  margin: 0 !important;
+}
+
+.streamSelect :global(.ant-select-selector) {
+  border: none !important;
+  box-shadow: none !important;
+  background: transparent !important;
+  color: #e8ecf5 !important;
+  padding: 0 !important;
+  padding-inline: 0 !important;
+  padding-block: 0 !important;
+  min-height: auto !important;
+  height: auto !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: flex-start !important;
+  width: fit-content !important;
+  max-width: 100%;
+}
+
+/* Ant Design 6 + rc-select：去掉主题默认的水平内边距 */
+.streamSelect :global(.rc-select),
+.streamSelect :global(.rc-select-single) {
+  margin: 0 !important;
+}
+
+.streamSelect :global(.rc-select-selector) {
+  padding: 0 !important;
+  padding-inline: 0 !important;
+  border: none !important;
+  box-shadow: none !important;
+  background: transparent !important;
+}
+
+.streamSelect :global(.ant-select-single.ant-select-show-arrow) :global(.ant-select-selector),
+.streamSelect:global(.ant-select-borderless) :global(.ant-select-selector) {
+  padding-inline: 0 !important;
+}
+
+/* 测量用隐藏搜索区不占左侧空白 */
+.streamSelect :global(.ant-select-selection-search) {
+  width: 0 !important;
+  min-width: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  inset-inline-start: 0 !important;
+}
+
+.streamSelect :global(.ant-select-selection-search-input) {
+  width: 0 !important;
+  min-width: 0 !important;
+  padding: 0 !important;
+}
+
+.streamSelect :global(.ant-select-selection-overflow),
+.streamSelect :global(.ant-select-selection-overflow-item) {
+  margin: 0 !important;
+  padding: 0 !important;
+  max-width: 100%;
+}
+
+.streamSelect:global(.ant-select-focused) :global(.ant-select-selector),
+.streamSelect:global(.ant-select-open) :global(.ant-select-selector) {
+  border: none !important;
+  box-shadow: none !important;
+}
+
+.streamSelect :global(.ant-select-selection-wrap) {
+  flex: 0 1 auto !important;
+}
+
+.streamSelect :global(.ant-select-selection-item),
+.streamSelect :global(.ant-select-selection-placeholder) {
+  padding-inline: 0 !important;
+  line-height: 1.4 !important;
+  font-size: 13px !important;
+  text-align: left !important;
+}
+
+.streamSelect :global(.ant-select-arrow) {
+  position: static !important;
+  inset-inline-end: auto !important;
+  margin-inline-start: 6px !important;
+  margin-top: 0 !important;
+  height: auto !important;
+  display: flex !important;
+  align-items: center !important;
+  color: #a8b4cc !important;
+}
+
+.streamSelect :global(.ant-select-suffix) {
+  margin-inline-start: 6px !important;
+}
+
+/* —— 播放统计 —— */
+.statsPanel {
+  border: 1px solid #252a38;
+  border-radius: 12px;
+  background: #0d1018;
+  padding: 18px 18px 16px;
+}
+
+.specLabel {
+  color: #8390ad;
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.progressBox {
+  margin-top: 14px;
+}
+
+.historyTags {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+/* —— 演员 / 相关（无外层卡片框） —— */
+.panelPlain {
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+}
+
+.castRow {
+  display: flex;
+  gap: 16px;
+  padding-bottom: 4px;
+}
+
+.castCard {
+  width: 100px;
+  flex: 0 0 auto;
+  text-align: center;
+}
+
+.castAvatarImage {
+  width: 88px;
+  height: 88px;
+  margin: 0 auto;
+  border: 2px solid #2f3a52;
+  border-radius: 50%;
+  object-fit: cover;
+  display: block;
+}
+
+.castAvatarEmpty {
+  width: 88px;
+  height: 88px;
+  margin: 0 auto;
+  border-radius: 50%;
+  border: 1px dashed #3a455c;
+  background: rgba(22, 28, 42, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 28px;
+  font-weight: 700;
+  color: #5a6785;
+}
+
+.castName {
+  margin-top: 10px;
+  color: #e8ecf5;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.castRole {
+  color: #7d8aa3;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.relatedRow {
+  display: flex;
+  gap: 14px;
+  padding-bottom: 4px;
+}
+
+.relatedCard {
+  width: 142px;
+  min-width: 0;
+  flex: 0 0 auto;
+  text-decoration: none;
+  color: inherit;
+  display: block;
+  cursor: pointer;
+}
+
+.relatedCard:focus-visible {
+  outline: 2px solid rgba(0, 164, 220, 0.65);
+  outline-offset: 2px;
+}
+
+/* 相关卡片批量点选态（与首页 .thumbPosterMovieBulk 语义一致） */
+.relatedCardBulkPick {
+  contain: layout;
+}
+
+.relatedPosterWrap {
+  --related-ring: 2px;
+  position: relative;
+  aspect-ratio: 2 / 3;
+  border-radius: 8px;
+  border: 1px solid #2c3348;
+  overflow: hidden;
+  background: linear-gradient(160deg, #2a3142 0%, #171b26 100%);
+}
+
+.relatedPosterWrap::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 12;
+  box-sizing: border-box;
+  border: var(--related-ring) solid transparent;
+  border-radius: inherit;
+  pointer-events: none;
+  transition: border-color 0.15s ease;
+}
+
+/* 仅悬停海报区域时黄框；已选中时始终黄框（取消全选后鼠标离开海报即消失） */
+.relatedPosterWrap:hover::after,
+.relatedCardSelected .relatedPosterWrap::after {
+  border-color: #ed6d00;
+}
+
+.relatedPosterImg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  z-index: 1;
+}
+
+.relatedPosterFallback {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 28px;
+  font-weight: 700;
+  color: #4a5568;
+}
+
+.relatedPosterOverlay {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.48);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s ease;
+}
+
+/* 仅悬停海报区域时展开遮罩（避免鼠标在标题上仍显示按钮） */
+.relatedPosterWrap:hover .relatedPosterOverlay {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* 已选中：黄框 + 遮罩与选择态始终可见；仅当鼠标回到海报上时加深遮罩 */
+.relatedCardSelected .relatedPosterOverlay {
+  opacity: 1;
+  pointer-events: auto;
+  background: rgba(0, 0, 0, 0.22);
+}
+
+.relatedCardSelected .relatedPosterWrap:hover .relatedPosterOverlay {
+  background: rgba(0, 0, 0, 0.48);
+}
+
+.relatedOverlayBtn {
+  position: absolute;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 12px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 14px;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
+}
+
+.relatedOverlayBtn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}
+
+/* 较编辑/更多更小一圈，弱化空心选择环 */
+.relatedOverlaySelect {
+  top: calc(8px + var(--related-ring));
+  left: calc(8px + var(--related-ring));
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  min-height: 16px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.82);
+  background: rgba(0, 0, 0, 0.3);
+  font-size: 8px;
+}
+
+.relatedCardSelected .relatedOverlaySelect {
+  background: rgba(255, 255, 255, 0.95);
+  color: #141414;
+  border-color: rgba(255, 255, 255, 0.95);
+}
+
+.relatedOverlayEdit {
+  bottom: calc(6px + var(--related-ring));
+  left: calc(6px + var(--related-ring));
+}
+
+.relatedOverlayMore {
+  bottom: calc(6px + var(--related-ring));
+  right: calc(6px + var(--related-ring));
+}
+
+.relatedOverlayPlay {
+  position: relative;
+  width: 44px;
+  height: 44px;
+  border-radius: 22px;
+  border: 2px solid rgba(255, 255, 255, 0.9);
+  background: rgba(0, 0, 0, 0.35);
+  color: #fff;
+  font-size: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease,
+    transform 0.15s ease;
+}
+
+.relatedOverlayPlay :global(.anticon) {
+  margin-left: 2px;
+}
+
+.relatedOverlayPlaySvg {
+  width: 20px;
+  height: 20px;
+  display: block;
+  flex-shrink: 0;
+  margin-left: 2px;
+  color: inherit;
+}
+
+.relatedOverlayPlay:hover {
+  background: #ed6d00;
+  border-color: #ed6d00;
+  color: #141414;
+  transform: scale(1.04);
+}
+
+/* fixed：不随主区滚动；left/width 由 JS 对齐 .app-main-centered */
+.relatedBulkBar {
+  position: fixed;
+  z-index: 1000;
+  top: 72px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  padding: 8px 16px;
+  background: rgba(10, 10, 14, 0.96);
+  border: 1px solid #ed6d00;
+  border-radius: 8px;
+  box-shadow: 0 10px 36px rgba(0, 0, 0, 0.55);
+  transition: opacity 0.12s ease;
+}
+
+.relatedBulkLeft {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.relatedBulkOrangeMark {
+  font-size: 16px;
+  color: #ed6d00 !important;
+}
+
+.relatedBulkOrangeText {
+  font-size: 13px;
+  font-weight: 500;
+  color: #ed6d00;
+  white-space: nowrap;
+}
+
+.relatedBulkCenter {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+}
+
+.relatedBulkPlaySvg {
+  width: 15px;
+  height: 15px;
+  display: block;
+  flex-shrink: 0;
+  color: inherit;
+}
+
+.relatedBulkIconBtn {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 15px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease;
+}
+
+.relatedBulkIconBtn:hover {
+  background: rgba(255, 255, 255, 0.16);
+  border-color: rgba(255, 255, 255, 0.35);
+  color: #fff;
+}
+
+.relatedBulkCancel {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  margin: 0;
+  padding: 4px 2px 4px 8px;
+  border: none;
+  background: transparent;
+  color: #f0f4ff;
+  font-size: 13px;
+  cursor: pointer;
+  border-radius: 6px;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.relatedBulkCancel:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+.relatedBulkPopoverList {
+  margin: 0;
+  padding-left: 18px;
+  max-height: 220px;
+  overflow-y: auto;
+  font-size: 12px;
+  color: #e8ecf5;
+  line-height: 1.5;
+}
+
+.relatedBulkPopoverEmpty {
+  font-size: 12px;
+  color: #8b96ad;
+}
+
+.relatedTitle {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #e2e6f0;
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.relatedYear {
+  margin-top: 2px;
+  font-size: 11px;
+  color: #7d8aa3;
+}
+
+.empty {
+  color: #6b7288;
+  font-size: 14px;
+}
+
+/* —— 非电影库：经典详情版式 —— */
+.hero {
+  position: relative;
+  border: 1px solid #1f2430;
+  border-radius: 14px;
+  overflow: hidden;
+  margin-bottom: 16px;
+  background: radial-gradient(circle at 15% 20%, rgba(0, 176, 255, 0.2), transparent 55%),
+    linear-gradient(140deg, #121824 0%, #0e1320 55%, #141126 100%);
+}
+
+.heroBanner {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.heroBackdrop {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(to right, rgba(8, 12, 19, 0.85) 0%, rgba(8, 12, 19, 0.55) 45%, rgba(8, 12, 19, 0.82) 100%),
+    linear-gradient(to bottom, rgba(8, 12, 19, 0.2), rgba(8, 12, 19, 0.88));
+  pointer-events: none;
+}
+
+.heroBody {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: 180px 1fr;
+  gap: 20px;
+  padding: 0 20px 20px;
+  align-items: end;
+}
+
+.head {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  justify-content: flex-start;
+  align-items: center;
+  padding: 10px 12px;
+}
+
+.heroInfo {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  padding-bottom: 4px;
+}
+
+.badges {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.subtitle {
+  color: #a3b6d9 !important;
+}
+
+.logoLayer {
+  max-width: min(320px, 72%);
+  max-height: 72px;
+  object-fit: contain;
+  filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.55));
+}
+
+.logoText {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 62px;
+  height: 34px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.32);
+  background: rgba(6, 18, 34, 0.45);
+  color: #d7e6ff;
+  font-weight: 700;
+}
+
+.infoChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  color: #b8c7e4;
+  font-size: 13px;
+}
+
+.infoChips span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.overviewPanel {
+  border: 1px solid #222;
+  border-radius: 10px;
+  background: #0d0d15;
+  padding: 14px;
+  margin-bottom: 16px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.panel {
+  border: 1px solid #222;
+  border-radius: 10px;
+  background: #0d0d15;
+  padding: 14px;
+}
+
+.specGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 14px;
+}
+
+.specItem {
+  padding: 10px;
+  border: 1px solid #1e2432;
+  border-radius: 8px;
+  background: #111726;
+}
+
+.specValue {
+  color: #f4f7ff;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.panel .castCard {
+  width: 116px;
+}
+
+.castAvatarClassic {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  border: 1px solid #2a3348;
+  border-radius: 8px;
+  object-fit: cover;
+}
+
+.castAvatarEmptyClassic {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  border-radius: 8px;
+  border: 1px dashed #2a3348;
+  background: rgba(18, 22, 32, 0.5);
+}
+
+.relatedPoster {
+  aspect-ratio: 2 / 3;
+  border-radius: 8px;
+  border: 1px solid #2a2a35;
+  background: linear-gradient(160deg, #3a3a4a 0%, #1e1e28 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 30px;
+  color: #4f4f66;
+}
+
+.panel .relatedCard {
+  width: 158px;
+}
+
+@media (max-width: 900px) {
+  .heroBody {
+    grid-template-columns: 120px 1fr;
+    gap: 14px;
+    padding: 0 12px 12px;
+  }
+
+  .grid {
+    grid-template-columns: 1fr;
+  }
+
+  .specGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .stats {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 768px) {
+  .introInner {
+    grid-template-columns: 120px 1fr;
+    gap: 16px;
+    padding: 0;
+  }
+
+  .stats {
+    grid-template-columns: 1fr;
+  }
+
+  .streamPickers {
+    grid-template-columns: 1fr;
+    row-gap: 8px;
+  }
+
+  .streamSelect {
+    max-width: none;
+  }
+
+  .castCard {
+    width: 88px;
+  }
+
+  .castAvatarImage,
+  .castAvatarEmpty {
+    width: 72px;
+    height: 72px;
+  }
+}

@@ -1,0 +1,11 @@
+.tabs :global(.ant-tabs-nav) {
+  margin-bottom: 12px;
+}
+
+.tabField {
+  margin-bottom: 0;
+}
+
+.tabField :global(.ant-form-item-control-input) {
+  min-height: 0;
+}

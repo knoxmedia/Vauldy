@@ -1,0 +1,303 @@
+.reader {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  background: var(--reader-bg, #f5f5f0);
+  color: var(--reader-fg, #222);
+  overflow: hidden;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--reader-bar, rgba(0, 0, 0, 0.06));
+  border-bottom: 1px solid var(--reader-border, rgba(0, 0, 0, 0.08));
+  flex-shrink: 0;
+  color: var(--reader-fg, #222);
+}
+
+.toolbarTitle {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--reader-fg, #222);
+}
+
+.toolbarPageInfo {
+  color: var(--reader-fg-muted, rgba(0, 0, 0, 0.65));
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+/* Ant Design uses global darkAlgorithm; override controls per reader theme. */
+.toolbar :global(.ant-btn) {
+  color: var(--reader-btn-fg) !important;
+}
+
+.toolbar :global(.ant-btn-text:not(:disabled):hover),
+.toolbar :global(.ant-btn-text:not(:disabled):focus-visible) {
+  color: var(--reader-btn-fg) !important;
+  background: var(--reader-btn-hover-bg) !important;
+}
+
+.toolbarFavoriteActive:global(.ant-btn),
+.toolbarFavoriteActive:global(.ant-btn:not(:disabled):hover),
+.toolbarFavoriteActive:global(.ant-btn:not(:disabled):focus-visible) {
+  color: var(--knox-accent, #ed6d00) !important;
+}
+
+.toolbar :global(.ant-btn-default) {
+  color: var(--reader-btn-fg) !important;
+  background: var(--reader-input-bg) !important;
+  border-color: var(--reader-input-border) !important;
+}
+
+.toolbar :global(.ant-btn-default:not(:disabled):hover) {
+  color: var(--reader-btn-fg) !important;
+  background: var(--reader-btn-hover-bg) !important;
+  border-color: var(--reader-input-border-hover) !important;
+}
+
+.toolbar :global(.ant-btn:disabled),
+.toolbar :global(.ant-btn[disabled]) {
+  color: var(--reader-btn-fg-disabled) !important;
+  background: transparent !important;
+  border-color: var(--reader-input-border) !important;
+}
+
+.toolbar :global(.ant-select .ant-select-selector) {
+  color: var(--reader-btn-fg) !important;
+  background: var(--reader-input-bg) !important;
+  border-color: var(--reader-input-border) !important;
+}
+
+.toolbar :global(.ant-select:hover .ant-select-selector),
+.toolbar :global(.ant-select-focused .ant-select-selector) {
+  border-color: var(--reader-input-border-hover) !important;
+}
+
+.toolbar :global(.ant-select-arrow),
+.toolbar :global(.ant-select-selection-item) {
+  color: var(--reader-btn-fg) !important;
+}
+
+.toolbar :global(.ant-input),
+.toolbar :global(.ant-input-affix-wrapper) {
+  color: var(--reader-btn-fg) !important;
+  background: var(--reader-input-bg) !important;
+  border-color: var(--reader-input-border) !important;
+}
+
+.toolbar :global(.ant-input-affix-wrapper:hover),
+.toolbar :global(.ant-input-affix-wrapper-focused) {
+  border-color: var(--reader-input-border-hover) !important;
+}
+
+.toolbar :global(.ant-input::placeholder) {
+  color: var(--reader-btn-fg-muted) !important;
+}
+
+.toolbar :global(.ant-input-prefix),
+.toolbar :global(.ant-input-clear-icon) {
+  color: var(--reader-btn-fg-muted) !important;
+}
+
+.toolbar :global(.ant-input-clear-icon:hover) {
+  color: var(--reader-btn-fg) !important;
+}
+
+.body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.tocPanel {
+  width: 260px;
+  flex-shrink: 0;
+  overflow: auto;
+  border-right: 1px solid var(--reader-border, rgba(0, 0, 0, 0.08));
+  background: var(--reader-bar, rgba(0, 0, 0, 0.03));
+  padding: 8px;
+  color: var(--reader-fg, #222);
+}
+
+.content {
+  flex: 1;
+  overflow: auto;
+  padding: 24px;
+  font-size: var(--reader-font-size, 16px);
+}
+
+.textBody,
+.content pre,
+.content .markdown {
+  max-width: 800px;
+  margin: 0 auto;
+  line-height: 1.7;
+  font-size: var(--reader-font-size, 16px);
+}
+
+.content pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.pdfCanvasWrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  padding: 16px;
+}
+
+.contentEpub {
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.epubWrap {
+  position: relative;
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  height: 100%;
+}
+
+.epubView {
+  width: 100%;
+  height: 100%;
+  min-height: 400px;
+}
+
+.epubNavZone {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 28%;
+  max-width: 180px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  z-index: 2;
+  padding: 0;
+}
+
+.epubNavZonePrev {
+  left: 0;
+}
+
+.epubNavZoneNext {
+  right: 0;
+}
+
+.epubNavZone:hover:not(:disabled) {
+  background: var(--reader-epub-nav-hover, rgba(0, 0, 0, 0.04));
+}
+
+.epubNavZone:disabled {
+  cursor: default;
+  pointer-events: none;
+}
+
+.htmlFrame {
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: #fff;
+}
+
+.csvTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--reader-font-size, 16px);
+}
+
+.csvTable th,
+.csvTable td {
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  padding: 6px 10px;
+  text-align: left;
+}
+
+.csvTable th {
+  background: rgba(0, 0, 0, 0.05);
+  position: sticky;
+  top: 0;
+}
+
+.theme-light {
+  --reader-bg: #ffffff;
+  --reader-fg: #1f1f1f;
+  --reader-fg-muted: rgba(0, 0, 0, 0.55);
+  --reader-bar: #f5f5f5;
+  --reader-border: rgba(0, 0, 0, 0.08);
+  --reader-btn-fg: rgba(0, 0, 0, 0.88);
+  --reader-btn-fg-muted: rgba(0, 0, 0, 0.45);
+  --reader-btn-fg-disabled: rgba(0, 0, 0, 0.25);
+  --reader-btn-hover-bg: rgba(0, 0, 0, 0.06);
+  --reader-input-bg: #ffffff;
+  --reader-input-border: #d9d9d9;
+  --reader-input-border-hover: #1677ff;
+  --reader-toc-hover: rgba(0, 0, 0, 0.06);
+  --reader-epub-nav-hover: rgba(0, 0, 0, 0.05);
+}
+
+.theme-sepia {
+  --reader-bg: #f4ecd8;
+  --reader-fg: #5b4636;
+  --reader-fg-muted: rgba(91, 70, 54, 0.65);
+  --reader-bar: #e8dcc8;
+  --reader-border: rgba(91, 70, 54, 0.12);
+  --reader-btn-fg: #5b4636;
+  --reader-btn-fg-muted: rgba(91, 70, 54, 0.55);
+  --reader-btn-fg-disabled: rgba(91, 70, 54, 0.3);
+  --reader-btn-hover-bg: rgba(91, 70, 54, 0.08);
+  --reader-input-bg: #faf3e8;
+  --reader-input-border: #c9b89a;
+  --reader-input-border-hover: #a8845a;
+  --reader-toc-hover: rgba(91, 70, 54, 0.08);
+  --reader-epub-nav-hover: rgba(91, 70, 54, 0.08);
+}
+
+.theme-dark {
+  --reader-bg: #1a1a1a;
+  --reader-fg: #e8e8e8;
+  --reader-fg-muted: rgba(255, 255, 255, 0.55);
+  --reader-bar: #2a2a2a;
+  --reader-border: rgba(255, 255, 255, 0.1);
+  --reader-btn-fg: rgba(255, 255, 255, 0.88);
+  --reader-btn-fg-muted: rgba(255, 255, 255, 0.45);
+  --reader-btn-fg-disabled: rgba(255, 255, 255, 0.25);
+  --reader-btn-hover-bg: rgba(255, 255, 255, 0.08);
+  --reader-input-bg: #333333;
+  --reader-input-border: #434343;
+  --reader-input-border-hover: #177ddc;
+  --reader-toc-hover: rgba(255, 255, 255, 0.08);
+  --reader-epub-nav-hover: rgba(255, 255, 255, 0.06);
+}
+
+.errorBox {
+  text-align: center;
+  padding: 48px;
+}
+
+.tocItem {
+  padding: 6px 8px;
+  cursor: pointer;
+  border-radius: 4px;
+  font-size: 13px;
+}
+
+.tocItem:hover {
+  background: var(--reader-toc-hover, rgba(0, 0, 0, 0.06));
+}

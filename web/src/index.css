@@ -1,0 +1,628 @@
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+:root {
+  /* 全宽布局下左右留白，随视口变化 */
+  --app-page-gutter: clamp(16px, 4vw, 48px);
+
+  /* 自定义滚动条（竖向 / 横向统一） */
+  --knox-scrollbar-size: 14px;
+  --knox-scrollbar-track: #141414;
+  --knox-scrollbar-thumb: #5a5a5a;
+  --knox-scrollbar-thumb-hover: #707070;
+  --knox-scrollbar-thumb-active: #858585;
+  --knox-scrollbar-inset: 3px;
+  --knox-scrollbar-arrow: #666666;
+
+  /* 浏览/列表悬停与选中高亮（影片、电视节目、音乐等） */
+  --knox-accent: #ed6d00;
+  --knox-accent-rgb: 237, 109, 0;
+  --knox-accent-bg: rgba(237, 109, 0, 0.08);
+  --knox-accent-bg-strong: rgba(237, 109, 0, 0.12);
+}
+
+body {
+  font-family:
+    system-ui,
+    -apple-system,
+    Segoe UI,
+    Roboto,
+    Helvetica,
+    Arial,
+    sans-serif;
+  background: #0f1419;
+  color: #e6edf3;
+}
+
+/* 全局自定义滚动条（列表、表格、侧栏等） */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--knox-scrollbar-thumb) var(--knox-scrollbar-track);
+}
+
+*::-webkit-scrollbar {
+  width: var(--knox-scrollbar-size);
+  height: var(--knox-scrollbar-size);
+  background: var(--knox-scrollbar-track);
+}
+
+*::-webkit-scrollbar-track {
+  background: var(--knox-scrollbar-track);
+}
+
+*::-webkit-scrollbar-thumb {
+  background-color: var(--knox-scrollbar-thumb);
+  border-radius: 999px;
+  border: var(--knox-scrollbar-inset) solid transparent;
+  background-clip: padding-box;
+  min-width: 32px;
+  min-height: 32px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background-color: var(--knox-scrollbar-thumb-hover);
+}
+
+*::-webkit-scrollbar-thumb:active {
+  background-color: var(--knox-scrollbar-thumb-active);
+}
+
+*::-webkit-scrollbar-corner {
+  background: var(--knox-scrollbar-track);
+}
+
+*::-webkit-scrollbar-button {
+  display: block;
+  width: var(--knox-scrollbar-size);
+  height: var(--knox-scrollbar-size);
+  background-color: var(--knox-scrollbar-track);
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 6px 6px;
+}
+
+*::-webkit-scrollbar-button:single-button:vertical:decrement {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8'%3E%3Cpath fill='%23666666' d='M4 1.5 1 5.5h6z'/%3E%3C/svg%3E");
+}
+
+*::-webkit-scrollbar-button:single-button:vertical:increment {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8'%3E%3Cpath fill='%23666666' d='M4 6.5 1 2.5h6z'/%3E%3C/svg%3E");
+}
+
+*::-webkit-scrollbar-button:single-button:horizontal:decrement {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8'%3E%3Cpath fill='%23666666' d='M1.5 4 5.5 1v6z'/%3E%3C/svg%3E");
+}
+
+*::-webkit-scrollbar-button:single-button:horizontal:increment {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8'%3E%3Cpath fill='%23666666' d='M6.5 4 2.5 1v6z'/%3E%3C/svg%3E");
+}
+
+*::-webkit-scrollbar-button:hover {
+  background-color: #1c1c1c;
+}
+
+/* 刻意隐藏滚动条的区域 */
+.knox-scrollbar-hidden {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.knox-scrollbar-hidden::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+/* 主壳：固定视口高度，避免整页滚动导致顶栏/侧栏被卷走 */
+.app-shell {
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* 覆盖 antd Header 默认左右内边距，保证贴边 */
+.app-top-header.ant-layout-header {
+  padding-inline: 0 !important;
+  padding-block: 0 !important;
+  flex-shrink: 0;
+  position: sticky;
+  top: 0;
+  z-index: 200;
+}
+
+/* 顶栏：全宽铺满视口，左/右区贴页面两侧，中间为导航 */
+.app-header-bar {
+  width: 100%;
+  max-width: 100vw;
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+.app-header-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  min-height: 64px;
+  column-gap: 12px;
+  width: 100%;
+}
+
+.app-header-left {
+  justify-self: start;
+}
+
+.app-header-center {
+  justify-self: center;
+  display: flex;
+  align-items: center;
+}
+
+.app-header-right {
+  justify-self: end;
+  display: flex;
+  align-items: center;
+}
+
+/* 主内容区：横向铺满，左右留白；min-width:0 保证在 flex 布局下随侧栏收放占满剩余宽度 */
+.app-main-centered {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding-left: var(--app-page-gutter);
+  padding-right: var(--app-page-gutter);
+  padding-bottom: 40px;
+  box-sizing: border-box;
+}
+
+.app-main-centered-player {
+  padding: 0;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.app-shell-content-music-player {
+  padding-bottom: 72px;
+}
+
+.app-shell-content-player {
+  overflow: hidden !important;
+}
+
+body.photo-lightbox-open {
+  overflow: hidden;
+}
+
+body.photo-lightbox-open .app-shell-content {
+  overflow: hidden !important;
+}
+
+/* 窄表单页在居中容器内再水平居中 */
+.app-narrow-block {
+  max-width: 560px;
+  margin-left: auto;
+  margin-right: auto;
+  width: 100%;
+}
+
+/* 主壳：左侧栏 + 内容区 */
+.app-shell-inner {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* 侧栏展开/收起时，主列始终吃掉剩余宽度 */
+.app-shell-content {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+.app-shell-sider {
+  border-right: 1px solid #1f1f1f !important;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.app-shell-sider .ant-layout-sider-trigger {
+  display: none !important;
+}
+
+.app-shell-sider .ant-layout-sider-children {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.app-sider-brand {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  padding: 14px 10px 12px;
+  border-bottom: 1px solid #222;
+  flex-shrink: 0;
+}
+
+.app-sider-logo {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #fff;
+  font-weight: 600;
+  font-size: 16px;
+  text-decoration: none;
+}
+
+.app-sider-logo:hover {
+  color: #00a4dc;
+}
+
+.app-sider-collapsed-open-btn.ant-btn {
+  width: 100%;
+}
+
+.app-sider-mode-btn.ant-btn,
+.app-sider-pin-btn.ant-btn,
+.app-sider-close-btn.ant-btn {
+  flex-shrink: 0;
+}
+
+.app-sider-logo {
+  flex: 1;
+}
+
+.app-sider-close-btn.ant-btn {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+}
+
+.app-sider-pin-btn.ant-btn {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+}
+
+.app-sider-brand:hover .app-sider-close-btn.ant-btn,
+.app-sider-brand:hover .app-sider-pin-btn.ant-btn {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.app-sider-brand-pending-pin .app-sider-close-btn.ant-btn,
+.app-sider-brand-pending-pin .app-sider-pin-btn.ant-btn {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.app-main-nav {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.app-main-nav-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.app-main-nav-expanded .app-main-nav-menu.ant-menu-root {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.app-collapsed-nav {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.app-collapsed-nav-items {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.app-collapsed-nav-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 40px;
+  margin: 0;
+  color: rgba(255, 255, 255, 0.65);
+  cursor: pointer;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+.app-collapsed-nav-item:hover:not(.app-collapsed-nav-item-disabled) {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.app-collapsed-nav-item-selected {
+  color: #fff;
+  background: #1677ff;
+}
+
+.app-collapsed-nav-item-selected:hover {
+  background: #1677ff;
+}
+
+.app-collapsed-nav-item-disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.app-collapsed-nav-item-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  line-height: 0;
+}
+
+.app-collapsed-nav-item-label {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  opacity: 0;
+}
+
+.app-collapsed-nav-item-label a {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.app-collapsed-nav-more {
+  flex-shrink: 0;
+}
+
+.app-collapsed-nav-popover .ant-popover-inner {
+  padding: 6px;
+  background: #141414;
+  border: 1px solid #303030;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.45);
+}
+
+.app-collapsed-nav-popover-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: min(60vh, 360px);
+  overflow-y: auto;
+}
+
+.app-collapsed-nav-popover-list .app-collapsed-nav-item {
+  position: relative;
+  width: 40px;
+  border-radius: 6px;
+}
+
+.app-collapsed-nav-popover-list .app-collapsed-nav-item-label {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+}
+
+.app-main-nav-search {
+  padding: 12px 10px 8px;
+  flex-shrink: 0;
+}
+
+.app-main-nav-search-input {
+  border-radius: 8px !important;
+}
+
+.app-main-nav-search-icon.ant-btn {
+  width: 100%;
+  height: 36px;
+  border: 1px solid #2a2a2a;
+  border-radius: 8px;
+}
+
+.app-main-nav-search-icon.ant-btn:hover {
+  border-color: #3a3a3a !important;
+  background: #171717 !important;
+}
+
+.app-shell-header-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  min-height: 64px;
+  padding-left: var(--app-page-gutter);
+  padding-right: var(--app-page-gutter);
+  box-sizing: border-box;
+}
+
+.app-shell-header-bar-hidden {
+  padding-left: 12px;
+}
+
+.app-shell-header-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.app-shell-header-left-hidden {
+  width: auto;
+  justify-content: flex-start;
+  flex-shrink: 0;
+}
+
+.app-header-hidden-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.app-header-hidden-logo {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #e6edf3;
+  font-weight: 700;
+  font-size: 24px;
+  line-height: 1;
+  text-decoration: none;
+  max-width: 170px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.app-header-hidden-logo:hover {
+  color: #00a4dc;
+}
+
+.app-hidden-nav-open-btn.ant-btn {
+  width: 32px;
+  height: 32px;
+}
+
+.app-shell-header-title {
+  color: #e6edf3 !important;
+  font-size: 16px;
+  max-width: min(50vw, 360px);
+}
+
+.app-shell-header-search-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  flex: 1;
+}
+
+.app-shell-header-search-row-compact {
+  flex: 1;
+  min-width: 0;
+}
+
+.app-shell-header-search-row-compact .app-shell-header-title {
+  flex-shrink: 0;
+  max-width: 72px;
+}
+
+.app-shell-header-search-row .app-shell-header-title {
+  flex-shrink: 0;
+  max-width: none;
+}
+
+.app-header-search-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+  max-width: min(480px, 52vw);
+}
+
+.app-header-search-input {
+  flex: 1;
+  min-width: 140px;
+}
+
+.app-header-search-clear {
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 14px;
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+
+.app-header-search-clear:hover {
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.app-shell-header-right {
+  flex-shrink: 0;
+}
+
+.app-shell-avatar-wrap {
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+}
+
+/* 顶栏用户下拉：加大行距，「退出」前分割线 */
+.app-user-dropdown-menu.ant-dropdown-menu {
+  padding: 6px 0;
+  min-width: 148px;
+}
+
+.app-user-dropdown-menu.ant-dropdown-menu .ant-dropdown-menu-item {
+  padding: 12px 16px !important;
+  line-height: 1.5;
+}
+
+.app-user-dropdown-menu.ant-dropdown-menu .ant-dropdown-menu-item-disabled {
+  padding: 14px 16px 12px !important;
+  opacity: 1;
+}
+
+.app-user-dropdown-menu.ant-dropdown-menu .ant-dropdown-menu-item-divider {
+  margin: 10px 12px !important;
+  border-color: rgba(255, 255, 255, 0.12) !important;
+}
+
+/* Knox 外挂字幕外观（变量由 Player 写在 .xgplayer 根 .knox-subtitle-tuned 上） */
+.knox-subtitle-tuned xg-text-track.xg-text-track {
+  color: var(--knox-sub-fg, #fff) !important;
+}
+.knox-subtitle-tuned xg-text-track.xg-text-track xg-text-track-inner {
+  background-color: var(--knox-sub-bg, transparent) !important;
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+.knox-subtitle-tuned xg-text-track.xg-text-track xg-text-track-span {
+  font-size: var(--knox-sub-font-size, 16px) !important;
+  text-shadow: var(--knox-sub-shadow, none) !important;
+}
+
+.app-drawer-nav {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+/* Modal.confirm：与主页内容区（Home.module.css .page）相同的纯黑底 */
+.ant-modal-root .ant-modal.ant-modal-confirm .ant-modal-content,
+.ant-modal-root .ant-modal.ant-modal-confirm .ant-modal-container,
+.ant-modal-root .ant-modal.ant-modal-confirm .ant-modal-body {
+  background: #000 !important;
+}
+
+.ant-modal-root .ant-modal.ant-modal-confirm .ant-modal-confirm-title {
+  color: rgba(255, 255, 255, 0.95);
+}
+
+.ant-modal-root .ant-modal.ant-modal-confirm .ant-modal-confirm-content {
+  color: rgba(255, 255, 255, 0.72);
+}
+

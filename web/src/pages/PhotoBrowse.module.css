@@ -1,0 +1,358 @@
+.photoLightbox {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: 1200;
+  background: #000;
+  display: flex;
+  flex-direction: column;
+  animation: photoFadeIn 0.25s ease-out;
+}
+
+@keyframes photoFadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  color: rgba(255, 255, 255, 0.85);
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0.65), transparent);
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 2;
+}
+
+.title {
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 50vw;
+}
+
+.stage {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  min-height: 0;
+  padding: 56px 72px 24px;
+  overflow: hidden;
+}
+
+.imageWrap {
+  max-width: 100%;
+  max-height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: visible;
+  cursor: grab;
+}
+
+.imageWrapDragging {
+  cursor: grabbing;
+}
+
+.image {
+  max-width: none;
+  max-height: none;
+  object-fit: contain;
+  user-select: none;
+  transform-origin: center center;
+  transition: transform 0.1s ease-out;
+}
+
+.navBtn {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 48px;
+  height: 48px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  font-size: 20px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2;
+}
+
+.navBtn:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.navPrev {
+  left: 16px;
+}
+
+.navNext {
+  right: 16px;
+}
+
+.footer {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  padding: 12px 16px 20px;
+  background: linear-gradient(0deg, rgba(0, 0, 0, 0.7), transparent);
+  color: rgba(255, 255, 255, 0.75);
+  font-size: 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 16px;
+}
+
+.meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.counter {
+  opacity: 0.8;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 12px;
+  padding: 8px 0 32px;
+}
+
+.card {
+  position: relative;
+  border-radius: 8px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.04);
+  cursor: pointer;
+  aspect-ratio: 1;
+}
+
+.card img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  transition: transform 0.15s ease-out;
+}
+
+.card:hover img {
+  transform: scale(1.03);
+}
+
+.cardTitle {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 24px 8px 8px;
+  font-size: 12px;
+  color: #fff;
+  background: linear-gradient(0deg, rgba(0, 0, 0, 0.75), transparent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.page {
+  padding: 8px 0 32px;
+}
+
+.mainTabs :global(.ant-tabs-nav) {
+  margin-bottom: 12px;
+}
+
+.mainTabs :global(.ant-tabs-tab) {
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.mainTabs :global(.ant-tabs-tab-active .ant-tabs-tab-btn) {
+  color: rgba(255, 255, 255, 0.92) !important;
+}
+
+.mainTabs :global(.ant-tabs-ink-bar) {
+  background: #4a90d9;
+}
+
+.libraryName {
+  color: rgba(255, 255, 255, 0.85);
+  font-weight: 600;
+}
+
+.count {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.drillHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.drillTitle {
+  font-size: 16px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.drillTitleEditable {
+  border: none;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+}
+
+.drillTitleEditable:hover {
+  color: #fff;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.drillTitleInput {
+  width: min(280px, 50vw);
+}
+
+.timelineLayout {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.timelineMain {
+  flex: 1;
+  min-width: 0;
+}
+
+.loadingWrap {
+  display: flex;
+  justify-content: center;
+  padding: 48px;
+}
+
+.dateGroup {
+  margin-bottom: 24px;
+}
+
+.dateHeading {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 12px;
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.progressBar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: rgba(74, 144, 217, 0.12);
+  color: rgba(255, 255, 255, 0.75);
+  font-size: 13px;
+}
+
+.progressHint {
+  white-space: nowrap;
+  opacity: 0.75;
+}
+
+.categoryBar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+  flex: 1;
+  min-width: 0;
+}
+
+.categoryRow {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.reclassifyBtn {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.categoryChip {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.75);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.categoryChip[data-active] {
+  border-color: #4a90d9;
+  background: rgba(74, 144, 217, 0.2);
+  color: #fff;
+}
+
+.categoryCount {
+  opacity: 0.65;
+  font-size: 12px;
+}
+
+.footerTagRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.miniTag {
+  margin: 0;
+  font-size: 11px;
+  line-height: 18px;
+  padding: 0 6px;
+  border: none;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+}
+
+.tagInput {
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  color: #fff;
+  border-radius: 4px;
+  padding: 4px 8px;
+  min-width: 180px;
+}

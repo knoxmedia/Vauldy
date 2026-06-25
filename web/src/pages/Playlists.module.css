@@ -1,0 +1,956 @@
+.topBar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.topLeft {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.topRight {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.loadingWrap {
+  display: flex;
+  justify-content: center;
+  padding: 48px 0;
+}
+
+/* ——— Playlist grid (poster cards) ——— */
+.playlistGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 16px 14px;
+  align-items: start;
+}
+
+.playlistCard {
+  background: transparent;
+  width: 100%;
+  min-width: 0;
+}
+
+.playlistImage {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 2 / 3;
+  min-height: 0;
+  background: #1a2229;
+  cursor: pointer;
+  overflow: hidden;
+  border: 2px solid transparent;
+  border-radius: 6px;
+  box-sizing: border-box;
+  transition: border-color 0.15s ease, background 0.2s ease;
+}
+
+.playlistImage[data-cover-loaded] {
+  background: transparent;
+}
+
+.playlistImage:hover {
+  border-color: #ed6d00;
+}
+
+.playlistImage[data-selected] {
+  border-color: #ed6d00;
+}
+
+.playlistCoverImg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
+  z-index: 1;
+}
+
+.playlistCountBadge {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  z-index: 4;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  line-height: 1.4;
+}
+
+.playlistHoverShade {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+}
+
+.playlistImage:hover .playlistHoverShade {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.playlistPlayBtn {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  padding: 0 0 0 4px;
+  border: 2px solid rgba(255, 255, 255, 0.92);
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  font-size: 24px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    transform 0.15s ease,
+    background 0.15s ease,
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.playlistPlayBtn:hover {
+  background: rgba(255, 255, 255, 0.34);
+  border-color: #fff;
+  box-shadow: 0 0 24px rgba(255, 255, 255, 0.5);
+  transform: scale(1.08);
+}
+
+.playlistCardPlaySvg {
+  width: 24px;
+  height: 24px;
+  display: block;
+  color: #fff;
+}
+
+/* 曲目行下拉菜单内「播放下一个」图标 */
+.playlistMenuPlaySvg {
+  width: 14px;
+  height: 14px;
+  display: block;
+  vertical-align: -0.15em;
+}
+
+.playlistEditBtn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 5;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.4);
+  color: #fff;
+  font-size: 14px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease, background 0.15s ease, color 0.15s ease;
+}
+
+.playlistImage:hover .playlistEditBtn {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.playlistEditBtn:hover {
+  background: rgba(255, 255, 255, 0.22);
+  color: #ed6d00;
+}
+
+.playlistDeleteBtn {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 5;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.4);
+  color: #fff;
+  font-size: 14px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease, background 0.15s ease, color 0.15s ease;
+}
+
+.playlistImage:hover .playlistDeleteBtn {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.playlistDeleteBtn:hover {
+  background: rgba(255, 77, 77, 0.6);
+  color: #fff;
+}
+
+.playlistCardBody {
+  padding: 10px 2px 0;
+  min-width: 0;
+  text-align: center;
+}
+
+.playlistName {
+  color: #fff;
+  font-size: 12px;
+  line-height: 1.4;
+  font-weight: 400;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.playlistEmpty {
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 13px;
+  margin-top: 4px;
+}
+
+/* ——— Playlist detail view ——— */
+.detailHeader {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.backBtn {
+  color: rgba(255, 255, 255, 0.65) !important;
+  flex-shrink: 0;
+}
+
+.backBtn:hover {
+  color: #ed6d00 !important;
+}
+
+.detailTitle {
+  font-size: 18px !important;
+  font-weight: 500 !important;
+  color: #e6edf3 !important;
+  margin: 0 !important;
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.detailActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.playbackModeGroup {
+  display: inline-flex;
+  border: 1px solid #333;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.playbackModeBtn {
+  padding: 4px 12px;
+  border: none;
+  border-radius: 0;
+  background: #1a1a1a;
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+  box-shadow: none !important;
+}
+
+.playbackModeBtn:hover {
+  background: #242424;
+  color: #fff;
+}
+
+.playbackModeBtn[data-active] {
+  background: #ed6d00;
+  color: #111;
+}
+
+/* ——— Detail list (items) ——— */
+.detailListWrap {
+  border: 1px solid #232323;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.detailRow {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 72px;
+  padding: 10px 12px;
+  border-top: 1px solid #1f1f1f;
+  background: #111;
+  transition: background 0.15s ease, padding-left 0.15s ease, padding-right 0.15s ease;
+  cursor: pointer;
+}
+
+.detailRow:first-child {
+  border-top: none;
+}
+
+.detailRow:hover {
+  background: #1a1a1a;
+  padding-left: 44px;
+  padding-right: 44px;
+}
+
+.detailRow[data-playing] {
+  background: #1e2430;
+}
+
+.detailRow[data-playing]:hover {
+  background: #1e2430;
+}
+
+.detailIndex {
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.35);
+  width: 20px;
+  text-align: center;
+  transition: opacity 0.12s ease;
+}
+
+.detailRow:hover .detailIndex {
+  opacity: 0;
+}
+
+.detailRow[data-playing] .detailIndex {
+  color: #ed6d00;
+  opacity: 1;
+}
+
+.detailRowMain {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+  flex: 1;
+  text-align: left;
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+}
+
+.detailPosterBlock {
+  flex-shrink: 0;
+}
+
+.detailPosterInner {
+  position: relative;
+  width: 72px;
+  aspect-ratio: 2 / 3;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 2px solid transparent;
+  background: linear-gradient(135deg, #2a2a3a 0%, #1a1a24 100%);
+  transition: border-color 0.15s ease;
+}
+
+.detailPosterInner:hover {
+  border-color: #ed6d00;
+}
+
+.detailPosterImg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  z-index: 1;
+}
+
+.detailPlayOverlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: rgba(0, 0, 0, 0.35);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.detailPosterInner:hover .detailPlayOverlay {
+  opacity: 1;
+}
+
+.detailPlayCircle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: #ed6d00;
+  color: #111;
+  font-size: 20px;
+  padding-left: 3px;
+}
+
+.detailInfo {
+  min-width: 0;
+  flex: 1;
+}
+
+.detailItemTitle {
+  color: #e6edf3;
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.detailRow[data-playing] .detailItemTitle {
+  color: #ed6d00;
+}
+
+.detailMeta {
+  color: #8c8c8c;
+  font-size: 13px;
+  margin-top: 4px;
+}
+
+.detailMoreSlot {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.detailRow:hover .detailMoreSlot {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.detailMoreBtn {
+  color: rgba(255, 255, 255, 0.65) !important;
+}
+
+.detailMoreBtn:hover {
+  color: #ed6d00 !important;
+}
+
+.detailPlayNextBtn {
+  color: rgba(255, 255, 255, 0.65) !important;
+  margin-right: 4px;
+}
+
+.detailPlayNextBtn:hover {
+  color: #ed6d00 !important;
+}
+
+/* ——— Create playlist button ——— */
+.createBtn {
+  background: #ed6d00 !important;
+  color: #111 !important;
+  border-color: #ed6d00 !important;
+  font-weight: 500 !important;
+}
+
+.createBtn:hover {
+  background: #ffe064 !important;
+  border-color: #ffe064 !important;
+}
+
+/* ——— Modal form ——— */
+.formItem {
+  margin-bottom: 16px;
+}
+
+@media (max-width: 900px) {
+  .topBar {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .detailHeader {
+    flex-wrap: wrap;
+  }
+
+  .detailTitle {
+    font-size: 16px !important;
+  }
+}
+
+/* ——— Playlist detail (hero + track list)：与浏览媒体页同宽（铺满主内容区，不另设 max-width） ——— */
+.detailPage {
+  width: 100%;
+  min-width: 0;
+  padding: 16px 0 32px;
+  box-sizing: border-box;
+}
+
+.detailBackLink {
+  color: rgba(255, 255, 255, 0.65) !important;
+  padding-left: 0 !important;
+  margin-bottom: 12px;
+}
+
+.detailBackLink:hover {
+  color: #ed6d00 !important;
+}
+
+.detailHero {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 28px;
+  margin-bottom: 28px;
+  padding: 8px 4px 4px;
+}
+
+.detailHeroArt {
+  position: relative;
+  flex-shrink: 0;
+  width: 200px;
+  height: 200px;
+  border: 2px solid rgba(250, 173, 20, 0);
+  border-radius: 4px;
+  overflow: hidden;
+  background: #1a1a1a;
+  transition: border-color 0.18s ease;
+}
+
+.detailHeroArt:hover,
+.detailHeroArt:focus-within {
+  border-color: #ed6d00;
+}
+
+.detailHeroImg {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.detailHeroPlaceholder {
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(145deg, #2a2a32 0%, #141418 100%);
+}
+
+.detailHeroPlayFab {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  border: none;
+  background: #ed6d00;
+  color: #111;
+  font-size: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding-left: 4px;
+  cursor: pointer;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.45);
+  transition: transform 0.15s ease, background 0.15s ease, opacity 0.18s ease;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.detailHeroArt:hover .detailHeroPlayFab:not(:disabled),
+.detailHeroArt:focus-within .detailHeroPlayFab:not(:disabled) {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.detailHeroPlayFab:hover:not(:disabled) {
+  background: #ffa940;
+  transform: scale(1.05);
+}
+
+.detailHeroPlayFab:disabled {
+  cursor: not-allowed;
+}
+
+.detailHeroPlayFabSvg {
+  width: 28px;
+  height: 28px;
+  display: block;
+  color: #111;
+}
+
+.detailHeroMeta {
+  flex: 1;
+  min-width: 0;
+  padding-top: 4px;
+}
+
+.detailHeroTitle {
+  margin: 0 0 10px;
+  font-size: 26px;
+  font-weight: 600;
+  color: #fff;
+  line-height: 1.25;
+}
+
+.detailHeroSubtitle {
+  font-size: 15px;
+  color: rgba(255, 255, 255, 0.55);
+  margin-bottom: 8px;
+  line-height: 1.45;
+}
+
+.detailHeroKind {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.45);
+  margin-bottom: 10px;
+}
+
+.detailHeroStars {
+  margin-bottom: 16px !important;
+  font-size: 16px;
+}
+
+.detailHeroStars :global(.ant-rate-star) {
+  color: rgba(255, 255, 255, 0.22) !important;
+}
+
+.detailToolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+}
+
+.detailToolbarIconWrap {
+  display: inline-flex;
+  vertical-align: middle;
+}
+
+/* 主按钮：橙底黑字 + 图标（与参考图一致） */
+.detailToolbarPlayBtn {
+  background: #ed6d00 !important;
+  border-color: #ed6d00 !important;
+  color: #111 !important;
+  font-weight: 600 !important;
+  height: 42px !important;
+  padding: 0 20px !important;
+  border-radius: 8px !important;
+  box-shadow: none !important;
+}
+
+.detailToolbarPlayBtn :global(.ant-btn-icon) {
+  color: #111 !important;
+  line-height: 1;
+}
+
+.detailToolbarPlayBtn :global(.anticon) {
+  color: #111 !important;
+  font-size: 18px !important;
+}
+
+.detailToolbarPlayBtn .detailToolbarPlaySvg {
+  width: 18px;
+  height: 18px;
+  display: block;
+  flex-shrink: 0;
+  color: #111;
+}
+
+.detailToolbarPlayBtn:hover:not(:disabled) .detailToolbarPlaySvg {
+  color: #111;
+}
+
+.detailToolbarPlayBtn:hover:not(:disabled) {
+  background: #ed6d00 !important;
+  border-color: #ed6d00 !important;
+  color: #111 !important;
+}
+
+.detailToolbarPlayBtn:disabled {
+  opacity: 0.45;
+}
+
+/* 其余：幽灵图标按钮，白图标、无边框 */
+.detailToolbar .detailIconBtn :global(.ant-btn-icon) {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  line-height: 0 !important;
+}
+
+.detailToolbar .detailIconBtn :global(.anticon) {
+  font-size: 22px;
+  line-height: 1;
+  color: rgba(255, 255, 255, 0.92) !important;
+}
+
+.detailToolbarShuffleSvg,
+.detailToolbarAddSvg {
+  width: 22px;
+  height: 22px;
+  display: block;
+  flex-shrink: 0;
+  color: rgba(255, 255, 255, 0.92);
+}
+
+.detailToolbar .detailIconBtn {
+  width: 40px !important;
+  min-width: 40px !important;
+  height: 40px !important;
+  padding: 0 !important;
+  border: none !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  color: rgba(255, 255, 255, 0.92) !important;
+  border-radius: 8px !important;
+}
+
+.detailToolbar .detailIconBtn:hover {
+  color: #ed6d00 !important;
+  background: rgba(255, 255, 255, 0.06) !important;
+}
+
+.detailToolbar .detailIconBtn:hover :global(.anticon) {
+  color: #ed6d00 !important;
+}
+
+.detailToolbar .detailIconBtn:hover .detailToolbarShuffleSvg,
+.detailToolbar .detailIconBtn:hover .detailToolbarAddSvg {
+  color: #ed6d00;
+}
+
+.detailToolbar .detailIconBtn[data-active] {
+  color: #ed6d00 !important;
+  background: rgba(250, 173, 20, 0.1) !important;
+}
+
+.detailToolbar .detailIconBtn[data-active] :global(.anticon) {
+  color: #ed6d00 !important;
+}
+
+.detailToolbar .detailIconBtn[data-active] .detailToolbarShuffleSvg,
+.detailToolbar .detailIconBtn[data-active] .detailToolbarAddSvg {
+  color: #ed6d00;
+}
+
+.detailEmpty {
+  margin: 32px 0;
+}
+
+.trackSectionHead {
+  font-size: 16px;
+  font-weight: 600;
+  color: #fff;
+  margin: 8px 0 12px;
+  padding-left: 2px;
+}
+
+.trackList {
+  background: #141414;
+  border-radius: 8px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  max-height: min(72vh, 720px);
+  border: 1px solid #252525;
+}
+
+.trackDragHandle {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  margin-right: -4px;
+  color: rgba(255, 255, 255, 0.28);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.trackDragHandle:active {
+  cursor: grabbing;
+}
+
+.trackDragHandle[draggable="false"] {
+  cursor: default;
+  opacity: 0.35;
+}
+
+.trackRowDragging {
+  opacity: 0.5;
+}
+
+.trackRowDropTarget {
+  box-shadow: inset 0 2px 0 #ed6d00;
+  background: rgba(237, 109, 0, 0.06);
+}
+
+.trackRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 48px;
+  padding: 10px 12px 10px 14px;
+  border-bottom: 1px solid #1f1f1f;
+  cursor: pointer;
+  color: rgba(255, 255, 255, 0.88);
+  transition: background 0.12s ease;
+}
+
+.trackRow:last-child {
+  border-bottom: none;
+}
+
+.trackRow:hover {
+  background: #1c1c1c;
+}
+
+.trackRow[data-playing] {
+  background: #1e2430;
+}
+
+.trackRow[data-playing] .trackTitle {
+  color: #ed6d00;
+}
+
+.trackPlayingIcon {
+  width: 14px;
+  height: 14px;
+  display: block;
+  color: #ed6d00;
+}
+
+.trackRow[data-playing] .trackIndex {
+  color: #ed6d00;
+}
+
+.trackPlayingLabel {
+  margin-left: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #ed6d00;
+  opacity: 0.9;
+}
+
+.trackIndex {
+  flex-shrink: 0;
+  width: 28px;
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.4);
+  font-variant-numeric: tabular-nums;
+}
+
+.trackTitle {
+  flex: 1;
+  min-width: 0;
+  font-size: 15px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.trackDuration {
+  flex-shrink: 0;
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.5);
+  font-variant-numeric: tabular-nums;
+  min-width: 40px;
+  text-align: right;
+}
+
+.trackMore {
+  flex-shrink: 0;
+  width: 36px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.trackMore :global(.ant-btn) {
+  color: rgba(255, 255, 255, 0.55) !important;
+}
+
+.trackMore :global(.ant-btn:hover) {
+  color: #ed6d00 !important;
+}
+
+.detailPaginationBar {
+  display: flex;
+  justify-content: flex-end;
+  padding: 12px 8px 0;
+}
+
+.detailPaginationBar :global(.ant-pagination-item),
+.detailPaginationBar :global(.ant-pagination-prev .ant-pagination-item-link),
+.detailPaginationBar :global(.ant-pagination-next .ant-pagination-item-link) {
+  background: #2a2a2a !important;
+  border-color: #3a3a3a !important;
+}
+
+.detailPaginationBar :global(.ant-pagination-item a) {
+  color: rgba(255, 255, 255, 0.75) !important;
+}
+
+@media (max-width: 700px) {
+  .detailHero {
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+  }
+
+  .detailHeroMeta {
+    width: 100%;
+  }
+
+  .detailToolbar {
+    justify-content: center;
+  }
+
+  .detailHeroTitle {
+    font-size: 22px;
+  }
+}

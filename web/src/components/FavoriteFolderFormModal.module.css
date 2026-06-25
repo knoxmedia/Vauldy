@@ -1,0 +1,64 @@
+.modal :global(.ant-modal-content) {
+  background: #1c2228;
+  border-radius: 10px;
+  padding: 0;
+}
+
+.modal :global(.ant-modal-header) {
+  background: transparent;
+  border-bottom: none;
+  padding: 20px 20px 0;
+  margin-bottom: 0;
+}
+
+.modal :global(.ant-modal-title) {
+  color: #fff;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.modal :global(.ant-modal-close) {
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.modal :global(.ant-modal-body) {
+  padding: 16px 20px 20px;
+}
+
+.input {
+  background: #12171c !important;
+  border-color: rgba(255, 255, 255, 0.12) !important;
+  color: #fff !important;
+  border-radius: 8px;
+  height: 44px;
+}
+
+.input:focus,
+.input:hover {
+  border-color: rgba(220, 68, 70, 0.75) !important;
+  box-shadow: 0 0 0 2px rgba(220, 68, 70, 0.15) !important;
+}
+
+.input::placeholder {
+  color: rgba(255, 255, 255, 0.35);
+}
+
+.confirmBtn {
+  width: 100%;
+  height: 44px;
+  margin-top: 20px;
+  border: none;
+  border-radius: 8px;
+  background: #8b2e32;
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 15px;
+}
+
+.confirmBtn:hover:not(:disabled) {
+  background: #a0353a !important;
+  color: #fff !important;
+}
+
+.confirmBtn:disabled {
+  opacity: 0.45;
+}

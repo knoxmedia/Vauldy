@@ -1,0 +1,81 @@
+.wrap {
+  width: 100%;
+}
+
+.hint {
+  margin: 0 0 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.list {
+  background: #141414;
+  border: 1px solid #252525;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-height: 48px;
+  padding: 10px 12px;
+  border-bottom: 1px solid #1f1f1f;
+  transition: background 0.15s ease;
+}
+
+.row:last-child {
+  border-bottom: none;
+}
+
+.rowDragging {
+  opacity: 0.45;
+}
+
+.rowDropTarget {
+  box-shadow: inset 0 2px 0 #1677ff;
+  background: rgba(22, 119, 255, 0.08);
+}
+
+.dragHandle {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  margin-top: 2px;
+  color: rgba(255, 255, 255, 0.28);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.dragHandle:active {
+  cursor: grabbing;
+}
+
+.checkbox {
+  flex-shrink: 0;
+  margin-top: 3px;
+}
+
+.body {
+  flex: 1;
+  min-width: 0;
+}
+
+.label {
+  font-size: 14px;
+  line-height: 22px;
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.description {
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.45);
+}

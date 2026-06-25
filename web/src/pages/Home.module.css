@@ -1,0 +1,868 @@
+.page {
+  padding: 24px 0 48px;
+  background: #000;
+  min-height: calc(100vh - 64px);
+}
+
+.section {
+  margin-bottom: 40px;
+}
+
+.sectionHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.title {
+  margin: 0 !important;
+  font-size: 1.35em !important;
+  font-weight: 600 !important;
+  color: #fff !important;
+  letter-spacing: 0.02em;
+}
+
+.more {
+  color: #00a4dc;
+  font-size: 14px;
+}
+
+.more:hover {
+  color: #4cc3e0;
+}
+
+.rowScroll {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  overflow-x: auto;
+  overflow-y: visible;
+  padding-top: 4px;
+  padding-bottom: 12px;
+  scroll-snap-type: x proximity;
+  -webkit-overflow-scrolling: touch;
+}
+
+.carouselWrap {
+  position: relative;
+}
+
+.rowScrollNoBar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.rowScrollNoBar::-webkit-scrollbar {
+  display: none;
+}
+
+.carouselArrow {
+  position: absolute;
+  top: 40%;
+  z-index: 3;
+  width: 34px;
+  height: 34px;
+  border: 1px solid #2e2e2e;
+  border-radius: 17px;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  cursor: pointer;
+}
+
+.carouselArrow:hover {
+  background: rgba(0, 164, 220, 0.3);
+  border-color: #00a4dc;
+}
+
+.carouselArrowLeft {
+  left: 6px;
+}
+
+.carouselArrowRight {
+  right: 6px;
+}
+
+/* 继续观看：标题行右侧横向排列，避免被下方滚动层盖住 */
+.historyHeadControls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.carouselArrowInline {
+  position: relative;
+  top: auto;
+  left: auto;
+  right: auto;
+  z-index: 1;
+  flex-shrink: 0;
+}
+
+/* 媒体库大卡片（Emby 风格：四联海报预览 + 名称） */
+.libCard {
+  flex: 0 0 min(300px, 52vw);
+  scroll-snap-align: start;
+  border-radius: 4px;
+  overflow: hidden;
+  position: relative;
+  cursor: pointer;
+  border: none;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+  text-decoration: none;
+  color: inherit;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  background: transparent;
+}
+
+.libCard:hover {
+  transform: scale(1.03);
+}
+
+.libPreviewWrap {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 960 / 500;
+  border-radius: 4px;
+  overflow: hidden;
+  background: #121216;
+  border: 1px solid #222;
+}
+
+.libPreviewImg {
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  display: block;
+}
+
+.libPreviewFallback {
+  width: 100%;
+  height: 100%;
+}
+
+.libCardLabel {
+  margin-top: 10px;
+  text-align: center;
+  font-size: 15px;
+  font-weight: 600;
+  color: #eee;
+  line-height: 1.3;
+  padding: 0 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.libCardMeta {
+  margin-top: 4px;
+  text-align: center;
+  font-size: 12px;
+  color: #888;
+  padding: 0 4px 2px;
+}
+
+.libScanOverlay {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  right: 10px;
+  z-index: 2;
+  border: 1px solid rgba(0, 164, 220, 0.55);
+  border-radius: 8px;
+  background: rgba(5, 15, 28, 0.7);
+  padding: 8px 10px;
+  backdrop-filter: blur(2px);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.libScanTitle {
+  color: #53c6ff;
+  font-weight: 600;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.libScanMeta {
+  margin-top: 4px;
+  color: #d6efff;
+  font-size: 12px;
+}
+
+.libScanInfo {
+  min-width: 0;
+}
+
+.libScanCircle :global(.ant-progress-text) {
+  color: #d6efff !important;
+  font-size: 11px !important;
+  font-weight: 600;
+}
+
+.libName {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: #fff;
+  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.8);
+}
+
+.libMeta {
+  margin-top: 6px;
+  font-size: 13px;
+  color: #aaa;
+}
+
+/* 横向 16:9 继续观看（悬停遮罩与电影卡角标一致） */
+.thumb169 {
+  flex: 0 0 280px;
+  width: 280px;
+  min-width: 0;
+  max-width: 280px;
+  box-sizing: border-box;
+  scroll-snap-align: start;
+  border-radius: 6px;
+  overflow: visible;
+  position: relative;
+  background: #1a1a1a;
+  border: 1px solid #222;
+  cursor: pointer;
+  text-decoration: none;
+  color: inherit;
+  display: block;
+}
+
+.thumb169Box {
+  --poster-movie-ring: 2px;
+  aspect-ratio: 16 / 9;
+  background: linear-gradient(135deg, #2a2a3a 0%, #1a1a24 100%);
+  position: relative;
+  overflow: visible;
+  border-radius: 6px 6px 0 0;
+}
+
+.thumb169Box::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 12;
+  box-sizing: border-box;
+  border: var(--poster-movie-ring) solid transparent;
+  border-radius: inherit;
+  pointer-events: none;
+  transition: border-color 0.15s ease;
+}
+
+.thumb169:hover .thumb169Box::after,
+.thumb169:focus-within .thumb169Box::after,
+.thumb169Selected .thumb169Box::after {
+  border-color: #ed6d00;
+}
+
+.thumb169Overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.48);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s ease;
+}
+
+.thumb169:hover .thumb169Overlay,
+.thumb169:focus-within .thumb169Overlay {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.thumb169Selected .posterOverlaySelect {
+  background: rgba(255, 255, 255, 0.95);
+  color: #141414;
+  border-color: rgba(255, 255, 255, 0.95);
+}
+
+/* 继续观看 · 批量点选（对齐 .thumbPosterMovieBulk） */
+.thumb169Bulk .thumb169Overlay {
+  opacity: 1;
+  pointer-events: auto;
+  background: rgba(0, 0, 0, 0.22);
+}
+
+.thumb169Bulk.thumb169Selected .thumb169Box:hover .thumb169Overlay {
+  background: rgba(0, 0, 0, 0.48);
+}
+
+.thumb169Bulk:not(.thumb169Selected) .thumb169Box:hover::after {
+  border-color: transparent;
+}
+
+.thumb169Cover {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  z-index: 1;
+}
+
+.progressBar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.progressFill {
+  height: 100%;
+  background: #00a4dc;
+  transition: width 0.2s ease;
+}
+
+.thumb169Cap {
+  padding: 10px 8px 12px;
+  background: #0a0a0a;
+  min-width: 0;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.thumb169Title {
+  font-size: 13px;
+  color: #e6edf3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.thumb169Sub {
+  font-size: 12px;
+  color: #888;
+  margin-top: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.thumb169Tags {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+  align-items: center;
+  flex-wrap: nowrap;
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* 竖版海报 · 最近添加（默认）；横版见 .thumbPosterLandscape */
+.thumbPoster {
+  flex: 0 0 130px;
+  scroll-snap-align: start;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #1a1a1a;
+  border: 1px solid #222;
+  cursor: pointer;
+  text-decoration: none;
+  color: inherit;
+  display: block;
+  position: relative;
+  transition: transform 0.16s ease, box-shadow 0.16s ease;
+}
+
+.thumbPoster:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 20px rgba(0, 0, 0, 0.35);
+}
+
+.thumbPosterLandscape {
+  flex: 0 0 min(220px, 70vw);
+}
+
+.posterBox {
+  position: relative;
+  aspect-ratio: 2 / 3;
+  background: linear-gradient(160deg, #3a3a4a 0%, #1e1e28 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.posterBoxLandscape {
+  aspect-ratio: 16 / 9;
+}
+
+.posterFillImg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  z-index: 1;
+}
+
+.posterEmpty {
+  position: relative;
+  z-index: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  color: #8b94a8;
+  font-size: 22px;
+}
+
+.posterEmpty span {
+  font-size: 12px;
+  color: #b7bfcd;
+}
+
+.posterPlayBtn {
+  position: absolute;
+  left: 10px;
+  bottom: 46px;
+  width: 40px;
+  height: 40px;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 20px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity 0.16s ease, transform 0.16s ease, background 0.16s ease;
+  cursor: pointer;
+}
+
+.thumbPoster:hover .posterPlayBtn,
+.thumbPoster:focus-within .posterPlayBtn {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.posterPlayBtnLandscape {
+  bottom: 40px;
+}
+
+.posterPlayBtn:hover {
+  background: rgba(0, 164, 220, 0.7);
+}
+
+.posterCap {
+  padding: 8px 6px 10px;
+  background: #0a0a0a;
+}
+
+.posterTitle {
+  font-size: 12px;
+  color: #ddd;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* 最近添加的电影：固定卡片与海报尺寸；黑底无灰色拉伸块 */
+.thumbPoster.thumbPosterMovie {
+  overflow: visible;
+}
+
+.thumbPosterMovie {
+  flex: 0 0 auto;
+  width: 140px;
+  max-width: 140px;
+  display: flex;
+  flex-direction: column;
+  align-self: flex-start;
+  background: #000;
+  overflow: visible;
+  border: none;
+}
+
+.thumbPosterMovieLandscape {
+  width: min(220px, 70vw);
+  max-width: min(220px, 70vw);
+}
+
+.posterImgMovieCover {
+  object-fit: cover;
+}
+
+.thumbPosterMovie:focus-visible {
+  outline: none;
+}
+
+.posterBoxMovie {
+  --poster-movie-ring: 2px;
+  flex: 0 0 210px;
+  width: 100%;
+  height: 210px;
+  aspect-ratio: auto;
+  box-sizing: border-box;
+  background: #000;
+  border-radius: 4px;
+  overflow: visible;
+}
+
+.posterBoxMovieLandscape {
+  flex: 0 0 auto;
+  height: auto;
+  aspect-ratio: 16 / 9;
+}
+
+.posterBoxMovieMusic {
+  flex: 0 0 auto;
+  height: auto;
+  aspect-ratio: 1 / 1;
+  background: #1a1a24;
+}
+
+.posterMusicPlaceholderIcon {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.22);
+  pointer-events: none;
+}
+
+.posterMusicPlaceholderIcon svg {
+  width: 46%;
+  height: 46%;
+}
+
+/* 顶层描边：避免 border 被子层盖住或被横向滚动容器裁掉上下边 */
+.posterBoxMovie::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 12;
+  box-sizing: border-box;
+  border: var(--poster-movie-ring) solid transparent;
+  border-radius: inherit;
+  pointer-events: none;
+  transition: border-color 0.15s ease;
+}
+
+.posterBoxMovie:hover::after,
+.thumbPosterMovie:focus-within .posterBoxMovie::after,
+.thumbPosterMovieSelected .posterBoxMovie::after {
+  border-color: #ed6d00;
+}
+
+/* 电影海报：铺满海报格（与黄框 ::after 之间无额外边距），contain 仅保留必要黑边 */
+.posterImgMovie {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: block;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  object-fit: contain;
+  object-position: center;
+  box-sizing: border-box;
+}
+
+.posterImgContain {
+  object-fit: contain;
+}
+
+.posterEmptyMovie {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #4a4f5c;
+  font-size: 28px;
+  pointer-events: none;
+}
+
+/* 电影卡无海报：仅纯色底，无图标 */
+.posterEmptyMovieSolid {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background: #1a1a1a;
+  pointer-events: none;
+}
+
+/* 铺满 .posterBoxMovie，角标与黄框（::after 2px）对齐 */
+.posterOverlay {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.48);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s ease;
+}
+
+.thumbPosterMovie:hover .posterOverlay,
+.thumbPosterMovie:focus-within .posterOverlay {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.posterOverlayIconBtn {
+  position: absolute;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 12px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.posterOverlayIconBtn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}
+
+/* 与详情页相关视频 .relatedOverlaySelect 一致 */
+.posterOverlaySelect {
+  top: calc(8px + var(--poster-movie-ring));
+  left: calc(8px + var(--poster-movie-ring));
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  min-height: 16px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.82);
+  background: rgba(0, 0, 0, 0.3);
+  font-size: 8px;
+  line-height: 1;
+}
+
+.thumbPosterMovieSelected .posterOverlaySelect {
+  background: rgba(255, 255, 255, 0.95);
+  color: #141414;
+  border-color: rgba(255, 255, 255, 0.95);
+}
+
+/* 批量点选：弱遮罩常显；未选中海报悬停不描黄框；回到已选中海报上加深遮罩 */
+.thumbPosterMovieBulk .posterOverlay {
+  opacity: 1;
+  pointer-events: auto;
+  background: rgba(0, 0, 0, 0.22);
+}
+
+.thumbPosterMovieBulk.thumbPosterMovieSelected .posterBoxMovie:hover .posterOverlay {
+  background: rgba(0, 0, 0, 0.48);
+}
+
+.thumbPosterMovieBulk:not(.thumbPosterMovieSelected) .posterBoxMovie:hover::after {
+  border-color: transparent;
+}
+
+.posterOverlayEdit {
+  bottom: calc(8px + var(--poster-movie-ring));
+  left: calc(8px + var(--poster-movie-ring));
+}
+
+.posterOverlayMore {
+  bottom: calc(8px + var(--poster-movie-ring));
+  right: calc(8px + var(--poster-movie-ring));
+}
+
+.posterPlayFab {
+  position: relative;
+  width: 44px;
+  height: 44px;
+  border-radius: 22px;
+  border: 2px solid rgba(255, 255, 255, 0.9);
+  background: rgba(0, 0, 0, 0.35);
+  color: #fff;
+  font-size: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.15s ease;
+}
+
+.posterPlayFab :global(.anticon) {
+  margin-left: 2px;
+}
+
+.posterPlayFab:hover {
+  background: #ed6d00;
+  border-color: #ed6d00;
+  color: #141414;
+  transform: scale(1.04);
+}
+
+.posterCapMovie {
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  width: 100%;
+  padding: 8px 6px 10px;
+  background: #000;
+  cursor: pointer;
+}
+
+.posterTitleOneLine {
+  font-size: 13px;
+  font-weight: 400;
+  color: #e8eaed;
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.posterYearLine {
+  font-size: 12px;
+  color: #8b9099;
+  margin-top: 4px;
+  line-height: 1.3;
+}
+
+.emptyHint {
+  color: #666;
+  font-size: 14px;
+  padding: 24px 0;
+}
+
+/* 首页「最近添加的电影」浮动工具条（对齐详情 .relatedBulkBar） */
+.homeShelfBulkBar {
+  position: fixed;
+  z-index: 1000;
+  top: 72px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  padding: 8px 16px;
+  background: rgba(10, 10, 14, 0.96);
+  border: 1px solid #ed6d00;
+  border-radius: 8px;
+  box-shadow: 0 10px 36px rgba(0, 0, 0, 0.55);
+  transition: opacity 0.12s ease;
+}
+
+.homeShelfBulkLeft {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.homeShelfBulkOrangeMark {
+  font-size: 16px;
+  color: #ed6d00 !important;
+}
+
+.homeShelfBulkOrangeText {
+  font-size: 13px;
+  font-weight: 500;
+  color: #ed6d00;
+  white-space: nowrap;
+}
+
+.homeShelfBulkCenter {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+}
+
+.homeShelfBulkIconBtn {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 15px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease;
+}
+
+.homeShelfBulkIconBtn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.16);
+  border-color: rgba(255, 255, 255, 0.35);
+  color: #fff;
+}
+
+.homeShelfBulkIconBtn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.homeShelfBulkCancel {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  margin: 0;
+  padding: 4px 2px 4px 8px;
+  border: none;
+  background: transparent;
+  color: #f0f4ff;
+  font-size: 13px;
+  cursor: pointer;
+  border-radius: 6px;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.homeShelfBulkCancel:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+.homeShelfBulkPopoverList {
+  margin: 0;
+  padding-left: 18px;
+  max-height: 240px;
+  overflow: auto;
+  color: rgba(0, 0, 0, 0.88);
+  font-size: 13px;
+}
+
+.homeShelfBulkPopoverEmpty {
+  color: rgba(0, 0, 0, 0.45);
+  font-size: 13px;
+}
