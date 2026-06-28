@@ -10,6 +10,7 @@ import (
 
 	"knox-media/internal/musicparse"
 	"knox-media/internal/musicstore"
+	"knox-media/internal/scraper"
 	"knox-media/internal/textencoding"
 )
 
@@ -391,6 +392,11 @@ func (h *Handler) ServeAlbumArtwork(c *gin.Context) {
 	if !h.requireLibraryAccess(c, libID) {
 		return
 	}
+	stored := strings.TrimSpace(artworkPath.String)
+	if strings.HasPrefix(stored, "http://") || strings.HasPrefix(stored, "https://") {
+		c.Redirect(http.StatusFound, stored)
+		return
+	}
 	path, serveMediaID := h.resolveAlbumArtworkPath(albumID, libID, artworkPath)
 	if path == "" {
 		c.Status(http.StatusNotFound)
@@ -445,4 +451,322 @@ func (h *Handler) ListGenreAlbums(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"items": items, "library_id": libID, "genre": genre})
+}
+
+type updateAlbumBody struct {
+	Title   string `json:"title"`
+	Year    *int   `json:"year"`
+	Genre   string `json:"genre"`
+	Artwork string `json:"artwork"`
+}
+
+// UpdateAlbum updates editable album metadata (title, year, genre, artwork).
+func (h *Handler) UpdateAlbum(c *gin.Context) {
+	albumID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || albumID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid album id"})
+		return
+	}
+	var body updateAlbumBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	var libID int64
+	var existingTitle sql.NullString
+	var existingYear sql.NullInt64
+	var existingGenre sql.NullString
+	if err := h.App.DB.QueryRow(`
+		SELECT library_id, title, COALESCE(year, 0), COALESCE(genre, '')
+		FROM music_album WHERE id = ?
+	`, albumID).Scan(&libID, &existingTitle, &existingYear, &existingGenre); err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if !h.requireLibraryAccess(c, libID) {
+		return
+	}
+	title := strings.TrimSpace(body.Title)
+	if title == "" {
+		title = strings.TrimSpace(existingTitle.String)
+	}
+	if title == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "title required"})
+		return
+	}
+	titleNorm := musicparse.NormKey(title)
+	year := existingYear.Int64
+	if body.Year != nil {
+		year = int64(*body.Year)
+	}
+	genre := strings.TrimSpace(body.Genre)
+	if genre == "" && body.Genre == "" {
+		genre = strings.TrimSpace(existingGenre.String)
+	}
+	artwork := strings.TrimSpace(body.Artwork)
+	if artwork != "" {
+		artwork = h.materializeAlbumArtwork(albumID, artwork)
+	}
+	_, err = h.App.DB.Exec(`
+		UPDATE music_album SET
+			title = ?,
+			title_norm = ?,
+			year = ?,
+			genre = CASE WHEN ? != '' THEN ? ELSE genre END,
+			artwork_path = CASE WHEN ? != '' THEN ? ELSE artwork_path END,
+			updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, title, titleNorm, year, genre, genre, artwork, artwork, albumID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"ok":           true,
+		"id":           albumID,
+		"title":        title,
+		"year":         year,
+		"genre":        genre,
+		"artwork_path": artwork,
+	})
+}
+
+// ListAlbumImageCandidates returns poster candidates for an album using the library's
+// configured image scrape sources (same rules as media/series image candidates).
+func (h *Handler) ListAlbumImageCandidates(c *gin.Context) {
+	albumID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || albumID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid album id"})
+		return
+	}
+	kind := strings.ToLower(strings.TrimSpace(c.DefaultQuery("kind", "poster")))
+
+	var libraryID int64
+	var title string
+	var year int
+	if err := h.App.DB.QueryRow(
+		`SELECT library_id, COALESCE(title, ''), COALESCE(year, 0) FROM music_album WHERE id = ?`,
+		albumID,
+	).Scan(&libraryID, &title, &year); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "album not found"})
+		return
+	}
+	if !h.requireLibraryAccess(c, libraryID) {
+		return
+	}
+	keyword := strings.TrimSpace(title)
+	if keyword == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "album has no title to search"})
+		return
+	}
+	cfg := h.readLibraryScrapeConfig(libraryID)
+	candidates, errs, scraped := scraper.FetchImageCandidates(cfg, keyword, year, kind, "")
+	if candidates == nil {
+		candidates = []scraper.ImageCandidate{}
+	}
+	resp := gin.H{"candidates": candidates, "scraped": scraped}
+	if len(errs) > 0 {
+		resp["errors"] = errs
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+// GetArtist returns artist detail.
+func (h *Handler) GetArtist(c *gin.Context) {
+	artistID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || artistID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid artist id"})
+		return
+	}
+	var libID int64
+	var name, nameNorm, artwork sql.NullString
+	if err := h.App.DB.QueryRow(`
+		SELECT library_id, name, name_norm, COALESCE(artwork_path, '')
+		FROM music_artist WHERE id = ?
+	`, artistID).Scan(&libID, &name, &nameNorm, &artwork); err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if !h.requireLibraryAccess(c, libID) {
+		return
+	}
+	var albumCount, trackCount int64
+	_ = h.App.DB.QueryRow(`SELECT COUNT(DISTINCT a.id) FROM music_album a WHERE a.album_artist_id = ?`, artistID).Scan(&albumCount)
+	_ = h.App.DB.QueryRow(`
+		SELECT COUNT(1) FROM music_track mt
+		JOIN music_album a ON a.id = mt.album_id
+		WHERE a.album_artist_id = ?
+	`, artistID).Scan(&trackCount)
+	c.JSON(http.StatusOK, gin.H{
+		"id":           artistID,
+		"library_id":   libID,
+		"name":         textencoding.FixMetadataString(name.String),
+		"name_norm":    nameNorm.String,
+		"artwork_path": artwork.String,
+		"album_count":  albumCount,
+		"track_count":  trackCount,
+	})
+}
+
+type updateArtistBody struct {
+	Name    string `json:"name"`
+	Artwork string `json:"artwork"`
+}
+
+// UpdateArtist updates editable artist metadata (name, artwork).
+func (h *Handler) UpdateArtist(c *gin.Context) {
+	artistID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || artistID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid artist id"})
+		return
+	}
+	var body updateArtistBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	var libID int64
+	var existingName sql.NullString
+	if err := h.App.DB.QueryRow(`SELECT library_id, name FROM music_artist WHERE id = ?`, artistID).Scan(&libID, &existingName); err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if !h.requireLibraryAccess(c, libID) {
+		return
+	}
+	name := strings.TrimSpace(body.Name)
+	if name == "" {
+		name = strings.TrimSpace(existingName.String)
+	}
+	if name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name required"})
+		return
+	}
+	nameNorm := musicparse.NormKey(name)
+	artwork := strings.TrimSpace(body.Artwork)
+	if artwork != "" {
+		artwork = h.materializeArtistArtwork(artistID, artwork)
+	}
+	_, err = h.App.DB.Exec(`
+		UPDATE music_artist SET
+			name = ?,
+			name_norm = ?,
+			artwork_path = CASE WHEN ? != '' THEN ? ELSE artwork_path END,
+			updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, name, nameNorm, artwork, artwork, artistID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"ok":           true,
+		"id":           artistID,
+		"name":         name,
+		"artwork_path": artwork,
+	})
+}
+
+// ListArtistImageCandidates returns poster candidates for an artist using library image sources.
+func (h *Handler) ListArtistImageCandidates(c *gin.Context) {
+	artistID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || artistID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid artist id"})
+		return
+	}
+	kind := strings.ToLower(strings.TrimSpace(c.DefaultQuery("kind", "poster")))
+
+	var libraryID int64
+	var name string
+	if err := h.App.DB.QueryRow(
+		`SELECT library_id, COALESCE(name, '') FROM music_artist WHERE id = ?`,
+		artistID,
+	).Scan(&libraryID, &name); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "artist not found"})
+		return
+	}
+	if !h.requireLibraryAccess(c, libraryID) {
+		return
+	}
+	keyword := strings.TrimSpace(name)
+	if keyword == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "artist has no name to search"})
+		return
+	}
+	cfg := h.readLibraryScrapeConfig(libraryID)
+	candidates, errs, scraped := scraper.FetchImageCandidates(cfg, keyword, 0, kind, "")
+	if candidates == nil {
+		candidates = []scraper.ImageCandidate{}
+	}
+	resp := gin.H{"candidates": candidates, "scraped": scraped}
+	if len(errs) > 0 {
+		resp["errors"] = errs
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+type updateLibraryGenreBody struct {
+	OldName string `json:"old_name"`
+	NewName string `json:"new_name"`
+}
+
+// UpdateLibraryGenre renames a genre across all albums in a music library.
+func (h *Handler) UpdateLibraryGenre(c *gin.Context) {
+	libID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || libID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid library id"})
+		return
+	}
+	if !h.requireLibraryAccess(c, libID) {
+		return
+	}
+	var body updateLibraryGenreBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	oldName := strings.TrimSpace(body.OldName)
+	newName := strings.TrimSpace(body.NewName)
+	if oldName == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "old_name required"})
+		return
+	}
+	if newName == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "new_name required"})
+		return
+	}
+	if strings.EqualFold(oldName, newName) {
+		c.JSON(http.StatusOK, gin.H{"ok": true, "genre": newName})
+		return
+	}
+	var where string
+	var args []any
+	if strings.EqualFold(oldName, "未知流派") {
+		where = `library_id = ? AND TRIM(COALESCE(genre, '')) = ''`
+		args = []any{libID}
+	} else {
+		where = `library_id = ? AND LOWER(TRIM(genre)) = LOWER(?)`
+		args = []any{libID, oldName}
+	}
+	res, err := h.App.DB.Exec(`
+		UPDATE music_album SET genre = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE `+where, append([]any{newName}, args...)...)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	n, _ := res.RowsAffected()
+	c.JSON(http.StatusOK, gin.H{"ok": true, "genre": newName, "updated_albums": n})
 }

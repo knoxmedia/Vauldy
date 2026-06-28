@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"knox-media/api/middleware"
+	"knox-media/internal/scraper"
 	"knox-media/internal/tvparse"
 	"knox-media/internal/tvstore"
 )
@@ -423,6 +424,51 @@ func (h *Handler) UpdateSeries(c *gin.Context) {
 		"poster": poster,
 		"overview": strings.TrimSpace(body.Overview),
 	})
+}
+
+// ListSeriesImageCandidates returns poster/backdrop/logo candidates for a TV series,
+// querying ONLY the image sources configured on the series' owning library.
+//
+// Query: kind=poster|backdrop|logo (default poster)
+func (h *Handler) ListSeriesImageCandidates(c *gin.Context) {
+	seriesID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || seriesID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid series id"})
+		return
+	}
+	kind := strings.ToLower(strings.TrimSpace(c.DefaultQuery("kind", "poster")))
+
+	var libraryID int64
+	var title string
+	var year int
+	var tmdbID string
+	if err := h.App.DB.QueryRow(
+		`SELECT library_id, COALESCE(title, ''), COALESCE(year, 0), COALESCE(tmdb_id, '') FROM series WHERE id = ?`,
+		seriesID,
+	).Scan(&libraryID, &title, &year, &tmdbID); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "series not found"})
+		return
+	}
+	if !h.requireLibraryAccess(c, libraryID) {
+		return
+	}
+
+	keyword := strings.TrimSpace(title)
+	if keyword == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "series has no title to search"})
+		return
+	}
+
+	cfg := h.readLibraryScrapeConfig(libraryID)
+	candidates, errs, scraped := scraper.FetchImageCandidates(cfg, keyword, year, kind, strings.TrimSpace(tmdbID))
+	if candidates == nil {
+		candidates = []scraper.ImageCandidate{}
+	}
+	resp := gin.H{"candidates": candidates, "scraped": scraped}
+	if len(errs) > 0 {
+		resp["errors"] = errs
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 func (h *Handler) requireLibraryAccess(c *gin.Context, libraryID int64) bool {

@@ -1,6 +1,7 @@
 package scraper
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -80,6 +81,31 @@ func TestNormalizeSearchInputUserExamples(t *testing.T) {
 		title, year := NormalizeSearchInput(tc.raw)
 		if title != tc.wantTitle || year != tc.wantYear {
 			t.Fatalf("%q => title=%q year=%d want title=%q year=%d", tc.raw, title, year, tc.wantTitle, tc.wantYear)
+		}
+	}
+}
+
+func TestParseMediaFilenameChineseDateTitle(t *testing.T) {
+	cases := []struct {
+		raw       string
+		wantTitle string
+	}{
+		{"6月27日.mp4", "6月27日"},
+		{"6月27日", "6月27日"},
+		{"12月25日.mp4", "12月25日"},
+		{"1月1日.mp4", "1月1日"},
+		{"6月27日公司活动.mp4", "6月27日公司活动"},
+	}
+	for _, tc := range cases {
+		got := ParseMediaFilename(tc.raw)
+		if got.Title != tc.wantTitle {
+			t.Fatalf("ParseMediaFilename(%q).Title = %q want %q", tc.raw, got.Title, tc.wantTitle)
+		}
+		if NormalizeTitle(strings.TrimSuffix(tc.raw, filepath.Ext(tc.raw))) != tc.wantTitle {
+			t.Fatalf("NormalizeTitle(%q) = %q want %q",
+				strings.TrimSuffix(tc.raw, filepath.Ext(tc.raw)),
+				NormalizeTitle(strings.TrimSuffix(tc.raw, filepath.Ext(tc.raw))),
+				tc.wantTitle)
 		}
 	}
 }

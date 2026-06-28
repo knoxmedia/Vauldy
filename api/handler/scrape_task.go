@@ -1004,6 +1004,80 @@ func (h *Handler) SearchTMDbImages(c *gin.Context) {
 	})
 }
 
+// ListMediaImageCandidates returns poster/backdrop/logo candidates for a media item,
+// querying ONLY the image sources configured on the media's owning library. Sources
+// not selected for the library are never contacted, so unreachable providers can be
+// omitted from the library config to avoid long connection delays.
+//
+// Query: kind=poster|backdrop|logo (default poster)
+func (h *Handler) ListMediaImageCandidates(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	kind := strings.ToLower(strings.TrimSpace(c.DefaultQuery("kind", "poster")))
+
+	var libraryID int64
+	var title string
+	var year int
+	var metaJSON string
+	if err := h.App.DB.QueryRow(
+		`SELECT library_id, COALESCE(title, ''), COALESCE(year, 0), COALESCE(meta_json, '') FROM media WHERE id = ?`,
+		id,
+	).Scan(&libraryID, &title, &year, &metaJSON); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "media not found"})
+		return
+	}
+
+	cfg := h.readLibraryScrapeConfig(libraryID)
+	tmdbID := extractTmdbID(metaJSON)
+	if tmdbID == "" {
+		// TV: the tmdb_id lives on the series row rather than the episode media meta.
+		_ = h.App.DB.QueryRow(`
+			SELECT COALESCE(sr.tmdb_id, '')
+			FROM episode_media em
+			JOIN episode ep ON ep.id = em.episode_id
+			JOIN season se ON se.id = ep.season_id
+			JOIN series sr ON sr.id = se.tv_id
+			WHERE em.media_id = ? AND sr.library_id = ?
+			LIMIT 1`, id, libraryID).Scan(&tmdbID)
+	}
+
+	keyword := strings.TrimSpace(title)
+	if keyword == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "media has no title to search"})
+		return
+	}
+
+	candidates, errs, scraped := scraper.FetchImageCandidates(cfg, keyword, year, kind, tmdbID)
+	if candidates == nil {
+		candidates = []scraper.ImageCandidate{}
+	}
+	resp := gin.H{"candidates": candidates, "scraped": scraped}
+	if len(errs) > 0 {
+		resp["errors"] = errs
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+// extractTmdbID pulls scrape.extra.tmdb_id out of a media meta_json blob.
+func extractTmdbID(metaJSON string) string {
+	metaJSON = strings.TrimSpace(metaJSON)
+	if metaJSON == "" {
+		return ""
+	}
+	var doc struct {
+		Scrape struct {
+			Extra map[string]any `json:"extra"`
+		} `json:"scrape"`
+	}
+	if json.Unmarshal([]byte(metaJSON), &doc) != nil {
+		return ""
+	}
+	return stringScrapeField(doc.Scrape.Extra["tmdb_id"])
+}
+
 func splitCSV(v string) []string {
 	v = strings.TrimSpace(v)
 	if v == "" {

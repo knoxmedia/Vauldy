@@ -45,6 +45,7 @@ import {
 } from "react";
 import type { ReactNode } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
+import MediaPosterImg from "../components/MediaPosterImg";
 import {
   MediaDetail,
   HistoryItem,
@@ -64,7 +65,6 @@ import {
   isTVLibraryType,
   mediaDetailPosterSrc,
   authListPosterUrl,
-  mediaPosterSrc,
   removeFavorite,
   savePlaybackProgress,
   type MediaMatchListUpdate,
@@ -442,6 +442,27 @@ function MediaHorizontalShelf({
   );
 }
 
+function RelatedPoster({
+  m,
+  broken,
+  onBroken,
+}: {
+  m: MediaItem;
+  broken: boolean;
+  onBroken: () => void;
+}) {
+  if (broken) {
+    return <div className={styles.relatedPosterFallback}>{(m.title || "?").slice(0, 1)}</div>;
+  }
+  return (
+    <MediaPosterImg
+      item={m}
+      className={styles.relatedPosterImg}
+      onFinalError={() => onBroken()}
+    />
+  );
+}
+
 function RelatedMovieCard({
   m,
   nav,
@@ -460,7 +481,6 @@ function RelatedMovieCard({
   /** 已有选中项时：海报区仅做点选，不展示播放/编辑/更多 */
   bulkSelectMode: boolean;
 }) {
-  const relPoster = mediaPosterSrc(m);
   const relatedMediaMenu: MenuProps = useMemo(
     () => buildMediaMenuItems(m, nav),
     [m.id, nav],
@@ -488,18 +508,7 @@ function RelatedMovieCard({
       }}
     >
       <div className={styles.relatedPosterWrap}>
-        {!posterBroken ? (
-          <img
-            src={relPoster}
-            alt=""
-            className={styles.relatedPosterImg}
-            loading="lazy"
-            decoding="async"
-            onError={onPosterError}
-          />
-        ) : (
-          <div className={styles.relatedPosterFallback}>{(m.title || "?").slice(0, 1)}</div>
-        )}
+        <RelatedPoster m={m} broken={posterBroken} onBroken={onPosterError} />
         <div
           className={styles.relatedPosterOverlay}
           onClick={(e) => {
@@ -539,7 +548,7 @@ function RelatedMovieCard({
                 aria-label={tGlobal("pages.media_detail.aria_edit")}
                 onClick={(e) => {
                   e.stopPropagation();
-                  nav(`/detail/${m.id}`);
+                  nav(`/media-manager?media_id=${m.id}`);
                 }}
               >
                 <EditOutlined />
@@ -870,7 +879,11 @@ export default function MediaDetailPage() {
 
   function onEditClick() {
     if (isAdminRole(role)) {
-      nav("/media-manager");
+      if (mediaId && !Number.isNaN(mediaId)) {
+        nav(`/media-manager?media_id=${mediaId}`);
+      } else {
+        nav("/media-manager");
+      }
     } else {
       message.info(t("pages.media_detail.edit_admin_only"));
     }
@@ -1183,7 +1196,13 @@ export default function MediaDetailPage() {
             <div className={styles.relatedRow}>
               {related.slice(0, 8).map((m) => (
                 <Link key={m.id} to={`/detail/${m.id}`} className={styles.relatedCard}>
-                  <div className={styles.relatedPoster}>{(m.title || "?").slice(0, 1)}</div>
+                  <div className={styles.relatedPosterWrap}>
+                    <RelatedPoster
+                      m={m}
+                      broken={!!brokenImages[`rel-${m.id}`]}
+                      onBroken={() => setBrokenImages((prev) => ({ ...prev, [`rel-${m.id}`]: true }))}
+                    />
+                  </div>
                   <div className={styles.relatedTitle}>{m.title || tGlobal("pages.media_detail.untitled")}</div>
                 </Link>
               ))}

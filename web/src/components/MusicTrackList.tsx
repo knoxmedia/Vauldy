@@ -339,7 +339,7 @@ export default function MusicTrackList({
                     aria-label={t("components.music_track_list.aria_edit")}
                     onClick={(e) => {
                       e.stopPropagation();
-                      nav(`/detail/${tr.media_id}`);
+                      nav(`/media-manager?media_id=${tr.media_id}`);
                     }}
                   />
                   <Dropdown menu={buildTrackMenu(tr)} trigger={["click"]} placement="bottomRight">

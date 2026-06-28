@@ -2,11 +2,13 @@ package handler
 
 import (
 	"database/sql"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -118,6 +120,15 @@ func (h *Handler) existingArtworkFile(raw string) string {
 			}
 		}
 	}
+	if strings.HasPrefix(raw, "/uploads/") && h.App != nil && h.App.Config != nil {
+		uploadDir := strings.TrimSpace(h.App.Config.Data.Upload)
+		if uploadDir != "" {
+			candidate := filepath.Join(uploadDir, filepath.FromSlash(strings.TrimPrefix(raw, "/uploads/")))
+			if artworkFileReady(candidate) {
+				return candidate
+			}
+		}
+	}
 	if artworkFileReady(raw) {
 		return raw
 	}
@@ -193,4 +204,205 @@ func (h *Handler) deliverAlbumArtwork(c *gin.Context, path string, serveMediaID 
 	c.Header("Content-Type", "image/jpeg")
 	c.Header("Cache-Control", "public, max-age=86400")
 	c.File(path)
+}
+
+// materializeAlbumArtwork resolves user-provided artwork (local path, /uploads URL, or http URL)
+// into a local cache file when possible so ServeAlbumArtwork can serve it reliably.
+func (h *Handler) materializeAlbumArtwork(albumID int64, raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || albumID <= 0 {
+		return ""
+	}
+	if local := h.existingArtworkFile(raw); local != "" {
+		if local != raw && artworkFileReady(local) {
+			if cached := h.copyToAlbumArtworkCache(albumID, local); cached != "" {
+				return cached
+			}
+		}
+		return local
+	}
+	if strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") {
+		if cached := h.downloadAlbumArtworkURL(albumID, raw); cached != "" {
+			return cached
+		}
+		return raw
+	}
+	return raw
+}
+
+func (h *Handler) copyToAlbumArtworkCache(albumID int64, src string) string {
+	outFile := h.albumArtworkCacheFile(albumID)
+	if outFile == "" || !artworkFileReady(src) {
+		return ""
+	}
+	if err := os.MkdirAll(filepath.Dir(outFile), 0o755); err != nil {
+		return ""
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return ""
+	}
+	defer in.Close()
+	out, err := os.Create(outFile)
+	if err != nil {
+		return ""
+	}
+	defer out.Close()
+	if _, err := io.Copy(out, in); err != nil {
+		return ""
+	}
+	return outFile
+}
+
+func (h *Handler) downloadAlbumArtworkURL(albumID int64, u string) string {
+	outFile := h.albumArtworkCacheFile(albumID)
+	if outFile == "" {
+		return ""
+	}
+	client := &http.Client{Timeout: 15 * time.Second}
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	if err != nil {
+		return ""
+	}
+	resp, err := client.Do(req)
+	if err != nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return ""
+	}
+	defer resp.Body.Close()
+	if err := os.MkdirAll(filepath.Dir(outFile), 0o755); err != nil {
+		return ""
+	}
+	out, err := os.Create(outFile)
+	if err != nil {
+		return ""
+	}
+	defer out.Close()
+	if _, err := io.Copy(out, resp.Body); err != nil {
+		return ""
+	}
+	return outFile
+}
+
+func (h *Handler) artistArtworkCacheFile(artistID int64) string {
+	if h == nil || h.App == nil || h.App.Config == nil || artistID <= 0 {
+		return ""
+	}
+	preview := strings.TrimSpace(h.App.Config.Data.Preview)
+	if preview == "" {
+		return ""
+	}
+	return filepath.Join(preview, "music-artist", strconv.FormatInt(artistID, 10), "artwork.jpg")
+}
+
+func (h *Handler) materializeArtistArtwork(artistID int64, raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || artistID <= 0 {
+		return ""
+	}
+	if local := h.existingArtworkFile(raw); local != "" {
+		if local != raw && artworkFileReady(local) {
+			if cached := h.copyToArtistArtworkCache(artistID, local); cached != "" {
+				return cached
+			}
+		}
+		return local
+	}
+	if strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") {
+		if cached := h.downloadArtistArtworkURL(artistID, raw); cached != "" {
+			return cached
+		}
+		return raw
+	}
+	return raw
+}
+
+func (h *Handler) copyToArtistArtworkCache(artistID int64, src string) string {
+	outFile := h.artistArtworkCacheFile(artistID)
+	if outFile == "" || !artworkFileReady(src) {
+		return ""
+	}
+	if err := os.MkdirAll(filepath.Dir(outFile), 0o755); err != nil {
+		return ""
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return ""
+	}
+	defer in.Close()
+	out, err := os.Create(outFile)
+	if err != nil {
+		return ""
+	}
+	defer out.Close()
+	if _, err := io.Copy(out, in); err != nil {
+		return ""
+	}
+	return outFile
+}
+
+func (h *Handler) downloadArtistArtworkURL(artistID int64, u string) string {
+	outFile := h.artistArtworkCacheFile(artistID)
+	if outFile == "" {
+		return ""
+	}
+	client := &http.Client{Timeout: 15 * time.Second}
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	if err != nil {
+		return ""
+	}
+	resp, err := client.Do(req)
+	if err != nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return ""
+	}
+	defer resp.Body.Close()
+	if err := os.MkdirAll(filepath.Dir(outFile), 0o755); err != nil {
+		return ""
+	}
+	out, err := os.Create(outFile)
+	if err != nil {
+		return ""
+	}
+	defer out.Close()
+	if _, err := io.Copy(out, resp.Body); err != nil {
+		return ""
+	}
+	return outFile
+}
+
+// ServeArtistArtwork serves artist portrait from cache path or stored artwork_path.
+func (h *Handler) ServeArtistArtwork(c *gin.Context) {
+	artistID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || artistID <= 0 {
+		c.Status(http.StatusBadRequest)
+		return
+	}
+	var libID int64
+	var artworkPath sql.NullString
+	if err := h.App.DB.QueryRow(`SELECT library_id, artwork_path FROM music_artist WHERE id = ?`, artistID).Scan(&libID, &artworkPath); err != nil {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	if !h.requireLibraryAccess(c, libID) {
+		return
+	}
+	stored := strings.TrimSpace(artworkPath.String)
+	if strings.HasPrefix(stored, "http://") || strings.HasPrefix(stored, "https://") {
+		c.Redirect(http.StatusFound, stored)
+		return
+	}
+	path := h.existingArtworkFile(stored)
+	if path == "" {
+		path = h.artistArtworkCacheFile(artistID)
+		if !artworkFileReady(path) {
+			c.Status(http.StatusNotFound)
+			return
+		}
+	}
+	h.deliverAlbumArtwork(c, path, 0)
 }

@@ -1454,7 +1454,7 @@ export default function BrowsePage() {
                           aria-label={t("pages.browse.aria_edit")}
                           onClick={(e) => {
                             e.stopPropagation();
-                            nav(`/detail/${r.id}`);
+                            nav(`/media-manager?media_id=${r.id}`);
                           }}
                         >
                           <EditOutlined />

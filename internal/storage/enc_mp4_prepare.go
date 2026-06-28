@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -197,6 +198,10 @@ func (s *AssetEncryptor) RepackEncryptedMP4ForPipe(ctx context.Context, mediaID 
 	if err := s.DB.QueryRowContext(ctx, `
 		SELECT enc_path FROM media_encrypted_assets WHERE media_id = ? AND status = 'encrypted'
 	`, mediaID).Scan(&encPath); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// No at-rest encrypted asset for this media — nothing to repack.
+			return nil
+		}
 		return err
 	}
 	encPath = strings.TrimSpace(encPath)
@@ -299,6 +304,13 @@ func (s *AssetEncryptor) EnsureEncryptedISOPipePlayback(ctx context.Context, med
 		return nil
 	}
 	catalogPath = strings.TrimSpace(catalogPath)
+	// Only applies to media that has a Knox .enc asset at rest. Plaintext media (including
+	// stream-DRM JIT paths where encryption happens at playback time) has nothing to repack;
+	// without this guard, a plaintext .mp4 path would trip isISOBaseMediaCatalog via the
+	// extension alone and RepackEncryptedMP4ForPipe would fail with sql.ErrNoRows.
+	if !IsMediaEncrypted(s.DB, mediaID, catalogPath) {
+		return nil
+	}
 	if !isISOBaseMediaCatalog(s.DB, mediaID, catalogPath) {
 		return nil
 	}

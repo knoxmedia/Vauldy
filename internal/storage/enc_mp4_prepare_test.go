@@ -1,11 +1,13 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"knox-media/internal/keystore"
 	"knox-media/internal/store"
 )
 
@@ -91,5 +93,69 @@ func TestResolveEncryptSourceSkipsInvalidMP4WhenPlainKept(t *testing.T) {
 	}
 	if src != plain {
 		t.Fatalf("src=%q want plain", src)
+	}
+}
+
+// TestEnsureEncryptedISOPipePlaybackNoopForPlaintextWithoutEncAsset guards the regression
+// where a DRM-enabled JIT stream path passed the plaintext .mp4 file_path as catalogPath.
+// With no media_encrypted_assets row, the function must no-op rather than fail with
+// sql.ErrNoRows from RepackEncryptedMP4ForPipe (which surfaced as HTTP 503
+// "encrypted media not ready for streaming playback").
+func TestEnsureEncryptedISOPipePlaybackNoopForPlaintextWithoutEncAsset(t *testing.T) {
+	db, err := store.OpenSQLite(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	kek := bytes.Repeat([]byte{0x42}, 32)
+	vault, err := keystore.NewVault(string(kek), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	plain := filepath.Join(dir, "movie.mp4")
+	if err := os.WriteFile(plain, []byte("not-mp4"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO library (id, name, type, path) VALUES (1, 'lib', 'video', ?)`, dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO media (id, library_id, file_id, title, file_path, file_type, format, status) VALUES (3943, 1, 'f', 't', ?, 'video', 'mp4', 'active')`, plain); err != nil {
+		t.Fatal(err)
+	}
+	// Deliberately NO media_encrypted_assets row for media 3943.
+
+	enc := &AssetEncryptor{DB: db, Vault: vault, DataDir: dir}
+	if err := enc.EnsureEncryptedISOPipePlayback(context.Background(), 3943, plain); err != nil {
+		t.Fatalf("expected no-op for plaintext media without encrypted asset, got: %v", err)
+	}
+}
+
+// TestRepackEncryptedMP4ForPipeNoopWithoutEncAsset verifies the defense-in-depth guard in
+// RepackEncryptedMP4ForPipe: a missing encrypted asset row returns nil, not sql.ErrNoRows.
+func TestRepackEncryptedMP4ForPipeNoopWithoutEncAsset(t *testing.T) {
+	db, err := store.OpenSQLite(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	kek := bytes.Repeat([]byte{0x42}, 32)
+	vault, err := keystore.NewVault(string(kek), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if _, err := db.Exec(`INSERT INTO library (id, name, type, path) VALUES (1, 'lib', 'video', ?)`, dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO media (id, library_id, file_id, title, file_path, file_type, format, status) VALUES (3944, 1, 'f', 't', ?, 'video', 'mp4', 'active')`, filepath.Join(dir, "x.mp4")); err != nil {
+		t.Fatal(err)
+	}
+
+	enc := &AssetEncryptor{DB: db, Vault: vault, DataDir: dir}
+	if err := enc.RepackEncryptedMP4ForPipe(context.Background(), 3944); err != nil {
+		t.Fatalf("expected nil for missing encrypted asset, got: %v", err)
 	}
 }

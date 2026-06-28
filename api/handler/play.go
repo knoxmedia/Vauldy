@@ -1167,7 +1167,7 @@ type clientCaps struct {
 	AudioCodecs []string `json:"audio_codecs"`
 	MaxHeight   int      `json:"max_height"`
 	Qualities   []string `json:"qualities"`
-	// Containers lists MIME-derived container tokens the browser reports (mp4/mkv/webm/ogg).
+	// Containers lists MIME-derived container tokens the browser reports (mp4/mkv/webm/ogg/flv).
 	Containers []string `json:"containers,omitempty"`
 	// Mcap is a compact MediaCapabilities summary from the web player (H.264/H.265 × ladder).
 	Mcap string `json:"mcap,omitempty"`
@@ -1322,9 +1322,10 @@ func resolutionForBitrate(bitrate string) string {
 }
 
 // directPlayContainerNeeds maps ffprobe format_name (comma-separated) to a client "containers" token
-// (mp4 / mkv / webm / ogg). The second value is false if the mux cannot be direct-played in a typical
-// HTMLMediaElement path (e.g. MPEG-TS, FLV). When the first value is empty and the second is true,
-// there is no token to match against the client's list (empty meta or only unrecognized tags).
+// (mp4 / mkv / webm / ogg / flv). The second value is false if the mux cannot be direct-played in a typical
+// HTMLMediaElement path (e.g. MPEG-TS). FLV is direct-playable when Knox players (PowerPlayer / xgplayer)
+// demux in JS and the client advertises matching codec + flv container support. When the first value is empty
+// and the second is true, there is no token to match against the client's list (empty meta or only unrecognized tags).
 func directPlayContainerNeeds(formatName string) (need string, ok bool) {
 	c := strings.ToLower(strings.TrimSpace(formatName))
 	if c == "" {
@@ -1342,7 +1343,9 @@ func directPlayContainerNeeds(formatName string) (need string, ok bool) {
 				continue
 			}
 			switch p {
-			case "flv", "mpegts", "mts", "m2ts", "ts", "avi", "wmv", "asf", "mpeg", "mpg", "mpe", "vob":
+			case "flv":
+				return "flv", true
+			case "mpegts", "mts", "m2ts", "ts", "avi", "wmv", "asf", "mpeg", "mpg", "mpe", "vob":
 				return "", false
 			case "matroska", "mkv":
 				toks["mkv"] = struct{}{}
@@ -1420,7 +1423,10 @@ func canDirectPlay(media mediaProfile, caps clientCaps) bool {
 	} else {
 		// Legacy clients (no container probe): keep conservative blocks.
 		mc := strings.ToLower(media.Container)
-		if strings.Contains(mc, "matroska") || strings.Contains(mc, "flv") {
+		if strings.Contains(mc, "matroska") {
+			return false
+		}
+		if strings.Contains(mc, "flv") {
 			return false
 		}
 	}
@@ -1431,10 +1437,17 @@ func fallbackDirectPlayHeuristic(media mediaProfile) bool {
 	video := strings.ToLower(strings.TrimSpace(media.Video))
 	audio := strings.ToLower(strings.TrimSpace(media.Audio))
 	container := strings.ToLower(strings.TrimSpace(media.Container))
-	if strings.Contains(container, "matroska") || strings.Contains(container, "flv") {
+	if strings.Contains(container, "matroska") {
 		return false
 	}
-	if !(video == "h264" || video == "avc1") {
+	videoOK := video == "h264" || video == "avc1" || video == "h265" || video == "hevc"
+	if strings.Contains(container, "flv") {
+		if !videoOK {
+			return false
+		}
+		return audio == "" || audio == "aac" || audio == "mp3"
+	}
+	if !videoOK {
 		return false
 	}
 	if audio == "" || audio == "aac" || audio == "mp3" {

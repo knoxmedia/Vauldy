@@ -228,6 +228,21 @@ func pickFirstChineseSegment(s string) string {
 	if start < 0 {
 		return ""
 	}
+	// If the first Han rune is a Chinese date/time marker (年/月/日/时/分/秒) preceded by
+	// digits, include those digits so date-style titles like "6月27日" are not truncated
+	// to "月27日". Whitespace/dots between the digits and the marker are skipped.
+	if isCJKDateMarker(runes[start]) {
+		j := start - 1
+		for j >= 0 && (runes[j] == ' ' || runes[j] == '.') {
+			j--
+		}
+		if j >= 0 && runes[j] >= '0' && runes[j] <= '9' {
+			for j >= 0 && runes[j] >= '0' && runes[j] <= '9' {
+				j--
+			}
+			start = j + 1
+		}
+	}
 	end := start
 	for i := len(runes) - 1; i >= start; i-- {
 		if isHanRune(runes[i]) {

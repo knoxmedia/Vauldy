@@ -20,7 +20,9 @@ import {
   message,
 } from "antd";
 import type { DataNode } from "antd/es/tree";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
+import { EditOutlined } from "@ant-design/icons";
 import {
   fetchLibraries,
   fetchMedia,
@@ -31,6 +33,7 @@ import {
   updateMediaAdmin,
 } from "../api/client";
 import { useT } from "../i18n";
+import MediaImagePickerDialog, { autoFrameForMedia } from "../components/MediaImagePickerDialog";
 
 type EditorValues = {
   title?: string;
@@ -123,6 +126,18 @@ function nodeTitle(name: string, kind: "dir" | "file") {
 
 export default function MediaManagerPage() {
   const t = useT();
+  const [searchParams] = useSearchParams();
+  // ?media_id=<id> (or ?id=<id>) requests auto-selection of a specific media item,
+  // e.g. when the user clicks "Edit" on a media detail page. The ref holds the
+  // pending target only for the initial mount so subsequent in-app navigation
+  // behaves normally.
+  const initialTargetId = (() => {
+    const raw = searchParams.get("media_id") || searchParams.get("id");
+    if (!raw) return null;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  })();
+  const pendingTargetIdRef = useRef<number | null>(initialTargetId);
   const [libs, setLibs] = useState<Library[]>([]);
   const [libraryId, setLibraryId] = useState<number | undefined>(undefined);
   const [rows, setRows] = useState<MediaItem[]>([]);
@@ -131,6 +146,9 @@ export default function MediaManagerPage() {
   const [saving, setSaving] = useState(false);
   const [detail, setDetail] = useState<MediaDetail | null>(null);
   const [treeKeyword, setTreeKeyword] = useState("");
+  const [posterPickerOpen, setPosterPickerOpen] = useState(false);
+  const [backdropPickerOpen, setBackdropPickerOpen] = useState(false);
+  const [logoPickerOpen, setLogoPickerOpen] = useState(false);
   const [form] = Form.useForm<EditorValues>();
   const posterPreview = Form.useWatch("poster", form);
   const backdropPreview = Form.useWatch("backdrop", form);
@@ -150,9 +168,21 @@ export default function MediaManagerPage() {
   async function loadLibraries() {
     const items = await fetchLibraries();
     setLibs(items);
-    if (items.length > 0) {
-      setLibraryId((current) => (current !== undefined ? current : items[0].id));
+    if (items.length === 0) return;
+    const target = pendingTargetIdRef.current;
+    if (target != null) {
+      // Switch to the library that actually owns the target media so the tree
+      // highlights the right file instead of defaulting to the first library.
+      try {
+        const d = await fetchMediaDetail(target);
+        const ownerLib = items.find((l) => l.id === d.library_id);
+        setLibraryId(ownerLib ? ownerLib.id : items[0].id);
+      } catch {
+        setLibraryId(items[0].id);
+      }
+      return;
     }
+    setLibraryId((current) => (current !== undefined ? current : items[0].id));
   }
 
   async function loadMedia(libId?: number) {
@@ -162,7 +192,25 @@ export default function MediaManagerPage() {
       setSelectedNode(null);
       setDetail(null);
       form.resetFields();
-    } else if (!selectedId || !items.some((x) => x.id === selectedId)) {
+      return;
+    }
+    const target = pendingTargetIdRef.current;
+    if (target != null) {
+      const hit = items.find((x) => x.id === target);
+      pendingTargetIdRef.current = null;
+      if (hit) {
+        setSelectedNode({
+          type: "file",
+          key: `file:${hit.id}`,
+          name: hit.title || hit.file_id,
+          path: toLibraryDisplayRelativePath(hit.file_path || "", selectedLibraryRoots),
+          mediaId: hit.id,
+        });
+        return;
+      }
+      // Target not within the first 500 items of its library; fall through to default.
+    }
+    if (!selectedId || !items.some((x) => x.id === selectedId)) {
       const first = items[0];
       setSelectedNode({
         type: "file",
@@ -567,17 +615,77 @@ export default function MediaManagerPage() {
               </Row>
               <Row gutter={12}>
                 <Col span={8}>
-                  <Form.Item name="poster" label={t("pages.media_manager.field_poster")}>
+                  <Form.Item
+                    name="poster"
+                    label={
+                      <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                        {t("pages.media_manager.field_poster")}
+                        <Button
+                          type="text"
+                          size="small"
+                          icon={<EditOutlined />}
+                          aria-label={t("pages.media_manager.poster_picker_edit_aria")}
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            if (!selectedId) return;
+                            setPosterPickerOpen(true);
+                          }}
+                          disabled={!selectedId}
+                        />
+                      </span>
+                    }
+                  >
                     <Input placeholder="https://..." />
                   </Form.Item>
                 </Col>
                 <Col span={8}>
-                  <Form.Item name="backdrop" label={t("pages.media_manager.field_backdrop")}>
+                  <Form.Item
+                    name="backdrop"
+                    label={
+                      <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                        {t("pages.media_manager.field_backdrop")}
+                        <Button
+                          type="text"
+                          size="small"
+                          icon={<EditOutlined />}
+                          aria-label={t("pages.media_manager.poster_picker_edit_aria")}
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            if (!selectedId) return;
+                            setBackdropPickerOpen(true);
+                          }}
+                          disabled={!selectedId}
+                        />
+                      </span>
+                    }
+                  >
                     <Input placeholder="https://..." />
                   </Form.Item>
                 </Col>
                 <Col span={8}>
-                  <Form.Item name="logo" label="Logo URL">
+                  <Form.Item
+                    name="logo"
+                    label={
+                      <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                        {t("pages.media_manager.field_logo")}
+                        <Button
+                          type="text"
+                          size="small"
+                          icon={<EditOutlined />}
+                          aria-label={t("pages.media_manager.poster_picker_edit_aria")}
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            if (!selectedId) return;
+                            setLogoPickerOpen(true);
+                          }}
+                          disabled={!selectedId}
+                        />
+                      </span>
+                    }
+                  >
                     <Input placeholder="https://..." />
                   </Form.Item>
                 </Col>
@@ -664,6 +772,37 @@ export default function MediaManagerPage() {
           )}
         </Col>
       </Row>
+      <MediaImagePickerDialog
+        open={posterPickerOpen}
+        onClose={() => setPosterPickerOpen(false)}
+        mediaId={detail?.id}
+        mediaTitle={detail?.title}
+        mediaYear={detail?.year}
+        kind="poster"
+        currentUrl={posterPreview}
+        autoFrameUrl={detail ? autoFrameForMedia(detail.id, "poster") : undefined}
+        onConfirm={(url) => form.setFieldValue("poster", url)}
+      />
+      <MediaImagePickerDialog
+        open={backdropPickerOpen}
+        onClose={() => setBackdropPickerOpen(false)}
+        mediaId={detail?.id}
+        mediaTitle={detail?.title}
+        mediaYear={detail?.year}
+        kind="backdrop"
+        currentUrl={backdropPreview}
+        onConfirm={(url) => form.setFieldValue("backdrop", url)}
+      />
+      <MediaImagePickerDialog
+        open={logoPickerOpen}
+        onClose={() => setLogoPickerOpen(false)}
+        mediaId={detail?.id}
+        mediaTitle={detail?.title}
+        mediaYear={detail?.year}
+        kind="logo"
+        currentUrl={logoPreview}
+        onConfirm={(url) => form.setFieldValue("logo", url)}
+      />
     </Space>
   );
 }

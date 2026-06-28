@@ -368,7 +368,7 @@ type ClientCaps = {
   audioCodecs: string[];
   maxHeight: number;
   qualities: string[];
-  /** Container types the browser likely plays in `<video>` (mp4/mkv/webm/ogg). */
+  /** Container types the browser / Knox players can play (mp4/mkv/webm/ogg/flv). */
   containers: string[];
   /**
    * Compact MediaCapabilities decoding hints: `h264@1080:111` = supported/smooth/powerEfficient (0/1 each).
@@ -469,6 +469,11 @@ async function detectClientCaps(): Promise<ClientCaps> {
     supports("video/webm; codecs=vp9")
   ) {
     videoCodecs.push("vp9");
+  }
+  // FLV is not exposed via canPlayType in Chromium, but PowerPlayer / xgplayer demux FLV in JS
+  // when the inner video/audio codecs are supported.
+  if (videoCodecs.includes("h264") || videoCodecs.includes("h265")) {
+    containers.push("flv");
   }
 
   const audioCodecs: string[] = [];

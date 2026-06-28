@@ -78,7 +78,7 @@ func insertScriptBoundaries(s string) string {
 		if i > 0 {
 			prev := runes[i-1]
 			if isLatinOrDigit(prev) && isCJK(r) {
-				if !followsEmbeddedDateDigits(runes, i) && !isCompactTechTokenBeforeCJK(runes, i) && !isChineseOrdinalSuffix(runes, i-1) {
+				if !followsEmbeddedDateDigits(runes, i) && !isCompactTechTokenBeforeCJK(runes, i) && !isChineseOrdinalSuffix(runes, i-1) && !isCJKDateMarker(r) {
 					b.WriteRune(' ')
 				}
 			} else if isCJK(prev) && isLatinOrDigit(r) && !isNumericSequelSuffix(runes, i) && !isEmbeddedDateDigits(runes, i) {
@@ -276,6 +276,17 @@ func isCJK(r rune) bool {
 
 func isLatinOrDigit(r rune) bool {
 	return (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+}
+
+// isCJKDateMarker reports whether a CJK rune is a Chinese date/time unit (年/月/日/时/分/秒).
+// Used to keep digits glued to the marker so date-style titles like "6月27日" survive
+// normalization and title extraction intact instead of being truncated to "月27日".
+func isCJKDateMarker(r rune) bool {
+	switch r {
+	case '年', '月', '日', '时', '分', '秒':
+		return true
+	}
+	return false
 }
 
 // orderProvidersForKeyword puts Chinese-friendly sources first when the title contains Han characters.

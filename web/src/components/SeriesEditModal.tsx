@@ -1,4 +1,5 @@
-import { Input, InputNumber, Modal, Spin, Typography, message } from "antd";
+import { Button, Input, InputNumber, Modal, Spin, Typography, message } from "antd";
+import { EditOutlined } from "@ant-design/icons";
 import { useEffect, useState } from "react";
 import {
   SeriesSummary,
@@ -6,6 +7,7 @@ import {
   normalizeListPosterUrl,
   updateSeries,
 } from "../api/client";
+import MediaImagePickerDialog from "./MediaImagePickerDialog";
 import { useT } from "../i18n";
 
 const { Text } = Typography;
@@ -31,6 +33,7 @@ export default function SeriesEditModal({ series, open, onClose, onSaved }: Seri
   const t = useT();
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [posterPickerOpen, setPosterPickerOpen] = useState(false);
   const [title, setTitle] = useState("");
   const [year, setYear] = useState<number | null>(null);
   const [poster, setPoster] = useState("");
@@ -59,7 +62,7 @@ export default function SeriesEditModal({ series, open, onClose, onSaved }: Seri
     return () => {
       cancelled = true;
     };
-  }, [open, series]);
+  }, [open, series, t]);
 
   async function handleSave() {
     if (!series) return;
@@ -94,58 +97,78 @@ export default function SeriesEditModal({ series, open, onClose, onSaved }: Seri
   }
 
   return (
-    <Modal
-      title={t("components.series_edit_modal.title")}
-      open={open}
-      onCancel={onClose}
-      onOk={() => void handleSave()}
-      okText={t("components.series_edit_modal.ok")}
-      cancelText={t("components.series_edit_modal.cancel")}
-      confirmLoading={saving}
-      destroyOnClose
-      centered
-      width={560}
-    >
-      {loading ? (
-        <div style={{ display: "flex", justifyContent: "center", padding: 32 }}>
-          <Spin />
-        </div>
-      ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-          <div>
-            <Text type="secondary">{t("components.series_edit_modal.label_title")}</Text>
-            <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder={t("components.series_edit_modal.title_placeholder")} />
+    <>
+      <Modal
+        title={t("components.series_edit_modal.title")}
+        open={open}
+        onCancel={onClose}
+        onOk={() => void handleSave()}
+        okText={t("components.series_edit_modal.ok")}
+        cancelText={t("components.series_edit_modal.cancel")}
+        confirmLoading={saving}
+        destroyOnClose
+        centered
+        width={560}
+      >
+        {loading ? (
+          <div style={{ display: "flex", justifyContent: "center", padding: 32 }}>
+            <Spin />
           </div>
-          <div>
-            <Text type="secondary">{t("components.series_edit_modal.label_year")}</Text>
-            <InputNumber
-              value={year}
-              onChange={(v) => setYear(typeof v === "number" ? v : null)}
-              min={1800}
-              max={2100}
-              placeholder={t("components.series_edit_modal.year_placeholder")}
-              style={{ width: "100%" }}
-            />
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <div>
+              <Text type="secondary">{t("components.series_edit_modal.label_title")}</Text>
+              <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder={t("components.series_edit_modal.title_placeholder")} />
+            </div>
+            <div>
+              <Text type="secondary">{t("components.series_edit_modal.label_year")}</Text>
+              <InputNumber
+                value={year}
+                onChange={(v) => setYear(typeof v === "number" ? v : null)}
+                min={1800}
+                max={2100}
+                placeholder={t("components.series_edit_modal.year_placeholder")}
+                style={{ width: "100%" }}
+              />
+            </div>
+            <div>
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                <Text type="secondary">{t("components.series_edit_modal.label_poster")}</Text>
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<EditOutlined />}
+                  aria-label={t("pages.media_manager.poster_picker_edit_aria")}
+                  disabled={!series}
+                  onClick={() => setPosterPickerOpen(true)}
+                />
+              </span>
+              <Input
+                value={poster}
+                onChange={(e) => setPoster(e.target.value)}
+                placeholder={t("components.series_edit_modal.poster_placeholder")}
+              />
+            </div>
+            <div>
+              <Text type="secondary">{t("components.series_edit_modal.label_overview")}</Text>
+              <Input.TextArea
+                value={overview}
+                onChange={(e) => setOverview(e.target.value)}
+                rows={5}
+                placeholder={t("components.series_edit_modal.overview_placeholder")}
+              />
+            </div>
           </div>
-          <div>
-            <Text type="secondary">{t("components.series_edit_modal.label_poster")}</Text>
-            <Input
-              value={poster}
-              onChange={(e) => setPoster(e.target.value)}
-              placeholder={t("components.series_edit_modal.poster_placeholder")}
-            />
-          </div>
-          <div>
-            <Text type="secondary">{t("components.series_edit_modal.label_overview")}</Text>
-            <Input.TextArea
-              value={overview}
-              onChange={(e) => setOverview(e.target.value)}
-              rows={5}
-              placeholder={t("components.series_edit_modal.overview_placeholder")}
-            />
-          </div>
-        </div>
-      )}
-    </Modal>
+        )}
+      </Modal>
+      <MediaImagePickerDialog
+        open={posterPickerOpen}
+        onClose={() => setPosterPickerOpen(false)}
+        seriesId={series?.id}
+        kind="poster"
+        currentUrl={poster}
+        onConfirm={setPoster}
+      />
+    </>
   );
 }
