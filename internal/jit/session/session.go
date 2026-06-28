@@ -217,6 +217,16 @@ func (m *Manager) Get(id string) *Session {
 	return m.sessions[id]
 }
 
+// ActiveSessionCount returns the number of in-memory JIT playback sessions.
+func (m *Manager) ActiveSessionCount() int {
+	if m == nil {
+		return 0
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.sessions)
+}
+
 // HasActiveMedia reports whether any JIT session is using the given media id.
 func (m *Manager) HasActiveMedia(mediaID int64) bool {
 	if m == nil || mediaID <= 0 {

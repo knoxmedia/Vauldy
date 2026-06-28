@@ -12,6 +12,8 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"knox-media/api/middleware"
+	"knox-media/internal/musicstore"
+	"knox-media/internal/tvstore"
 )
 
 var sidecarDeleteExts = map[string]struct{}{
@@ -222,6 +224,12 @@ func (h *Handler) deleteMediaRecords(id int64, fileID string) error {
 		{`DELETE FROM drm_key_material WHERE media_id = ?`, []any{id}},
 		{`DELETE FROM drm_asset WHERE media_id = ?`, []any{id}},
 		{`DELETE FROM library_node WHERE media_id = ?`, []any{id}},
+		{`DELETE FROM music_track WHERE media_id = ?`, []any{id}},
+		{`DELETE FROM episode_media WHERE media_id = ?`, []any{id}},
+		{`DELETE FROM photo_face WHERE media_id = ?`, []any{id}},
+		{`DELETE FROM photo_face_task WHERE media_id = ?`, []any{id}},
+		{`DELETE FROM photo_classify_task WHERE media_id = ?`, []any{id}},
+		{`DELETE FROM photo_location_task WHERE media_id = ?`, []any{id}},
 	}
 	for _, s := range stmts {
 		if _, err := tx.Exec(s.q, s.args...); err != nil {
@@ -291,6 +299,10 @@ func (h *Handler) DeleteMedia(c *gin.Context) {
 	}
 	h.purgeMediaFiles(info)
 	h.scheduleLibraryPreviewRefresh(libraryID)
+	if libraryID > 0 {
+		musicstore.PruneOrphansForLibrary(h.App.DB, libraryID)
+		tvstore.PruneOrphansForLibrary(h.App.DB, libraryID)
+	}
 	mid := info.ID
 	h.logActivity(middleware.UserID(c), middleware.Username(c), "media.delete", &mid, info.FilePath)
 	c.JSON(http.StatusOK, gin.H{"ok": true})

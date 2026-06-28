@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"knox-media/internal/doctrans"
@@ -17,7 +18,7 @@ func renderPageCover(ctx context.Context, opts Options, mediaID int64, srcPath, 
 	if !docTransEnabled(opts.DocTrans) {
 		return fmt.Errorf("pdf cover: ffmpeg failed and document conversion disabled")
 	}
-	if err := doctrans.ExportDrawJPEG(ctx, opts.MediaRoot, opts.DocTrans, srcPath, dstPath); err != nil {
+	if err := doctrans.ExportPageJPEG(ctx, opts.MediaRoot, opts.DocTrans, srcPath, dstPath); err != nil {
 		return err
 	}
 	if st, err := os.Stat(dstPath); err != nil || st.IsDir() || st.Size() == 0 {
@@ -55,7 +56,11 @@ func renderJPEG(ctx context.Context, opts Options, mediaID int64, srcPath, dstPa
 			return fmt.Errorf("source missing: %w", err)
 		}
 	}
-	if _, err := storage.RunFFmpeg(ctx, opts.DB, opts.Vault, ffmpegPath, mediaID, srcPath, 0, 0, nil, post, ""); err != nil {
+	var pre []string
+	if strings.EqualFold(filepath.Ext(srcPath), ".pdf") {
+		pre = []string{"-f", "pdf"}
+	}
+	if _, err := storage.RunFFmpeg(ctx, opts.DB, opts.Vault, ffmpegPath, mediaID, srcPath, 0, 0, pre, post, ""); err != nil {
 		return fmt.Errorf("ffmpeg cover: %w: %s", err, strings.TrimSpace(err.Error()))
 	}
 	if st, err := os.Stat(dstPath); err != nil || st.IsDir() || st.Size() == 0 {

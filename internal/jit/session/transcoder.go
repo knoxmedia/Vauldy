@@ -52,6 +52,8 @@ type TranscodeConfig struct {
 	AudioCodec       string  // source audio codec (aac/eac3/...)
 	AudioPlaylistURL string  // if set, skip audio encoding (-an)
 	StartTime        float64 // seek time in seconds (0 = from beginning)
+	X264Preset       string  // libx264 -preset; empty = veryfast
+	CRF              int     // libx264 -crf; 0 = default 23
 }
 
 // StartTranscode launches ffmpeg in a goroutine for the session.
@@ -357,15 +359,24 @@ func buildVideoArgs(cfg TranscodeConfig, segDuration float64) []string {
 	wPx, hPx := parseResolutionWH(cfg.Resolution)
 	gops := []string{"-g:v:0", "72", "-sc_threshold:v:0", "0", "-keyint_min:v:0", "72", "-r:v:0", "23.976043701171875"}
 
+	preset := strings.TrimSpace(cfg.X264Preset)
+	if preset == "" {
+		preset = "veryfast"
+	}
+	crf := cfg.CRF
+	if crf <= 0 {
+		crf = 23
+	}
+
 	// Default to libx264 (software). HW encoder detection can be added later.
 	return append([]string{
 		"-vf", fmt.Sprintf("scale=%s:%s,format=yuv420p", wPx, hPx),
 		"-c:v", "libx264",
-		"-preset", "veryfast",
+		"-preset", preset,
 		"-b:v", cfg.Bitrate, "-maxrate", cfg.Bitrate, "-bufsize", "2M",
 		"-profile:v", "high",
 		"-x264opts:v:0", "subme=0:me_range=4:rc_lookahead=10:partitions=none",
-		"-crf:v:0", "23",
+		"-crf:v:0", strconv.Itoa(crf),
 	}, gops...)
 }
 

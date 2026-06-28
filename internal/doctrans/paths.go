@@ -16,10 +16,24 @@ var officeExts = map[string]struct{}{
 	".doc": {}, ".docx": {}, ".xls": {}, ".xlsx": {}, ".ppt": {}, ".pptx": {},
 }
 
+var officeFormats = map[string]struct{}{
+	"doc": {}, "docx": {}, "xls": {}, "xlsx": {}, "ppt": {}, "pptx": {},
+}
+
 // IsOfficeFormat reports whether the extension needs LibreOffice conversion for preview.
 func IsOfficeFormat(name string) bool {
 	ext := strings.ToLower(filepath.Ext(name))
 	_, ok := officeExts[ext]
+	return ok
+}
+
+// IsOfficeDocument reports office format from path extension and/or catalog format (e.g. doc on .enc).
+func IsOfficeDocument(path, format string) bool {
+	if IsOfficeFormat(path) {
+		return true
+	}
+	f := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(format)), ".")
+	_, ok := officeFormats[f]
 	return ok
 }
 

@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	kcrypto "knox-media/internal/crypto"
 )
 
 // FindMediaIDByEncryptedPlainPath returns media id when path is the plaintext side of an encrypted asset.
@@ -62,6 +64,15 @@ func ShouldLinkEncryptedPlainPathScan(db *sql.DB, mediaID int64, diskPath, diskM
 	}
 	stored := strings.TrimSpace(storedMD5.String)
 	diskMD5 = strings.TrimSpace(diskMD5)
+	catalog := strings.TrimSpace(catalogPath.String)
+	isEncCatalog := kcrypto.IsEncFile(catalog) || strings.EqualFold(filepath.Ext(catalog), ".enc")
+	// After encrypt the catalog path is .enc while plaintext may still exist on disk (especially with SkipHash scans).
+	if isEncCatalog {
+		if stored != "" && diskMD5 != "" {
+			return strings.EqualFold(stored, diskMD5)
+		}
+		return true
+	}
 	if stored == "" || diskMD5 == "" {
 		return false
 	}

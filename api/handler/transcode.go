@@ -55,9 +55,7 @@ func (h *Handler) TranscodeAsync(c *gin.Context) {
 		return
 	}
 	tid, _ := res.LastInsertId()
-	go func() {
-		_ = h.Worker.RunTask(context.Background(), tid, fpath, q)
-	}()
+	h.kickTranscodeWorker()
 	c.JSON(http.StatusAccepted, gin.H{"task_id": tid, "status": "waiting"})
 }
 
@@ -158,18 +156,7 @@ func (h *Handler) RetryTranscodeTask(c *gin.Context) {
 	if err == nil {
 		n, _ := res.RowsAffected()
 		if n > 0 {
-			var filePath, quality string
-			if e := h.App.DB.QueryRow(`
-				SELECT m.file_path, t.quality
-				FROM transcode_task t
-				LEFT JOIN media m ON m.file_id = t.file_id
-				WHERE t.id = ?
-				LIMIT 1
-			`, id).Scan(&filePath, &quality); e == nil && h.Worker != nil {
-				go func(taskID int64, fp, q string) {
-					_ = h.Worker.RunTask(context.Background(), taskID, fp, q)
-				}(id, filePath, quality)
-			}
+			h.kickTranscodeWorker()
 			c.JSON(http.StatusAccepted, gin.H{"ok": true, "status": "waiting", "task_id": id})
 			return
 		}

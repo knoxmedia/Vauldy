@@ -16,6 +16,10 @@ var libreOfficeMu sync.Mutex
 
 // ExportDrawJPEG renders the first page of a PDF or other Draw-supported document to JPEG via LibreOffice.
 func ExportDrawJPEG(ctx context.Context, mediaRoot string, cfg config.DocTransConfig, sourcePath, outPath string) error {
+	return exportDrawJPEGLibreOffice(ctx, mediaRoot, cfg, sourcePath, outPath)
+}
+
+func exportDrawJPEGLibreOffice(ctx context.Context, mediaRoot string, cfg config.DocTransConfig, sourcePath, outPath string) error {
 	sourcePath = strings.TrimSpace(sourcePath)
 	outPath = strings.TrimSpace(outPath)
 	if sourcePath == "" || outPath == "" {
@@ -31,7 +35,10 @@ func ExportDrawJPEG(ctx context.Context, mediaRoot string, cfg config.DocTransCo
 	defer libreOfficeMu.Unlock()
 
 	conv := &Converter{MediaRoot: mediaRoot, Config: cfg}
-	soffice := absSofficePath(mediaRoot, conv.resolveLibreOffice())
+	soffice := resolveSofficePath(mediaRoot, cfg)
+	if soffice == "" {
+		soffice = absSofficePath(mediaRoot, conv.resolveLibreOffice())
+	}
 	if soffice == "" {
 		return fmt.Errorf("libreoffice not found")
 	}

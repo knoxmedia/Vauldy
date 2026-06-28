@@ -15,6 +15,10 @@ import (
 
 // serveDerivedAsset streams a derived artifact, decrypting Knox .enc when needed.
 func (h *Handler) serveDerivedAsset(c *gin.Context, mediaID int64, path, contentType string) {
+	h.serveDerivedAssetKind(c, mediaID, path, contentType, "", "")
+}
+
+func (h *Handler) serveDerivedAssetKind(c *gin.Context, mediaID int64, path, contentType, kind, logicalName string) {
 	path = filepath.Clean(strings.TrimSpace(path))
 	if path == "" {
 		c.JSON(http.StatusNotFound, gin.H{"error": "missing path"})
@@ -34,7 +38,7 @@ func (h *Handler) serveDerivedAsset(c *gin.Context, mediaID int64, path, content
 		http.ServeFile(c.Writer, c.Request, path)
 		return
 	}
-	seeker, err := storage.OpenDerivedSeeker(h.App.DB, h.KeyVault, mediaID, path)
+	seeker, err := storage.OpenDerivedArtifactSeeker(h.App.DB, h.KeyVault, mediaID, path, kind, logicalName)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "file missing"})
 		return

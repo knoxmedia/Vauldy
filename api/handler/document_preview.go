@@ -27,7 +27,7 @@ func (h *Handler) DocumentPreviewInfo(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 		return
 	}
-	office := doctrans.IsOfficeFormat(path)
+	office := doctrans.IsOfficeDocument(path, format)
 	resp := gin.H{
 		"id":              id,
 		"format":          format,
@@ -69,21 +69,27 @@ func (h *Handler) ServeDocumentPreview(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "document conversion disabled"})
 		return
 	}
-	path, _, mtime, err := h.loadDocumentSource(id)
+	path, format, mtime, err := h.loadDocumentSource(id)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 		return
 	}
-	if !doctrans.IsOfficeFormat(path) {
+	if !doctrans.IsOfficeDocument(path, format) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "preview conversion not supported for this format"})
 		return
 	}
+	workPath, cleanup, err := storage.MaterializePlaintextTemp(h.App.DB, h.KeyVault, id, path)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer cleanup()
 	conv, err := h.docConverter()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	pdfPath, err := conv.EnsurePreviewPDF(c.Request.Context(), id, path, mtime)
+	pdfPath, err := conv.EnsurePreviewPDF(c.Request.Context(), id, workPath, mtime)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -99,9 +105,10 @@ func (h *Handler) ServeDocumentPreview(c *gin.Context) {
 func (h *Handler) loadDocumentSource(id int64) (filePath, format string, mtime int64, err error) {
 	var path, ftype, fmtVal sql.NullString
 	var fileMtime sql.NullInt64
+	var libraryID int64
 	e := h.App.DB.QueryRow(`
-		SELECT file_path, file_type, format, file_mtime FROM media WHERE id = ? AND status = 'active'`, id).
-		Scan(&path, &ftype, &fmtVal, &fileMtime)
+		SELECT file_path, file_type, format, file_mtime, library_id FROM media WHERE id = ? AND status = 'active'`, id).
+		Scan(&path, &ftype, &fmtVal, &fileMtime, &libraryID)
 	if e != nil {
 		if e == sql.ErrNoRows {
 			return "", "", 0, fmt.Errorf("not found")
@@ -115,5 +122,11 @@ func (h *Handler) loadDocumentSource(id int64) (filePath, format string, mtime i
 		return "", "", 0, fmt.Errorf("file path missing")
 	}
 	mtime = fileMtime.Int64
-	return path.String, fmtVal.String, mtime, nil
+	catalog := path.String
+	if pref := storage.PreferredFFmpegPath(h.App.DB, id, libraryID, catalog); pref != "" {
+		catalog = pref
+	} else if abs := storage.ResolveMediaAbsolutePath(h.App.DB, libraryID, catalog); abs != "" {
+		catalog = abs
+	}
+	return catalog, fmtVal.String, mtime, nil
 }

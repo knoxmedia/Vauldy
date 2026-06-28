@@ -32,6 +32,13 @@ type Options struct {
 	DocTrans   config.DocTransConfig
 }
 
+func (o Options) derivedBaseDir() string {
+	if o.Derived != nil && strings.TrimSpace(o.Derived.BaseDir) != "" {
+		return o.Derived.BaseDir
+	}
+	return ""
+}
+
 // Path returns the cached cover image path for one media item.
 func Path(previewDir string, mediaID int64) string {
 	return filepath.Join(previewDir, "documents", fmt.Sprintf("%d", mediaID), "cover.jpg")
@@ -45,7 +52,7 @@ func Exists(previewDir string, mediaID int64) bool {
 
 // CachedCover reports whether a usable cover exists (plaintext or encrypted derived asset).
 // When sourceMtime <= 0, any non-empty cover file is accepted.
-func CachedCover(db *sql.DB, previewDir string, mediaID int64, sourceMtime int64) bool {
+func CachedCover(db *sql.DB, previewDir, derivedBaseDir string, mediaID int64, sourceMtime int64) bool {
 	if mediaID <= 0 {
 		return false
 	}
@@ -55,7 +62,7 @@ func CachedCover(db *sql.DB, previewDir string, mediaID int64, sourceMtime int64
 	if db == nil {
 		return false
 	}
-	if enc, ok := storage.LookupEncPath(db, mediaID, docCoverKind, docCoverLogicalName); ok {
+	if enc, ok := storage.ResolveDerivedEncPath(db, derivedBaseDir, mediaID, docCoverKind, docCoverLogicalName); ok {
 		return coverFresh(enc, sourceMtime)
 	}
 	return false
@@ -104,15 +111,16 @@ func Ensure(ctx context.Context, opts Options, mediaID int64, sourcePath string,
 	defer cleanup()
 
 	outPath := Path(opts.PreviewDir, mediaID)
-	if CachedCover(opts.DB, opts.PreviewDir, mediaID, fileMtime) {
+	if CachedCover(opts.DB, opts.PreviewDir, opts.derivedBaseDir(), mediaID, fileMtime) {
 		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
 		return err
 	}
 
+	strategy := coverStrategyFor(workPath)
 	var genErr error
-	switch coverStrategyFor(sourcePath) {
+	switch strategy {
 	case strategyEPUB:
 		if ExtractEPUBCover(workPath, outPath) == "" {
 			genErr = fmt.Errorf("epub cover not found")
@@ -124,11 +132,11 @@ func Ensure(ctx context.Context, opts Options, mediaID int64, sourcePath string,
 	case strategyOffice:
 		if !docTransEnabled(opts.DocTrans) {
 			genErr = fmt.Errorf("office cover requires document conversion")
-		} else {
+		} else if err := doctrans.ExportOfficeCoverJPEG(ctx, opts.MediaRoot, opts.DocTrans, workPath, outPath); err != nil {
 			conv := doctrans.NewConverter(opts.MediaRoot, opts.PreviewDir, opts.DocTrans)
-			pdfPath, err := conv.EnsurePreviewPDF(ctx, mediaID, workPath, fileMtime)
-			if err != nil {
-				genErr = err
+			pdfPath, convErr := conv.EnsurePreviewPDF(ctx, mediaID, workPath, fileMtime)
+			if convErr != nil {
+				genErr = convErr
 			} else {
 				genErr = renderPageCover(ctx, opts, mediaID, pdfPath, outPath)
 			}

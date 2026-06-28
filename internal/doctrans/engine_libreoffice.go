@@ -15,8 +15,11 @@ import (
 
 func detectLibreOffice(mediaRoot string, cfg config.DocTransConfig) EngineStatus {
 	st := EngineStatus{Kind: EngineLibreOffice, Label: engineLabel(EngineLibreOffice)}
-	conv := &Converter{MediaRoot: mediaRoot, Config: cfg}
-	p := absSofficePath(mediaRoot, conv.resolveLibreOffice())
+	p := resolveSofficePath(mediaRoot, cfg)
+	if p == "" {
+		conv := &Converter{MediaRoot: mediaRoot, Config: cfg}
+		p = absSofficePath(mediaRoot, conv.resolveLibreOffice())
+	}
 	if p == "" {
 		st.Message = fmt.Sprintf("未找到 LibreOffice，可一键安装到 %s", DefaultDirRel)
 		return st
@@ -85,6 +88,11 @@ func convertLibreOffice(ctx context.Context, mediaRoot string, cfg config.DocTra
 func (c *Converter) resolveLibreOffice() string {
 	if c == nil {
 		return ""
+	}
+	if p := strings.TrimSpace(libreOfficePath(c.Config)); p != "" && filepath.IsAbs(p) {
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			return p
+		}
 	}
 	p := ResolvePath(c.MediaRoot, libreOfficePath(c.Config))
 	if p != "" {

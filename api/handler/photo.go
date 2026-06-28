@@ -167,6 +167,7 @@ func (h *Handler) ensurePhotoVariants(mediaID int64, srcPath string) error {
 	root["photo"] = photo
 	b, _ := json.Marshal(root)
 	_, _ = h.App.DB.Exec(`UPDATE media SET meta_json = ? WHERE id = ?`, string(b), mediaID)
+	h.scheduleLibraryPreviewRefreshForMedia(mediaID)
 	return nil
 }
 

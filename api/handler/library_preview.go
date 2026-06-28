@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 
+	"knox-media/internal/doccover"
+	"knox-media/internal/imagethumb"
 	"knox-media/internal/metadatalib"
 	"knox-media/internal/storage"
 )
@@ -40,9 +42,18 @@ func libraryPreviewTotalH() int {
 var libraryPreviewLocks sync.Map
 var libraryPreviewPending sync.Map
 
+const (
+	libraryPreviewKindPoster       = "poster"
+	libraryPreviewKindPhotoThumb   = "photo_thumb"
+	libraryPreviewKindDocCover     = "doc_cover"
+	libraryPreviewKindMusicArtwork = "music_artwork"
+)
+
 type libraryPreviewSource struct {
 	mediaID   int64
+	albumID   int64
 	posterURL string
+	kind      string
 }
 
 // scheduleLibraryPreviewRefresh regenerates the composite preview asynchronously.
@@ -97,6 +108,41 @@ func (h *Handler) refreshLibraryPreview(libraryID int64) {
 }
 
 func (h *Handler) latestLibraryPreviewSources(libraryID int64) ([]libraryPreviewSource, error) {
+	libType := strings.ToLower(strings.TrimSpace(h.loadLibraryType(libraryID)))
+	candidates, err := h.queryLibraryPreviewCandidates(libraryID, libType, libraryPreviewSlots*5)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]libraryPreviewSource, 0, libraryPreviewSlots)
+	for _, src := range candidates {
+		if !h.previewSourceReady(src) {
+			continue
+		}
+		out = append(out, src)
+		if len(out) >= libraryPreviewSlots {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (h *Handler) queryLibraryPreviewCandidates(libraryID int64, libType string, limit int) ([]libraryPreviewSource, error) {
+	if limit <= 0 {
+		limit = libraryPreviewSlots
+	}
+	switch libType {
+	case "music":
+		return h.queryMusicPreviewCandidates(libraryID, limit)
+	case "photo":
+		return h.queryPhotoPreviewCandidates(libraryID, limit)
+	case "document":
+		return h.queryDocumentPreviewCandidates(libraryID, limit)
+	default:
+		return h.queryVideoPreviewCandidates(libraryID, limit)
+	}
+}
+
+func (h *Handler) queryVideoPreviewCandidates(libraryID int64, limit int) ([]libraryPreviewSource, error) {
 	rows, err := h.App.DB.Query(`
 		SELECT m.id,
 			COALESCE(
@@ -104,9 +150,23 @@ func (h *Handler) latestLibraryPreviewSources(libraryID int64) ([]libraryPreview
 				NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.extra.poster')), '')
 			) AS poster_url
 		FROM media m
-		WHERE m.library_id = ? AND m.file_type = 'video'
+		WHERE m.library_id = ? AND m.file_type = 'video' AND m.status = 'active'
 		ORDER BY datetime(m.created_at) DESC, m.id DESC
-		LIMIT ?`, libraryID, libraryPreviewSlots)
+		LIMIT ?`, libraryID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanPreviewPosterRows(rows)
+}
+
+func (h *Handler) queryPhotoPreviewCandidates(libraryID int64, limit int) ([]libraryPreviewSource, error) {
+	rows, err := h.App.DB.Query(`
+		SELECT m.id, ''
+		FROM media m
+		WHERE m.library_id = ? AND m.file_type = 'image' AND m.status = 'active'
+		ORDER BY datetime(m.created_at) DESC, m.id DESC
+		LIMIT ?`, libraryID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -119,9 +179,146 @@ func (h *Handler) latestLibraryPreviewSources(libraryID int64) ([]libraryPreview
 			continue
 		}
 		src.posterURL = strings.TrimSpace(poster.String)
+		src.kind = libraryPreviewKindPhotoThumb
 		out = append(out, src)
 	}
 	return out, rows.Err()
+}
+
+func (h *Handler) queryDocumentPreviewCandidates(libraryID int64, limit int) ([]libraryPreviewSource, error) {
+	rows, err := h.App.DB.Query(`
+		SELECT m.id, ''
+		FROM media m
+		WHERE m.library_id = ? AND m.file_type = 'document' AND m.status = 'active'
+		ORDER BY datetime(m.created_at) DESC, m.id DESC
+		LIMIT ?`, libraryID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []libraryPreviewSource
+	for rows.Next() {
+		var src libraryPreviewSource
+		var poster sql.NullString
+		if err := rows.Scan(&src.mediaID, &poster); err != nil {
+			continue
+		}
+		src.kind = libraryPreviewKindDocCover
+		out = append(out, src)
+	}
+	return out, rows.Err()
+}
+
+func (h *Handler) queryMusicPreviewCandidates(libraryID int64, limit int) ([]libraryPreviewSource, error) {
+	rows, err := h.App.DB.Query(`
+		SELECT a.id,
+			COALESCE(NULLIF(TRIM(a.artwork_path), ''), ''),
+			COALESCE((
+				SELECT mt.media_id
+				FROM music_track mt
+				JOIN media m ON m.id = mt.media_id AND m.status = 'active'
+				WHERE mt.album_id = a.id
+				ORDER BY mt.sort_order ASC, mt.track_number ASC, mt.media_id ASC
+				LIMIT 1
+			), 0)
+		FROM music_album a
+		WHERE a.library_id = ?
+		ORDER BY datetime(COALESCE(a.updated_at, a.created_at)) DESC, a.id DESC
+		LIMIT ?`, libraryID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []libraryPreviewSource
+	for rows.Next() {
+		var src libraryPreviewSource
+		var artwork sql.NullString
+		if err := rows.Scan(&src.albumID, &artwork, &src.mediaID); err != nil {
+			continue
+		}
+		src.posterURL = strings.TrimSpace(artwork.String)
+		src.kind = libraryPreviewKindMusicArtwork
+		out = append(out, src)
+	}
+	return out, rows.Err()
+}
+
+func scanPreviewPosterRows(rows *sql.Rows) ([]libraryPreviewSource, error) {
+	var out []libraryPreviewSource
+	for rows.Next() {
+		var src libraryPreviewSource
+		var poster sql.NullString
+		if err := rows.Scan(&src.mediaID, &poster); err != nil {
+			continue
+		}
+		src.posterURL = strings.TrimSpace(poster.String)
+		src.kind = libraryPreviewKindPoster
+		out = append(out, src)
+	}
+	return out, rows.Err()
+}
+
+func (h *Handler) previewSourceReady(src libraryPreviewSource) bool {
+	switch src.kind {
+	case libraryPreviewKindPhotoThumb:
+		return h.photoThumbReady(src.mediaID)
+	case libraryPreviewKindDocCover:
+		previewDir := ""
+		if h.App != nil && h.App.Config != nil {
+			previewDir = h.App.Config.Data.Preview
+		}
+		return doccover.CachedCover(h.App.DB, previewDir, h.derivedBaseDir(), src.mediaID, 0)
+	case libraryPreviewKindMusicArtwork:
+		if p := h.existingArtworkFile(src.posterURL); p != "" {
+			return true
+		}
+		if src.albumID > 0 && artworkFileReady(h.albumArtworkCacheFile(src.albumID)) {
+			return true
+		}
+		if src.mediaID > 0 {
+			uploadDir := ""
+			if h.App != nil && h.App.Config != nil {
+				uploadDir = strings.TrimSpace(h.App.Config.Data.Upload)
+			}
+			return storage.ResolvePosterServePath(h.App.DB, uploadDir, src.mediaID) != ""
+		}
+		return false
+	default:
+		if src.posterURL != "" && h.resolvePosterFilePath(src.mediaID, src.posterURL) != "" {
+			return true
+		}
+		return h.resolvePosterFilePath(src.mediaID, "") != ""
+	}
+}
+
+func (h *Handler) photoThumbReady(mediaID int64) bool {
+	if mediaID <= 0 {
+		return false
+	}
+	paths := imagethumb.ResolvedPaths(h.App.DB, h.photoCacheDir(), mediaID)
+	if artworkFileReady(paths.Thumb) {
+		return true
+	}
+	if enc, ok := storage.LookupEncPath(h.App.DB, mediaID, "photo_thumb", "thumb.jpg"); ok {
+		return artworkFileReady(enc)
+	}
+	return false
+}
+
+func (h *Handler) scheduleLibraryPreviewRefreshForMedia(mediaID int64) {
+	if h == nil || h.App == nil || h.App.DB == nil || mediaID <= 0 {
+		return
+	}
+	var libraryID sql.NullInt64
+	if err := h.App.DB.QueryRow(`SELECT library_id FROM media WHERE id = ?`, mediaID).Scan(&libraryID); err != nil || libraryID.Int64 <= 0 {
+		return
+	}
+	h.scheduleLibraryPreviewRefresh(libraryID.Int64)
+}
+
+// ScheduleLibraryPreviewRefreshForMedia regenerates the library strip after one media item gains a cover/thumb.
+func (h *Handler) ScheduleLibraryPreviewRefreshForMedia(mediaID int64) {
+	h.scheduleLibraryPreviewRefreshForMedia(mediaID)
 }
 
 func (h *Handler) libraryPreviewPublicURL(libraryID int64) string {
@@ -182,6 +379,62 @@ func (h *Handler) resolvePosterFilePath(mediaID int64, posterURL string) string 
 	return ""
 }
 
+func (h *Handler) loadCoverImageForCompose(src libraryPreviewSource) (image.Image, error) {
+	switch src.kind {
+	case libraryPreviewKindPhotoThumb:
+		return h.loadPhotoThumbForCompose(src.mediaID)
+	case libraryPreviewKindDocCover:
+		return h.loadDocCoverForCompose(src.mediaID)
+	case libraryPreviewKindMusicArtwork:
+		return h.loadMusicArtworkForCompose(src.albumID, src.mediaID, src.posterURL)
+	default:
+		return h.loadPosterImageForCompose(src.mediaID, src.posterURL)
+	}
+}
+
+func (h *Handler) loadPhotoThumbForCompose(mediaID int64) (image.Image, error) {
+	if enc, ok := storage.LookupEncPath(h.App.DB, mediaID, "photo_thumb", "thumb.jpg"); ok {
+		seeker, err := storage.OpenDerivedSeeker(h.App.DB, h.KeyVault, mediaID, enc)
+		if err != nil {
+			return nil, err
+		}
+		defer seeker.Close()
+		img, _, err := image.Decode(seeker)
+		return img, err
+	}
+	paths := imagethumb.ResolvedPaths(h.App.DB, h.photoCacheDir(), mediaID)
+	return loadImageFile(paths.Thumb)
+}
+
+func (h *Handler) loadDocCoverForCompose(mediaID int64) (image.Image, error) {
+	if enc, ok := storage.ResolveDerivedEncPath(h.App.DB, h.derivedBaseDir(), mediaID, "doc_cover", "cover.jpg"); ok {
+		seeker, err := storage.OpenDerivedArtifactSeeker(h.App.DB, h.KeyVault, mediaID, enc, "doc_cover", "cover.jpg")
+		if err != nil {
+			return nil, err
+		}
+		defer seeker.Close()
+		img, _, err := image.Decode(seeker)
+		return img, err
+	}
+	previewDir := ""
+	if h.App != nil && h.App.Config != nil {
+		previewDir = h.App.Config.Data.Preview
+	}
+	return loadImageFile(doccover.Path(previewDir, mediaID))
+}
+
+func (h *Handler) loadMusicArtworkForCompose(albumID, mediaID int64, artworkPath string) (image.Image, error) {
+	if p := h.existingArtworkFile(artworkPath); p != "" {
+		return loadImageFile(p)
+	}
+	if albumID > 0 {
+		if p := h.albumArtworkCacheFile(albumID); artworkFileReady(p) {
+			return loadImageFile(p)
+		}
+	}
+	return h.loadPosterImageForCompose(mediaID, "")
+}
+
 func (h *Handler) loadPosterImageForCompose(mediaID int64, posterURL string) (image.Image, error) {
 	if enc, ok := storage.LookupEncPath(h.App.DB, mediaID, "poster", "poster.jpg"); ok {
 		seeker, err := storage.OpenDerivedSeeker(h.App.DB, h.KeyVault, mediaID, enc)
@@ -207,6 +460,7 @@ func composeLibraryPreviewImage(h *Handler, sources []libraryPreviewSource, outF
 	mainRect := image.Rect(0, 0, width, libraryPreviewMainH)
 	draw.Draw(canvas, mainRect, &image.Uniform{C: color.RGBA{0x12, 0x12, 0x16, 0xff}}, image.Point{}, draw.Src)
 
+	loaded := 0
 	for i := 0; i < libraryPreviewSlots; i++ {
 		x0 := i * slotW
 		x1 := x0 + slotW
@@ -215,12 +469,16 @@ func composeLibraryPreviewImage(h *Handler, sources []libraryPreviewSource, outF
 		}
 		rect := image.Rect(x0, 0, x1, libraryPreviewMainH)
 		if i < len(sources) {
-			if img, err := h.loadPosterImageForCompose(sources[i].mediaID, sources[i].posterURL); err == nil {
+			if img, err := h.loadCoverImageForCompose(sources[i]); err == nil {
 				drawCover(canvas, img, rect)
+				loaded++
 				continue
 			}
 		}
 		fillPlaceholderSlot(canvas, rect, i)
+	}
+	if loaded == 0 {
+		return fmt.Errorf("no cover images loaded")
 	}
 	drawReflection(canvas, libraryPreviewMainH, libraryPreviewReflect)
 	f, err := os.Create(outFile)

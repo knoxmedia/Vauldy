@@ -14,6 +14,18 @@ func TestIsOfficeFormat(t *testing.T) {
 	}
 }
 
+func TestIsOfficeDocument(t *testing.T) {
+	if !IsOfficeDocument("92a7a378.enc", "doc") {
+		t.Fatal("encrypted doc catalog should be office via format")
+	}
+	if IsOfficeDocument("92a7a378.enc", "pdf") {
+		t.Fatal("encrypted pdf should not be office")
+	}
+	if !IsOfficeDocument("report.docx", "") {
+		t.Fatal("docx path should be office")
+	}
+}
+
 func TestDefaultSofficeRel(t *testing.T) {
 	if DefaultSofficeRel() == "" {
 		t.Fatal("expected default soffice path")

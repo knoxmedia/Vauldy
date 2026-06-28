@@ -15,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"knox-media/internal/jit/session"
+	"knox-media/internal/playback"
 )
 
 func jitSegmentStartTime(seg int) float64 {
@@ -123,20 +124,20 @@ func (h *Handler) tryReviveJITSession(c *gin.Context, sessionID, asset string) (
 	if _, ok := h.requireMediaAccess(c, mediaID, true); !ok {
 		return nil, false
 	}
-	var fileID, filePath, metaJSON sql.NullString
+	var fileID, filePath sql.NullString
 	var srcHeight, srcWidth, srcDuration sql.NullInt64
 	if err := h.App.DB.QueryRow(
-		`SELECT file_id, file_path, meta_json, height, width, duration FROM media WHERE id = ?`,
+		`SELECT file_id, file_path, height, width, duration FROM media WHERE id = ?`,
 		mediaID,
-	).Scan(&fileID, &filePath, &metaJSON, &srcHeight, &srcWidth, &srcDuration); err != nil {
+	).Scan(&fileID, &filePath, &srcHeight, &srcWidth, &srcDuration); err != nil {
 		return nil, false
 	}
 	if !fileID.Valid || strings.TrimSpace(fileID.String) == "" || !filePath.Valid || strings.TrimSpace(filePath.String) == "" {
 		return nil, false
 	}
-	media := detectMediaProfile(metaJSON.String)
-	bitrate := pickBitrate(media, int(srcWidth.Int64), int(srcHeight.Int64))
-	resolution := resolutionForBitrate(bitrate)
+	homeLimit, _ := h.loadHomeStreamPlayback()
+	caps := readClientCaps(c)
+	bitrate, resolution := playback.PickJITParams(int(srcHeight.Int64), int(srcWidth.Int64), caps.MaxHeight, homeLimit)
 	if !h.ensureEncryptedISOPipePlayback(c, mediaID, filePath.String) {
 		return nil, false
 	}
@@ -420,12 +421,15 @@ func (h *Handler) buildTranscodeConfig(s *session.Session, startTime float64) se
 		}
 	}
 
+	txSettings := h.loadTranscoderSettings()
 	return session.TranscodeConfig{
 		SourcePath: s.SourcePath,
 		Bitrate:    s.Bitrate,
 		Resolution: s.Resolution,
 		AudioCodec: strings.ToLower(strings.TrimSpace(audioCodec.String)),
 		StartTime:  startTime,
+		X264Preset: txSettings.InstantX264Preset(),
+		CRF:        txSettings.InstantCRF(),
 	}
 }
 

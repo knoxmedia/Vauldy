@@ -152,6 +152,12 @@ export function withAccessToken(url: string): string {
   return `${u}${sep}access_token=${encodeURIComponent(token)}`;
 }
 
+/** Scrape/list poster or backdrop URL with JWT when pointing at Knox API assets. */
+export function authListPosterUrl(raw: string): string {
+  const u = normalizeListPosterUrl(raw);
+  return u ? withAccessToken(u) : "";
+}
+
 /** Server-generated frame capture for encrypted libraries (auth + decrypt). */
 export function derivedVideoPosterSrc(id: number): string {
   return withAccessToken(`/api/v1/media/${id}/poster.jpg`);
@@ -192,7 +198,7 @@ export function mediaLandscapeThumbSrc(
     return mediaPosterSrc(r);
   }
   const backdrop = normalizeListPosterUrl(r.backdrop_url || "");
-  if (backdrop) return backdrop;
+  if (backdrop) return withAccessToken(backdrop);
   return mediaPosterSrc(r);
 }
 
@@ -212,6 +218,22 @@ export function mediaPosterSrc(
   const u = normalizeListPosterUrl(r.poster_url || "");
   if (u) return withAccessToken(u);
   return localPosterSrc(r.id, r.encrypted_asset);
+}
+
+/** Detail page poster: meta scrape path or derived frame capture for encrypted video. */
+export function mediaDetailPosterSrc(
+  detail: Pick<MediaItem, "id" | "file_path" | "poster_url" | "encrypted_asset">,
+  metaPoster?: string,
+): string {
+  const fromMeta = authListPosterUrl(metaPoster || "");
+  if (fromMeta) return fromMeta;
+  const encrypted =
+    Boolean(detail.encrypted_asset) || (detail.file_path || "").toLowerCase().endsWith(".enc");
+  return mediaPosterSrc({
+    id: detail.id,
+    poster_url: detail.poster_url,
+    encrypted_asset: encrypted,
+  });
 }
 
 /** Cached photo thumbnail (480px max edge). */
@@ -898,8 +920,7 @@ export async function fetchArtistAlbums(artistId: number) {
 
 export function seriesPosterSrc(s: Pick<SeriesSummary, "id" | "poster_url" | "poster">): string {
   const u = normalizeListPosterUrl(s.poster_url || s.poster || "");
-  if (u) return u;
-  return "";
+  return u ? withAccessToken(u) : "";
 }
 
 export async function fetchLibrarySeries(libraryId: number) {

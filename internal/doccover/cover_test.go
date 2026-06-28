@@ -98,7 +98,7 @@ func TestCachedCoverPlaintext(t *testing.T) {
 	if err := os.WriteFile(cover, []byte("jpg"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if !CachedCover(nil, preview, id, 0) {
+	if !CachedCover(nil, preview, dir, id, 0) {
 		t.Fatal("expected plaintext cover")
 	}
 }
@@ -106,8 +106,9 @@ func TestCachedCoverPlaintext(t *testing.T) {
 func TestCachedCoverEncryptedDerived(t *testing.T) {
 	dir := t.TempDir()
 	preview := filepath.Join(dir, "preview")
+	derivedBase := filepath.Join(dir, "derived")
 	id := int64(99)
-	enc := filepath.Join(dir, "derived", "99", "doc_cover", "cover.jpg.enc")
+	enc := filepath.Join(derivedBase, "99", "doc_cover", "cover.jpg.enc")
 	if err := os.MkdirAll(filepath.Dir(enc), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +134,7 @@ func TestCachedCoverEncryptedDerived(t *testing.T) {
 	if Exists(preview, id) {
 		t.Fatal("plaintext should be absent")
 	}
-	if !CachedCover(db, preview, id, 0) {
+	if !CachedCover(db, preview, derivedBase, id, 0) {
 		t.Fatal("expected encrypted derived cover")
 	}
 }
@@ -149,6 +150,8 @@ func TestCoverStrategy(t *testing.T) {
 		{"sheet.xls", strategyOffice},
 		{"photo.jpg", strategyImage},
 		{"notes.txt", strategyNone},
+		{"catalog.enc", strategyNone},
+		{filepath.Join(t.TempDir(), "knox-plain-1.pdf"), strategyPDF},
 	}
 	for _, tc := range cases {
 		if got := coverStrategyFor(tc.path); got != tc.want {

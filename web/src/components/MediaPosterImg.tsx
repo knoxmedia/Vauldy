@@ -7,7 +7,7 @@ import {
 } from "../api/client";
 
 type Props = {
-  item: Pick<MediaItem, "id" | "poster_url">;
+  item: Pick<MediaItem, "id" | "poster_url" | "encrypted_asset">;
   className?: string;
   onLoad?: (e: React.SyntheticEvent<HTMLImageElement>) => void;
   onLoadStart?: (e: React.SyntheticEvent<HTMLImageElement>) => void;
@@ -18,7 +18,7 @@ type Props = {
 export default function MediaPosterImg({ item, className, onLoad, onLoadStart, onFinalError }: Props) {
   const [scrapedFailed, setScrapedFailed] = useState(false);
   const src = useMemo(() => {
-    if (scrapedFailed && hasScrapedPosterUrl(item)) return localPosterSrc(item.id);
+    if (scrapedFailed && hasScrapedPosterUrl(item)) return localPosterSrc(item.id, item.encrypted_asset);
     return mediaPosterSrc(item);
   }, [item, scrapedFailed]);
 

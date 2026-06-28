@@ -11,7 +11,7 @@ func (h *Handler) GenerateDocumentCover(mediaID int64) {
 	if h.App.Config != nil {
 		previewDir = h.App.Config.Data.Preview
 	}
-	if !doccover.NeedsCoverWork(h.App.DB, previewDir, mediaID, 0) {
+	if !doccover.NeedsCoverWork(h.App.DB, previewDir, h.derivedBaseDir(), mediaID, 0) {
 		return
 	}
 	h.DocCoverWorker.Enqueue(mediaID)

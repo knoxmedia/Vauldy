@@ -402,9 +402,9 @@
       "disable_video_transcode": "停用影片串流轉碼",
       "disable_video_transcode_desc": "在转码操作中禁用视频流的转码。设置后，转码器仍然可以转码音频或重新封装视频。",
       "max_cpu_concurrent": "最大 CPU 並行轉碼數",
-      "max_cpu_concurrent_desc": "限制服务器使用 CPU 进行视频转码的并发数量。",
+      "max_cpu_concurrent_desc": "限制線上播放時即時轉碼的並行數量，保障正在觀看使用者的流暢體驗（主要控制 CPU 軟編；GPU 滿載時可能回退到 CPU）。",
       "max_bg_concurrent": "最大背景影片並行轉碼數",
-      "max_bg_concurrent_desc": "限制服务器可用于优化器和下载的视频转码的并发数量。",
+      "max_bg_concurrent_desc": "限制背景優化影片、離線下載等預處理任務的並行數量，避免與即時播放搶占 CPU 資源。",
       "x264": {
         "ultrafast": "极快 (ultrafast)",
         "superfast": "超快 (superfast)",

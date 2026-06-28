@@ -13,6 +13,7 @@ import (
 
 	kcrypto "knox-media/internal/crypto"
 	"knox-media/internal/keystore"
+	"knox-media/pkg/hashutil"
 )
 
 var ErrAlreadyEncrypted = errors.New("media already encrypted")
@@ -186,6 +187,7 @@ func (s *AssetEncryptor) encryptMedia(ctx context.Context, mediaID int64, manual
 	if _, err := s.DB.ExecContext(ctx, `UPDATE media SET file_path = ? WHERE id = ?`, encPath, mediaID); err != nil {
 		return err
 	}
+	persistPlainMD5AfterEncrypt(s.DB, mediaID, plainPath)
 	if cleanupPlain == 1 {
 		cleanupPlaintextAfterEncrypt(s.DB, mediaID, plainPath)
 	}
@@ -232,6 +234,25 @@ func OpenPlaintext(db *sql.DB, vault *keystore.Vault, mediaID int64, path string
 		}
 	}()
 	return kcrypto.OpenDecryptSeeker(path, wrapped, kek)
+}
+
+func persistPlainMD5AfterEncrypt(db *sql.DB, mediaID int64, plainPath string) {
+	plainPath = strings.TrimSpace(plainPath)
+	if db == nil || mediaID <= 0 || plainPath == "" {
+		return
+	}
+	var existing sql.NullString
+	if err := db.QueryRow(`SELECT md5 FROM media WHERE id = ?`, mediaID).Scan(&existing); err != nil {
+		return
+	}
+	if existing.Valid && strings.TrimSpace(existing.String) != "" {
+		return
+	}
+	h, err := hashutil.MD5File(plainPath)
+	if err != nil || h == "" {
+		return
+	}
+	_, _ = db.Exec(`UPDATE media SET md5 = ? WHERE id = ? AND (md5 IS NULL OR trim(md5) = '')`, h, mediaID)
 }
 
 func markEncryptPlainMissing(db *sql.DB, mediaID int64, plainPath string) {

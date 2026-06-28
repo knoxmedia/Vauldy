@@ -65,6 +65,17 @@ func NewWorker(db *sql.DB, ffmpegPath, transcodeDir string) *Worker {
 	return w
 }
 
+func (w *Worker) loadSettings() Settings {
+	if w == nil || w.DB == nil {
+		return DefaultSettings()
+	}
+	var raw sql.NullString
+	if err := w.DB.QueryRow(`SELECT options_json FROM system_options WHERE id = 1`).Scan(&raw); err != nil {
+		return DefaultSettings()
+	}
+	return SettingsFromOptionsJSON(raw.String)
+}
+
 func (w *Worker) RunTask(ctx context.Context, taskID int64, inputPath, quality string) error {
 	if taskID <= 0 {
 		return nil
@@ -226,10 +237,7 @@ func (w *Worker) EnsureHLS(fileID, inputPath string, sourceHeight, maxHeight int
 	}
 	tid, _ := res.LastInsertId()
 	outDir := filepath.Join(w.TranscodeDir, fileID, profileKey)
-	go func(taskID int64, ladder []Rendition) {
-		_ = w.runHLS(context.Background(), taskID, inputPath, outDir, ladder)
-	}(tid, ladder)
-
+	// Background worker loop starts waiting tasks respecting concurrency limits.
 	return filepath.Join(outDir, "master.m3u8"), "waiting", tid, nil
 }
 
@@ -289,8 +297,9 @@ func (w *Worker) transcodeRendition(ctx context.Context, taskID int64, inputPath
 		"-hls_segment_filename", filepath.Join(outDir, r.Name+"_%03d.ts"),
 		filepath.Join(outDir, r.Name+".m3u8"),
 	}
+	x264Preset := w.loadSettings().EffectiveBackgroundPreset()
 	try := func(enc EncoderBackend) (stderrOut string, err error) {
-		args := append(append(append([]string{}, prefix...), w.encoderArgsFor(enc, vf, r.VideoRate)...), suffix...)
+		args := append(append(append([]string{}, prefix...), w.encoderArgsFor(enc, vf, r.VideoRate, x264Preset)...), suffix...)
 		cmd := exec.CommandContext(ctx, w.FFmpegPath, args...)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
@@ -338,10 +347,13 @@ func (w *Worker) detectEncoderBackend() EncoderBackend {
 }
 
 func (w *Worker) encoderArgs(vf string, videoRate string) []string {
-	return w.encoderArgsFor(w.Encoder, vf, videoRate)
+	return w.encoderArgsFor(w.Encoder, vf, videoRate, w.loadSettings().EffectiveBackgroundPreset())
 }
 
-func (w *Worker) encoderArgsFor(enc EncoderBackend, vf string, videoRate string) []string {
+func (w *Worker) encoderArgsFor(enc EncoderBackend, vf string, videoRate string, x264Preset string) []string {
+	if strings.TrimSpace(x264Preset) == "" {
+		x264Preset = "veryfast"
+	}
 	switch enc {
 	case EncoderQSV:
 		return []string{"-vf", vf, "-c:v", "h264_qsv", "-b:v", videoRate, "-maxrate", videoRate, "-bufsize", "2M"}
@@ -356,7 +368,7 @@ func (w *Worker) encoderArgsFor(enc EncoderBackend, vf string, videoRate string)
 	case EncoderNVENC:
 		return []string{"-vf", vf, "-c:v", "h264_nvenc", "-preset", "p4", "-b:v", videoRate, "-maxrate", videoRate, "-bufsize", "2M"}
 	default:
-		return []string{"-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-b:v", videoRate, "-maxrate", videoRate, "-bufsize", "2M"}
+		return []string{"-vf", vf, "-c:v", "libx264", "-preset", x264Preset, "-b:v", videoRate, "-maxrate", videoRate, "-bufsize", "2M"}
 	}
 }
 

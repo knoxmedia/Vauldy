@@ -40,5 +40,12 @@ func (h *Handler) createJITSession(c *gin.Context, mediaID int64, fileID, source
 	if !h.ensureEncryptedISOPipePlayback(c, mediaID, sourcePath) {
 		return nil, fmt.Errorf("encrypted pipe prep declined")
 	}
+	if !h.instantTranscodeSlotsAvailable() {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":   "instant transcode capacity reached",
+			"message": "服务器实时转码并发已达上限，请稍后重试",
+		})
+		return nil, fmt.Errorf("instant transcode capacity reached")
+	}
 	return h.SessionManager.CreateSession(mediaID, fileID, sourcePath, bitrate, resolution, duration)
 }

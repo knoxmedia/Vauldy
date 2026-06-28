@@ -470,6 +470,73 @@ CREATE TABLE media_encrypted_assets (
 	}
 }
 
+func TestScanMusicLibrarySkipsEncryptedPlainDuplicateSkipHash(t *testing.T) {
+	t.Parallel()
+
+	db := newScannerTestDB(t)
+	_, err := db.Exec(`
+CREATE TABLE media_encrypted_assets (
+	media_id INTEGER PRIMARY KEY,
+	enc_path TEXT NOT NULL,
+	wrapped_dek TEXT NOT NULL,
+	iv TEXT NOT NULL,
+	plain_path TEXT NOT NULL,
+	status TEXT NOT NULL DEFAULT 'encrypted',
+	updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);`)
+	if err != nil {
+		t.Fatalf("create encrypted assets table: %v", err)
+	}
+
+	root := t.TempDir()
+	plain := filepath.Join(root, "Artist - Song.mp3")
+	if err := os.WriteFile(plain, []byte("fake-mp3-content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	enc := filepath.Join(root, ".encrypted", "audio", "fid-audio.enc")
+	if err := os.MkdirAll(filepath.Dir(enc), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(enc, []byte("enc"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = db.Exec(`INSERT INTO media (id, library_id, file_id, title, file_path, file_type, status) VALUES (42, 3, 'fid-audio', 'Song', ?, 'audio', 'active')`, enc)
+	if err != nil {
+		t.Fatalf("insert media: %v", err)
+	}
+	_, err = db.Exec(`INSERT INTO media_encrypted_assets (media_id, enc_path, wrapped_dek, iv, plain_path, status) VALUES (42, ?, 'aa', 'bb', ?, 'encrypted')`, enc, plain)
+	if err != nil {
+		t.Fatalf("insert encrypted asset: %v", err)
+	}
+
+	addedCalls := 0
+	s := &Scanner{
+		DB:       db,
+		SkipHash: true,
+		OnMediaAdded: func(int64, string, string) {
+			addedCalls++
+		},
+	}
+	added, err := s.ScanLibraryFoldersWithContext(context.Background(), 3, []string{root})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if added != 0 {
+		t.Fatalf("added=%d want 0", added)
+	}
+	if addedCalls != 0 {
+		t.Fatalf("OnMediaAdded=%d want 0", addedCalls)
+	}
+	var mediaCount int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM media WHERE library_id = 3`).Scan(&mediaCount); err != nil {
+		t.Fatal(err)
+	}
+	if mediaCount != 1 {
+		t.Fatalf("media count=%d want 1", mediaCount)
+	}
+}
+
 func TestScanLibraryFoldersAddsWhenEncryptedPlainPathReused(t *testing.T) {
 	t.Parallel()
 

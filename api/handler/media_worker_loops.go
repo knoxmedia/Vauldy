@@ -4,9 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"log"
-	"strconv"
-	"strings"
 	"time"
+
+	"knox-media/internal/transcode"
 )
 
 const (
@@ -167,13 +167,6 @@ func (h *Handler) runTranscodeWorkerOnce() {
 		  AND updated_at < datetime('now', '-20 minutes')
 	`)
 
-	maxBg := h.transcodeMaxBackground()
-	running := h.countRunningTranscodeJobs()
-	slots := maxBg - running
-	if slots <= 0 {
-		return
-	}
-
 	var waiting int
 	_ = h.App.DB.QueryRow(`
 		SELECT (
@@ -182,6 +175,13 @@ func (h *Handler) runTranscodeWorkerOnce() {
 		)
 	`).Scan(&waiting)
 	if waiting == 0 {
+		return
+	}
+
+	settings := h.loadTranscoderSettings()
+	running := h.countRunningBackgroundTranscodeJobs()
+	slots := transcode.BackgroundSlots(settings, running, waiting)
+	if slots <= 0 {
 		return
 	}
 
@@ -196,11 +196,27 @@ func (h *Handler) runTranscodeWorkerOnce() {
 		started += n
 	}
 	if started > 0 {
-		log.Printf("transcode worker: started=%d running=%d max=%d waiting=%d", started, running+started, maxBg, waiting)
+		log.Printf("transcode worker: started=%d running_bg=%d max_bg=%d waiting=%d",
+			started, running+started, settings.MaxBackgroundConcurrent, waiting)
 	}
 }
 
-func (h *Handler) countRunningTranscodeJobs() int {
+func (h *Handler) loadTranscoderSettings() transcode.Settings {
+	if h == nil || h.App == nil || h.App.DB == nil {
+		return transcode.DefaultSettings()
+	}
+	var raw sql.NullString
+	if err := h.App.DB.QueryRow(`SELECT options_json FROM system_options WHERE id = 1`).Scan(&raw); err != nil {
+		return transcode.DefaultSettings()
+	}
+	return transcode.SettingsFromOptionsJSON(raw.String)
+}
+
+func (h *Handler) kickTranscodeWorker() {
+	h.runTranscodeWorkerOnce()
+}
+
+func (h *Handler) countRunningBackgroundTranscodeJobs() int {
 	var n int
 	_ = h.App.DB.QueryRow(`
 		SELECT (
@@ -211,25 +227,10 @@ func (h *Handler) countRunningTranscodeJobs() int {
 	return n
 }
 
-func (h *Handler) transcodeMaxBackground() int {
-	if h == nil || h.App == nil || h.App.DB == nil {
-		return 1
+func (h *Handler) instantTranscodeSlotsAvailable() bool {
+	if h == nil || h.SessionManager == nil {
+		return true
 	}
-	var raw sql.NullString
-	if err := h.App.DB.QueryRow(`SELECT options_json FROM system_options WHERE id = 1`).Scan(&raw); err != nil || !raw.Valid {
-		return 1
-	}
-	opts := decodeSystemOptions(raw.String)
-	s := strings.TrimSpace(opts.Transcoder.MaxBackgroundConcurrent)
-	if s == "" || s == "unlimited" {
-		if s == "unlimited" {
-			return 4
-		}
-		return 1
-	}
-	n, err := strconv.Atoi(s)
-	if err != nil || n < 1 {
-		return 1
-	}
-	return n
+	settings := h.loadTranscoderSettings()
+	return transcode.InstantSlots(settings, h.SessionManager.ActiveSessionCount())
 }

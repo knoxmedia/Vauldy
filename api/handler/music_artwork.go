@@ -168,6 +168,11 @@ func (h *Handler) extractAndCacheAlbumArtwork(albumID, mediaID int64, inputPath 
 		return ""
 	}
 	_, _ = h.App.DB.Exec(`UPDATE music_album SET artwork_path = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, outFile, albumID)
+	var libraryID sql.NullInt64
+	_ = h.App.DB.QueryRow(`SELECT library_id FROM music_album WHERE id = ?`, albumID).Scan(&libraryID)
+	if libraryID.Int64 > 0 {
+		h.scheduleLibraryPreviewRefresh(libraryID.Int64)
+	}
 	return outFile
 }
 

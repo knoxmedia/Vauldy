@@ -23,7 +23,7 @@ func TestNeedsCoverWorkRespectsSkip(t *testing.T) {
 	preview := dir
 	id := int64(99)
 	MarkCoverFailed(preview, id, errors.New("failed"))
-	if NeedsCoverWork(nil, preview, id, 0) {
+	if NeedsCoverWork(nil, preview, dir, id, 0) {
 		t.Fatal("expected no work when retry blocked")
 	}
 }

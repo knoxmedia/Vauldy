@@ -644,6 +644,13 @@ func (c *Config) ResolveExecutablePaths(baseDir string) {
 	c.FFmpeg.FFmpegPath = resolveMaybeRelativePath(c.FFmpeg.FFmpegPath, baseDir)
 	c.FFmpeg.FFprobePath = resolveMaybeRelativePath(c.FFmpeg.FFprobePath, baseDir)
 	c.DRMPackaging.ShakaPackagerPath = resolveMaybeRelativePath(c.DRMPackaging.ShakaPackagerPath, baseDir)
+	c.DocTrans.LibreOfficePath = resolveMaybeRelativePath(c.DocTrans.LibreOfficePath, baseDir)
+	c.DocTrans.SofficePath = resolveMaybeRelativePath(c.DocTrans.SofficePath, baseDir)
+	c.DocTrans.WPSPath = resolveMaybeRelativePath(c.DocTrans.WPSPath, baseDir)
+	c.DocTrans.OfficePath = resolveMaybeRelativePath(c.DocTrans.OfficePath, baseDir)
+	if strings.TrimSpace(c.DocTrans.CacheDir) != "" {
+		c.DocTrans.CacheDir = resolveMaybeRelativePath(c.DocTrans.CacheDir, baseDir)
+	}
 }
 
 // ResolveDataPaths makes data directory settings absolute relative to baseDir.

@@ -203,3 +203,58 @@ func TestHLSInfoMkvNotNativeWhenClientContainersExcludeMkv(t *testing.T) {
 		t.Fatalf("should not return native when client lacks mkv container support: %s", body)
 	}
 }
+
+func TestHLSInfoForcesJITWhenSourceExceedsHomeStreamQuality(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	base := t.TempDir()
+
+	dbPath := filepath.Join(base, "play-home-stream-quality.sqlite")
+	db, err := store.OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	if _, err := db.Exec(`INSERT INTO library (id, name, type, path) VALUES (1, 'lib', 'movie', 'E:/videos')`); err != nil {
+		t.Fatalf("insert library: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO media (id, library_id, file_id, file_path, meta_json, height, width, duration, bitrate) VALUES (1, 1, 'f-1', 'E:/videos/a.mp4', '{"format":{"format_name":"mov,mp4,m4a"},"streams":[{"codec_type":"video","codec_name":"h264"},{"codec_type":"audio","codec_name":"aac"}]}', 2160, 3840, 300, 50000000)`); err != nil {
+		t.Fatalf("insert media: %v", err)
+	}
+	opts := `{"playback":{"home_stream_quality":"1080p-30mbps","screen_orientation":"auto"},"transcoder":{"quality":"auto","disable_video_stream_transcoding":false}}`
+	if _, err := db.Exec(`UPDATE system_options SET options_json = ? WHERE id = 1`, opts); err != nil {
+		t.Fatalf("update system options: %v", err)
+	}
+
+	sm, err := session.NewManager("ffmpeg", "ffprobe", base, "", nil, nil)
+	if err != nil {
+		t.Fatalf("create session manager: %v", err)
+	}
+	h := &Handler{App: &app.App{DB: db}, SessionManager: sm, runningScans: map[int64]scanRuntime{}}
+
+	q := url.Values{}
+	q.Set("video_codecs", "h264")
+	q.Set("audio_codecs", "aac")
+	q.Set("max_height", "2160")
+	q.Set("qualities", "360p,480p,720p,1080p,2160p")
+	q.Set("containers", "mp4,mkv,webm")
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/media/1/hls?"+q.Encode(), nil)
+	req.Host = "example.com"
+	c.Request = req
+	c.Params = gin.Params{{Key: "id", Value: "1"}}
+
+	h.HLSInfo(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !contains(body, `"mode":"jit_hls"`) {
+		t.Fatalf("expected jit_hls when 4K source exceeds 1080p-30mbps cap, got: %s", body)
+	}
+	if contains(body, `"mode":"native"`) {
+		t.Fatalf("should not return native when source exceeds home stream quality: %s", body)
+	}
+}

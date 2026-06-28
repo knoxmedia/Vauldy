@@ -42,6 +42,9 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 	keyVault, assetEnc := storage.NewAssetEncryptorFromConfig(cfg, application.DB)
 	derivedStore := storage.NewDerivedAssetStoreFromConfig(cfg, application.DB, keyVault)
 	h := handler.New(application, worker, packageWorker, previewWorker, sub, up, instant, sm, atw, kfw, lw, pcw, dcw, keyVault, assetEnc, derivedStore)
+	if dcw != nil {
+		dcw.SetOnCoverReady(h.ScheduleLibraryPreviewRefreshForMedia)
+	}
 	go h.StartScheduleLoop(context.Background())
 	go h.StartScrapeTaskLoop(context.Background())
 	go h.StartSubtitleTaskLoop(context.Background())

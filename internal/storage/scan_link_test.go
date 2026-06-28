@@ -69,6 +69,14 @@ func TestShouldLinkEncryptedPlainPathScan(t *testing.T) {
 	if ShouldLinkEncryptedPlainPathScan(db, 5, plain, newMD5) {
 		t.Fatal("expected no relink for new file reusing encrypted plain_path")
 	}
+
+	_, _ = db.Exec(`UPDATE media SET md5 = NULL WHERE id = 5`)
+	if err := os.WriteFile(plain, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !ShouldLinkEncryptedPlainPathScan(db, 5, plain, md5) {
+		t.Fatal("expected relink for same plain file when catalog is .enc and stored md5 missing")
+	}
 }
 
 func TestMediaFileStillPresentAfterEncrypt(t *testing.T) {

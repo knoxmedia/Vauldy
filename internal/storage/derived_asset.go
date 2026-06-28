@@ -156,8 +156,98 @@ func LookupEncPath(db *sql.DB, mediaID int64, kind, logicalName string) (string,
 	return p, err == nil && strings.TrimSpace(p) != ""
 }
 
+// ExpectedDerivedEncPath returns the on-disk path for a derived encrypted artifact.
+func ExpectedDerivedEncPath(baseDir string, mediaID int64, kind, logicalName string) string {
+	baseDir = strings.TrimSpace(baseDir)
+	if baseDir == "" || mediaID <= 0 {
+		return ""
+	}
+	name := sanitizeDerivedFileName(logicalName) + ".enc"
+	return filepath.Join(baseDir, fmt.Sprintf("%d", mediaID), sanitizeDerivedKind(kind), name)
+}
+
+// ResolveDerivedEncPath returns a readable encrypted derived artifact path.
+// It prefers the DB record and falls back to the expected layout under baseDir.
+func ResolveDerivedEncPath(db *sql.DB, baseDir string, mediaID int64, kind, logicalName string) (string, bool) {
+	if p, ok := LookupEncPath(db, mediaID, kind, logicalName); ok {
+		if st, err := os.Stat(p); err == nil && !st.IsDir() && st.Size() > 0 {
+			return p, true
+		}
+	}
+	if guess := ExpectedDerivedEncPath(baseDir, mediaID, kind, logicalName); guess != "" {
+		if st, err := os.Stat(guess); err == nil && !st.IsDir() && st.Size() > 0 {
+			return guess, true
+		}
+	}
+	return "", false
+}
+
+func lookupDerivedWrappedDEK(db *sql.DB, mediaID int64, path, kind, logicalName string) (string, error) {
+	if db == nil || mediaID <= 0 {
+		return "", sql.ErrNoRows
+	}
+	kind = strings.TrimSpace(kind)
+	logicalName = strings.TrimSpace(logicalName)
+	if kind != "" && logicalName != "" {
+		var wrappedHex string
+		err := db.QueryRow(`
+			SELECT wrapped_dek FROM media_derived_assets
+			WHERE media_id = ? AND artifact_kind = ? AND logical_name = ?
+		`, mediaID, kind, logicalName).Scan(&wrappedHex)
+		if err == nil {
+			return wrappedHex, nil
+		}
+		if err != sql.ErrNoRows {
+			return "", err
+		}
+	}
+	path = filepath.Clean(strings.TrimSpace(path))
+	var wrappedHex string
+	err := db.QueryRow(`
+		SELECT wrapped_dek FROM media_derived_assets
+		WHERE media_id = ? AND enc_path = ?
+	`, mediaID, path).Scan(&wrappedHex)
+	if err == nil {
+		return wrappedHex, nil
+	}
+	if err != sql.ErrNoRows {
+		return "", err
+	}
+	rows, err := db.Query(`
+		SELECT enc_path, wrapped_dek FROM media_derived_assets WHERE media_id = ?
+	`, mediaID)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var stored, wh string
+		if rows.Scan(&stored, &wh) != nil {
+			continue
+		}
+		if derivedPathsEqual(stored, path) {
+			return wh, nil
+		}
+	}
+	return "", sql.ErrNoRows
+}
+
+func derivedPathsEqual(a, b string) bool {
+	a = filepath.Clean(strings.TrimSpace(a))
+	b = filepath.Clean(strings.TrimSpace(b))
+	if a == b {
+		return true
+	}
+	return strings.EqualFold(filepath.ToSlash(a), filepath.ToSlash(b))
+}
+
 // OpenDerivedSeeker opens a derived artifact, decrypting Knox .enc when needed.
 func OpenDerivedSeeker(db *sql.DB, vault *keystore.Vault, mediaID int64, path string) (*PlaintextSeeker, error) {
+	return OpenDerivedArtifactSeeker(db, vault, mediaID, path, "", "")
+}
+
+// OpenDerivedArtifactSeeker opens a derived artifact by path, with optional kind/name fallbacks for DEK lookup.
+func OpenDerivedArtifactSeeker(db *sql.DB, vault *keystore.Vault, mediaID int64, path, kind, logicalName string) (*PlaintextSeeker, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return nil, os.ErrInvalid
@@ -177,17 +267,7 @@ func OpenDerivedSeeker(db *sql.DB, vault *keystore.Vault, mediaID int64, path st
 	if db == nil || vault == nil {
 		return nil, fmt.Errorf("derived asset requires keystore")
 	}
-	var wrappedHex string
-	err := db.QueryRow(`
-		SELECT wrapped_dek FROM media_derived_assets
-		WHERE media_id = ? AND enc_path = ?
-	`, mediaID, path).Scan(&wrappedHex)
-	if err == sql.ErrNoRows {
-		err = db.QueryRow(`
-			SELECT wrapped_dek FROM media_encrypted_assets
-			WHERE media_id = ? AND enc_path = ? AND status = 'encrypted'
-		`, mediaID, path).Scan(&wrappedHex)
-	}
+	wrappedHex, err := lookupDerivedWrappedDEK(db, mediaID, path, kind, logicalName)
 	if err != nil {
 		return nil, err
 	}

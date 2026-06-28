@@ -43,12 +43,12 @@ func CoverRetryBlocked(previewDir string, mediaID int64) bool {
 }
 
 // NeedsCoverWork reports whether enqueue/generation should run for a document.
-func NeedsCoverWork(db *sql.DB, previewDir string, mediaID int64, sourceMtime int64) bool {
+func NeedsCoverWork(db *sql.DB, previewDir, derivedBaseDir string, mediaID int64, sourceMtime int64) bool {
 	if mediaID <= 0 {
 		return false
 	}
 	if CoverRetryBlocked(previewDir, mediaID) {
 		return false
 	}
-	return !CachedCover(db, previewDir, mediaID, sourceMtime)
+	return !CachedCover(db, previewDir, derivedBaseDir, mediaID, sourceMtime)
 }

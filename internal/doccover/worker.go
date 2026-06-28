@@ -23,6 +23,7 @@ type WorkerConfig struct {
 	FFmpegPath string
 	DocTrans   config.DocTransConfig
 	TimeoutSec func() int
+	OnCoverReady func(mediaID int64)
 }
 
 // Worker serializes document cover jobs so LibreOffice conversions do not stampede or time out while waiting.
@@ -40,6 +41,14 @@ func NewWorker(cfg WorkerConfig) *Worker {
 		pending: map[int64]struct{}{},
 		wake:    make(chan struct{}, 1),
 	}
+}
+
+// SetOnCoverReady registers a callback after a document cover is generated.
+func (w *Worker) SetOnCoverReady(fn func(mediaID int64)) {
+	if w == nil {
+		return
+	}
+	w.cfg.OnCoverReady = fn
 }
 
 // Start runs the cover worker loop until ctx is cancelled.
@@ -85,6 +94,10 @@ func (w *Worker) BackfillLibrary(libraryID int64) {
 		return
 	}
 	preview := w.cfg.PreviewDir
+	derivedBase := ""
+	if w.cfg.Derived != nil {
+		derivedBase = w.cfg.Derived.BaseDir
+	}
 	rows, err := w.cfg.DB.Query(`
 		SELECT id FROM media
 		WHERE library_id = ? AND file_type = 'document' AND status = 'active'`, libraryID)
@@ -98,7 +111,7 @@ func (w *Worker) BackfillLibrary(libraryID int64) {
 		if rows.Scan(&id) != nil || id <= 0 {
 			continue
 		}
-		if !NeedsCoverWork(w.cfg.DB, preview, id, 0) {
+		if !NeedsCoverWork(w.cfg.DB, preview, derivedBase, id, 0) {
 			continue
 		}
 		w.Enqueue(id)
@@ -184,7 +197,11 @@ func (w *Worker) runOne(mediaID int64) {
 		}
 	}
 	preview := w.cfg.PreviewDir
-	if !NeedsCoverWork(w.cfg.DB, preview, mediaID, mtime) {
+	derivedBase := ""
+	if w.cfg.Derived != nil {
+		derivedBase = w.cfg.Derived.BaseDir
+	}
+	if !NeedsCoverWork(w.cfg.DB, preview, derivedBase, mediaID, mtime) {
 		return
 	}
 	log.Printf("document cover generating media=%d", mediaID)
@@ -207,4 +224,7 @@ func (w *Worker) runOne(mediaID int64) {
 	}
 	_ = os.Remove(coverSkipPath(preview, mediaID))
 	log.Printf("document cover ready media=%d", mediaID)
+	if w.cfg.OnCoverReady != nil {
+		w.cfg.OnCoverReady(mediaID)
+	}
 }

@@ -402,9 +402,9 @@
       "disable_video_transcode": "Disable video stream transcoding",
       "disable_video_transcode_desc": "Disables transcoding of video streams. Audio transcoding and remuxing may still occur.",
       "max_cpu_concurrent": "Max CPU concurrent transcodes",
-      "max_cpu_concurrent_desc": "Limits how many CPU video transcodes run at once.",
+      "max_cpu_concurrent_desc": "Limits concurrent instant transcodes during live playback so viewers stay smooth (mainly CPU software encodes; may fall back to CPU when GPU is saturated).",
       "max_bg_concurrent": "Max background video concurrent transcodes",
-      "max_bg_concurrent_desc": "Limits concurrent video transcodes for optimizer and downloads.",
+      "max_bg_concurrent_desc": "Limits concurrent background jobs such as video optimization and download prep, so they do not compete with live playback.",
       "x264": {
         "ultrafast": "Ultra fast (ultrafast)",
         "superfast": "Super fast (superfast)",

@@ -79,6 +79,42 @@ func TestDerivedFinalizePathPlainLibrary(t *testing.T) {
 	}
 }
 
+func TestResolveDerivedEncPathFallbackLayout(t *testing.T) {
+	dir := t.TempDir()
+	derivedBase := filepath.Join(dir, ".derived")
+	enc := filepath.Join(derivedBase, "10", "doc_cover", "cover.jpg.enc")
+	if err := os.MkdirAll(filepath.Dir(enc), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(enc, []byte("enc"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := ResolveDerivedEncPath(nil, derivedBase, 10, "doc_cover", "cover.jpg")
+	if !ok || got != enc {
+		t.Fatalf("ResolveDerivedEncPath() = (%q, %v), want (%q, true)", got, ok, enc)
+	}
+}
+
+func TestLookupDerivedWrappedDEKByKind(t *testing.T) {
+	db, err := store.OpenSQLite(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	_, _ = db.Exec(`INSERT INTO library (id, name, type, path) VALUES (1, 'docs', 'document', '/x')`)
+	_, _ = db.Exec(`INSERT INTO media (id, library_id, file_id, file_path, file_type, status) VALUES (10, 1, 'f', 'a.pdf', 'document', 'active')`)
+	enc := `F:\data\.derived\10\doc_cover\cover.jpg.enc`
+	if _, err := db.Exec(`
+		INSERT INTO media_derived_assets (media_id, artifact_kind, logical_name, enc_path, wrapped_dek, iv)
+		VALUES (10, 'doc_cover', 'cover.jpg', ?, '6161', '6262')`, enc); err != nil {
+		t.Fatal(err)
+	}
+	wh, err := lookupDerivedWrappedDEK(db, 10, `f:/data/.derived/10/doc_cover/cover.jpg.enc`, "doc_cover", "cover.jpg")
+	if err != nil || wh != "6161" {
+		t.Fatalf("lookupDerivedWrappedDEK() = (%q, %v)", wh, err)
+	}
+}
+
 func TestNeedsDerivedEncryption(t *testing.T) {
 	db, err := store.OpenSQLite(":memory:")
 	if err != nil {

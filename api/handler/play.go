@@ -18,6 +18,7 @@ import (
 
 	"knox-media/api/middleware"
 	"knox-media/internal/mediautil"
+	"knox-media/internal/playback"
 	"knox-media/internal/storage"
 )
 
@@ -411,8 +412,8 @@ func (h *Handler) HLSInfo(c *gin.Context) {
 		return
 	}
 	var fileID, filePath, metaJSON sql.NullString
-	var srcHeight, srcWidth, srcDuration sql.NullInt64
-	if err := h.App.DB.QueryRow(`SELECT file_id, file_path, meta_json, height, width, duration FROM media WHERE id = ?`, id).Scan(&fileID, &filePath, &metaJSON, &srcHeight, &srcWidth, &srcDuration); err != nil {
+	var srcHeight, srcWidth, srcDuration, srcBitrate sql.NullInt64
+	if err := h.App.DB.QueryRow(`SELECT file_id, file_path, meta_json, height, width, duration, COALESCE(bitrate, 0) FROM media WHERE id = ?`, id).Scan(&fileID, &filePath, &metaJSON, &srcHeight, &srcWidth, &srcDuration, &srcBitrate); err != nil {
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 			return
@@ -428,6 +429,14 @@ func (h *Handler) HLSInfo(c *gin.Context) {
 	}
 	playURL := base + "/api/v1/media/" + c.Param("id") + "/play"
 	accessToken := strings.TrimSpace(c.Query("access_token"))
+	caps := readClientCaps(c)
+	homeLimit, disableStreamTranscode := h.loadHomeStreamPlayback()
+	needsQualityTranscode := !disableStreamTranscode && playback.SourceExceedsLimit(
+		int(srcHeight.Int64), int(srcWidth.Int64), srcBitrate.Int64, homeLimit,
+	)
+	pickJIT := func() (string, string) {
+		return playback.PickJITParams(int(srcHeight.Int64), int(srcWidth.Int64), caps.MaxHeight, homeLimit)
+	}
 	widevineURL := base + "/api/v1/drm/widevine/license"
 	powerDRMKeyURL := base + "/api/v1/drm/powerdrm/key"
 	fairplayCertURL := base + "/api/v1/drm/fairplay/cert"
@@ -504,9 +513,7 @@ func (h *Handler) HLSInfo(c *gin.Context) {
 			return
 		}
 		if h.SessionManager != nil && fileID.Valid && strings.TrimSpace(fileID.String) != "" && filePath.Valid && strings.TrimSpace(filePath.String) != "" {
-			media := detectMediaProfile(metaJSON.String)
-			bitrate := pickBitrate(media, int(srcWidth.Int64), int(srcHeight.Int64))
-			resolution := resolutionForBitrate(bitrate)
+			bitrate, resolution := pickJIT()
 			s, err := h.createJITSession(c, id, fileID.String, filePath.String, bitrate, resolution, float64(srcDuration.Int64))
 			if err != nil {
 				if c.Writer.Written() {
@@ -621,7 +628,6 @@ func (h *Handler) HLSInfo(c *gin.Context) {
 		}))
 		return
 	}
-	caps := readClientCaps(c)
 	media := detectMediaProfile(metaJSON.String)
 	atRestEnc := h.KeyVault != nil && storage.IsMediaEncrypted(h.App.DB, id, filePath.String)
 
@@ -641,10 +647,9 @@ func (h *Handler) HLSInfo(c *gin.Context) {
 	}
 
 	// Knox .enc at rest: prefer JIT (pipe decrypt) when the client cannot direct-play; otherwise native decrypt stream.
-	if atRestEnc && !canDirectPlay(media, caps) {
+	if atRestEnc && (!canDirectPlay(media, caps) || needsQualityTranscode) {
 		if h.SessionManager != nil && fileID.Valid && strings.TrimSpace(fileID.String) != "" && filePath.Valid && strings.TrimSpace(filePath.String) != "" {
-			bitrate := pickBitrate(media, int(srcWidth.Int64), int(srcHeight.Int64))
-			resolution := resolutionForBitrate(bitrate)
+			bitrate, resolution := pickJIT()
 			s, err := h.createJITSession(c, id, fileID.String, filePath.String, bitrate, resolution, float64(srcDuration.Int64))
 			if err != nil {
 				if c.Writer.Written() {
@@ -672,7 +677,7 @@ func (h *Handler) HLSInfo(c *gin.Context) {
 	}
 
 	// Check if client can decode the source directly (plaintext or decrypted progressive).
-	if canDirectPlay(media, caps) || (atRestEnc && !pol.DRMEnabled) {
+	if (canDirectPlay(media, caps) && !needsQualityTranscode) || (atRestEnc && !pol.DRMEnabled && !needsQualityTranscode) {
 		c.JSON(http.StatusOK, h.withPlaybackPlanForMode("native", gin.H{
 			"mode":          "native",
 			"playUrl":       playURL,
@@ -687,8 +692,7 @@ func (h *Handler) HLSInfo(c *gin.Context) {
 	// Fallback: JIT transcoding when client cannot play source directly.
 	// New Redis-free session JIT.
 	if h.SessionManager != nil && fileID.Valid && strings.TrimSpace(fileID.String) != "" && filePath.Valid && strings.TrimSpace(filePath.String) != "" {
-		bitrate := pickBitrate(media, int(srcWidth.Int64), int(srcHeight.Int64))
-		resolution := resolutionForBitrate(bitrate)
+		bitrate, resolution := pickJIT()
 		s, err := h.createJITSession(c, id, fileID.String, filePath.String, bitrate, resolution, float64(srcDuration.Int64))
 		if err != nil {
 			if c.Writer.Written() {
@@ -738,7 +742,7 @@ func (h *Handler) HLSInfo(c *gin.Context) {
 			}
 			c.JSON(http.StatusOK, h.withPlaybackPlanForMode("jit_hls", gin.H{
 				"mode":                   "jit_hls",
-				"hls_master":             fmt.Sprintf("%s/api/v1/jit/master/%s", base, fileID.String),
+				"hls_master":             h.jitLegacyMasterURL(base, fileID.String, homeLimit),
 				"status":                 "processing",
 				"fallback":               playURL,
 				"media_profile":          media,
@@ -759,6 +763,9 @@ func (h *Handler) HLSInfo(c *gin.Context) {
 	if terr != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": terr.Error()})
 		return
+	}
+	if status == "waiting" {
+		h.kickTranscodeWorker()
 	}
 	playlistURL := ""
 	if playlist != "" {
@@ -1170,6 +1177,26 @@ type mediaProfile struct {
 	Container string `json:"container"`
 	Video     string `json:"video_codec"`
 	Audio     string `json:"audio_codec"`
+}
+
+func (h *Handler) loadHomeStreamPlayback() (playback.HomeStreamLimit, bool) {
+	if h == nil || h.App == nil || h.App.DB == nil {
+		return playback.HomeStreamLimit{Auto: true}, false
+	}
+	var raw sql.NullString
+	if err := h.App.DB.QueryRow(`SELECT options_json FROM system_options WHERE id = 1`).Scan(&raw); err != nil {
+		return playback.HomeStreamLimit{Auto: true}, false
+	}
+	opts := decodeSystemOptions(raw.String)
+	return playback.ParseHomeStreamQuality(opts.Playback.HomeStreamQuality), opts.Transcoder.DisableVideoStreamTranscoding
+}
+
+func (h *Handler) jitLegacyMasterURL(base, fileID string, limit playback.HomeStreamLimit) string {
+	u := fmt.Sprintf("%s/api/v1/jit/master/%s", base, fileID)
+	if !limit.Auto && limit.MaxHeight > 0 {
+		u = appendQueryValue(u, "max_height", strconv.Itoa(limit.MaxHeight))
+	}
+	return u
 }
 
 func readClientCaps(c *gin.Context) clientCaps {

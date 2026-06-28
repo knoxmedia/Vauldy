@@ -319,11 +319,21 @@ func (h *Handler) GetDocumentDetail(c *gin.Context) {
 		"stream_url":   fmt.Sprintf("/api/v1/media/%d/play", id),
 		"download_url": fmt.Sprintf("/api/v1/media/%d/play?download=1", id),
 	}
-	if doctrans.IsOfficeFormat(path.String) {
+	if doctrans.IsOfficeDocument(path.String, docFormat) {
 		item["needs_preview"] = true
 		item["preview_url"] = fmt.Sprintf("/api/v1/media/%d/document/preview.pdf", id)
 	}
 	c.JSON(http.StatusOK, item)
+}
+
+func (h *Handler) derivedBaseDir() string {
+	if h != nil && h.DerivedStore != nil && strings.TrimSpace(h.DerivedStore.BaseDir) != "" {
+		return h.DerivedStore.BaseDir
+	}
+	if h != nil && h.App != nil && h.App.Config != nil {
+		return filepath.Join(strings.TrimSpace(h.App.Config.Data.Dir), ".derived")
+	}
+	return ""
 }
 
 func (h *Handler) ServeDocumentCover(c *gin.Context) {
@@ -335,7 +345,11 @@ func (h *Handler) ServeDocumentCover(c *gin.Context) {
 	if _, ok := h.requireMediaAccess(c, id, false); !ok {
 		return
 	}
-	cache := h.resolvedDocumentCoverPath(id)
+	if enc, ok := storage.ResolveDerivedEncPath(h.App.DB, h.derivedBaseDir(), id, "doc_cover", "cover.jpg"); ok {
+		h.serveDerivedAssetKind(c, id, enc, "image/jpeg", "doc_cover", "cover.jpg")
+		return
+	}
+	cache := h.documentCoverPath(id)
 	if st, err := os.Stat(cache); err == nil && !st.IsDir() && st.Size() > 0 {
 		h.serveDerivedAsset(c, id, cache, "image/jpeg")
 		return
@@ -352,7 +366,12 @@ func (h *Handler) ServeDocumentCover(c *gin.Context) {
 		return
 	}
 	if strings.EqualFold(format.String, "epub") {
-		if cover := extractEPUBCover(filePath.String, h.documentCoverPath(id)); cover != "" {
+		epubPath := filePath.String
+		if work, cleanup, err := storage.MaterializePlaintextTemp(h.App.DB, h.KeyVault, id, epubPath); err == nil {
+			epubPath = work
+			defer cleanup()
+		}
+		if cover := extractEPUBCover(epubPath, h.documentCoverPath(id)); cover != "" {
 			h.serveDerivedAsset(c, id, cover, "image/jpeg")
 			return
 		}
@@ -361,17 +380,10 @@ func (h *Handler) ServeDocumentCover(c *gin.Context) {
 	if h.App != nil && h.App.Config != nil {
 		previewDir = h.App.Config.Data.Preview
 	}
-	if doccover.NeedsCoverWork(h.App.DB, previewDir, id, 0) {
+	if doccover.NeedsCoverWork(h.App.DB, previewDir, h.derivedBaseDir(), id, 0) {
 		h.GenerateDocumentCover(id)
 	}
 	h.serveDocumentPlaceholder(c, format.String)
-}
-
-func (h *Handler) resolvedDocumentCoverPath(id int64) string {
-	if enc, ok := storage.LookupEncPath(h.App.DB, id, "doc_cover", "cover.jpg"); ok {
-		return enc
-	}
-	return h.documentCoverPath(id)
 }
 
 func (h *Handler) documentCoverPath(id int64) string {

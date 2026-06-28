@@ -62,6 +62,8 @@ import {
   fetchMediaSubtitles,
   fetchUserHistory,
   isTVLibraryType,
+  mediaDetailPosterSrc,
+  authListPosterUrl,
   mediaPosterSrc,
   removeFavorite,
   savePlaybackProgress,
@@ -805,11 +807,9 @@ export default function MediaDetailPage() {
   const showResumeActions = canResume && !isCompleted;
   const resumeTarget = `/player/${detail?.id}?t=${resumeSeconds}`;
   const playFromStartTarget = `/player/${detail?.id}`;
-  const posterCandidate =
-    (meta.poster || "").trim() ||
-    (detail?.id ? mediaPosterSrc({ id: detail.id, poster_url: "" }) : "");
+  const posterCandidate = detail?.id ? mediaDetailPosterSrc(detail, meta.poster) : "";
   const posterUrl = posterCandidate && !brokenImages.poster ? posterCandidate : "";
-  const bannerUrl = meta.backdrop && !brokenImages.backdrop ? meta.backdrop : "";
+  const bannerUrl = meta.backdrop && !brokenImages.backdrop ? authListPosterUrl(meta.backdrop) : "";
 
   async function refreshHistory() {
     try {
@@ -959,7 +959,7 @@ export default function MediaDetailPage() {
   }
   if (!detail) return null;
 
-  const logoUrlClassic = meta.logo && !brokenImages.logo ? meta.logo : "";
+  const logoUrlClassic = meta.logo && !brokenImages.logo ? authListPosterUrl(meta.logo) : "";
   const posterLetterClassic = (detail.title || "?").slice(0, 1).toUpperCase();
   const runtimeClassic = fmtSeconds(detail.duration);
   const castListClassic = meta.cast?.slice(0, 18) ?? [];
