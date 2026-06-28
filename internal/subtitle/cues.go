@@ -13,6 +13,7 @@ const (
 	FormatVTT
 	FormatSRT
 	FormatASS
+	FormatLRC
 )
 
 type Cue struct {
@@ -26,6 +27,8 @@ var (
 	srtTSLine    = regexp.MustCompile(`^(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})\s*(.*)$`)
 	assDialogue  = regexp.MustCompile(`(?i)^Dialogue:\s*\d+,([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),(.*)$`)
 	cueIndexLine = regexp.MustCompile(`^\d+$`)
+	// lrcTimestamp matches a single LRC timestamp tag like [00:12.34] or [1:02.345].
+	lrcTimestamp = regexp.MustCompile(`^\[\d{1,2}:\d{1,2}\.\d{1,3}\]`)
 )
 
 func stripUTF8BOM(s string) string {
@@ -42,8 +45,12 @@ func DetectFormat(content, srcURL string) Format {
 		return FormatASS
 	case strings.Contains(lowerURL, ".srt"):
 		return FormatSRT
+	case strings.Contains(lowerURL, ".lrc"):
+		return FormatLRC
 	case strings.Contains(strings.ToUpper(trim), "[SCRIPT INFO]") || assDialogue.MatchString(trim):
 		return FormatASS
+	case isLRCContent(trim):
+		return FormatLRC
 	case srtTSLine.MatchString(trim) || strings.Contains(trim, "-->"):
 		if strings.Contains(trim, ",") && strings.Count(trim, "-->") > 0 {
 			return FormatSRT
@@ -52,6 +59,18 @@ func DetectFormat(content, srcURL string) Format {
 	default:
 		return FormatUnknown
 	}
+}
+
+// isLRCContent reports whether content looks like LRC lyrics: at least one line
+// begins with a [mm:ss.xx] timestamp tag. Metadata-only LRC (e.g. [ti:..]) is
+// treated as unknown since there are no lyric cues to proofread.
+func isLRCContent(trim string) bool {
+	for _, line := range splitLines(trim) {
+		if lrcTimestamp.MatchString(strings.TrimSpace(line)) {
+			return true
+		}
+	}
+	return false
 }
 
 func ParseCues(content string, format Format) ([]Cue, Format, error) {
@@ -65,6 +84,9 @@ func ParseCues(content string, format Format) ([]Cue, Format, error) {
 	case FormatSRT:
 		cues, err := parseSRTCues(content)
 		return cues, FormatSRT, err
+	case FormatLRC:
+		cues, err := parseLRCCues(content)
+		return cues, FormatLRC, err
 	default:
 		cues, err := parseVTTCues(content)
 		return cues, FormatVTT, err
@@ -173,12 +195,54 @@ func parseASSCues(content string) ([]Cue, error) {
 	return cues, nil
 }
 
+// parseLRCCues parses LRC lyrics into cues. Each [mm:ss.xx] prefix becomes a cue
+// whose Start holds the verbatim tag and Text holds the lyric text. Lines without
+// a leading timestamp (metadata tags like [ti:..], blank lines) are skipped.
+// Multi-timestamp lines ([00:01.00][00:05.00]text) expand into one cue per tag.
+func parseLRCCues(content string) ([]Cue, error) {
+	lines := splitLines(content)
+	var cues []Cue
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+		rest := line
+		var stamps []string
+		for strings.HasPrefix(rest, "[") {
+			end := strings.Index(rest, "]")
+			if end < 0 {
+				break
+			}
+			tag := rest[:end+1]
+			if !lrcTimestamp.MatchString(tag) {
+				break
+			}
+			stamps = append(stamps, tag)
+			rest = rest[end+1:]
+		}
+		if len(stamps) == 0 {
+			continue
+		}
+		text := strings.TrimSpace(rest)
+		for _, s := range stamps {
+			cues = append(cues, Cue{Start: s, Text: text})
+		}
+	}
+	if len(cues) == 0 {
+		return nil, fmt.Errorf("no lrc cues found")
+	}
+	return cues, nil
+}
+
 func RenderCues(cues []Cue, format Format) string {
 	switch format {
 	case FormatASS:
 		return renderASS(cues)
 	case FormatSRT:
 		return renderSRT(cues)
+	case FormatLRC:
+		return renderLRC(cues)
 	default:
 		return renderVTT(cues)
 	}
@@ -216,6 +280,16 @@ func renderASS(cues []Cue) string {
 		fmt.Fprintf(&b, "Dialogue: 0,%s,%s,Default,,0,0,0,,%s\n", c.Start, c.End, c.Text)
 	}
 	return b.String()
+}
+
+func renderLRC(cues []Cue) string {
+	var b strings.Builder
+	for _, c := range cues {
+		b.WriteString(c.Start)
+		b.WriteString(c.Text)
+		b.WriteByte('\n')
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 func splitLines(s string) []string {

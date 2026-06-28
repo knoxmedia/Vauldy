@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -216,6 +217,13 @@ func (w *Worker) Process(ctx context.Context, mediaID int64) (err error) {
 	if err = musiclyrics.ConvertVTTFile(vttPath, lrcPath); err != nil {
 		w.markFailed(mediaID, err.Error())
 		return err
+	}
+
+	// AI-proofread the final LRC lyric text (preserves [mm:ss.xx] timestamps and metadata).
+	if w.Subtitle.AIProofreadEnabled() {
+		if perr := w.Subtitle.ProofreadFileInPlace(ctx, lrcPath, "und"); perr != nil {
+			log.Printf("lyric ai-proofread media=%d err=%v", mediaID, perr)
+		}
 	}
 
 	finalVTT, finalLRC := vttPath, lrcPath

@@ -12,6 +12,15 @@ import (
 	"strings"
 )
 
+// 7-Zip bootstrap URLs used when no system 7-Zip is installed.
+// 7zr.exe is a single-file console binary that only handles the 7z format; it can
+// extract the 7z-extra package, which contains 7zz.exe (Alone2 bundle) — the only
+// standalone 7-Zip binary that supports NSIS installer extraction.
+const (
+	sevenZipStandaloneURL = "https://www.7-zip.org/a/7zr.exe"
+	sevenZipExtraURL      = "https://github.com/ip7z/7zip/releases/download/26.01/7z2601-extra.7z"
+)
+
 func installTesseractWindows(ctx context.Context, destDir string) (string, string, error) {
 	exe := filepath.Join(destDir, "tesseract.exe")
 	tessdata := filepath.Join(destDir, "tessdata")
@@ -47,7 +56,7 @@ func installTesseractWindows(ctx context.Context, destDir string) (string, strin
 			return sysExe, preferTessdataDir(sysData, tessdata), nil
 		}
 		if isElevationError(err, out) {
-			return "", "", fmt.Errorf("tesseract 安装需要管理员权限；请安装 7-Zip 后重试一键安装、以管理员运行服务，或手动安装 Tesseract 并加入 PATH: %w", err)
+			return "", "", fmt.Errorf("tesseract 安装需要管理员权限；一键安装已尝试自动下载 7-Zip 解压但失败（%s）。请检查网络后重试、以管理员运行服务，或手动安装 Tesseract 并加入 PATH: %w", sevenZipExtraURL, err)
 		}
 		return "", "", fmt.Errorf("tesseract silent install: %w: %s", err, trimOut(out))
 	}
@@ -68,10 +77,12 @@ func isElevationError(err error, out []byte) bool {
 	return strings.Contains(s, "elevation") || strings.Contains(s, "requires administrator") || strings.Contains(s, "740")
 }
 
+// find7zip returns a 7-Zip executable capable of extracting NSIS installers.
+// 7za.exe is intentionally excluded because it cannot handle the NSIS format;
+// only the full 7z.exe (with 7z.dll) supports NSIS.
 func find7zip() string {
 	candidates := []string{
 		"7z",
-		"7za",
 		`C:\Program Files\7-Zip\7z.exe`,
 		`C:\Program Files (x86)\7-Zip\7z.exe`,
 	}
@@ -86,10 +97,60 @@ func find7zip() string {
 	return ""
 }
 
+// ensure7zip returns a 7-Zip executable that supports NSIS extraction.
+// It prefers a system-installed 7-Zip (find7zip). When none is found it
+// bootstraps 7zz.exe by downloading 7zr.exe plus the 7-Zip extra package —
+// no administrator privileges required. The bootstrapped 7zz.exe is cached
+// under cacheDir for reuse.
+func ensure7zip(ctx context.Context, cacheDir string) (string, error) {
+	if found := find7zip(); found != "" {
+		return found, nil
+	}
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		return "", err
+	}
+	sevenZZ := filepath.Join(cacheDir, "7zz.exe")
+	if fileExists(sevenZZ) {
+		return sevenZZ, nil
+	}
+	sevenZR := filepath.Join(cacheDir, "7zr.exe")
+	if !fileExists(sevenZR) {
+		if err := downloadFile(ctx, sevenZipStandaloneURL, sevenZR); err != nil {
+			return "", fmt.Errorf("download 7zr.exe: %w", err)
+		}
+	}
+	extraArchive := filepath.Join(cacheDir, "7z-extra.7z")
+	if !fileExists(extraArchive) {
+		if err := downloadFile(ctx, sevenZipExtraURL, extraArchive); err != nil {
+			return "", fmt.Errorf("download 7z-extra: %w", err)
+		}
+	}
+	extractDir := filepath.Join(cacheDir, ".extra")
+	_ = os.RemoveAll(extractDir)
+	if err := os.MkdirAll(extractDir, 0o755); err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(extractDir)
+	cmd := exec.CommandContext(ctx, sevenZR, "x", "-y", "-o"+extractDir, extraArchive)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("7zr extract 7z-extra: %w: %s", err, trimOut(out))
+	}
+	found, err := findFileInTree(extractDir, "7zz.exe")
+	if err != nil {
+		return "", err
+	}
+	if err := copyFile(found, sevenZZ); err != nil {
+		return "", err
+	}
+	return sevenZZ, nil
+}
+
 func extractTesseractInstaller7z(ctx context.Context, installer, destDir string) error {
-	sevenZip := find7zip()
-	if sevenZip == "" {
-		return fmt.Errorf("7-Zip not found")
+	cacheDir := filepath.Join(destDir, ".7zip")
+	sevenZip, err := ensure7zip(ctx, cacheDir)
+	if err != nil {
+		return fmt.Errorf("7-Zip unavailable: %w", err)
 	}
 	extractDir := filepath.Join(destDir, ".extract")
 	_ = os.RemoveAll(extractDir)

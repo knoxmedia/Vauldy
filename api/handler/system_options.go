@@ -26,8 +26,9 @@ type SystemOptionsJSON struct {
 }
 
 type SystemOptionsRecognition struct {
-	ASR SystemOptionsASR `json:"asr"`
-	OCR SystemOptionsOCR `json:"ocr"`
+	ASR          SystemOptionsASR `json:"asr"`
+	OCR          SystemOptionsOCR `json:"ocr"`
+	AIProofread  bool             `json:"ai_proofread"`
 }
 
 type SystemOptionsASR struct {
@@ -126,6 +127,7 @@ func defaultRecognitionOptions() SystemOptionsRecognition {
 			MkvextractPath: "",
 			MkvmergePath:   "",
 		},
+		AIProofread: true,
 	}
 }
 
@@ -368,6 +370,7 @@ func recognitionFromConfig(cfg *config.Config) SystemOptionsRecognition {
 			MkvextractPath: cfg.Subtitle.GraphicalOCR.MkvextractPath,
 			MkvmergePath:   cfg.Subtitle.GraphicalOCR.MkvmergePath,
 		},
+		AIProofread: cfg.SubtitleAIProofreadEnabled(),
 	}
 }
 
@@ -402,13 +405,15 @@ func (h *Handler) applyRecognitionConfig(r SystemOptionsRecognition) error {
 	if cfgPath == "" {
 		return fmt.Errorf("config path not set")
 	}
-	if err := config.SaveSubtitleRecognition(cfgPath, r.ASR.AutoOnScan, asr, ocr); err != nil {
+	if err := config.SaveSubtitleRecognition(cfgPath, r.ASR.AutoOnScan, asr, ocr, r.AIProofread); err != nil {
 		return err
 	}
 	autoOnScan := r.ASR.AutoOnScan
 	h.App.Config.Subtitle.AutoOnScan = &autoOnScan
 	h.App.Config.Subtitle.ASR = asr
 	h.App.Config.Subtitle.GraphicalOCR = ocr
+	aiProofread := r.AIProofread
+	h.App.Config.Subtitle.AIProofread = &aiProofread
 	if h.Subtitle != nil {
 		h.Subtitle.ApplyRecognition(subtitle.ASRConfig{
 			Provider:    asr.Provider,
@@ -426,6 +431,7 @@ func (h *Handler) applyRecognitionConfig(r SystemOptionsRecognition) error {
 			MkvextractPath: ocr.MkvextractPath,
 			MkvmergePath:   ocr.MkvmergePath,
 		})
+		h.Subtitle.ApplyAIProofread(aiProofread)
 	}
 	return nil
 }

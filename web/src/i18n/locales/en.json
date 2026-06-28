@@ -421,6 +421,8 @@
       "intro": "ASR settings are stored in config.yml under subtitle.asr. Use one-click install to deploy to tools/recognition/ (Python venv) if dependencies are missing.",
       "auto_on_scan": "Auto speech recognition on scan",
       "auto_on_scan_desc": "When importing or scanning libraries, queue new videos for subtitle_task (extract embedded/sidecar subtitles; run ASR when none exist).",
+      "ai_proofread": "AI proofread subtitles/lyrics",
+      "ai_proofread_desc": "When at least one AI LLM provider is enabled (System Options → AI Providers), successfully recognized subtitles/lyrics are sent to the LLM to fix typos, homophones, missing characters and OCR noise. Only obvious errors are corrected; language and meaning are preserved.",
       "provider": "Provider",
       "provider_desc": "Optional automatic speech recognition when no subtitles exist. Whisper CLI runs the whisper command; Shell uses a custom script with {input}, {output_dir}, {output_vtt} placeholders.",
       "whisper_path": "Whisper path",
@@ -1739,6 +1741,27 @@
       "provider_desc_ai": "AI recognition uses large language models and computer vision to infer metadata from file names and on-screen content. No external API required; supports fuzzy name matching and smart classification of unknown media — useful when traditional providers fail."
     }
   },
+  "proofread": {
+    "subtitle_title": "Proofread subtitles",
+    "lyric_title": "Proofread lyrics",
+    "import_subtitle": "Import subtitle",
+    "import_lyric": "Import lyrics",
+    "save": "Save",
+    "cancel": "Cancel",
+    "prev": "Previous",
+    "next": "Next",
+    "line": "Line",
+    "edit_placeholder": "Edit this line",
+    "select_line": "Select a line on the left to edit",
+    "no_subtitles": "No subtitles available",
+    "no_cues": "This subtitle has no editable lines",
+    "no_lyrics": "No lyrics available",
+    "load_failed": "Failed to load",
+    "save_failed": "Failed to save",
+    "saved": "Saved",
+    "imported": "Imported successfully",
+    "import_failed": "Import failed"
+  },
   "components": {
     "now_playing_indicator": {
       "playing": "Now playing",
@@ -2001,6 +2024,7 @@
       "add_to": "Add to",
       "edit": "Edit",
       "identify_lyrics": "Recognize lyrics",
+      "proofread_lyrics": "Proofread lyrics",
       "view_history": "View playback history",
       "get_info": "View info",
       "delete": "Delete",
@@ -2038,6 +2062,7 @@
       "merge": "Merge",
       "optimize": "Optimize",
       "recognize_subtitles": "Recognize subtitles",
+      "proofread_subtitles": "Proofread subtitles",
       "extract_audio": "Extract audio track",
       "reextract_audio": "Re-extract audio track",
       "extract_keyframes": "Extract keyframes",

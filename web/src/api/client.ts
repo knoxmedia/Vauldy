@@ -1770,6 +1770,47 @@ export async function enqueueLyricRecognition(mediaId: number) {
   await api.post(`/api/v1/media/${mediaId}/lyrics/recognize`);
 }
 
+export type SubtitleCue = {
+  start: string;
+  end: string;
+  text: string;
+};
+
+export type SubtitleCuesResponse = {
+  format: string;
+  cues: SubtitleCue[];
+};
+
+export async function fetchSubtitleCues(mediaId: number, subtitleId: number): Promise<SubtitleCuesResponse> {
+  const { data } = await api.get<SubtitleCuesResponse>(`/api/v1/media/${mediaId}/subtitles/${subtitleId}/cues`);
+  return data ?? { format: "vtt", cues: [] };
+}
+
+export async function saveSubtitleCues(mediaId: number, subtitleId: number, cues: SubtitleCue[]): Promise<void> {
+  await api.put(`/api/v1/media/${mediaId}/subtitles/${subtitleId}/cues`, { cues });
+}
+
+export async function importSubtitle(mediaId: number, file: File): Promise<MediaSubtitleRow> {
+  const form = new FormData();
+  form.append("file", file);
+  const { data } = await api.post<{ ok: boolean; subtitle: MediaSubtitleRow }>(`/api/v1/media/${mediaId}/subtitles/import`, form, {
+    headers: { "Content-Type": "multipart/form-data" },
+  });
+  return data.subtitle;
+}
+
+export async function saveMediaLyrics(mediaId: number, lrc: string): Promise<void> {
+  await api.put(`/api/v1/media/${mediaId}/lyrics`, { lrc });
+}
+
+export async function importMediaLyrics(mediaId: number, file: File): Promise<void> {
+  const form = new FormData();
+  form.append("file", file);
+  await api.post(`/api/v1/media/${mediaId}/lyrics/import`, form, {
+    headers: { "Content-Type": "multipart/form-data" },
+  });
+}
+
 export async function retryLyricTask(mediaId: number) {
   await api.post(`/api/v1/lyric/task/${mediaId}/retry`);
 }
@@ -2160,6 +2201,7 @@ export type SystemOptionsOCR = {
 export type SystemOptionsRecognition = {
   asr: SystemOptionsASR;
   ocr: SystemOptionsOCR;
+  ai_proofread: boolean;
 };
 
 export type SystemOptionsPhotoClassify = {

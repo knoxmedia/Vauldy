@@ -8,9 +8,9 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// SaveSubtitleRecognition updates subtitle.auto_on_scan, subtitle.asr and subtitle.graphical_ocr in config.yml,
-// preserving other keys and comments where possible.
-func SaveSubtitleRecognition(path string, autoOnScan bool, asr ASRConfig, ocr GraphicalOCRConfig) error {
+// SaveSubtitleRecognition updates subtitle.auto_on_scan, subtitle.asr, subtitle.graphical_ocr
+// and subtitle.ai_proofread in config.yml, preserving other keys and comments where possible.
+func SaveSubtitleRecognition(path string, autoOnScan bool, asr ASRConfig, ocr GraphicalOCRConfig, aiProofread bool) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("read config: %w", err)
@@ -32,6 +32,9 @@ func SaveSubtitleRecognition(path string, autoOnScan bool, asr ASRConfig, ocr Gr
 	}
 	if err := setStructKey(subtitle, "graphical_ocr", ocr); err != nil {
 		return fmt.Errorf("patch graphical_ocr: %w", err)
+	}
+	if err := setScalarKey(subtitle, "ai_proofread", aiProofread); err != nil {
+		return fmt.Errorf("patch ai_proofread: %w", err)
 	}
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)

@@ -39,7 +39,7 @@ subtitle:
 		Languages:     "chi_sim",
 		ScriptPath:    "tools/subtitle_ocr/bitmap_subtitle_ocr.py",
 	}
-	if err := SaveSubtitleRecognition(path, false, asr, ocr); err != nil {
+	if err := SaveSubtitleRecognition(path, false, asr, ocr, true); err != nil {
 		t.Fatalf("SaveSubtitleRecognition: %v", err)
 	}
 
@@ -73,6 +73,9 @@ subtitle:
 	}
 	if cfg.Subtitle.GraphicalOCR.ScriptPath != ocr.ScriptPath {
 		t.Fatalf("script_path=%q", cfg.Subtitle.GraphicalOCR.ScriptPath)
+	}
+	if !cfg.SubtitleAIProofreadEnabled() {
+		t.Fatal("ai_proofread should be true after patch")
 	}
 
 	var doc yaml.Node

@@ -3,9 +3,11 @@ server:
   port: 8200
   mode: "release" # debug | release
 # Web UI branding (sidebar title, browser tab, favicon).
+
 branding:
   app_name: "Knox-Media"
   # Optional custom favicon (.svg/.png/.ico), path relative to this file or absolute.
+
   favicon_path: ""
   # When true, JIT master playlist may emit EXT-X-MEDIA TYPE=AUDIO for pre-extracted audio tracks.
 
@@ -34,6 +36,7 @@ ffmpeg:
   ffprobe_path: "tools/ffmpeg/bin/ffprobe.exe"
   ffmpeg_path: "tools/ffmpeg/bin/ffmpeg.exe"
 # CENC fMP4 HLS: Shaka first, then ffmpeg fallback. Empty shaka path skips Shaka.
+
 drm_packaging:
   engine_order:
     - shaka
@@ -56,20 +59,24 @@ drm:
   powerdrm:
     enabled: true
 # Web playback plan: player_engine_order (powerplayer | shaka | xgplayer). Omitted entries use server defaults.
+
 playback:
   engines:
     progressive_hls: ["powerplayer", "xgplayer"] # native + clear HLS (hls, jit_hls, hls_aes_128)
     hls_powerdrm: ["powerplayer"]
     drm: ["powerplayer", "shaka", "xgplayer"] # Widevine/FairPlay HLS or DASH
 # Knox 9527 envelope encryption at rest (per-library encrypted_assets_enabled).
+
 encrypted_assets:
   enabled: true
   cleanup_plaintext_default: false
 # Library scan: default skips full-file MD5 (very slow) and uses shorter ffprobe analysis.
+
 scan:
   file_hash_on_scan: false
   fast_ffprobe: true
 # Sidecar scan (srt/ass/ssa/vtt/sub), embedded extract to WebVTT, optional ASR.
+
 subtitle:
   # When true, a new video discovered by library scan gets a pending subtitle_task (default: true).
   auto_on_scan: true
@@ -88,15 +95,19 @@ subtitle:
     pgsrip_path: tools/recognition/.venv/Scripts/pgsrip.exe
     mkvextract_path: ""
     mkvmerge_path: ""
+  ai_proofread: true
 # Audio track extraction: separate audio from video on library scan.
+
 atrack:
   # When true, a new video discovered by library scan gets a waiting atrack_task (default: true).
   auto_on_scan: false
 # Lyric recognition: ASR → VTT → LRC for music library audio tracks.
+
 lyric:
   # When true, a new audio track in a music library without lyrics gets a pending lyric_task (default: true).
   auto_on_scan: true
 # Photo AI classification for photo libraries (heuristic + optional ONNX).
+
 photo_classify:
   auto_on_scan: true
   engine: auto
@@ -105,6 +116,7 @@ photo_classify:
   model_path: tools/photo_classify/models/mobilenetv2-7.onnx
   labels_path: tools/photo_classify/imagenet_labels.txt
 # Face detection and person clustering for photo libraries (InsightFace).
+
 photo_face:
   auto_on_scan: true
   python_path: tools/recognition/.venv/Scripts/python.exe
@@ -115,6 +127,7 @@ photo_face:
   poll_interval_seconds: 10
   failed_retry_minutes: 60
 # Office document preview via LibreOffice headless (DOC/DOCX/XLS/XLSX/PPT/PPTX -> PDF).
+
 doc_trans:
   enabled: true
   engine_order:
@@ -129,6 +142,7 @@ doc_trans:
   cache_ttl_days: 30
   timeout_seconds: 600
 # Just-in-time transcode options.
+
 jit:
   # When true, use a single long-running ffmpeg process that outputs HLS segments
 

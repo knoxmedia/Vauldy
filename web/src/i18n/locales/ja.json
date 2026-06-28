@@ -421,6 +421,8 @@
       "intro": "ASR settings are stored in config.yml under subtitle.asr. Use one-click install to deploy to tools/recognition/ (Python venv) if dependencies are missing.",
       "auto_on_scan": "スキャン時に自動音声認識",
       "auto_on_scan_desc": "ライブラリの取り込み・スキャン時に新しい動画を subtitle_task に自動キュー（内蔵/外部字幕の抽出、字幕がない場合は ASR 設定に従って認識）。",
+      "ai_proofread": "AI 大モデルで字幕/歌詞を校正",
+      "ai_proofread_desc": "AI プロバイダー（システムオプション → AI プロバイダー）が少なくとも1件有効な場合、認識成功した字幕/歌詞を大モデルに送り、誤字・同音字・脱字・OCR ノイズを校正します。明らかな誤りのみを修正し、言語・意味は変更しません。",
       "provider": "Provider",
       "provider_desc": "Optional automatic speech recognition when no subtitles exist. Whisper CLI runs the whisper command; Shell uses a custom script with {input}, {output_dir}, {output_vtt} placeholders.",
       "whisper_path": "Whisper path",
@@ -1712,6 +1714,27 @@
       "provider_desc_ai": "AI 認識は大規模言語モデルとコンピュータービジョンを用い、ファイル名や画面内容からメタデータを推定します。外部 API 不要で、曖昧な名前のマッチングや未知メディアのスマート分類が可能。"
     }
   },
+  "proofread": {
+    "subtitle_title": "字幕を校正",
+    "lyric_title": "歌詞を校正",
+    "import_subtitle": "字幕をインポート",
+    "import_lyric": "歌詞をインポート",
+    "save": "保存",
+    "cancel": "キャンセル",
+    "prev": "前の行",
+    "next": "次の行",
+    "line": "行",
+    "edit_placeholder": "この行のテキストを編集",
+    "select_line": "左側の行を選択して編集",
+    "no_subtitles": "字幕がありません",
+    "no_cues": "編集可能な行がありません",
+    "no_lyrics": "歌詞がありません",
+    "load_failed": "読み込みに失敗しました",
+    "save_failed": "保存に失敗しました",
+    "saved": "保存しました",
+    "imported": "インポート成功",
+    "import_failed": "インポート失敗"
+  },
   "components": {
     "now_playing_indicator": {
       "playing": "再生中",
@@ -1956,6 +1979,7 @@
       "add_to": "追加",
       "edit": "編集",
       "identify_lyrics": "歌詞を認識",
+      "proofread_lyrics": "歌詞を校正",
       "view_history": "再生履歴を表示",
       "get_info": "情報を表示",
       "delete": "削除",
@@ -1993,6 +2017,7 @@
       "merge": "結合",
       "optimize": "最適化",
       "recognize_subtitles": "字幕を認識",
+      "proofread_subtitles": "字幕を校正",
       "extract_audio": "音声トラックを抽出",
       "reextract_audio": "音声トラックを再抽出",
       "extract_keyframes": "キーフレームを抽出",

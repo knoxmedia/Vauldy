@@ -421,6 +421,8 @@
       "intro": "語音識別（ASR）配置保存在 config.yml 的 subtitle.asr 段。若未安裝依賴，可使用「一鍵安裝」自動部署到 tools/recognition/（Python 虛擬環境）。",
       "auto_on_scan": "掃描時自動識別語音",
       "auto_on_scan_desc": "匯入或掃描媒體庫時，為新影片自動加入 subtitle_task 佇列（提取內嵌/外掛字幕，無字幕時依 ASR 配置識別）。",
+      "ai_proofread": "AI 大模型校對字幕/歌詞",
+      "ai_proofread_desc": "當已啟用至少一個 AI 大模型（系統選項 → AI 服務商）時，識別成功的字幕/歌詞會自動交由大模型校對更正錯別字、同音字、漏字及 OCR 噪點，僅修正明顯錯誤且不改變原文語言與語義。",
       "provider": "Provider",
       "provider_desc": "无字幕时可选自动语音识别。Whisper CLI 直接调用 whisper 命令；Shell 使用自定义脚本（支持 {input}、{output_dir}、{output_vtt} 占位符）。",
       "whisper_path": "Whisper 路径",
@@ -1712,6 +1714,27 @@
       "provider_desc_ai": "AI 智慧識別使用大型語言模型與電腦視覺技術，從檔案名稱與畫面內容自動推斷中繼資料。無需外部 API，支援模糊名稱比對與未知媒體的智慧歸類。"
     }
   },
+  "proofread": {
+    "subtitle_title": "校對字幕",
+    "lyric_title": "校對歌詞",
+    "import_subtitle": "匯入字幕",
+    "import_lyric": "匯入歌詞",
+    "save": "儲存",
+    "cancel": "取消",
+    "prev": "上一行",
+    "next": "下一行",
+    "line": "行",
+    "edit_placeholder": "編輯該行文字",
+    "select_line": "選擇左側一行進行編輯",
+    "no_subtitles": "暫無可用字幕",
+    "no_cues": "該字幕沒有可編輯的行",
+    "no_lyrics": "暫無歌詞",
+    "load_failed": "載入失敗",
+    "save_failed": "儲存失敗",
+    "saved": "已儲存",
+    "imported": "匯入成功",
+    "import_failed": "匯入失敗"
+  },
   "components": {
     "now_playing_indicator": {
       "playing": "正在播放",
@@ -1956,6 +1979,7 @@
       "add_to": "加入",
       "edit": "編輯",
       "identify_lyrics": "識別歌詞",
+      "proofread_lyrics": "校對歌詞",
       "view_history": "檢視播放紀錄",
       "get_info": "檢視資訊",
       "delete": "刪除",
@@ -1993,6 +2017,7 @@
       "merge": "合併",
       "optimize": "最佳化",
       "recognize_subtitles": "識別字幕",
+      "proofread_subtitles": "校對字幕",
       "extract_audio": "分離音軌",
       "reextract_audio": "重新分離音軌",
       "extract_keyframes": "擷取關鍵影格",

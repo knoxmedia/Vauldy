@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"knox-media/internal/keystore"
+	"knox-media/internal/scraper"
 	"knox-media/internal/storage"
 )
 
@@ -41,6 +42,9 @@ type Service struct {
 	SubtitleDir string
 	ASR         ASRConfig
 	OCR         OCRConfig
+	// AIProofread enables LLM-based correction of ASR/OCR output when at least one
+	// ai_provider_config is enabled. Mirrors config.SubtitleProcessingConfig.AIProofread.
+	AIProofread bool
 
 	cfgMu      sync.RWMutex
 	mediaLocks sync.Map // mediaID -> *sync.Mutex
@@ -64,6 +68,56 @@ func (s *Service) ApplyRecognition(asr ASRConfig, ocr OCRConfig) {
 	s.cfgMu.Unlock()
 }
 
+// ApplyAIProofread updates the in-memory AI proofread toggle (e.g. after config.yml save).
+func (s *Service) ApplyAIProofread(enabled bool) {
+	if s == nil {
+		return
+	}
+	s.cfgMu.Lock()
+	s.AIProofread = enabled
+	s.cfgMu.Unlock()
+}
+
+// AIProofreadEnabled reports whether LLM proofreading is enabled and at least one AI provider is configured.
+func (s *Service) AIProofreadEnabled() bool {
+	if s == nil {
+		return false
+	}
+	s.cfgMu.RLock()
+	enabled := s.AIProofread
+	s.cfgMu.RUnlock()
+	if !enabled {
+		return false
+	}
+	return len(s.enabledAIProviders()) > 0
+}
+
+// EnabledAIProviders returns configured OpenAI-compatible LLM providers from ai_provider_config.
+func (s *Service) EnabledAIProviders() []scraper.AIProviderConfig {
+	return s.enabledAIProviders()
+}
+
+func (s *Service) enabledAIProviders() []scraper.AIProviderConfig {
+	if s == nil || s.DB == nil {
+		return nil
+	}
+	rows, err := s.DB.Query(
+		`SELECT id, name, api_url, api_key, model FROM ai_provider_config WHERE enabled = 1 ORDER BY id`,
+	)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	out := make([]scraper.AIProviderConfig, 0)
+	for rows.Next() {
+		var p scraper.AIProviderConfig
+		if rows.Scan(&p.ID, &p.Name, &p.APIURL, &p.APIKey, &p.Model) == nil {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 func NewService(db *sql.DB, vault *keystore.Vault, derived *storage.DerivedAssetStore, mediaRoot, ffmpegPath, ffprobePath, subtitleDir string, asr ASRConfig, ocr OCRConfig) *Service {
 	if strings.TrimSpace(ffmpegPath) == "" {
 		ffmpegPath = "ffmpeg"
@@ -72,15 +126,16 @@ func NewService(db *sql.DB, vault *keystore.Vault, derived *storage.DerivedAsset
 		ffprobePath = "ffprobe"
 	}
 	return &Service{
-		DB:          db,
-		Vault:       vault,
-		Derived:     derived,
-		MediaRoot:   strings.TrimSpace(mediaRoot),
-		FFmpegPath:  ffmpegPath,
-		FFprobePath: ffprobePath,
-		SubtitleDir: subtitleDir,
-		ASR:         asr,
-		OCR:         ocr,
+		DB:           db,
+		Vault:        vault,
+		Derived:      derived,
+		MediaRoot:    strings.TrimSpace(mediaRoot),
+		FFmpegPath:   ffmpegPath,
+		FFprobePath:  ffprobePath,
+		SubtitleDir:  subtitleDir,
+		ASR:          asr,
+		OCR:          ocr,
+		AIProofread:  true,
 	}
 }
 
@@ -262,6 +317,9 @@ func (s *Service) syncEmbedded(ctx context.Context, mediaID int64, videoPath, ou
 					trimErr(err), mediaID, dedupe)
 				continue
 			}
+			if perr := s.ProofreadFileInPlace(ctx, outPath, lang); perr != nil {
+				log.Printf("subtitle ai-proofread media=%d dedupe=%s err=%v", mediaID, dedupe, perr)
+			}
 			_ = s.markSubtitleReady(ctx, mediaID, dedupe, filepath.Base(outPath), outPath)
 			continue
 		}
@@ -370,6 +428,9 @@ func (s *Service) syncSidecars(ctx context.Context, mediaID int64, videoPath, ou
 			if err := s.RunVobSubIdxOCR(ctx, full, outPath); err != nil {
 				_, _ = s.DB.Exec(`UPDATE media_subtitle SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`, trimErr(err), mediaID, dedupe)
 				continue
+			}
+			if perr := s.ProofreadFileInPlace(ctx, outPath, lang); perr != nil {
+				log.Printf("subtitle ai-proofread media=%d dedupe=%s err=%v", mediaID, dedupe, perr)
 			}
 			_ = s.markSubtitleReady(ctx, mediaID, dedupe, filepath.Base(outPath), outPath)
 			continue
@@ -530,6 +591,9 @@ func (s *Service) runASR(ctx context.Context, mediaID int64, videoPath, outDir s
 		_ = out
 	default:
 		return nil
+	}
+	if perr := s.ProofreadFileInPlace(ctx, outPath, "und"); perr != nil {
+		log.Printf("subtitle ai-proofread media=%d dedupe=%s err=%v", mediaID, dedupe, perr)
 	}
 	return s.markSubtitleReady(ctx, mediaID, dedupe, filepath.Base(outPath), outPath)
 }

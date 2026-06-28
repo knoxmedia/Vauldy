@@ -88,6 +88,7 @@ function defaultSystemOptions(): SystemOptions {
         mkvextract_path: "",
         mkvmerge_path: "",
       },
+      ai_proofread: true,
     },
     photo_classify: {
       auto_on_scan: true,
@@ -131,6 +132,10 @@ function mergeSystemOptions(data: Partial<SystemOptions> | null | undefined): Sy
     recognition: {
       asr,
       ocr: { ...base.recognition.ocr, ...(data.recognition?.ocr ?? {}) },
+      ai_proofread:
+        typeof data.recognition?.ai_proofread === "boolean"
+          ? data.recognition.ai_proofread
+          : base.recognition.ai_proofread,
     },
     photo_classify: { ...base.photo_classify, ...(data.photo_classify ?? {}) },
     photo_face: { ...base.photo_face, ...(data.photo_face ?? {}) },
@@ -964,6 +969,20 @@ export default function SystemOptionsPage() {
             setOpts((p) => ({
               ...p,
               recognition: { ...p.recognition, asr: { ...p.recognition.asr, auto_on_scan: v } },
+            }))
+          }
+        />
+      </SettingRow>
+      <SettingRow
+        title={t("system_options.asr.ai_proofread")}
+        description={t("system_options.asr.ai_proofread_desc")}
+      >
+        <Switch
+          checked={opts.recognition.ai_proofread}
+          onChange={(v) =>
+            setOpts((p) => ({
+              ...p,
+              recognition: { ...p.recognition, ai_proofread: v },
             }))
           }
         />

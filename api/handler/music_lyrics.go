@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -66,4 +67,83 @@ func (h *Handler) readLyricFile(mediaID int64, path string) ([]byte, error) {
 	}
 	defer seeker.Close()
 	return io.ReadAll(seeker)
+}
+
+type saveLyricsBody struct {
+	Lrc string `json:"lrc"`
+}
+
+// SaveMediaLyrics persists edited or imported LRC content for an audio track.
+func (h *Handler) SaveMediaLyrics(c *gin.Context) {
+	if h.LyricWorker == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "lyric worker disabled"})
+		return
+	}
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	if _, ok := h.requireMediaAccess(c, id, false); !ok {
+		return
+	}
+	var body saveLyricsBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := h.LyricWorker.SaveLyrics(c.Request.Context(), id, body.Lrc); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// ImportMediaLyrics uploads a .lrc (or .vtt) file and saves it as the track's lyrics.
+func (h *Handler) ImportMediaLyrics(c *gin.Context) {
+	if h.LyricWorker == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "lyric worker disabled"})
+		return
+	}
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	if _, ok := h.requireMediaAccess(c, id, false); !ok {
+		return
+	}
+	fh, err := c.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "file required"})
+		return
+	}
+	f, err := fh.Open()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	defer f.Close()
+	data, err := io.ReadAll(f)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	content := strings.TrimSpace(string(data))
+	if content == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "empty file"})
+		return
+	}
+	// Accept .vtt too: convert to LRC when it looks like WebVTT.
+	name := strings.ToLower(filepath.Base(fh.Filename))
+	if strings.HasSuffix(name, ".vtt") || strings.HasPrefix(content, "WEBVTT") {
+		if lrc := musiclyrics.VTTToLRC(content); strings.TrimSpace(lrc) != "" {
+			content = lrc
+		}
+	}
+	if err := h.LyricWorker.SaveLyrics(c.Request.Context(), id, content); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }

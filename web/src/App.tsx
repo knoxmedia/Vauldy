@@ -63,6 +63,8 @@ import MainNav from "./components/MainNav";
 import MusicPlayerBar from "./components/MusicPlayerBar";
 import ScrollToTopFab from "./components/ScrollToTopFab";
 import SearchHeaderControls from "./components/SearchHeaderControls";
+import { SubtitleProofreadDialog } from "./components/SubtitleProofreadDialog";
+import { LyricProofreadDialog } from "./components/LyricProofreadDialog";
 import { useMusicPlayerStore } from "./store/musicPlayer";
 import { useBrandingStore, useAppName } from "./store/branding";
 import { useT } from "./i18n";
@@ -463,6 +465,8 @@ function MainShell() {
         </Content>
         {!isImmersiveRoute ? <MusicPlayerBar /> : null}
         {!isImmersiveRoute ? <ScrollToTopFab scrollRootRef={contentRef} bottomOffset={musicPlayerActive ? 96 : 24} /> : null}
+        <SubtitleProofreadDialog />
+        <LyricProofreadDialog />
       </Layout>
     </Layout>
   );

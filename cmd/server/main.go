@@ -100,22 +100,23 @@ func main() {
 			ocrScript = abs
 		}
 	}
-	subSvc := subtitle.NewService(db, keyVault, derivedStore, filepath.Dir(cfgPath), cfg.FFmpeg.FFmpegPath, cfg.FFmpeg.FFprobePath, cfg.Data.Subtitle, subtitle.ASRConfig{
-		Provider:    cfg.Subtitle.ASR.Provider,
-		WhisperPath: cfg.Subtitle.ASR.WhisperPath,
-		ExtraArgs:   cfg.Subtitle.ASR.ExtraArgs,
-		Shell:       cfg.Subtitle.ASR.Shell,
-	}, subtitle.OCRConfig{
-		Enabled:        cfg.Subtitle.GraphicalOCR.Enabled,
-		TesseractPath:  cfg.Subtitle.GraphicalOCR.TesseractPath,
-		TessdataPrefix: cfg.Subtitle.GraphicalOCR.TessdataPrefix,
-		Languages:      cfg.Subtitle.GraphicalOCR.Languages,
-		PythonPath:     cfg.Subtitle.GraphicalOCR.PythonPath,
-		ScriptPath:     ocrScript,
-		PgsripPath:     cfg.Subtitle.GraphicalOCR.PgsripPath,
-		MkvextractPath: cfg.Subtitle.GraphicalOCR.MkvextractPath,
-		MkvmergePath:   cfg.Subtitle.GraphicalOCR.MkvmergePath,
-	})
+subSvc := subtitle.NewService(db, keyVault, derivedStore, filepath.Dir(cfgPath), cfg.FFmpeg.FFmpegPath, cfg.FFmpeg.FFprobePath, cfg.Data.Subtitle, subtitle.ASRConfig{
+	Provider:    cfg.Subtitle.ASR.Provider,
+	WhisperPath: cfg.Subtitle.ASR.WhisperPath,
+	ExtraArgs:   cfg.Subtitle.ASR.ExtraArgs,
+	Shell:       cfg.Subtitle.ASR.Shell,
+}, subtitle.OCRConfig{
+	Enabled:        cfg.Subtitle.GraphicalOCR.Enabled,
+	TesseractPath:  cfg.Subtitle.GraphicalOCR.TesseractPath,
+	TessdataPrefix: cfg.Subtitle.GraphicalOCR.TessdataPrefix,
+	Languages:      cfg.Subtitle.GraphicalOCR.Languages,
+	PythonPath:     cfg.Subtitle.GraphicalOCR.PythonPath,
+	ScriptPath:     ocrScript,
+	PgsripPath:     cfg.Subtitle.GraphicalOCR.PgsripPath,
+	MkvextractPath: cfg.Subtitle.GraphicalOCR.MkvextractPath,
+	MkvmergePath:   cfg.Subtitle.GraphicalOCR.MkvmergePath,
+})
+subSvc.AIProofread = cfg.SubtitleAIProofreadEnabled()
 	up := &upload.Service{UploadDir: cfg.Data.Upload, ChunksDir: cfg.Data.Chunks}
 	atrackWorker := atrack.NewWorker(db, keyVault, derivedStore, cfg.FFmpeg.FFmpegPath, cfg.FFmpeg.FFprobePath, cfg.Data.ATracks)
 	keyframeWorker := keyframe.NewWorker(db, keyVault, derivedStore, cfg.FFmpeg.FFprobePath, cfg.Data.Keyframes)

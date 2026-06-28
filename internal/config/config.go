@@ -191,6 +191,9 @@ type SubtitleProcessingConfig struct {
 	AutoOnScan   *bool              `yaml:"auto_on_scan"`
 	ASR          ASRConfig          `yaml:"asr"`
 	GraphicalOCR GraphicalOCRConfig `yaml:"graphical_ocr"`
+	// AIProofread enables LLM-based correction of ASR/OCR subtitle text after recognition.
+	// Only active when at least one ai_provider_config is enabled. Nil means true.
+	AIProofread *bool `yaml:"ai_proofread"`
 }
 
 // ATrackConfig controls audio track extraction behavior.
@@ -574,6 +577,18 @@ func (c *Config) SubtitleAutoOnScan() bool {
 		return true
 	}
 	return *c.Subtitle.AutoOnScan
+}
+
+// SubtitleAIProofreadEnabled reports whether LLM proofreading should run on ASR/OCR subtitle output.
+// Nil means true (applies only when an enabled ai_provider_config exists at runtime).
+func (c *Config) SubtitleAIProofreadEnabled() bool {
+	if c == nil {
+		return false
+	}
+	if c.Subtitle.AIProofread == nil {
+		return true
+	}
+	return *c.Subtitle.AIProofread
 }
 
 // ATrackAutoOnScan reports whether scan should enqueue atrack tasks for new videos.
