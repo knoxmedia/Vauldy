@@ -14,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"knox-media/internal/jit/hwenc"
 	"knox-media/internal/jit/session"
 	"knox-media/internal/playback"
 )
@@ -422,6 +423,8 @@ func (h *Handler) buildTranscodeConfig(s *session.Session, startTime float64) se
 	}
 
 	txSettings := h.loadTranscoderSettings()
+	encoder := txSettings.EffectiveHWEncoderID()
+	useHW := txSettings.EnableHardwareEncoding && encoder != hwenc.Libx264
 	return session.TranscodeConfig{
 		SourcePath: s.SourcePath,
 		Bitrate:    s.Bitrate,
@@ -430,6 +433,8 @@ func (h *Handler) buildTranscodeConfig(s *session.Session, startTime float64) se
 		StartTime:  startTime,
 		X264Preset: txSettings.InstantX264Preset(),
 		CRF:        txSettings.InstantCRF(),
+		UseHWEncoding: useHW,
+		VideoEncoder:  encoder,
 	}
 }
 

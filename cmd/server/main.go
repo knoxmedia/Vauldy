@@ -18,6 +18,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"knox-media/api"
+	"knox-media/api/handler"
 	"knox-media/cmd/scheduler"
 	"knox-media/cmd/sliceworker"
 	"knox-media/cmd/transcodeworker"
@@ -25,6 +26,7 @@ import (
 	"knox-media/internal/atrack"
 	"knox-media/internal/config"
 	"knox-media/internal/doccover"
+	"knox-media/internal/jit/hwenc"
 	"knox-media/internal/imagethumb"
 	jitsession "knox-media/internal/jit/session"
 	"knox-media/internal/jit/ingestprepare"
@@ -77,6 +79,19 @@ func main() {
 	}
 
 	application := &app.App{Config: cfg, ConfigPath: cfgPath, DB: db}
+	application.AvailableHardwareAcceleration = hwenc.ListAvailableHardwareAcceleration(cfg.FFmpeg.FFmpegPath)
+	if err := handler.EnsureHardwareAccelDefaults(db, cfg.FFmpeg.FFmpegPath, application.AvailableHardwareAcceleration); err != nil {
+		log.Printf("hardware acceleration defaults: %v", err)
+	}
+	if len(application.AvailableHardwareAcceleration) == 0 {
+		log.Printf("hardware acceleration: none detected, using software encoding")
+	} else {
+		log.Printf("hardware acceleration detected: available=%v best=%s",
+			application.AvailableHardwareAcceleration,
+			hwenc.DetectHWAccel(cfg.FFmpeg.FFmpegPath),
+		)
+	}
+	transcodeSettings := loadSystemOptionsTranscodeSettings(db)
 	keyVault, assetEncryptor := storage.NewAssetEncryptorFromConfig(cfg, db)
 	derivedStore := storage.NewDerivedAssetStoreFromConfig(cfg, db, keyVault)
 	worker := transcode.NewWorker(db, cfg.FFmpeg.FFmpegPath, cfg.Data.Transcode)
@@ -175,6 +190,7 @@ subSvc.AIProofread = cfg.SubtitleAIProofreadEnabled()
 		WorkerID:             "embedded-transcode",
 		MaxConcurrent:        instantMaxConcurrent(),
 		HLSContinuousEnabled: cfg.JITContinuousHLSEnabled(),
+		VideoEncoder:         string(transcodeSettings.EffectiveHWEncoderID()),
 	})
 	// Redis-free session JIT replaces these; only start old workers if Redis is available.
 	redisAvailable := false
@@ -508,4 +524,15 @@ func generatePhotoVariantsOnScan(db *sql.DB, vault *keystore.Vault, cfg *config.
 	root["photo"] = photo
 	merged, _ := json.Marshal(root)
 	_, _ = db.Exec(`UPDATE media SET meta_json = ? WHERE id = ?`, string(merged), mediaID)
+}
+
+func loadSystemOptionsTranscodeSettings(db *sql.DB) transcode.Settings {
+	if db == nil {
+		return transcode.DefaultSettings()
+	}
+	var raw sql.NullString
+	if err := db.QueryRow(`SELECT options_json FROM system_options WHERE id = 1`).Scan(&raw); err != nil {
+		return transcode.DefaultSettings()
+	}
+	return transcode.SettingsFromOptionsJSON(raw.String)
 }

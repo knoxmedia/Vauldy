@@ -399,6 +399,17 @@
       "throttle_buffer_desc": "Seconds to buffer before throttling the transcoder.",
       "bg_x264_preset": "백그라운드 x264 프리셋",
       "bg_x264_preset_desc": "x264 preset for background transcodes (sync and media optimizer). Lower values improve quality and reduce size but take longer.",
+      "hardware_acceleration": "하드웨어 가속",
+      "hardware_acceleration_desc": "트랜스코딩에 사용할 GPU 하드웨어 가속 방식입니다. 없음을 선택하면 CPU 소프트웨어 인코딩(libx264)을 사용합니다.",
+      "enable_hardware_encoding": "하드웨어 인코딩 사용",
+      "enable_hardware_encoding_desc": "활성화하면 선택한 하드웨어 가속으로 H.264 비디오 인코딩을 수행합니다.",
+      "hw_accel": {
+        "none": "없음",
+        "amf": "AMD AMF",
+        "nvenc": "Nvidia NVENC",
+        "qsv": "Intel QuickSync (QSV)",
+        "vaapi": "Video Acceleration API (VAAPI)"
+      },
       "disable_video_transcode": "비디오 스트림 트랜스코딩 비활성화",
       "disable_video_transcode_desc": "Disables transcoding of video streams. Audio transcoding and remuxing may still occur.",
       "max_cpu_concurrent": "최대 CPU 동시 트랜스코드 수",

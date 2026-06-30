@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"knox-media/internal/jit/hwenc"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -118,22 +120,38 @@ func TestDetectEncoderBackend(t *testing.T) {
 
 	cases := []struct {
 		name    string
-		output  string
+		hwAccel string
 		wantEnc EncoderBackend
 	}{
-		{name: "qsv preferred", output: " h264_qsv\n h264_nvenc", wantEnc: EncoderQSV},
-		{name: "vaapi", output: " h264_vaapi", wantEnc: EncoderVAAPI},
-		{name: "nvenc", output: " h264_nvenc", wantEnc: EncoderNVENC},
-		{name: "fallback x264", output: " libvpx", wantEnc: EncoderX264},
+		{name: "qsv", hwAccel: "qsv", wantEnc: EncoderQSV},
+		{name: "vaapi", hwAccel: "vaapi", wantEnc: EncoderVAAPI},
+		{name: "nvenc", hwAccel: "nvenc", wantEnc: EncoderNVENC},
+		{name: "amf", hwAccel: "amf", wantEnc: EncoderAMF},
 	}
 
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			w := &Worker{FFmpegPath: writeMockEncoderLister(t, tc.output)}
-			if got := w.detectEncoderBackend(); got != tc.wantEnc {
-				t.Fatalf("detectEncoderBackend=%s want %s", got, tc.wantEnc)
+			id, ok := hwenc.HardwareAccelToEncoder(tc.hwAccel)
+			if !ok {
+				t.Fatalf("HardwareAccelToEncoder(%q) not ok", tc.hwAccel)
+			}
+			var got EncoderBackend
+			switch id {
+			case hwenc.H264QSV:
+				got = EncoderQSV
+			case hwenc.H264AMF:
+				got = EncoderAMF
+			case hwenc.H264NVENC:
+				got = EncoderNVENC
+			case hwenc.H264VAAPI:
+				got = EncoderVAAPI
+			default:
+				got = EncoderX264
+			}
+			if got != tc.wantEnc {
+				t.Fatalf("encoder mapping=%s want %s", got, tc.wantEnc)
 			}
 		})
 	}

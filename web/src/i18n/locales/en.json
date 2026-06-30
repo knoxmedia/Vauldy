@@ -399,6 +399,17 @@
       "throttle_buffer_desc": "Seconds to buffer before throttling the transcoder.",
       "bg_x264_preset": "Background x264 preset",
       "bg_x264_preset_desc": "x264 preset for background transcodes (sync and media optimizer). Lower values improve quality and reduce size but take longer.",
+      "hardware_acceleration": "Hardware acceleration",
+      "hardware_acceleration_desc": "GPU hardware acceleration for transcoding. Select None to use CPU software encoding (libx264).",
+      "enable_hardware_encoding": "Enable hardware encoding",
+      "enable_hardware_encoding_desc": "When enabled, the transcoder uses the selected hardware acceleration for H.264 video encoding.",
+      "hw_accel": {
+        "none": "None",
+        "amf": "AMD AMF",
+        "nvenc": "Nvidia NVENC",
+        "qsv": "Intel QuickSync (QSV)",
+        "vaapi": "Video Acceleration API (VAAPI)"
+      },
       "disable_video_transcode": "Disable video stream transcoding",
       "disable_video_transcode_desc": "Disables transcoding of video streams. Audio transcoding and remuxing may still occur.",
       "max_cpu_concurrent": "Max CPU concurrent transcodes",

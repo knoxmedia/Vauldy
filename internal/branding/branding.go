@@ -10,7 +10,7 @@ import (
 //go:embed default_favicon.svg
 var DefaultFaviconSVG []byte
 
-const DefaultAppName = "Knox-Media"
+const DefaultAppName = "Vauldy"
 
 // ResolveFaviconPath returns an on-disk favicon path when configured and present.
 func ResolveFaviconPath(faviconPath, configPath string) string {

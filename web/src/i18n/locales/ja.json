@@ -399,6 +399,17 @@
       "throttle_buffer_desc": "Seconds to buffer before throttling the transcoder.",
       "bg_x264_preset": "バックグラウンド x264 プリセット",
       "bg_x264_preset_desc": "x264 preset for background transcodes (sync and media optimizer). Lower values improve quality and reduce size but take longer.",
+      "hardware_acceleration": "ハードウェアアクセラレーション",
+      "hardware_acceleration_desc": "トランスコードに使用する GPU ハードウェアアクセラレーション。なしを選択すると CPU ソフトウェアエンコード（libx264）を使用します。",
+      "enable_hardware_encoding": "ハードウェアエンコードを有効化",
+      "enable_hardware_encoding_desc": "有効にすると、選択したハードウェアアクセラレーションで H.264 動画エンコードを行います。",
+      "hw_accel": {
+        "none": "なし",
+        "amf": "AMD AMF",
+        "nvenc": "Nvidia NVENC",
+        "qsv": "Intel QuickSync (QSV)",
+        "vaapi": "Video Acceleration API (VAAPI)"
+      },
       "disable_video_transcode": "動画ストリームのトランスコードを無効化",
       "disable_video_transcode_desc": "Disables transcoding of video streams. Audio transcoding and remuxing may still occur.",
       "max_cpu_concurrent": "最大 CPU 同時トランスコード数",

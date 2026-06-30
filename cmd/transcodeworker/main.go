@@ -321,31 +321,39 @@ func (w *TranscodeWorker) processTranscodeTask(task *models.TranscodeTask) {
 		return
 	}
 
-	transcodeArgs := w.buildTranscodeArgs(inputPath, outputPath, task, ssSec, durSec)
-	logger.Info("ffmpeg transcode args", zap.String("args", strings.Join(transcodeArgs, " ")))
+	transcodeArgs := w.buildTranscodeArgs(inputPath, outputPath, task, ssSec, durSec, w.hwEncoder)
+	logger.Info("ffmpeg transcode args", zap.String("encoder", string(w.hwEncoder)), zap.String("args", strings.Join(transcodeArgs, " ")))
 
 	logPrefix := fmt.Sprintf("[transcode file=%s seg=%d br=%s session=%s] ",
 		task.FileID, task.SegmentID, task.Bitrate, task.SessionID)
 	outLog := &linePrefixWriter{mu: &w.ffmpegLogMu, out: os.Stdout, prefix: logPrefix}
 	errLog := &linePrefixWriter{mu: &w.ffmpegLogMu, out: os.Stderr, prefix: logPrefix}
 
-	cmd := exec.Command(w.ffmpeg, transcodeArgs...)
-	cmd.Stdout = outLog
-	cmd.Stderr = errLog
+	runOnce := func(args []string) error {
+		cmd := exec.Command(w.ffmpeg, args...)
+		cmd.Stdout = outLog
+		cmd.Stderr = errLog
+		if err := cmd.Start(); err != nil {
+			return err
+		}
+		done := make(chan struct{})
+		if task.SessionID != "prefetch" {
+			go w.monitorSession(cmd, task.SessionID, done)
+		}
+		err := cmd.Wait()
+		close(done)
+		_ = outLog.flush()
+		_ = errLog.flush()
+		return err
+	}
 
-	if err := cmd.Start(); err != nil {
-		logger.Error("Transcode start failed", zap.Error(err))
-		w.updateSegmentStatus(task.FileID, task.SegmentID, task.Bitrate, "failed")
-		return
+	err = runOnce(transcodeArgs)
+	if err != nil && w.hwEncoder != hwenc.Libx264 {
+		logger.Warn("Hardware transcode failed, falling back to libx264", zap.Error(err))
+		transcodeArgs = w.buildTranscodeArgs(inputPath, outputPath, task, ssSec, durSec, hwenc.Libx264)
+		logger.Info("ffmpeg transcode fallback args", zap.String("args", strings.Join(transcodeArgs, " ")))
+		err = runOnce(transcodeArgs)
 	}
-	done := make(chan struct{})
-	if task.SessionID != "prefetch" {
-		go w.monitorSession(cmd, task.SessionID, done)
-	}
-	err = cmd.Wait()
-	close(done)
-	_ = outLog.flush()
-	_ = errLog.flush()
 	if err != nil {
 		logger.Error("Transcode failed", zap.Error(err))
 		w.updateSegmentStatus(task.FileID, task.SegmentID, task.Bitrate, "failed")
@@ -395,43 +403,6 @@ func resolutionForBitrate(bitrate string) string {
 		return res
 	}
 	return "1280x720"
-}
-
-func mapX264PresetToQSV(p string) string {
-	switch p {
-	case "ultrafast", "veryfast":
-		return "veryfast"
-	case "fast":
-		return "faster"
-	case "slow":
-		return "slow"
-	default:
-		return "medium"
-	}
-}
-
-func mapX264PresetToAMF(p string) string {
-	switch p {
-	case "ultrafast", "veryfast", "fast":
-		return "speed"
-	case "slow":
-		return "quality"
-	default:
-		return "balanced"
-	}
-}
-
-func mapX264PresetToNVENC(p string) string {
-	switch p {
-	case "ultrafast":
-		return "p1"
-	case "veryfast":
-		return "p2"
-	case "fast":
-		return "p3"
-	default:
-		return "p4"
-	}
 }
 
 func parseResolutionWH(res string) (w, h string) {
@@ -502,7 +473,7 @@ func (w *TranscodeWorker) resolveSegmentSource(task *models.TranscodeTask) (inpu
 	return filepath.Clean(inputPath), seg.StartTime, seg.Duration, nil
 }
 
-func (w *TranscodeWorker) buildTranscodeArgs(inputPath, outputPath string, task *models.TranscodeTask, ssSec, durSec float64) []string {
+func (w *TranscodeWorker) buildTranscodeArgs(inputPath, outputPath string, task *models.TranscodeTask, ssSec, durSec float64, enc hwenc.ID) []string {
 	res := task.Resolution
 	if res == "" {
 		res = resolutionForBitrate(task.Bitrate)
@@ -517,7 +488,6 @@ func (w *TranscodeWorker) buildTranscodeArgs(inputPath, outputPath string, task 
 	}
 
 	forceSW := strings.EqualFold(strings.TrimSpace(task.Codec), "libx264")
-	enc := w.hwEncoder
 	if forceSW {
 		enc = hwenc.Libx264
 	}
@@ -542,75 +512,36 @@ func (w *TranscodeWorker) buildTranscodeArgs(inputPath, outputPath string, task 
 		return args
 	}
 
-	wPx, hPx := parseResolutionWH(res)
-	gops := []string{"-g", "48", "-keyint_min", "48", "-sc_threshold", "0"}
 	head := []string{"-hide_banner", "-loglevel", "error"}
 	mapArgs := []string{"-map", "0:v:0", "-map", "0:a:0?"}
 
-	switch enc {
-	case hwenc.H264QSV:
-		vf := "scale=" + wPx + ":" + hPx + ",format=nv12"
-		args := w.appendStdInput(head, inputPath, ssSec, durSec)
-		args = append(args, mapArgs...)
-		args = append(args, "-vf", vf,
-			"-c:v", "h264_qsv",
-			"-preset", mapX264PresetToQSV(preset),
-			"-b:v", task.Bitrate, "-maxrate", task.Bitrate, "-bufsize", "2M",
-			"-profile:v", "high")
-		args = append(args, gops...)
-		args = append(args, audioArgs...)
-		return append(args, "-f", "mpegts", "-muxdelay", "0", outputPath)
-	case hwenc.H264AMF:
-		vf := "scale=" + wPx + ":" + hPx
-		args := w.appendStdInput(head, inputPath, ssSec, durSec)
-		args = append(args, mapArgs...)
-		args = append(args, "-vf", vf,
-			"-c:v", "h264_amf",
-			"-quality", mapX264PresetToAMF(preset),
-			"-rc", "vbr_peak",
-			"-b:v", task.Bitrate)
-		args = append(args, gops...)
-		args = append(args, audioArgs...)
-		return append(args, "-f", "mpegts", "-muxdelay", "0", outputPath)
-	case hwenc.H264NVENC:
-		vf := "scale=" + wPx + ":" + hPx
-		args := w.appendStdInput(head, inputPath, ssSec, durSec)
-		args = append(args, mapArgs...)
-		args = append(args, "-vf", vf,
-			"-c:v", "h264_nvenc",
-			"-preset", mapX264PresetToNVENC(preset),
-			"-b:v", task.Bitrate, "-maxrate", task.Bitrate, "-bufsize", "2M",
-			"-profile:v", "high")
-		args = append(args, gops...)
-		args = append(args, audioArgs...)
-		return append(args, "-f", "mpegts", "-muxdelay", "0", outputPath)
-	case hwenc.H264VAAPI:
-		dev := hwenc.VAAPIDevice()
-		vf := "format=nv12,hwupload,scale_vaapi=w=" + wPx + ":h=" + hPx
-		args := w.appendVAAPIInput(head, dev, inputPath, ssSec, durSec)
-		args = append(args, mapArgs...)
-		args = append(args, "-vf", vf,
-			"-c:v", "h264_vaapi", "-b:v", task.Bitrate)
-		args = append(args, gops...)
-		args = append(args, audioArgs...)
-		return append(args, "-f", "mpegts", "-muxdelay", "0", outputPath)
-	default:
-		codec := strings.TrimSpace(task.Codec)
-		if codec == "" {
-			codec = "libx264"
-		}
-		args := w.appendStdInput(head, inputPath, ssSec, durSec)
-		args = append(args, mapArgs...)
-		args = append(args,
-			"-c:v", codec,
-			"-b:v", task.Bitrate,
-			"-s", res,
-			"-preset", preset,
-			"-profile:v", "high")
-		args = append(args, gops...)
-		args = append(args, audioArgs...)
-		return append(args, "-f", "mpegts", "-muxdelay", "0", outputPath)
+	pipeline := hwenc.PipelineModeForInput(enc != hwenc.Libx264, true)
+	if enc == hwenc.Libx264 {
+		pipeline = hwenc.PipelineSoftware
 	}
+	videoArgs := hwenc.BuildInstantVideoArgs(hwenc.InstantVideoPlan{
+		Encoder:    enc,
+		Mode:       pipeline,
+		Resolution: res,
+		Bitrate:    task.Bitrate,
+		X264Preset: preset,
+		SessionGOP: false,
+	})
+	args := w.appendVideoInput(head, enc, inputPath, ssSec, durSec)
+	args = append(args, mapArgs...)
+	args = append(args, videoArgs...)
+	args = append(args, audioArgs...)
+	return append(args, "-f", "mpegts", "-muxdelay", "0", outputPath)
+}
+
+func (w *TranscodeWorker) appendVideoInput(head []string, enc hwenc.ID, inputPath string, ssSec, durSec float64) []string {
+	if enc != hwenc.Libx264 {
+		head = append(head, hwenc.InputAccelArgs(enc)...)
+	}
+	if durSec > 0 {
+		return append(head, "-ss", formatSeekTS(ssSec), "-i", inputPath, "-t", formatSeekTS(durSec))
+	}
+	return append(head, "-i", inputPath)
 }
 
 // audioOutputArgs 返回 ffmpeg 音频输出参数。源 AAC 直接 stream copy；其他格式重编码为 AAC 128k。

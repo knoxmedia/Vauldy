@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	models "knox-media/internal/model"
+	"knox-media/internal/jit/hwenc"
 )
 
 func TestAudioOutputArgs_AACSourceCopy(t *testing.T) {
@@ -49,7 +50,7 @@ func TestBuildTranscodeArgs_PassthroughIncludesAudioMap(t *testing.T) {
 		Bitrate:    "4000k",
 		Resolution: "1920x1080",
 	}
-	args := w.buildTranscodeArgs("/in.mp4", "/out.ts", task, 0, 0)
+	args := w.buildTranscodeArgs("/in.mp4", "/out.ts", task, 0, 0, hwenc.Libx264)
 	joined := strings.Join(args, " ")
 	if !strings.Contains(joined, "-c:v copy") {
 		t.Fatalf("expected -c:v copy in args; got %s", joined)

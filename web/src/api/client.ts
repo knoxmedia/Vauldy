@@ -2289,6 +2289,8 @@ export type SystemOptionsTranscoder = {
   download_temp_dir: string;
   throttle_buffer_seconds: number;
   background_x264_preset: string;
+  hardware_acceleration: string;
+  enable_hardware_encoding: boolean;
   disable_video_stream_transcoding: boolean;
   max_cpu_concurrent: string;
   max_background_concurrent: string;
@@ -2376,8 +2378,12 @@ export type SystemOptions = {
   doc_trans: SystemOptionsDocTrans;
 };
 
+export type SystemOptionsResponse = SystemOptions & {
+  available_hardware_acceleration?: string[];
+};
+
 export async function fetchSystemOptions() {
-  const { data } = await api.get<SystemOptions>("/api/v1/admin/system-options");
+  const { data } = await api.get<SystemOptionsResponse>("/api/v1/admin/system-options");
   return data;
 }
 

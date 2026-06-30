@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"knox-media/internal/config"
+	"knox-media/internal/jit/hwenc"
 	"knox-media/internal/subtitle"
 )
 
@@ -23,6 +24,11 @@ type SystemOptionsJSON struct {
 	PhotoClassify SystemOptionsPhotoClassify `json:"photo_classify"`
 	PhotoFace     SystemOptionsPhotoFace     `json:"photo_face"`
 	DocTrans      SystemOptionsDocTrans      `json:"doc_trans"`
+}
+
+type systemOptionsGetResponse struct {
+	SystemOptionsJSON
+	AvailableHardwareAcceleration []string `json:"available_hardware_acceleration"`
 }
 
 type SystemOptionsRecognition struct {
@@ -71,6 +77,8 @@ type SystemOptionsTranscoder struct {
 	DownloadTempDir               string `json:"download_temp_dir"`
 	ThrottleBufferSeconds         int    `json:"throttle_buffer_seconds"`
 	BackgroundX264Preset          string `json:"background_x264_preset"`
+	HardwareAcceleration          string `json:"hardware_acceleration"`
+	EnableHardwareEncoding        bool   `json:"enable_hardware_encoding"`
 	DisableVideoStreamTranscoding bool   `json:"disable_video_stream_transcoding"`
 	MaxCPUConcurrent              string `json:"max_cpu_concurrent"`
 	MaxBackgroundConcurrent       string `json:"max_background_concurrent"`
@@ -96,6 +104,8 @@ func defaultSystemOptions() SystemOptionsJSON {
 			DownloadTempDir:               "",
 			ThrottleBufferSeconds:         60,
 			BackgroundX264Preset:          "veryfast",
+			HardwareAcceleration:          "none",
+			EnableHardwareEncoding:        false,
 			DisableVideoStreamTranscoding: false,
 			MaxCPUConcurrent:              "unlimited",
 			MaxBackgroundConcurrent:       "1",
@@ -149,6 +159,9 @@ func fillSystemOptionsDefaults(o *SystemOptionsJSON, def SystemOptionsJSON) {
 	}
 	if strings.TrimSpace(o.Transcoder.BackgroundX264Preset) == "" {
 		o.Transcoder.BackgroundX264Preset = def.Transcoder.BackgroundX264Preset
+	}
+	if strings.TrimSpace(o.Transcoder.HardwareAcceleration) == "" {
+		o.Transcoder.HardwareAcceleration = def.Transcoder.HardwareAcceleration
 	}
 	if o.Transcoder.ThrottleBufferSeconds <= 0 {
 		o.Transcoder.ThrottleBufferSeconds = def.Transcoder.ThrottleBufferSeconds
@@ -266,6 +279,14 @@ func normalizeSystemOptions(o SystemOptionsJSON) SystemOptionsJSON {
 	if _, ok := validPreset[o.Transcoder.BackgroundX264Preset]; !ok {
 		o.Transcoder.BackgroundX264Preset = "veryfast"
 	}
+	switch o.Transcoder.HardwareAcceleration {
+	case "none", "amf", "nvenc", "qsv", "vaapi":
+	default:
+		o.Transcoder.HardwareAcceleration = "none"
+	}
+	if o.Transcoder.HardwareAcceleration == "none" {
+		o.Transcoder.EnableHardwareEncoding = false
+	}
 	if o.Transcoder.MaxCPUConcurrent != "unlimited" && o.Transcoder.MaxCPUConcurrent != "" {
 		ok := false
 		for i := 1; i <= 16; i++ {
@@ -300,6 +321,36 @@ func normalizeSystemOptions(o SystemOptionsJSON) SystemOptionsJSON {
 	o.PhotoFace = normalizePhotoFaceOptions(o.PhotoFace)
 	o.DocTrans = normalizeDocTransOptions(o.DocTrans)
 	return o
+}
+
+func (h *Handler) availableHardwareAcceleration() []string {
+	if h == nil || h.App == nil {
+		return nil
+	}
+	if len(h.App.AvailableHardwareAcceleration) > 0 {
+		return append([]string(nil), h.App.AvailableHardwareAcceleration...)
+	}
+	if h.App.Config != nil {
+		return hwenc.ListAvailableHardwareAcceleration(h.App.Config.FFmpeg.FFmpegPath)
+	}
+	return nil
+}
+
+func clampTranscoderHardware(t *SystemOptionsTranscoder, available []string) {
+	if t == nil {
+		return
+	}
+	if t.HardwareAcceleration == "none" {
+		t.EnableHardwareEncoding = false
+		return
+	}
+	for _, a := range available {
+		if a == t.HardwareAcceleration {
+			return
+		}
+	}
+	t.HardwareAcceleration = "none"
+	t.EnableHardwareEncoding = false
 }
 
 func normalizeRecognitionOptions(r SystemOptionsRecognition) SystemOptionsRecognition {
@@ -468,7 +519,12 @@ func (h *Handler) GetSystemOptions(c *gin.Context) {
 		opts.PhotoFace = photoFaceFromConfig(h.App.Config)
 		opts.DocTrans = docTransFromConfig(h.App.Config)
 	}
-	c.JSON(http.StatusOK, opts)
+	available := h.availableHardwareAcceleration()
+	clampTranscoderHardware(&opts.Transcoder, available)
+	c.JSON(http.StatusOK, systemOptionsGetResponse{
+		SystemOptionsJSON:             opts,
+		AvailableHardwareAcceleration: available,
+	})
 }
 
 // PutSystemOptions replaces system options (admin). Client should send the full document from GET after edits.
@@ -483,7 +539,9 @@ func (h *Handler) PutSystemOptions(c *gin.Context) {
 		return
 	}
 	fillSystemOptionsDefaults(&body, defaultSystemOptions())
+	available := h.availableHardwareAcceleration()
 	merged := normalizeSystemOptions(body)
+	clampTranscoderHardware(&merged.Transcoder, available)
 	if err := h.applyRecognitionConfig(merged.Recognition); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存识别配置失败: " + err.Error()})
 		return

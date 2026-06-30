@@ -14,6 +14,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"knox-media/internal/jit/hwenc"
 	"knox-media/internal/storage"
 )
 
@@ -54,6 +55,8 @@ type TranscodeConfig struct {
 	StartTime        float64 // seek time in seconds (0 = from beginning)
 	X264Preset       string  // libx264 -preset; empty = veryfast
 	CRF              int     // libx264 -crf; 0 = default 23
+	UseHWEncoding    bool    // from system options enable_hardware_encoding
+	VideoEncoder     hwenc.ID
 }
 
 // StartTranscode launches ffmpeg in a goroutine for the session.
@@ -81,21 +84,69 @@ func (s *Session) runTranscode(cfg TranscodeConfig) error {
 		zap.String("bitrate", cfg.Bitrate),
 	)
 
+	attempts := transcodeAttempts(cfg)
+	var lastErr error
+	for i, attempt := range attempts {
+		if i > 0 {
+			logger.Info("session transcode retry with software encoder",
+				zap.String("previous_encoder", string(attempts[i-1].VideoEncoder)),
+			)
+		}
+		ffmpegIn, ffmpegInErr := s.openTranscodeInput(cfg.SourcePath)
+		if ffmpegInErr != nil {
+			return ffmpegInErr
+		}
+		err := s.runTranscodeOnce(ctx, attempt, ffmpegIn, logger)
+		if ffmpegIn != nil && ffmpegIn.Cleanup != nil {
+			ffmpegIn.Cleanup()
+		}
+		if err != nil {
+			if ctx.Err() != nil {
+				return fmt.Errorf("cancelled: %w", ctx.Err())
+			}
+			lastErr = err
+			continue
+		}
+		return nil
+	}
+	return lastErr
+}
+
+func (s *Session) openTranscodeInput(sourcePath string) (*storage.FFmpegInput, error) {
+	if s.mgr != nil && s.mgr.DB != nil && s.mgr.Vault != nil {
+		in, err := storage.OpenFFmpegInput(s.mgr.DB, s.mgr.Vault, s.MediaID, sourcePath, 0)
+		if err != nil {
+			return nil, err
+		}
+		return in, nil
+	}
+	return &storage.FFmpegInput{Path: sourcePath}, nil
+}
+
+func transcodeAttempts(cfg TranscodeConfig) []TranscodeConfig {
+	if !cfg.UseHWEncoding || cfg.VideoEncoder == "" || cfg.VideoEncoder == hwenc.Libx264 {
+		sw := cfg
+		sw.UseHWEncoding = false
+		sw.VideoEncoder = hwenc.Libx264
+		return []TranscodeConfig{sw}
+	}
+	sw := cfg
+	sw.UseHWEncoding = false
+	sw.VideoEncoder = hwenc.Libx264
+	return []TranscodeConfig{cfg, sw}
+}
+
+func (s *Session) runTranscodeOnce(ctx context.Context, cfg TranscodeConfig, ffmpegIn *storage.FFmpegInput, logger *zap.Logger) error {
 	segDuration := JITSegmentDurationSeconds
 	startSeg := s.NextSegmentToEmit()
 
 	args := []string{"-hide_banner", "-loglevel", "error"}
-	var ffmpegIn *storage.FFmpegInput
-	var ffmpegInErr error
-	if s.mgr != nil && s.mgr.DB != nil && s.mgr.Vault != nil {
-		ffmpegIn, ffmpegInErr = storage.OpenFFmpegInput(s.mgr.DB, s.mgr.Vault, s.MediaID, cfg.SourcePath, 0)
+	localFile := strings.TrimSpace(ffmpegIn.Path) != "" && !ffmpegIn.FromEnc
+	pipeline := hwenc.PipelineModeForInput(cfg.UseHWEncoding, localFile)
+	if pipeline == hwenc.PipelineHWFull {
+		args = append(args, hwenc.InputAccelArgs(cfg.VideoEncoder)...)
 	}
-	if ffmpegInErr != nil {
-		return ffmpegInErr
-	}
-	if ffmpegIn == nil {
-		ffmpegIn = &storage.FFmpegInput{Path: cfg.SourcePath}
-	}
+
 	seekTime := seekTimeForTranscode(s, cfg.StartTime, ffmpegIn)
 	if seekTime > 0.01 {
 		args = append(args, "-y", "-copyts", "-start_at_zero")
@@ -103,9 +154,6 @@ func (s *Session) runTranscode(cfg TranscodeConfig) error {
 	}
 	var stdin io.Reader
 	args, stdin = storage.ApplyFFmpegInput(args, ffmpegIn)
-	if ffmpegIn.Cleanup != nil {
-		defer ffmpegIn.Cleanup()
-	}
 
 	// Video stream selection.
 	args = append(args, "-map", "0:v:0")
@@ -118,9 +166,20 @@ func (s *Session) runTranscode(cfg TranscodeConfig) error {
 	}
 	args = append(args, "-sn")
 
-	// Video encoder args.
-	videoArgs := buildVideoArgs(cfg, segDuration)
-	args = append(args, videoArgs...)
+	videoPlan := hwenc.InstantVideoPlan{
+		Encoder:    cfg.VideoEncoder,
+		Mode:       pipeline,
+		Resolution: cfg.Resolution,
+		Bitrate:    cfg.Bitrate,
+		X264Preset: cfg.X264Preset,
+		CRF:        cfg.CRF,
+		SessionGOP: true,
+	}
+	if !cfg.UseHWEncoding {
+		videoPlan.Encoder = hwenc.Libx264
+		videoPlan.Mode = hwenc.PipelineSoftware
+	}
+	args = append(args, hwenc.BuildInstantVideoArgs(videoPlan)...)
 
 	// Audio encoder args.
 	if strings.TrimSpace(cfg.AudioPlaylistURL) == "" && strings.TrimSpace(cfg.AudioCodec) != "" {
@@ -177,7 +236,11 @@ func (s *Session) runTranscode(cfg TranscodeConfig) error {
 		)
 	}
 
-	logger.Info("starting session ffmpeg", zap.String("args", strings.Join(args, " ")))
+	logger.Info("starting session ffmpeg",
+		zap.String("encoder", string(videoPlan.Encoder)),
+		zap.String("pipeline", pipelineName(pipeline)),
+		zap.String("args", strings.Join(args, " ")),
+	)
 
 	ffmpeg := s.ffmpegPath
 	if ffmpeg == "" {
@@ -195,14 +258,24 @@ func (s *Session) runTranscode(cfg TranscodeConfig) error {
 		return fmt.Errorf("ffmpeg start: %w", err)
 	}
 
-	// Monitor segments in background.
 	go s.monitorSegments(ctx, m3u8Path)
 
 	err := cmd.Wait()
-	if ctx.Err() != nil {
-		return fmt.Errorf("cancelled: %w", ctx.Err())
+	if err != nil {
+		return fmt.Errorf("ffmpeg exited: %w", err)
 	}
-	return err
+	return nil
+}
+
+func pipelineName(mode hwenc.PipelineMode) string {
+	switch mode {
+	case hwenc.PipelineHWFull:
+		return "hw_full"
+	case hwenc.PipelineHWEncodeOnly:
+		return "hw_encode_only"
+	default:
+		return "software"
+	}
 }
 
 // monitorSegments polls the segment m3u8 and updates LatestSeg.
@@ -352,45 +425,6 @@ func parseSegmentM3U8(path string) []m3u8Entry {
 		return nil
 	}
 	return nil
-}
-
-// buildVideoArgs constructs video encoder arguments.
-func buildVideoArgs(cfg TranscodeConfig, segDuration float64) []string {
-	wPx, hPx := parseResolutionWH(cfg.Resolution)
-	gops := []string{"-g:v:0", "72", "-sc_threshold:v:0", "0", "-keyint_min:v:0", "72", "-r:v:0", "23.976043701171875"}
-
-	preset := strings.TrimSpace(cfg.X264Preset)
-	if preset == "" {
-		preset = "veryfast"
-	}
-	crf := cfg.CRF
-	if crf <= 0 {
-		crf = 23
-	}
-
-	// Default to libx264 (software). HW encoder detection can be added later.
-	return append([]string{
-		"-vf", fmt.Sprintf("scale=%s:%s,format=yuv420p", wPx, hPx),
-		"-c:v", "libx264",
-		"-preset", preset,
-		"-b:v", cfg.Bitrate, "-maxrate", cfg.Bitrate, "-bufsize", "2M",
-		"-profile:v", "high",
-		"-x264opts:v:0", "subme=0:me_range=4:rc_lookahead=10:partitions=none",
-		"-crf:v:0", strconv.Itoa(crf),
-	}, gops...)
-}
-
-// parseResolutionWH splits "WxH" or "W:H" into width/height strings.
-func parseResolutionWH(res string) (string, string) {
-	parts := strings.Split(res, ":")
-	if len(parts) == 2 {
-		return parts[0], parts[1]
-	}
-	parts = strings.Split(res, "x")
-	if len(parts) == 2 {
-		return parts[0], parts[1]
-	}
-	return "iw", "ih"
 }
 
 // formatSeconds produces an H:M:S.ms string suitable for ffmpeg -ss.

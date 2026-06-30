@@ -399,6 +399,17 @@
       "throttle_buffer_desc": "在对转码器进行节流前缓冲所用的秒数。",
       "bg_x264_preset": "后台转码 x264 预设",
       "bg_x264_preset_desc": "x264 预设值用于后台转码（同步和媒体优化器）。值越小，视频质量越好、文件越小，但处理时间更长。",
+      "hardware_acceleration": "硬件加速",
+      "hardware_acceleration_desc": "选择转码时使用的 GPU 硬件加速方式。选择「无」时使用 CPU 软件编码（libx264）。",
+      "enable_hardware_encoding": "启用硬件编码",
+      "enable_hardware_encoding_desc": "启用后，转码器将使用所选硬件加速进行 H.264 视频编码。",
+      "hw_accel": {
+        "none": "无",
+        "amf": "AMD AMF",
+        "nvenc": "Nvidia NVENC",
+        "qsv": "Intel QuickSync (QSV)",
+        "vaapi": "Video Acceleration API (VAAPI)"
+      },
       "disable_video_transcode": "禁用视频流转码",
       "disable_video_transcode_desc": "在转码操作中禁用视频流的转码。设置后，转码器仍然可以转码音频或重新封装视频。",
       "max_cpu_concurrent": "最大 CPU 并发转码数",

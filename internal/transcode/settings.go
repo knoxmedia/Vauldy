@@ -4,12 +4,16 @@ import (
 	"encoding/json"
 	"strconv"
 	"strings"
+
+	"knox-media/internal/jit/hwenc"
 )
 
 // Settings mirrors transcoder fields from system_options.options_json.
 type Settings struct {
 	Quality                   string
 	BackgroundX264Preset      string
+	HardwareAcceleration      string
+	EnableHardwareEncoding    bool
 	DisableVideoStream        bool
 	MaxCPUConcurrent          int // 0 = unlimited
 	MaxBackgroundConcurrent   int // 0 = unlimited
@@ -18,6 +22,8 @@ type Settings struct {
 type systemOptionsTranscoder struct {
 	Quality                       string `json:"quality"`
 	BackgroundX264Preset          string `json:"background_x264_preset"`
+	HardwareAcceleration          string `json:"hardware_acceleration"`
+	EnableHardwareEncoding        bool   `json:"enable_hardware_encoding"`
 	DisableVideoStreamTranscoding bool   `json:"disable_video_stream_transcoding"`
 	MaxCPUConcurrent              string `json:"max_cpu_concurrent"`
 	MaxBackgroundConcurrent       string `json:"max_background_concurrent"`
@@ -63,6 +69,18 @@ func normalizeSettings(in systemOptionsTranscoder, def Settings) Settings {
 	}
 	if !validX264Preset(out.BackgroundX264Preset) {
 		out.BackgroundX264Preset = def.BackgroundX264Preset
+	}
+	if accel := strings.TrimSpace(in.HardwareAcceleration); accel != "" {
+		out.HardwareAcceleration = accel
+	}
+	switch out.HardwareAcceleration {
+	case "none", "amf", "nvenc", "qsv", "vaapi":
+	default:
+		out.HardwareAcceleration = "none"
+	}
+	out.EnableHardwareEncoding = in.EnableHardwareEncoding
+	if out.HardwareAcceleration == "none" {
+		out.EnableHardwareEncoding = false
 	}
 	out.DisableVideoStream = in.DisableVideoStreamTranscoding
 	out.MaxCPUConcurrent = parseConcurrentLimit(in.MaxCPUConcurrent)
@@ -155,4 +173,35 @@ func BackgroundSlots(settings Settings, runningBackground, waiting int) int {
 		return 0
 	}
 	return slots
+}
+
+// EffectiveHWEncoderID returns the FFmpeg encoder selected by system options.
+func (s Settings) EffectiveHWEncoderID() hwenc.ID {
+	if !s.EnableHardwareEncoding {
+		return hwenc.Libx264
+	}
+	accel := strings.TrimSpace(s.HardwareAcceleration)
+	if accel == "" || accel == "none" {
+		return hwenc.Libx264
+	}
+	if id, ok := hwenc.HardwareAccelToEncoder(accel); ok {
+		return id
+	}
+	return hwenc.Libx264
+}
+
+// EffectiveEncoderBackend maps system options to the package worker encoder enum.
+func (s Settings) EffectiveEncoderBackend() EncoderBackend {
+	switch s.EffectiveHWEncoderID() {
+	case hwenc.H264QSV:
+		return EncoderQSV
+	case hwenc.H264AMF:
+		return EncoderAMF
+	case hwenc.H264NVENC:
+		return EncoderNVENC
+	case hwenc.H264VAAPI:
+		return EncoderVAAPI
+	default:
+		return EncoderX264
+	}
 }

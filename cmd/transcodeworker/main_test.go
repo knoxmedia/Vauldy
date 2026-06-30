@@ -54,7 +54,7 @@ func TestBuildTranscodeArgs_SeekBoostUsesUltrafastPreset(t *testing.T) {
 		SessionID: "seek-1",
 	}
 
-	args := w.buildTranscodeArgs("/in.mp4", "/out.ts", task, 12.0, 6.0)
+	args := w.buildTranscodeArgs("/in.mp4", "/out.ts", task, 12.0, 6.0, hwenc.Libx264)
 	var sawPreset bool
 	for i := 0; i < len(args)-1; i++ {
 		if args[i] == "-preset" {

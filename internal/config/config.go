@@ -7,25 +7,26 @@ import (
 	"strings"
 
 	"knox-media/internal/branding"
+
 	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
-	Server       ServerConfig             `yaml:"server"`
-	Data         DataConfig               `yaml:"data"`
-	Security     SecurityConfig           `yaml:"security"`
-	FFmpeg       FFmpegConfig             `yaml:"ffmpeg"`
-	DRMPackaging DRMPackagingConfig       `yaml:"drm_packaging"`
-	DRM          DRMConfig                `yaml:"drm"`
-	Scan         ScanConfig               `yaml:"scan"`
-	Subtitle     SubtitleProcessingConfig `yaml:"subtitle"`
-	ATrack       ATrackConfig             `yaml:"atrack"`
-	Lyric        LyricConfig              `yaml:"lyric"`
-	PhotoClassify PhotoClassifyConfig     `yaml:"photo_classify"`
-	PhotoFace     PhotoFaceConfig         `yaml:"photo_face"`
-	DocTrans      DocTransConfig          `yaml:"doc_trans"`
-	JIT          JITConfig                `yaml:"jit"`
-	CORS         CORSConfig               `yaml:"cors"`
+	Server        ServerConfig             `yaml:"server"`
+	Data          DataConfig               `yaml:"data"`
+	Security      SecurityConfig           `yaml:"security"`
+	FFmpeg        FFmpegConfig             `yaml:"ffmpeg"`
+	DRMPackaging  DRMPackagingConfig       `yaml:"drm_packaging"`
+	DRM           DRMConfig                `yaml:"drm"`
+	Scan          ScanConfig               `yaml:"scan"`
+	Subtitle      SubtitleProcessingConfig `yaml:"subtitle"`
+	ATrack        ATrackConfig             `yaml:"atrack"`
+	Lyric         LyricConfig              `yaml:"lyric"`
+	PhotoClassify PhotoClassifyConfig      `yaml:"photo_classify"`
+	PhotoFace     PhotoFaceConfig          `yaml:"photo_face"`
+	DocTrans      DocTransConfig           `yaml:"doc_trans"`
+	JIT           JITConfig                `yaml:"jit"`
+	CORS          CORSConfig               `yaml:"cors"`
 	// PowerPlayer is included in GET /media/:id/hls playback plans for the web player (PowerPlayer 6 setup).
 	PowerPlayer PowerPlayerWebConfig `yaml:"powerplayer"`
 	// Playback selects web player priority (see api/handler play.HLSInfo player_engine_order).
@@ -46,12 +47,12 @@ type BrandingConfig struct {
 
 func (c *Config) BrandingAppName() string {
 	if c == nil {
-		return "Knox-Media"
+		return "Vauldy"
 	}
 	if name := strings.TrimSpace(c.Branding.AppName); name != "" {
 		return name
 	}
-	return "Knox-Media"
+	return "Vauldy"
 }
 
 func (c *Config) ResolveBrandingFaviconPath(configPath string) string {
@@ -240,10 +241,10 @@ func (c *Config) PhotoClassifyEngine() string {
 
 // PhotoFaceConfig controls face detection and clustering for photo libraries.
 type PhotoFaceConfig struct {
-	AutoOnScan            *bool   `yaml:"auto_on_scan"`
-	PythonPath            string  `yaml:"python_path"`
-	ScriptPath            string  `yaml:"script_path"`
-	SimilarityThreshold   float32 `yaml:"similarity_threshold"`
+	AutoOnScan          *bool   `yaml:"auto_on_scan"`
+	PythonPath          string  `yaml:"python_path"`
+	ScriptPath          string  `yaml:"script_path"`
+	SimilarityThreshold float32 `yaml:"similarity_threshold"`
 	// MaxConcurrent limits simultaneous face-detect jobs (ffmpeg + InsightFace).
 	MaxConcurrent int `yaml:"max_concurrent"`
 	// BatchLimit is the max tasks started per scheduler tick.

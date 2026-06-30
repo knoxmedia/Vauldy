@@ -15,7 +15,6 @@ import (
 	"strings"
 	"sync"
 
-	"knox-media/internal/jit/hwenc"
 )
 
 type Rendition struct {
@@ -60,7 +59,7 @@ func NewWorker(db *sql.DB, ffmpegPath, transcodeDir string) *Worker {
 		TranscodeDir: transcodeDir,
 		running:      make(map[int64]context.CancelFunc),
 	}
-	w.Encoder = w.detectEncoderBackend()
+	w.Encoder = w.loadSettings().EffectiveEncoderBackend()
 	log.Printf("transcode encoder selected: %s", w.Encoder)
 	return w
 }
@@ -113,6 +112,7 @@ func (w *Worker) RunTask(ctx context.Context, taskID int64, inputPath, quality s
 	if len(ladder) == 0 {
 		ladder = selectRenditions("720p", sourceHeight)
 	}
+	w.Encoder = w.loadSettings().EffectiveEncoderBackend()
 	outDir := taskOutputDir(w.TranscodeDir, taskID, fileID, quality, ladder)
 	return w.runHLS(ctx, taskID, inputPath, outDir, ladder)
 }
@@ -329,21 +329,6 @@ func (w *Worker) Cancel(taskID int64) bool {
 		return true
 	}
 	return false
-}
-
-func (w *Worker) detectEncoderBackend() EncoderBackend {
-	switch hwenc.DetectH264Encoder(w.FFmpegPath) {
-	case hwenc.H264QSV:
-		return EncoderQSV
-	case hwenc.H264AMF:
-		return EncoderAMF
-	case hwenc.H264NVENC:
-		return EncoderNVENC
-	case hwenc.H264VAAPI:
-		return EncoderVAAPI
-	default:
-		return EncoderX264
-	}
 }
 
 func (w *Worker) encoderArgs(vf string, videoRate string) []string {
