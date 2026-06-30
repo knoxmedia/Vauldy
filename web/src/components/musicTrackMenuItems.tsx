@@ -5,6 +5,7 @@ import { addFavorite, enqueueLyricRecognition } from "../api/client";
 import type { RecentPlaylistEntry } from "../lib/recentPlaylists";
 import { tGlobal as t } from "../i18n";
 import { confirmDeleteMedia } from "./mediaMenuItems";
+import { openLyricProofreadDialog } from "../store/proofreadDialog";
 
 export type MusicTrackMenuTarget = {
   media_id: number;
@@ -59,6 +60,7 @@ export function buildMusicTrackMenuItems(
       { key: "addTo", label: t("components.music_track_menu.add_to"), children: addToChildren },
       { key: "edit", label: t("components.music_track_menu.edit") },
       { key: "identifyLyrics", label: t("components.music_track_menu.identify_lyrics") },
+      { key: "proofreadLyrics", label: t("components.music_track_menu.proofread_lyrics") },
       { type: "divider" },
       { key: "viewHistory", label: t("components.music_track_menu.view_history") },
       { key: "getInfo", label: t("components.music_track_menu.get_info") },
@@ -87,6 +89,9 @@ export function buildMusicTrackMenuItems(
           void enqueueLyricRecognition(mediaId)
             .then(() => message.success(t("components.music_track_menu.lyric_task_created")))
             .catch(() => message.error(t("components.music_track_menu.lyric_task_failed")));
+          break;
+        case "proofreadLyrics":
+          openLyricProofreadDialog(mediaId, track.title);
           break;
         case "viewHistory":
           nav(`/playback-history?media_id=${mediaId}`);

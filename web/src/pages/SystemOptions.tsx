@@ -38,6 +38,7 @@ import {
   installLibreOfficeDocTrans,
   updateUserProfile,
   type SystemOptions,
+  type SystemOptionsResponse,
   type RecognitionTestResult,
   type DocTransTestResult,
 } from "../api/client";
@@ -65,6 +66,8 @@ function defaultSystemOptions(): SystemOptions {
       download_temp_dir: "",
       throttle_buffer_seconds: 60,
       background_x264_preset: "veryfast",
+      hardware_acceleration: "none",
+      enable_hardware_encoding: false,
       disable_video_stream_transcoding: false,
       max_cpu_concurrent: "unlimited",
       max_background_concurrent: "1",
@@ -88,6 +91,7 @@ function defaultSystemOptions(): SystemOptions {
         mkvextract_path: "",
         mkvmerge_path: "",
       },
+      ai_proofread: true,
     },
     photo_classify: {
       auto_on_scan: true,
@@ -131,6 +135,10 @@ function mergeSystemOptions(data: Partial<SystemOptions> | null | undefined): Sy
     recognition: {
       asr,
       ocr: { ...base.recognition.ocr, ...(data.recognition?.ocr ?? {}) },
+      ai_proofread:
+        typeof data.recognition?.ai_proofread === "boolean"
+          ? data.recognition.ai_proofread
+          : base.recognition.ai_proofread,
     },
     photo_classify: { ...base.photo_classify, ...(data.photo_classify ?? {}) },
     photo_face: { ...base.photo_face, ...(data.photo_face ?? {}) },
@@ -177,6 +185,19 @@ function buildTranscoderQualityOptions(t: TranslateFn): { value: string; label: 
     { value: "medium", label: t("system_options.common.quality_medium") },
     { value: "low", label: t("system_options.common.quality_low") },
   ];
+}
+
+const HW_ACCEL_VALUES = ["none", "amf", "nvenc", "qsv", "vaapi"] as const;
+
+function buildHardwareAccelerationOptions(
+  t: TranslateFn,
+  available: readonly string[],
+): { value: string; label: string }[] {
+  const availableSet = new Set(available);
+  return HW_ACCEL_VALUES.filter((value) => value === "none" || availableSet.has(value)).map((value) => ({
+    value,
+    label: t(`system_options.transcoder.hw_accel.${value}`),
+  }));
 }
 
 function buildX264PresetOptions(t: TranslateFn): { value: string; label: string }[] {
@@ -273,6 +294,11 @@ export default function SystemOptionsPage() {
   const homeStreamQualityOptions = useMemo(() => buildHomeStreamQualityOptions(t), [t]);
   const transcoderQualityOptions = useMemo(() => buildTranscoderQualityOptions(t), [t]);
   const x264PresetOptions = useMemo(() => buildX264PresetOptions(t), [t]);
+  const [availableHwAccel, setAvailableHwAccel] = useState<string[]>([]);
+  const hardwareAccelerationOptions = useMemo(
+    () => buildHardwareAccelerationOptions(t, availableHwAccel),
+    [t, availableHwAccel],
+  );
   const cpuConcurrentOptions = useMemo(() => buildCpuConcurrentOptions(t), [t]);
   const asrProviderOptions = useMemo(() => buildAsrProviderOptions(t), [t]);
   const photoClassifyEngineOptions = useMemo(() => buildPhotoClassifyEngineOptions(t), [t]);
@@ -309,7 +335,9 @@ export default function SystemOptionsPage() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const merged = mergeSystemOptions(await fetchSystemOptions());
+      const data: SystemOptionsResponse = await fetchSystemOptions();
+      setAvailableHwAccel(data.available_hardware_acceleration ?? []);
+      const merged = mergeSystemOptions(data);
       setOpts(merged);
       setBaseline(merged);
       setAsrTestResult(null);
@@ -801,6 +829,42 @@ export default function SystemOptionsPage() {
   const tabTranscoder = (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
       <SettingRow
+        title={t("system_options.transcoder.hardware_acceleration")}
+        description={t("system_options.transcoder.hardware_acceleration_desc")}
+      >
+        <Select
+          style={{ minWidth: 320 }}
+          options={hardwareAccelerationOptions}
+          value={opts.transcoder.hardware_acceleration}
+          onChange={(v) =>
+            setOpts((p) => ({
+              ...p,
+              transcoder: {
+                ...p.transcoder,
+                hardware_acceleration: v,
+                enable_hardware_encoding: v === "none" ? false : true,
+              },
+            }))
+          }
+        />
+      </SettingRow>
+      {opts.transcoder.hardware_acceleration !== "none" ? (
+        <SettingRow
+          title={t("system_options.transcoder.enable_hardware_encoding")}
+          description={t("system_options.transcoder.enable_hardware_encoding_desc")}
+        >
+          <Switch
+            checked={opts.transcoder.enable_hardware_encoding}
+            onChange={(v) =>
+              setOpts((p) => ({
+                ...p,
+                transcoder: { ...p.transcoder, enable_hardware_encoding: v },
+              }))
+            }
+          />
+        </SettingRow>
+      ) : null}
+      <SettingRow
         title={t("system_options.transcoder.quality")}
         description={t("system_options.transcoder.quality_desc")}
       >
@@ -964,6 +1028,20 @@ export default function SystemOptionsPage() {
             setOpts((p) => ({
               ...p,
               recognition: { ...p.recognition, asr: { ...p.recognition.asr, auto_on_scan: v } },
+            }))
+          }
+        />
+      </SettingRow>
+      <SettingRow
+        title={t("system_options.asr.ai_proofread")}
+        description={t("system_options.asr.ai_proofread_desc")}
+      >
+        <Switch
+          checked={opts.recognition.ai_proofread}
+          onChange={(v) =>
+            setOpts((p) => ({
+              ...p,
+              recognition: { ...p.recognition, ai_proofread: v },
             }))
           }
         />

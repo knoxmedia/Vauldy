@@ -19,6 +19,7 @@ import type { RecentFavoriteFolderEntry } from "../lib/recentFavoriteFolders";
 import { MAX_RECENT_FAVORITE_FOLDERS } from "../lib/recentFavoriteFolders";
 import type { RecentPlaylistEntry } from "../lib/recentPlaylists";
 import { tGlobal as t } from "../i18n";
+import { openSubtitleProofreadDialog } from "../store/proofreadDialog";
 
 export interface MediaMenuTarget {
   id: number;
@@ -210,6 +211,7 @@ export function buildMediaMenuItems(
       { key: "optimize", label: t("components.media_menu.optimize") },
       { type: "divider" as const },
       { key: "recognizeSubtitles", label: t("components.media_menu.recognize_subtitles") },
+      { key: "proofreadSubtitles", label: t("components.media_menu.proofread_subtitles") },
       { key: "extractAudio", label: atrackDone ? t("components.media_menu.reextract_audio") : t("components.media_menu.extract_audio") },
       { key: "extractKeyframes", label: keyframeDone ? t("components.media_menu.reextract_keyframes") : t("components.media_menu.extract_keyframes") },
       ...(showEncryptAsset
@@ -363,6 +365,9 @@ export function buildMediaMenuItems(
               const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error;
               message.error(msg || t("components.media_menu.operation_failed"));
             });
+          break;
+        case "proofreadSubtitles":
+          openSubtitleProofreadDialog(r.id, r.title);
           break;
         case "extractAudio":
           extractAudioTrack(r.id)

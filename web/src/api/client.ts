@@ -864,6 +864,12 @@ export function albumArtworkSrc(albumId: number): string {
   return `/api/v1/album/${albumId}/artwork${q}`;
 }
 
+export function artistArtworkSrc(artistId: number): string {
+  const token = useAuthStore.getState().token;
+  const q = token ? `?access_token=${encodeURIComponent(token)}` : "";
+  return `/api/v1/artist/${artistId}/artwork${q}`;
+}
+
 export async function fetchLibraryAlbums(libraryId: number) {
   const { data } = await api.get<{ items?: AlbumSummary[] }>(`/api/v1/library/${libraryId}/albums`);
   return data?.items ?? [];
@@ -886,6 +892,33 @@ export async function fetchLibraryTracks(libraryId: number) {
 
 export async function fetchAlbum(albumId: number) {
   const { data } = await api.get<AlbumDetail>(`/api/v1/album/${albumId}`);
+  return data;
+}
+
+export async function updateAlbum(
+  albumId: number,
+  payload: { title?: string; year?: number; genre?: string; artwork?: string },
+) {
+  const { data } = await api.patch<{
+    ok: boolean;
+    id: number;
+    title: string;
+    year?: number;
+    genre?: string;
+    artwork_path?: string;
+  }>(`/api/v1/album/${albumId}`, payload);
+  return data;
+}
+
+/** Fetch poster candidates for an album from the library's configured image scrape sources. */
+export async function fetchAlbumImageCandidates(
+  albumId: number,
+  kind: "poster" | "backdrop" | "logo" = "poster",
+): Promise<ImageCandidatesResponse> {
+  const { data } = await api.get<ImageCandidatesResponse>(
+    `/api/v1/album/${albumId}/image-candidates`,
+    { params: { kind } },
+  );
   return data;
 }
 
@@ -915,6 +948,46 @@ export async function fetchGenreAlbums(libraryId: number, genre: string) {
 
 export async function fetchArtistAlbums(artistId: number) {
   const { data } = await api.get<ArtistAlbumsResponse>(`/api/v1/artist/${artistId}/albums`);
+  return data;
+}
+
+export async function fetchArtist(artistId: number) {
+  const { data } = await api.get<ArtistSummary>(`/api/v1/artist/${artistId}`);
+  return data;
+}
+
+export async function updateArtist(
+  artistId: number,
+  payload: { name?: string; artwork?: string },
+) {
+  const { data } = await api.patch<{
+    ok: boolean;
+    id: number;
+    name: string;
+    artwork_path?: string;
+  }>(`/api/v1/artist/${artistId}`, payload);
+  return data;
+}
+
+export async function fetchArtistImageCandidates(
+  artistId: number,
+  kind: "poster" | "backdrop" | "logo" = "poster",
+): Promise<ImageCandidatesResponse> {
+  const { data } = await api.get<ImageCandidatesResponse>(
+    `/api/v1/artist/${artistId}/image-candidates`,
+    { params: { kind } },
+  );
+  return data;
+}
+
+export async function updateLibraryGenre(
+  libraryId: number,
+  payload: { old_name: string; new_name: string },
+) {
+  const { data } = await api.patch<{ ok: boolean; genre: string; updated_albums?: number }>(
+    `/api/v1/library/${libraryId}/genre`,
+    payload,
+  );
   return data;
 }
 
@@ -1770,6 +1843,47 @@ export async function enqueueLyricRecognition(mediaId: number) {
   await api.post(`/api/v1/media/${mediaId}/lyrics/recognize`);
 }
 
+export type SubtitleCue = {
+  start: string;
+  end: string;
+  text: string;
+};
+
+export type SubtitleCuesResponse = {
+  format: string;
+  cues: SubtitleCue[];
+};
+
+export async function fetchSubtitleCues(mediaId: number, subtitleId: number): Promise<SubtitleCuesResponse> {
+  const { data } = await api.get<SubtitleCuesResponse>(`/api/v1/media/${mediaId}/subtitles/${subtitleId}/cues`);
+  return data ?? { format: "vtt", cues: [] };
+}
+
+export async function saveSubtitleCues(mediaId: number, subtitleId: number, cues: SubtitleCue[]): Promise<void> {
+  await api.put(`/api/v1/media/${mediaId}/subtitles/${subtitleId}/cues`, { cues });
+}
+
+export async function importSubtitle(mediaId: number, file: File): Promise<MediaSubtitleRow> {
+  const form = new FormData();
+  form.append("file", file);
+  const { data } = await api.post<{ ok: boolean; subtitle: MediaSubtitleRow }>(`/api/v1/media/${mediaId}/subtitles/import`, form, {
+    headers: { "Content-Type": "multipart/form-data" },
+  });
+  return data.subtitle;
+}
+
+export async function saveMediaLyrics(mediaId: number, lrc: string): Promise<void> {
+  await api.put(`/api/v1/media/${mediaId}/lyrics`, { lrc });
+}
+
+export async function importMediaLyrics(mediaId: number, file: File): Promise<void> {
+  const form = new FormData();
+  form.append("file", file);
+  await api.post(`/api/v1/media/${mediaId}/lyrics/import`, form, {
+    headers: { "Content-Type": "multipart/form-data" },
+  });
+}
+
 export async function retryLyricTask(mediaId: number) {
   await api.post(`/api/v1/lyric/task/${mediaId}/retry`);
 }
@@ -2032,6 +2146,49 @@ export async function searchTmdbImages(query: string, year?: number) {
   return data;
 }
 
+export interface MediaImageCandidate {
+  url: string;
+  /** Backend provider id, e.g. "tmdb" | "douban" | "bangumi" | "tvdb" | "omdb" | "fanart". */
+  source: string;
+}
+
+export type ImageCandidatesResponse = {
+  candidates: MediaImageCandidate[];
+  errors?: Record<string, string>;
+  /** True when at least one online image scrape source was contacted. */
+  scraped?: boolean;
+};
+
+/**
+ * Fetch poster/backdrop/logo candidates for a media item from the image sources
+ * configured on the media's owning library. The backend only contacts sources
+ * selected for that library, so unreachable providers can be omitted from the
+ * library config to avoid long connection delays.
+ */
+export async function fetchMediaImageCandidates(
+  mediaId: number,
+  kind: "poster" | "backdrop" | "logo",
+): Promise<ImageCandidatesResponse> {
+  const { data } = await api.get<ImageCandidatesResponse>(
+    `/api/v1/media/${mediaId}/image-candidates`,
+    { params: { kind } },
+  );
+  return data;
+}
+
+/** Same as fetchMediaImageCandidates but for a TV series row (uses library image sources). */
+export async function fetchSeriesImageCandidates(
+  seriesId: number,
+  kind: "poster" | "backdrop" | "logo",
+): Promise<ImageCandidatesResponse> {
+  const { data } = await api.get<ImageCandidatesResponse>(
+    `/api/v1/series/${seriesId}/image-candidates`,
+    { params: { kind } },
+  );
+  return data;
+}
+
+
 export async function uploadImageFile(file: File) {
   const fd = new FormData();
   fd.append("file", file);
@@ -2132,6 +2289,8 @@ export type SystemOptionsTranscoder = {
   download_temp_dir: string;
   throttle_buffer_seconds: number;
   background_x264_preset: string;
+  hardware_acceleration: string;
+  enable_hardware_encoding: boolean;
   disable_video_stream_transcoding: boolean;
   max_cpu_concurrent: string;
   max_background_concurrent: string;
@@ -2160,6 +2319,7 @@ export type SystemOptionsOCR = {
 export type SystemOptionsRecognition = {
   asr: SystemOptionsASR;
   ocr: SystemOptionsOCR;
+  ai_proofread: boolean;
 };
 
 export type SystemOptionsPhotoClassify = {
@@ -2218,8 +2378,12 @@ export type SystemOptions = {
   doc_trans: SystemOptionsDocTrans;
 };
 
+export type SystemOptionsResponse = SystemOptions & {
+  available_hardware_acceleration?: string[];
+};
+
 export async function fetchSystemOptions() {
-  const { data } = await api.get<SystemOptions>("/api/v1/admin/system-options");
+  const { data } = await api.get<SystemOptionsResponse>("/api/v1/admin/system-options");
   return data;
 }
 

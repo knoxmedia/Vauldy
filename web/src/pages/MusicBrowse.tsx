@@ -14,6 +14,9 @@ import type { MenuProps } from "antd";
 import { Button, Dropdown, Empty, Input, Select, Space, Spin, Tabs, message } from "antd";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
+import AlbumEditModal from "../components/AlbumEditModal";
+import ArtistEditModal from "../components/ArtistEditModal";
+import GenreEditModal from "../components/GenreEditModal";
 import {
   AlbumSummary,
   ArtistSummary,
@@ -122,6 +125,9 @@ export default function MusicBrowse({ libraryId, libraryName, onEmpty }: Props) 
   const [bulkPlaylistMediaIds, setBulkPlaylistMediaIds] = useState<number[] | null>(null);
   const [addToFavoriteFolderMediaId, setAddToFavoriteFolderMediaId] = useState<number | null>(null);
   const [matchMedia, setMatchMedia] = useState<MediaItem | null>(null);
+  const [editAlbum, setEditAlbum] = useState<AlbumSummary | null>(null);
+  const [editArtist, setEditArtist] = useState<ArtistSummary | null>(null);
+  const [editGenre, setEditGenre] = useState<GenreSummary | null>(null);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(() => new Set());
   const [recentPlaylistMenu, setRecentPlaylistMenu] = useState<RecentPlaylistEntry[]>(() => readRecentPlaylists());
   const { rememberFolderMenuAdded } = useFavoriteFolderMenuRecents();
@@ -896,7 +902,7 @@ export default function MusicBrowse({ libraryId, libraryName, onEmpty }: Props) 
                 title: a.title,
                 subtitle: a.album_artist || t("pages.music_browse.various_artists"),
                 href: `/album/${a.id}`,
-                onEdit: () => nav(`/album/${a.id}`),
+                onEdit: () => setEditAlbum(a),
                 menu: buildCardMenu(a.title, mediaIds, {
                   onPlayAll: () => playAlbumAll(a.id),
                   onPlayNext: () => playAlbumNext(a.id),
@@ -1031,7 +1037,7 @@ export default function MusicBrowse({ libraryId, libraryName, onEmpty }: Props) 
                 }),
                 coverClassName: musicStyles.artistCover,
                 href: `/artist/${a.id}`,
-                onEdit: () => nav(`/artist/${a.id}`),
+                onEdit: () => setEditArtist(a),
                 menu: buildCardMenu(a.name, mediaIds, {
                   onPlayAll: () => queueFromTracks(artistTracks, "all"),
                   onPlayNext: () => queueFromTracks(artistTracks, "next"),
@@ -1065,7 +1071,7 @@ export default function MusicBrowse({ libraryId, libraryName, onEmpty }: Props) 
                   tracks: g.track_count ?? 0,
                 }),
                 href: `/genre?library=${libraryId}&name=${genreKey}`,
-                onEdit: () => nav(`/genre?library=${libraryId}&name=${genreKey}`),
+                onEdit: () => setEditGenre(g),
                 menu: buildCardMenu(g.genre, mediaIds, {
                   onPlayAll: async () => {
                     const rows = await tracksForGenre(g.genre);
@@ -1141,6 +1147,34 @@ export default function MusicBrowse({ libraryId, libraryName, onEmpty }: Props) 
           }}
         />
       )}
+      <AlbumEditModal
+        album={editAlbum}
+        open={editAlbum != null}
+        onClose={() => setEditAlbum(null)}
+        onSaved={(update) => {
+          setAlbums((prev) => prev.map((a) => (a.id === update.id ? { ...a, ...update } : a)));
+          setEditAlbum(null);
+        }}
+      />
+      <ArtistEditModal
+        artist={editArtist}
+        open={editArtist != null}
+        onClose={() => setEditArtist(null)}
+        onSaved={(update) => {
+          setArtists((prev) => prev.map((a) => (a.id === update.id ? { ...a, ...update } : a)));
+          setEditArtist(null);
+        }}
+      />
+      <GenreEditModal
+        genre={editGenre}
+        libraryId={libraryId}
+        open={editGenre != null}
+        onClose={() => setEditGenre(null)}
+        onSaved={() => {
+          setEditGenre(null);
+          void reloadLibrary();
+        }}
+      />
     </div>
   );
 }
