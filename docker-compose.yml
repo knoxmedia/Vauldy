@@ -1,0 +1,11 @@
+services:
+  knox-media:
+    build: .
+    image: knox-media:latest
+    ports:
+      - "8200:8200"
+    volumes:
+      - ./data:/app/data
+    environment:
+      KNOX_MEDIA_CONFIG: /app/config.yml
+    restart: unless-stopped

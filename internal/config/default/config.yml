@@ -1,0 +1,104 @@
+server:
+  host: "0.0.0.0"
+  port: 8200
+  mode: "release"
+  hls_multi_audio_enabled: false
+branding:
+  app_name: "Knox-Media"
+  favicon_path: ""
+data:
+  dir: "./data"
+  db: "./data/knox-media.db"
+  transcode: "./data/transcode"
+  preview: "./data/preview"
+  subtitle: "./data/subtitles"
+  upload: "./data/upload"
+  chunks: "./data/upload/chunks"
+  static: "./data/static"
+security:
+  jwt_secret: "change-me-in-production-use-long-random-string"
+  token_hours: 168
+# Third-party binaries live under tools/ (relative to this config file).
+# Windows: run tools/download_media_tools.ps1 after clone. Linux: place ffmpeg under tools/ffmpeg/bin/.
+ffmpeg:
+  ffprobe_path: "tools/ffmpeg/bin/ffprobe"
+  ffmpeg_path: "tools/ffmpeg/bin/ffmpeg"
+drm_packaging:
+  engine_order:
+    - shaka
+    - ffmpeg
+  shaka_packager_path: "tools/shaka-packager/packager"
+  segment_seconds: 4
+drm:
+  widevine:
+    enabled: false
+    emit_service_cert_url: false
+    private_module_url: ""
+    private_module_token: ""
+    private_module_timeout_seconds: 8
+  powerdrm:
+    enabled: true
+playback:
+  engines:
+    progressive_hls: ["powerplayer", "xgplayer"]
+    hls_powerdrm: ["powerplayer"]
+    drm: ["powerplayer", "shaka", "xgplayer"]
+encrypted_assets:
+  enabled: true
+  cleanup_plaintext_default: false
+scan:
+  file_hash_on_scan: false
+  fast_ffprobe: true
+subtitle:
+  auto_on_scan: true
+  asr:
+    provider: shell
+    whisper_path: "tools/recognition/.venv/bin/whisper"
+    extra_args: []
+    shell: '"tools/recognition/.venv/bin/python" "tools/asr/asr_to_vtt.py" --engine whisper --input "{input}" --output-vtt "{output_vtt}" --whisper-model base --whisper-language zh'
+  graphical_ocr:
+    enabled: true
+    tesseract_path: "tools/tesseract/tesseract"
+    tessdata_prefix: ""
+    languages: chi_sim+eng
+    python_path: "tools/recognition/.venv/bin/python"
+    script_path: "tools/subtitle_ocr/bitmap_subtitle_ocr.py"
+    pgsrip_path: "tools/recognition/.venv/bin/pgsrip"
+    mkvextract_path: ""
+    mkvmerge_path: ""
+atrack:
+  auto_on_scan: false
+lyric:
+  auto_on_scan: true
+photo_classify:
+  auto_on_scan: true
+  engine: auto
+  python_path: "tools/recognition/.venv/bin/python"
+  script_path: "tools/photo_classify/classify.py"
+  model_path: "tools/photo_classify/models/mobilenetv2-7.onnx"
+  labels_path: "tools/photo_classify/imagenet_labels.txt"
+photo_face:
+  auto_on_scan: true
+  python_path: "tools/recognition/.venv/bin/python"
+  script_path: "tools/photo_face/detect.py"
+  similarity_threshold: 0.45
+  max_concurrent: 1
+  batch_limit: 1
+  poll_interval_seconds: 10
+  failed_retry_minutes: 60
+doc_trans:
+  enabled: true
+  engine_order:
+    - libreoffice
+  libreoffice_path: "tools/doctran/LibreOfficePortable/App/libreoffice/program/soffice"
+  soffice_path: "tools/doctran/LibreOfficePortable/App/libreoffice/program/soffice"
+  office_path: ""
+  wps_path: ""
+  cache_dir: ""
+  cache_ttl_days: 30
+  timeout_seconds: 600
+jit:
+  continuous_hls_enabled: true
+cors:
+  allow_origins:
+    - "*"

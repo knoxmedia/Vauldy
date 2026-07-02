@@ -1,0 +1,162 @@
+<?xml version="1.0"?>
+<skin version="1.0" name="Nacht" author="LongTail Video">
+	<settings>
+		<setting name="backcolor" value="0x000000" />
+		<setting name="frontcolor" value="0xFFFFFF" />
+		<setting name="lightcolor" value="0x000000" />
+		<setting name="screencolor" value="0x000000" />
+	</settings>
+	<components>
+		<component name="controlbar">
+			<settings>
+				<setting name="margin" value="0" />
+				<setting name="fontsize" value="10" />
+				<setting name="fontcolor" value="0xFFFFFF" />
+			</settings>
+			
+			<layout>
+				<group position="left">
+					<button name="play"/>
+					<divider name="divider"/>
+					<button name="prev"/>
+					<divider name="divider"/>
+					<button name="next"/>
+					<divider name="divider"/>
+					<text name="elapsed"/>
+					
+				</group>
+				<group position="center">
+					<slider name="time"/>
+				</group>
+				<group position="right">
+					<text name="duration"/>
+					<divider name="divider"/>
+					<button name="blank"/>
+					<divider name="divider"/>
+					<button name="mute"/>
+					<slider name="volume"/>
+					<divider name="divider"/>
+					<button name="fullscreen"/>
+				</group>
+			</layout>	
+			
+			<elements>
+				<element name="background" src="background.png" />
+				<element name="capLeft" src="capLeft.png" />
+				<element name="capRight" src="capRight.png" />
+				<element name="divider" src="divider.png" />
+				<element name="blankButton" src="blankButton.png" />
+				<element name="blankButtonOver" src="blankButton.png" />
+				<element name="playButton" src="playButton.png" />
+				<element name="playButtonOver" src="playButtonOver.png" />
+				<element name="pauseButton" src="pauseButton.png" />
+				<element name="pauseButtonOver" src="pauseButtonOver.png" />
+				<!--
+				<element name="prevButton" src="prevButton.png" />
+				<element name="prevButtonOver" src="prevButtonOver.png" />
+				-->
+				<element name="nextButton" src="nextButton.png" />
+				<element name="nextButtonOver" src="nextButtonOver.png" />
+				<!--
+				<element name="stopButton" src="stopButton.png" />
+				<element name="stopButtonOver" src="stopButtonOver.png" />
+				-->
+				<element name="nicepartButton" src="nicepartButton.png"/>
+				<element name="nicepartButtonOver" src="nicepartButtonOver.png"/>	
+				<element name="nicepartButtonOverOn" src="nicepartButtonOverOn.png"/>				
+				<element name="timeSliderRail" src="timeSliderRail.png" />      							
+				<element name="timeSliderBuffer" src="timeSliderBuffer.png" />
+				<element name="timeSliderProgress" src="timeSliderProgress.png" />
+				<element name="timeSliderThumb" src="timeSliderThumb.png" />
+				<element name="smallTimeSliderRail" src="smallTimeSliderRail.png" />      							
+				<element name="smallTimeSliderBuffer" src="smallTimeSliderBuffer.png" />
+				<element name="smallTimeSliderProgress" src="smallTimeSliderProgress.png" />
+				<element name="setButton" src="setButton.png" />
+				<element name="setButtonOver" src="setButtonOver.png" />
+				<element name="definitionButton" src="definitionButton.png"/>
+				<element name="definitionButtonOver" src="definitionButtonOver.png"/>
+				<element name="definitionButtonSmooth" src="definitionButtonSmooth.png"/>	
+				<element name="definitionButtonSmoothOver" src="definitionButtonSmoothOver.png"/>
+				<element name="definitionButtonSD" src="definitionButtonSD.png"/>	
+				<element name="definitionButtonSDOver" src="definitionButtonSDOver.png"/>
+				<element name="definitionButtonHD" src="definitionButtonHD.png"/>	
+				<element name="definitionButtonHDOver" src="definitionButtonHDOver.png"/>
+				<element name="fullscreenButton" src="fullscreenButton.png" />
+				<element name="fullscreenButtonOver" src="fullscreenButtonOver.png" />
+				<element name="normalscreenButton" src="normalscreenButton.png" />
+				<element name="normalscreenButtonOver" src="normalscreenButtonOver.png" />
+				<element name="muteButton" src="muteButton.png" />
+				<element name="muteButtonOver" src="muteButtonOver.png" />
+				<element name="unmuteButton" src="unmuteButton.png" />
+				<element name="unmuteButtonOver" src="unmuteButtonOver.png" />
+				<element name="volumeSliderRail" src="volumeSliderRail.png" />
+				<!--
+				<element name="volumeSliderBuffer" src="volumeSliderBuffer.png" />
+				-->
+				<element name="volumeSliderProgress" src="volumeSliderProgress.png" />
+				<element name="volumeSliderThumb" src="volumeSliderThumb.png" />
+			</elements>
+		</component>
+		<component name="display">
+			<elements>
+				<element name="background" src="background.png" />
+				<element name="playIcon" src="playIcon.png" />
+				<element name="muteIcon" src="muteIcon.png" />
+				<element name="errorIcon" src="errorIcon.png" />
+				<element name="bufferIcon" src="bufferIcon.png" />
+			</elements>
+		</component>
+		<component name="dock">
+			<elements>
+				<element name="button" src="button.png" />
+				<element name="buttonOver" src="button.png" />
+			</elements>
+		</component>
+		<component name="playlist">
+			<elements>
+				<element name="background" src="background.png" />
+				<element name="item" src="item.png" />
+				<element name="itemOver" src="itemOver.png" />
+				<element name="sliderRail" src="sliderRail.png" />
+				<element name="sliderThumb" src="sliderThumb.png" />
+			</elements>
+		</component>
+		<component name="RightToolBar">
+			<settings>
+				<setting name="margin" value="0" />
+				<setting name="fontsize" value="10" />
+			</settings>
+			<elements>
+				<element name="background" src="background.png" />
+				<element name="divider" src="divider.png" />
+				<element name="screenshotButton" src="screenshotButton.png" />
+				<element name="screenshotOver" src="screenshotButton.png" />
+				<element name="shareButton" src="shareButton.png" />
+				<element name="tdcodeButton" src="tdcodeButton.png" />
+				<element name="nicepartButton" src="nicepartButton.png" />
+			</elements>
+		</component>
+		<component name="tooltip">
+			<settings>
+				<setting name="fontcase" value="normal"/>
+				<setting name="fontcolor" value="cccccc"/>
+				<setting name="fontsize" value="12"/>
+				<setting name="fontweight" value="normal"/>
+				<setting name="activecolor" value="cccccc"/>
+				<setting name="overcolor" value="ffffff"/>
+			</settings>
+			<elements>
+				<element name="arrow" src="arrow.png" />
+				<element name="background" src="back.png" />
+				<element name="menuOption" src="menuOption.png" />
+				<element name="menuOptionOver" src="menuOptionOver.png" />
+				<element name="menuOptionActive" src="menuOptionActive.png" />
+				<element name="menuTopHD" src="menuTopHD.png" />
+				<element name="menuTopCC" src="cc.png" />
+				<!--
+				<element name="menuBottom" src="bottom.png" />
+				-->
+			</elements>
+		</component>		
+	</components>
+</skin>

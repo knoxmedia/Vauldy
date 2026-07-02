@@ -1,0 +1,17 @@
+/data/
+cmd/server/data/
+*.exe
+*.db
+*.db-shm
+*.db-wal
+*.salt
+*.7z
+bin/
+**/__pycache__/
+*.pyc
+web/node_modules/
+web/dist/
+internal/webembed/dist/
+tools/doctran/LibreOfficePortable/
+tools/doctran/fixtures/
+

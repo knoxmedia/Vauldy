@@ -1,0 +1,3 @@
+# Optional: pip install pillow numpy onnxruntime
+# Model: place MobileNetV2 ONNX under tools/photo_classify/models/
+# Labels: ImageNet 1000-class synset lines (one per line, index = class id)
