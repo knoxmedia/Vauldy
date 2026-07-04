@@ -1,5 +1,5 @@
 # Build knox-media with web/dist embedded into the executable (go:embed).
-# Outputs: bin/knox-media.exe (Windows) and bin/knox-media-linux (linux/amd64).
+# Outputs: Windows/Linux/macOS × amd64/arm64 (6 binaries).
 # Run from media/ (repo root for this project).
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -27,22 +27,44 @@ $env:CGO_ENABLED = "0"
 function Invoke-GoBuild {
   param(
     [string]$Output,
-    [string]$GoOS = "",
-    [string]$GoArch = ""
+    [string]$GoOS,
+    [string]$GoArch
   )
-  if ($GoOS) { $env:GOOS = $GoOS } else { Remove-Item Env:GOOS -ErrorAction SilentlyContinue }
-  if ($GoArch) { $env:GOARCH = $GoArch } else { Remove-Item Env:GOARCH -ErrorAction SilentlyContinue }
+  $env:GOOS = $GoOS
+  $env:GOARCH = $GoArch
   & go build -tags embedweb "-ldflags=-s -w" -o $Output ./cmd/server
   if ($LASTEXITCODE -ne 0) {
     throw "go build failed for $Output"
   }
 }
 
-Invoke-GoBuild -Output (Join-Path $binDir "knox-media.exe")
-Invoke-GoBuild -Output (Join-Path $binDir "knox-media-linux") -GoOS linux -GoArch amd64
-Remove-Item Env:GOOS, Env:GOARCH -ErrorAction SilentlyContinue
+$builds = @(
+  @{ OS = "windows"; Arch = "amd64"; Suffix = ".exe" },
+  @{ OS = "windows"; Arch = "arm64"; Suffix = ".exe" },
+  @{ OS = "linux";   Arch = "amd64"; Suffix = "" },
+  @{ OS = "linux";   Arch = "arm64"; Suffix = "" },
+  @{ OS = "darwin";  Arch = "amd64"; Suffix = "" },
+  @{ OS = "darwin";  Arch = "arm64"; Suffix = "" }
+)
 
-Write-Host "Built:"
-Write-Host "  bin/knox-media.exe"
-Write-Host "  bin/knox-media-linux"
+$total = $builds.Count
+$sw = [System.Diagnostics.Stopwatch]::StartNew()
+
+for ($i = 0; $i -lt $total; $i++) {
+  $b = $builds[$i]
+  $name = "vauldy-$($b.OS)-$($b.Arch)$($b.Suffix)"
+  $out = Join-Path $binDir $name
+  Write-Host "[$($i+1)/$total] Building $name ..."
+  Invoke-GoBuild -Output $out -GoOS $b.OS -GoArch $b.Arch
+}
+
+$sw.Stop()
+Remove-Item Env:GOOS, Env:GOARCH, Env:CGO_ENABLED -ErrorAction SilentlyContinue
+
+Write-Host ""
+Write-Host "Built $total binaries in $([math]::Round($sw.Elapsed.TotalSeconds, 1))s:"
+Get-ChildItem $binDir | ForEach-Object {
+  $sizeMB = [math]::Round($_.Length / 1MB, 1)
+  Write-Host "  $($_.Name)  ($sizeMB MB)"
+}
 Write-Host "(embedded web/dist - no external web/dist folder required at runtime)"
