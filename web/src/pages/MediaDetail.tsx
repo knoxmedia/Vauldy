@@ -43,7 +43,7 @@ import {
   useRef,
   useState,
 } from "react";
-import type { ReactNode } from "react";
+import type { Dispatch, ReactNode, SetStateAction } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import MediaPosterImg from "../components/MediaPosterImg";
 import {
@@ -61,7 +61,10 @@ import {
   fetchMediaDetail,
   fetchMediaStats,
   fetchMediaSubtitles,
+  fetchMediaPersons,
   fetchUserHistory,
+  resolvePersonAvatarSrc,
+  searchCastPersons,
   isTVLibraryType,
   mediaDetailPosterSrc,
   authListPosterUrl,
@@ -107,9 +110,198 @@ type ParsedMeta = {
   poster?: string;
   backdrop?: string;
   logo?: string;
-  cast?: Array<{ name: string; role?: string; avatar?: string }>;
+  cast?: Array<{ name: string; role?: string; avatar?: string; personId?: number }>;
   subtitleCodecs: string[];
 };
+
+type CastCrewMember = {
+  name: string;
+  occupation: string;
+  role?: string;
+  avatar?: string;
+  personId?: number;
+};
+
+function readMetaNameList(...sources: unknown[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const src of sources) {
+    if (typeof src === "string") {
+      for (const part of src.split(/[,、/|]/)) {
+        const s = part.trim();
+        if (!s) continue;
+        const key = s.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(s);
+      }
+      continue;
+    }
+    if (!Array.isArray(src)) continue;
+    for (const item of src) {
+      const s =
+        typeof item === "string"
+          ? item.trim()
+          : item && typeof item === "object" && typeof (item as { name?: unknown }).name === "string"
+            ? (item as { name: string }).name.trim()
+            : "";
+      if (!s) continue;
+      const key = s.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(s);
+    }
+  }
+  return out;
+}
+
+function readMetaExtra(metaJson?: string): Record<string, unknown> {
+  if (!metaJson) return {};
+  try {
+    const raw = JSON.parse(metaJson) as { scrape?: { extra?: Record<string, unknown> } };
+    return raw.scrape?.extra ?? {};
+  } catch {
+    return {};
+  }
+}
+
+function personNameMatches(candidate: string, target: string): boolean {
+  const a = candidate.trim();
+  const b = target.trim();
+  if (!a || !b) return false;
+  return a === b || a.toLowerCase() === b.toLowerCase();
+}
+
+function buildCastCrewList(
+  links: Array<{
+    person_id: number;
+    person_name: string;
+    avatar_url?: string;
+    occupation: string;
+    character_name?: string;
+  }>,
+  meta: ParsedMeta,
+  metaJson?: string,
+  resolved: Array<{ person_id: number; person_name: string; avatar_url?: string }> = [],
+): CastCrewMember[] {
+  const seen = new Set<string>();
+  const out: CastCrewMember[] = [];
+  const memberKey = (occupation: string, name: string) => `${occupation}:${name.trim().toLowerCase()}`;
+  const personByName = new Map<string, { person_id: number; avatar_url?: string }>();
+  for (const l of links) {
+    const key = l.person_name.trim().toLowerCase();
+    if (key && !personByName.has(key)) {
+      personByName.set(key, { person_id: l.person_id, avatar_url: l.avatar_url });
+    }
+  }
+  for (const row of resolved) {
+    const key = row.person_name.trim().toLowerCase();
+    if (key && !personByName.has(key)) {
+      personByName.set(key, { person_id: row.person_id, avatar_url: row.avatar_url });
+    }
+  }
+
+  const resolvePerson = (name: string, member: CastCrewMember) => {
+    if (member.personId && member.personId > 0) return member;
+    const hit = personByName.get(name.trim().toLowerCase());
+    if (!hit?.person_id) return member;
+    return {
+      ...member,
+      personId: hit.person_id,
+      avatar: resolvePersonAvatarSrc(hit.person_id, hit.avatar_url, hit.person_id),
+    };
+  };
+
+  const push = (member: CastCrewMember) => {
+    const name = member.name.trim();
+    if (!name) return;
+    const key = memberKey(member.occupation, name);
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(resolvePerson(name, { ...member, name }));
+  };
+
+  for (const l of links) {
+    push({
+      name: l.person_name,
+      occupation: l.occupation,
+      personId: l.person_id,
+      avatar: resolvePersonAvatarSrc(l.person_id, l.avatar_url, l.person_id),
+      role:
+        l.occupation === "actor" && l.character_name
+          ? l.character_name
+          : tGlobal(`occupations.${l.occupation}`),
+    });
+  }
+
+  const extra = readMetaExtra(metaJson);
+  for (const name of readMetaNameList(meta.director, extra.directors, extra.director, extra.crew)) {
+    push({ name, occupation: "director", role: tGlobal("occupations.director") });
+  }
+  for (const name of readMetaNameList(extra.producers, extra.producer)) {
+    push({ name, occupation: "producer", role: tGlobal("occupations.producer") });
+  }
+  for (const name of readMetaNameList(extra.writers, extra.writer, extra.author, extra.authors)) {
+    push({ name, occupation: "writer", role: tGlobal("occupations.writer") });
+  }
+  for (const m of meta.cast ?? []) {
+    push({
+      name: m.name,
+      occupation: "actor",
+      personId: m.personId,
+      avatar: m.avatar,
+      role: m.role || tGlobal("occupations.actor"),
+    });
+  }
+  for (const name of readMetaNameList(extra.actors)) {
+    push({ name, occupation: "actor", role: tGlobal("occupations.actor") });
+  }
+
+  return out;
+}
+
+function CastCrewCard({
+  member,
+  idx,
+  brokenImages,
+  setBrokenImages,
+  avatarClassName,
+  emptyClassName,
+  roleFallback,
+}: {
+  member: CastCrewMember;
+  idx: number;
+  brokenImages: Record<string, true>;
+  setBrokenImages: Dispatch<SetStateAction<Record<string, true>>>;
+  avatarClassName: string;
+  emptyClassName: string;
+  roleFallback: string;
+}) {
+  const body = (
+    <>
+      {member.personId && member.avatar && !brokenImages[`actor-${idx}`] ? (
+        <img
+          src={member.avatar}
+          alt={member.name}
+          className={avatarClassName}
+          onError={() => setBrokenImages((prev) => ({ ...prev, [`actor-${idx}`]: true }))}
+        />
+      ) : (
+        <div className={emptyClassName} aria-hidden />
+      )}
+      <div className={styles.castName}>{member.name}</div>
+      <div className={styles.castRole}>{member.role || roleFallback}</div>
+    </>
+  );
+  if (member.personId && member.personId > 0) {
+    return (
+      <Link to={`/person/${member.personId}`} className={`${styles.castCard} ${styles.castCardLink}`}>
+        {body}
+      </Link>
+    );
+  }
+  return <div className={styles.castCard}>{body}</div>;
+}
 
 /** 已观看：白实心圆，勾为镂空（透出按钮底色），与未观看的线框圆+勾区分 */
 function WatchedSolidCutoutIcon({ className }: { className?: string }) {
@@ -216,31 +408,33 @@ function parseMeta(metaJson?: string): ParsedMeta {
       if (typeof certRaw === "string" && certRaw.trim()) {
         out.certification = certRaw.trim();
       }
-      const director =
-        (extra.director as string[]) ||
-        (extra.directors as string[]) ||
-        (extra.crew as string[]) ||
-        [];
-      if (Array.isArray(director)) {
-        out.director = director.filter((x): x is string => typeof x === "string" && x.trim().length > 0);
+      const director = readMetaNameList(extra.director, extra.directors, extra.crew);
+      if (director.length > 0) {
+        out.director = director;
       }
-      const actors =
-        (extra.cast as Array<Record<string, unknown>>) ||
-        (extra.actors as Array<Record<string, unknown>>) ||
-        [];
+      const actors = (extra.cast as unknown[]) || (extra.actors as unknown[]) || [];
       if (Array.isArray(actors)) {
         out.cast = actors
-          .map((x) => ({
-            name: String(x.name || x.actor || ""),
-            role: x.role ? String(x.role) : x.character ? String(x.character) : "",
-            avatar: x.profile_path
-              ? String(x.profile_path)
-              : x.avatar
-                ? String(x.avatar)
-                : x.image
-                  ? String(x.image)
-                  : "",
-          }))
+          .map((x) => {
+            if (typeof x === "string") {
+              return { name: x.trim(), role: "" };
+            }
+            if (!x || typeof x !== "object") {
+              return { name: "", role: "" };
+            }
+            const row = x as Record<string, unknown>;
+            return {
+              name: String(row.name || row.actor || ""),
+              role: row.role ? String(row.role) : row.character ? String(row.character) : "",
+              avatar: row.profile_path
+                ? String(row.profile_path)
+                : row.avatar
+                  ? String(row.avatar)
+                  : row.image
+                    ? String(row.image)
+                    : "",
+            };
+          })
           .filter((x) => x.name.trim().length > 0);
       }
       const pick = (a: string, b: string) => {
@@ -597,6 +791,12 @@ export default function MediaDetailPage() {
   const [isMovieLibrary, setIsMovieLibrary] = useState(false);
   const [libraryType, setLibraryType] = useState("");
   const [relatedSelectedIds, setRelatedSelectedIds] = useState<number[]>([]);
+  const [mediaPersonLinks, setMediaPersonLinks] = useState<
+    Array<{ person_id: number; person_name: string; avatar_url?: string; occupation: string; character_name?: string; role_type?: string }>
+  >([]);
+  const [resolvedPersonRefs, setResolvedPersonRefs] = useState<
+    Array<{ person_id: number; person_name: string; avatar_url?: string }>
+  >([]);
   /** 固定工具条与主内容列对齐（.app-main-centered 的视口 left/width） */
   const [relatedBulkDock, setRelatedBulkDock] = useState({ left: 0, width: 0 });
   const [playlistModalOpen, setPlaylistModalOpen] = useState(false);
@@ -695,7 +895,8 @@ export default function MediaDetailPage() {
       fetchUserHistory(300),
       fetchFavoriteStatus(mediaId),
       fetchMediaSubtitles(mediaId),
-    ]).then(async ([d, s, h, fav, subs]) => {
+      fetchMediaPersons(mediaId),
+    ]).then(async ([d, s, h, fav, subs, persons]) => {
       if (d.status === "fulfilled") {
         setDetail(d.value);
         let movieLib = false;
@@ -741,6 +942,13 @@ export default function MediaDetailPage() {
       } else {
         setSubtitleRows([]);
       }
+      if (persons.status === "fulfilled") {
+        setMediaPersonLinks(persons.value.items);
+        setResolvedPersonRefs(persons.value.resolved);
+      } else {
+        setMediaPersonLinks([]);
+        setResolvedPersonRefs([]);
+      }
       setLoading(false);
     });
   }, [mediaId, nav]);
@@ -783,7 +991,52 @@ export default function MediaDetailPage() {
   const overviewPreviewLen = 220;
   const overviewLong = overview.length > overviewPreviewLen;
   const overviewShown = overviewOpen || !overviewLong ? overview : `${overview.slice(0, overviewPreviewLen)}…`;
-  const castList = meta.cast?.slice(0, 24) ?? [];
+  const castList = useMemo(
+    () => buildCastCrewList(mediaPersonLinks, meta, detail?.meta_json, resolvedPersonRefs),
+    [mediaPersonLinks, meta, detail?.meta_json, resolvedPersonRefs],
+  );
+
+  useEffect(() => {
+    const pending = [...new Set(castList.filter((m) => !m.personId).map((m) => m.name.trim()).filter(Boolean))];
+    if (pending.length === 0) return;
+    let cancelled = false;
+    void (async () => {
+      const additions: Array<{ person_id: number; person_name: string; avatar_url?: string }> = [];
+      for (const name of pending.slice(0, 24)) {
+        try {
+          const items = await searchCastPersons(name, 12);
+          const hit = items.find(
+            (p) =>
+              personNameMatches(p.name, name) ||
+              (p.english_name ? personNameMatches(p.english_name, name) : false) ||
+              (p.aliases || "")
+                .split(/[,;，；|/]/)
+                .some((alias) => personNameMatches(alias, name)),
+          );
+          if (hit?.id) {
+            additions.push({ person_id: hit.id, person_name: name, avatar_url: hit.avatar_url });
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+      if (cancelled || additions.length === 0) return;
+      setResolvedPersonRefs((prev) => {
+        const seen = new Set(prev.map((p) => `${p.person_id}:${p.person_name.trim().toLowerCase()}`));
+        const merged = [...prev];
+        for (const row of additions) {
+          const token = `${row.person_id}:${row.person_name.trim().toLowerCase()}`;
+          if (seen.has(token)) continue;
+          seen.add(token);
+          merged.push(row);
+        }
+        return merged;
+      });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [castList]);
   const yearStr =
     detail?.year != null && detail.year > 0
       ? String(detail.year)
@@ -975,7 +1228,7 @@ export default function MediaDetailPage() {
   const logoUrlClassic = meta.logo && !brokenImages.logo ? authListPosterUrl(meta.logo) : "";
   const posterLetterClassic = (detail.title || "?").slice(0, 1).toUpperCase();
   const runtimeClassic = fmtSeconds(detail.duration);
-  const castListClassic = meta.cast?.slice(0, 18) ?? [];
+  const castListClassic = castList.slice(0, 18);
 
   if (!isMovieLibrary) {
     return (
@@ -1169,20 +1422,16 @@ export default function MediaDetailPage() {
           ) : (
             <div className={styles.castRow}>
               {castListClassic.map((member, idx) => (
-                <div key={`${member.name}-${idx}`} className={styles.castCard}>
-                  {member.avatar && !brokenImages[`actor-${idx}`] ? (
-                    <img
-                      src={member.avatar}
-                      alt={member.name}
-                      className={styles.castAvatarClassic}
-                      onError={() => setBrokenImages((prev) => ({ ...prev, [`actor-${idx}`]: true }))}
-                    />
-                  ) : (
-                    <div className={styles.castAvatarEmptyClassic} />
-                  )}
-                  <div className={styles.castName}>{member.name}</div>
-                  <div className={styles.castRole}>{member.role || t("pages.media_detail.role_actor")}</div>
-                </div>
+                <CastCrewCard
+                  key={`${member.personId ?? member.name}-${idx}`}
+                  member={member}
+                  idx={idx}
+                  brokenImages={brokenImages}
+                  setBrokenImages={setBrokenImages}
+                  avatarClassName={styles.castAvatarClassic}
+                  emptyClassName={styles.castAvatarEmptyClassic}
+                  roleFallback={t("pages.media_detail.role_actor")}
+                />
               ))}
             </div>
           )}
@@ -1556,20 +1805,16 @@ export default function MediaDetailPage() {
         refreshKey={castList.map((c) => c.name).join("\n")}
       >
         {castList.map((member, idx) => (
-          <div key={`${member.name}-${idx}`} className={styles.castCard}>
-            {member.avatar && !brokenImages[`actor-${idx}`] ? (
-              <img
-                src={member.avatar}
-                alt={member.name}
-                className={styles.castAvatarImage}
-                onError={() => setBrokenImages((prev) => ({ ...prev, [`actor-${idx}`]: true }))}
-              />
-            ) : (
-              <div className={styles.castAvatarEmpty}>{(member.name || "?").slice(0, 1).toUpperCase()}</div>
-            )}
-            <div className={styles.castName}>{member.name}</div>
-            <div className={styles.castRole}>{member.role || t("pages.media_detail.role_actor")}</div>
-          </div>
+          <CastCrewCard
+            key={`${member.personId ?? member.name}-${idx}`}
+            member={member}
+            idx={idx}
+            brokenImages={brokenImages}
+            setBrokenImages={setBrokenImages}
+            avatarClassName={styles.castAvatarImage}
+            emptyClassName={styles.castAvatarEmpty}
+            roleFallback={t("pages.media_detail.role_actor")}
+          />
         ))}
       </MediaHorizontalShelf>
 

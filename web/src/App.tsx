@@ -34,6 +34,8 @@ import FavoritesPage from "./pages/Favorites";
 import SeriesDetailPage from "./pages/SeriesDetail";
 import AlbumDetailPage from "./pages/AlbumDetail";
 import ArtistDetailPage from "./pages/ArtistDetail";
+import PersonBrowsePage from "./pages/PersonBrowse";
+import PersonDetailPage from "./pages/PersonDetail";
 import GenreDetailPage from "./pages/GenreDetail";
 import PlayerPage from "./pages/Player";
 import UploadPage from "./pages/Upload";
@@ -491,6 +493,8 @@ export default function App() {
           <Route path="series/:id" element={<SeriesDetailPage />} />
           <Route path="album/:id" element={<AlbumDetailPage />} />
           <Route path="artist/:id" element={<ArtistDetailPage />} />
+          <Route path="persons" element={<PersonBrowsePage />} />
+          <Route path="person/:id" element={<PersonDetailPage />} />
           <Route path="genre" element={<GenreDetailPage />} />
           <Route path="playback-history" element={<PlaybackHistoryPage />} />
           <Route path="search" element={<SearchPage />} />

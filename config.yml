@@ -79,14 +79,14 @@ scan:
 
 subtitle:
   # When true, a new video discovered by library scan gets a pending subtitle_task (default: true).
-  auto_on_scan: true
+  auto_on_scan: false
   asr:
     provider: shell
     whisper_path: tools/recognition/.venv/Scripts/whisper.exe
     extra_args: []
     shell: cd /d "{output_dir}" && "tools/recognition/.venv/Scripts/python.exe" "tools/asr/asr_to_vtt.py" --engine whisper --input "{input}" --output-vtt "{output_vtt}" --whisper-model base --whisper-language zh
   graphical_ocr:
-    enabled: true
+    enabled: false
     tesseract_path: tesseract
     tessdata_prefix: ""
     languages: chi_sim+eng
@@ -122,10 +122,10 @@ photo_face:
   python_path: tools/recognition/.venv/Scripts/python.exe
   script_path: tools/photo_face/detect.py
   similarity_threshold: 0.45
-  max_concurrent: 1
-  batch_limit: 1
-  poll_interval_seconds: 10
-  failed_retry_minutes: 60
+  max_concurrent: 0
+  batch_limit: 0
+  poll_interval_seconds: 0
+  failed_retry_minutes: 0
 # Office document preview via LibreOffice headless (DOC/DOCX/XLS/XLSX/PPT/PPTX -> PDF).
 
 doc_trans:
@@ -134,8 +134,8 @@ doc_trans:
     - office
     - wps
     - libreoffice
-  libreoffice_path: tools/doctran/LibreOfficePortable/App/libreoffice/program/soffice.exe
-  soffice_path: tools/doctran/LibreOfficePortable/App/libreoffice/program/soffice.exe
+  libreoffice_path: E:\Projects\PowerCOM\Knox\media\tools\doctran\LibreOfficePortable\App\libreoffice\program\soffice.exe
+  soffice_path: E:\Projects\PowerCOM\Knox\media\tools\doctran\LibreOfficePortable\App\libreoffice\program\soffice.exe
   office_path: ""
   wps_path: C:\Program Files (x86)\WPS Office\12.1.0.18276\office6
   cache_dir: ""

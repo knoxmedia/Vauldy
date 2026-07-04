@@ -117,3 +117,11 @@
   display: block;
   flex-shrink: 0;
 }
+
+.searchPersonAvatarEmpty {
+  width: 100%;
+  height: 100%;
+  border: 1px dashed rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 8px;
+}

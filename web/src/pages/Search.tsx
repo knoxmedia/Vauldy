@@ -11,6 +11,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   MediaItem,
+  CastPersonSummary,
   addFavorite,
   addFavoriteFolderItem,
   addPlaylistItem,
@@ -18,6 +19,8 @@ import {
   fetchMedia,
   mediaPosterSrc,
   normalizeListPosterUrl,
+  searchCastPersons,
+  resolvePersonAvatarSrc,
   type Library,
   type MediaMatchListUpdate,
 } from "../api/client";
@@ -34,7 +37,7 @@ import { readRecentPlaylists, rememberPlaylistAdded } from "../lib/recentPlaylis
 import browseStyles from "./Browse.module.css";
 import styles from "./Search.module.css";
 
-type SearchFilter = "all" | "movie" | "tv" | "music" | "image" | "document";
+type SearchFilter = "all" | "movie" | "tv" | "music" | "image" | "document" | "person";
 
 const FILTER_SPECS: { key: SearchFilter; i18nKey: string }[] = [
   { key: "all", i18nKey: "pages.search.filter_all" },
@@ -43,6 +46,7 @@ const FILTER_SPECS: { key: SearchFilter; i18nKey: string }[] = [
   { key: "music", i18nKey: "pages.search.filter_music" },
   { key: "image", i18nKey: "pages.search.filter_photo" },
   { key: "document", i18nKey: "pages.search.filter_document" },
+  { key: "person", i18nKey: "pages.search.filter_person" },
 ];
 
 function fmtDurationLocalized(sec: number, t: TranslateFn): string {
@@ -66,6 +70,7 @@ function matchesFilter(
   filter: SearchFilter,
   libraryTypeById: Map<number, string>,
 ): boolean {
+  if (filter === "person") return false;
   if (filter === "all") return true;
   const libType = libraryTypeById.get(r.library_id) || "";
   switch (filter) {
@@ -114,6 +119,7 @@ export default function SearchPage() {
   const [searchParams] = useSearchParams();
   const qParam = searchParams.get("q")?.trim() ?? "";
   const [rows, setRows] = useState<MediaItem[]>([]);
+  const [personRows, setPersonRows] = useState<CastPersonSummary[]>([]);
   const [libraries, setLibraries] = useState<Library[]>([]);
   const [loading, setLoading] = useState(false);
   const [typeFilter, setTypeFilter] = useState<SearchFilter>("all");
@@ -142,17 +148,20 @@ export default function SearchPage() {
   async function load() {
     if (!qParam) {
       setRows([]);
+      setPersonRows([]);
       setLoading(false);
       return;
     }
     setLoading(true);
     try {
-      const [items, libs] = await Promise.all([
+      const [items, libs, persons] = await Promise.all([
         fetchMedia(undefined, { q: qParam, limit: 500 }),
         fetchLibraries(),
+        searchCastPersons(qParam, 30),
       ]);
       setRows(items);
       setLibraries(libs);
+      setPersonRows(persons);
     } catch (e: unknown) {
       message.error((e as Error).message || t("pages.search.load_failed"));
       setRows([]);
@@ -172,10 +181,11 @@ export default function SearchPage() {
 
   const visibleFilters = useMemo(() => {
     return FILTER_SPECS.filter((spec) => {
-      if (spec.key === "all") return rows.length > 0;
+      if (spec.key === "person") return personRows.length > 0;
+      if (spec.key === "all") return rows.length > 0 || personRows.length > 0;
       return rows.some((r) => matchesFilter(r, spec.key, libraryTypeById));
     });
-  }, [rows, libraryTypeById]);
+  }, [rows, personRows, libraryTypeById]);
 
   const selectionCount = selectedIds.size;
   const bulkPick = selectionCount > 0;
@@ -503,9 +513,73 @@ export default function SearchPage() {
         </div>
       ) : !qParam ? (
         <Empty description={t("pages.search.start_hint")} />
-      ) : filteredRows.length === 0 ? (
+      ) : typeFilter === "person" ? (
+        personRows.length === 0 ? (
+          <Empty description={t("pages.search.no_match")} />
+        ) : (
+          <div className={`${browseStyles.listWrap} ${styles.searchListWrap}`}>
+            {personRows.map((p) => (
+              <div
+                key={p.id}
+                className={`${browseStyles.listRow} ${styles.searchListRow}`}
+                role="button"
+                tabIndex={0}
+                onClick={() => nav(`/person/${p.id}`)}
+              >
+                <div className={browseStyles.listPosterWrap}>
+                  {(() => {
+                    const avatar = resolvePersonAvatarSrc(p.id, p.avatar_url, p.updated_at || p.id);
+                    return avatar ? (
+                      <img src={avatar} alt="" className={browseStyles.listPoster} loading="lazy" />
+                    ) : (
+                      <div className={styles.searchPersonAvatarEmpty} aria-hidden />
+                    );
+                  })()}
+                </div>
+                <div className={browseStyles.listMain}>
+                  <div className={browseStyles.listTitle}>{p.name}</div>
+                  <div className={browseStyles.listMeta}>
+                    {t("pages.search.type_person")}
+                    {(p.occupations ?? []).length > 0 ? ` · ${(p.occupations ?? []).map((o) => t(`occupations.${o}`)).join(" / ")}` : ""}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )
+      ) : filteredRows.length === 0 && (typeFilter !== "all" || personRows.length === 0) ? (
         <Empty description={t("pages.search.no_match")} />
       ) : (
+        <>
+        {typeFilter === "all" && personRows.length > 0 && (
+          <div className={`${browseStyles.listWrap} ${styles.searchListWrap}`} style={{ marginBottom: 24 }}>
+            {personRows.slice(0, 8).map((p) => (
+              <div
+                key={`person-${p.id}`}
+                className={`${browseStyles.listRow} ${styles.searchListRow}`}
+                role="button"
+                tabIndex={0}
+                onClick={() => nav(`/person/${p.id}`)}
+              >
+                <div className={browseStyles.listPosterWrap}>
+                  {(() => {
+                    const avatar = resolvePersonAvatarSrc(p.id, p.avatar_url, p.updated_at || p.id);
+                    return avatar ? (
+                      <img src={avatar} alt="" className={browseStyles.listPoster} loading="lazy" />
+                    ) : (
+                      <div className={styles.searchPersonAvatarEmpty} aria-hidden />
+                    );
+                  })()}
+                </div>
+                <div className={browseStyles.listMain}>
+                  <div className={browseStyles.listTitle}>{p.name}</div>
+                  <div className={browseStyles.listMeta}>{t("pages.search.type_person")}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        {filteredRows.length > 0 && (
         <div className={`${browseStyles.listWrap} ${styles.searchListWrap}`}>
           {filteredRows.map((r) => {
             const isSelected = selectedIds.has(r.id);
@@ -623,6 +697,8 @@ export default function SearchPage() {
             );
           })}
         </div>
+        )}
+        </>
       )}
 
       <AddToPlaylistModal

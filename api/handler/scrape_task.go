@@ -437,6 +437,7 @@ func (h *Handler) runScrapeTasksWithLimit(ids []int64, limit int) (int, int) {
 		}
 		_, _ = h.App.DB.Exec(`UPDATE media SET title = ?, meta_json = ? WHERE id = ?`, res.Title, merged, mediaID)
 		h.syncSeriesCollectionMeta(libraryID, mediaID, res)
+		h.importMediaCreditsAfterScrape(libraryID, mediaID, merged, libraryType)
 		js, _ := json.Marshal(res)
 		okMsg := summarizeProviderWarnings(res)
 		if sErr != nil {

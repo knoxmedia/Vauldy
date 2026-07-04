@@ -124,12 +124,12 @@ func fetchTmdbImageList(apiKey, keyword string, year int, kind string) ([]string
 	if keyword == "" {
 		return nil, 0, fmt.Errorf("tmdb query empty")
 	}
-	u := "https://api.themoviedb.org/3/search/multi?api_key=" + url.QueryEscape(apiKey) +
+	u := tmdbAPIBase + "/3/search/multi?api_key=" + url.QueryEscape(apiKey) +
 		"&query=" + url.QueryEscape(keyword) + "&language=zh-CN&page=1&include_adult=false"
 	if year > 0 {
 		u += "&year=" + strconv.Itoa(year)
 	}
-	body, err := httpGetJSON(u, map[string]string{"Accept": "application/json"})
+	body, err := httpGetJSONWithRetry(u, map[string]string{"Accept": "application/json"})
 	if err != nil {
 		return nil, 0, err
 	}
@@ -150,8 +150,8 @@ func fetchTmdbImageList(apiKey, keyword string, year int, kind string) ([]string
 	if strings.EqualFold(x.MediaType, "tv") {
 		imgPath = "tv"
 	}
-	imgURL := fmt.Sprintf("https://api.themoviedb.org/3/%s/%d/images?api_key=%s", imgPath, x.ID, url.QueryEscape(apiKey))
-	imgBody, err := httpGetJSON(imgURL, map[string]string{"Accept": "application/json"})
+	imgURL := fmt.Sprintf("%s/3/%s/%d/images?api_key=%s", tmdbAPIBase, imgPath, x.ID, url.QueryEscape(apiKey))
+	imgBody, err := httpGetJSONWithRetry(imgURL, map[string]string{"Accept": "application/json"})
 	if err != nil {
 		return nil, 0, err
 	}
@@ -167,7 +167,7 @@ func fetchTmdbImageList(apiKey, keyword string, year int, kind string) ([]string
 		} `json:"logos"`
 	}
 	_ = json.Unmarshal(imgBody, &imgs)
-	base := "https://image.tmdb.org/t/p/original"
+	base := tmdbImageBase + "/t/p/original"
 	var out []string
 	switch kind {
 	case "backdrop":

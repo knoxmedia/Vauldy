@@ -238,12 +238,12 @@ func scrapeTMDB(keyword string, year int, apiKey string) (*ScrapeResult, error) 
 	if strings.TrimSpace(apiKey) == "" {
 		return nil, fmt.Errorf("tmdb api key missing")
 	}
-	u := "https://api.themoviedb.org/3/search/multi?api_key=" + url.QueryEscape(apiKey) +
+	u := tmdbAPIBase + "/3/search/multi?api_key=" + url.QueryEscape(apiKey) +
 		"&query=" + url.QueryEscape(keyword) + "&language=zh-CN&page=1&include_adult=false"
 	if year > 0 {
 		u += "&year=" + strconv.Itoa(year)
 	}
-	body, err := httpGetJSON(u, map[string]string{"Accept": "application/json"})
+	body, err := httpGetJSONWithRetry(u, map[string]string{"Accept": "application/json"})
 	if err != nil {
 		return nil, err
 	}
@@ -276,7 +276,7 @@ func scrapeTMDB(keyword string, year int, apiKey string) (*ScrapeResult, error) 
 	if release == "" {
 		release = x.FirstAirDate
 	}
-	imgBase := "https://image.tmdb.org/t/p/original"
+	imgBase := tmdbImageBase + "/t/p/original"
 	return &ScrapeResult{
 		Source:      "tmdb",
 		Title:       title,

@@ -665,6 +665,17 @@
   text-align: center;
 }
 
+.castCardLink {
+  display: block;
+  color: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.castCardLink:hover .castName {
+  color: #ed6d00;
+}
+
 .castAvatarImage {
   width: 88px;
   height: 88px;
