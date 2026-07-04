@@ -100,13 +100,13 @@ func searchTMDBCandidates(keyword string, year int, language, apiKey string, lim
 	if strings.TrimSpace(apiKey) == "" {
 		return nil, fmt.Errorf("tmdb api key missing")
 	}
-	u := "https://api.themoviedb.org/3/search/multi?api_key=" + url.QueryEscape(apiKey) +
+	u := tmdbAPIBase + "/3/search/multi?api_key=" + url.QueryEscape(apiKey) +
 		"&query=" + url.QueryEscape(keyword) + "&language=" + url.QueryEscape(language) +
 		"&page=1&include_adult=false"
 	if year > 0 {
 		u += "&year=" + strconv.Itoa(year)
 	}
-	body, err := httpGetJSON(u, map[string]string{"Accept": "application/json"})
+	body, err := httpGetJSONWithRetry(u, map[string]string{"Accept": "application/json"})
 	if err != nil {
 		return nil, err
 	}
@@ -126,7 +126,7 @@ func searchTMDBCandidates(keyword string, year int, language, apiKey string, lim
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, err
 	}
-	imgBase := "https://image.tmdb.org/t/p/w342"
+	imgBase := tmdbImageBase + "/t/p/w342"
 	out := make([]MatchCandidate, 0, len(resp.Results))
 	for _, x := range resp.Results {
 		if x.MediaType != "movie" && x.MediaType != "tv" {
@@ -169,9 +169,9 @@ func fetchTMDBByID(externalID, mediaType, language, apiKey string) (*ScrapeResul
 	if mediaType != "tv" {
 		mediaType = "movie"
 	}
-	u := fmt.Sprintf("https://api.themoviedb.org/3/%s/%s?api_key=%s&language=%s",
-		mediaType, url.PathEscape(id), url.QueryEscape(apiKey), url.QueryEscape(language))
-	body, err := httpGetJSON(u, map[string]string{"Accept": "application/json"})
+	u := fmt.Sprintf("%s/3/%s/%s?api_key=%s&language=%s",
+		tmdbAPIBase, mediaType, url.PathEscape(id), url.QueryEscape(apiKey), url.QueryEscape(language))
+	body, err := httpGetJSONWithRetry(u, map[string]string{"Accept": "application/json"})
 	if err != nil {
 		return nil, err
 	}
@@ -197,7 +197,7 @@ func fetchTMDBByID(externalID, mediaType, language, apiKey string) (*ScrapeResul
 	if release == "" {
 		release = resp.FirstAirDate
 	}
-	imgBase := "https://image.tmdb.org/t/p/original"
+	imgBase := tmdbImageBase + "/t/p/original"
 	return &ScrapeResult{
 		Source:      "tmdb",
 		Title:       title,

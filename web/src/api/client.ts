@@ -1,6 +1,7 @@
 import axios from "axios";
 import { message } from "antd";
 import type { PlayerPrefs } from "../lib/playerPrefs";
+import { proxyImageSrc } from "../lib/imageUrl";
 import { useAuthStore, type UserRole } from "../store/auth";
 
 export const api = axios.create({
@@ -868,6 +869,211 @@ export function artistArtworkSrc(artistId: number): string {
   const token = useAuthStore.getState().token;
   const q = token ? `?access_token=${encodeURIComponent(token)}` : "";
   return `/api/v1/artist/${artistId}/artwork${q}`;
+}
+
+export type CastPersonSummary = {
+  id: number;
+  name: string;
+  english_name?: string;
+  gender?: number;
+  birth_date?: string;
+  birth_place?: string;
+  nationality?: string;
+  occupations?: string[];
+  biography?: string;
+  avatar_url?: string;
+  aliases?: string;
+  scraped?: boolean;
+  scraped_at?: string;
+  tmdb_id?: string;
+  imdb_id?: string;
+  douban_id?: string;
+  work_count?: number;
+  occupation_counts?: Record<string, number>;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type MediaPersonLink = {
+  id: number;
+  media_id: number;
+  person_id: number;
+  person_name: string;
+  avatar_url?: string;
+  occupation: string;
+  character_name?: string;
+  role_type?: string;
+  sort_order?: number;
+  media_title?: string;
+  media_year?: number;
+  poster_url?: string;
+};
+
+export type PersonCollaborator = {
+  person_id: number;
+  name: string;
+  avatar_url?: string;
+  collaboration_count: number;
+  recent_movie_titles?: string[];
+};
+
+export type PersonScrapeCandidate = {
+  source: string;
+  external_id: string;
+  name: string;
+  english_name?: string;
+  profile?: string;
+  birthday?: string;
+  known_for?: string;
+  gender?: number;
+};
+
+export function personAvatarSrc(personId: number): string {
+  const token = useAuthStore.getState().token;
+  const q = token ? `?access_token=${encodeURIComponent(token)}` : "";
+  return `/api/v1/person/${personId}/avatar${q}`;
+}
+
+/** True when avatar_url can be used directly in <img src> (not a server filesystem path). */
+export function isPersonAvatarWebUrl(raw: string): boolean {
+  const p = (raw || "").trim();
+  if (!p) return false;
+  if (p.startsWith("http://") || p.startsWith("https://")) return true;
+  if (p.startsWith("/uploads/") || p.startsWith("/metadata/") || p.startsWith("/api/")) return true;
+  if (/^[a-zA-Z]:[\\/]/.test(p) || p.startsWith("\\\\")) return false;
+  // Unix absolute paths outside public URL prefixes
+  if (p.startsWith("/") && !p.startsWith("/uploads/") && !p.startsWith("/metadata/") && !p.startsWith("/api/")) {
+    return false;
+  }
+  return false;
+}
+
+/** Resolve cast person avatar for display; local cache paths are served via /person/:id/avatar. */
+export function resolvePersonAvatarSrc(
+  personId: number,
+  avatarUrl?: string,
+  cacheKey?: string | number,
+): string {
+  const raw = (avatarUrl || "").trim();
+  if (!raw) return "";
+  if (isPersonAvatarWebUrl(raw)) {
+    return authListPosterUrl(proxyImageSrc(raw) || raw) || proxyImageSrc(raw) || raw;
+  }
+  if (personId > 0) {
+    let src = personAvatarSrc(personId);
+    if (cacheKey != null && String(cacheKey) !== "") {
+      src += (src.includes("?") ? "&" : "?") + `v=${encodeURIComponent(String(cacheKey))}`;
+    }
+    return src;
+  }
+  return "";
+}
+
+export async function fetchPersons(opts?: {
+  q?: string;
+  occupation?: string;
+  scraped?: string;
+  sort?: string;
+  page?: number;
+  page_size?: number;
+}) {
+  const { data } = await api.get<{ items?: CastPersonSummary[]; total?: number; page?: number; page_size?: number }>(
+    "/api/v1/persons",
+    { params: opts ?? {} },
+  );
+  return data;
+}
+
+export async function searchCastPersons(q: string, limit = 20) {
+  const { data } = await api.get<{ items?: CastPersonSummary[] }>("/api/v1/persons/search", {
+    params: { q, limit },
+  });
+  return data?.items ?? [];
+}
+
+export async function fetchPerson(personId: number) {
+  const { data } = await api.get<CastPersonSummary>(`/api/v1/person/${personId}`);
+  return data;
+}
+
+export async function fetchPersonWorks(personId: number, occupation?: string) {
+  const { data } = await api.get<{ items?: MediaPersonLink[] }>(`/api/v1/person/${personId}/works`, {
+    params: occupation ? { occupation } : {},
+  });
+  return data?.items ?? [];
+}
+
+export async function fetchPersonCollaborators(personId: number, limit = 20) {
+  const { data } = await api.get<{ items?: PersonCollaborator[] }>(
+    `/api/v1/person/${personId}/collaborators`,
+    { params: { limit } },
+  );
+  return data?.items ?? [];
+}
+
+export async function fetchMediaPersons(mediaId: number) {
+  const { data } = await api.get<{
+    items?: MediaPersonLink[];
+    resolved?: Array<{ person_id: number; person_name: string; avatar_url?: string }>;
+  }>(`/api/v1/media/${mediaId}/persons`);
+  return {
+    items: data?.items ?? [],
+    resolved: data?.resolved ?? [],
+  };
+}
+
+export async function createPerson(payload: Partial<CastPersonSummary>) {
+  const { data } = await api.post<CastPersonSummary>("/api/v1/persons", payload);
+  return data;
+}
+
+export async function updatePerson(personId: number, payload: Partial<CastPersonSummary>) {
+  const { data } = await api.patch<CastPersonSummary>(`/api/v1/person/${personId}`, payload);
+  return data;
+}
+
+export async function deletePerson(personId: number, removeLinks = false) {
+  await api.delete(`/api/v1/person/${personId}`, { data: { remove_links: removeLinks } });
+}
+
+export async function searchPersonScrapeCandidates(q: string, source = "tmdb") {
+  const { data } = await api.get<{ items?: PersonScrapeCandidate[] }>("/api/v1/scrape/person/search", {
+    params: { q, source },
+  });
+  return data?.items ?? [];
+}
+
+export async function applyPersonScrape(personId: number, source: string, externalId: string, language = "zh-CN") {
+  const { data } = await api.post<CastPersonSummary>(`/api/v1/person/${personId}/scrape`, {
+    source,
+    external_id: externalId,
+    language,
+  });
+  return data;
+}
+
+export async function addMediaPerson(
+  mediaId: number,
+  payload: {
+    person_id?: number;
+    name?: string;
+    occupation?: string;
+    character_name?: string;
+    role_type?: string;
+    sort_order?: number;
+  },
+) {
+  const { data } = await api.post<{ ok: boolean; person_id: number }>(`/api/v1/media/${mediaId}/persons`, payload);
+  return data;
+}
+
+export async function deleteMediaPersonLink(mediaId: number, linkId: number) {
+  await api.delete(`/api/v1/media/${mediaId}/persons/${linkId}`);
+}
+
+export async function importMediaCredits(mediaId: number) {
+  const { data } = await api.post<{ ok: boolean; imported: number }>(`/api/v1/media/${mediaId}/import-credits`);
+  return data;
 }
 
 export async function fetchLibraryAlbums(libraryId: number) {

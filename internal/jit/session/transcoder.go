@@ -159,7 +159,9 @@ func (s *Session) runTranscodeOnce(ctx context.Context, cfg TranscodeConfig, ffm
 	args = append(args, "-map", "0:v:0")
 
 	// Audio: include unless pre-extracted audio is available.
-	if strings.TrimSpace(cfg.AudioPlaylistURL) == "" && strings.TrimSpace(cfg.AudioCodec) != "" {
+	// When AudioCodec is empty we still map audio — ffmpeg auto-detects the codec.
+	// Only skip audio when a separate AudioPlaylistURL is provided (pre-extracted audio).
+	if strings.TrimSpace(cfg.AudioPlaylistURL) == "" {
 		args = append(args, "-map", "0:a:0?")
 	} else {
 		args = append(args, "-an")
@@ -182,10 +184,11 @@ func (s *Session) runTranscodeOnce(ctx context.Context, cfg TranscodeConfig, ffm
 	args = append(args, hwenc.BuildInstantVideoArgs(videoPlan)...)
 
 	// Audio encoder args.
-	if strings.TrimSpace(cfg.AudioPlaylistURL) == "" && strings.TrimSpace(cfg.AudioCodec) != "" {
-		if strings.ToLower(cfg.AudioCodec) == "aac" {
+	if strings.TrimSpace(cfg.AudioPlaylistURL) == "" {
+		if strings.ToLower(strings.TrimSpace(cfg.AudioCodec)) == "aac" {
 			args = append(args, "-c:a", "copy", "-bsf:a", "aac_adtstoasc")
 		} else {
+			// Non-AAC or unknown codec: transcode to AAC for HLS compatibility.
 			args = append(args, "-c:a", "aac", "-b:a", "128k", "-ac", "2", "-ar", "48000")
 		}
 	}

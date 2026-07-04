@@ -819,6 +819,68 @@ func OpenSQLite(path string) (*sql.DB, error) {
 			FOREIGN KEY (library_id) REFERENCES library(id) ON DELETE CASCADE
 		)`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_scan_log_task ON scan_log(scan_task_id)`)
+	// Cast/crew persons (film library).
+	_, _ = db.Exec(`
+		CREATE TABLE IF NOT EXISTS cast_person (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL,
+			name_norm TEXT NOT NULL,
+			english_name TEXT DEFAULT '',
+			gender INTEGER DEFAULT 0,
+			birth_date TEXT DEFAULT '',
+			birth_place TEXT DEFAULT '',
+			nationality TEXT DEFAULT '',
+			occupation_json TEXT DEFAULT '[]',
+			biography TEXT DEFAULT '',
+			avatar_url TEXT DEFAULT '',
+			aliases TEXT DEFAULT '',
+			scraped INTEGER DEFAULT 0,
+			scraped_at TIMESTAMP,
+			tmdb_id TEXT DEFAULT '',
+			imdb_id TEXT DEFAULT '',
+			douban_id TEXT DEFAULT '',
+			field_locks_json TEXT DEFAULT '{}',
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			deleted_at TIMESTAMP
+		)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_cast_person_name_norm ON cast_person(name_norm)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_cast_person_tmdb ON cast_person(tmdb_id)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_cast_person_deleted ON cast_person(deleted_at)`)
+	_, _ = db.Exec(`
+		CREATE TABLE IF NOT EXISTS media_person (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			media_id INTEGER NOT NULL,
+			person_id INTEGER NOT NULL,
+			occupation TEXT NOT NULL,
+			character_name TEXT DEFAULT '',
+			role_type TEXT DEFAULT '',
+			sort_order INTEGER DEFAULT 9999,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE,
+			FOREIGN KEY (person_id) REFERENCES cast_person(id),
+			UNIQUE(media_id, person_id, occupation)
+		)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_media_person_media ON media_person(media_id)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_media_person_person ON media_person(person_id)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_media_person_person_occ ON media_person(person_id, occupation)`)
+	_, _ = db.Exec(`
+		CREATE TABLE IF NOT EXISTS person_scrape_task (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			person_id INTEGER,
+			source TEXT DEFAULT 'tmdb',
+			status TEXT DEFAULT 'pending',
+			query TEXT DEFAULT '',
+			external_id TEXT DEFAULT '',
+			result_json TEXT DEFAULT '',
+			error_message TEXT DEFAULT '',
+			started_at TIMESTAMP,
+			completed_at TIMESTAMP,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (person_id) REFERENCES cast_person(id)
+		)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_person_scrape_task_status ON person_scrape_task(status, created_at)`)
 	// Seed default AI provider configs.
 	seedAIProviders(db)
 	// Remove duplicate scheduled tasks (legacy seed inserted on every restart).

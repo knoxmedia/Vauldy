@@ -47,8 +47,8 @@ func testTMDB(apiKey string) ProviderTestResult {
 	if strings.TrimSpace(apiKey) == "" {
 		return ProviderTestResult{OK: false, Message: "API Key 未设置"}
 	}
-	u := "https://api.themoviedb.org/3/configuration?api_key=" + url.QueryEscape(apiKey)
-	body, err := httpGetJSON(u, map[string]string{"Accept": "application/json"})
+	u := tmdbAPIBase + "/3/configuration?api_key=" + url.QueryEscape(apiKey)
+	body, err := httpGetJSONWithRetry(u, map[string]string{"Accept": "application/json"})
 	if err != nil {
 		return providerTestFromErr(err)
 	}

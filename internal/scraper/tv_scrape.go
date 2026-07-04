@@ -154,9 +154,9 @@ func scrapeTMDBEpisode(cfg Config, ctx TVScrapeContext) (*ScrapeResult, error) {
 	if seasonNum == 0 {
 		seasonNum = 0 // specials
 	}
-	u := fmt.Sprintf("https://api.themoviedb.org/3/tv/%s/season/%d/episode/%d?api_key=%s&language=%s",
-		url.PathEscape(seriesID), seasonNum, ctx.Episode, url.QueryEscape(key), url.QueryEscape(language))
-	body, err := httpGetJSON(u, map[string]string{"Accept": "application/json"})
+	u := fmt.Sprintf("%s/3/tv/%s/season/%d/episode/%d?api_key=%s&language=%s",
+		tmdbAPIBase, url.PathEscape(seriesID), seasonNum, ctx.Episode, url.QueryEscape(key), url.QueryEscape(language))
+	body, err := httpGetJSONWithRetry(u, map[string]string{"Accept": "application/json"})
 	if err != nil {
 		// Fall back to series-level metadata when episode endpoint misses (some specials).
 		return buildTVResultFromSeries(seriesRes, ctx, "tmdb"), nil
@@ -173,7 +173,7 @@ func scrapeTMDBEpisode(cfg Config, ctx TVScrapeContext) (*ScrapeResult, error) {
 	if json.Unmarshal(body, &ep) != nil {
 		return buildTVResultFromSeries(seriesRes, ctx, "tmdb"), nil
 	}
-	imgBase := "https://image.tmdb.org/t/p/original"
+	imgBase := tmdbImageBase + "/t/p/original"
 	still := pickImage(imgBase, ep.StillPath)
 	seriesTitle := seriesRes.Title
 	if seriesTitle == "" {

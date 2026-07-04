@@ -11,6 +11,7 @@ import {
   FolderOpenOutlined,
   HomeOutlined,
   HistoryOutlined,
+  IdcardOutlined,
   LoadingOutlined,
   TeamOutlined,
   ScheduleOutlined,
@@ -84,6 +85,7 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
     if (path.startsWith("/library")) return ["library"];
     if (path.startsWith("/upload")) return ["upload"];
     if (path.startsWith("/media-manager")) return ["media-manager"];
+    if (path.startsWith("/person")) return ["persons"];
     if (path.startsWith("/tasks")) return ["tasks"];
     if (path.startsWith("/drm-license-audit")) return ["drm-license-audit"];
     if (path.startsWith("/access-logs")) return ["access-logs"];
@@ -106,6 +108,7 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
       (path.startsWith("/library") ||
         path.startsWith("/upload") ||
         path.startsWith("/media-manager") ||
+        path.startsWith("/person") ||
         path.startsWith("/tasks") ||
         path.startsWith("/drm-license-audit") ||
         path.startsWith("/access-logs") ||
@@ -210,6 +213,16 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
         label: (
           <Link to="/media-manager" onClick={onNavigate}>
             {t("nav.media_manager")}
+          </Link>
+        ),
+      },
+      {
+        key: "persons",
+        icon: <IdcardOutlined />,
+        title: t("nav.persons"),
+        label: (
+          <Link to="/persons" onClick={onNavigate}>
+            {t("nav.persons")}
           </Link>
         ),
       },
