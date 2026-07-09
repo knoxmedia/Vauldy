@@ -32,7 +32,8 @@ CREATE TABLE transcode_task (
     status TEXT DEFAULT 'waiting',
     progress INTEGER DEFAULT 0,
     error_message TEXT,
-    output_path TEXT
+    output_path TEXT,
+    task_type TEXT NOT NULL DEFAULT 'batch'
 );
 `)
 	if err != nil {
@@ -259,4 +260,48 @@ func TestRunHLSSuccessAndFailure(t *testing.T) {
 			t.Fatalf("error_message should exist: %#v", errMsg)
 		}
 	})
+}
+
+func TestStartWaitingSkipsPretranscodeTasks(t *testing.T) {
+	t.Parallel()
+
+	db := newTranscodeTestDB(t)
+	_, err := db.Exec(`
+		CREATE TABLE media (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			file_id TEXT,
+			file_path TEXT
+		)`)
+	if err != nil {
+		t.Fatalf("create media table: %v", err)
+	}
+	_, err = db.Exec(`INSERT INTO media (file_id, file_path) VALUES ('f-pre', 'secret.enc')`)
+	if err != nil {
+		t.Fatalf("insert media: %v", err)
+	}
+	res, err := db.Exec(`INSERT INTO transcode_task (file_id, quality, status, task_type) VALUES ('f-pre', 'preset', 'waiting', 'pretranscode')`)
+	if err != nil {
+		t.Fatalf("insert pretranscode task: %v", err)
+	}
+	preID, _ := res.LastInsertId()
+
+	w := &Worker{
+		DB:           db,
+		FFmpegPath:   writeMockFFmpegRunner(t, false),
+		TranscodeDir: t.TempDir(),
+		Encoder:      EncoderX264,
+		running:      map[int64]context.CancelFunc{},
+	}
+	started := w.StartWaiting(context.Background(), 5)
+	if started != 0 {
+		t.Fatalf("expected 0 batch tasks started, got %d", started)
+	}
+
+	var status string
+	if err := db.QueryRow(`SELECT status FROM transcode_task WHERE id = ?`, preID).Scan(&status); err != nil {
+		t.Fatalf("query pretranscode task: %v", err)
+	}
+	if status != "waiting" {
+		t.Fatalf("pretranscode task should stay waiting, got %s", status)
+	}
 }

@@ -1,10 +1,6 @@
 /data/
-cmd/server/data/
 *.exe
 *.db
-*.db-shm
-*.db-wal
-*.salt
 *.7z
 bin/
 **/__pycache__/

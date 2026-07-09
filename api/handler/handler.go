@@ -13,10 +13,10 @@ import (
 	"knox-media/internal/doccover"
 	"knox-media/internal/jit/session"
 	"knox-media/internal/keyframe"
-	"knox-media/internal/keystore"
 	"knox-media/internal/lyrictask"
 	"knox-media/internal/photoclass"
 	"knox-media/internal/photoface"
+	"knox-media/internal/keystore"
 	"knox-media/internal/photogeocode"
 	"knox-media/internal/preview"
 	"knox-media/internal/storage"
@@ -26,16 +26,16 @@ import (
 )
 
 type Handler struct {
-	App                 *app.App
-	Worker              *transcode.Worker
-	PackageWorker       *transcode.PackageWorker
-	PreviewWorker       *preview.Worker
-	Subtitle            *subtitle.Service
-	Upload              *upload.Service
-	Instant             *scheduler.Scheduler
-	SessionManager      *session.Manager
-	AtrackWorker        *atrack.Worker
-	KeyframeWorker      *keyframe.Worker
+	App            *app.App
+	Worker         *transcode.Worker
+	PackageWorker  *transcode.PackageWorker
+	PreviewWorker  *preview.Worker
+	Subtitle       *subtitle.Service
+	Upload         *upload.Service
+	Instant        *scheduler.Scheduler
+	SessionManager *session.Manager
+	AtrackWorker   *atrack.Worker
+	KeyframeWorker *keyframe.Worker
 	LyricWorker         *lyrictask.Worker
 	PhotoClassifyWorker *photoclass.Worker
 	PhotoGeocode        *photogeocode.Service
@@ -46,8 +46,8 @@ type Handler struct {
 	AssetEncryptor      *storage.AssetEncryptor
 	DerivedStore        *storage.DerivedAssetStore
 	scanMu              sync.Mutex
-	scrapeRunMu         sync.Mutex
-	runningScans        map[int64]scanRuntime
+	scrapeRunMu    sync.Mutex
+	runningScans   map[int64]scanRuntime
 }
 
 func New(a *app.App, w *transcode.Worker, pkgw *transcode.PackageWorker, pw *preview.Worker, sub *subtitle.Service, u *upload.Service, instant *scheduler.Scheduler, sm *session.Manager, atw *atrack.Worker, kfw *keyframe.Worker, lw *lyrictask.Worker, pcw *photoclass.Worker, dcw *doccover.Worker, keyVault *keystore.Vault, assetEnc *storage.AssetEncryptor, derived *storage.DerivedAssetStore) *Handler {
