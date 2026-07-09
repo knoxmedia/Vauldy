@@ -22,14 +22,14 @@ func newTestRDB(t *testing.T) *redis.Client {
 }
 
 func TestPick_PrefersSourceHeight(t *testing.T) {
-	got := Pick(context.Background(), nil, 720, 0)
+	got := Pick(context.Background(), nil, 0, 720, 0)
 	if got.Height != 720 {
 		t.Fatalf("rung=%s height=%d, want 720p", got.Name, got.Height)
 	}
 }
 
 func TestPick_RespectsClientMaxHeight(t *testing.T) {
-	got := Pick(context.Background(), nil, 2160, 480)
+	got := Pick(context.Background(), nil, 0, 2160, 480)
 	if got.Height != 480 {
 		t.Fatalf("rung=%s height=%d, want 480", got.Name, got.Height)
 	}
@@ -41,7 +41,7 @@ func TestPick_DropsCapWhenLoadHigh(t *testing.T) {
 	if err := rdb.Set(ctx, "jit:metrics:cpu_percent", "92.0", 0).Err(); err != nil {
 		t.Fatalf("seed cpu: %v", err)
 	}
-	got := Pick(ctx, rdb, 1080, 0)
+	got := Pick(ctx, rdb, 0, 1080, 0)
 	if got.Height != 360 {
 		t.Fatalf("rung=%s height=%d, want 360 under high CPU", got.Name, got.Height)
 	}
@@ -52,9 +52,23 @@ func TestPick_GPULoadOverridesCPU(t *testing.T) {
 	ctx := context.Background()
 	_ = rdb.Set(ctx, "jit:metrics:cpu_percent", "10.0", 0).Err()
 	_ = rdb.Set(ctx, "jit:metrics:gpu_percent", "82.5", 0).Err()
-	got := Pick(ctx, rdb, 2160, 0)
+	got := Pick(ctx, rdb, 0, 2160, 0)
 	if got.Height > 480 {
 		t.Fatalf("rung=%s height=%d, want <=480 under high GPU", got.Name, got.Height)
+	}
+}
+
+func TestPick_PortraitSwaps720p(t *testing.T) {
+	got := Pick(context.Background(), nil, 720, 1280, 0)
+	if got.Width != 720 || got.Height != 1280 {
+		t.Fatalf("portrait 720p = %dx%d, want 720x1280", got.Width, got.Height)
+	}
+}
+
+func TestResolutionForBitratePortrait(t *testing.T) {
+	got := ResolutionForBitrate("2000k", 720, 1280)
+	if got != "720x1280" {
+		t.Fatalf("ResolutionForBitrate portrait = %q, want 720x1280", got)
 	}
 }
 

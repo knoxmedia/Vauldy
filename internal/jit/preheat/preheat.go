@@ -10,6 +10,7 @@ import (
 	"github.com/go-redis/redis/v8"
 
 	"knox-media/internal/jit/metrics"
+	"knox-media/internal/jit/profile"
 	models "knox-media/internal/model"
 )
 
@@ -68,21 +69,23 @@ func gpuTargetSegments(gpu float64) int {
 	}
 }
 
-func resolutionForBitrate(bitrate string) string {
-	switch bitrate {
-	case "8000k":
-		return "3840x2160"
-	case "4000k":
-		return "1920x1080"
-	case "2000k":
-		return "1280x720"
-	case "1000k":
-		return "854x480"
-	case "500k":
-		return "640x360"
-	default:
-		return "1280x720"
+func resolutionForBitrate(bitrate string, sourceWidth, sourceHeight int) string {
+	return profile.ResolutionForBitrate(bitrate, sourceWidth, sourceHeight)
+}
+
+func sourceDimensions(ctx context.Context, rdb *redis.Client, fileID string) (int, int) {
+	if rdb == nil || strings.TrimSpace(fileID) == "" {
+		return 0, 0
 	}
+	w, errW := rdb.HGet(ctx, "video:meta:"+fileID, "width").Int()
+	h, errH := rdb.HGet(ctx, "video:meta:"+fileID, "height").Int()
+	if errW != nil {
+		w = 0
+	}
+	if errH != nil {
+		h = 0
+	}
+	return w, h
 }
 
 // EnqueueInitialSegments pushes prefetch transcode jobs for the first N segments at the
@@ -101,6 +104,7 @@ func EnqueueInitialSegments(ctx context.Context, rdb *redis.Client, fileID strin
 	if br == "" {
 		br = "2000k"
 	}
+	srcW, srcH := sourceDimensions(ctx, rdb, fileID)
 	base := float64(time.Now().Unix()) * 1e6
 	now := time.Now().Unix()
 	for seg := 0; seg < n; seg++ {
@@ -108,7 +112,7 @@ func EnqueueInitialSegments(ctx context.Context, rdb *redis.Client, fileID strin
 			FileID:     fileID,
 			SegmentID:  seg,
 			Bitrate:    br,
-			Resolution: resolutionForBitrate(br),
+			Resolution: resolutionForBitrate(br, srcW, srcH),
 			Codec:      "",
 			Preset:     "veryfast",
 			SessionID:  "prefetch",

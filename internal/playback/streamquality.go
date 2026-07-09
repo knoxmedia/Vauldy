@@ -1,10 +1,11 @@
-// Package playback helpers interpret system playback options (e.g. home stream quality).
 package playback
 
 import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"knox-media/internal/jit/profile"
 )
 
 // HomeStreamLimit describes the configured maximum streaming quality cap.
@@ -76,7 +77,7 @@ func PickJITParams(srcHeight, srcWidth, clientMaxHeight int, limit HomeStreamLim
 	if clientMaxHeight > 0 && clientMaxHeight < targetH {
 		targetH = clientMaxHeight
 	}
-	return limit.BitrateFFmpeg, resolutionForHeight(targetH)
+	return limit.BitrateFFmpeg, profile.AdaptResolutionString(srcWidth, srcHeight, resolutionForHeight(targetH))
 }
 
 func pickAutoJITParams(srcHeight, srcWidth, clientMaxHeight int) (bitrate, resolution string) {
@@ -87,16 +88,19 @@ func pickAutoJITParams(srcHeight, srcWidth, clientMaxHeight int) (bitrate, resol
 	if clientMaxHeight > 0 && (maxH <= 0 || clientMaxHeight < maxH) {
 		maxH = clientMaxHeight
 	}
+	var w, h int
 	switch {
 	case maxH >= 1080:
-		return "4000k", "1920:1080"
+		bitrate, w, h = "4000k", 1920, 1080
 	case maxH >= 720:
-		return "2000k", "1280:720"
+		bitrate, w, h = "2000k", 1280, 720
 	case maxH >= 480:
-		return "1000k", "854:480"
+		bitrate, w, h = "1000k", 854, 480
 	default:
-		return "500k", "640:360"
+		bitrate, w, h = "500k", 640, 360
 	}
+	w, h = profile.AdaptLandscapeDimensions(srcWidth, srcHeight, w, h)
+	return bitrate, fmt.Sprintf("%d:%d", w, h)
 }
 
 func resolutionHeight(resKey string) int {

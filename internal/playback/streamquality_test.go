@@ -71,3 +71,11 @@ func TestPickJITParamsAuto(t *testing.T) {
 		t.Fatalf("PickJITParams auto client cap = (%q,%q), want (2000k,1280:720)", bitrate, resolution)
 	}
 }
+
+func TestPickJITParamsAutoPortrait(t *testing.T) {
+	limit := HomeStreamLimit{Auto: true}
+	bitrate, resolution := PickJITParams(1280, 720, 0, limit)
+	if bitrate != "4000k" || resolution != "1080:1920" {
+		t.Fatalf("PickJITParams portrait auto = (%q,%q), want (4000k,1080:1920)", bitrate, resolution)
+	}
+}
