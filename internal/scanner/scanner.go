@@ -79,6 +79,7 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 	photoLibrary := photoparse.IsPhotoLibraryType(libraryType)
 	documentLibrary := docparse.IsDocumentLibraryType(libraryType)
 	excludePatterns := s.loadScanExcludePatterns(libraryID)
+	pretranscodeRoots := s.loadPretranscodeOutputRoots()
 	if _, err := s.DB.Exec(`DELETE FROM library_node WHERE library_id = ?`, libraryID); err != nil {
 		return 0, err
 	}
@@ -133,12 +134,12 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 				if rel != "" {
 					_ = s.upsertNode(libraryID, parentPath, nodePath, nodeName, "dir", nil)
 				}
-				if shouldSkipScanDir(path) {
+				if shouldSkipScanDir(path) || shouldSkipPretranscodePath(path, pretranscodeRoots) {
 					return filepath.SkipDir
 				}
 				return nil
 			}
-			if shouldSkipScanFile(path) {
+			if shouldSkipScanFile(path) || shouldSkipPretranscodePath(path, pretranscodeRoots) {
 				return nil
 			}
 			st, stErr := os.Stat(path)
@@ -414,6 +415,58 @@ func shouldSkipScanFile(path string) bool {
 		}
 	}
 	return false
+}
+
+func shouldSkipPretranscodePath(path string, dbRoots []string) bool {
+	if fileutil.IsPretranscodeOutputPath(path) {
+		return true
+	}
+	return pathUnderPretranscodeRoots(path, dbRoots)
+}
+
+func pathUnderPretranscodeRoots(path string, roots []string) bool {
+	if len(roots) == 0 {
+		return false
+	}
+	norm := normalizeMediaPath(path)
+	if norm == "" {
+		return false
+	}
+	sep := string(filepath.Separator)
+	for _, root := range roots {
+		root = normalizeMediaPath(root)
+		if root == "" {
+			continue
+		}
+		if norm == root || strings.HasPrefix(norm, root+sep) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Scanner) loadPretranscodeOutputRoots() []string {
+	if s == nil || s.DB == nil {
+		return nil
+	}
+	rows, err := s.DB.Query(`SELECT DISTINCT COALESCE(output_path,'') FROM pretranscode_task_meta WHERE COALESCE(output_path,'') != ''`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	roots := make([]string, 0, 8)
+	for rows.Next() {
+		var root string
+		if rows.Scan(&root) != nil {
+			continue
+		}
+		root = strings.TrimSpace(root)
+		if root == "" {
+			continue
+		}
+		roots = append(roots, root)
+	}
+	return roots
 }
 
 func nullInt(v int) any {

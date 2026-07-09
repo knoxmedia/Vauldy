@@ -134,6 +134,63 @@ func TestScanLibraryFoldersAddsMediaAndNodes(t *testing.T) {
 	}
 }
 
+func TestScanLibraryFoldersSkipsPretranscodeOutput(t *testing.T) {
+	t.Parallel()
+
+	db := newScannerTestDB(t)
+	root := t.TempDir()
+	sourcePath := filepath.Join(root, "Movie.2025.mp4")
+	if err := os.WriteFile(sourcePath, []byte("source-video"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	pretranscodeDir := filepath.Join(root, "Movie.2025.pretranscode", "preset1", "720p")
+	if err := os.MkdirAll(pretranscodeDir, 0o755); err != nil {
+		t.Fatalf("mkdir pretranscode output: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pretranscodeDir, "720p.m3u8"), []byte("#EXTM3U"), 0o644); err != nil {
+		t.Fatalf("write playlist: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pretranscodeDir, "seg000.ts"), []byte("segment"), 0o644); err != nil {
+		t.Fatalf("write segment: %v", err)
+	}
+
+	addedCalls := 0
+	s := &Scanner{
+		DB:       db,
+		SkipHash: true,
+		OnMediaAdded: func(int64, string, string) {
+			addedCalls++
+		},
+	}
+
+	added, err := s.ScanLibraryFoldersWithContext(context.Background(), 12, []string{root})
+	if err != nil {
+		t.Fatalf("scan error: %v", err)
+	}
+	if added != 1 {
+		t.Fatalf("added=%d want 1", added)
+	}
+	if addedCalls != 1 {
+		t.Fatalf("OnMediaAdded calls=%d want 1", addedCalls)
+	}
+
+	var mediaCount int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM media WHERE library_id = ?`, 12).Scan(&mediaCount); err != nil {
+		t.Fatalf("query media count: %v", err)
+	}
+	if mediaCount != 1 {
+		t.Fatalf("media count=%d want 1", mediaCount)
+	}
+
+	var storedPath string
+	if err := db.QueryRow(`SELECT file_path FROM media WHERE library_id = ? LIMIT 1`, 12).Scan(&storedPath); err != nil {
+		t.Fatalf("query file_path: %v", err)
+	}
+	if normalizeMediaPath(storedPath) != normalizeMediaPath(sourcePath) {
+		t.Fatalf("stored path=%q want %q", storedPath, sourcePath)
+	}
+}
+
 func TestScanLibraryFoldersDedupOverlappingRoots(t *testing.T) {
 	t.Parallel()
 
