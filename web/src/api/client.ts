@@ -118,8 +118,10 @@ export type MediaItem = {
   photo_tag_ids?: string[];
   /** True when meaningful scrape metadata exists. */
   scraped?: boolean;
-  /** Knox 9527 envelope encryption at rest. */
-  encrypted_asset?: boolean;
+    /** Knox 9527 envelope encryption at rest. */
+    encrypted_asset?: boolean;
+    /** Video pretranscode requires an on-disk plaintext source file. */
+    optimization_available?: boolean;
   /** Populated for audio tracks linked in music_track. */
   music_album_id?: number;
   music_album_title?: string;

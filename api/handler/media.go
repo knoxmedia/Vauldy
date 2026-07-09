@@ -13,6 +13,7 @@ import (
 	"knox-media/api/middleware"
 	"knox-media/internal/photoclass"
 	"knox-media/internal/scraper"
+	"knox-media/internal/storage"
 	"knox-media/internal/textencoding"
 )
 
@@ -45,6 +46,7 @@ func (h *Handler) ListMedia(c *gin.Context) {
 	photoTagID := strings.TrimSpace(c.Query("photo_tag"))
 	photoPlaceID := strings.TrimSpace(c.Query("photo_place"))
 	photoPersonID := strings.TrimSpace(c.Query("photo_person"))
+	db := h.App.DB
 	if lib != "" && fileType == "image" {
 		if libID, err := strconv.ParseInt(lib, 10, 64); err == nil && libID > 0 {
 			_, _ = photoclass.RepairLibraryPhotoTags(h.App.DB, libID)
@@ -167,6 +169,10 @@ func (h *Handler) ListMedia(c *gin.Context) {
 		if photoTagID != "" && photoTagID != "all" && !photoTagIDMatches(photoTagID, photoTags, photoTagIDs) {
 			continue
 		}
+		optimizationAvailable := false
+		if strings.EqualFold(ftype.String, "video") {
+			optimizationAvailable = storage.PlaintextSourceAvailable(db, mid, libID.Int64, path.String)
+		}
 		items = append(items, gin.H{
 			"id": mid, "library_id": libID.Int64, "file_id": fileID.String,
 			"title": title.String, "original_title": orig.String, "file_path": path.String,
@@ -175,6 +181,7 @@ func (h *Handler) ListMedia(c *gin.Context) {
 			"last_play_at": lastPlayAt.String, "completed": playCompleted.Int64, "release_date": releaseDate.String, "year": releaseYear.Int64,
 			"poster_url": posterURL.String, "backdrop_url": backdropURL.String, "scraped": scraped.Int64 == 1,
 			"encrypted_asset": encryptedAsset.Int64 == 1,
+			"optimization_available": optimizationAvailable,
 			"photo_taken_at": photoTakenAt.String,
 			"photo_tags":     photoTags,
 			"photo_tag_ids":  photoTagIDs,
@@ -233,12 +240,23 @@ func (h *Handler) GetMedia(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	var encryptedAsset int64
+	_ = h.App.DB.QueryRow(`SELECT CASE WHEN EXISTS (
+			SELECT 1 FROM media_encrypted_assets mea
+			WHERE mea.media_id = ? AND mea.status = 'encrypted'
+		) OR lower(?) LIKE '%.enc' THEN 1 ELSE 0 END`, mid, path.String).Scan(&encryptedAsset)
+	optimizationAvailable := false
+	if strings.EqualFold(ftype.String, "video") {
+		optimizationAvailable = storage.PlaintextSourceAvailable(h.App.DB, mid, libID.Int64, path.String)
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"id": mid, "library_id": libID.Int64, "file_id": fileID.String,
 		"title": title.String, "original_title": orig.String, "file_path": path.String,
 		"file_type": ftype.String, "duration": dur.Int64, "width": w.Int64, "height": hei.Int64,
 		"bitrate": br.Int64, "md5": md5.String, "format": format.String, "meta_json": meta.String,
 		"status": status.String, "created_at": created.String,
+		"encrypted_asset": encryptedAsset == 1,
+		"optimization_available": optimizationAvailable,
 	})
 }
 

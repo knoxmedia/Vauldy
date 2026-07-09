@@ -25,16 +25,22 @@ import (
 	"knox-media/internal/app"
 	"knox-media/internal/atrack"
 	"knox-media/internal/config"
+	"knox-media/internal/coreiface"
 	"knox-media/internal/doccover"
-	"knox-media/internal/jit/hwenc"
 	"knox-media/internal/imagethumb"
-	jitsession "knox-media/internal/jit/session"
+	"knox-media/internal/jit/hwenc"
 	"knox-media/internal/jit/ingestprepare"
-	"knox-media/internal/keystore"
 	jitmetrics "knox-media/internal/jit/metrics"
+	jitsession "knox-media/internal/jit/session"
 	"knox-media/internal/keyframe"
+	"knox-media/internal/keystore"
+	// Enterprise module imports — their init() registers into
+	// coreiface.EnterpriseModules. The community build excludes these
+	// imports (and the packages themselves), leaving EnterpriseModules empty.
+	_ "knox-media/internal/license"
 	"knox-media/internal/lyrictask"
 	"knox-media/internal/monitor"
+	_ "knox-media/internal/pretranscode"
 	"knox-media/internal/photoclass"
 	"knox-media/internal/photoface"
 	"knox-media/internal/preview"
@@ -115,23 +121,23 @@ func main() {
 			ocrScript = abs
 		}
 	}
-subSvc := subtitle.NewService(db, keyVault, derivedStore, filepath.Dir(cfgPath), cfg.FFmpeg.FFmpegPath, cfg.FFmpeg.FFprobePath, cfg.Data.Subtitle, subtitle.ASRConfig{
-	Provider:    cfg.Subtitle.ASR.Provider,
-	WhisperPath: cfg.Subtitle.ASR.WhisperPath,
-	ExtraArgs:   cfg.Subtitle.ASR.ExtraArgs,
-	Shell:       cfg.Subtitle.ASR.Shell,
-}, subtitle.OCRConfig{
-	Enabled:        cfg.Subtitle.GraphicalOCR.Enabled,
-	TesseractPath:  cfg.Subtitle.GraphicalOCR.TesseractPath,
-	TessdataPrefix: cfg.Subtitle.GraphicalOCR.TessdataPrefix,
-	Languages:      cfg.Subtitle.GraphicalOCR.Languages,
-	PythonPath:     cfg.Subtitle.GraphicalOCR.PythonPath,
-	ScriptPath:     ocrScript,
-	PgsripPath:     cfg.Subtitle.GraphicalOCR.PgsripPath,
-	MkvextractPath: cfg.Subtitle.GraphicalOCR.MkvextractPath,
-	MkvmergePath:   cfg.Subtitle.GraphicalOCR.MkvmergePath,
-})
-subSvc.AIProofread = cfg.SubtitleAIProofreadEnabled()
+	subSvc := subtitle.NewService(db, keyVault, derivedStore, filepath.Dir(cfgPath), cfg.FFmpeg.FFmpegPath, cfg.FFmpeg.FFprobePath, cfg.Data.Subtitle, subtitle.ASRConfig{
+		Provider:    cfg.Subtitle.ASR.Provider,
+		WhisperPath: cfg.Subtitle.ASR.WhisperPath,
+		ExtraArgs:   cfg.Subtitle.ASR.ExtraArgs,
+		Shell:       cfg.Subtitle.ASR.Shell,
+	}, subtitle.OCRConfig{
+		Enabled:        cfg.Subtitle.GraphicalOCR.Enabled,
+		TesseractPath:  cfg.Subtitle.GraphicalOCR.TesseractPath,
+		TessdataPrefix: cfg.Subtitle.GraphicalOCR.TessdataPrefix,
+		Languages:      cfg.Subtitle.GraphicalOCR.Languages,
+		PythonPath:     cfg.Subtitle.GraphicalOCR.PythonPath,
+		ScriptPath:     ocrScript,
+		PgsripPath:     cfg.Subtitle.GraphicalOCR.PgsripPath,
+		MkvextractPath: cfg.Subtitle.GraphicalOCR.MkvextractPath,
+		MkvmergePath:   cfg.Subtitle.GraphicalOCR.MkvmergePath,
+	})
+	subSvc.AIProofread = cfg.SubtitleAIProofreadEnabled()
 	up := &upload.Service{UploadDir: cfg.Data.Upload, ChunksDir: cfg.Data.Chunks}
 	atrackWorker := atrack.NewWorker(db, keyVault, derivedStore, cfg.FFmpeg.FFmpegPath, cfg.FFmpeg.FFprobePath, cfg.Data.ATracks)
 	keyframeWorker := keyframe.NewWorker(db, keyVault, derivedStore, cfg.FFmpeg.FFprobePath, cfg.Data.Keyframes)
@@ -248,6 +254,26 @@ subSvc.AIProofread = cfg.SubtitleAIProofreadEnabled()
 	go mon.Start(context.Background())
 
 	engine := api.NewEngine(cfg, application, worker, packageWorker, previewWorker, subSvc, up, instantScheduler, sessionMgr, atrackWorker, keyframeWorker, lyricWorker, photoClassifyWorker, docCoverWorker)
+
+	// Initialize commercial enterprise modules (license + pretranscode). The
+	// community build leaves EnterpriseModules empty, so this loop is a no-op.
+	enterpriseCtx, enterpriseCancel := context.WithCancel(context.Background())
+	defer enterpriseCancel()
+	for _, mod := range coreiface.EnterpriseModules {
+		if err := mod.Init(enterpriseCtx, coreiface.ModuleDeps{
+			DB:           db,
+			Config:       cfg,
+			Vault:        keyVault,
+			TranscodeDir: cfg.Data.Transcode,
+			FFmpegPath:   cfg.FFmpeg.FFmpegPath,
+			FFprobePath:  cfg.FFmpeg.FFprobePath,
+		}); err != nil {
+			log.Printf("enterprise module %s init failed: %v", mod.Name(), err)
+		} else {
+			log.Printf("enterprise module %s initialized", mod.Name())
+		}
+	}
+
 	log.Printf("knox-media listening on http://%s", cfg.Addr())
 	if err := engine.Run(cfg.Addr()); err != nil {
 		log.Fatal(err)

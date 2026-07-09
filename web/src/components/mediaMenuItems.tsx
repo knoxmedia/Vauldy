@@ -120,6 +120,10 @@ export function buildMediaMenuItems(
     encryptedAsset?: boolean;
     /** 加密完成后刷新列表 */
     afterEncryptAsset?: () => void | Promise<void>;
+    /** 媒体库视频：显示「优化」菜单项并打开优化对话框 */
+    onOpenOptimization?: (mediaId: number) => void;
+    /** 预转码需要磁盘上的明文源文件；加密且明文已删除时为 false */
+    optimizationAvailable?: boolean;
   },
 ): MenuProps {
   const preset = extra?.preset ?? "full";
@@ -145,6 +149,8 @@ export function buildMediaMenuItems(
   const showEncryptAsset = extra?.showEncryptAsset ?? false;
   const encryptedAsset = extra?.encryptedAsset ?? false;
   const afterEncryptAsset = extra?.afterEncryptAsset;
+  const onOpenOptimization = extra?.onOpenOptimization;
+  const optimizationAvailable = extra?.optimizationAvailable ?? true;
 
   const addToChildren: MenuProps["items"] = [
     {
@@ -208,7 +214,16 @@ export function buildMediaMenuItems(
       { type: "divider" as const },
       { key: "refreshMetadata", label: t("components.media_menu.refresh_metadata") },
       { key: "analyze", label: t("components.media_menu.analyze") },
-      { key: "optimize", label: t("components.media_menu.optimize") },
+      ...(onOpenOptimization
+        ? [
+            {
+              key: "optimize",
+              label: t("components.media_menu.optimize"),
+              disabled: !optimizationAvailable,
+              title: !optimizationAvailable ? t("components.media_menu.optimize_unavailable_hint") : undefined,
+            },
+          ]
+        : []),
       { type: "divider" as const },
       { key: "recognizeSubtitles", label: t("components.media_menu.recognize_subtitles") },
       { key: "proofreadSubtitles", label: t("components.media_menu.proofread_subtitles") },
@@ -256,7 +271,16 @@ export function buildMediaMenuItems(
           { key: "unmatch", label: t("components.media_menu.unmatch") },
         ]
       : []),
-    { key: "optimize", label: t("components.media_menu.optimize") },
+    ...(onOpenOptimization
+      ? [
+          {
+            key: "optimize",
+            label: t("components.media_menu.optimize"),
+            disabled: !optimizationAvailable,
+            title: !optimizationAvailable ? t("components.media_menu.optimize_unavailable_hint") : undefined,
+          },
+        ]
+      : []),
     { type: "divider" as const },
     { key: "viewHistory", label: t("components.media_menu.view_history") },
     { key: "getInfo", label: t("components.media_menu.get_info_view") },
@@ -354,9 +378,13 @@ export function buildMediaMenuItems(
             .catch(() => message.error(t("components.media_menu.operation_failed")));
           break;
         case "optimize":
-          transcodeAsync(r.id, "optimize")
-            .then(() => message.success(t("components.media_menu.optimize_task_created")))
-            .catch(() => message.error(t("components.media_menu.operation_failed")));
+          if (!optimizationAvailable) {
+            message.warning(t("components.media_menu.optimize_unavailable_hint"));
+            break;
+          }
+          if (onOpenOptimization) {
+            onOpenOptimization(r.id);
+          }
           break;
         case "recognizeSubtitles":
           recognizeMediaSubtitles(r.id)

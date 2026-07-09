@@ -11,6 +11,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// Edition identifies the build variant. "commercial" for knox-media, "community" for Vauldy.
+// Override this via -ldflags "-X config.Edition=community" for community builds.
+var Edition = "commercial"
+
 type Config struct {
 	Server        ServerConfig             `yaml:"server"`
 	Data          DataConfig               `yaml:"data"`

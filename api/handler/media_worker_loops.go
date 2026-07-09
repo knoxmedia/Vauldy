@@ -170,7 +170,7 @@ func (h *Handler) runTranscodeWorkerOnce() {
 	var waiting int
 	_ = h.App.DB.QueryRow(`
 		SELECT (
-			(SELECT COUNT(1) FROM transcode_task WHERE status = 'waiting') +
+			(SELECT COUNT(1) FROM transcode_task WHERE status = 'waiting' AND COALESCE(task_type,'batch') = 'batch') +
 			(SELECT COUNT(1) FROM package_task WHERE status = 'waiting')
 		)
 	`).Scan(&waiting)
@@ -220,7 +220,7 @@ func (h *Handler) countRunningBackgroundTranscodeJobs() int {
 	var n int
 	_ = h.App.DB.QueryRow(`
 		SELECT (
-			(SELECT COUNT(1) FROM transcode_task WHERE status = 'running') +
+			(SELECT COUNT(1) FROM transcode_task WHERE status = 'running' AND COALESCE(task_type,'batch') = 'batch') +
 			(SELECT COUNT(1) FROM package_task WHERE status = 'running')
 		)
 	`).Scan(&n)

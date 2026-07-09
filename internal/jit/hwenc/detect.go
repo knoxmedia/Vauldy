@@ -18,6 +18,12 @@ const (
 	H264AMF   ID = "h264_amf"
 	H264NVENC ID = "h264_nvenc"
 	H264VAAPI ID = "h264_vaapi"
+
+	Libx265   ID = "libx265"
+	HEVCQSV   ID = "hevc_qsv"
+	HEVCAMF   ID = "hevc_amf"
+	HEVCNVENC ID = "hevc_nvenc"
+	HEVCVAAPI ID = "hevc_vaapi"
 )
 
 // HardwareAccelOption is the value stored in system options (transcoder.hardware_acceleration).
@@ -184,6 +190,75 @@ func VAAPIDevice() string {
 	return "/dev/dri/renderD128"
 }
 
+// EncoderInfo describes a single available encoder for the admin UI.
+type EncoderInfo struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Family string `json:"family"` // "h264" or "h265"
+	Type   string `json:"type"`   // "software" or "hardware"
+}
+
+// ListAvailableEncoders returns every H.264 / H.265 encoder (software + detected
+// hardware) that FFmpeg on this host supports.  Designed for the admin UI codec
+// dropdown so users only see codecs that will actually work.
+func ListAvailableEncoders(ffmpegPath string) []EncoderInfo {
+	encoders := make([]EncoderInfo, 0, 10)
+	// Software encoders are always available if FFmpeg exists.
+	encoders = append(encoders,
+		EncoderInfo{ID: string(Libx264), Name: "H.264 (libx264)", Family: "h264", Type: "software"},
+		EncoderInfo{ID: string(Libx265), Name: "H.265 (libx265)", Family: "h265", Type: "software"},
+	)
+
+	ffout, ok := ffmpegEncodersLower(ffmpegPath)
+	if !ok {
+		return encoders
+	}
+	ctx := currentDetectContext()
+
+	// H.264 hardware encoders
+	if ctx.NvidiaPresent && strings.Contains(ffout, " h264_nvenc") {
+		encoders = append(encoders, EncoderInfo{ID: string(H264NVENC), Name: "H.264 NVENC", Family: "h264", Type: "hardware"})
+	}
+	if ctx.IntelPresent && strings.Contains(ffout, " h264_qsv") {
+		encoders = append(encoders, EncoderInfo{ID: string(H264QSV), Name: "H.264 QSV", Family: "h264", Type: "hardware"})
+	}
+	if ctx.GOOS == "linux" && ctx.RenderNodeOK && strings.Contains(ffout, " h264_vaapi") {
+		encoders = append(encoders, EncoderInfo{ID: string(H264VAAPI), Name: "H.264 VAAPI", Family: "h264", Type: "hardware"})
+	}
+	if ctx.AMDPresent && strings.Contains(ffout, " h264_amf") {
+		encoders = append(encoders, EncoderInfo{ID: string(H264AMF), Name: "H.264 AMF", Family: "h264", Type: "hardware"})
+	}
+
+	// H.265 hardware encoders
+	if ctx.NvidiaPresent && strings.Contains(ffout, " hevc_nvenc") {
+		encoders = append(encoders, EncoderInfo{ID: string(HEVCNVENC), Name: "H.265 NVENC", Family: "h265", Type: "hardware"})
+	}
+	if ctx.IntelPresent && strings.Contains(ffout, " hevc_qsv") {
+		encoders = append(encoders, EncoderInfo{ID: string(HEVCQSV), Name: "H.265 QSV", Family: "h265", Type: "hardware"})
+	}
+	if ctx.GOOS == "linux" && ctx.RenderNodeOK && strings.Contains(ffout, " hevc_vaapi") {
+		encoders = append(encoders, EncoderInfo{ID: string(HEVCVAAPI), Name: "H.265 VAAPI", Family: "h265", Type: "hardware"})
+	}
+	if ctx.AMDPresent && strings.Contains(ffout, " hevc_amf") {
+		encoders = append(encoders, EncoderInfo{ID: string(HEVCAMF), Name: "H.265 AMF", Family: "h265", Type: "hardware"})
+	}
+
+	return encoders
+}
+
+// EncoderListedInFFmpeg reports whether ffmpeg -encoders lists the given codec id.
+func EncoderListedInFFmpeg(ffmpegPath, encoderID string) bool {
+	encoderID = strings.ToLower(strings.TrimSpace(encoderID))
+	if encoderID == "" {
+		return false
+	}
+	ffout, ok := ffmpegEncodersLower(ffmpegPath)
+	if !ok {
+		return false
+	}
+	return strings.Contains(ffout, " "+encoderID)
+}
+
 // ParseEncoder maps env/config strings to ID; second return is false if unknown.
 func ParseEncoder(s string) (ID, bool) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
@@ -199,6 +274,16 @@ func ParseEncoder(s string) (ID, bool) {
 		return H264NVENC, true
 	case "h264_vaapi", "vaapi":
 		return H264VAAPI, true
+	case "hevc_nvenc":
+		return HEVCNVENC, true
+	case "hevc_amf":
+		return HEVCAMF, true
+	case "hevc_qsv":
+		return HEVCQSV, true
+	case "hevc_vaapi":
+		return HEVCVAAPI, true
+	case "libx265", "x265", "hevc":
+		return Libx265, true
 	default:
 		return "", false
 	}

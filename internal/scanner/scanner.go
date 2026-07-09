@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,7 +14,9 @@ import (
 	"github.com/google/uuid"
 
 	kcrypto "knox-media/internal/crypto"
+	"knox-media/internal/coreiface"
 	"knox-media/internal/docparse"
+	"knox-media/internal/mediastore"
 	"knox-media/internal/musicparse"
 	"knox-media/internal/musicstore"
 	"knox-media/internal/photoparse"
@@ -37,6 +40,8 @@ type Scanner struct {
 	FFprobeExtra []string
 	OnFile       func(path string, err error)
 	OnMediaAdded func(mediaID int64, title string, fileType string)
+	// OnMediaRemoved is invoked after a stale catalog row is removed during sync.
+	OnMediaRemoved func(mediaID int64, filePath string)
 	// OnDocumentScanned is invoked after a document is inserted or updated during scan.
 	OnDocumentScanned func(mediaID int64)
 }
@@ -92,7 +97,16 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 			default:
 			}
 			if walkErr != nil {
-				return walkErr
+				if errors.Is(walkErr, context.Canceled) || errors.Is(walkErr, context.DeadlineExceeded) {
+					return walkErr
+				}
+				if s.OnFile != nil {
+					s.OnFile(path, walkErr)
+				}
+				if d != nil && d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
 			}
 			rel, relErr := filepath.Rel(rootPath, path)
 			if relErr != nil {
@@ -293,6 +307,11 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 			if documentLibrary && ft == "document" {
 				metaJSON = docparse.MergeDocumentMetaJSON(metaJSON, docMeta)
 			}
+			if existingMediaID == 0 {
+				if adopted := s.tryAdoptRenamedMedia(libraryID, normPath, seenMedia, ft, dur, w, h, md5sum); adopted > 0 {
+					existingMediaID = adopted
+				}
+			}
 			var res sql.Result
 			var e error
 			if existingMediaID > 0 {
@@ -351,28 +370,7 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 			return added, err
 		}
 	}
-	// sync deletion: remove files no longer present
-	rows, qerr := s.DB.Query(`SELECT file_path FROM media WHERE library_id = ?`, libraryID)
-	if qerr == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var p sql.NullString
-			if rows.Scan(&p) != nil || !p.Valid || p.String == "" {
-				continue
-			}
-			if _, ok := seenMedia[normalizeMediaPath(p.String)]; !ok {
-				var mid int64
-				if s.DB.QueryRow(`SELECT id FROM media WHERE library_id = ? AND file_path = ?`, libraryID, p.String).Scan(&mid) == nil && mid > 0 {
-					if storage.MediaFileStillPresentAfterEncrypt(s.DB, mid, p.String, seenMedia) {
-						continue
-					}
-					tvstore.CleanupMedia(s.DB, mid)
-					musicstore.CleanupMedia(s.DB, mid)
-				}
-				_, _ = s.DB.Exec(`DELETE FROM media WHERE library_id = ? AND file_path = ?`, libraryID, p.String)
-			}
-		}
-	}
+	s.syncMissingMedia(ctx, libraryID, cleanRoots, seenMedia)
 	if tvLibrary {
 		_, _ = tvstore.BackfillLibraryTV(s.DB, libraryID)
 		tvstore.PruneOrphansForLibrary(s.DB, libraryID)
@@ -578,4 +576,172 @@ func padEp(n int) string {
 		return fmt.Sprintf("0%d", n)
 	}
 	return fmt.Sprintf("%d", n)
+}
+
+func (s *Scanner) syncMissingMedia(ctx context.Context, libraryID int64, roots []string, seenMedia map[string]struct{}) {
+	if s == nil || s.DB == nil || libraryID <= 0 {
+		return
+	}
+	rows, err := s.DB.Query(`SELECT id, COALESCE(file_id,''), COALESCE(file_path,'') FROM media WHERE library_id = ?`, libraryID)
+	if err != nil {
+		return
+	}
+	type staleMedia struct {
+		id       int64
+		fileID   string
+		filePath string
+	}
+	var stale []staleMedia
+	for rows.Next() {
+		var mediaID int64
+		var fileID, filePath string
+		if rows.Scan(&mediaID, &fileID, &filePath) != nil || mediaID <= 0 || strings.TrimSpace(filePath) == "" {
+			continue
+		}
+		if _, ok := seenMedia[normalizeMediaPath(filePath)]; ok {
+			continue
+		}
+		if !s.mediaPathUnderRoots(filePath, roots) {
+			continue
+		}
+		if storage.MediaFileStillPresentAfterEncrypt(s.DB, mediaID, filePath, seenMedia) {
+			continue
+		}
+		if mediaPathExistsOnDisk(filePath) {
+			continue
+		}
+		stale = append(stale, staleMedia{id: mediaID, fileID: fileID, filePath: filePath})
+	}
+	_ = rows.Close()
+
+	for _, item := range stale {
+		if coreiface.PretranscodeMod != nil && strings.TrimSpace(item.fileID) != "" {
+			_ = coreiface.PretranscodeMod.OnMediaDeleted(ctx, item.id, []string{item.fileID})
+		}
+		tvstore.CleanupMedia(s.DB, item.id)
+		musicstore.CleanupMedia(s.DB, item.id)
+		if err := mediastore.DeleteCatalog(s.DB, item.id, item.fileID); err != nil {
+			if s.OnFile != nil {
+				s.OnFile(item.filePath, err)
+			}
+			continue
+		}
+		if s.OnMediaRemoved != nil {
+			s.OnMediaRemoved(item.id, item.filePath)
+		}
+	}
+}
+
+func (s *Scanner) mediaPathUnderRoots(filePath string, roots []string) bool {
+	norm := normalizeMediaPath(filePath)
+	if norm == "" {
+		return false
+	}
+	sep := string(filepath.Separator)
+	for _, root := range roots {
+		rootNorm := normalizeMediaPath(root)
+		if rootNorm == "" {
+			continue
+		}
+		if norm == rootNorm || strings.HasPrefix(norm, rootNorm+sep) {
+			return true
+		}
+	}
+	return false
+}
+
+func mediaPathExistsOnDisk(filePath string) bool {
+	filePath = strings.TrimSpace(filePath)
+	if filePath == "" {
+		return false
+	}
+	if _, err := os.Stat(filePath); err == nil {
+		return true
+	}
+	return false
+}
+
+func (s *Scanner) tryAdoptRenamedMedia(libraryID int64, normPath string, seenMedia map[string]struct{}, ft string, dur, w, h int, md5sum sql.NullString) int64 {
+	candidate := s.findRenamedMediaCandidate(libraryID, normPath, seenMedia, ft, dur, w, h, md5sum)
+	if candidate <= 0 {
+		return 0
+	}
+	_, _ = s.DB.Exec(`UPDATE media SET file_path = ?, status = 'active' WHERE id = ?`, normPath, candidate)
+	_, _ = s.DB.Exec(`UPDATE media_encrypted_assets SET plain_path = ? WHERE media_id = ? AND status = 'encrypted'`, normPath, candidate)
+	return candidate
+}
+
+func (s *Scanner) findRenamedMediaCandidate(libraryID int64, normPath string, seenMedia map[string]struct{}, ft string, dur, w, h int, md5sum sql.NullString) int64 {
+	if s == nil || s.DB == nil || libraryID <= 0 || normPath == "" {
+		return 0
+	}
+	if md5sum.Valid {
+		var id int64
+		var oldPath string
+		if err := s.DB.QueryRow(`SELECT id, file_path FROM media WHERE library_id = ? AND md5 = ? LIMIT 1`, libraryID, md5sum.String).Scan(&id, &oldPath); err == nil && id > 0 {
+			if normalizeMediaPath(oldPath) != normPath && !mediaPathExistsOnDisk(oldPath) {
+				return id
+			}
+		}
+	}
+	if ft != "video" && ft != "audio" {
+		return 0
+	}
+	if dur <= 0 && w <= 0 && h <= 0 {
+		return 0
+	}
+	rows, err := s.DB.Query(`SELECT id, file_path, COALESCE(duration,0), COALESCE(width,0), COALESCE(height,0) FROM media WHERE library_id = ? AND file_type = ?`, libraryID, ft)
+	if err != nil {
+		return 0
+	}
+	defer rows.Close()
+	var candidate int64
+	for rows.Next() {
+		var id, rowDur, rowW, rowH int
+		var oldPath string
+		if rows.Scan(&id, &oldPath, &rowDur, &rowW, &rowH) != nil || id <= 0 {
+			continue
+		}
+		if normalizeMediaPath(oldPath) == normPath {
+			continue
+		}
+		if _, ok := seenMedia[normalizeMediaPath(oldPath)]; ok {
+			continue
+		}
+		if mediaPathExistsOnDisk(oldPath) {
+			continue
+		}
+		if !metadataMatchesForRename(dur, w, h, rowDur, rowW, rowH) {
+			continue
+		}
+		if candidate > 0 {
+			return 0
+		}
+		candidate = int64(id)
+	}
+	return candidate
+}
+
+func metadataMatchesForRename(dur, w, h, rowDur, rowW, rowH int) bool {
+	matched := 0
+	required := 0
+	if dur > 0 {
+		required++
+		if rowDur == dur {
+			matched++
+		}
+	}
+	if w > 0 {
+		required++
+		if rowW == w {
+			matched++
+		}
+	}
+	if h > 0 {
+		required++
+		if rowH == h {
+			matched++
+		}
+	}
+	return required > 0 && matched == required
 }

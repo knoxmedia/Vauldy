@@ -69,9 +69,9 @@ func (h *Handler) PutBranding(c *gin.Context) {
 	h.App.Config.Branding.AppName = appName
 	h.App.Config.Branding.FaviconPath = faviconPath
 	c.JSON(http.StatusOK, gin.H{
-		"ok":          true,
-		"app_name":    appName,
+		"ok":           true,
+		"app_name":     appName,
 		"favicon_path": faviconPath,
-		"favicon_url": "/favicon.svg",
+		"favicon_url":  "/favicon.svg",
 	})
 }

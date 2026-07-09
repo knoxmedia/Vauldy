@@ -588,6 +588,25 @@ CREATE TABLE IF NOT EXISTS system_options (
 );
 `
 
+// Migration is a single idempotent schema migration step. Community
+// migrations live inline in OpenSQLite; enterprise migrations are registered
+// via RegisterEnterpriseMigration so the community build excludes them.
+type Migration struct {
+	ID string
+	Up  func(db *sql.DB) error
+}
+
+// enterpriseMigrations is appended to by commercial init() functions
+// (e.g. internal/store/migrations_pretranscode.go). It stays empty in the
+// community build, keeping commercial tables out of the community schema.
+var enterpriseMigrations []Migration
+
+// RegisterEnterpriseMigration appends a commercial migration. Called from
+// init() in commercial-only files; a no-op in the community build.
+func RegisterEnterpriseMigration(m Migration) {
+	enterpriseMigrations = append(enterpriseMigrations, m)
+}
+
 func OpenSQLite(path string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(30000)&_pragma=foreign_keys(ON)")
 	if err != nil {
@@ -891,6 +910,15 @@ func OpenSQLite(path string) (*sql.DB, error) {
 	// Clean up stale transcode tasks that failed due to transient issues (path not found, context canceled).
 	cleanupStaleTranscodeTasks(db)
 	recoverStalePhotoTasks(db)
+	// Apply enterprise migrations registered via RegisterEnterpriseMigration.
+	// In the community build this slice is empty; commercial init() functions
+	// append migrations for pretranscode/license tables before main runs.
+	for _, m := range enterpriseMigrations {
+		if err := m.Up(db); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("enterprise migration %s: %w", m.ID, err)
+		}
+	}
 	return db, nil
 }
 

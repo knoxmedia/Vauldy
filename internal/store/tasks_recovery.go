@@ -45,6 +45,11 @@ func ResetInterruptedTasks(db *sql.DB) {
 		SET status = 'waiting', progress = 0, error_message = ?
 		WHERE status = 'running'`, restartResetMessage)
 
+	reset("pretranscode_rendition_job", `
+		UPDATE pretranscode_rendition_job
+		SET status = 'waiting', progress = 0, error_message = ?
+		WHERE status = 'running'`, restartResetMessage)
+
 	reset("package_task", `
 		UPDATE package_task
 		SET status = 'waiting', progress = 0, drm_status = '', error_message = ?, updated_at = CURRENT_TIMESTAMP

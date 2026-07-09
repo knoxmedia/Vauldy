@@ -56,7 +56,7 @@ CREATE TABLE library_node (
     media_id INTEGER
 );
 CREATE UNIQUE INDEX idx_library_node_unique ON library_node(library_id, node_path);
-`)
+` + deleteCatalogTestDDL())
 	if err != nil {
 		t.Fatalf("create schema: %v", err)
 	}
@@ -606,5 +606,122 @@ CREATE TABLE media_encrypted_assets (
 	}
 	if mediaCount != 2 {
 		t.Fatalf("media count=%d want 2", mediaCount)
+	}
+}
+
+func deleteCatalogTestDDL() string {
+	return `
+CREATE TABLE IF NOT EXISTS favorite (media_id INTEGER);
+CREATE TABLE IF NOT EXISTS favorite_folder_item (media_id INTEGER);
+CREATE TABLE IF NOT EXISTS playlist_item (media_id INTEGER);
+CREATE TABLE IF NOT EXISTS scrape_task (media_id INTEGER);
+CREATE TABLE IF NOT EXISTS scrape_history (media_id INTEGER);
+CREATE TABLE IF NOT EXISTS media_subtitle (media_id INTEGER);
+CREATE TABLE IF NOT EXISTS subtitle_task (media_id INTEGER);
+CREATE TABLE IF NOT EXISTS lyric_task (media_id INTEGER);
+CREATE TABLE IF NOT EXISTS atrack_task (media_id INTEGER);
+CREATE TABLE IF NOT EXISTS keyframe_task (media_id INTEGER);
+CREATE TABLE IF NOT EXISTS preview_task (media_id INTEGER);
+CREATE TABLE IF NOT EXISTS media_derived_assets (media_id INTEGER);
+CREATE TABLE IF NOT EXISTS package_task (media_id INTEGER);
+CREATE TABLE IF NOT EXISTS drm_license_audit (media_id INTEGER);
+CREATE TABLE IF NOT EXISTS drm_key_material (media_id INTEGER);
+CREATE TABLE IF NOT EXISTS drm_asset (media_id INTEGER);
+CREATE TABLE IF NOT EXISTS music_track (media_id INTEGER);
+CREATE TABLE IF NOT EXISTS episode_media (media_id INTEGER);
+CREATE TABLE IF NOT EXISTS photo_face (media_id INTEGER);
+CREATE TABLE IF NOT EXISTS photo_face_task (media_id INTEGER);
+CREATE TABLE IF NOT EXISTS photo_classify_task (media_id INTEGER);
+CREATE TABLE IF NOT EXISTS photo_location_task (media_id INTEGER);
+CREATE TABLE IF NOT EXISTS transcode_task (file_id TEXT);
+CREATE TABLE IF NOT EXISTS play_progress (file_id TEXT);
+`
+}
+
+func TestScanLibraryFoldersRemovesMissingFiles(t *testing.T) {
+	t.Parallel()
+
+	db := newScannerTestDB(t)
+	root := t.TempDir()
+	moviePath := filepath.Join(root, "gone.mp4")
+	if err := os.WriteFile(moviePath, []byte("video"), 0o644); err != nil {
+		t.Fatalf("write movie: %v", err)
+	}
+
+	s := &Scanner{DB: db, SkipHash: true}
+	if _, err := s.ScanLibraryFoldersWithContext(context.Background(), 5, []string{root}); err != nil {
+		t.Fatalf("initial scan: %v", err)
+	}
+	if err := os.Remove(moviePath); err != nil {
+		t.Fatalf("remove movie: %v", err)
+	}
+
+	removed := 0
+	s.OnMediaRemoved = func(mediaID int64, filePath string) {
+		removed++
+	}
+	if _, err := s.ScanLibraryFoldersWithContext(context.Background(), 5, []string{root}); err != nil {
+		t.Fatalf("rescan: %v", err)
+	}
+
+	var mediaCount int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM media WHERE library_id = ?`, 5).Scan(&mediaCount); err != nil {
+		t.Fatalf("count media: %v", err)
+	}
+	if mediaCount != 0 {
+		t.Fatalf("media count=%d want 0 after file deleted", mediaCount)
+	}
+	if removed != 1 {
+		t.Fatalf("OnMediaRemoved calls=%d want 1", removed)
+	}
+}
+
+func TestScanLibraryFoldersAdoptsRenamedFileByMetadata(t *testing.T) {
+	t.Parallel()
+
+	db := newScannerTestDB(t)
+	root := t.TempDir()
+	oldPath := filepath.Join(root, "old-name.mp4")
+	newPath := filepath.Join(root, "new-name.mp4")
+	content := []byte("video-bytes")
+	if err := os.WriteFile(oldPath, content, 0o644); err != nil {
+		t.Fatalf("write old: %v", err)
+	}
+	sum := md5.Sum(content)
+	md5hex := hex.EncodeToString(sum[:])
+
+	fileID := uuid.NewString()
+	_, err := db.Exec(`INSERT INTO media (library_id, file_id, title, file_path, file_type, duration, width, height, md5, status)
+		VALUES (?, ?, 'Old', ?, 'video', 120, 1920, 1080, ?, 'active')`, 6, fileID, oldPath, md5hex)
+	if err != nil {
+		t.Fatalf("insert media: %v", err)
+	}
+	if err := os.Rename(oldPath, newPath); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+
+	s := &Scanner{DB: db, SkipHash: false}
+	addedCalls := 0
+	s.OnMediaAdded = func(int64, string, string) { addedCalls++ }
+	if _, err := s.ScanLibraryFoldersWithContext(context.Background(), 6, []string{root}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if addedCalls != 0 {
+		t.Fatalf("OnMediaAdded=%d want 0 (rename should reuse row)", addedCalls)
+	}
+
+	var count int
+	var path string
+	if err := db.QueryRow(`SELECT COUNT(1) FROM media WHERE library_id = ?`, 6).Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("media count=%d want 1", count)
+	}
+	if err := db.QueryRow(`SELECT file_path FROM media WHERE library_id = ?`, 6).Scan(&path); err != nil {
+		t.Fatalf("path: %v", err)
+	}
+	if normalizeMediaPath(path) != normalizeMediaPath(newPath) {
+		t.Fatalf("file_path=%q want %q", path, newPath)
 	}
 }

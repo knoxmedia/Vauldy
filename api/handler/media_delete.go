@@ -12,6 +12,8 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"knox-media/api/middleware"
+	"knox-media/internal/coreiface"
+	"knox-media/internal/mediastore"
 	"knox-media/internal/musicstore"
 	"knox-media/internal/tvstore"
 )
@@ -197,54 +199,7 @@ func (h *Handler) collectMediaDeletionDirs(info mediaDeleteInfo) []string {
 }
 
 func (h *Handler) deleteMediaRecords(id int64, fileID string) error {
-	tx, err := h.App.DB.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	stmts := []struct {
-		q    string
-		args []any
-	}{
-		{`DELETE FROM favorite WHERE media_id = ?`, []any{id}},
-		{`DELETE FROM favorite_folder_item WHERE media_id = ?`, []any{id}},
-		{`DELETE FROM playlist_item WHERE media_id = ?`, []any{id}},
-		{`DELETE FROM scrape_task WHERE media_id = ?`, []any{id}},
-		{`DELETE FROM scrape_history WHERE media_id = ?`, []any{id}},
-		{`DELETE FROM media_subtitle WHERE media_id = ?`, []any{id}},
-		{`DELETE FROM subtitle_task WHERE media_id = ?`, []any{id}},
-		{`DELETE FROM lyric_task WHERE media_id = ?`, []any{id}},
-		{`DELETE FROM atrack_task WHERE media_id = ?`, []any{id}},
-		{`DELETE FROM keyframe_task WHERE media_id = ?`, []any{id}},
-		{`DELETE FROM preview_task WHERE media_id = ?`, []any{id}},
-		{`DELETE FROM media_derived_assets WHERE media_id = ?`, []any{id}},
-		{`DELETE FROM package_task WHERE media_id = ?`, []any{id}},
-		{`DELETE FROM drm_license_audit WHERE media_id = ?`, []any{id}},
-		{`DELETE FROM drm_key_material WHERE media_id = ?`, []any{id}},
-		{`DELETE FROM drm_asset WHERE media_id = ?`, []any{id}},
-		{`DELETE FROM library_node WHERE media_id = ?`, []any{id}},
-		{`DELETE FROM music_track WHERE media_id = ?`, []any{id}},
-		{`DELETE FROM episode_media WHERE media_id = ?`, []any{id}},
-		{`DELETE FROM photo_face WHERE media_id = ?`, []any{id}},
-		{`DELETE FROM photo_face_task WHERE media_id = ?`, []any{id}},
-		{`DELETE FROM photo_classify_task WHERE media_id = ?`, []any{id}},
-		{`DELETE FROM photo_location_task WHERE media_id = ?`, []any{id}},
-	}
-	for _, s := range stmts {
-		if _, err := tx.Exec(s.q, s.args...); err != nil {
-			return err
-		}
-	}
-	if fileID != "" {
-		if _, err := tx.Exec(`DELETE FROM play_progress WHERE file_id = ?`, fileID); err != nil {
-			return err
-		}
-	}
-	if _, err := tx.Exec(`DELETE FROM media WHERE id = ?`, id); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return mediastore.DeleteCatalog(h.App.DB, id, fileID)
 }
 
 func (h *Handler) purgeMediaFiles(info mediaDeleteInfo) {
@@ -293,6 +248,11 @@ func (h *Handler) DeleteMedia(c *gin.Context) {
 		return
 	}
 	libraryID := info.LibraryID
+	// Cascade pretranscode cleanup (SRS STOR-04 / AC-15) before deleting the
+	// media row so the playback module can resolve file_id → output_path.
+	if coreiface.PretranscodeMod != nil && info.FileID != "" {
+		_ = coreiface.PretranscodeMod.OnMediaDeleted(c.Request.Context(), info.ID, []string{info.FileID})
+	}
 	if err := h.deleteMediaRecords(info.ID, info.FileID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

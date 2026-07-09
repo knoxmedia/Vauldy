@@ -181,6 +181,9 @@ func (h *Handler) runLibraryScanTask(ctx context.Context, taskID, libraryID int6
 		OnDocumentScanned: func(mediaID int64) {
 			h.GenerateDocumentCover(mediaID)
 		},
+		OnMediaRemoved: func(mediaID int64, filePath string) {
+			_, _ = h.App.DB.Exec(`INSERT INTO scan_log (scan_task_id, library_id, file_path, action, message) VALUES (?, ?, ?, 'removed', ?)`, taskID, libraryID, filePath, strconv.FormatInt(mediaID, 10))
+		},
 	}
 	added, err := s.ScanLibraryFoldersWithContext(ctx, libraryID, folders)
 	if added > 0 && int64(added) > atomic.LoadInt64(&addedCount) {
