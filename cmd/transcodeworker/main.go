@@ -19,6 +19,7 @@ import (
 	"go.uber.org/zap"
 
 	"knox-media/internal/jit/hwenc"
+	"knox-media/internal/jit/profile"
 	"knox-media/internal/jit/processctl"
 	models "knox-media/internal/model"
 )
@@ -391,18 +392,22 @@ func (w *TranscodeWorker) processTranscodeTask(task *models.TranscodeTask) {
 	}
 }
 
-func resolutionForBitrate(bitrate string) string {
-	m := map[string]string{
-		"8000k": "3840x2160",
-		"4000k": "1920x1080",
-		"2000k": "1280x720",
-		"1000k": "854x480",
-		"500k":  "640x360",
+func (w *TranscodeWorker) sourceDimensions(fileID string) (int, int) {
+	if w == nil || w.redis == nil || strings.TrimSpace(fileID) == "" {
+		return 0, 0
 	}
-	if res, ok := m[bitrate]; ok {
-		return res
+	meta, err := w.redis.HGetAll(context.Background(), "video:meta:"+fileID).Result()
+	if err != nil {
+		return 0, 0
 	}
-	return "1280x720"
+	sw, _ := strconv.Atoi(strings.TrimSpace(meta["width"]))
+	sh, _ := strconv.Atoi(strings.TrimSpace(meta["height"]))
+	return sw, sh
+}
+
+func (w *TranscodeWorker) resolutionForBitrate(bitrate, fileID string) string {
+	srcW, srcH := w.sourceDimensions(fileID)
+	return profile.ResolutionForBitrate(bitrate, srcW, srcH)
 }
 
 func parseResolutionWH(res string) (w, h string) {
@@ -476,7 +481,7 @@ func (w *TranscodeWorker) resolveSegmentSource(task *models.TranscodeTask) (inpu
 func (w *TranscodeWorker) buildTranscodeArgs(inputPath, outputPath string, task *models.TranscodeTask, ssSec, durSec float64, enc hwenc.ID) []string {
 	res := task.Resolution
 	if res == "" {
-		res = resolutionForBitrate(task.Bitrate)
+		res = w.resolutionForBitrate(task.Bitrate, task.FileID)
 	}
 	preset := strings.TrimSpace(task.Preset)
 	if preset == "" {
@@ -704,7 +709,7 @@ func (w *TranscodeWorker) prefetchNextSegments(fileID string, currentSegID int, 
 			break
 		}
 
-		res := resolutionForBitrate(bitrate)
+		res := w.resolutionForBitrate(bitrate, fileID)
 		task := &models.TranscodeTask{
 			FileID:     fileID,
 			SegmentID:  segID,
@@ -1060,7 +1065,7 @@ func (w *TranscodeWorker) buildVideoEncoderArgsCtn(job *ContinuousHLSJob, segDur
 		w.hwEncoder = hwenc.Libx264
 	}
 
-	res := resolutionForBitrate(pickedBitrate)
+	res := w.resolutionForBitrate(pickedBitrate, job.FileID)
 	wPx, hPx := parseResolutionWH(res)
 
 	gops := []string{"-g", fmt.Sprintf("%d", int(segDuration*8)), "-keyint_min", fmt.Sprintf("%d", int(segDuration*8)), "-sc_threshold", "0"}

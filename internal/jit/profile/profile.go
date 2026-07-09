@@ -33,8 +33,11 @@ var builtinRungs = []Variant{
 }
 
 // Pick returns the single rung this server should produce for fileID.
-// rdb may be nil; callers passing nil get a load-agnostic decision based purely on srcHeight + maxClientHeight.
-func Pick(ctx context.Context, rdb *redis.Client, srcHeight, maxClientHeight int) Variant {
+// rdb may be nil; callers passing nil get a load-agnostic decision based purely on src dimensions + maxClientHeight.
+func Pick(ctx context.Context, rdb *redis.Client, srcWidth, srcHeight, maxClientHeight int) Variant {
+	if IsPortraitSource(srcWidth, srcHeight) {
+		return pickPortrait(ctx, rdb, srcWidth, srcHeight, maxClientHeight)
+	}
 	cap := constrainCap(srcHeight, maxClientHeight)
 	cap = applyLoadLimit(ctx, rdb, cap)
 	for _, v := range builtinRungs {
@@ -59,6 +62,11 @@ func PickByName(name string) Variant {
 		}
 	}
 	return builtinRungs[2]
+}
+
+// PickByNameForSource returns PickByName adapted for portrait sources.
+func PickByNameForSource(name string, srcWidth, srcHeight int) Variant {
+	return AdaptVariantForPortrait(PickByName(name), srcWidth, srcHeight)
 }
 
 func constrainCap(srcHeight, maxClientHeight int) int {
