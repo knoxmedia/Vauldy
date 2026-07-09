@@ -177,7 +177,7 @@ func TestSkipRenditionsAboveSource(t *testing.T) {
 		{Name: "1080p", Height: 1080, VideoBitrate: "5000k"},
 		{Name: "2160p", Height: 2160, VideoBitrate: "18000k"},
 	}
-	out := SkipRenditionsAboveSource(renditions, 1080)
+	out := SkipRenditionsAboveSource(renditions, 1920, 1080)
 	if len(out) != 2 {
 		t.Errorf("expected 2 renditions ≤1080p, got %d", len(out))
 	}

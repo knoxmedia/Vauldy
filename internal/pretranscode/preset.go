@@ -8,7 +8,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 )
 
@@ -422,19 +421,6 @@ func normalizeEncryption(format, enc string) string {
 		return enc
 	}
 	return "none"
-}
-
-// SkipRenditionsAboveSource returns the subset of renditions whose height is
-// <= sourceHeight (SRS REN-05: never upscale).
-func SkipRenditionsAboveSource(renditions []Rendition, sourceHeight int) []Rendition {
-	out := make([]Rendition, 0, len(renditions))
-	for _, r := range renditions {
-		if sourceHeight <= 0 || r.Height <= sourceHeight {
-			out = append(out, r)
-		}
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Height < out[j].Height })
-	return out
 }
 
 // Standard errors.

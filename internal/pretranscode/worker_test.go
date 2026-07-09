@@ -23,7 +23,7 @@ func TestClaimNextJobSelectsWaitingRendition(t *testing.T) {
 	}
 
 	w := NewWorker(db, nil, "ffmpeg", t.TempDir(), 1, 1)
-	job, gotPreset, rendition, mediaID, catalogPath, _, err := w.claimNextJob()
+	job, gotPreset, rendition, mediaID, catalogPath, _, _, err := w.claimNextJob()
 	if err != nil {
 		t.Fatalf("claimNextJob: %v", err)
 	}
@@ -52,7 +52,7 @@ func TestClaimNextJobSelectsWaitingRendition(t *testing.T) {
 func TestClaimNextJobReturnsNoRowsWhenNoneWaiting(t *testing.T) {
 	db := newTestDB(t)
 	w := NewWorker(db, nil, "ffmpeg", t.TempDir(), 1, 1)
-	_, _, _, _, _, _, err := w.claimNextJob()
+	_, _, _, _, _, _, _, err := w.claimNextJob()
 	if err != sql.ErrNoRows {
 		t.Fatalf("expected sql.ErrNoRows, got %v", err)
 	}
@@ -80,14 +80,14 @@ func TestClaimNextJobAllowsRunningTask(t *testing.T) {
 	taskID := ids[0]
 
 	w := NewWorker(db, nil, "ffmpeg", t.TempDir(), 2, 1)
-	first, _, _, _, _, _, err := w.claimNextJob()
+	first, _, _, _, _, _, _, err := w.claimNextJob()
 	if err != nil {
 		t.Fatalf("first claim: %v", err)
 	}
 
 	_, _ = db.Exec(`UPDATE transcode_task SET status='running' WHERE id=?`, taskID)
 
-	second, _, _, _, _, _, err := w.claimNextJob()
+	second, _, _, _, _, _, _, err := w.claimNextJob()
 	if err != nil {
 		t.Fatalf("second claim while task running: %v", err)
 	}

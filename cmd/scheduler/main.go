@@ -1064,7 +1064,7 @@ func (s *Scheduler) startTranscodeTask(fileID string, segID int, bitrate, sessio
 	s.updateSegmentStatus(fileID, segID, bitrate, "transcoding")
 
 	// 获取分辨率
-	resolution := s.getResolutionForBitrate(bitrate)
+	resolution := s.getResolutionForBitrate(fileID, bitrate)
 
 	// 创建转码任务
 	task := &models.TranscodeTask{
@@ -1375,12 +1375,14 @@ func (s *Scheduler) generateMasterPlaylist(c *gin.Context, fileID string, meta *
 		}
 	}
 
+	srcWidth := 0
 	srcHeight := 0
 	if meta != nil {
+		srcWidth = meta.Width
 		srcHeight = meta.Height
 	}
 	// 单清晰度策略：根据源高度、客户端能力、机器实时 CPU/GPU 负载选定唯一档位。
-	picked := profile.Pick(c.Request.Context(), s.redis, srcHeight, maxClientHeight)
+	picked := profile.Pick(c.Request.Context(), s.redis, srcWidth, srcHeight, maxClientHeight)
 
 	// Check if pre-extracted audio HLS is available (separated audio tracks).
 	// Only emit separate audio groups when config allows it.
@@ -1441,16 +1443,20 @@ func (s *Scheduler) generateMasterPlaylist(c *gin.Context, fileID string, meta *
 	return b.String()
 }
 
-func (s *Scheduler) getResolutionForBitrate(bitrate string) string {
-	resolutions := map[string]string{
-		"8000k": "3840x2160",
-		"4000k": "1920x1080",
-		"2000k": "1280x720",
-		"1000k": "854x480",
-		"500k":  "640x360",
+func (s *Scheduler) getResolutionForBitrate(fileID, bitrate string) string {
+	srcW, srcH := s.getSourceDimensions(fileID)
+	return profile.ResolutionForBitrate(bitrate, srcW, srcH)
+}
+
+func (s *Scheduler) getSourceDimensions(fileID string) (int, int) {
+	if s == nil || s.redis == nil || strings.TrimSpace(fileID) == "" {
+		return 0, 0
 	}
-	if res, ok := resolutions[bitrate]; ok {
-		return res
+	meta, err := s.redis.HGetAll(context.Background(), "video:meta:"+fileID).Result()
+	if err != nil {
+		return 0, 0
 	}
-	return "1280x720"
+	w, _ := strconv.Atoi(strings.TrimSpace(meta["width"]))
+	h, _ := strconv.Atoi(strings.TrimSpace(meta["height"]))
+	return w, h
 }

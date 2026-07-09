@@ -80,7 +80,7 @@ func (w *Worker) Start(ctx context.Context) {
 
 // runOnce picks the next eligible waiting rendition job and runs it.
 func (w *Worker) runOnce(ctx context.Context) {
-	job, preset, rendition, mediaID, catalogPath, sourceHeight, err := w.claimNextJob()
+	job, preset, rendition, mediaID, catalogPath, sourceWidth, sourceHeight, err := w.claimNextJob()
 	if err != nil {
 		if err != sql.ErrNoRows {
 			log.Printf("pretranscode claimNextJob error: %v", err)
@@ -90,13 +90,14 @@ func (w *Worker) runOnce(ctx context.Context) {
 	if job == nil {
 		return
 	}
-	// SRS REN-05: skip renditions taller than the source.
-	if sourceHeight > 0 && rendition.Height > sourceHeight {
+	if ShouldSkipRenditionAboveSource(*rendition, sourceWidth, sourceHeight) {
 		_, _ = w.DB.Exec(`UPDATE pretranscode_rendition_job SET status='done', progress=100, output_path='', completed_at=CURRENT_TIMESTAMP WHERE id=?`, job.ID)
 		w.refreshTaskProgress(job.TaskID)
 		w.maybeCompleteTask(job.TaskID)
 		return
 	}
+	adapted := AdaptRenditionForSource(*rendition, sourceWidth, sourceHeight)
+	rendition = &adapted
 	log.Printf("pretranscode job claimed: job_id=%d task_id=%d rendition=%s media_id=%d", job.ID, job.TaskID, rendition.Name, mediaID)
 	go w.runRenditionJob(ctx, job, preset, rendition, mediaID, catalogPath)
 }
@@ -108,7 +109,7 @@ type claimedJob struct {
 	Name        string
 }
 
-func (w *Worker) claimNextJob() (*claimedJob, *Preset, *Rendition, int64, string, int, error) {
+func (w *Worker) claimNextJob() (*claimedJob, *Preset, *Rendition, int64, string, int, int, error) {
 	row := w.DB.QueryRow(`SELECT j.id, j.task_id, j.rendition_id, j.rendition_name
 		FROM pretranscode_rendition_job j
 		JOIN transcode_task t ON t.id = j.task_id
@@ -118,14 +119,14 @@ func (w *Worker) claimNextJob() (*claimedJob, *Preset, *Rendition, int64, string
 		LIMIT 1`)
 	var c claimedJob
 	if err := row.Scan(&c.ID, &c.TaskID, &c.RenditionID, &c.Name); err != nil {
-		return nil, nil, nil, 0, "", 0, err
+		return nil, nil, nil, 0, "", 0, 0, err
 	}
 	res, err := w.DB.Exec(`UPDATE pretranscode_rendition_job SET status='running', started_at=CURRENT_TIMESTAMP WHERE id=? AND status='waiting'`, c.ID)
 	if err != nil {
-		return nil, nil, nil, 0, "", 0, err
+		return nil, nil, nil, 0, "", 0, 0, err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return nil, nil, nil, 0, "", 0, fmt.Errorf("lost race")
+		return nil, nil, nil, 0, "", 0, 0, fmt.Errorf("lost race")
 	}
 	// Load preset + rendition + media info.
 	var p Preset
@@ -142,7 +143,7 @@ func (w *Worker) claimNextJob() (*claimedJob, *Preset, *Rendition, int64, string
 		&videoCodec, &videoPreset, &videoCRF, &videoMaxrate, &videoBufsize, &videoProfile, &videoGOP, &videoPixFmt,
 		&audioCodec, &audioBitrate, &audioCh, &audioSR, &hwFB)
 	if err != nil {
-		return nil, nil, nil, 0, "", 0, err
+		return nil, nil, nil, 0, "", 0, 0, err
 	}
 	p.ID = presetID
 	p.OutputFormat = outFormat
@@ -165,24 +166,24 @@ func (w *Worker) claimNextJob() (*claimedJob, *Preset, *Rendition, int64, string
 	err = w.DB.QueryRow(`SELECT id, preset_id, name, height, COALESCE(width,0), video_bitrate, COALESCE(audio_bitrate,''), COALESCE(bandwidth,0), COALESCE(sort_order,0)
 		FROM preset_rendition WHERE id = ?`, c.RenditionID).Scan(&r.ID, &r.PresetID, &r.Name, &r.Height, &r.Width, &r.VideoBitrate, &r.AudioBitrate, &r.Bandwidth, &r.SortOrder)
 	if err != nil {
-		return nil, nil, nil, 0, "", 0, err
+		return nil, nil, nil, 0, "", 0, 0, err
 	}
 
 	var mediaID int64
 	var libraryID int64
 	var catalogPath string
-	var sourceHeight int
-	_ = w.DB.QueryRow(`SELECT COALESCE(m.id,0), COALESCE(m.library_id,0), COALESCE(m.height,0), COALESCE(m.file_path,'')
-		FROM transcode_task t LEFT JOIN media m ON m.file_id = t.file_id WHERE t.id = ?`, c.TaskID).Scan(&mediaID, &libraryID, &sourceHeight, &catalogPath)
+	var sourceWidth, sourceHeight int
+	_ = w.DB.QueryRow(`SELECT COALESCE(m.id,0), COALESCE(m.library_id,0), COALESCE(m.width,0), COALESCE(m.height,0), COALESCE(m.file_path,'')
+		FROM transcode_task t LEFT JOIN media m ON m.file_id = t.file_id WHERE t.id = ?`, c.TaskID).Scan(&mediaID, &libraryID, &sourceWidth, &sourceHeight, &catalogPath)
 	if catalogPath == "" {
-		return nil, nil, nil, 0, "", 0, fmt.Errorf("input path missing for task %d", c.TaskID)
+		return nil, nil, nil, 0, "", 0, 0, fmt.Errorf("input path missing for task %d", c.TaskID)
 	}
 	if libraryID > 0 {
 		if resolved := storage.ResolveMediaAbsolutePath(w.DB, libraryID, catalogPath); resolved != "" {
 			catalogPath = resolved
 		}
 	}
-	return &c, &p, &r, mediaID, catalogPath, sourceHeight, nil
+	return &c, &p, &r, mediaID, catalogPath, sourceWidth, sourceHeight, nil
 }
 
 // runRenditionJob executes FFmpeg and updates progress.

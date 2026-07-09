@@ -584,8 +584,8 @@ func (s *TaskService) GetMediaOptimizationStatus(mediaID int64) (*MediaOptimizat
 		if outputPath != "" {
 			r.FileSize, _ = dirSize(RenditionSizePath(outputPath, r.OutputFormat))
 		}
-		// Parse resolution from rendition name (e.g., "720p" -> "1280x720")
-		r.Resolution = resolutionFromName(r.RenditionName)
+		// Parse resolution from rendition name (e.g., "720p" -> "1280x720", portrait -> "720x1280")
+		r.Resolution = resolutionFromRendition(r.RenditionName, width, height)
 		r.Bitrate = bitrateFromName(r.RenditionName)
 		status.OptimizedRenditions = append(status.OptimizedRenditions, r)
 	}
@@ -705,6 +705,39 @@ func (s *TaskService) RepairStuckWaitingTasks() int {
 		log.Printf("pretranscode repair: reset %d stuck rendition job(s) to waiting", n)
 	}
 	return int(n)
+}
+
+// resolutionFromRendition returns the effective output resolution for a rendition,
+// adapting landscape preset sizes for portrait source videos.
+func resolutionFromRendition(name string, sourceWidth, sourceHeight int) string {
+	r := Rendition{Name: name, Height: heightFromRenditionName(name)}
+	adapted := AdaptRenditionForSource(r, sourceWidth, sourceHeight)
+	w, h := renditionTargetSize(adapted)
+	if w > 0 && h > 0 {
+		return fmt.Sprintf("%dx%d", w, h)
+	}
+	return resolutionFromName(name)
+}
+
+func heightFromRenditionName(name string) int {
+	switch name {
+	case "360p":
+		return 360
+	case "480p":
+		return 480
+	case "540p":
+		return 540
+	case "720p":
+		return 720
+	case "1080p":
+		return 1080
+	case "1440p":
+		return 1440
+	case "2160p", "4K":
+		return 2160
+	default:
+		return 0
+	}
 }
 
 // resolutionFromName returns a resolution string from a rendition name.
