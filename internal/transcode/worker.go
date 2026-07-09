@@ -86,7 +86,7 @@ func (w *Worker) RunTask(ctx context.Context, taskID int64, inputPath, quality s
 	}
 	w.mu.Unlock()
 
-	res, err := w.DB.Exec(`UPDATE transcode_task SET status='running', progress=1 WHERE id=? AND status='waiting'`, taskID)
+	res, err := w.DB.Exec(`UPDATE transcode_task SET status='running', progress=1 WHERE id=? AND status='waiting' AND COALESCE(task_type,'batch') = 'batch'`, taskID)
 	if err != nil {
 		return err
 	}
@@ -127,6 +127,7 @@ func (w *Worker) StartWaiting(ctx context.Context, limit int) int {
 		FROM transcode_task t
 		LEFT JOIN media m ON m.file_id = t.file_id
 		WHERE t.status = 'waiting' AND COALESCE(m.file_path,'') != ''
+		  AND COALESCE(t.task_type,'batch') = 'batch'
 		ORDER BY t.id ASC
 		LIMIT ?
 	`, limit)
