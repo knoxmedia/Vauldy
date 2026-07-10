@@ -4,3 +4,6 @@
 [submodule "Vauldy-Desktop"]
 	path = Vauldy-Desktop
 	url = https://github.com/knoxmedia/Vauldy-Desktop.git
+[submodule "Vauldy-TV"]
+	path = Vauldy-TV
+	url = https://github.com/knoxmedia/Vauldy-TV.git
