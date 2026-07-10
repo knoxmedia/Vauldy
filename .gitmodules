@@ -1,0 +1,6 @@
+[submodule "Vauldy-ReactNative"]
+	path = Vauldy-ReactNative
+	url = https://github.com/knoxmedia/Vauldy-ReactNative.git
+[submodule "Vauldy-Desktop"]
+	path = Vauldy-Desktop
+	url = https://github.com/knoxmedia/Vauldy-Desktop.git
