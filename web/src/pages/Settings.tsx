@@ -1,5 +1,5 @@
 import { Checkbox, Select, message } from "antd";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Cropper, { type Area } from "react-easy-crop";
 import "react-easy-crop/react-easy-crop.css";
 
@@ -10,7 +10,7 @@ import {
   updateUserProfile,
   uploadUserAvatar,
 } from "../api/client";
-import { languageOptions, resolveLocale, useT, type TranslateFn } from "../i18n";
+import { languageOptions, resolveLocale, useI18n, type TranslateFn } from "../i18n";
 import { defaultPlayerPrefs, normalizePlayerPrefs, type PlayerPrefs } from "../lib/playerPrefs";
 import { isAdminRole, useAuthStore } from "../store/auth";
 import { getCroppedCircularPngBlob } from "../utils/cropImage";
@@ -69,14 +69,19 @@ function summarizePlayerPrefsLocalized(prefs: PlayerPrefs, t: TranslateFn): stri
   return `${auto}${track}\n${search}`;
 }
 
-export default function SettingsPage() {
+type SettingsPageProps = {
+  /** Desktop-only block inserted below the language setting row. */
+  extraAfterLanguage?: ReactNode;
+};
+
+export default function SettingsPage({ extraAfterLanguage }: SettingsPageProps = {}) {
   const username = useAuthStore((s) => s.username);
   const role = useAuthStore((s) => s.role);
   const avatarUrl = useAuthStore((s) => s.avatarUrl);
   const uiLocale = useAuthStore((s) => s.uiLocale);
   const playerPrefs = useAuthStore((s) => s.playerPrefs);
   const setProfile = useAuthStore((s) => s.setProfile);
-  const t = useT();
+  const { t, setLocale } = useI18n();
 
   const UI_LOCALES = useMemo(() => languageOptions(), []);
   const LANG_TRACKS = useMemo(() => buildTrackLangOptions(t), [t]);
@@ -117,6 +122,8 @@ export default function SettingsPage() {
 
   const [edit, setEdit] = useState<EditMode>(null);
   const [loading, setLoading] = useState(false);
+  const tRef = useRef(t);
+  tRef.current = t;
 
   const refresh = useCallback(async () => {
     try {
@@ -124,17 +131,20 @@ export default function SettingsPage() {
       setProfile(u.username, u.role, {
         canPlay: u.can_play !== false,
         avatarUrl: u.avatar_url || null,
-        uiLocale: u.ui_locale || null,
+        // Normalize so "zh" / "zh-CN" do not thrash i18n identity.
+        uiLocale: u.ui_locale ? resolveLocale(u.ui_locale) : null,
         playerPrefs: u.player_prefs ? normalizePlayerPrefs(u.player_prefs) : defaultPlayerPrefs(),
       });
     } catch {
-      message.error(t("settings.language.load_failure"));
+      message.error(tRef.current("settings.language.load_failure"));
     }
-  }, [setProfile, t]);
+  }, [setProfile]);
 
   useEffect(() => {
     void refresh();
-  }, [refresh]);
+    // Mount-only: do not re-fetch when `t` / locale identity changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const prefs = playerPrefs ?? defaultPlayerPrefs();
   const subtitleAppearanceSummary = useMemo(
@@ -213,7 +223,7 @@ export default function SettingsPage() {
       setProfile(u.username, u.role, {
         canPlay: u.can_play !== false,
         avatarUrl: u.avatar_url || url,
-        uiLocale: u.ui_locale || null,
+        uiLocale: u.ui_locale ? resolveLocale(u.ui_locale) : null,
         playerPrefs: u.player_prefs ? normalizePlayerPrefs(u.player_prefs) : defaultPlayerPrefs(),
       });
       message.success(t("settings.avatar.saved"));
@@ -244,12 +254,14 @@ export default function SettingsPage() {
     try {
       const data = await updateUserProfile({ ui_locale: langDraft });
       const u = await fetchUserInfo();
+      const nextLocale = resolveLocale(data.ui_locale || langDraft);
       setProfile(u.username, u.role, {
         canPlay: u.can_play !== false,
         avatarUrl: u.avatar_url || null,
-        uiLocale: data.ui_locale,
+        uiLocale: nextLocale,
         playerPrefs: normalizePlayerPrefs(data.player_prefs),
       });
+      setLocale(nextLocale);
       message.success(t("settings.language.success"));
       setEdit(null);
     } catch {
@@ -267,7 +279,7 @@ export default function SettingsPage() {
       setProfile(u.username, u.role, {
         canPlay: u.can_play !== false,
         avatarUrl: u.avatar_url || null,
-        uiLocale: u.ui_locale || null,
+        uiLocale: u.ui_locale ? resolveLocale(u.ui_locale) : null,
         playerPrefs: normalizePlayerPrefs(data.player_prefs),
       });
       message.success(t("settings.audio.success"));
@@ -292,7 +304,7 @@ export default function SettingsPage() {
       setProfile(u.username, u.role, {
         canPlay: u.can_play !== false,
         avatarUrl: u.avatar_url || null,
-        uiLocale: u.ui_locale || null,
+        uiLocale: u.ui_locale ? resolveLocale(u.ui_locale) : null,
         playerPrefs: normalizePlayerPrefs(data.player_prefs),
       });
       message.success(t("settings.subtitle_appearance.success"));
@@ -542,6 +554,8 @@ export default function SettingsPage() {
           </div>
         </div>
       )}
+
+      {extraAfterLanguage}
 
       {edit !== "audio" ? (
         <div className={styles.row}>

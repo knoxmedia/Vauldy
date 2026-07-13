@@ -25,7 +25,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { fetchLibrariesWithCapabilities, type Library } from "../api/client";
 import { libraryTypeIcon } from "../lib/libraryTypeIcon";
 import { isAdminRole, useAuthStore } from "../store/auth";
-import { useT } from "../i18n";
+import { useI18n } from "../i18n";
 import CollapsedMainNavMenu, { flattenNavMenuItems } from "./CollapsedMainNavMenu";
 
 type MainNavProps = {
@@ -33,16 +33,18 @@ type MainNavProps = {
   onNavigate?: () => void;
   /** 侧栏折叠为仅图标时，子菜单用弹出层 */
   inlineCollapsed?: boolean;
+  /** 暂时隐藏管理菜单（桌面端） */
+  hideAdmin?: boolean;
 };
 
-export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
+export default function MainNav({ onNavigate, inlineCollapsed, hideAdmin }: MainNavProps) {
   const navigate = useNavigate();
   const loc = useLocation();
-  const t = useT();
+  const { t, locale } = useI18n();
   const path = loc.pathname;
   const search = loc.search;
   const role = useAuthStore((s) => s.role);
-  const admin = isAdminRole(role);
+  const admin = isAdminRole(role) && !hideAdmin;
 
   const [libs, setLibs] = useState<Library[]>([]);
   const [libsLoading, setLibsLoading] = useState(true);
@@ -427,12 +429,14 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
       <div ref={navBodyRef} className="app-main-nav-body">
         {inlineCollapsed ? (
           <CollapsedMainNavMenu
+            key={locale}
             items={flatCollapsedItems}
             selectedKeys={selectedKeys}
             containerRef={navBodyRef}
           />
         ) : (
           <Menu
+            key={locale}
             theme="dark"
             mode="inline"
             inlineCollapsed={false}

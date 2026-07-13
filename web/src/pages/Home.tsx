@@ -76,6 +76,14 @@ function formatYear(path: string) {
   return m ? m[0] : "";
 }
 
+/** Stable fingerprint so library polling does not thrash recent-media reloads. */
+function librariesSignature(libs: Library[]): string {
+  return libs
+    .map((l) => `${l.id}:${(l.type || "").trim()}`)
+    .sort()
+    .join("|");
+}
+
 function mediaReleaseYear(m: MediaItem): string {
   if (typeof m.year === "number" && m.year > 0) return String(m.year);
   const rd = (m.release_date || "").trim();
@@ -640,6 +648,8 @@ export default function HomePage() {
   const nav = useNavigate();
   const t = useT();
   const RECENT_SECTIONS = useMemo(() => buildHomeRecentSections(t), [t]);
+  const recentSectionsRef = useRef(RECENT_SECTIONS);
+  recentSectionsRef.current = RECENT_SECTIONS;
   const [loading, setLoading] = useState(true);
   const [libs, setLibs] = useState<Library[]>([]);
   const [history, setHistory] = useState<HistoryItem[]>([]);
@@ -711,6 +721,8 @@ export default function HomePage() {
     el.scrollBy({ left: delta, behavior: "smooth" });
   };
 
+  // Data fetch must not depend on `t`: locale-bound t identity changes on language switch
+  // and would re-trigger loading + cancel in-flight requests in a loop with libs polling.
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
@@ -728,28 +740,22 @@ export default function HomePage() {
       } else {
         setHistory([]);
       }
-      const sections = buildHomeRecentSections(t);
-      const recentMap = libsData.length
-        ? await loadHomeRecentBySection(libsData, sections)
-        : new Map<string, MediaItem[]>();
-      if (!cancelled) {
-        setRecentBySection(recentMap);
-        setLoading(false);
-      }
+      // Recent shelves load in the libs effect below (avoids duplicate /api/v1/media storms).
+      if (libsData.length === 0) setLoading(false);
     })();
     return () => {
       cancelled = true;
     };
-  }, [t]);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
     const timer = window.setInterval(() => {
       void fetchLibraries()
         .then((items) => {
-          if (!cancelled) {
-            setLibs(Array.isArray(items) ? items : []);
-          }
+          if (cancelled) return;
+          const next = Array.isArray(items) ? items : [];
+          setLibs((prev) => (librariesSignature(prev) === librariesSignature(next) ? prev : next));
         })
         .catch(() => {
           // keep existing list on transient polling failures
@@ -768,8 +774,11 @@ export default function HomePage() {
     }
     let cancelled = false;
     const refreshRecent = () => {
-      void loadHomeRecentBySection(libs, RECENT_SECTIONS).then((map) => {
-        if (!cancelled) setRecentBySection(map);
+      void loadHomeRecentBySection(libs, recentSectionsRef.current).then((map) => {
+        if (!cancelled) {
+          setRecentBySection(map);
+          setLoading(false);
+        }
       });
     };
     refreshRecent();
@@ -778,7 +787,7 @@ export default function HomePage() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [libs, RECENT_SECTIONS]);
+  }, [libs]);
 
   const allRecent = useMemo(() => flattenHomeRecent(recentBySection), [recentBySection]);
 
@@ -889,7 +898,9 @@ export default function HomePage() {
   const refreshHomeAfterBulk = useCallback(async () => {
     const [histR, recentR] = await Promise.allSettled([
       fetchUserHistory(24, { libraryTypes: CONTINUE_WATCHING_LIBRARY_TYPES }),
-      libs.length > 0 ? loadHomeRecentBySection(libs, RECENT_SECTIONS) : Promise.resolve(new Map<string, MediaItem[]>()),
+      libs.length > 0
+        ? loadHomeRecentBySection(libs, recentSectionsRef.current)
+        : Promise.resolve(new Map<string, MediaItem[]>()),
     ]);
     if (histR.status === "fulfilled") {
       setHistory(histR.value.filter((h) => h.media_id > 0));
@@ -897,7 +908,7 @@ export default function HomePage() {
     if (recentR.status === "fulfilled") {
       setRecentBySection(recentR.value);
     }
-  }, [libs, RECENT_SECTIONS]);
+  }, [libs]);
 
   const homeBulkSelectedMediaIds = useMemo(() => {
     const ids = new Set<number>();
