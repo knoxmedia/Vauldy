@@ -1,17 +1,20 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"github.com/google/uuid"
 	"io"
+	kcrypto "knox-media/internal/crypto"
+	"knox-media/internal/keystore"
+	"knox-media/internal/store"
 	"os"
 	"path/filepath"
 	"strings"
-
-	kcrypto "knox-media/internal/crypto"
-	"knox-media/internal/keystore"
 )
 
 // DerivedAssetStore encrypts task-produced artifacts at rest for encrypted libraries.
@@ -67,61 +70,144 @@ func (s *DerivedAssetStore) fallbackBase(mediaID int64) string {
 	return filepath.Join(".derived", fmt.Sprintf("%d", mediaID))
 }
 
-// Write encrypts r to a Knox .enc file and upserts media_derived_assets.
-func (s *DerivedAssetStore) Write(ctx context.Context, mediaID int64, kind, logicalName string, r io.Reader) (string, error) {
-	if s == nil || s.DB == nil || s.Vault == nil {
-		return "", fmt.Errorf("derived asset store not configured")
-	}
-	kind = strings.TrimSpace(kind)
-	logicalName = strings.TrimSpace(logicalName)
-	if mediaID <= 0 || kind == "" || logicalName == "" {
-		return "", fmt.Errorf("invalid derived asset args")
-	}
-	encPath, err := s.encPath(mediaID, kind, logicalName)
-	if err != nil {
-		return "", err
-	}
-	if err := os.MkdirAll(filepath.Dir(encPath), 0o700); err != nil {
-		return "", err
-	}
+type StagedDerivedAsset struct {
+	mediaID                                    int64
+	kind, logicalName, encPath, wrappedDEK, iv string
+}
 
+func (a *StagedDerivedAsset) EncPath() string {
+	if a == nil {
+		return ""
+	}
+	return a.encPath
+}
+
+func (s *DerivedAssetStore) stageReader(ctx context.Context, mediaID int64, kind, logicalName string, r io.Reader) (*StagedDerivedAsset, error) {
+	if s == nil || s.DB == nil || s.Vault == nil {
+		return nil, fmt.Errorf("derived asset store not configured")
+	}
+	kind, logicalName = strings.TrimSpace(kind), strings.TrimSpace(logicalName)
+	if mediaID <= 0 || kind == "" || logicalName == "" {
+		return nil, fmt.Errorf("invalid derived asset args")
+	}
+	base := strings.TrimSpace(s.BaseDir)
+	if base == "" {
+		return nil, fmt.Errorf("derived base dir empty")
+	}
+	dir := filepath.Join(base, fmt.Sprintf("%d", mediaID), sanitizeDerivedKind(kind))
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return nil, err
+	}
+	unique := sanitizeDerivedFileName(logicalName) + "." + uuid.NewString() + ".enc"
+	finalPath := filepath.Join(dir, unique)
 	kek, err := s.Vault.GetKEK(ctx)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer zeroBytes(kek)
-
-	dst, err := os.OpenFile(encPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	tmp, err := os.CreateTemp(dir, unique+".tmp-")
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	result, encErr := kcrypto.EncryptFile(r, dst, kek)
-	closeErr := dst.Close()
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	result, encErr := kcrypto.EncryptFile(r, tmp, kek)
+	closeErr := tmp.Close()
 	if encErr != nil {
-		_ = os.Remove(encPath)
-		return "", encErr
+		return nil, encErr
 	}
 	if closeErr != nil {
-		_ = os.Remove(encPath)
-		return "", closeErr
+		return nil, closeErr
 	}
+	if err = ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err = os.Rename(tmpPath, finalPath); err != nil {
+		return nil, err
+	}
+	return &StagedDerivedAsset{mediaID: mediaID, kind: kind, logicalName: logicalName, encPath: finalPath, wrappedDEK: hex.EncodeToString(result.WrappedDEK), iv: hex.EncodeToString(result.IV)}, nil
+}
+func (s *DerivedAssetStore) StageBytes(ctx context.Context, mediaID int64, kind, logicalName string, data []byte) (*StagedDerivedAsset, error) {
+	return s.stageReader(ctx, mediaID, kind, logicalName, bytes.NewReader(data))
+}
 
-	wrappedHex := hex.EncodeToString(result.WrappedDEK)
-	ivHex := hex.EncodeToString(result.IV)
-	_, err = s.DB.ExecContext(ctx, `
-		INSERT INTO media_derived_assets (media_id, artifact_kind, logical_name, enc_path, wrapped_dek, iv, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-		ON CONFLICT(media_id, artifact_kind, logical_name) DO UPDATE SET
-		  enc_path = excluded.enc_path,
-		  wrapped_dek = excluded.wrapped_dek,
-		  iv = excluded.iv,
-		  updated_at = CURRENT_TIMESTAMP
-	`, mediaID, kind, logicalName, encPath, wrappedHex, ivHex)
+func (s *DerivedAssetStore) StagePath(ctx context.Context, mediaID int64, kind, logicalName, plainPath string) (*StagedDerivedAsset, error) {
+	f, err := os.Open(strings.TrimSpace(plainPath))
 	if err != nil {
-		_ = os.Remove(encPath)
+		return nil, err
+	}
+	defer f.Close()
+	return s.stageReader(ctx, mediaID, kind, logicalName, f)
+}
+func (s *DerivedAssetStore) CommitStagedTx(ctx context.Context, tx *sql.Tx, assets ...*StagedDerivedAsset) ([]string, error) {
+	if tx == nil {
+		return nil, fmt.Errorf("derived staged transaction is nil")
+	}
+	old := make([]string, 0, len(assets))
+	for _, a := range assets {
+		if a == nil {
+			return nil, fmt.Errorf("nil staged asset")
+		}
+		var p string
+		err := tx.QueryRowContext(ctx, `SELECT enc_path FROM media_derived_assets WHERE media_id=? AND artifact_kind=? AND logical_name=?`, a.mediaID, a.kind, a.logicalName).Scan(&p)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
+		if p != "" && filepath.Clean(p) != filepath.Clean(a.encPath) {
+			old = append(old, p)
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO media_derived_assets(media_id,artifact_kind,logical_name,enc_path,wrapped_dek,iv,updated_at) VALUES(?,?,?,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(media_id,artifact_kind,logical_name) DO UPDATE SET enc_path=excluded.enc_path,wrapped_dek=excluded.wrapped_dek,iv=excluded.iv,updated_at=CURRENT_TIMESTAMP`, a.mediaID, a.kind, a.logicalName, a.encPath, a.wrappedDEK, a.iv); err != nil {
+			return nil, err
+		}
+	}
+	return old, nil
+}
+func (s *DerivedAssetStore) AbortStaged(assets ...*StagedDerivedAsset) {
+	for _, a := range assets {
+		if a != nil {
+			_ = os.Remove(a.encPath)
+		}
+	}
+}
+func (s *DerivedAssetStore) CleanupReplaced(paths []string) {
+	for _, p := range paths {
+		if strings.TrimSpace(p) != "" {
+			_ = os.Remove(p)
+		}
+	}
+}
+
+// Write encrypts r and atomically publishes one derived asset.
+func (s *DerivedAssetStore) Write(ctx context.Context, mediaID int64, kind, logicalName string, r io.Reader) (string, error) {
+	a, err := s.stageReader(ctx, mediaID, kind, logicalName, r)
+	if err != nil {
 		return "", err
 	}
-	return encPath, nil
+	committed := false
+	defer func() {
+		if !committed {
+			s.AbortStaged(a)
+		}
+	}()
+	var old []string
+	err = store.WithBusyRetry(ctx, nil, func() error {
+		tx, e := s.DB.BeginTx(ctx, nil)
+		if e != nil {
+			return e
+		}
+		defer tx.Rollback()
+		old, e = s.CommitStagedTx(ctx, tx, a)
+		if e != nil {
+			return e
+		}
+		return tx.Commit()
+	})
+	if err != nil {
+		return "", err
+	}
+	committed = true
+	s.CleanupReplaced(old)
+	return a.encPath, nil
 }
 
 // WriteFromTemp encrypts a temp/plain file and deletes it.
@@ -345,6 +431,9 @@ func sanitizeDerivedFileName(name string) string {
 	name = strings.TrimSpace(name)
 	name = strings.ReplaceAll(name, "\\", "_")
 	name = strings.ReplaceAll(name, "/", "_")
+	for _, invalid := range []string{":", "*", "?", "\"", "<", ">", "|"} {
+		name = strings.ReplaceAll(name, invalid, "_")
+	}
 	if name == "" {
 		return "asset"
 	}

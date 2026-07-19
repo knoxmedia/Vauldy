@@ -40,6 +40,7 @@ import {
   pickPrimaryEpisodeMediaId,
 } from "../lib/seriesEpisodeOrder";
 import { storeSeriesPlaySession } from "../lib/seriesPlayback";
+import { resolveSeriesMatchMedia } from "../lib/seriesMatchTarget";
 import { tGlobal, useT } from "../i18n";
 import md from "./MediaDetail.module.css";
 import styles from "./SeriesDetail.module.css";
@@ -172,20 +173,24 @@ export default function SeriesDetailPage() {
   const [searchParams] = useSearchParams();
   const playingMediaId = Number(searchParams.get("current_media_id"));
   const playingRowRef = useRef<HTMLDivElement | null>(null);
-  const [detail, setDetail] = useState<SeriesDetail | null>(null);
+  const [detailState, setDetail] = useState<SeriesDetail | null>(null);
+  const detail = detailState?.id === seriesId ? detailState : null;
   const [loading, setLoading] = useState(true);
   const [activeSeasonId, setActiveSeasonId] = useState<number | null>(null);
   const [episodes, setEpisodes] = useState<EpisodeRow[]>([]);
   const [epLoading, setEpLoading] = useState(false);
-  const [playTarget, setPlayTarget] = useState<{ media_id: number; position: number } | null>(null);
+  const [playTargetState, setPlayTargetState] = useState<{ seriesId: number; target: { media_id: number; position: number } | null } | null>(null);
+  const playTarget = playTargetState?.seriesId === seriesId ? playTargetState.target : null;
   const [playBusy, setPlayBusy] = useState(false);
   const [overviewOpen, setOverviewOpen] = useState(false);
   const [posterBroken, setPosterBroken] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [favorited, setFavorited] = useState(false);
-  const [allMediaIds, setAllMediaIds] = useState<number[]>([]);
+  const [allMediaIDsState, setAllMediaIDsState] = useState<{ seriesId: number; ids: number[] } | null>(null);
+  const allMediaIds = allMediaIDsState?.seriesId === seriesId ? allMediaIDsState.ids : [];
   const [episodeOrder, setEpisodeOrder] = useState<number[]>([]);
-  const [representativeMedia, setRepresentativeMedia] = useState<MediaDetail | null>(null);
+  const [representativeState, setRepresentativeState] = useState<{ seriesId: number; media: MediaDetail | null } | null>(null);
+  const representativeMedia = representativeState?.seriesId === seriesId ? representativeState.media : null;
   const [matchModalOpen, setMatchModalOpen] = useState(false);
   const [playlistModalOpen, setPlaylistModalOpen] = useState(false);
   const [recentPlaylistMenu, setRecentPlaylistMenu] = useState(readRecentPlaylists);
@@ -234,10 +239,10 @@ export default function SeriesDetailPage() {
     let cancelled = false;
     void fetchSeriesPlayTarget(seriesId)
       .then((target) => {
-        if (!cancelled) setPlayTarget(target);
+        if (!cancelled) setPlayTargetState({ seriesId, target });
       })
       .catch(() => {
-        if (!cancelled) setPlayTarget(null);
+        if (!cancelled) setPlayTargetState({ seriesId, target: null });
       });
     return () => {
       cancelled = true;
@@ -247,7 +252,7 @@ export default function SeriesDetailPage() {
   useEffect(() => {
     const seasons = detail?.seasons ?? [];
     if (seasons.length === 0) {
-      setAllMediaIds([]);
+      setAllMediaIDsState({ seriesId, ids: [] });
       setEpisodeOrder([]);
       return;
     }
@@ -256,7 +261,7 @@ export default function SeriesDetailPage() {
       const order = await fetchSeriesEpisodeMediaOrder(seasons);
       if (!cancelled) {
         setEpisodeOrder(order);
-        setAllMediaIds(order);
+        setAllMediaIDsState({ seriesId, ids: order });
       }
     })();
     return () => {
@@ -267,14 +272,14 @@ export default function SeriesDetailPage() {
   useEffect(() => {
     const mid = playTarget?.media_id ?? allMediaIds[0];
     if (!mid) {
-      setRepresentativeMedia(null);
+      setRepresentativeState({ seriesId, media: null });
       setFavorited(false);
       return;
     }
     let cancelled = false;
     void Promise.allSettled([fetchMediaDetail(mid), fetchFavoriteStatus(mid)]).then(([d, fav]) => {
       if (cancelled) return;
-      setRepresentativeMedia(d.status === "fulfilled" ? d.value : null);
+      setRepresentativeState({ seriesId, media: d.status === "fulfilled" ? d.value : null });
       setFavorited(fav.status === "fulfilled" ? fav.value : false);
     });
     return () => {
@@ -382,7 +387,7 @@ export default function SeriesDetailPage() {
     setPlayBusy(true);
     try {
       const target = playTarget ?? (await fetchSeriesPlayTarget(seriesId));
-      setPlayTarget(target);
+      setPlayTargetState({ seriesId, target });
       const order =
         episodeOrder.length > 0
           ? [...episodeOrder]
@@ -459,7 +464,7 @@ export default function SeriesDetailPage() {
       void reloadSeries();
       const mid = playTarget?.media_id ?? allMediaIds[0];
       if (mid) {
-        void fetchMediaDetail(mid).then(setRepresentativeMedia).catch(() => {});
+        void fetchMediaDetail(mid).then((media) => setRepresentativeState({ seriesId, media })).catch(() => {});
       }
     },
     [reloadSeries, playTarget, allMediaIds],
@@ -517,12 +522,12 @@ export default function SeriesDetailPage() {
     season_count: seasons.length,
     episode_count: totalEpisodes,
   };
-  const matchMedia = representativeMedia ?? {
-    id: playTarget?.media_id ?? allMediaIds[0] ?? 0,
-    title: detail.title,
-    year: detail.year,
-    file_path: "",
-  };
+  const matchMedia = resolveSeriesMatchMedia(
+    seriesId,
+    detail,
+    representativeState,
+    { seriesId, mediaId: playTarget?.media_id ?? allMediaIds[0] },
+  );
 
   return (
     <div className={md.page}>
@@ -826,10 +831,11 @@ export default function SeriesDetailPage() {
           }}
         />
       ) : null}
-      {matchMedia.id > 0 ? (
+      {matchMedia && matchMedia.id > 0 ? (
         <MediaMatchModal
           media={matchMedia}
           fixMatch={Boolean(representativeMedia?.scraped)}
+          matchKind="series"
           open={matchModalOpen}
           onClose={() => setMatchModalOpen(false)}
           onMatched={applyMatchUpdate}

@@ -8,7 +8,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-
 )
 
 // OCRConfig enables Tesseract-based extraction for bitmap (PGS / VobSub) subtitles.

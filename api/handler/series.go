@@ -1,18 +1,19 @@
 package handler
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"knox-media/api/middleware"
 	"knox-media/internal/scraper"
 	"knox-media/internal/tvparse"
-	"knox-media/internal/tvstore"
 )
 
 // ListLibrarySeries returns TV series grouped for a library (剧 → 季 → 集 hierarchy entry point).
@@ -22,39 +23,29 @@ func (h *Handler) ListLibrarySeries(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid library id"})
 		return
 	}
-	if !h.requireLibraryAccess(c, libID) {
+	if !h.requireSpecializedAggregateAccess(c, libID) {
 		return
 	}
-	items, err := h.queryLibrarySeriesItems(libID)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+	defer cancel()
+	items, err := h.queryLibrarySeriesItemsContext(ctx, libID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	var unlinked int
-	_ = h.App.DB.QueryRow(`
-		SELECT COUNT(1) FROM media m
-		LEFT JOIN episode_media em ON em.media_id = m.id
-		WHERE m.library_id = ? AND m.file_type = 'video' AND m.status = 'active' AND em.id IS NULL
-	`, libID).Scan(&unlinked)
-	if len(items) == 0 || unlinked > 0 {
-		var mediaCount int
-		_ = h.App.DB.QueryRow(`
-			SELECT COUNT(1) FROM media WHERE library_id = ? AND file_type = 'video' AND status = 'active'
-		`, libID).Scan(&mediaCount)
-		if mediaCount > 0 {
-			_, _ = tvstore.BackfillLibraryTV(h.App.DB, libID)
-			items, err = h.queryLibrarySeriesItems(libID)
-			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-				return
-			}
-		}
+	unlinked, err := h.unlinkedTVCount(ctx, libID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
 	}
-	c.JSON(http.StatusOK, gin.H{"items": items})
+	c.JSON(http.StatusOK, gin.H{"items": items, "maintenance_required": unlinked > 0, "unlinked_count": unlinked})
 }
 
 func (h *Handler) queryLibrarySeriesItems(libID int64) ([]gin.H, error) {
-	rows, err := h.App.DB.Query(`
+	return h.queryLibrarySeriesItemsContext(context.Background(), libID)
+}
+func (h *Handler) queryLibrarySeriesItemsContext(ctx context.Context, libID int64) ([]gin.H, error) {
+	rows, err := h.App.DB.QueryContext(ctx, `
 		SELECT s.id, s.title, s.title_norm, COALESCE(s.year, 0), COALESCE(s.tmdb_id, ''), COALESCE(s.tvdb_id, ''),
 			COALESCE(
 				NULLIF(TRIM(s.poster), ''),
@@ -94,7 +85,7 @@ func (h *Handler) queryLibrarySeriesItems(libID int64) ([]gin.H, error) {
 		var id, year, seasonCount, episodeCount int64
 		var title, titleNorm, tmdbID, tvdbID, posterURL, foldersRaw, created, updated sql.NullString
 		if err := rows.Scan(&id, &title, &titleNorm, &year, &tmdbID, &tvdbID, &posterURL, &foldersRaw, &created, &updated, &seasonCount, &episodeCount); err != nil {
-			continue
+			return nil, err
 		}
 		var folders []string
 		if foldersRaw.Valid {
@@ -108,6 +99,9 @@ func (h *Handler) queryLibrarySeriesItems(libID int64) ([]gin.H, error) {
 			"created_at": created.String, "updated_at": updated.String,
 		})
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return items, nil
 }
 
@@ -118,7 +112,9 @@ func (h *Handler) GetSeries(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid series id"})
 		return
 	}
-	row := h.App.DB.QueryRow(`
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+	defer cancel()
+	row := h.App.DB.QueryRowContext(ctx, `
 		SELECT s.id, s.library_id, s.title, s.title_norm, COALESCE(s.year, 0),
 			COALESCE(s.tmdb_id, ''), COALESCE(s.tvdb_id, ''),
 			COALESCE(
@@ -151,14 +147,18 @@ func (h *Handler) GetSeries(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	if !h.requireLibraryAccess(c, libID) {
+	if !h.requireSpecializedAggregateAccess(c, libID) {
 		return
 	}
 	var folders []string
 	if foldersRaw.Valid {
 		_ = json.Unmarshal([]byte(foldersRaw.String), &folders)
 	}
-	seasons, _ := h.listSeasonSummaries(seriesID)
+	seasons, seasonErr := h.listSeasonSummariesContext(ctx, seriesID)
+	if seasonErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": seasonErr.Error()})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"id": id, "library_id": libID, "title": title.String, "title_norm": titleNorm.String,
 		"year": year, "tmdb_id": tmdbID.String, "tvdb_id": tvdbID.String,
@@ -169,7 +169,10 @@ func (h *Handler) GetSeries(c *gin.Context) {
 }
 
 func (h *Handler) listSeasonSummaries(seriesID int64) ([]gin.H, error) {
-	rows, err := h.App.DB.Query(`
+	return h.listSeasonSummariesContext(context.Background(), seriesID)
+}
+func (h *Handler) listSeasonSummariesContext(ctx context.Context, seriesID int64) ([]gin.H, error) {
+	rows, err := h.App.DB.QueryContext(ctx, `
 		SELECT se.id, se.season_num, COALESCE(se.name, ''), COALESCE(se.poster, ''),
 			(SELECT COUNT(DISTINCT ep.id) FROM episode ep WHERE ep.season_id = se.id) AS episode_count
 		FROM season se
@@ -185,12 +188,15 @@ func (h *Handler) listSeasonSummaries(seriesID int64) ([]gin.H, error) {
 		var id, seasonNum, epCount int64
 		var name, poster sql.NullString
 		if err := rows.Scan(&id, &seasonNum, &name, &poster, &epCount); err != nil {
-			continue
+			return nil, err
 		}
 		items = append(items, gin.H{
 			"id": id, "season_num": seasonNum, "name": name.String,
 			"poster": poster.String, "episode_count": epCount,
 		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return items, nil
 }
@@ -202,8 +208,10 @@ func (h *Handler) ListSeasonEpisodes(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid season id"})
 		return
 	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+	defer cancel()
 	var libID int64
-	if err := h.App.DB.QueryRow(`
+	if err := h.App.DB.QueryRowContext(ctx, `
 		SELECT sr.library_id FROM season se JOIN series sr ON sr.id = se.tv_id WHERE se.id = ?
 	`, seasonID).Scan(&libID); err != nil {
 		if err == sql.ErrNoRows {
@@ -213,11 +221,11 @@ func (h *Handler) ListSeasonEpisodes(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	if !h.requireLibraryAccess(c, libID) {
+	if !h.requireSpecializedAggregateAccess(c, libID) {
 		return
 	}
 	uid := middleware.UserID(c)
-	rows, err := h.App.DB.Query(`
+	rows, err := h.App.DB.QueryContext(ctx, `
 		SELECT ep.id, ep.episode_num, COALESCE(ep.title, ''), COALESCE(ep.duration, 0)
 		FROM episode ep
 		WHERE ep.season_id = ?
@@ -233,20 +241,32 @@ func (h *Handler) ListSeasonEpisodes(c *gin.Context) {
 		var epID, epNum, dur int64
 		var epTitle sql.NullString
 		if err := rows.Scan(&epID, &epNum, &epTitle, &dur); err != nil {
-			continue
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
 		}
-		versions, _ := h.listEpisodeMediaVersions(epID, uid)
+		versions, versionErr := h.listEpisodeMediaVersionsContext(ctx, epID, uid)
+		if versionErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": versionErr.Error()})
+			return
+		}
 		items = append(items, gin.H{
 			"id": epID, "episode_num": epNum, "title": epTitle.String,
 			"duration": dur, "versions": versions,
 		})
 	}
+	if err := rows.Err(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"items": items})
 }
 
 func (h *Handler) listEpisodeMediaVersions(episodeID int64, userID int64) ([]gin.H, error) {
-	rows, err := h.App.DB.Query(`
-		SELECT m.id, m.file_id, m.title, m.file_path, m.duration, m.width, m.height, m.bitrate, m.format,
+	return h.listEpisodeMediaVersionsContext(context.Background(), episodeID, userID)
+}
+func (h *Handler) listEpisodeMediaVersionsContext(ctx context.Context, episodeID int64, userID int64) ([]gin.H, error) {
+	rows, err := h.App.DB.QueryContext(ctx, `
+		SELECT m.id, m.file_id, m.title, m.file_path, COALESCE(m.duration,0), COALESCE(m.width,0), COALESCE(m.height,0), COALESCE(m.bitrate,0), m.format,
 			em.sort_order,
 			COALESCE(NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.poster')), ''), '') AS poster_url,
 			COALESCE((SELECT pp.completed FROM play_progress pp WHERE pp.file_id = m.file_id AND pp.user_id = ?), 0) AS play_completed
@@ -264,7 +284,7 @@ func (h *Handler) listEpisodeMediaVersions(episodeID int64, userID int64) ([]gin
 		var mid, dur, w, h, br, sortOrder, playCompleted int64
 		var fileID, title, path, format, poster sql.NullString
 		if err := rows.Scan(&mid, &fileID, &title, &path, &dur, &w, &h, &br, &format, &sortOrder, &poster, &playCompleted); err != nil {
-			continue
+			return nil, err
 		}
 		items = append(items, gin.H{
 			"media_id": mid, "file_id": fileID.String, "title": title.String,
@@ -272,6 +292,9 @@ func (h *Handler) listEpisodeMediaVersions(episodeID int64, userID int64) ([]gin
 			"bitrate": br, "format": format.String, "sort_order": sortOrder,
 			"poster_url": poster.String, "completed": playCompleted,
 		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return items, nil
 }
@@ -285,13 +308,15 @@ type updateSeriesBody struct {
 
 // GetSeriesPlayTarget returns the media id and resume position for series playback.
 func (h *Handler) GetSeriesPlayTarget(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+	defer cancel()
 	seriesID, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || seriesID <= 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid series id"})
 		return
 	}
 	var libID int64
-	if err := h.App.DB.QueryRow(`SELECT library_id FROM series WHERE id = ?`, seriesID).Scan(&libID); err != nil {
+	if err := h.App.DB.QueryRowContext(ctx, `SELECT library_id FROM series WHERE id = ?`, seriesID).Scan(&libID); err != nil {
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 			return
@@ -299,12 +324,12 @@ func (h *Handler) GetSeriesPlayTarget(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	if !h.requireLibraryAccess(c, libID) {
+	if !h.requireSpecializedAggregateAccess(c, libID) {
 		return
 	}
 	uid := middleware.UserID(c)
 	var mediaID, duration, position, completed int64
-	err = h.App.DB.QueryRow(`
+	err = h.App.DB.QueryRowContext(ctx, `
 		SELECT m.id, COALESCE(m.duration, 0), COALESCE(p.position, 0), COALESCE(p.completed, 0)
 		FROM play_progress p
 		JOIN media m ON m.file_id = p.file_id
@@ -323,7 +348,7 @@ func (h *Handler) GetSeriesPlayTarget(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"media_id": mediaID, "position": resumePos})
 		return
 	}
-	if err := h.App.DB.QueryRow(`
+	if err := h.App.DB.QueryRowContext(ctx, `
 		SELECT m.id
 		FROM episode_media em
 		JOIN episode ep ON ep.id = em.episode_id
@@ -369,7 +394,7 @@ func (h *Handler) UpdateSeries(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	if !h.requireLibraryAccess(c, libID) {
+	if !h.requireSpecializedAggregateAccess(c, libID) {
 		return
 	}
 	title := strings.TrimSpace(body.Title)
@@ -417,11 +442,11 @@ func (h *Handler) UpdateSeries(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"ok": true,
-		"id": seriesID,
-		"title": title,
-		"year": year,
-		"poster": poster,
+		"ok":       true,
+		"id":       seriesID,
+		"title":    title,
+		"year":     year,
+		"poster":   poster,
 		"overview": strings.TrimSpace(body.Overview),
 	})
 }
@@ -449,7 +474,7 @@ func (h *Handler) ListSeriesImageCandidates(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "series not found"})
 		return
 	}
-	if !h.requireLibraryAccess(c, libraryID) {
+	if !h.requireSpecializedAggregateAccess(c, libraryID) {
 		return
 	}
 

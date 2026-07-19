@@ -3,6 +3,7 @@ package subtitle
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -177,7 +178,7 @@ func TestSyncSidecarsMatchAndGenerate(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(workDir, "movie.en.srt"), []byte("1\n00:00:00,000 --> 00:00:01,000\nhello\n"), 0o644); err != nil {
 		t.Fatalf("write srt: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(workDir, "movie.zh.vtt"), []byte("WEBVTT\n\n00:00:00.000 --> 00:00:01.000\n你好\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(workDir, "movie.zh.vtt"), []byte("WEBVTT\n\n00:00:00.000 --> 00:00:01.000\n浣犲ソ\n"), 0o644); err != nil {
 		t.Fatalf("write vtt: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(workDir, "other.en.srt"), []byte("x"), 0o644); err != nil {
@@ -274,9 +275,9 @@ func TestRunVobSubIdxOCRCreatesVTT(t *testing.T) {
 	db := newSubtitleTestDB(t)
 	mockPy := writeMockTool(t, t.TempDir(), "python-mock")
 	service := &Service{
-		DB:         db,
-		FFmpegPath: "ffmpeg",
-		FFprobePath:"ffprobe",
+		DB:          db,
+		FFmpegPath:  "ffmpeg",
+		FFprobePath: "ffprobe",
 		OCR: OCRConfig{
 			Enabled:    true,
 			PythonPath: mockPy,
@@ -392,5 +393,146 @@ func TestNullStr(t *testing.T) {
 	}
 	if v := nullStr("en"); fmt.Sprint(v) != "en" {
 		t.Fatalf("value mismatch: %#v", v)
+	}
+}
+
+func TestSubtitleStreamsHonorsCancelledContext(t *testing.T) {
+	db := newSubtitleTestDB(t)
+	s := &Service{DB: db, FFprobePath: "ffprobe"}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := s.subtitleStreams(ctx, 41, filepath.Join(t.TempDir(), "missing.mp4"))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err=%v want context canceled", err)
+	}
+}
+
+func TestProcessMediaReturnsSavedFailedError(t *testing.T) {
+	db := newSubtitleTestDB(t)
+	_, _ = db.Exec(`CREATE TABLE subtitle_task(media_id INTEGER UNIQUE,status TEXT,message TEXT,created_at TEXT,started_at TEXT,finished_at TEXT,updated_at TEXT); CREATE TABLE media(id INTEGER PRIMARY KEY,file_type TEXT,file_path TEXT); INSERT INTO subtitle_task(media_id,status,message) VALUES(41,'failed','saved subtitle failure')`)
+	s := &Service{DB: db}
+	err := s.ProcessMedia(context.Background(), 41)
+	if err == nil || !strings.Contains(err.Error(), "saved subtitle failure") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestProcessMediaRunningWriteFailureStopsProcessing(t *testing.T) {
+	db := newSubtitleTestDB(t)
+	video := filepath.Join(t.TempDir(), "video.mp4")
+	_ = os.WriteFile(video, []byte("x"), 0644)
+	_, _ = db.Exec(`CREATE TABLE subtitle_task(media_id INTEGER UNIQUE,status TEXT,message TEXT,created_at TEXT,started_at TEXT,finished_at TEXT,updated_at TEXT); CREATE TABLE media(id INTEGER PRIMARY KEY,file_type TEXT,file_path TEXT); INSERT INTO media(id,file_type,file_path) VALUES(41,'video',?)`, video)
+	_, _ = db.Exec(`CREATE TRIGGER reject_subtitle_running BEFORE INSERT ON subtitle_task BEGIN SELECT RAISE(FAIL,'reject running'); END`)
+	s := &Service{DB: db, SubtitleDir: t.TempDir(), FFprobePath: "ffprobe"}
+	err := s.ProcessMedia(context.Background(), 41)
+	if err == nil || !strings.Contains(err.Error(), "reject running") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestProcessMediaDoneWriteFailureIsReturned(t *testing.T) {
+	db := newSubtitleTestDB(t)
+	video := filepath.Join(t.TempDir(), "video.mp4")
+	_ = os.WriteFile(video, []byte("x"), 0644)
+	_, _ = db.Exec(`CREATE TABLE subtitle_task(media_id INTEGER UNIQUE,status TEXT,message TEXT,created_at TEXT,started_at TEXT,finished_at TEXT,updated_at TEXT); CREATE TABLE media(id INTEGER PRIMARY KEY,file_type TEXT,file_path TEXT); INSERT INTO media(id,file_type,file_path) VALUES(41,'video',?); INSERT INTO subtitle_task(media_id,status) VALUES(41,'pending')`, video)
+	_, _ = db.Exec(`CREATE TRIGGER reject_subtitle_done BEFORE UPDATE OF status ON subtitle_task WHEN NEW.status='done' BEGIN SELECT RAISE(FAIL,'reject done'); END`)
+	s := &Service{DB: db, SubtitleDir: t.TempDir(), FFprobePath: writeProbeNoStreams(t)}
+	err := s.ProcessMedia(context.Background(), 41)
+	if err == nil || !strings.Contains(err.Error(), "reject done") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func writeProbeNoStreams(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if runtime.GOOS == "windows" {
+		p := filepath.Join(dir, "probe.bat")
+		_ = os.WriteFile(p, []byte("@echo {\"streams\":[]}\r\n"), 0644)
+		return p
+	}
+	p := filepath.Join(dir, "probe.sh")
+	_ = os.WriteFile(p, []byte("#!/bin/sh\necho '{\"streams\":[]}'\n"), 0755)
+	return p
+}
+
+func TestMarkSubtitleReadyUpdateFailureIsFatal(t *testing.T) {
+	db := newSubtitleTestDB(t)
+	_, _ = db.Exec(`INSERT INTO media_subtitle(media_id,dedupe_key,source_kind,vtt_path,status) VALUES(41,'x','embedded','old','running'); CREATE TRIGGER reject_ready BEFORE UPDATE ON media_subtitle WHEN NEW.status='ready' BEGIN SELECT RAISE(FAIL,'reject ready'); END`)
+	p := filepath.Join(t.TempDir(), "x.vtt")
+	_ = os.WriteFile(p, []byte("WEBVTT"), 0644)
+	s := &Service{DB: db}
+	err := s.markSubtitleReady(context.Background(), 41, "x", "x.vtt", p)
+	if err == nil || !strings.Contains(err.Error(), "reject ready") {
+		t.Fatalf("err=%v", err)
+	}
+}
+func TestMarkSubtitleReadyMissingRowIsFatal(t *testing.T) {
+	db := newSubtitleTestDB(t)
+	p := filepath.Join(t.TempDir(), "x.vtt")
+	_ = os.WriteFile(p, []byte("WEBVTT"), 0644)
+	s := &Service{DB: db}
+	if err := s.markSubtitleReady(context.Background(), 41, "missing", "x.vtt", p); err == nil {
+		t.Fatal("expected zero-row error")
+	}
+}
+
+func TestProcessMediaStaleGuardDoesNotWriteRunning(t *testing.T) {
+	db := newSubtitleTestDB(t)
+	_, _ = db.Exec(`CREATE TABLE subtitle_task(media_id INTEGER UNIQUE,status TEXT,message TEXT,started_at TEXT,finished_at TEXT,updated_at TEXT); CREATE TABLE media(id INTEGER PRIMARY KEY,file_type TEXT,file_path TEXT); INSERT INTO subtitle_task(media_id,status) VALUES(41,'pending')`)
+	stale := errors.New("stale generation")
+	ctx := WithCommitGuard(context.Background(), func(context.Context) error { return stale })
+	s := &Service{DB: db}
+	err := s.ProcessMedia(ctx, 41)
+	if !errors.Is(err, stale) {
+		t.Fatalf("err=%v", err)
+	}
+	var status string
+	_ = db.QueryRow(`SELECT status FROM subtitle_task WHERE media_id=41`).Scan(&status)
+	if status != "pending" {
+		t.Fatalf("status=%q", status)
+	}
+}
+func TestProcessMediaStaleCleanupDoesNotOverwriteRunning(t *testing.T) {
+	db := newSubtitleTestDB(t)
+	_, _ = db.Exec(`CREATE TABLE subtitle_task(media_id INTEGER UNIQUE,status TEXT,message TEXT,started_at TEXT,finished_at TEXT,updated_at TEXT); CREATE TABLE media(id INTEGER PRIMARY KEY,file_type TEXT,file_path TEXT); INSERT INTO subtitle_task(media_id,status) VALUES(41,'pending')`)
+	calls := 0
+	stale := errors.New("stale generation")
+	ctx := WithCommitGuard(context.Background(), func(context.Context) error {
+		calls++
+		if calls > 1 {
+			return stale
+		}
+		return nil
+	})
+	s := &Service{DB: db}
+	s.processMediaHook = func(context.Context, int64) error { return context.Canceled }
+	err := s.ProcessMedia(ctx, 41)
+	if !errors.Is(err, context.Canceled) || !errors.Is(err, stale) {
+		t.Fatalf("err=%v", err)
+	}
+	var status string
+	_ = db.QueryRow(`SELECT status FROM subtitle_task WHERE media_id=41`).Scan(&status)
+	if status != "running" {
+		t.Fatalf("status=%q", status)
+	}
+}
+
+func TestMarkSubtitleReadyStaleTxGuardLeavesOldRow(t *testing.T) {
+	db := newSubtitleTestDB(t)
+	_, _ = db.Exec(`INSERT INTO media_subtitle(media_id,dedupe_key,source_kind,vtt_path,status) VALUES(41,'x','embedded','old.vtt','running')`)
+	p := filepath.Join(t.TempDir(), "new.vtt")
+	_ = os.WriteFile(p, []byte("WEBVTT"), 0644)
+	stale := errors.New("stale generation")
+	ctx := WithCommitGuardTx(context.Background(), func(context.Context, *sql.Tx) error { return stale })
+	s := &Service{DB: db}
+	err := s.markSubtitleReady(ctx, 41, "x", "x.vtt", p)
+	if !errors.Is(err, stale) {
+		t.Fatalf("err=%v", err)
+	}
+	var path, status string
+	_ = db.QueryRow(`SELECT vtt_path,status FROM media_subtitle WHERE media_id=41`).Scan(&path, &status)
+	if path != "old.vtt" || status != "running" {
+		t.Fatalf("path=%q status=%q", path, status)
 	}
 }

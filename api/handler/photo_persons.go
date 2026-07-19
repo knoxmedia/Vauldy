@@ -3,18 +3,23 @@ package handler
 import (
 	"database/sql"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 
 	"knox-media/internal/photoface"
+	"knox-media/internal/storage"
 )
 
 func (h *Handler) ListPhotoPersons(c *gin.Context) {
 	libraryID, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || libraryID <= 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid library id"})
+		return
+	}
+	if !h.requirePhotoAggregateAccess(c, libraryID) {
 		return
 	}
 	rows, err := h.App.DB.Query(`
@@ -29,10 +34,10 @@ func (h *Handler) ListPhotoPersons(c *gin.Context) {
 	defer rows.Close()
 
 	type personRow struct {
-		ID         int64  `json:"id"`
-		Name       string `json:"name"`
-		Count      int64  `json:"count"`
-		CoverFaceID int64 `json:"cover_face_id,omitempty"`
+		ID          int64  `json:"id"`
+		Name        string `json:"name"`
+		Count       int64  `json:"count"`
+		CoverFaceID int64  `json:"cover_face_id,omitempty"`
 	}
 	items := make([]personRow, 0)
 	for rows.Next() {
@@ -67,7 +72,7 @@ func (h *Handler) UpdatePhotoPerson(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid person id"})
 		return
 	}
-	if !h.requireLibraryAccess(c, libraryID) {
+	if !h.requirePhotoAggregateAccess(c, libraryID) {
 		return
 	}
 	var body updatePhotoPersonBody
@@ -76,7 +81,7 @@ func (h *Handler) UpdatePhotoPerson(c *gin.Context) {
 		return
 	}
 	name := strings.TrimSpace(body.Name)
-	res, err := h.App.DB.Exec(`
+	res, err := h.App.DB.ExecContext(c.Request.Context(), `
 		UPDATE photo_person SET label = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ? AND library_id = ?`, name, personID, libraryID)
 	if err != nil {
@@ -101,9 +106,10 @@ func (h *Handler) ServePhotoFaceThumb(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid face id"})
 		return
 	}
+	c.Header("Cache-Control", "private, no-store")
 	var mediaID int64
 	var bboxX, bboxY, bboxW, bboxH float64
-	if err := h.App.DB.QueryRow(`
+	if err := h.App.DB.QueryRowContext(c.Request.Context(), `
 		SELECT media_id, bbox_x, bbox_y, bbox_w, bbox_h FROM photo_face WHERE id = ?`, faceID).
 		Scan(&mediaID, &bboxX, &bboxY, &bboxW, &bboxH); err != nil {
 		if err == sql.ErrNoRows {
@@ -116,25 +122,24 @@ func (h *Handler) ServePhotoFaceThumb(c *gin.Context) {
 	if _, ok := h.requireMediaAccess(c, mediaID, false); !ok {
 		return
 	}
-	var filePath sql.NullString
-	if err := h.App.DB.QueryRow(`SELECT file_path FROM media WHERE id = ?`, mediaID).Scan(&filePath); err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "media not found"})
+	if encPath, ok := storage.LookupEncPath(h.App.DB, mediaID, photoface.FaceThumbnailArtifactKind, photoface.FaceThumbnailLogicalName(faceID)); ok {
+		h.serveDerivedAssetKind(c, mediaID, encPath, "image/jpeg", photoface.FaceThumbnailArtifactKind, photoface.FaceThumbnailLogicalName(faceID))
 		return
 	}
-	src, cleanup, err := h.resolvePhotoThumbSource(mediaID, filePath.String)
-	if cleanup != nil {
-		defer cleanup()
-	}
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	facePath := photoface.ExpectedFaceThumbnailPath(h.photoCacheDir(), faceID)
+	if photoface.ValidateFaceJPEG(facePath) != nil {
+		c.Header("X-Thumbnail-Pending", "1")
+		c.Header("Retry-After", "5")
+		c.JSON(http.StatusNotFound, gin.H{"error": "face thumbnail not ready"})
 		return
 	}
-	data, err := photoface.CropFaceJPEG(src, bboxX, bboxY, bboxW, bboxH, 88)
+	data, err := os.ReadFile(facePath)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		c.Header("X-Thumbnail-Pending", "1")
+		c.Header("Retry-After", "5")
+		c.JSON(http.StatusNotFound, gin.H{"error": "face thumbnail not ready"})
 		return
 	}
 	c.Header("Content-Type", "image/jpeg")
-	c.Header("Cache-Control", "public, max-age=86400")
 	c.Writer.Write(data)
 }

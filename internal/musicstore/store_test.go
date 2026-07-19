@@ -1,10 +1,11 @@
-package musicstore
+package musicstore_test
 
 import (
 	"path/filepath"
 	"testing"
 
 	"knox-media/internal/musicparse"
+	. "knox-media/internal/musicstore"
 	"knox-media/internal/store"
 )
 

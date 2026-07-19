@@ -26,6 +26,9 @@ func (h *Handler) ListPhotoPlaces(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid library id"})
 		return
 	}
+	if !h.requirePhotoAggregateAccess(c, libraryID) {
+		return
+	}
 
 	rows, err := h.App.DB.Query(`
 		SELECT
@@ -92,6 +95,6 @@ func (h *Handler) BackfillPhotoLocations(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	go h.runPhotoLocationOnce()
+	go h.runPhotoLocationOnce(c.Request.Context())
 	c.JSON(http.StatusOK, gin.H{"ok": true, "queued": n})
 }

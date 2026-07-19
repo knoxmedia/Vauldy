@@ -329,8 +329,8 @@ export type HistoryItem = {
   library_type?: string;
 };
 
-export async function fetchLibraries() {
-  const { data } = await api.get<{ items?: Library[] }>("/api/v1/library");
+export async function fetchLibraries(signal?: AbortSignal) {
+  const { data } = await api.get<{ items?: Library[] }>("/api/v1/library", { signal });
   return data?.items ?? [];
 }
 
@@ -338,12 +338,12 @@ export type EncryptedAssetsConfig = {
   data_dot_encrypted_dir?: string;
 };
 
-export async function fetchLibrariesWithCapabilities() {
+export async function fetchLibrariesWithCapabilities(signal?: AbortSignal) {
   const { data } = await api.get<{
     items?: Library[];
     drm_capabilities?: DRMCapabilities;
     encrypted_assets_config?: EncryptedAssetsConfig;
-  }>("/api/v1/library");
+  }>("/api/v1/library", { signal });
   return {
     items: data?.items ?? [],
     drmCapabilities: data?.drm_capabilities ?? { widevine_enabled: true, powerdrm_enabled: true },
@@ -450,6 +450,7 @@ export async function fetchMedia(
     /** Full-text fuzzy search across title, overview, genres, tags, etc. */
     q?: string;
   },
+  signal?: AbortSignal,
 ) {
   const params: Record<string, string | number> = {};
   if (libraryId !== undefined) params.library_id = libraryId;
@@ -460,7 +461,7 @@ export async function fetchMedia(
   if (opts?.photo_place) params.photo_place = opts.photo_place;
   if (opts?.photo_person) params.photo_person = opts.photo_person;
   if (opts?.q) params.q = opts.q;
-  const { data } = await api.get<{ items?: MediaItem[] }>("/api/v1/media", { params });
+  const { data } = await api.get<{ items?: MediaItem[] }>("/api/v1/media", { params, signal });
   return data?.items ?? [];
 }
 
@@ -580,28 +581,29 @@ export type DocumentNode = {
 export async function fetchDocuments(
   libraryId: number,
   params?: Record<string, string | number | boolean | undefined>,
+  signal?: AbortSignal,
 ): Promise<DocumentItem[]> {
-  const { data } = await api.get<{ items?: DocumentItem[] }>(`/api/v1/library/${libraryId}/documents`, { params });
+  const { data } = await api.get<{ items?: DocumentItem[] }>(`/api/v1/library/${libraryId}/documents`, { params, signal });
   return data?.items ?? [];
 }
 
-export async function fetchDocumentNodes(libraryId: number, parent = ""): Promise<DocumentNode[]> {
+export async function fetchDocumentNodes(libraryId: number, parent = "", signal?: AbortSignal): Promise<DocumentNode[]> {
   const { data } = await api.get<{ items?: DocumentNode[] }>(`/api/v1/library/${libraryId}/document/nodes`, {
-    params: { parent },
+    params: { parent }, signal,
   });
   return data?.items ?? [];
 }
 
-export async function fetchDocumentFacets(libraryId: number, kind: string): Promise<DocumentFacet[]> {
+export async function fetchDocumentFacets(libraryId: number, kind: string, signal?: AbortSignal): Promise<DocumentFacet[]> {
   const { data } = await api.get<{ items?: DocumentFacet[] }>(`/api/v1/library/${libraryId}/document/facets`, {
-    params: { kind },
+    params: { kind }, signal,
   });
   return data?.items ?? [];
 }
 
-export async function fetchRecentDocuments(libraryId?: number): Promise<DocumentItem[]> {
+export async function fetchRecentDocuments(libraryId?: number, signal?: AbortSignal): Promise<DocumentItem[]> {
   const { data } = await api.get<{ items?: DocumentItem[] }>(`/api/v1/library/${libraryId ?? 0}/documents/recent`, {
-    params: libraryId ? { library_id: libraryId } : undefined,
+    params: libraryId ? { library_id: libraryId } : undefined, signal,
   });
   return data?.items ?? [];
 }
@@ -661,6 +663,28 @@ export function isOfficeDocumentFormat(format?: string): boolean {
   return OFFICE_DOCUMENT_FORMATS.has((format || "").trim().toLowerCase());
 }
 
+export type DocumentTagUpdateMode = "add" | "remove" | "replace";
+
+export type DocumentTagBatchResult = {
+  updated: number;
+  items: Array<{ media_id: number; tags: string[] }>;
+  facet_deltas: Array<{ tag: string; delta: number }>;
+};
+
+export async function batchUpdateDocumentTags(
+  mediaIds: number[],
+  mode: DocumentTagUpdateMode,
+  tags: string[],
+  signal?: AbortSignal,
+): Promise<DocumentTagBatchResult> {
+  const { data } = await api.patch<DocumentTagBatchResult>(
+    "/api/v1/documents/tags",
+    { media_ids: mediaIds, mode, tags },
+    { signal },
+  );
+  return data;
+}
+
 export async function batchDownloadDocuments(mediaIds: number[]): Promise<Blob> {
   const { data } = await api.post("/api/v1/documents/download", { media_ids: mediaIds }, { responseType: "blob" });
   return data as Blob;
@@ -688,18 +712,18 @@ export type PhotoPerson = {
   cover_face_id?: number;
 };
 
-export async function fetchPhotoCategories(libraryId: number): Promise<PhotoCategory[]> {
-  const { data } = await api.get<{ items?: PhotoCategory[] }>(`/api/v1/library/${libraryId}/photo/categories`);
+export async function fetchPhotoCategories(libraryId: number, signal?: AbortSignal): Promise<PhotoCategory[]> {
+  const { data } = await api.get<{ items?: PhotoCategory[] }>(`/api/v1/library/${libraryId}/photo/categories`, { signal });
   return data?.items ?? [];
 }
 
-export async function fetchPhotoPlaces(libraryId: number): Promise<PhotoPlace[]> {
-  const { data } = await api.get<{ items?: PhotoPlace[] }>(`/api/v1/library/${libraryId}/photo/places`);
+export async function fetchPhotoPlaces(libraryId: number, signal?: AbortSignal): Promise<PhotoPlace[]> {
+  const { data } = await api.get<{ items?: PhotoPlace[] }>(`/api/v1/library/${libraryId}/photo/places`, { signal });
   return data?.items ?? [];
 }
 
-export async function fetchPhotoPersons(libraryId: number): Promise<PhotoPerson[]> {
-  const { data } = await api.get<{ items?: PhotoPerson[] }>(`/api/v1/library/${libraryId}/photo/persons`);
+export async function fetchPhotoPersons(libraryId: number, signal?: AbortSignal): Promise<PhotoPerson[]> {
+  const { data } = await api.get<{ items?: PhotoPerson[] }>(`/api/v1/library/${libraryId}/photo/persons`, { signal });
   return data?.items ?? [];
 }
 
@@ -713,6 +737,22 @@ export async function updatePhotoPersonName(
     { name },
   );
   return data ?? { ok: false, name };
+}
+
+export class PhotoFaceThumbnailPendingError extends Error {
+  constructor() { super("face thumbnail not ready"); this.name = "PhotoFaceThumbnailPendingError"; }
+}
+
+export async function fetchPhotoFaceThumbnail(faceId: number, signal?: AbortSignal): Promise<Blob> {
+  try {
+    const { data } = await api.get<Blob>(`/api/v1/photo/face/${faceId}/thumb.jpg`, { responseType: "blob", signal });
+    return data;
+  } catch (error) {
+    if (axios.isAxiosError(error) && error.response?.status === 404 && String(error.response.headers?.["x-thumbnail-pending"] ?? "") === "1") {
+      throw new PhotoFaceThumbnailPendingError();
+    }
+    throw error;
+  }
 }
 
 export function photoFaceThumbSrc(faceId: number): string {
@@ -729,7 +769,7 @@ export async function backfillPhotoFaces(libraryId: number): Promise<{ ok: boole
   return data ?? { ok: false, queued: 0 };
 }
 
-export async function fetchPhotoFaceProgress(libraryId: number): Promise<{
+export async function fetchPhotoFaceProgress(libraryId: number, signal?: AbortSignal): Promise<{
   total: number;
   processed: number;
   detected: number;
@@ -744,7 +784,7 @@ export async function fetchPhotoFaceProgress(libraryId: number): Promise<{
     pending: number;
     failed?: number;
     percent: number;
-  }>(`/api/v1/library/${libraryId}/photo/faces/progress`);
+  }>(`/api/v1/library/${libraryId}/photo/faces/progress`, { signal });
   return {
     total: data?.total ?? 0,
     processed: data?.processed ?? 0,
@@ -762,7 +802,7 @@ export async function backfillPhotoLocations(libraryId: number): Promise<{ ok: b
   return data ?? { ok: false, queued: 0 };
 }
 
-export async function fetchPhotoLocationProgress(libraryId: number): Promise<{
+export async function fetchPhotoLocationProgress(libraryId: number, signal?: AbortSignal): Promise<{
   total: number;
   located: number;
   pending: number;
@@ -770,11 +810,12 @@ export async function fetchPhotoLocationProgress(libraryId: number): Promise<{
 }> {
   const { data } = await api.get<{ total: number; located: number; pending: number; percent: number }>(
     `/api/v1/library/${libraryId}/photo/locations/progress`,
+    { signal },
   );
   return data ?? { total: 0, located: 0, pending: 0, percent: 0 };
 }
 
-export async function fetchPhotoClassifyProgress(libraryId: number): Promise<{
+export async function fetchPhotoClassifyProgress(libraryId: number, signal?: AbortSignal): Promise<{
   total: number;
   classified: number;
   pending: number;
@@ -782,6 +823,7 @@ export async function fetchPhotoClassifyProgress(libraryId: number): Promise<{
 }> {
   const { data } = await api.get<{ total: number; classified: number; pending: number; percent: number }>(
     `/api/v1/library/${libraryId}/photo/classify/progress`,
+    { signal },
   );
   return data ?? { total: 0, classified: 0, pending: 0, percent: 0 };
 }
