@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 
@@ -806,7 +807,9 @@ func OpenSQLite(path string) (*sql.DB, error) {
 			UNIQUE(media_id, tag),
 			FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
 		)`)
-	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_document_tag_tag ON document_tag(tag)`)
+	_, _ = db.Exec(`DELETE FROM document_tag WHERE id NOT IN (SELECT MIN(id) FROM document_tag GROUP BY media_id, tag COLLATE NOCASE)`)
+	_, _ = db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_document_tag_media_tag_nocase ON document_tag(media_id, tag COLLATE NOCASE)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_document_tag_tag ON document_tag(tag COLLATE NOCASE)`)
 	_, _ = db.Exec(`
 		CREATE TABLE IF NOT EXISTS scan_log (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -891,6 +894,10 @@ func OpenSQLite(path string) (*sql.DB, error) {
 	// Clean up stale transcode tasks that failed due to transient issues (path not found, context canceled).
 	cleanupStaleTranscodeTasks(db)
 	recoverStalePhotoTasks(db)
+	if err := MigrateMediaSortColumns(context.Background(), db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("media sort migration: %w", err)
+	}
 	return db, nil
 }
 
