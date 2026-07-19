@@ -119,6 +119,7 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 			auth.GET("/media/:id/read-progress", h.GetReadProgress)
 			auth.POST("/media/:id/read-progress", h.SaveReadProgress)
 			auth.POST("/documents/download", h.BatchDownloadDocuments)
+			auth.PATCH("/documents/tags", h.BatchUpdateDocumentTags)
 			auth.GET("/scan-logs", h.ListScanLogs)
 			auth.GET("/album/:id", h.GetAlbum)
 			auth.GET("/album/:id/play-target", h.GetAlbumPlayTarget)

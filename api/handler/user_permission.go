@@ -1,9 +1,11 @@
 package handler
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -39,8 +41,21 @@ type parentalAccessPlan struct {
 }
 
 func (h *Handler) loadUserPermissionProfile(userID int64) (userPermissionProfile, error) {
+	return h.loadUserPermissionProfileContext(context.Background(), userID)
+}
+
+type permissionQueryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func (h *Handler) loadUserPermissionProfileContext(ctx context.Context, userID int64) (userPermissionProfile, error) {
+	return loadUserPermissionProfileFrom(ctx, h.App.DB, userID)
+}
+
+func loadUserPermissionProfileFrom(ctx context.Context, q permissionQueryer, userID int64) (userPermissionProfile, error) {
 	p := userPermissionProfile{UserID: userID, AllowedLibraryIDs: map[int64]struct{}{}, AllowedLibraryFolders: map[int64][]string{}}
-	row := h.App.DB.QueryRow(`
+	row := q.QueryRowContext(ctx, `
 		SELECT role, COALESCE(can_manage,0), COALESCE(can_play,1), COALESCE(can_download,0), COALESCE(can_access_features,1),
 		       COALESCE(library_scope,'all'), COALESCE(parental_enabled,0), COALESCE(parental_max_rating,''), COALESCE(parental_pin_hash,''),
 		       COALESCE(allowed_time_start,''), COALESCE(allowed_time_end,''), COALESCE(parental_access_plan_json,'[]')
@@ -49,13 +64,6 @@ func (h *Handler) loadUserPermissionProfile(userID int64) (userPermissionProfile
 	var canManage, canPlay, canDownload, canAccessFeatures, parentalEnabled int
 	var parentalPlansRaw string
 	if err := row.Scan(&p.Role, &canManage, &canPlay, &canDownload, &canAccessFeatures, &p.LibraryScope, &parentalEnabled, &p.ParentalMaxRating, &p.ParentalPinHash, &p.AllowedTimeStart, &p.AllowedTimeEnd, &parentalPlansRaw); err != nil {
-		if err == sql.ErrNoRows {
-			// Token references a missing user; fall back to a permissive default profile so
-			// downstream library permission checks (selected scope) simply don't engage.
-			p.LibraryScope = "all"
-			p.CanPlay = true
-			return p, nil
-		}
 		return p, err
 	}
 	p.ParentalPlans = parseParentalPlansJSON(parentalPlansRaw)
@@ -69,18 +77,24 @@ func (h *Handler) loadUserPermissionProfile(userID int64) (userPermissionProfile
 		return p, nil
 	}
 	if strings.EqualFold(strings.TrimSpace(p.LibraryScope), "selected") {
-		rows, err := h.App.DB.Query(`SELECT library_id FROM user_library_permission WHERE user_id = ?`, userID)
+		rows, err := q.QueryContext(ctx, `SELECT library_id FROM user_library_permission WHERE user_id = ?`, userID)
 		if err != nil {
 			return p, err
 		}
 		defer rows.Close()
 		for rows.Next() {
 			var lid int64
-			if rows.Scan(&lid) == nil && lid > 0 {
+			if err := rows.Scan(&lid); err != nil {
+				return p, err
+			}
+			if lid > 0 {
 				p.AllowedLibraryIDs[lid] = struct{}{}
 			}
 		}
-		fRows, err := h.App.DB.Query(`SELECT library_id, folder_path FROM user_library_folder_permission WHERE user_id = ?`, userID)
+		if err := rows.Err(); err != nil {
+			return p, err
+		}
+		fRows, err := q.QueryContext(ctx, `SELECT library_id, folder_path FROM user_library_folder_permission WHERE user_id = ?`, userID)
 		if err != nil {
 			return p, err
 		}
@@ -88,12 +102,46 @@ func (h *Handler) loadUserPermissionProfile(userID int64) (userPermissionProfile
 		for fRows.Next() {
 			var lid int64
 			var folder string
-			if fRows.Scan(&lid, &folder) == nil && lid > 0 && strings.TrimSpace(folder) != "" {
+			if err := fRows.Scan(&lid, &folder); err != nil {
+				return p, err
+			}
+			if lid > 0 && strings.TrimSpace(folder) != "" {
 				p.AllowedLibraryFolders[lid] = append(p.AllowedLibraryFolders[lid], strings.TrimSpace(folder))
 			}
 		}
+		if err := fRows.Err(); err != nil {
+			return p, err
+		}
 	}
 	return p, nil
+}
+
+func (h *Handler) requireSpecializedAggregateAccess(c *gin.Context, libraryID int64) bool {
+	if h == nil || h.App == nil || libraryID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid library"})
+		return false
+	}
+	uid := middleware.UserID(c)
+	if uid <= 0 {
+		return true
+	}
+	profile, err := h.loadUserPermissionProfileContext(c.Request.Context(), uid)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return false
+	}
+	if !strings.EqualFold(profile.LibraryScope, "selected") {
+		return true
+	}
+	if _, ok := profile.AllowedLibraryIDs[libraryID]; !ok {
+		c.JSON(http.StatusForbidden, gin.H{"error": "library access denied"})
+		return false
+	}
+	if len(profile.AllowedLibraryFolders[libraryID]) > 0 {
+		c.JSON(http.StatusForbidden, gin.H{"error": "folder-scoped media aggregate unavailable"})
+		return false
+	}
+	return true
 }
 
 func (h *Handler) requirePhotoAggregateAccess(c *gin.Context, libraryID int64) bool {
@@ -193,17 +241,59 @@ func (h *Handler) requireMediaAccess(c *gin.Context, mediaID int64, needPlay boo
 	return libraryID, true
 }
 
+type permissionPathStyle uint8
+
+const (
+	permissionPathRelative permissionPathStyle = iota
+	permissionPathPOSIX
+	permissionPathWindowsDrive
+	permissionPathUNC
+)
+
+type normalizedPermissionPath struct {
+	value string
+	style permissionPathStyle
+}
+
+func normalizePermissionPath(raw string) (normalizedPermissionPath, bool) {
+	raw = strings.TrimSpace(strings.ReplaceAll(raw, "\\", "/"))
+	if raw == "" {
+		return normalizedPermissionPath{}, false
+	}
+	style := permissionPathRelative
+	switch {
+	case strings.HasPrefix(raw, "//"):
+		style = permissionPathUNC
+	case len(raw) >= 3 && isASCIILetter(raw[0]) && raw[1] == ':' && raw[2] == '/':
+		style = permissionPathWindowsDrive
+	case strings.HasPrefix(raw, "/"):
+		style = permissionPathPOSIX
+	}
+	cleaned := path.Clean(raw)
+	if cleaned == "." || cleaned == "" {
+		return normalizedPermissionPath{}, false
+	}
+	if style == permissionPathWindowsDrive || style == permissionPathUNC {
+		cleaned = strings.ToLower(cleaned)
+	}
+	return normalizedPermissionPath{value: cleaned, style: style}, true
+}
+
+func isASCIILetter(value byte) bool {
+	return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z'
+}
+
 func pathMatchesAnyFolder(filePath string, folders []string) bool {
-	fp := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(filePath), "\\", "/"))
-	if fp == "" {
+	fp, ok := normalizePermissionPath(filePath)
+	if !ok {
 		return false
 	}
-	for _, f := range folders {
-		ff := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(f), "\\", "/"))
-		if ff == "" {
+	for _, folder := range folders {
+		ff, ok := normalizePermissionPath(folder)
+		if !ok || fp.style != ff.style {
 			continue
 		}
-		if strings.HasPrefix(fp, ff) {
+		if fp.value == ff.value || ff.style == permissionPathPOSIX && ff.value == "/" && strings.HasPrefix(fp.value, "/") || ff.style == permissionPathWindowsDrive && strings.HasSuffix(ff.value, ":/") && strings.HasPrefix(fp.value, ff.value) || strings.HasPrefix(fp.value, ff.value+"/") {
 			return true
 		}
 	}
