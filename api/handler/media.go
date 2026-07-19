@@ -45,11 +45,6 @@ func (h *Handler) ListMedia(c *gin.Context) {
 	photoTagID := strings.TrimSpace(c.Query("photo_tag"))
 	photoPlaceID := strings.TrimSpace(c.Query("photo_place"))
 	photoPersonID := strings.TrimSpace(c.Query("photo_person"))
-	if lib != "" && fileType == "image" {
-		if libID, err := strconv.ParseInt(lib, 10, 64); err == nil && libID > 0 {
-			_, _ = photoclass.RepairLibraryPhotoTags(h.App.DB, libID)
-		}
-	}
 	if lib != "" && strings.EqualFold(profile.LibraryScope, "selected") {
 		if libID, perr := strconv.ParseInt(lib, 10, 64); perr == nil && libID > 0 {
 			if _, ok := profile.AllowedLibraryIDs[libID]; !ok {
@@ -174,11 +169,11 @@ func (h *Handler) ListMedia(c *gin.Context) {
 			"bitrate": br.Int64, "format": format.String, "status": status.String, "created_at": created.String,
 			"last_play_at": lastPlayAt.String, "completed": playCompleted.Int64, "release_date": releaseDate.String, "year": releaseYear.Int64,
 			"poster_url": posterURL.String, "backdrop_url": backdropURL.String, "scraped": scraped.Int64 == 1,
-			"encrypted_asset": encryptedAsset.Int64 == 1,
-			"photo_taken_at": photoTakenAt.String,
-			"photo_tags":     photoTags,
-			"photo_tag_ids":  photoTagIDs,
-			"music_album_id": musicAlbumID.Int64,
+			"encrypted_asset":   encryptedAsset.Int64 == 1,
+			"photo_taken_at":    photoTakenAt.String,
+			"photo_tags":        photoTags,
+			"photo_tag_ids":     photoTagIDs,
+			"music_album_id":    musicAlbumID.Int64,
 			"music_album_title": textencoding.FixMetadataString(musicAlbumTitle.String),
 			"music_artist":      textencoding.FixMetadataString(musicArtist.String),
 		})

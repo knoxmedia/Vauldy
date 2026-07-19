@@ -2,6 +2,7 @@ package crypto
 
 import (
 	"bytes"
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -75,6 +76,14 @@ func IsEncFile(path string) bool {
 
 // EncryptFile encrypts plaintext using AES-CTR streaming (mode 0x01); ciphertext length equals plaintext length.
 func EncryptFile(src io.Reader, dst io.Writer, kek []byte) (*EnvelopeResult, error) {
+	return EncryptFileContext(context.Background(), src, dst, kek)
+}
+
+// EncryptFileContext encrypts plaintext and observes cancellation between chunks.
+func EncryptFileContext(ctx context.Context, src io.Reader, dst io.Writer, kek []byte) (*EnvelopeResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	dek := make([]byte, DEKSize)
 	var nonce [IVSize]byte
 	if _, err := io.ReadFull(rand.Reader, dek); err != nil {
@@ -88,13 +97,22 @@ func EncryptFile(src io.Reader, dst io.Writer, kek []byte) (*EnvelopeResult, err
 	if err != nil {
 		return nil, err
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err := writeHeader(dst, ModeCTR, nonce[:]); err != nil {
 		return nil, err
 	}
-	if err := encryptCTR(src, dst, block, nonce); err != nil {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := encryptCTRContext(ctx, src, dst, block, nonce); err != nil {
 		return nil, err
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	wrappedDEK, err := AESKeyWrap(kek, dek)
 	if err != nil {
 		return nil, err

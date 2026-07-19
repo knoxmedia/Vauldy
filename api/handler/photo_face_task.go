@@ -15,7 +15,7 @@ import (
 )
 
 func (h *Handler) StartPhotoFaceLoop(ctx context.Context) {
-	go h.runPhotoFaceLoop(ctx)
+	h.runPhotoFaceLoop(ctx)
 }
 
 func (h *Handler) runPhotoFaceLoop(ctx context.Context) {
@@ -23,7 +23,7 @@ func (h *Handler) runPhotoFaceLoop(ctx context.Context) {
 	tk := time.NewTicker(h.photoFacePollInterval())
 	defer tk.Stop()
 	for {
-		h.runPhotoFaceOnce(&loopMu)
+		h.runPhotoFaceOnce(ctx, &loopMu)
 		select {
 		case <-ctx.Done():
 			return
@@ -50,7 +50,14 @@ func (h *Handler) photoFaceBatchLimit() int {
 	return 1
 }
 
-func (h *Handler) runPhotoFaceOnce(loopMu *sync.Mutex) {
+func (h *Handler) photoFaceThumbnailRepairBatch() int {
+	if h != nil && h.App != nil && h.App.Config != nil {
+		return h.App.Config.PhotoFaceThumbnailRepairBatch()
+	}
+	return 32
+}
+
+func (h *Handler) runPhotoFaceOnce(ctx context.Context, loopMu *sync.Mutex) {
 	if h == nil || h.PhotoFaceWorker == nil || h.App == nil || h.App.DB == nil {
 		return
 	}
@@ -63,19 +70,8 @@ func (h *Handler) runPhotoFaceOnce(loopMu *sync.Mutex) {
 	if h.PhotoFaceWorker.ActiveCount() >= h.PhotoFaceWorker.MaxConcurrent() {
 		return
 	}
-	var pending int
-	_ = h.App.DB.QueryRow(`
-		SELECT COUNT(1) FROM photo_face_task
-		WHERE status = 'pending'
-		   OR (status = 'running' AND started_at IS NOT NULL AND started_at < datetime('now', '-20 minutes'))
-	`).Scan(&pending)
-	if pending == 0 {
-		return
-	}
-	limit := pending
-	if cap := h.photoFaceBatchLimit(); limit > cap {
-		limit = cap
-	}
+	h.discoverPendingPhotoFaces(ctx, h.photoFaceBatchLimit())
+	limit := h.photoFaceBatchLimit()
 	slots := h.PhotoFaceWorker.MaxConcurrent() - h.PhotoFaceWorker.ActiveCount()
 	if slots <= 0 {
 		return
@@ -83,7 +79,16 @@ func (h *Handler) runPhotoFaceOnce(loopMu *sync.Mutex) {
 	if limit > slots {
 		limit = slots
 	}
-	done, failed := h.PhotoFaceWorker.RunBatch(context.Background(), limit)
+	done, failed := h.PhotoFaceWorker.RunBatch(ctx, limit)
+	if done+failed == 0 && h.PhotoFaceWorker.ActiveCount() == 0 {
+		checked, repaired, repairFailed, repairErr := h.PhotoFaceWorker.RepairMissingThumbnails(ctx, h.photoFaceThumbnailRepairBatch())
+		if repaired > 0 || repairFailed > 0 {
+			log.Printf("photo face thumbnail repair: checked=%d repaired=%d failed=%d", checked, repaired, repairFailed)
+		}
+		if repairErr != nil && ctx.Err() == nil {
+			log.Printf("photo face thumbnail repair: failed=%d error=%v", repairFailed, repairErr)
+		}
+	}
 	if done+failed > 0 {
 		if failed > 0 {
 			var sample sql.NullString
@@ -105,6 +110,27 @@ func (h *Handler) runPhotoFaceOnce(loopMu *sync.Mutex) {
 	}
 }
 
+func (h *Handler) discoverPendingPhotoFaces(ctx context.Context, limit int) {
+	if h == nil || h.PhotoFaceWorker == nil || h.App == nil || h.App.DB == nil || limit <= 0 {
+		return
+	}
+	rows, err := h.App.DB.QueryContext(ctx, `
+		SELECT m.id,m.library_id FROM media m JOIN library l ON l.id=m.library_id
+		WHERE m.file_type='image' AND m.status='active' AND lower(COALESCE(l.type,'')) IN ('photo','photos','image','images')
+		AND NOT EXISTS(SELECT 1 FROM photo_face_task t WHERE t.media_id=m.id)
+		ORDER BY m.id LIMIT ?`, limit)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var mediaID, libraryID int64
+		if rows.Scan(&mediaID, &libraryID) == nil {
+			_ = h.PhotoFaceWorker.Enqueue(mediaID, libraryID)
+		}
+	}
+}
+
 func (h *Handler) PhotoFaceProgress(c *gin.Context) {
 	if h.PhotoFaceWorker == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "photo face worker disabled"})
@@ -113,6 +139,9 @@ func (h *Handler) PhotoFaceProgress(c *gin.Context) {
 	libraryID, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || libraryID <= 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid library id"})
+		return
+	}
+	if !h.requirePhotoAggregateAccess(c, libraryID) {
 		return
 	}
 	total, processed, withFaces, pending, failed, err := h.PhotoFaceWorker.LibraryProgress(libraryID)
@@ -152,7 +181,7 @@ func (h *Handler) BackfillPhotoFaces(c *gin.Context) {
 	}
 	go func() {
 		var mu sync.Mutex
-		h.runPhotoFaceOnce(&mu)
+		h.runPhotoFaceOnce(context.Background(), &mu)
 	}()
 	c.JSON(http.StatusOK, gin.H{"ok": true, "queued": n})
 }

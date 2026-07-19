@@ -545,6 +545,33 @@ CREATE TABLE IF NOT EXISTS photo_face_task (
 );
 CREATE INDEX IF NOT EXISTS idx_photo_face_task_status ON photo_face_task(library_id, status, updated_at);
 
+CREATE TABLE IF NOT EXISTS photo_face_thumb_repair_state (
+    name TEXT PRIMARY KEY,
+    phase TEXT NOT NULL DEFAULT 'covers',
+    last_person_id INTEGER NOT NULL DEFAULT 0,
+    last_face_id INTEGER NOT NULL DEFAULT 0,
+    completed_at TIMESTAMP,
+    next_audit_at TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS photo_face_thumb_repair_failure (
+    face_id INTEGER PRIMARY KEY,
+    person_id INTEGER,
+    attempts INTEGER NOT NULL DEFAULT 1,
+    next_retry_at TIMESTAMP NOT NULL,
+    last_error TEXT,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (face_id) REFERENCES photo_face(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_photo_face_thumb_repair_failure_due ON photo_face_thumb_repair_failure(next_retry_at, face_id);
+
+CREATE TABLE IF NOT EXISTS media_file_cleanup_task (
+    path TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+    next_retry_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, last_error TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_media_file_cleanup_due ON media_file_cleanup_task(status, next_retry_at);
+
 CREATE TABLE IF NOT EXISTS atrack_task (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     media_id INTEGER NOT NULL UNIQUE,
