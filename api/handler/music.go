@@ -1,85 +1,49 @@
 package handler
 
 import (
+	"context"
 	"database/sql"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"knox-media/internal/musicparse"
-	"knox-media/internal/musicstore"
 	"knox-media/internal/scraper"
 	"knox-media/internal/textencoding"
 )
 
 // ListLibraryAlbums returns albums grouped for a music library.
 func (h *Handler) ListLibraryAlbums(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+	defer cancel()
 	libID, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || libID <= 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid library id"})
 		return
 	}
-	if !h.requireLibraryAccess(c, libID) {
+	if !h.requireSpecializedAggregateAccess(c, libID) {
 		return
 	}
-	items, err := h.queryLibraryAlbums(libID, "", "")
+	items, err := h.queryLibraryAlbumsContext(ctx, libID, "", "")
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	if len(items) == 0 {
-		var mediaCount int
-		_ = h.App.DB.QueryRow(`SELECT COUNT(1) FROM media WHERE library_id = ? AND file_type = 'audio' AND status = 'active'`, libID).Scan(&mediaCount)
-		if mediaCount > 0 {
-			_, _ = musicstore.BackfillLibraryMusic(h.App.DB, libID)
-			_ = musicstore.MergeUnknownAlbums(h.App.DB, libID)
-			items, err = h.queryLibraryAlbums(libID, "", "")
-			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-				return
-			}
-		}
-	} else {
-		var trackTotal int
-		for _, it := range items {
-			if tc, ok := it["track_count"].(int64); ok && tc > 0 {
-				trackTotal += int(tc)
-			}
-		}
-		if trackTotal == 0 {
-			_, _ = musicstore.BackfillLibraryMusic(h.App.DB, libID)
-			_ = musicstore.MergeUnknownAlbums(h.App.DB, libID)
-			items, err = h.queryLibraryAlbums(libID, "", "")
-			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-				return
-			}
-		}
-	}
-	// Drop stale empty unknown-album shells left from earlier versions.
-	_, _ = h.App.DB.Exec(`
-		DELETE FROM music_album
-		WHERE library_id = ? AND is_unknown = 1
-		  AND id NOT IN (
-		    SELECT DISTINCT mt.album_id FROM music_track mt
-		    JOIN media m ON m.id = mt.media_id AND m.status = 'active'
-		    WHERE m.library_id = ?
-		  )
-		  AND id NOT IN (
-		    SELECT MIN(id) FROM music_album WHERE library_id = ? AND is_unknown = 1
-		  )
-	`, libID, libID, libID)
-	items, err = h.queryLibraryAlbums(libID, "", "")
+	unlinked, err := h.unlinkedMusicCount(ctx, libID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"items": items})
+	c.JSON(http.StatusOK, gin.H{"items": items, "maintenance_required": unlinked > 0, "unlinked_count": unlinked})
 }
 
 func (h *Handler) queryLibraryAlbums(libID int64, artistFilter, genreFilter string) ([]gin.H, error) {
+	return h.queryLibraryAlbumsContext(context.Background(), libID, artistFilter, genreFilter)
+}
+func (h *Handler) queryLibraryAlbumsContext(ctx context.Context, libID int64, artistFilter, genreFilter string) ([]gin.H, error) {
 	args := []any{libID}
 	where := `WHERE a.library_id = ?`
 	if strings.TrimSpace(artistFilter) != "" {
@@ -94,7 +58,7 @@ func (h *Handler) queryLibraryAlbums(libID int64, artistFilter, genreFilter stri
 			args = append(args, strings.TrimSpace(genreFilter))
 		}
 	}
-	rows, err := h.App.DB.Query(`
+	rows, err := h.App.DB.QueryContext(ctx, `
 		SELECT a.id, a.title, a.title_norm, COALESCE(a.year, 0), COALESCE(a.genre, ''),
 			COALESCE(a.artwork_path, ''), COALESCE(a.is_unknown, 0), COALESCE(a.rating, 0),
 			COALESCE(ar.name, ''), COALESCE(ar.id, 0),
@@ -115,7 +79,7 @@ func (h *Handler) queryLibraryAlbums(libID int64, artistFilter, genreFilter stri
 		var id, year, trackCount, totalDur, artistID, rating, isUnknown int64
 		var title, titleNorm, genre, artwork, artistName, created, updated sql.NullString
 		if err := rows.Scan(&id, &title, &titleNorm, &year, &genre, &artwork, &isUnknown, &rating, &artistName, &artistID, &trackCount, &totalDur, &created, &updated); err != nil {
-			continue
+			return nil, err
 		}
 		items = append(items, gin.H{
 			"id": id, "library_id": libID, "title": textencoding.FixMetadataString(title.String), "title_norm": titleNorm.String,
@@ -126,20 +90,25 @@ func (h *Handler) queryLibraryAlbums(libID int64, artistFilter, genreFilter stri
 			"created_at": created.String, "updated_at": updated.String,
 		})
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return items, nil
 }
 
 // ListLibraryArtists returns artists for a music library.
 func (h *Handler) ListLibraryArtists(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+	defer cancel()
 	libID, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || libID <= 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid library id"})
 		return
 	}
-	if !h.requireLibraryAccess(c, libID) {
+	if !h.requireSpecializedAggregateAccess(c, libID) {
 		return
 	}
-	rows, err := h.App.DB.Query(`
+	rows, err := h.App.DB.QueryContext(ctx, `
 		SELECT ar.id, ar.name, ar.name_norm, COALESCE(ar.artwork_path, ''),
 			(SELECT COUNT(DISTINCT a.id) FROM music_album a WHERE a.album_artist_id = ar.id) AS album_count,
 			(SELECT COUNT(1) FROM music_track mt JOIN music_album a ON a.id = mt.album_id WHERE a.album_artist_id = ar.id) AS track_count
@@ -156,28 +125,40 @@ func (h *Handler) ListLibraryArtists(c *gin.Context) {
 	for rows.Next() {
 		var id, albumCount, trackCount int64
 		var name, nameNorm, artwork sql.NullString
-		if rows.Scan(&id, &name, &nameNorm, &artwork, &albumCount, &trackCount) != nil {
-			continue
+		if err := rows.Scan(&id, &name, &nameNorm, &artwork, &albumCount, &trackCount); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
 		}
 		items = append(items, gin.H{
 			"id": id, "library_id": libID, "name": name.String, "name_norm": nameNorm.String,
 			"artwork_path": artwork.String, "album_count": albumCount, "track_count": trackCount,
 		})
 	}
-	c.JSON(http.StatusOK, gin.H{"items": items})
+	if err := rows.Err(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	unlinked, err := h.unlinkedMusicCount(ctx, libID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items, "maintenance_required": unlinked > 0, "unlinked_count": unlinked})
 }
 
 // ListLibraryGenres returns distinct genres for a music library.
 func (h *Handler) ListLibraryGenres(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+	defer cancel()
 	libID, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || libID <= 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid library id"})
 		return
 	}
-	if !h.requireLibraryAccess(c, libID) {
+	if !h.requireSpecializedAggregateAccess(c, libID) {
 		return
 	}
-	rows, err := h.App.DB.Query(`
+	rows, err := h.App.DB.QueryContext(ctx, `
 		SELECT COALESCE(NULLIF(TRIM(genre), ''), '未知流派') AS genre,
 			COUNT(DISTINCT id) AS album_count,
 			(SELECT COUNT(1) FROM music_track mt WHERE mt.album_id IN (
@@ -197,35 +178,55 @@ func (h *Handler) ListLibraryGenres(c *gin.Context) {
 	for rows.Next() {
 		var albumCount, trackCount int64
 		var genre sql.NullString
-		if rows.Scan(&genre, &albumCount, &trackCount) != nil {
-			continue
+		if err := rows.Scan(&genre, &albumCount, &trackCount); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
 		}
 		items = append(items, gin.H{
 			"genre": genre.String, "album_count": albumCount, "track_count": trackCount,
 		})
 	}
-	c.JSON(http.StatusOK, gin.H{"items": items})
+	if err := rows.Err(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	unlinked, err := h.unlinkedMusicCount(ctx, libID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items, "maintenance_required": unlinked > 0, "unlinked_count": unlinked})
 }
 
 // ListLibraryTracks returns flat track list for a music library.
 func (h *Handler) ListLibraryTracks(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+	defer cancel()
 	libID, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || libID <= 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid library id"})
 		return
 	}
-	if !h.requireLibraryAccess(c, libID) {
+	if !h.requireSpecializedAggregateAccess(c, libID) {
 		return
 	}
-	items, err := h.queryLibraryTracks(libID, 0, 0, "")
+	items, err := h.queryLibraryTracksContext(ctx, libID, 0, 0, "")
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"items": items})
+	unlinked, err := h.unlinkedMusicCount(ctx, libID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items, "maintenance_required": unlinked > 0, "unlinked_count": unlinked})
 }
 
 func (h *Handler) queryLibraryTracks(libID, albumID, artistID int64, genre string) ([]gin.H, error) {
+	return h.queryLibraryTracksContext(context.Background(), libID, albumID, artistID, genre)
+}
+func (h *Handler) queryLibraryTracksContext(ctx context.Context, libID, albumID, artistID int64, genre string) ([]gin.H, error) {
 	args := []any{libID}
 	where := `WHERE m.library_id = ? AND m.file_type = 'audio' AND m.status = 'active'`
 	if albumID > 0 {
@@ -240,7 +241,7 @@ func (h *Handler) queryLibraryTracks(libID, albumID, artistID int64, genre strin
 		where += ` AND LOWER(COALESCE(a.genre, '')) = LOWER(?)`
 		args = append(args, strings.TrimSpace(genre))
 	}
-	rows, err := h.App.DB.Query(`
+	rows, err := h.App.DB.QueryContext(ctx, `
 		SELECT mt.id, mt.media_id, COALESCE(mt.track_number, 0), mt.title, COALESCE(mt.artist_display, ''),
 			COALESCE(m.duration, 0), COALESCE(m.bitrate, 0), COALESCE(m.format, ''),
 			a.id, a.title, COALESCE(ar.name, ''), COALESCE(ar.id, 0), COALESCE(a.year, 0), COALESCE(a.artwork_path, ''),
@@ -261,8 +262,8 @@ func (h *Handler) queryLibraryTracks(libID, albumID, artistID int64, genre strin
 		var trackID, mediaID, trackNum, duration, bitrate, albumIDVal, artistIDVal, year int64
 		var title, artist, albumTitle, albumArtist, format, artwork, filePath, created sql.NullString
 		if rows.Scan(&trackID, &mediaID, &trackNum, &title, &artist, &duration, &bitrate, &format,
-			&albumIDVal, &albumTitle, &albumArtist, &artistIDVal, &year, &artwork, &filePath, &created) != nil {
-			continue
+			&albumIDVal, &albumTitle, &albumArtist, &artistIDVal, &year, &artwork, &filePath, &created); err != nil {
+			return nil, err
 		}
 		items = append(items, gin.H{
 			"id": trackID, "media_id": mediaID, "track_number": trackNum,
@@ -274,17 +275,22 @@ func (h *Handler) queryLibraryTracks(libID, albumID, artistID int64, genre strin
 			"created_at": created.String,
 		})
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return items, nil
 }
 
 // GetAlbum returns album detail with tracks.
 func (h *Handler) GetAlbum(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+	defer cancel()
 	albumID, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || albumID <= 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid album id"})
 		return
 	}
-	row := h.App.DB.QueryRow(`
+	row := h.App.DB.QueryRowContext(ctx, `
 		SELECT a.id, a.library_id, a.title, a.title_norm, COALESCE(a.year, 0), COALESCE(a.genre, ''),
 			COALESCE(a.artwork_path, ''), COALESCE(a.is_unknown, 0), COALESCE(a.rating, 0),
 			COALESCE(ar.name, ''), COALESCE(ar.id, 0), COALESCE(a.meta_json, ''),
@@ -303,26 +309,13 @@ func (h *Handler) GetAlbum(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	if !h.requireLibraryAccess(c, libID) {
+	if !h.requireSpecializedAggregateAccess(c, libID) {
 		return
 	}
-	musicstore.RefreshAlbumEncoding(h.App.DB, albumID)
-	_, _ = h.App.DB.Exec(`UPDATE music_track SET track_number = 0 WHERE track_number IS NULL`)
-	_, _ = musicstore.SyncAlbumTracks(h.App.DB, albumID)
-	tracks, err := h.queryLibraryTracks(libID, albumID, 0, "")
+	tracks, err := h.queryLibraryTracksContext(ctx, libID, albumID, 0, "")
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
-	}
-	if len(tracks) == 0 {
-		_, _ = musicstore.BackfillLibraryMusic(h.App.DB, libID)
-		_ = musicstore.MergeUnknownAlbums(h.App.DB, libID)
-		_, _ = musicstore.SyncAlbumTracks(h.App.DB, albumID)
-		tracks, err = h.queryLibraryTracks(libID, albumID, 0, "")
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
 	}
 	var totalDur int64
 	for _, t := range tracks {
@@ -342,13 +335,15 @@ func (h *Handler) GetAlbum(c *gin.Context) {
 
 // GetAlbumPlayTarget returns the first track media_id for album playback.
 func (h *Handler) GetAlbumPlayTarget(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+	defer cancel()
 	albumID, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || albumID <= 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid album id"})
 		return
 	}
 	var libID, mediaID int64
-	err = h.App.DB.QueryRow(`
+	err = h.App.DB.QueryRowContext(ctx, `
 		SELECT a.library_id, mt.media_id
 		FROM music_album a
 		JOIN music_track mt ON mt.album_id = a.id
@@ -364,11 +359,11 @@ func (h *Handler) GetAlbumPlayTarget(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	if !h.requireLibraryAccess(c, libID) {
+	if !h.requireSpecializedAggregateAccess(c, libID) {
 		return
 	}
 	var position int64
-	_ = h.App.DB.QueryRow(`
+	_ = h.App.DB.QueryRowContext(ctx, `
 		SELECT COALESCE(pp.position, 0) FROM play_progress pp
 		JOIN media m ON m.file_id = pp.file_id
 		WHERE m.id = ? ORDER BY pp.update_at DESC LIMIT 1
@@ -378,6 +373,8 @@ func (h *Handler) GetAlbumPlayTarget(c *gin.Context) {
 
 // ServeAlbumArtwork serves album cover from cache path, folder cover, track poster, or embedded art.
 func (h *Handler) ServeAlbumArtwork(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+	defer cancel()
 	albumID, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || albumID <= 0 {
 		c.Status(http.StatusBadRequest)
@@ -385,11 +382,15 @@ func (h *Handler) ServeAlbumArtwork(c *gin.Context) {
 	}
 	var libID int64
 	var artworkPath sql.NullString
-	if err := h.App.DB.QueryRow(`SELECT library_id, artwork_path FROM music_album WHERE id = ?`, albumID).Scan(&libID, &artworkPath); err != nil {
+	if err := ctx.Err(); err != nil {
+		c.JSON(http.StatusRequestTimeout, gin.H{"error": err.Error()})
+		return
+	}
+	if err := h.App.DB.QueryRowContext(ctx, `SELECT library_id, artwork_path FROM music_album WHERE id = ?`, albumID).Scan(&libID, &artworkPath); err != nil {
 		c.Status(http.StatusNotFound)
 		return
 	}
-	if !h.requireLibraryAccess(c, libID) {
+	if !h.requireSpecializedAggregateAccess(c, libID) {
 		return
 	}
 	stored := strings.TrimSpace(artworkPath.String)
@@ -397,32 +398,34 @@ func (h *Handler) ServeAlbumArtwork(c *gin.Context) {
 		c.Redirect(http.StatusFound, stored)
 		return
 	}
-	path, serveMediaID := h.resolveAlbumArtworkPath(albumID, libID, artworkPath)
+	path := h.existingArtworkFile(stored)
 	if path == "" {
 		c.Status(http.StatusNotFound)
 		return
 	}
-	h.deliverAlbumArtwork(c, path, serveMediaID)
+	h.deliverAlbumArtwork(c, path, 0)
 }
 
 // ListArtistAlbums returns albums for a specific artist.
 func (h *Handler) ListArtistAlbums(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+	defer cancel()
 	artistID, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || artistID <= 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid artist id"})
 		return
 	}
 	var libID int64
-	if err := h.App.DB.QueryRow(`SELECT library_id FROM music_artist WHERE id = ?`, artistID).Scan(&libID); err != nil {
+	if err := h.App.DB.QueryRowContext(ctx, `SELECT library_id FROM music_artist WHERE id = ?`, artistID).Scan(&libID); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 		return
 	}
-	if !h.requireLibraryAccess(c, libID) {
+	if !h.requireSpecializedAggregateAccess(c, libID) {
 		return
 	}
 	var artistName sql.NullString
-	_ = h.App.DB.QueryRow(`SELECT name FROM music_artist WHERE id = ?`, artistID).Scan(&artistName)
-	items, err := h.queryLibraryAlbums(libID, artistName.String, "")
+	_ = h.App.DB.QueryRowContext(ctx, `SELECT name FROM music_artist WHERE id = ?`, artistID).Scan(&artistName)
+	items, err := h.queryLibraryAlbumsContext(ctx, libID, artistName.String, "")
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -432,6 +435,8 @@ func (h *Handler) ListArtistAlbums(c *gin.Context) {
 
 // ListGenreAlbums returns albums for a specific genre in a music library.
 func (h *Handler) ListGenreAlbums(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+	defer cancel()
 	libID, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || libID <= 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid library id"})
@@ -442,10 +447,10 @@ func (h *Handler) ListGenreAlbums(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "genre required"})
 		return
 	}
-	if !h.requireLibraryAccess(c, libID) {
+	if !h.requireSpecializedAggregateAccess(c, libID) {
 		return
 	}
-	items, err := h.queryLibraryAlbums(libID, "", genre)
+	items, err := h.queryLibraryAlbumsContext(ctx, libID, "", genre)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -487,7 +492,7 @@ func (h *Handler) UpdateAlbum(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	if !h.requireLibraryAccess(c, libID) {
+	if !h.requireSpecializedAggregateAccess(c, libID) {
 		return
 	}
 	title := strings.TrimSpace(body.Title)
@@ -555,7 +560,7 @@ func (h *Handler) ListAlbumImageCandidates(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "album not found"})
 		return
 	}
-	if !h.requireLibraryAccess(c, libraryID) {
+	if !h.requireSpecializedAggregateAccess(c, libraryID) {
 		return
 	}
 	keyword := strings.TrimSpace(title)
@@ -577,6 +582,8 @@ func (h *Handler) ListAlbumImageCandidates(c *gin.Context) {
 
 // GetArtist returns artist detail.
 func (h *Handler) GetArtist(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+	defer cancel()
 	artistID, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || artistID <= 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid artist id"})
@@ -584,7 +591,7 @@ func (h *Handler) GetArtist(c *gin.Context) {
 	}
 	var libID int64
 	var name, nameNorm, artwork sql.NullString
-	if err := h.App.DB.QueryRow(`
+	if err := h.App.DB.QueryRowContext(ctx, `
 		SELECT library_id, name, name_norm, COALESCE(artwork_path, '')
 		FROM music_artist WHERE id = ?
 	`, artistID).Scan(&libID, &name, &nameNorm, &artwork); err != nil {
@@ -595,12 +602,12 @@ func (h *Handler) GetArtist(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	if !h.requireLibraryAccess(c, libID) {
+	if !h.requireSpecializedAggregateAccess(c, libID) {
 		return
 	}
 	var albumCount, trackCount int64
-	_ = h.App.DB.QueryRow(`SELECT COUNT(DISTINCT a.id) FROM music_album a WHERE a.album_artist_id = ?`, artistID).Scan(&albumCount)
-	_ = h.App.DB.QueryRow(`
+	_ = h.App.DB.QueryRowContext(ctx, `SELECT COUNT(DISTINCT a.id) FROM music_album a WHERE a.album_artist_id = ?`, artistID).Scan(&albumCount)
+	_ = h.App.DB.QueryRowContext(ctx, `
 		SELECT COUNT(1) FROM music_track mt
 		JOIN music_album a ON a.id = mt.album_id
 		WHERE a.album_artist_id = ?
@@ -643,7 +650,7 @@ func (h *Handler) UpdateArtist(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	if !h.requireLibraryAccess(c, libID) {
+	if !h.requireSpecializedAggregateAccess(c, libID) {
 		return
 	}
 	name := strings.TrimSpace(body.Name)
@@ -697,7 +704,7 @@ func (h *Handler) ListArtistImageCandidates(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "artist not found"})
 		return
 	}
-	if !h.requireLibraryAccess(c, libraryID) {
+	if !h.requireSpecializedAggregateAccess(c, libraryID) {
 		return
 	}
 	keyword := strings.TrimSpace(name)
@@ -729,7 +736,7 @@ func (h *Handler) UpdateLibraryGenre(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid library id"})
 		return
 	}
-	if !h.requireLibraryAccess(c, libID) {
+	if !h.requireSpecializedAggregateAccess(c, libID) {
 		return
 	}
 	var body updateLibraryGenreBody

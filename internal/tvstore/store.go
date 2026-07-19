@@ -1,6 +1,7 @@
 package tvstore
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -14,28 +15,40 @@ import (
 // LinkEpisode associates a scanned media file with series/season/episode records.
 // It merges series across folders by tmdbid, tvdbid, or normalized title.
 func LinkEpisode(db *sql.DB, libraryID, mediaID int64, info tvparse.EpisodeInfo) error {
+	return linkEpisodeContext(context.Background(), db, libraryID, mediaID, info)
+}
+func LinkEpisodeTx(ctx context.Context, tx *sql.Tx, libraryID, mediaID int64, info tvparse.EpisodeInfo) error {
+	return linkEpisodeContext(ctx, tx, libraryID, mediaID, info)
+}
+
+type relationDB interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func linkEpisodeContext(ctx context.Context, db relationDB, libraryID, mediaID int64, info tvparse.EpisodeInfo) error {
 	if db == nil || libraryID <= 0 || mediaID <= 0 || info.SeriesTitleNorm == "" {
 		return nil
 	}
-	seriesID, err := findOrCreateSeries(db, libraryID, info)
+	seriesID, err := findOrCreateSeries(ctx, db, libraryID, info)
 	if err != nil {
 		return err
 	}
-	seasonID, err := findOrCreateSeason(db, seriesID, info)
+	seasonID, err := findOrCreateSeason(ctx, db, seriesID, info)
 	if err != nil {
 		return err
 	}
-	return linkEpisodeMedia(db, seasonID, mediaID, info)
+	return linkEpisodeMedia(ctx, db, seasonID, mediaID, info)
 }
 
-func findOrCreateSeries(db *sql.DB, libraryID int64, info tvparse.EpisodeInfo) (int64, error) {
-	if id := lookupSeriesByExternalID(db, libraryID, info.TMDBID, info.TVDBID); id > 0 {
-		_ = appendSeriesFolder(db, id, info.SourceFolder)
+func findOrCreateSeries(ctx context.Context, db relationDB, libraryID int64, info tvparse.EpisodeInfo) (int64, error) {
+	if id := lookupSeriesByExternalID(ctx, db, libraryID, info.TMDBID, info.TVDBID); id > 0 {
+		_ = appendSeriesFolder(ctx, db, id, info.SourceFolder)
 		return id, nil
 	}
-	if id := lookupSeriesByNormTitle(db, libraryID, info.SeriesTitleNorm, info.Year); id > 0 {
-		_ = mergeSeriesExternalIDs(db, id, info.TMDBID, info.TVDBID)
-		_ = appendSeriesFolder(db, id, info.SourceFolder)
+	if id := lookupSeriesByNormTitle(ctx, db, libraryID, info.SeriesTitleNorm, info.Year); id > 0 {
+		_ = mergeSeriesExternalIDs(ctx, db, id, info.TMDBID, info.TVDBID)
+		_ = appendSeriesFolder(ctx, db, id, info.SourceFolder)
 		return id, nil
 	}
 	title := info.SeriesTitle
@@ -46,13 +59,13 @@ func findOrCreateSeries(db *sql.DB, libraryID int64, info tvparse.EpisodeInfo) (
 	var res sql.Result
 	var err error
 	if info.Year > 0 {
-		res, err = db.Exec(`
+		res, err = db.ExecContext(ctx, `
 			INSERT INTO series (library_id, title, title_norm, year, tmdb_id, tvdb_id, folder_paths)
 			VALUES (?, ?, ?, ?, ?, ?, ?)`,
 			libraryID, title, info.SeriesTitleNorm, info.Year, nullIfEmpty(info.TMDBID), nullIfEmpty(info.TVDBID), string(folders),
 		)
 	} else {
-		res, err = db.Exec(`
+		res, err = db.ExecContext(ctx, `
 			INSERT INTO series (library_id, title, title_norm, year, tmdb_id, tvdb_id, folder_paths)
 			VALUES (?, ?, ?, NULL, ?, ?, ?)`,
 			libraryID, title, info.SeriesTitleNorm, nullIfEmpty(info.TMDBID), nullIfEmpty(info.TVDBID), string(folders),
@@ -64,63 +77,63 @@ func findOrCreateSeries(db *sql.DB, libraryID int64, info tvparse.EpisodeInfo) (
 	return res.LastInsertId()
 }
 
-func lookupSeriesByExternalID(db *sql.DB, libraryID int64, tmdbID, tvdbID string) int64 {
+func lookupSeriesByExternalID(ctx context.Context, db relationDB, libraryID int64, tmdbID, tvdbID string) int64 {
 	tmdbID = strings.TrimSpace(tmdbID)
 	tvdbID = strings.TrimSpace(tvdbID)
 	if tmdbID != "" {
 		var id int64
-		if db.QueryRow(`SELECT id FROM series WHERE library_id = ? AND tmdb_id = ? LIMIT 1`, libraryID, tmdbID).Scan(&id) == nil && id > 0 {
+		if db.QueryRowContext(ctx, `SELECT id FROM series WHERE library_id = ? AND tmdb_id = ? LIMIT 1`, libraryID, tmdbID).Scan(&id) == nil && id > 0 {
 			return id
 		}
 	}
 	if tvdbID != "" {
 		var id int64
-		if db.QueryRow(`SELECT id FROM series WHERE library_id = ? AND tvdb_id = ? LIMIT 1`, libraryID, tvdbID).Scan(&id) == nil && id > 0 {
+		if db.QueryRowContext(ctx, `SELECT id FROM series WHERE library_id = ? AND tvdb_id = ? LIMIT 1`, libraryID, tvdbID).Scan(&id) == nil && id > 0 {
 			return id
 		}
 	}
 	return 0
 }
 
-func lookupSeriesByNormTitle(db *sql.DB, libraryID int64, titleNorm string, year int) int64 {
+func lookupSeriesByNormTitle(ctx context.Context, db relationDB, libraryID int64, titleNorm string, year int) int64 {
 	titleNorm = strings.TrimSpace(titleNorm)
 	if titleNorm == "" {
 		return 0
 	}
 	if year > 0 {
 		var id int64
-		if db.QueryRow(`SELECT id FROM series WHERE library_id = ? AND title_norm = ? AND COALESCE(year, 0) = ? LIMIT 1`, libraryID, titleNorm, year).Scan(&id) == nil && id > 0 {
+		if db.QueryRowContext(ctx, `SELECT id FROM series WHERE library_id = ? AND title_norm = ? AND COALESCE(year, 0) = ? LIMIT 1`, libraryID, titleNorm, year).Scan(&id) == nil && id > 0 {
 			return id
 		}
 		// Explicit year in folder name: do not fall back to title-only (avoids merging 2005 vs 2022 remakes).
 		return 0
 	}
 	var id int64
-	if db.QueryRow(`SELECT id FROM series WHERE library_id = ? AND title_norm = ? AND COALESCE(year, 0) = 0 LIMIT 1`, libraryID, titleNorm).Scan(&id) == nil && id > 0 {
+	if db.QueryRowContext(ctx, `SELECT id FROM series WHERE library_id = ? AND title_norm = ? AND COALESCE(year, 0) = 0 LIMIT 1`, libraryID, titleNorm).Scan(&id) == nil && id > 0 {
 		return id
 	}
 	return 0
 }
 
-func mergeSeriesExternalIDs(db *sql.DB, seriesID int64, tmdbID, tvdbID string) error {
+func mergeSeriesExternalIDs(ctx context.Context, db relationDB, seriesID int64, tmdbID, tvdbID string) error {
 	tmdbID = strings.TrimSpace(tmdbID)
 	tvdbID = strings.TrimSpace(tvdbID)
 	if tmdbID != "" {
-		_, _ = db.Exec(`UPDATE series SET tmdb_id = COALESCE(NULLIF(tmdb_id,''), ?), updated_at = CURRENT_TIMESTAMP WHERE id = ?`, tmdbID, seriesID)
+		_, _ = db.ExecContext(ctx, `UPDATE series SET tmdb_id = COALESCE(NULLIF(tmdb_id,''), ?), updated_at = CURRENT_TIMESTAMP WHERE id = ?`, tmdbID, seriesID)
 	}
 	if tvdbID != "" {
-		_, _ = db.Exec(`UPDATE series SET tvdb_id = COALESCE(NULLIF(tvdb_id,''), ?), updated_at = CURRENT_TIMESTAMP WHERE id = ?`, tvdbID, seriesID)
+		_, _ = db.ExecContext(ctx, `UPDATE series SET tvdb_id = COALESCE(NULLIF(tvdb_id,''), ?), updated_at = CURRENT_TIMESTAMP WHERE id = ?`, tvdbID, seriesID)
 	}
 	return nil
 }
 
-func appendSeriesFolder(db *sql.DB, seriesID int64, folder string) error {
+func appendSeriesFolder(ctx context.Context, db relationDB, seriesID int64, folder string) error {
 	folder = strings.TrimSpace(folder)
 	if folder == "" || seriesID <= 0 {
 		return nil
 	}
 	var raw sql.NullString
-	if err := db.QueryRow(`SELECT folder_paths FROM series WHERE id = ?`, seriesID).Scan(&raw); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT folder_paths FROM series WHERE id = ?`, seriesID).Scan(&raw); err != nil {
 		return err
 	}
 	var paths []string
@@ -134,18 +147,18 @@ func appendSeriesFolder(db *sql.DB, seriesID int64, folder string) error {
 	}
 	paths = append(paths, folder)
 	b, _ := json.Marshal(paths)
-	_, err := db.Exec(`UPDATE series SET folder_paths = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, string(b), seriesID)
+	_, err := db.ExecContext(ctx, `UPDATE series SET folder_paths = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, string(b), seriesID)
 	return err
 }
 
-func findOrCreateSeason(db *sql.DB, seriesID int64, info tvparse.EpisodeInfo) (int64, error) {
+func findOrCreateSeason(ctx context.Context, db relationDB, seriesID int64, info tvparse.EpisodeInfo) (int64, error) {
 	var seasonID int64
-	err := db.QueryRow(`SELECT id FROM season WHERE tv_id = ? AND season_num = ? LIMIT 1`, seriesID, info.SeasonNum).Scan(&seasonID)
+	err := db.QueryRowContext(ctx, `SELECT id FROM season WHERE tv_id = ? AND season_num = ? LIMIT 1`, seriesID, info.SeasonNum).Scan(&seasonID)
 	if err == nil && seasonID > 0 {
 		return seasonID, nil
 	}
 	name := seasonDisplayName(info.SeasonNum, info.IsSpecial)
-	res, err := db.Exec(`INSERT INTO season (tv_id, season_num, name) VALUES (?, ?, ?)`, seriesID, info.SeasonNum, name)
+	res, err := db.ExecContext(ctx, `INSERT INTO season (tv_id, season_num, name) VALUES (?, ?, ?)`, seriesID, info.SeasonNum, name)
 	if err != nil {
 		return 0, err
 	}
@@ -159,12 +172,12 @@ func seasonDisplayName(num int, special bool) string {
 	return fmt.Sprintf("Season %02d", num)
 }
 
-func linkEpisodeMedia(db *sql.DB, seasonID, mediaID int64, info tvparse.EpisodeInfo) error {
+func linkEpisodeMedia(ctx context.Context, db relationDB, seasonID, mediaID int64, info tvparse.EpisodeInfo) error {
 	var episodeID int64
-	err := db.QueryRow(`SELECT id FROM episode WHERE season_id = ? AND episode_num = ? LIMIT 1`, seasonID, info.EpisodeNum).Scan(&episodeID)
+	err := db.QueryRowContext(ctx, `SELECT id FROM episode WHERE season_id = ? AND episode_num = ? LIMIT 1`, seasonID, info.EpisodeNum).Scan(&episodeID)
 	if err == sql.ErrNoRows || episodeID == 0 {
 		title := info.EpisodeTitle
-		res, insErr := db.Exec(`
+		res, insErr := db.ExecContext(ctx, `
 			INSERT INTO episode (season_id, episode_num, title, file_path)
 			VALUES (?, ?, ?, (SELECT file_path FROM media WHERE id = ? LIMIT 1))`,
 			seasonID, info.EpisodeNum, nullIfEmpty(title), mediaID,
@@ -177,7 +190,7 @@ func linkEpisodeMedia(db *sql.DB, seasonID, mediaID int64, info tvparse.EpisodeI
 		return err
 	}
 
-	_, err = db.Exec(`
+	_, err = db.ExecContext(ctx, `
 		INSERT INTO episode_media (episode_id, media_id, sort_order)
 		VALUES (?, ?, COALESCE((SELECT MAX(sort_order) FROM episode_media WHERE episode_id = ?), -1) + 1)
 		ON CONFLICT(media_id) DO UPDATE SET episode_id = excluded.episode_id`,
@@ -356,28 +369,19 @@ func CleanupMedia(db *sql.DB, mediaID int64) {
 
 // PruneOrphansForLibrary removes series/season/episode rows with no linked media after scan.
 func PruneOrphansForLibrary(db *sql.DB, libraryID int64) {
+	_ = PruneOrphansForLibraryContext(context.Background(), db, libraryID)
+}
+func PruneOrphansForLibraryContext(ctx context.Context, db *sql.DB, libraryID int64) error {
 	if db == nil || libraryID <= 0 {
-		return
+		return nil
 	}
-	_, _ = db.Exec(`
-		DELETE FROM episode_media
-		WHERE media_id NOT IN (SELECT id FROM media WHERE library_id = ?)
-	`, libraryID)
-	_, _ = db.Exec(`
-		DELETE FROM episode
-		WHERE id NOT IN (SELECT episode_id FROM episode_media)
-		  AND season_id IN (SELECT s.id FROM season s JOIN series sr ON sr.id = s.tv_id WHERE sr.library_id = ?)
-	`, libraryID)
-	_, _ = db.Exec(`
-		DELETE FROM season
-		WHERE id NOT IN (SELECT season_id FROM episode)
-		  AND tv_id IN (SELECT id FROM series WHERE library_id = ?)
-	`, libraryID)
-	_, _ = db.Exec(`
-		DELETE FROM series
-		WHERE library_id = ?
-		  AND id NOT IN (SELECT tv_id FROM season WHERE tv_id IS NOT NULL)
-	`, libraryID)
+	qs := []string{`DELETE FROM episode_media WHERE media_id IN (SELECT id FROM media WHERE library_id=?) AND media_id NOT IN (SELECT id FROM media WHERE library_id=?)`, `DELETE FROM episode WHERE id NOT IN (SELECT episode_id FROM episode_media) AND season_id IN (SELECT s.id FROM season s JOIN series sr ON sr.id=s.tv_id WHERE sr.library_id=?)`, `DELETE FROM season WHERE id NOT IN (SELECT season_id FROM episode) AND tv_id IN (SELECT id FROM series WHERE library_id=?)`, `DELETE FROM series WHERE library_id=? AND id NOT IN (SELECT tv_id FROM season WHERE tv_id IS NOT NULL)`}
+	for _, q := range qs {
+		if _, err := db.ExecContext(ctx, q, libraryID, libraryID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func nullIfEmpty(s string) any {

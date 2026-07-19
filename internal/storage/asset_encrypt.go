@@ -13,6 +13,8 @@ import (
 
 	kcrypto "knox-media/internal/crypto"
 	"knox-media/internal/keystore"
+
+	"github.com/google/uuid"
 	"knox-media/pkg/hashutil"
 )
 
@@ -20,12 +22,13 @@ var ErrAlreadyEncrypted = errors.New("media already encrypted")
 
 // AssetEncryptor encrypts library media to Knox 9527 .enc files at rest.
 type AssetEncryptor struct {
-	DB          *sql.DB
-	Vault       *keystore.Vault
-	BasePath    string // legacy default; prefer ResolveEncBase per library
-	DataDir     string
-	FFmpegPath  string
-	FFprobePath string
+	DB             *sql.DB
+	Vault          *keystore.Vault
+	BasePath       string // legacy default; prefer ResolveEncBase per library
+	DataDir        string
+	FFmpegPath     string
+	FFprobePath    string
+	onFlightJoined func(mediaID int64)
 }
 
 // IsMediaEncrypted reports whether the media item is already stored as an encrypted asset.
@@ -51,17 +54,21 @@ func (s *AssetEncryptor) EncryptMediaManual(ctx context.Context, mediaID int64) 
 	return s.encryptMedia(ctx, mediaID, true)
 }
 
-func (s *AssetEncryptor) encryptMedia(ctx context.Context, mediaID int64, manual bool) error {
+func (s *AssetEncryptor) encryptMedia(ctx context.Context, mediaID int64, manual bool) (err error) {
 	if s == nil || s.DB == nil || s.Vault == nil {
 		if manual {
 			return errors.New("encrypted assets not configured")
 		}
 		return nil
 	}
-	if !tryAcquireEncrypt(mediaID) {
-		return nil
+	leader, flight := acquireEncryptFlight(mediaID)
+	if !leader {
+		if s.onFlightJoined != nil {
+			s.onFlightJoined(mediaID)
+		}
+		return waitEncryptFlight(ctx, flight)
 	}
-	defer releaseEncrypt(mediaID)
+	defer func() { finishEncryptFlight(mediaID, flight, err) }()
 
 	var libraryID sql.NullInt64
 	var filePath, fileType, fileID string
@@ -95,12 +102,7 @@ func (s *AssetEncryptor) encryptMedia(ctx context.Context, mediaID int64, manual
 		}
 		return nil
 	}
-	if IsMediaEncrypted(s.DB, mediaID, plainPath) {
-		if manual {
-			return ErrAlreadyEncrypted
-		}
-		return nil
-	}
+
 	if _, err := os.Stat(plainPath); err != nil {
 		if os.IsNotExist(err) {
 			markEncryptPlainMissing(s.DB, mediaID, plainPath)
@@ -134,6 +136,13 @@ func (s *AssetEncryptor) encryptMedia(ctx context.Context, mediaID int64, manual
 		return err
 	}
 	encPath := filepath.Join(encDir, fileID+".enc")
+	valid, err := encryptedCanonicalRecordValid(ctx, s.DB, mediaID, encPath)
+	if err != nil {
+		return err
+	}
+	if valid {
+		return ErrAlreadyEncrypted
+	}
 
 	requireFaststart := cleanupPlain == 1 || encryptRequiresISOFaststart(ft, plainPath)
 	encryptSource, prepCleanup, remuxed, err := s.resolveEncryptSource(ctx, mediaID, plainPath, requireFaststart)
@@ -148,15 +157,26 @@ func (s *AssetEncryptor) encryptMedia(ctx context.Context, mediaID int64, manual
 	}
 	defer src.Close()
 
-	dst, err := os.OpenFile(encPath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
-	if err != nil {
-		if os.IsExist(err) {
-			// Another encrypt goroutine is writing the canonical path; do not allocate -1/-2 copies.
-			return nil
+	var backupPath string
+	if _, err := os.Stat(encPath); err == nil {
+		backupPath = encPath + ".orphan-" + uuid.NewString()
+		if err := os.Rename(encPath, backupPath); err != nil {
+			return err
 		}
+	} else if !os.IsNotExist(err) {
 		return err
 	}
-	result, err := kcrypto.EncryptFile(src, dst, kek)
+	published := false
+	defer func() {
+		if !published {
+			err = restoreEncryptedOutput(err, encPath, backupPath, os.Remove, os.Rename)
+		}
+	}()
+	dst, err := os.OpenFile(encPath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	result, err := kcrypto.EncryptFileContext(ctx, src, dst, kek)
 	closeErr := dst.Close()
 	if err != nil {
 		_ = os.Remove(encPath)
@@ -169,7 +189,17 @@ func (s *AssetEncryptor) encryptMedia(ctx context.Context, mediaID int64, manual
 
 	wrappedHex := hex.EncodeToString(result.WrappedDEK)
 	ivHex := hex.EncodeToString(result.IV)
-	_, err = s.DB.ExecContext(ctx, `
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		_ = os.Remove(encPath)
+		return err
+	}
+	defer tx.Rollback()
+	if err := runEncryptCommitGuard(ctx, tx); err != nil {
+		_ = os.Remove(encPath)
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO media_encrypted_assets (media_id, enc_path, wrapped_dek, iv, plain_path, status, updated_at)
 		VALUES (?, ?, ?, ?, ?, 'encrypted', CURRENT_TIMESTAMP)
 		ON CONFLICT(media_id) DO UPDATE SET
@@ -184,8 +214,17 @@ func (s *AssetEncryptor) encryptMedia(ctx context.Context, mediaID int64, manual
 		_ = os.Remove(encPath)
 		return err
 	}
-	if _, err := s.DB.ExecContext(ctx, `UPDATE media SET file_path = ? WHERE id = ?`, encPath, mediaID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE media SET file_path = ? WHERE id = ?`, encPath, mediaID); err != nil {
+		_ = os.Remove(encPath)
 		return err
+	}
+	if err := tx.Commit(); err != nil {
+		_ = os.Remove(encPath)
+		return err
+	}
+	published = true
+	if backupPath != "" {
+		_ = os.Remove(backupPath)
 	}
 	persistPlainMD5AfterEncrypt(s.DB, mediaID, plainPath)
 	if cleanupPlain == 1 {
@@ -195,6 +234,69 @@ func (s *AssetEncryptor) encryptMedia(ctx context.Context, mediaID int64, manual
 		markKeyframeReindex(s.DB, mediaID)
 	}
 	return nil
+}
+
+// ValidEncryptedFile validates a Knox encrypted file header and non-empty payload.
+func ValidEncryptedFile(path string) (bool, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return false, nil
+	}
+	plainSize, err := kcrypto.PlaintextSize(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, nil
+	}
+	return plainSize > 0, nil
+}
+
+// IsEncryptedAssetRecordValid validates the encrypted DB record and its file.
+func IsEncryptedAssetRecordValid(ctx context.Context, db *sql.DB, mediaID int64) (bool, error) {
+	if db == nil {
+		return false, errors.New("encrypted asset validator: database is not configured")
+	}
+	if mediaID <= 0 {
+		return false, nil
+	}
+	var path string
+	err := db.QueryRowContext(ctx, `SELECT enc_path FROM media_encrypted_assets WHERE media_id=? AND status='encrypted'`, mediaID).Scan(&path)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return ValidEncryptedFile(path)
+}
+
+func encryptedCanonicalRecordValid(ctx context.Context, db *sql.DB, mediaID int64, canonicalPath string) (bool, error) {
+	var path string
+	err := db.QueryRowContext(ctx, `SELECT enc_path FROM media_encrypted_assets WHERE media_id=? AND status='encrypted'`, mediaID).Scan(&path)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if strings.TrimSpace(path) != strings.TrimSpace(canonicalPath) {
+		return false, nil
+	}
+	return ValidEncryptedFile(path)
+}
+
+func restoreEncryptedOutput(original error, newPath, backupPath string, remove func(string) error, rename func(string, string) error) error {
+	var restoreErr error
+	if err := remove(newPath); err != nil && !os.IsNotExist(err) {
+		restoreErr = errors.Join(restoreErr, err)
+	}
+	if backupPath != "" {
+		if err := rename(backupPath, newPath); err != nil {
+			restoreErr = errors.Join(restoreErr, err)
+		}
+	}
+	return errors.Join(original, restoreErr)
 }
 
 // OpenPlaintext returns a reader for media content, decrypting .enc when needed.
@@ -268,4 +370,13 @@ func markEncryptPlainMissing(db *sql.DB, mediaID int64, plainPath string) {
 		  status = 'plain_missing',
 		  updated_at = CURRENT_TIMESTAMP
 	`, mediaID, plainPath, plainPath)
+}
+
+// EncryptionDB exposes the encryptor database to the post-ingest adapter for
+// idempotency checks and lease fencing.
+func (s *AssetEncryptor) EncryptionDB() *sql.DB {
+	if s == nil {
+		return nil
+	}
+	return s.DB
 }

@@ -15,12 +15,11 @@ const ffmpegPipeInput = "pipe:0"
 
 // subtitleStreams probes embedded subtitle tracks, using decrypt pipe for Knox .enc.
 func (s *Service) subtitleStreams(ctx context.Context, mediaID int64, videoPath string) ([]ffprobe.SubtitleStream, error) {
-	_ = ctx
 	if s == nil {
 		return nil, fmt.Errorf("subtitle service nil")
 	}
 	if storage.InputNeedsPipe(s.DB, mediaID, videoPath) {
-		out, cleanup, err := storage.FFprobeOutput(s.DB, s.Vault, s.FFprobePath, mediaID, videoPath, 0, 0, []string{
+		out, cleanup, err := storage.FFprobeOutputContext(ctx, s.DB, s.Vault, s.FFprobePath, mediaID, videoPath, 0, 0, []string{
 			"-v", "quiet",
 			"-print_format", "json",
 			"-show_streams",
@@ -33,7 +32,11 @@ func (s *Service) subtitleStreams(ctx context.Context, mediaID int64, videoPath 
 		}
 		return ffprobe.ParseSubtitleStreamsJSON(out)
 	}
-	return ffprobe.SubtitleStreams(s.FFprobePath, videoPath)
+	out, err := ffprobe.OutputContext(ctx, s.FFprobePath, []string{"-v", "quiet", "-print_format", "json", "-show_streams", videoPath}, nil)
+	if err != nil {
+		return nil, err
+	}
+	return ffprobe.ParseSubtitleStreamsJSON(out)
 }
 
 // openVideoPipeInput returns pipe:0 + stdin reader for encrypted video, or the plain path.

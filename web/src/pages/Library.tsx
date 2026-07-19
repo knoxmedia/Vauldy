@@ -1,6 +1,6 @@
 import { QuestionCircleOutlined } from "@ant-design/icons";
 import { Button, Col, Divider, Drawer, Form, Grid, Input, Modal, Radio, Row, Select, Space, Switch, Table, Tag, Tooltip, message } from "antd";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import LibraryProviderSourceTabs from "../components/LibraryProviderSourceTabs";
 import {
   DEFAULT_IMAGE_PROVIDERS,
@@ -18,9 +18,37 @@ import {
   updateLibrary,
 } from "../api/client";
 import { useT } from "../i18n";
+import { useLibraryRequestScope } from "../lib/libraryRequestScope";
+import { createGuardedPoll, createResumeRefresh, LIBRARY_ACTIVE_POLL_MS, LIBRARY_IDLE_POLL_MS, type PollController } from "../lib/polling";
+
+function stableLibrarySnapshot(data: Awaited<ReturnType<typeof fetchLibrariesWithCapabilities>>): string {
+  return JSON.stringify({
+    items: data.items.map((item) => ({
+      id: item.id, name: item.name, type: item.type, path: item.path, folders: item.folders ?? [],
+      auto_scan: item.auto_scan, enabled: item.enabled, realtime_monitor: item.realtime_monitor,
+      preview_extract: item.preview_extract, drm_enabled: item.drm_enabled, encryption_mode: item.encryption_mode,
+      encrypted_assets_enabled: item.encrypted_assets_enabled,
+      encrypted_assets_cleanup_plaintext: item.encrypted_assets_cleanup_plaintext,
+      encrypted_assets_dir_mode: item.encrypted_assets_dir_mode,
+      encrypted_assets_custom_dir: item.encrypted_assets_custom_dir,
+      metadata_providers: item.metadata_providers ?? [], image_providers: item.image_providers ?? [],
+      metadata_refresh_policy: item.metadata_refresh_policy, scraper: item.scraper, created_at: item.created_at,
+      media_count: item.media_count, scan_task_id: item.scan_task_id, scan_status: item.scan_status,
+      scan_processed_count: item.scan_processed_count, scan_total_count: item.scan_total_count,
+      scan_added_count: item.scan_added_count, scan_started_at: item.scan_started_at, preview_url: item.preview_url,
+    })),
+    encryptedAssetsConfig: data.encryptedAssetsConfig,
+  });
+}
 
 export default function LibraryPage() {
+  const libraryRequests = useLibraryRequestScope();
+  return <LibraryPageSession key={libraryRequests?.scopeId ?? "standalone"} />;
+}
+
+export function LibraryPageSession() {
   const t = useT();
+  const libraryRequests = useLibraryRequestScope();
   const [rows, setRows] = useState<Library[]>([]);
   const [loading, setLoading] = useState(false);
   const [open, setOpen] = useState(false);
@@ -30,6 +58,9 @@ export default function LibraryPage() {
   const [form] = Form.useForm();
   const [providerSourceTab, setProviderSourceTab] = useState("metadata");
   const screens = Grid.useBreakpoint();
+  const pollRef = useRef<PollController | null>(null);
+  const tRef = useRef(t);
+  tRef.current = t;
 
   function encDirRadioLabel(label: string, path: string) {
     return (
@@ -45,27 +76,41 @@ export default function LibraryPage() {
     );
   }
 
-  async function load(silent = false) {
-    if (!silent) setLoading(true);
-    try {
-      const data = await fetchLibrariesWithCapabilities();
-      setRows(data.items);
-      setEncryptedAssetsConfig(data.encryptedAssetsConfig);
-    } catch (e: unknown) {
-      message.error((e as Error).message || t("pages.library.load_failed"));
-    } finally {
-      if (!silent) setLoading(false);
-    }
-  }
-
   useEffect(() => {
-    void load();
-    const timer = window.setInterval(() => {
-      void load(true);
-    }, 3000);
-    return () => window.clearInterval(timer);
-     
-  }, []);
+    setLoading(true);
+    const poll = createGuardedPoll({
+      load: (signal) => libraryRequests?.load(signal) ?? fetchLibrariesWithCapabilities(signal),
+      delay: ({ items }) => items.some((item) => ["running", "scanning"].includes((item.scan_status || "").trim().toLowerCase()))
+        ? LIBRARY_ACTIVE_POLL_MS
+        : LIBRARY_IDLE_POLL_MS,
+      equal: (a, b) => stableLibrarySnapshot(a) === stableLibrarySnapshot(b),
+      commit: (data) => {
+        setRows(data.items);
+        setEncryptedAssetsConfig(data.encryptedAssetsConfig);
+        setLoading(false);
+      },
+      onError: (error) => {
+        setLoading(false);
+        message.error((error as Error).message || tRef.current("pages.library.load_failed"));
+      },
+    });
+    pollRef.current = poll;
+    const resumeRefresh = createResumeRefresh(() => poll.start());
+    const onVisibility = () => {
+      if (document.hidden) poll.stop();
+      else resumeRefresh();
+    };
+    const onFocus = () => { if (!document.hidden) resumeRefresh(); };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
+    poll.start();
+    return () => {
+      if (pollRef.current === poll) pollRef.current = null;
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
+      poll.stop();
+    };
+  }, [libraryRequests]);
 
   async function handleSubmit() {
     setSubmitting(true);
@@ -112,7 +157,7 @@ export default function LibraryPage() {
       setOpen(false);
       setEditing(null);
       form.resetFields();
-      await load();
+      pollRef.current?.refreshNow();
     } catch (e: unknown) {
       message.error((e as Error).message || t("pages.library.save_failed"));
     } finally {
@@ -236,7 +281,7 @@ export default function LibraryPage() {
                       } else {
                         message.success(t("pages.library.scan_started", { task_id: res.task_id }));
                       }
-                      await load(true);
+                      pollRef.current?.refreshNow();
                     } catch (e: unknown) {
                       message.error((e as Error).message || t("pages.library.scan_failed"));
                     }
@@ -251,7 +296,7 @@ export default function LibraryPage() {
                       try {
                         await cancelScanTask(r.scan_task_id!);
                         message.success(t("pages.library.cancel_scan_requested"));
-                        await load(true);
+                        pollRef.current?.refreshNow();
                       } catch (e: unknown) {
                         message.error((e as Error).message || t("pages.library.cancel_failed"));
                       }
@@ -270,7 +315,7 @@ export default function LibraryPage() {
                       onOk: async () => {
                         await deleteLibrary(r.id);
                         message.success(t("pages.library.deleted"));
-                        await load();
+                        pollRef.current?.refreshNow();
                       },
                     });
                   }}

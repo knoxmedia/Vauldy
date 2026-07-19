@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"knox-media/cmd/scheduler"
 	"knox-media/internal/app"
@@ -45,6 +46,7 @@ type Handler struct {
 	KeyVault            *keystore.Vault
 	AssetEncryptor      *storage.AssetEncryptor
 	DerivedStore        *storage.DerivedAssetStore
+	PlayCompletionNow   func() time.Time
 	scanMu              sync.Mutex
 	scrapeRunMu         sync.Mutex
 	runningScans        map[int64]scanRuntime

@@ -17,7 +17,7 @@ const (
 
 // StartPhotoLocationLoop drains pending photo location tasks.
 func (h *Handler) StartPhotoLocationLoop(ctx context.Context) {
-	go h.runPhotoLocationOnce()
+	h.runPhotoLocationOnce(ctx)
 	tk := time.NewTicker(photoLocationInterval)
 	defer tk.Stop()
 	for {
@@ -25,12 +25,12 @@ func (h *Handler) StartPhotoLocationLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-tk.C:
-			h.runPhotoLocationOnce()
+			h.runPhotoLocationOnce(ctx)
 		}
 	}
 }
 
-func (h *Handler) runPhotoLocationOnce() {
+func (h *Handler) runPhotoLocationOnce(ctx context.Context) {
 	if h == nil || h.PhotoLocationWorker == nil || h.App == nil || h.App.DB == nil {
 		return
 	}
@@ -43,7 +43,7 @@ func (h *Handler) runPhotoLocationOnce() {
 	if limit > photoLocationBatchMax {
 		limit = photoLocationBatchMax
 	}
-	done, failed := h.PhotoLocationWorker.RunBatch(context.Background(), limit)
+	done, failed := h.PhotoLocationWorker.RunBatch(ctx, limit)
 	if done+failed > 0 {
 		log.Printf("photo location worker: processed=%d ok=%d fail=%d", done+failed, done, failed)
 	}
@@ -59,15 +59,18 @@ func (h *Handler) PhotoLocationProgress(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid library id"})
 		return
 	}
+	if !h.requirePhotoAggregateAccess(c, libraryID) {
+		return
+	}
 	total, located, pending, err := h.PhotoLocationWorker.LibraryProgress(libraryID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"total":    total,
-		"located":  located,
-		"pending":  pending,
-		"percent":  progressPercent(located, total),
+		"total":   total,
+		"located": located,
+		"pending": pending,
+		"percent": progressPercent(located, total),
 	})
 }

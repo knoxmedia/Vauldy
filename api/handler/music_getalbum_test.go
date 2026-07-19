@@ -33,6 +33,7 @@ func TestGetAlbumReturnsTracksFromRealDB(t *testing.T) {
 		w := httptest.NewRecorder()
 		c, _ := gin.CreateTestContext(w)
 		c.Params = gin.Params{{Key: "id", Value: strconv.FormatInt(albumID, 10)}}
+		c.Request = httptest.NewRequest(http.MethodGet, "/album/"+strconv.FormatInt(albumID, 10), nil)
 
 		h.GetAlbum(c)
 		if w.Code != http.StatusOK {

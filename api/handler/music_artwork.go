@@ -384,7 +384,7 @@ func (h *Handler) ServeArtistArtwork(c *gin.Context) {
 	}
 	var libID int64
 	var artworkPath sql.NullString
-	if err := h.App.DB.QueryRow(`SELECT library_id, artwork_path FROM music_artist WHERE id = ?`, artistID).Scan(&libID, &artworkPath); err != nil {
+	if err := h.App.DB.QueryRowContext(c.Request.Context(), `SELECT library_id, artwork_path FROM music_artist WHERE id = ?`, artistID).Scan(&libID, &artworkPath); err != nil {
 		c.Status(http.StatusNotFound)
 		return
 	}
