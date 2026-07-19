@@ -328,8 +328,8 @@ export type HistoryItem = {
   library_type?: string;
 };
 
-export async function fetchLibraries() {
-  const { data } = await api.get<{ items?: Library[] }>("/api/v1/library");
+export async function fetchLibraries(signal?: AbortSignal) {
+  const { data } = await api.get<{ items?: Library[] }>("/api/v1/library", { signal });
   return data?.items ?? [];
 }
 
@@ -337,12 +337,12 @@ export type EncryptedAssetsConfig = {
   data_dot_encrypted_dir?: string;
 };
 
-export async function fetchLibrariesWithCapabilities() {
+export async function fetchLibrariesWithCapabilities(signal?: AbortSignal) {
   const { data } = await api.get<{
     items?: Library[];
     drm_capabilities?: DRMCapabilities;
     encrypted_assets_config?: EncryptedAssetsConfig;
-  }>("/api/v1/library");
+  }>("/api/v1/library", { signal });
   return {
     items: data?.items ?? [],
     drmCapabilities: data?.drm_capabilities ?? { widevine_enabled: true, powerdrm_enabled: true },
@@ -449,6 +449,7 @@ export async function fetchMedia(
     /** Full-text fuzzy search across title, overview, genres, tags, etc. */
     q?: string;
   },
+  signal?: AbortSignal,
 ) {
   const params: Record<string, string | number> = {};
   if (libraryId !== undefined) params.library_id = libraryId;
@@ -459,7 +460,7 @@ export async function fetchMedia(
   if (opts?.photo_place) params.photo_place = opts.photo_place;
   if (opts?.photo_person) params.photo_person = opts.photo_person;
   if (opts?.q) params.q = opts.q;
-  const { data } = await api.get<{ items?: MediaItem[] }>("/api/v1/media", { params });
+  const { data } = await api.get<{ items?: MediaItem[] }>("/api/v1/media", { params, signal });
   return data?.items ?? [];
 }
 
@@ -579,28 +580,29 @@ export type DocumentNode = {
 export async function fetchDocuments(
   libraryId: number,
   params?: Record<string, string | number | boolean | undefined>,
+  signal?: AbortSignal,
 ): Promise<DocumentItem[]> {
-  const { data } = await api.get<{ items?: DocumentItem[] }>(`/api/v1/library/${libraryId}/documents`, { params });
+  const { data } = await api.get<{ items?: DocumentItem[] }>(`/api/v1/library/${libraryId}/documents`, { params, signal });
   return data?.items ?? [];
 }
 
-export async function fetchDocumentNodes(libraryId: number, parent = ""): Promise<DocumentNode[]> {
+export async function fetchDocumentNodes(libraryId: number, parent = "", signal?: AbortSignal): Promise<DocumentNode[]> {
   const { data } = await api.get<{ items?: DocumentNode[] }>(`/api/v1/library/${libraryId}/document/nodes`, {
-    params: { parent },
+    params: { parent }, signal,
   });
   return data?.items ?? [];
 }
 
-export async function fetchDocumentFacets(libraryId: number, kind: string): Promise<DocumentFacet[]> {
+export async function fetchDocumentFacets(libraryId: number, kind: string, signal?: AbortSignal): Promise<DocumentFacet[]> {
   const { data } = await api.get<{ items?: DocumentFacet[] }>(`/api/v1/library/${libraryId}/document/facets`, {
-    params: { kind },
+    params: { kind }, signal,
   });
   return data?.items ?? [];
 }
 
-export async function fetchRecentDocuments(libraryId?: number): Promise<DocumentItem[]> {
+export async function fetchRecentDocuments(libraryId?: number, signal?: AbortSignal): Promise<DocumentItem[]> {
   const { data } = await api.get<{ items?: DocumentItem[] }>(`/api/v1/library/${libraryId ?? 0}/documents/recent`, {
-    params: libraryId ? { library_id: libraryId } : undefined,
+    params: libraryId ? { library_id: libraryId } : undefined, signal,
   });
   return data?.items ?? [];
 }
@@ -658,6 +660,28 @@ export const OFFICE_DOCUMENT_FORMATS = new Set(["doc", "docx", "xls", "xlsx", "p
 
 export function isOfficeDocumentFormat(format?: string): boolean {
   return OFFICE_DOCUMENT_FORMATS.has((format || "").trim().toLowerCase());
+}
+
+export type DocumentTagUpdateMode = "add" | "remove" | "replace";
+
+export type DocumentTagBatchResult = {
+  updated: number;
+  items: Array<{ media_id: number; tags: string[] }>;
+  facet_deltas: Array<{ tag: string; delta: number }>;
+};
+
+export async function batchUpdateDocumentTags(
+  mediaIds: number[],
+  mode: DocumentTagUpdateMode,
+  tags: string[],
+  signal?: AbortSignal,
+): Promise<DocumentTagBatchResult> {
+  const { data } = await api.patch<DocumentTagBatchResult>(
+    "/api/v1/documents/tags",
+    { media_ids: mediaIds, mode, tags },
+    { signal },
+  );
+  return data;
 }
 
 export async function batchDownloadDocuments(mediaIds: number[]): Promise<Blob> {

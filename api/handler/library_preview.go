@@ -58,7 +58,7 @@ type libraryPreviewSource struct {
 
 // scheduleLibraryPreviewRefresh regenerates the composite preview asynchronously.
 func (h *Handler) scheduleLibraryPreviewRefresh(libraryID int64) {
-	if h == nil || h.App == nil || h.App.DB == nil || libraryID <= 0 {
+	if h == nil || h.App == nil || h.App.DB == nil || h.App.Config == nil || libraryID <= 0 {
 		return
 	}
 	if _, loaded := libraryPreviewPending.LoadOrStore(libraryID, true); loaded {
@@ -322,6 +322,9 @@ func (h *Handler) ScheduleLibraryPreviewRefreshForMedia(mediaID int64) {
 }
 
 func (h *Handler) libraryPreviewPublicURL(libraryID int64) string {
+	if h == nil || h.App == nil || h.App.Config == nil || libraryID <= 0 {
+		return ""
+	}
 	uploadDir := strings.TrimSpace(h.App.Config.Data.Upload)
 	if uploadDir == "" || libraryID <= 0 {
 		return ""
