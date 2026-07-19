@@ -711,18 +711,18 @@ export type PhotoPerson = {
   cover_face_id?: number;
 };
 
-export async function fetchPhotoCategories(libraryId: number): Promise<PhotoCategory[]> {
-  const { data } = await api.get<{ items?: PhotoCategory[] }>(`/api/v1/library/${libraryId}/photo/categories`);
+export async function fetchPhotoCategories(libraryId: number, signal?: AbortSignal): Promise<PhotoCategory[]> {
+  const { data } = await api.get<{ items?: PhotoCategory[] }>(`/api/v1/library/${libraryId}/photo/categories`, { signal });
   return data?.items ?? [];
 }
 
-export async function fetchPhotoPlaces(libraryId: number): Promise<PhotoPlace[]> {
-  const { data } = await api.get<{ items?: PhotoPlace[] }>(`/api/v1/library/${libraryId}/photo/places`);
+export async function fetchPhotoPlaces(libraryId: number, signal?: AbortSignal): Promise<PhotoPlace[]> {
+  const { data } = await api.get<{ items?: PhotoPlace[] }>(`/api/v1/library/${libraryId}/photo/places`, { signal });
   return data?.items ?? [];
 }
 
-export async function fetchPhotoPersons(libraryId: number): Promise<PhotoPerson[]> {
-  const { data } = await api.get<{ items?: PhotoPerson[] }>(`/api/v1/library/${libraryId}/photo/persons`);
+export async function fetchPhotoPersons(libraryId: number, signal?: AbortSignal): Promise<PhotoPerson[]> {
+  const { data } = await api.get<{ items?: PhotoPerson[] }>(`/api/v1/library/${libraryId}/photo/persons`, { signal });
   return data?.items ?? [];
 }
 
@@ -736,6 +736,22 @@ export async function updatePhotoPersonName(
     { name },
   );
   return data ?? { ok: false, name };
+}
+
+export class PhotoFaceThumbnailPendingError extends Error {
+  constructor() { super("face thumbnail not ready"); this.name = "PhotoFaceThumbnailPendingError"; }
+}
+
+export async function fetchPhotoFaceThumbnail(faceId: number, signal?: AbortSignal): Promise<Blob> {
+  try {
+    const { data } = await api.get<Blob>(`/api/v1/photo/face/${faceId}/thumb.jpg`, { responseType: "blob", signal });
+    return data;
+  } catch (error) {
+    if (axios.isAxiosError(error) && error.response?.status === 404 && String(error.response.headers?.["x-thumbnail-pending"] ?? "") === "1") {
+      throw new PhotoFaceThumbnailPendingError();
+    }
+    throw error;
+  }
 }
 
 export function photoFaceThumbSrc(faceId: number): string {
@@ -752,7 +768,7 @@ export async function backfillPhotoFaces(libraryId: number): Promise<{ ok: boole
   return data ?? { ok: false, queued: 0 };
 }
 
-export async function fetchPhotoFaceProgress(libraryId: number): Promise<{
+export async function fetchPhotoFaceProgress(libraryId: number, signal?: AbortSignal): Promise<{
   total: number;
   processed: number;
   detected: number;
@@ -767,7 +783,7 @@ export async function fetchPhotoFaceProgress(libraryId: number): Promise<{
     pending: number;
     failed?: number;
     percent: number;
-  }>(`/api/v1/library/${libraryId}/photo/faces/progress`);
+  }>(`/api/v1/library/${libraryId}/photo/faces/progress`, { signal });
   return {
     total: data?.total ?? 0,
     processed: data?.processed ?? 0,
@@ -785,7 +801,7 @@ export async function backfillPhotoLocations(libraryId: number): Promise<{ ok: b
   return data ?? { ok: false, queued: 0 };
 }
 
-export async function fetchPhotoLocationProgress(libraryId: number): Promise<{
+export async function fetchPhotoLocationProgress(libraryId: number, signal?: AbortSignal): Promise<{
   total: number;
   located: number;
   pending: number;
@@ -793,11 +809,12 @@ export async function fetchPhotoLocationProgress(libraryId: number): Promise<{
 }> {
   const { data } = await api.get<{ total: number; located: number; pending: number; percent: number }>(
     `/api/v1/library/${libraryId}/photo/locations/progress`,
+    { signal },
   );
   return data ?? { total: 0, located: 0, pending: 0, percent: 0 };
 }
 
-export async function fetchPhotoClassifyProgress(libraryId: number): Promise<{
+export async function fetchPhotoClassifyProgress(libraryId: number, signal?: AbortSignal): Promise<{
   total: number;
   classified: number;
   pending: number;
@@ -805,6 +822,7 @@ export async function fetchPhotoClassifyProgress(libraryId: number): Promise<{
 }> {
   const { data } = await api.get<{ total: number; classified: number; pending: number; percent: number }>(
     `/api/v1/library/${libraryId}/photo/classify/progress`,
+    { signal },
   );
   return data ?? { total: 0, classified: 0, pending: 0, percent: 0 };
 }

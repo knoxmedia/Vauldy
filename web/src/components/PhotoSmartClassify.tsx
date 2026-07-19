@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import type { MediaItem, PhotoCategory, PhotoPerson, PhotoPlace } from "../api/client";
-import { photoFaceThumbSrc, photoThumbSrc } from "../api/client";
+import { fetchPhotoFaceThumbnail, PhotoFaceThumbnailPendingError, photoThumbSrc } from "../api/client";
 import { categoriesForSection, PERSON_ALL_ID, PLACE_ALL_ID, sampleCover, type DrillDown } from "../lib/photoBrowseUtils";
 import { tGlobal as t } from "../i18n";
 import styles from "./PhotoSmartClassify.module.css";
@@ -38,6 +38,36 @@ function useVisibleTileCount(containerRef: RefObject<HTMLElement | null>) {
   return count;
 }
 
+export const PERSON_FACE_MAX_RETRIES = 20;
+function PersonFaceImage({ faceId }: { faceId?: number }) {
+  const [blobSrc, setBlobSrc] = useState("");
+  const retryRef = useRef<(() => void) | null>(null);
+  useEffect(() => {
+    if (!faceId) { setBlobSrc(""); return; }
+    let active = true, attempts = 0, objectUrl = "";
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let controller: AbortController | undefined;
+    const clearObjectUrl = () => { if (objectUrl) { URL.revokeObjectURL(objectUrl); objectUrl = ""; } };
+    const load = async () => {
+      if (!active || attempts >= PERSON_FACE_MAX_RETRIES) return;
+      attempts += 1; controller?.abort(); controller = new AbortController();
+      try { const blob = await fetchPhotoFaceThumbnail(faceId, controller.signal); if (!active) return; clearObjectUrl(); objectUrl = URL.createObjectURL(blob); setBlobSrc(objectUrl); }
+      catch (error) { if (!active || controller.signal.aborted) return; setBlobSrc(""); if (error instanceof PhotoFaceThumbnailPendingError) schedule(); }
+    };
+    const onVisible = () => { document.removeEventListener("visibilitychange", onVisible); if (active && document.visibilityState === "visible") void load(); };
+    const schedule = () => {
+      if (!active || attempts >= PERSON_FACE_MAX_RETRIES || timer) return;
+      const delay = Math.min(60_000, 5_000 * (2 ** Math.min(Math.max(0, attempts - 1), 4)));
+      timer = setTimeout(() => { timer = undefined; if (document.visibilityState === "visible") void load(); else document.addEventListener("visibilitychange", onVisible); }, delay);
+    };
+    retryRef.current = () => { clearObjectUrl(); setBlobSrc(""); schedule(); };
+    setBlobSrc(""); void load();
+    return () => { active = false; retryRef.current = null; controller?.abort(); if (timer) clearTimeout(timer); document.removeEventListener("visibilitychange", onVisible); clearObjectUrl(); };
+  }, [faceId]);
+  if (!blobSrc) return <div className={styles.placeholder}>{t("components.photo_smart_classify.person_placeholder")}</div>;
+  return <img src={blobSrc} alt="" loading="lazy" decoding="async" onError={() => retryRef.current?.()} />;
+}
+
 function PersonMoreTile({
   coverFaceId,
   onClick,
@@ -48,11 +78,7 @@ function PersonMoreTile({
   return (
     <button type="button" className={`${styles.tile} ${styles.moreTile}`} onClick={onClick}>
       <div className={`${styles.cover} ${styles.faceCover}`}>
-        {coverFaceId ? (
-          <img src={photoFaceThumbSrc(coverFaceId)} alt="" loading="lazy" decoding="async" />
-        ) : (
-          <div className={styles.placeholder}>{t("components.photo_smart_classify.person_placeholder")}</div>
-        )}
+        <PersonFaceImage faceId={coverFaceId} />
         <span className={styles.moreLabel}>{t("components.photo_smart_classify.view_more")}</span>
       </div>
       <div className={`${styles.tileLabel} ${styles.tileMetaHidden}`} aria-hidden="true">
@@ -85,11 +111,7 @@ function PersonTile({
       }
     >
       <div className={`${styles.cover} ${styles.faceCover}`}>
-        {person.cover_face_id ? (
-          <img src={photoFaceThumbSrc(person.cover_face_id)} alt="" loading="lazy" decoding="async" />
-        ) : (
-          <div className={styles.placeholder}>{t("components.photo_smart_classify.person_placeholder")}</div>
-        )}
+        <PersonFaceImage faceId={person.cover_face_id} />
       </div>
       <div className={styles.tileLabel}>{person.name || t("components.photo_smart_classify.unnamed_person")}</div>
       <div className={styles.tileCount}>{t("components.photo_smart_classify.count_photos", { count: person.count })}</div>

@@ -12,16 +12,16 @@ import (
 	"knox-media/cmd/scheduler"
 	"knox-media/internal/app"
 	"knox-media/internal/atrack"
-	"knox-media/internal/metadatalib"
 	"knox-media/internal/config"
 	"knox-media/internal/doccover"
 	"knox-media/internal/jit/session"
 	"knox-media/internal/keyframe"
 	"knox-media/internal/lyrictask"
+	"knox-media/internal/metadatalib"
 	"knox-media/internal/photoclass"
 	"knox-media/internal/preview"
-	"knox-media/internal/subtitle"
 	"knox-media/internal/storage"
+	"knox-media/internal/subtitle"
 	"knox-media/internal/transcode"
 	"knox-media/internal/upload"
 )
@@ -56,6 +56,7 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 	go h.StartPhotoClassifyLoop(context.Background())
 	go h.StartPhotoLocationLoop(context.Background())
 	go h.StartPhotoFaceLoop(context.Background())
+	go h.StartMediaFileCleanupLoop(context.Background())
 	if dcw != nil {
 		go dcw.Start(context.Background())
 		go func() {

@@ -19,16 +19,18 @@ import (
 
 // Worker detects faces and assigns person clusters asynchronously.
 type Worker struct {
-	DB         *sql.DB
-	Vault      *keystore.Vault
-	Derived    *storage.DerivedAssetStore
-	MediaRoot  string
-	PreviewDir string
-	FFmpegPath string
-	Cfg        func() config.PhotoFaceConfig
-	mu         sync.Mutex
-	busy       map[int64]bool
-	activeJobs atomic.Int32
+	DB                   *sql.DB
+	Vault                *keystore.Vault
+	Derived              *storage.DerivedAssetStore
+	MediaRoot            string
+	PreviewDir           string
+	FFmpegPath           string
+	Cfg                  func() config.PhotoFaceConfig
+	mu                   sync.Mutex
+	repairMu             sync.Mutex
+	afterThumbnailCommit func()
+	busy                 map[int64]bool
+	activeJobs           atomic.Int32
 }
 
 func NewWorker(db *sql.DB, vault *keystore.Vault, derived *storage.DerivedAssetStore, mediaRoot, ffmpegPath, previewDir string, cfgFn func() config.PhotoFaceConfig) *Worker {
@@ -216,7 +218,7 @@ func (w *Worker) RunBatch(ctx context.Context, limit int) (done, failed int) {
 		limit = batchCap
 	}
 	retryMin := w.failedRetryMinutes()
-	rows, err := w.DB.Query(`
+	rows, err := w.DB.QueryContext(ctx, `
 		SELECT media_id FROM photo_face_task
 		WHERE status = 'pending'
 		   OR (status = 'running' AND started_at IS NOT NULL AND started_at < datetime('now', '-20 minutes'))
@@ -329,7 +331,7 @@ func (w *Worker) Process(ctx context.Context, mediaID int64) error {
 		return err
 	}
 
-	if err := w.replaceFaces(ctx, libraryID, mediaID, res); err != nil {
+	if err := w.replaceFaces(ctx, libraryID, mediaID, detectPath, res); err != nil {
 		w.fail(mediaID, err.Error())
 		return err
 	}
@@ -341,61 +343,108 @@ func (w *Worker) Process(ctx context.Context, mediaID int64) error {
 	return nil
 }
 
-func (w *Worker) replaceFaces(ctx context.Context, libraryID, mediaID int64, res *DetectResult) error {
-	_ = ctx
-	tx, err := w.DB.Begin()
-	if err != nil {
-		return err
+func (w *Worker) replaceFaces(ctx context.Context, libraryID, mediaID int64, detectPath string, res *DetectResult) error {
+	type preparedFace struct {
+		face      DetectedFace
+		embedding []float32
+		jpeg      []byte
 	}
-	defer func() { _ = tx.Rollback() }()
-
-	var oldPersons []int64
-	rows, err := tx.Query(`SELECT DISTINCT person_id FROM photo_face WHERE media_id = ? AND person_id IS NOT NULL`, mediaID)
-	if err != nil {
-		return err
-	}
-	for rows.Next() {
-		var pid sql.NullInt64
-		if rows.Scan(&pid) == nil && pid.Valid {
-			oldPersons = append(oldPersons, pid.Int64)
-		}
-	}
-	rows.Close()
-
-	if _, err := tx.Exec(`DELETE FROM photo_face WHERE media_id = ?`, mediaID); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-	for _, pid := range oldPersons {
-		w.refreshPersonStats(pid)
-	}
-
-	threshold := w.similarityThreshold()
+	prepared := make([]preparedFace, 0, len(res.Faces))
 	for _, face := range res.Faces {
 		if len(face.Embedding) == 0 {
 			continue
 		}
-		emb := floats64To32(face.Embedding)
-		bbox := face.BBox
-		quality := face.Score
-		resInsert, err := w.DB.Exec(`
-			INSERT INTO photo_face (media_id, library_id, bbox_x, bbox_y, bbox_w, bbox_h, embedding, quality, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
-			mediaID, libraryID,
-			bbox[0], bbox[1], bbox[2]-bbox[0], bbox[3]-bbox[1],
-			packEmbedding(normalizeEmbedding(emb)), quality)
+		b := face.BBox
+		data, err := CropFaceJPEG(detectPath, b[0], b[1], b[2]-b[0], b[3]-b[1], 88)
 		if err != nil {
 			return err
 		}
-		faceID, err := resInsert.LastInsertId()
+		prepared = append(prepared, preparedFace{face: face, embedding: floats64To32(face.Embedding), jpeg: data})
+	}
+	tx, err := w.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var oldFaces, oldPersons []int64
+	rows, err := tx.Query(`SELECT id,person_id FROM photo_face WHERE media_id=?`, mediaID)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var id int64
+		var pid sql.NullInt64
+		if rows.Scan(&id, &pid) == nil {
+			oldFaces = append(oldFaces, id)
+			if pid.Valid {
+				oldPersons = append(oldPersons, pid.Int64)
+			}
+		}
+	}
+	rows.Close()
+	if _, err = tx.Exec(`DELETE FROM photo_face WHERE media_id=?`, mediaID); err != nil {
+		return err
+	}
+	newPaths := []string{}
+	var thumbnailFinalizers []func(bool)
+	committed := false
+	defer func() {
+		for _, finalize := range thumbnailFinalizers {
+			finalize(committed)
+		}
+		if !committed {
+			for _, p := range newPaths {
+				_ = os.Remove(p)
+			}
+		}
+	}()
+	for _, item := range prepared {
+		b := item.face.BBox
+		r, err := tx.Exec(`INSERT INTO photo_face(media_id,library_id,bbox_x,bbox_y,bbox_w,bbox_h,embedding,quality,created_at) VALUES(?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`, mediaID, libraryID, b[0], b[1], b[2]-b[0], b[3]-b[1], packEmbedding(normalizeEmbedding(item.embedding)), item.face.Score)
 		if err != nil {
 			return err
 		}
-		if err := AssignPerson(w.DB, libraryID, faceID, emb, threshold); err != nil {
+		id, err := r.LastInsertId()
+		if err != nil {
 			return err
 		}
+		finalizeThumbnail, commitErr := w.commitFaceThumbnail(ctx, tx, mediaID, id, item.jpeg)
+		if commitErr != nil {
+			return commitErr
+		}
+		thumbnailFinalizers = append(thumbnailFinalizers, finalizeThumbnail)
+		if !storage.NeedsDerivedEncryption(w.DB, mediaID) {
+			newPaths = append(newPaths, ExpectedFaceThumbnailPath(w.photoCacheDir(), id))
+		}
+		if err = assignPersonWith(tx, libraryID, id, item.embedding, w.similarityThreshold()); err != nil {
+			return err
+		}
+	}
+	var oldDerivedFacePaths []string
+	if len(oldFaces) > 0 {
+		for _, oldFaceID := range oldFaces {
+			logical := FaceThumbnailLogicalName(oldFaceID)
+			var oldPath string
+			if scanErr := tx.QueryRowContext(ctx, `SELECT enc_path FROM media_derived_assets WHERE media_id=? AND artifact_kind=? AND logical_name=?`, mediaID, FaceThumbnailArtifactKind, logical).Scan(&oldPath); scanErr == nil {
+				oldDerivedFacePaths = append(oldDerivedFacePaths, oldPath)
+			}
+			if _, err = tx.ExecContext(ctx, `DELETE FROM media_derived_assets WHERE media_id=? AND artifact_kind=? AND logical_name=?`, mediaID, FaceThumbnailArtifactKind, logical); err != nil {
+				return err
+			}
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	if w.Derived != nil {
+		w.Derived.CleanupReplaced(oldDerivedFacePaths)
+	}
+	for _, id := range oldFaces {
+		_ = os.Remove(ExpectedFaceThumbnailPath(w.photoCacheDir(), id))
+	}
+	for _, pid := range oldPersons {
+		w.refreshPersonStats(pid)
 	}
 	return nil
 }
@@ -452,6 +501,9 @@ func (w *Worker) ensureDetectImage(ctx context.Context, mediaID, libraryID int64
 	srcPath = strings.TrimSpace(srcPath)
 	if srcPath == "" {
 		return "", cleanup, fmt.Errorf("empty file path")
+	}
+	if st, statErr := os.Stat(srcPath); statErr == nil && !st.IsDir() && st.Size() > 0 {
+		return storage.MaterializeCLIFile(w.DB, w.Vault, mediaID, srcPath)
 	}
 	inputPath := storage.PreferredFFmpegPath(w.DB, mediaID, libraryID, srcPath)
 	if inputPath == "" {
