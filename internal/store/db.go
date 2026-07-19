@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 
@@ -613,6 +614,10 @@ func OpenSQLite(path string) (*sql.DB, error) {
 	if _, err := db.Exec(schema); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
+	}
+	if err := ensurePlaybackCompletionSchema(context.Background(), db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("playback completion migration: %w", err)
 	}
 	_, _ = db.Exec(`ALTER TABLE transcode_task ADD COLUMN error_message TEXT`)
 	_, _ = db.Exec(`ALTER TABLE library ADD COLUMN enabled INTEGER DEFAULT 1`)

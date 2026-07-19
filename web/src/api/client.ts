@@ -1,6 +1,7 @@
 import axios from "axios";
 import { message } from "antd";
 import type { PlayerPrefs } from "../lib/playerPrefs";
+import type { PlaybackEvidencePayload, PlaybackProgressResult } from "../lib/playbackEvidence";
 import { proxyImageSrc } from "../lib/imageUrl";
 import { useAuthStore, type UserRole } from "../store/auth";
 
@@ -1740,11 +1741,14 @@ export async function logout() {
   await api.post("/api/v1/user/logout");
 }
 
-/** Optional `session_id` is the JIT HLS session (e.g. `jit-…`) for correlating access logs after idle recovery. */
+/** Legacy `session_id` remains the JIT HLS ID for older callers. */
 export type PlaybackLogPayload = {
   position?: number;
   completed?: number;
   session_id?: string;
+  event?: PlaybackEvidencePayload["event"];
+  sequence?: number;
+  jit_session_id?: string;
 };
 
 export async function reportPlaybackStart(mediaId: number, payload?: PlaybackLogPayload) {
@@ -1755,13 +1759,37 @@ export async function reportPlaybackEnd(mediaId: number, payload?: PlaybackLogPa
   await api.post(`/api/v1/media/${mediaId}/playback/end`, payload ?? {});
 }
 
-export async function savePlaybackProgress(
-  mediaId: number,
-  payload: { position: number; completed?: number; session_id?: string }
-) {
-  await api.post(`/api/v1/media/${mediaId}/progress`, payload);
+const PLAYBACK_KEEPALIVE_MAX_BYTES = 16 * 1024;
+function playbackKeepaliveHeaders(): Record<string, string> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const token = useAuthStore.getState().token;
+  if (token) headers.Authorization = `Bearer ${token}`;
+  return headers;
 }
 
+export async function reportPlaybackEndKeepalive(mediaId: number, payload: PlaybackLogPayload = {}): Promise<boolean> {
+  const body = JSON.stringify(payload);
+  if (new TextEncoder().encode(body).byteLength > PLAYBACK_KEEPALIVE_MAX_BYTES) return false;
+  const response = await fetch(`/api/v1/media/${mediaId}/playback/end`, {
+    method: "POST", headers: playbackKeepaliveHeaders(), body, keepalive: true,
+  });
+  return response.ok;
+}
+
+export type PlaybackProgressPayload = PlaybackEvidencePayload | { position: number; completed?: number; session_id?: string };
+export async function savePlaybackProgress(mediaId: number, payload: PlaybackProgressPayload): Promise<PlaybackProgressResult> {
+  const { data } = await api.post<PlaybackProgressResult>(`/api/v1/media/${mediaId}/progress`, payload);
+  return data;
+}
+
+export async function savePlaybackProgressKeepalive(mediaId: number, payload: PlaybackEvidencePayload): Promise<boolean> {
+  const body = JSON.stringify(payload);
+  if (new TextEncoder().encode(body).byteLength > PLAYBACK_KEEPALIVE_MAX_BYTES) return false;
+  const response = await fetch(`/api/v1/media/${mediaId}/progress`, {
+    method: "POST", headers: playbackKeepaliveHeaders(), body, keepalive: true,
+  });
+  return response.ok;
+}
 export async function removePlayProgress(mediaId: number) {
   await api.delete(`/api/v1/media/${mediaId}/progress`);
 }
