@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +14,8 @@ import (
 
 	"knox-media/internal/app"
 	"knox-media/internal/config"
+	"knox-media/internal/keystore"
+	"knox-media/internal/storage"
 	"knox-media/internal/store"
 )
 
@@ -157,5 +161,78 @@ func TestDeleteMediaRemovesMusicTrack(t *testing.T) {
 	}
 	if albumCount != 0 {
 		t.Fatalf("orphan album should be pruned, count=%d", albumCount)
+	}
+}
+
+func TestDeleteMediaRemovesFaceThumbnailFiles(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	base := t.TempDir()
+	db, err := store.OpenSQLite(filepath.Join(base, "faces.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	_, err = db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1,'p','photo',?); INSERT INTO media(id,library_id,file_id,file_path,file_type,status) VALUES(31,1,'f','x.jpg','image','active'); INSERT INTO photo_face(id,media_id,library_id,bbox_x,bbox_y,bbox_w,bbox_h) VALUES(77,31,1,0,0,1,1)`, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{}
+	cfg.Data.Preview = filepath.Join(base, "preview")
+	face := filepath.Join(cfg.Data.Preview, "photos", "faces", "77.jpg")
+	_ = os.MkdirAll(filepath.Dir(face), 0o755)
+	_ = os.WriteFile(face, []byte("jpg"), 0o644)
+	h := &Handler{App: &app.App{DB: db, Config: cfg}, runningScans: map[int64]scanRuntime{}}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodDelete, "/api/v1/media/31", nil)
+	c.Params = gin.Params{{Key: "id", Value: "31"}}
+	h.DeleteMedia(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if _, err := os.Stat(face); !os.IsNotExist(err) {
+		t.Fatalf("face thumbnail remains: %v", err)
+	}
+}
+
+func TestDeleteMediaRemovesEncryptedFaceDerivedArtifact(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	base := t.TempDir()
+	db, err := store.OpenSQLite(filepath.Join(base, "face-derived-delete.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	vault, err := keystore.NewVault("delete-face-key", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	derived := &storage.DerivedAssetStore{DB: db, Vault: vault, BaseDir: filepath.Join(base, "derived")}
+	_, err = db.Exec(`INSERT INTO library(id,name,type,path,encrypted_assets_enabled) VALUES(1,'p','photo',?,1); INSERT INTO media(id,library_id,file_id,file_path,file_type,status) VALUES(31,1,'f','x.jpg','image','active'); INSERT INTO photo_face(id,media_id,library_id,bbox_x,bbox_y,bbox_w,bbox_h) VALUES(77,31,1,0,0,1,1)`, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc, err := derived.Write(context.Background(), 31, "photo_face_thumb", "face:77", bytes.NewReader([]byte("jpeg")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{}
+	cfg.Data.Preview = filepath.Join(base, "preview")
+	h := &Handler{App: &app.App{DB: db, Config: cfg}, DerivedStore: derived, runningScans: map[int64]scanRuntime{}}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodDelete, "/api/v1/media/31", nil)
+	c.Params = gin.Params{{Key: "id", Value: "31"}}
+	h.DeleteMedia(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if _, err = os.Stat(enc); !os.IsNotExist(err) {
+		t.Fatalf("encrypted file remains: %v", err)
+	}
+	var n int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM media_derived_assets WHERE media_id=31`).Scan(&n)
+	if n != 0 {
+		t.Fatalf("rows=%d", n)
 	}
 }

@@ -1,7 +1,6 @@
 package crypto
 
 import (
-	"encoding/binary"
 	"io"
 	"os"
 )
@@ -18,21 +17,24 @@ type FileHeader struct {
 	Nonce   [IVSize]byte
 }
 
+func writeExact(dst io.Writer, p []byte) error {
+	n, err := dst.Write(p)
+	if err != nil {
+		return err
+	}
+	if n != len(p) {
+		return io.ErrShortWrite
+	}
+	return nil
+}
+
 func writeHeader(dst io.Writer, mode byte, nonce []byte) error {
-	if _, err := dst.Write([]byte(Magic9527)); err != nil {
-		return err
-	}
-	if err := binary.Write(dst, binary.LittleEndian, Version); err != nil {
-		return err
-	}
-	if err := binary.Write(dst, binary.LittleEndian, mode); err != nil {
-		return err
-	}
-	if _, err := dst.Write(make([]byte, 2)); err != nil {
-		return err
-	}
-	_, err := dst.Write(nonce[:IVSize])
-	return err
+	header := make([]byte, EncHeaderSize)
+	copy(header, Magic9527)
+	header[4] = Version
+	header[5] = mode
+	copy(header[8:], nonce[:IVSize])
+	return writeExact(dst, header)
 }
 
 func readHeader(r io.Reader) (FileHeader, error) {

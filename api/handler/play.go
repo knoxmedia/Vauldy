@@ -1,9 +1,12 @@
 package handler
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -19,6 +22,7 @@ import (
 	"knox-media/api/middleware"
 	"knox-media/internal/mediautil"
 	"knox-media/internal/playback"
+	"knox-media/internal/playcompletion"
 	"knox-media/internal/storage"
 )
 
@@ -199,46 +203,52 @@ func (h *Handler) PlaybackStart(c *gin.Context) {
 	if _, ok := h.requireMediaAccess(c, id, true); !ok {
 		return
 	}
-	uid := middleware.UserID(c)
-	isClient := middleware.IsAPIClient(c)
+	uid, isClient := middleware.UserID(c), middleware.IsAPIClient(c)
 	if !isClient && uid <= 0 {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
-	username := middleware.Username(c)
-	var body playbackLogBody
-	_ = c.ShouldBindJSON(&body)
-	var fileID string
-	if err := h.App.DB.QueryRow(`SELECT file_id FROM media WHERE id = ?`, id).Scan(&fileID); err == nil && strings.TrimSpace(fileID) != "" {
-		if !isClient && uid > 0 {
-			_ = h.touchPlayProgressOnStart(uid, fileID)
+	var body playbackEvidenceBody
+	if err := bindPlaybackEvidenceBody(c, &body); err != nil {
+		writePlaybackBindError(c, err)
+		return
+	}
+	pos := evidencePosition(body.Position)
+	if pos < 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid position"})
+		return
+	}
+	if !isClient {
+		store := playcompletion.Store{DB: h.App.DB, Now: h.PlayCompletionNow}
+		if isNewPlaybackProtocol(body) {
+			evidence, evidenceErr := body.evidence(uid, id, playcompletion.EventStart)
+			if evidenceErr != nil {
+				writePlaybackStoreError(c, evidenceErr)
+				return
+			}
+			if _, err = store.BeginSession(c.Request.Context(), evidence); err != nil {
+				writePlaybackStoreError(c, err)
+				return
+			}
+		} else if _, err = store.BeginLegacyPlayback(c.Request.Context(), uid, id, pos); err != nil {
+			writePlaybackStoreError(c, err)
+			return
 		}
 	}
-	pos := int64(0)
-	if body.Position != nil && *body.Position > 0 {
-		pos = *body.Position
-	}
-	completed := 0
-	if body.Completed != nil && *body.Completed > 0 {
-		completed = 1
-	}
-	ua := strings.TrimSpace(c.GetHeader("User-Agent"))
-	logUID := uid
+	completed, logUID := evidenceCompleted(body.Completed), uid
 	if isClient {
 		logUID = 0
 	}
-	sid := ""
-	if body.SessionID != nil {
-		sid = strings.TrimSpace(*body.SessionID)
-	}
-	msg := fmt.Sprintf("playback start; pos=%d; completed=%d; ip=%s; ua=%s", pos, completed, c.ClientIP(), ua)
-	if sid != "" {
+	msg := fmt.Sprintf("playback start; pos=%d; completed=%d; ip=%s; ua=%s", pos, completed, c.ClientIP(), strings.TrimSpace(c.GetHeader("User-Agent")))
+	if sid := body.applicationSessionID(); sid != "" {
 		msg += "; session_id=" + sid
 	}
-	h.logActivity(logUID, username, "playback_start", &id, msg)
+	if sid := body.jitSessionID(); sid != "" {
+		msg += "; jit_session_id=" + sid
+	}
+	h.logActivity(logUID, middleware.Username(c), "playback_start", &id, msg)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
-
 func (h *Handler) PlaybackEnd(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || id <= 0 {
@@ -248,52 +258,62 @@ func (h *Handler) PlaybackEnd(c *gin.Context) {
 	if _, ok := h.requireMediaAccess(c, id, true); !ok {
 		return
 	}
-	uid := middleware.UserID(c)
-	isClient := middleware.IsAPIClient(c)
+	uid, isClient := middleware.UserID(c), middleware.IsAPIClient(c)
 	if !isClient && uid <= 0 {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
-	username := middleware.Username(c)
-	var body playbackLogBody
-	_ = c.ShouldBindJSON(&body)
-	var fileID string
-	if err := h.App.DB.QueryRow(`SELECT file_id FROM media WHERE id = ?`, id).Scan(&fileID); err == nil && strings.TrimSpace(fileID) != "" {
-		if !isClient && uid > 0 {
-			_ = h.touchPlayProgressOnEnd(uid, fileID)
+	var body playbackEvidenceBody
+	if err := bindPlaybackEvidenceBody(c, &body); err != nil {
+		writePlaybackBindError(c, err)
+		return
+	}
+	pos := evidencePosition(body.Position)
+	if pos < 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid position"})
+		return
+	}
+	if !isClient {
+		store := playcompletion.Store{DB: h.App.DB, Now: h.PlayCompletionNow}
+		if isNewPlaybackProtocol(body) {
+			evidence, evidenceErr := body.evidence(uid, id, playcompletion.EventEnded)
+			if evidenceErr != nil {
+				writePlaybackStoreError(c, evidenceErr)
+				return
+			}
+			if _, err = store.SaveEvidence(c.Request.Context(), evidence); err != nil {
+				writePlaybackStoreError(c, err)
+				return
+			}
+		} else if evidenceCompleted(body.Completed) == 1 {
+			if _, err = store.SaveLegacyProgress(c.Request.Context(), uid, id, pos, true); err != nil {
+				writePlaybackStoreError(c, err)
+				return
+			}
 		}
 	}
-
-	// 通知 JIT 调度器结束会话以便立即停止转码进程，避免 35s TTL 自然过期带来的资源浪费
 	if h.Instant != nil {
-		sessionID := strings.TrimSpace(c.GetHeader("X-Session-ID"))
+		sessionID := body.playbackEndJITSessionID()
+		if sessionID == "" {
+			sessionID = strings.TrimSpace(c.GetHeader("X-Session-ID"))
+		}
 		if sessionID == "" {
 			sessionID = c.ClientIP() + "-" + c.Request.UserAgent()
 		}
 		h.Instant.EndSession(sessionID)
 	}
-	pos := int64(0)
-	if body.Position != nil && *body.Position > 0 {
-		pos = *body.Position
-	}
-	completed := 0
-	if body.Completed != nil && *body.Completed > 0 {
-		completed = 1
-	}
-	ua := strings.TrimSpace(c.GetHeader("User-Agent"))
-	logUID := uid
+	completed, logUID := evidenceCompleted(body.Completed), uid
 	if isClient {
 		logUID = 0
 	}
-	sid := ""
-	if body.SessionID != nil {
-		sid = strings.TrimSpace(*body.SessionID)
-	}
-	msg := fmt.Sprintf("playback end; pos=%d; completed=%d; ip=%s; ua=%s", pos, completed, c.ClientIP(), ua)
-	if sid != "" {
+	msg := fmt.Sprintf("playback end; pos=%d; completed=%d; ip=%s; ua=%s", pos, completed, c.ClientIP(), strings.TrimSpace(c.GetHeader("User-Agent")))
+	if sid := body.applicationSessionID(); sid != "" {
 		msg += "; session_id=" + sid
 	}
-	h.logActivity(logUID, username, "playback_end", &id, msg)
+	if sid := body.jitSessionID(); sid != "" {
+		msg += "; jit_session_id=" + sid
+	}
+	h.logActivity(logUID, middleware.Username(c), "playback_end", &id, msg)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
@@ -1532,17 +1552,160 @@ func (h *Handler) clearkeyMapByMediaID(mediaID int64) (map[string]string, error)
 	return map[string]string{kid: key}, nil
 }
 
-// Position 使用指针：binding:"required" 在数值类型上会拒绝 0，而 position=0 用于「未观看」等合法场景。
-type progressBody struct {
-	Position  *int64  `json:"position" binding:"required"`
-	Completed *int    `json:"completed"`
-	SessionID *string `json:"session_id"`
+const maxPlaybackEvidenceBodyBytes int64 = 16 << 10
+
+type playbackEvidenceBody struct {
+	Position        *int64                `json:"position"`
+	Completed       *int                  `json:"completed"`
+	SessionID       *string               `json:"session_id"`
+	JITSessionID    *string               `json:"jit_session_id"`
+	Sequence        *int64                `json:"sequence"`
+	Event           *playcompletion.Event `json:"event"`
+	eventPresent    bool
+	sequencePresent bool
 }
 
-type playbackLogBody struct {
-	Position  *int64  `json:"position"`
-	Completed *int    `json:"completed"`
-	SessionID *string `json:"session_id"`
+func bindPlaybackEvidenceBody(c *gin.Context, body *playbackEvidenceBody) error {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxPlaybackEvidenceBodyBytes)
+	decoder := json.NewDecoder(c.Request.Body)
+	var raw json.RawMessage
+	if err := decoder.Decode(&raw); err != nil {
+		return err
+	}
+	eventKeys, sequenceKeys, err := inspectPlaybackEvidenceKeys(raw)
+	if err != nil {
+		return err
+	}
+	body.eventPresent = eventKeys == 1
+	body.sequencePresent = sequenceKeys == 1
+	if err := json.Unmarshal(raw, body); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return errors.New("multiple JSON values")
+		}
+		return err
+	}
+	return nil
+}
+func inspectPlaybackEvidenceKeys(raw []byte) (eventKeys, sequenceKeys int, err error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	token, err := decoder.Token()
+	if err != nil {
+		return 0, 0, err
+	}
+	delim, ok := token.(json.Delim)
+	if !ok || delim != '{' {
+		return 0, 0, errors.New("playback evidence body must be an object")
+	}
+	for decoder.More() {
+		keyToken, keyErr := decoder.Token()
+		if keyErr != nil {
+			return 0, 0, keyErr
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return 0, 0, errors.New("invalid playback evidence key")
+		}
+		switch {
+		case strings.EqualFold(key, "event"):
+			eventKeys++
+		case strings.EqualFold(key, "sequence"):
+			sequenceKeys++
+		}
+		if eventKeys > 1 || sequenceKeys > 1 {
+			return 0, 0, errors.New("ambiguous playback evidence fields")
+		}
+		var value json.RawMessage
+		if valueErr := decoder.Decode(&value); valueErr != nil {
+			return 0, 0, valueErr
+		}
+	}
+	closing, err := decoder.Token()
+	if err != nil {
+		return 0, 0, err
+	}
+	if closing != json.Delim('}') {
+		return 0, 0, errors.New("invalid playback evidence object")
+	}
+	if _, err = decoder.Token(); err != io.EOF {
+		if err == nil {
+			return 0, 0, errors.New("multiple JSON values")
+		}
+		return 0, 0, err
+	}
+	return eventKeys, sequenceKeys, nil
+}
+
+func isNewPlaybackProtocol(body playbackEvidenceBody) bool {
+	return body.eventPresent || body.sequencePresent
+}
+func (body playbackEvidenceBody) evidence(userID, mediaID int64, expected playcompletion.Event) (playcompletion.Evidence, error) {
+	e := playcompletion.Evidence{UserID: userID, MediaID: mediaID, Position: evidencePosition(body.Position), Event: expected}
+	if body.SessionID != nil {
+		e.SessionID = strings.TrimSpace(*body.SessionID)
+	}
+	if body.Sequence != nil {
+		e.Sequence = *body.Sequence
+	}
+	if !body.eventPresent || body.Event == nil || *body.Event != expected {
+		return e, fmt.Errorf("%w: invalid event", playcompletion.ErrInvalidEvidence)
+	}
+	if !body.sequencePresent || body.Sequence == nil {
+		return e, fmt.Errorf("%w: sequence is required", playcompletion.ErrInvalidEvidence)
+	}
+	return e, nil
+}
+func (body playbackEvidenceBody) applicationSessionID() string {
+	if body.SessionID == nil {
+		return ""
+	}
+	return strings.TrimSpace(*body.SessionID)
+}
+func (body playbackEvidenceBody) jitSessionID() string {
+	if body.JITSessionID == nil {
+		return ""
+	}
+	return strings.TrimSpace(*body.JITSessionID)
+}
+func (body playbackEvidenceBody) playbackEndJITSessionID() string {
+	if sid := body.jitSessionID(); sid != "" {
+		return sid
+	}
+	if !isNewPlaybackProtocol(body) {
+		return body.applicationSessionID()
+	}
+	return ""
+}
+func evidencePosition(position *int64) int64 {
+	if position == nil {
+		return 0
+	}
+	return *position
+}
+func evidenceCompleted(completed *int) int {
+	if completed != nil && *completed > 0 {
+		return 1
+	}
+	return 0
+}
+func writePlaybackBindError(c *gin.Context, err error) {
+	var maxErr *http.MaxBytesError
+	if errors.As(err, &maxErr) {
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "playback request body too large"})
+		return
+	}
+	c.JSON(http.StatusBadRequest, gin.H{"error": "invalid playback request body"})
+}
+func writePlaybackStoreError(c *gin.Context, err error) {
+	if errors.Is(err, playcompletion.ErrInvalidEvidence) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	log.Printf("playback persistence failed: %v", err)
+	c.JSON(http.StatusInternalServerError, gin.H{"error": "internal playback persistence error"})
 }
 
 func (h *Handler) SaveProgress(c *gin.Context) {
@@ -1554,16 +1717,6 @@ func (h *Handler) SaveProgress(c *gin.Context) {
 	if _, ok := h.requireMediaAccess(c, id, true); !ok {
 		return
 	}
-	var body progressBody
-	if err := c.ShouldBindJSON(&body); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	pos := *body.Position
-	if pos < 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid position"})
-		return
-	}
 	if middleware.IsAPIClient(c) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "API client credentials cannot sync user progress"})
 		return
@@ -1573,43 +1726,52 @@ func (h *Handler) SaveProgress(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "login required for progress sync"})
 		return
 	}
-	var fileID string
-	if err := h.App.DB.QueryRow(`SELECT file_id FROM media WHERE id = ?`, id).Scan(&fileID); err != nil {
-		if err == sql.ErrNoRows {
-			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+	var body playbackEvidenceBody
+	if err := bindPlaybackEvidenceBody(c, &body); err != nil {
+		writePlaybackBindError(c, err)
+		return
+	}
+	if body.Position == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "position is required"})
+		return
+	}
+	if *body.Position < 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid position"})
+		return
+	}
+	store := playcompletion.Store{DB: h.App.DB, Now: h.PlayCompletionNow}
+	var result playcompletion.SaveResult
+	if isNewPlaybackProtocol(body) {
+		if body.Event == nil {
+			writePlaybackStoreError(c, fmt.Errorf("%w: event is required", playcompletion.ErrInvalidEvidence))
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	var n int
-	_ = h.App.DB.QueryRow(`SELECT COUNT(1) FROM play_progress WHERE user_id = ? AND file_id = ?`, uid, fileID).Scan(&n)
-	completed := 0
-	if body.Completed != nil && *body.Completed > 0 {
-		completed = 1
-	}
-	var execErr error
-	if n == 0 {
-		_, execErr = h.App.DB.Exec(`INSERT INTO play_progress (user_id, file_id, position, completed) VALUES (?, ?, ?, ?)`, uid, fileID, pos, completed)
+		evidence, evidenceErr := body.evidence(uid, id, *body.Event)
+		if evidenceErr == nil && *body.Event == playcompletion.EventStart {
+			evidenceErr = fmt.Errorf("%w: invalid progress event", playcompletion.ErrInvalidEvidence)
+		}
+		if evidenceErr != nil {
+			writePlaybackStoreError(c, evidenceErr)
+			return
+		}
+		result, err = store.SaveEvidence(c.Request.Context(), evidence)
 	} else {
-		_, execErr = h.App.DB.Exec(`UPDATE play_progress SET position = ?, completed = ?, update_at = CURRENT_TIMESTAMP WHERE user_id = ? AND file_id = ?`, pos, completed, uid, fileID)
+		result, err = store.SaveLegacyProgress(c.Request.Context(), uid, id, *body.Position, evidenceCompleted(body.Completed) == 1)
 	}
-	if execErr != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": execErr.Error()})
+	if err != nil {
+		writePlaybackStoreError(c, err)
 		return
-	}
-	var username sql.NullString
-	_ = h.App.DB.QueryRow(`SELECT username FROM user WHERE id = ?`, uid).Scan(&username)
-	sid := ""
-	if body.SessionID != nil {
-		sid = strings.TrimSpace(*body.SessionID)
 	}
 	msg := "save playback progress"
-	if sid != "" {
+	if sid := body.applicationSessionID(); sid != "" {
 		msg += "; session_id=" + sid
 	}
-	h.logActivity(uid, username.String, "progress", &id, msg)
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	h.logActivity(uid, middleware.Username(c), "progress", &id, msg)
+	if isNewPlaybackProtocol(body) {
+		c.JSON(http.StatusOK, result)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "completed": result.Completed, "auto_completed": result.AutoCompleted, "effective_position": result.EffectivePosition, "stale": result.Stale})
 }
 
 func (h *Handler) ClearProgress(c *gin.Context) {
@@ -1630,49 +1792,12 @@ func (h *Handler) ClearProgress(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "login required for progress sync"})
 		return
 	}
-	var fileID string
-	if err := h.App.DB.QueryRow(`SELECT file_id FROM media WHERE id = ?`, id).Scan(&fileID); err != nil {
-		if err == sql.ErrNoRows {
-			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	if _, err := h.App.DB.Exec(`DELETE FROM play_progress WHERE user_id = ? AND file_id = ?`, uid, fileID); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	progress := playcompletion.Store{DB: h.App.DB, Now: h.PlayCompletionNow}
+	if err := progress.ClearProgress(c.Request.Context(), uid, id); err != nil {
+		writePlaybackStoreError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
-}
-
-func (h *Handler) touchPlayProgressOnStart(userID int64, fileID string) error {
-	var n int
-	if err := h.App.DB.QueryRow(`SELECT COUNT(1) FROM play_progress WHERE user_id = ? AND file_id = ?`, userID, fileID).Scan(&n); err != nil {
-		return err
-	}
-	if n == 0 {
-		_, err := h.App.DB.Exec(`
-			INSERT INTO play_progress (user_id, file_id, position, play_start_at, completed, play_count, update_at)
-			VALUES (?, ?, 0, CURRENT_TIMESTAMP, 0, 1, CURRENT_TIMESTAMP)
-		`, userID, fileID)
-		return err
-	}
-	_, err := h.App.DB.Exec(`
-		UPDATE play_progress
-		SET play_start_at = CURRENT_TIMESTAMP, completed = 0, play_count = COALESCE(play_count,0) + 1, update_at = CURRENT_TIMESTAMP
-		WHERE user_id = ? AND file_id = ?
-	`, userID, fileID)
-	return err
-}
-
-func (h *Handler) touchPlayProgressOnEnd(userID int64, fileID string) error {
-	_, err := h.App.DB.Exec(`
-		UPDATE play_progress
-		SET play_end_at = CURRENT_TIMESTAMP, update_at = CURRENT_TIMESTAMP
-		WHERE user_id = ? AND file_id = ?
-	`, userID, fileID)
-	return err
 }
 
 func (h *Handler) PreviewInfo(c *gin.Context) {

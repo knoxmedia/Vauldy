@@ -12,8 +12,10 @@ import { useAuthStore } from "../store/auth";
 import {
   fetchMediaSubtitles,
   reportPlaybackEnd,
+  reportPlaybackEndKeepalive,
   reportPlaybackStart,
   savePlaybackProgress,
+  savePlaybackProgressKeepalive,
 } from "../api/client";
 import {
   clearPlaylistPlaySession,
@@ -28,6 +30,7 @@ import {
   buildAlbumPageUrl,
 } from "../lib/albumPlayback";
 import { isLikelyNaturalPlaybackEnd } from "../lib/playbackComplete";
+import { createPlaybackEvidenceReporter, type PlaybackEvidenceEvent, type PlaybackEvidencePayload } from "../lib/playbackEvidence";
 import {
   clearSeriesPlaySession,
   isSeriesPlaybackFinished,
@@ -533,6 +536,7 @@ export default function PlayerPage() {
   const [seriesFinished, setSeriesFinished] = useState(false);
   const playbackStartedRef = useRef(false);
   const playbackEndedRef = useRef(false);
+  const playbackServerCompletedRef = useRef(false);
   const lastProgressSecRef = useRef(0);
   const lastProgressAtRef = useRef(0);
   const lastProgressSaveAtRef = useRef(0);
@@ -582,9 +586,15 @@ export default function PlayerPage() {
       return;
     }
     const sessionGen = ++playbackGenerationRef.current;
-    const isStale = () => playbackGenerationRef.current !== sessionGen;
+    let disposed = false;
+    const ownsPlayback = () => playbackGenerationRef.current === sessionGen;
+    const isStale = () => disposed || !ownsPlayback();
     playbackStartedRef.current = false;
     playbackEndedRef.current = false;
+    playbackServerCompletedRef.current = false;
+    sourceFallbackTriedRef.current = false;
+    noAudioRetryTriedRef.current = false;
+    noAudioRetryInFlightRef.current = false;
     lastProgressSecRef.current = 0;
     lastProgressAtRef.current = 0;
     lastProgressSaveAtRef.current = 0;
@@ -594,10 +604,64 @@ export default function PlayerPage() {
     if (hostEl) hostEl.innerHTML = "";
     const capsPromise = detectClientCaps();
     let timer: number | null = null;
-    const withPlaybackLog = <T extends Record<string, unknown>>(p: T): T & { session_id?: string } => {
-      const sid = jitPlaybackSessionIdRef.current?.trim();
-      if (!sid) return p;
-      return { ...p, session_id: sid };
+    let generationStarted = false;
+    let generationEnded = false;
+    let evidence: ReturnType<typeof createPlaybackEvidenceReporter> | null = null;
+    try {
+      evidence = createPlaybackEvidenceReporter(
+        undefined,
+        () => jitPlaybackSessionIdRef.current ?? undefined,
+      );
+    } catch (error) {
+      console.error("[player] playback evidence reporter init failed", error);
+      setLoadingText(t("pages.player.play_prep_failed"));
+      return;
+    }
+    const activityEndPayload = (payload: PlaybackEvidencePayload) => ({
+      position: payload.position,
+      ...(payload.jit_session_id ? { jit_session_id: payload.jit_session_id } : {}),
+    });
+    let startTransport: Promise<boolean> = Promise.resolve(false);
+    let evidenceQueue: Promise<void> = Promise.resolve();
+    const sendEvidence = (
+      event: PlaybackEvidenceEvent,
+      position: number,
+      preparedPayload?: PlaybackEvidencePayload,
+    ) => {
+      if (!mid || isStale() || (generationEnded && event !== "ended")) return Promise.resolve(undefined);
+      const payload = preparedPayload ?? evidence.event(event, position);
+      let resolveResult: (value: Awaited<ReturnType<typeof savePlaybackProgress>> | undefined) => void = () => {};
+      const result = new Promise<Awaited<ReturnType<typeof savePlaybackProgress>> | undefined>((resolve) => { resolveResult = resolve; });
+      evidenceQueue = evidenceQueue.then(async () => {
+        if (!(await startTransport)) { resolveResult(undefined); return; }
+        try {
+          const saved = await savePlaybackProgress(mid, payload);
+          if (ownsPlayback() && saved.completed) playbackServerCompletedRef.current = true;
+          resolveResult(saved);
+        } catch (error) {
+          dbgErr("playback evidence failed", event, error);
+          resolveResult(undefined);
+        }
+      }).catch((error) => dbgErr("playback evidence queue failed", error));
+      return result;
+    };
+    const fireEvidence = (event: PlaybackEvidenceEvent, position: number) => {
+      void sendEvidence(event, position);
+    };
+    const startPlayback = (position: number) => {
+      if (!mid || isStale() || generationStarted || generationEnded) return;
+      generationStarted = true;
+      playbackStartedRef.current = true;
+      lastProgressSaveAtRef.current = monotonicNow();
+      const payload = evidence.event("start", position);
+      startTransport = reportPlaybackStart(mid, payload).then(
+        () => true,
+        (error) => { dbgErr("playback start evidence failed", error); return false; },
+      );
+    };
+    const sendSeek = (position: number) => {
+      if (!generationStarted || generationEnded) return;
+      fireEvidence("seek", position);
     };
     const dbg = (...args: any[]) => console.log("[player]", ...args);
     const dbgErr = (...args: any[]) => console.error("[player]", ...args);
@@ -646,6 +710,15 @@ export default function PlayerPage() {
     const safeSeconds = (v: number) => {
       if (!Number.isFinite(v) || v < 0) return null;
       return Math.floor(v);
+    };
+    const monotonicNow = () => {
+      try {
+        const value = globalThis.performance?.now();
+        if (typeof value === "number" && Number.isFinite(value)) return value;
+      } catch {
+        // Fall through to wall clock only where performance is unavailable.
+      }
+      return Date.now();
     };
 
     const readLivePlaybackSnapshot = () => {
@@ -734,16 +807,20 @@ export default function PlayerPage() {
         return;
       }
       playbackEndedRef.current = true;
+      generationEnded = true;
       lastProgressSecRef.current = live.position;
       if (live.duration > 0) mediaDurationSecRef.current = live.duration;
       const endPos = live.position;
-      void savePlaybackProgress(mid, withPlaybackLog({ position: endPos, completed: 1 })).catch(() => {});
-      void reportPlaybackEnd(mid, withPlaybackLog({ position: endPos, completed: 1 })).catch(() => {});
-      const params = searchParamsRef.current;
-      const advanced =
-        navigatePlaylistNext(nav, params, mid) ||
-        navigateSeriesNext(nav, params, mid) ||
-        navigateAlbumNext(nav, params, mid);
+      const endedPayload = evidence.event("ended", endPos);
+      const finishTerminal = async () => {
+        await sendEvidence("ended", endPos, endedPayload);
+        try { await reportPlaybackEnd(mid, activityEndPayload(endedPayload)); }
+        catch (error) { dbgErr("playback activity end failed", error); }
+        const params = searchParamsRef.current;
+        const advanced =
+          navigatePlaylistNext(nav, params, mid) ||
+          navigateSeriesNext(nav, params, mid) ||
+          navigateAlbumNext(nav, params, mid);
       if (!advanced && isPlaylistPlaybackFinished(params, mid)) {
         clearPlaylistPlaySession();
         setPlaylistFinished(true);
@@ -759,6 +836,8 @@ export default function PlayerPage() {
         setShowBack(true);
         message.info(t("pages.player.album_done"));
       }
+      };
+      void finishTerminal().catch((error) => dbgErr("playback terminal failed", error));
     };
 
     const attachPowerPlayerEvents = (pp: PowerPlayerLike) => {
@@ -783,7 +862,7 @@ export default function PlayerPage() {
         const raw = readPowerPlayerTimePayload(time);
         const sec = raw !== null ? safeSeconds(raw) : null;
         dbg("powerplayer onSeek", time);
-        if (sec !== null) void savePlaybackProgress(mid, withPlaybackLog({ position: sec, completed: 0 })).catch(() => {});
+        if (sec !== null) sendSeek(sec);
       });
 
       bind("onTime", (event: unknown) => {
@@ -794,16 +873,19 @@ export default function PlayerPage() {
         if (pos === null) return;
         const cur = safeSeconds(pos);
         if (cur === null || cur <= 0) return;
-        if (!playbackStartedRef.current) {
-          playbackStartedRef.current = true;
-          void reportPlaybackStart(mid, withPlaybackLog({ position: cur, completed: 0 })).catch(() => {});
+        if (!generationStarted) {
+          startPlayback(cur);
+          lastProgressSecRef.current = cur;
+          lastProgressAtRef.current = monotonicNow();
+          lastProgressSaveAtRef.current = monotonicNow();
+          return;
         }
         lastProgressSecRef.current = cur;
-        lastProgressAtRef.current = Date.now();
-        const now = Date.now();
+        lastProgressAtRef.current = monotonicNow();
+        const now = monotonicNow();
         if (now - lastProgressSaveAtRef.current < 9000) return;
         lastProgressSaveAtRef.current = now;
-        void savePlaybackProgress(mid, withPlaybackLog({ position: cur, completed: 0 })).catch(() => {});
+        fireEvidence("progress", cur);
       });
 
       const onPowerPlayerComplete = (event?: unknown) => {
@@ -824,7 +906,7 @@ export default function PlayerPage() {
         if (isStale() || !mid) return;
         dbg("powerplayer onPause");
         const cur = lastProgressSecRef.current;
-        if (cur > 0) void savePlaybackProgress(mid, withPlaybackLog({ position: cur, completed: 0 })).catch(() => {});
+        if (cur > 0 && generationStarted && !generationEnded) fireEvidence("progress", cur);
       });
 
       bind("onError", (error: unknown) => {
@@ -900,6 +982,7 @@ export default function PlayerPage() {
       }
       drmPlayerRef.current = player;
       player.addEventListener("error", (evt: any) => {
+        if (isStale() || drmPlayerRef.current !== player) return;
         const d = evt?.detail || evt;
         dbgErr("shaka error event", d, "data=", d?.data);
         const dataMsg = Array.isArray(d?.data) ? String(d.data[2] || "") : "";
@@ -988,6 +1071,7 @@ export default function PlayerPage() {
         }
       }
       video.addEventListener("error", () => {
+        if (isStale() || drmVideoRef.current !== video) return;
         if (drmRecoveryDepthRef.current > 0) {
           dbg("skip source fallback during Shaka DRM setup/recovery");
           return;
@@ -1006,15 +1090,20 @@ export default function PlayerPage() {
         setLoadingText(t("pages.player.drm_fallback"));
         const sourceURL = appendToken(`/api/v1/media/${mid}/play?prefer_source=1`);
         void fetchPreviewPlan().then(async (previewPlan) => {
+          if (isStale()) return;
           await playWithURL(sourceURL, previewPlan);
-        });
+        }).catch((error) => dbgErr("source fallback failed", error));
       });
       video.addEventListener("play", () => {
-        if (playbackStartedRef.current || !mid) return;
-        playbackStartedRef.current = true;
+        if (isStale()) return;
         const cur = safeSeconds(video.currentTime);
         if (cur === null) return;
-        void reportPlaybackStart(mid, withPlaybackLog({ position: cur, completed: 0 })).catch(() => {});
+        startPlayback(cur);
+      });
+      video.addEventListener("seeking", () => {
+        if (isStale()) return;
+        const cur = safeSeconds(video.currentTime);
+        if (cur !== null) sendSeek(cur);
       });
       video.addEventListener("timeupdate", () => {
         if (!mid) return;
@@ -1023,11 +1112,11 @@ export default function PlayerPage() {
         const cur = safeSeconds(video.currentTime);
         if (cur === null || cur <= 0) return;
         lastProgressSecRef.current = cur;
-        lastProgressAtRef.current = Date.now();
-        const now = Date.now();
+        lastProgressAtRef.current = monotonicNow();
+        const now = monotonicNow();
         if (now - lastProgressSaveAtRef.current < 9000) return;
         lastProgressSaveAtRef.current = now;
-        void savePlaybackProgress(mid, withPlaybackLog({ position: cur, completed: 0 })).catch(() => {});
+        if (generationStarted && !generationEnded) fireEvidence("progress", cur);
       });
       video.addEventListener("ended", () => {
         if (isStale() || playbackEndedRef.current || !mid) return;
@@ -1086,6 +1175,44 @@ export default function PlayerPage() {
         drmRecoveryDepthRef.current--;
       }
     };
+    const attachXgPlayerEvents = (xg: Player) => {
+      const isCurrentAdapter = () => playerRef.current === xg;
+      let lastSeekPosition: number | null = null;
+      const currentPosition = () => safeSeconds(Number((xg as any).currentTime || 0));
+      const reportSeek = () => {
+        if (isStale() || !isCurrentAdapter() || generationEnded) return;
+        const cur = currentPosition();
+        if (cur === null || cur === lastSeekPosition) return;
+        lastSeekPosition = cur;
+        sendSeek(cur);
+      };
+      xg.on("play", () => {
+        if (isStale() || !isCurrentAdapter()) return;
+        const cur = currentPosition();
+        if (cur !== null) startPlayback(cur);
+      });
+      xg.on("seeking", reportSeek);
+      xg.on("seeked", reportSeek);
+      xg.on("timeupdate", () => {
+        if (isStale() || !isCurrentAdapter() || !generationStarted || generationEnded) return;
+        const dur = safeSeconds(Number((xg as any).duration || 0));
+        if (dur !== null && dur > 0) mediaDurationSecRef.current = dur;
+        const cur = currentPosition();
+        if (cur === null || cur <= 0) return;
+        if (lastSeekPosition !== null && cur !== lastSeekPosition) lastSeekPosition = null;
+        lastProgressSecRef.current = cur;
+        lastProgressAtRef.current = monotonicNow();
+        const now = monotonicNow();
+        if (now - lastProgressSaveAtRef.current < 9000) return;
+        lastProgressSaveAtRef.current = now;
+        fireEvidence("progress", cur);
+      });
+      xg.on("ended", () => {
+        if (isStale() || !isCurrentAdapter() || generationEnded || !mid) return;
+        handleMediaPlaybackComplete();
+      });
+    };
+
     type PlayWithURLOptions = {
       drm?: PlaybackPlan["drm"];
       engineOrder?: string[];
@@ -1099,10 +1226,12 @@ export default function PlayerPage() {
       playerRef.current?.destroy();
       await destroyDRMPlayer();
       await destroyPowerPlayer();
-      playbackStartedRef.current = false;
-      playbackEndedRef.current = false;
-      lastProgressSaveAtRef.current = 0;
-      mediaDurationSecRef.current = 0;
+      if (!generationStarted) {
+        playbackStartedRef.current = false;
+        playbackEndedRef.current = false;
+        lastProgressSaveAtRef.current = 0;
+        mediaDurationSecRef.current = 0;
+      }
 
       const drm = opts?.drm;
       const planMode = opts?.planMode;
@@ -1256,7 +1385,6 @@ export default function PlayerPage() {
       if (chosen === "xgplayer" && hasWidevineFairplay && drm) {
         const drmURL = drm.dash_mpd_url ? appendToken(drm.dash_mpd_url) : url;
         dbg("switch to xgplayer-shaka DRM", { url: drmURL, drm });
-        noAudioRetryTriedRef.current = false;
         const host = resolvePlayerHost();
         if (!host) throw new Error("player mount missing");
         host.innerHTML = "";
@@ -1284,6 +1412,7 @@ export default function PlayerPage() {
           drmOptions.shakaPlugin.drm.servers["com.apple.fps"] = drm.fairplay_license_url;
         }
         playerRef.current = new Player(drmOptions);
+        attachXgPlayerEvents(playerRef.current);
         setLoadingText("");
         return;
       }
@@ -1340,6 +1469,7 @@ export default function PlayerPage() {
       window.setTimeout(applySubtitleLook, 500);
       dbg("xgplayer init", { url, useXgHlsPlugin });
       xg.on("error", () => {
+        if (isStale() || playerRef.current !== xg) return;
         dbgErr("xgplayer error event", { mid, url });
         if (sourceFallbackTriedRef.current || !mid) return;
         sourceFallbackTriedRef.current = true;
@@ -1347,42 +1477,11 @@ export default function PlayerPage() {
         setLoadingText(t("pages.player.device_unsupported_fallback"));
         const sourceURL = appendToken(`/api/v1/media/${mid}/play?prefer_source=1`);
         void fetchPreviewPlan().then(async (previewPlan) => {
+          if (isStale()) return;
           await playWithURL(sourceURL, previewPlan);
-        });
+        }).catch((error) => dbgErr("source fallback failed", error));
       });
-      const reportProgress = (completed = 0) => {
-        if (!mid || !playerRef.current) return;
-        const player = playerRef.current as any;
-        const dur = safeSeconds(player.duration || 0);
-        if (dur !== null && dur > 0) mediaDurationSecRef.current = dur;
-        const cur = safeSeconds(player.currentTime || 0);
-        if (cur === null) return;
-        if (!completed && cur <= 0) return;
-        lastProgressSecRef.current = cur;
-        lastProgressAtRef.current = Date.now();
-        if (completed) {
-          void savePlaybackProgress(mid, withPlaybackLog({ position: cur, completed })).catch(() => {});
-          return;
-        }
-        const now = Date.now();
-        if (now - lastProgressSaveAtRef.current < 9000) return;
-        lastProgressSaveAtRef.current = now;
-        void savePlaybackProgress(mid, withPlaybackLog({ position: cur, completed })).catch(() => {});
-      };
-      xg.on("play", () => {
-        if (playbackStartedRef.current) return;
-        playbackStartedRef.current = true;
-        if (!mid) return;
-        const cur = safeSeconds((playerRef.current as any)?.currentTime || 0);
-        if (cur === null) return;
-        void reportPlaybackStart(mid, withPlaybackLog({ position: cur, completed: 0 })).catch(() => {});
-      });
-      xg.on("timeupdate", () => reportProgress(0));
-      xg.on("ended", () => {
-        if (isStale() || playbackEndedRef.current || !mid) return;
-        reportProgress(1);
-        handleMediaPlaybackComplete();
-      });
+      attachXgPlayerEvents(xg);
       setLoadingText("");
     };
     const appendToken = (url: string) => {
@@ -1446,7 +1545,9 @@ export default function PlayerPage() {
       setLoadingText(t("pages.player.transcoding_progress", { percent: progress }));
       const nextDelay = state.poll_after_ms && state.poll_after_ms > 0 ? state.poll_after_ms : 1800;
       timer = window.setTimeout(() => {
-        void pollTaskStatus(taskId, fallback);
+        void pollTaskStatus(taskId, fallback).catch((error) => {
+          if (!isStale()) dbgErr("pollTaskStatus failed", error);
+        });
       }, nextDelay);
     };
     const resolvePlan = async () => {
@@ -1503,7 +1604,9 @@ export default function PlayerPage() {
           }
           setParentalUnlockToken(unlock.unlock_token);
           message.success(t("pages.player.parental_unlocked"));
-          timer = window.setTimeout(() => void resolvePlan(), 10);
+          timer = window.setTimeout(() => {
+            void resolvePlan().catch((error) => { if (!isStale()) dbgErr("parental resolvePlan failed", error); });
+          }, 10);
           return;
         }
         throw new PlaybackPermissionError(playbackForbiddenMessage(errStr));
@@ -1563,7 +1666,9 @@ export default function PlayerPage() {
           return;
         }
         setLoadingText(t("pages.player.preparing_transcode"));
-        timer = window.setTimeout(() => void resolvePlan(), 1200);
+        timer = window.setTimeout(() => {
+          void resolvePlan().catch((error) => { if (!isStale()) dbgErr("scheduled resolvePlan failed", error); });
+        }, 1200);
         return;
       }
       const nativeURL = appendToken(plan.playUrl || `/api/v1/media/${mid}/play`);
@@ -1594,14 +1699,39 @@ export default function PlayerPage() {
         }
       });
     });
-    return () => {
-      playbackGenerationRef.current++;
-      if (mid && playbackStartedRef.current && !playbackEndedRef.current) {
-        playbackEndedRef.current = true;
-        const cur = safeSeconds((playerRef.current as any)?.currentTime || 0) ?? 0;
-        void savePlaybackProgress(mid, withPlaybackLog({ position: cur, completed: 0 })).catch(() => {});
-        void reportPlaybackEnd(mid, withPlaybackLog({ position: cur, completed: 0 })).catch(() => {});
+    let teardownSent = false;
+    const sendTeardown = (keepalive: boolean) => {
+      if (!mid || teardownSent || !generationStarted || generationEnded) return;
+      teardownSent = true;
+      const live = readLivePlaybackSnapshot();
+      const progressPayload = evidence.event("progress", live.position);
+      if (keepalive) {
+        // Unload cannot reliably await ordering; invoke progress first, then activity shutdown.
+        void savePlaybackProgressKeepalive(mid, progressPayload)
+          .catch((error) => dbgErr("playback keepalive progress failed", error));
+        void reportPlaybackEndKeepalive(mid, activityEndPayload(progressPayload))
+          .catch((error) => dbgErr("playback keepalive activity end failed", error));
+        return;
       }
+      evidenceQueue = evidenceQueue.then(async () => {
+        if (await startTransport) {
+          try { await savePlaybackProgress(mid, progressPayload); }
+          catch (error) { dbgErr("final playback progress failed", error); }
+        }
+        try { await reportPlaybackEnd(mid, activityEndPayload(progressPayload)); }
+        catch (error) { dbgErr("playback cleanup activity end failed", error); }
+      }).catch((error) => dbgErr("final teardown queue failed", error));
+      if (playbackServerCompletedRef.current) playbackEndedRef.current = true;
+    };
+    const onPageHide = () => sendTeardown(true);
+    window.addEventListener("pagehide", onPageHide);
+    window.addEventListener("beforeunload", onPageHide);
+    return () => {
+      const wasOwner = ownsPlayback();
+      disposed = true;
+      window.removeEventListener("pagehide", onPageHide);
+      window.removeEventListener("beforeunload", onPageHide);
+      if (wasOwner) sendTeardown(false);
       if (timer) {
         window.clearTimeout(timer);
       }

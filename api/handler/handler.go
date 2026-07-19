@@ -1,10 +1,12 @@
 package handler
 
 import (
+	"context"
 	"database/sql"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"knox-media/cmd/scheduler"
 	"knox-media/internal/app"
@@ -18,43 +20,103 @@ import (
 	"knox-media/internal/photoclass"
 	"knox-media/internal/photoface"
 	"knox-media/internal/photogeocode"
+	"knox-media/internal/postingest"
 	"knox-media/internal/preview"
+	"knox-media/internal/scancoord"
 	"knox-media/internal/storage"
 	"knox-media/internal/subtitle"
 	"knox-media/internal/transcode"
 	"knox-media/internal/upload"
 )
 
-type Handler struct {
-	App                 *app.App
-	Worker              *transcode.Worker
-	PackageWorker       *transcode.PackageWorker
-	PreviewWorker       *preview.Worker
-	Subtitle            *subtitle.Service
-	Upload              *upload.Service
-	Instant             *scheduler.Scheduler
-	SessionManager      *session.Manager
-	AtrackWorker        *atrack.Worker
-	KeyframeWorker      *keyframe.Worker
-	LyricWorker         *lyrictask.Worker
-	PhotoClassifyWorker *photoclass.Worker
-	PhotoGeocode        *photogeocode.Service
-	PhotoLocationWorker *photogeocode.Worker
-	PhotoFaceWorker     *photoface.Worker
-	DocCoverWorker      *doccover.Worker
-	KeyVault            *keystore.Vault
-	AssetEncryptor      *storage.AssetEncryptor
-	DerivedStore        *storage.DerivedAssetStore
-	scanMu              sync.Mutex
-	scrapeRunMu         sync.Mutex
-	runningScans        map[int64]scanRuntime
+type ScanCoordinator interface {
+	Submit(context.Context, scancoord.ScanRequest) (scancoord.SubmitResult, error)
+	Cancel(context.Context, int64) (scancoord.CancelResult, error)
 }
 
-func New(a *app.App, w *transcode.Worker, pkgw *transcode.PackageWorker, pw *preview.Worker, sub *subtitle.Service, u *upload.Service, instant *scheduler.Scheduler, sm *session.Manager, atw *atrack.Worker, kfw *keyframe.Worker, lw *lyrictask.Worker, pcw *photoclass.Worker, dcw *doccover.Worker, keyVault *keystore.Vault, assetEnc *storage.AssetEncryptor, derived *storage.DerivedAssetStore) *Handler {
-	h := &Handler{App: a, Worker: w, PackageWorker: pkgw, PreviewWorker: pw, Subtitle: sub, Upload: u, Instant: instant, SessionManager: sm, AtrackWorker: atw, KeyframeWorker: kfw, LyricWorker: lw, PhotoClassifyWorker: pcw, DocCoverWorker: dcw, KeyVault: keyVault, AssetEncryptor: assetEnc, DerivedStore: derived, PhotoGeocode: photogeocode.New(a.DB), runningScans: map[int64]scanRuntime{}}
+type PostIngestEnqueuer interface {
+	EnqueueMedia(context.Context, int64, *int64, string) ([]postingest.TaskType, error)
+}
+
+type Dependencies struct {
+	ServerContext        context.Context
+	Background           *BackgroundGroup
+	Coordinator          ScanCoordinator
+	Queue                *postingest.Queue
+	PostIngest           *postingest.Enqueuer
+	Dispatcher           *postingest.Dispatcher
+	AdminOverviewBuilder OverviewBuilder
+	Worker               *transcode.Worker
+	PackageWorker        *transcode.PackageWorker
+	PreviewWorker        *preview.Worker
+	Subtitle             *subtitle.Service
+	Upload               *upload.Service
+	Instant              *scheduler.Scheduler
+	SessionManager       *session.Manager
+	AtrackWorker         *atrack.Worker
+	KeyframeWorker       *keyframe.Worker
+	LyricWorker          *lyrictask.Worker
+	PhotoClassifyWorker  *photoclass.Worker
+	DocCoverWorker       *doccover.Worker
+	KeyVault             *keystore.Vault
+	AssetEncryptor       *storage.AssetEncryptor
+	DerivedStore         *storage.DerivedAssetStore
+}
+
+type Handler struct {
+	App                    *app.App
+	Worker                 *transcode.Worker
+	PackageWorker          *transcode.PackageWorker
+	PreviewWorker          *preview.Worker
+	Subtitle               *subtitle.Service
+	Upload                 *upload.Service
+	Instant                *scheduler.Scheduler
+	SessionManager         *session.Manager
+	AtrackWorker           *atrack.Worker
+	KeyframeWorker         *keyframe.Worker
+	LyricWorker            *lyrictask.Worker
+	PhotoClassifyWorker    *photoclass.Worker
+	PhotoGeocode           *photogeocode.Service
+	PhotoLocationWorker    *photogeocode.Worker
+	PhotoFaceWorker        *photoface.Worker
+	DocCoverWorker         *doccover.Worker
+	KeyVault               *keystore.Vault
+	AssetEncryptor         *storage.AssetEncryptor
+	DerivedStore           *storage.DerivedAssetStore
+	Queue                  *postingest.Queue
+	PostIngestEnqueuer     PostIngestEnqueuer
+	Dispatcher             *postingest.Dispatcher
+	AdminOverviewBuilder   OverviewBuilder
+	overviewStreamInterval time.Duration
+	overviewBuildTimeout   time.Duration
+	ScanCoordinator        ScanCoordinator
+	OnPostIngestError      func(error)
+	Background             *BackgroundGroup
+	ServerContext          context.Context
+	PlayCompletionNow      func() time.Time
+	libraryPreviewRefresh  func(context.Context, int64) error
+	scanMu                 sync.Mutex
+	scrapeRunMu            sync.Mutex
+	runningScans           map[int64]scanRuntime
+}
+
+func New(a *app.App, deps Dependencies) *Handler {
+	h := &Handler{
+		App: a, Worker: deps.Worker, PackageWorker: deps.PackageWorker, PreviewWorker: deps.PreviewWorker,
+		Subtitle: deps.Subtitle, Upload: deps.Upload, Instant: deps.Instant, SessionManager: deps.SessionManager,
+		AtrackWorker: deps.AtrackWorker, KeyframeWorker: deps.KeyframeWorker, LyricWorker: deps.LyricWorker,
+		PhotoClassifyWorker: deps.PhotoClassifyWorker, DocCoverWorker: deps.DocCoverWorker, KeyVault: deps.KeyVault,
+		AssetEncryptor: deps.AssetEncryptor, DerivedStore: deps.DerivedStore, Queue: deps.Queue,
+		PostIngestEnqueuer: deps.PostIngest, Dispatcher: deps.Dispatcher, AdminOverviewBuilder: deps.AdminOverviewBuilder, ScanCoordinator: deps.Coordinator,
+		runningScans: map[int64]scanRuntime{}, Background: deps.Background, ServerContext: deps.ServerContext,
+	}
+	if a == nil || a.DB == nil || a.Config == nil {
+		return h
+	}
+	h.PhotoGeocode = photogeocode.New(a.DB)
 	_ = h.PhotoGeocode.EnsureSchema()
-	h.PhotoLocationWorker = photogeocode.NewWorker(a.DB, keyVault, h.PhotoGeocode)
-	h.PhotoFaceWorker = photoface.NewWorker(a.DB, keyVault, derived, filepath.Dir(a.ConfigPath), a.Config.FFmpeg.FFmpegPath, a.Config.Data.Preview, func() config.PhotoFaceConfig {
+	h.PhotoLocationWorker = photogeocode.NewWorker(a.DB, deps.KeyVault, h.PhotoGeocode)
+	h.PhotoFaceWorker = photoface.NewWorker(a.DB, deps.KeyVault, deps.DerivedStore, filepath.Dir(a.ConfigPath), a.Config.FFmpeg.FFmpegPath, a.Config.Data.Preview, func() config.PhotoFaceConfig {
 		cfg := a.Config.PhotoFace
 		if strings.TrimSpace(cfg.PythonPath) == "" {
 			cfg.PythonPath = a.Config.PhotoClassify.PythonPath

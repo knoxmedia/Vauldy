@@ -4,13 +4,16 @@ import (
 	"context"
 	"database/sql"
 	"io"
-	"os/exec"
+	"knox-media/internal/processmetrics"
 	"strings"
 
 	kcrypto "knox-media/internal/crypto"
 	"knox-media/internal/keystore"
 	"knox-media/pkg/ffprobe"
 )
+
+// FFmpegLaunchCount returns the process-wide number of actual ffmpeg launch attempts.
+func FFmpegLaunchCount() uint64 { return processmetrics.FFmpegLaunchCount() }
 
 // MediaProbe holds ffprobe results and optional pipe cleanup for encrypted sources.
 type MediaProbe struct {
@@ -37,13 +40,17 @@ func ProbeMediaFile(db *sql.DB, vault *keystore.Vault, ffprobePath string, media
 
 // FFprobeOutput runs ffprobe with caller-built args; the final argument must be the input path or pipe:0.
 func FFprobeOutput(db *sql.DB, vault *keystore.Vault, ffprobePath string, mediaID int64, path string, startSec, durationSec float64, argsBeforeInput []string) ([]byte, func(), error) {
+	return FFprobeOutputContext(context.Background(), db, vault, ffprobePath, mediaID, path, startSec, durationSec, argsBeforeInput)
+}
+
+func FFprobeOutputContext(ctx context.Context, db *sql.DB, vault *keystore.Vault, ffprobePath string, mediaID int64, path string, startSec, durationSec float64, argsBeforeInput []string) ([]byte, func(), error) {
 	in, err := OpenFFmpegInput(db, vault, mediaID, path, 0)
 	if err != nil {
 		return nil, nil, err
 	}
 	input, stdin := inputLabelAndStdin(in)
 	full := append(append([]string{}, argsBeforeInput...), input)
-	out, err := ffprobe.Output(ffprobePath, full, stdin)
+	out, err := ffprobe.OutputContext(ctx, ffprobePath, full, stdin)
 	if err != nil {
 		if in.Cleanup != nil {
 			in.Cleanup()
@@ -88,7 +95,10 @@ func RunFFmpeg(ctx context.Context, db *sql.DB, vault *keystore.Vault, ffmpegPat
 	if len(postInput) > 0 {
 		args = append(args, postInput...)
 	}
-	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	cmd := processmetrics.NewFFmpegCommandContext(ctx, ffmpegPath, args...)
 	if workDir != "" {
 		cmd.Dir = workDir
 	}

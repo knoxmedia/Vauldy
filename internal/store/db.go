@@ -1,10 +1,13 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 
 	_ "modernc.org/sqlite"
+
+	"knox-media/internal/relationshipmigration"
 )
 
 const schema = `
@@ -204,6 +207,7 @@ CREATE TABLE IF NOT EXISTS scan_task (
     processed_count INTEGER DEFAULT 0,
     total_count INTEGER DEFAULT 0,
     added_count INTEGER DEFAULT 0,
+    failed_count INTEGER DEFAULT 0,
     error_message TEXT,
     cancelled INTEGER DEFAULT 0,
     started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -212,6 +216,42 @@ CREATE TABLE IF NOT EXISTS scan_task (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (library_id) REFERENCES library(id)
 );
+
+CREATE TABLE IF NOT EXISTS scan_lease (
+    library_id INTEGER PRIMARY KEY,
+    scan_task_id INTEGER NOT NULL,
+    owner_id TEXT NOT NULL,
+    lease_until TIMESTAMP NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (library_id) REFERENCES library(id) ON DELETE CASCADE,
+    FOREIGN KEY (scan_task_id) REFERENCES scan_task(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_scan_lease_until ON scan_lease(lease_until);
+CREATE TABLE IF NOT EXISTS post_ingest_task (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    media_id INTEGER NOT NULL,
+    scan_task_id INTEGER,
+    task_type TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'waiting',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 3,
+    available_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    lease_owner TEXT,
+    lease_until TIMESTAMP,
+    last_error TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    started_at TIMESTAMP,
+    finished_at TIMESTAMP,
+    FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE,
+    FOREIGN KEY (scan_task_id) REFERENCES scan_task(id) ON DELETE SET NULL,
+    UNIQUE(media_id, task_type),
+    CHECK (task_type IN ('poster','preview','keyframe','subtitle','atrack')),
+    CHECK (status IN ('waiting','running','done','failed','cancelled'))
+);
+CREATE INDEX IF NOT EXISTS idx_post_ingest_claim ON post_ingest_task(status, available_at, lease_until, created_at);
+CREATE INDEX IF NOT EXISTS idx_post_ingest_scan ON post_ingest_task(scan_task_id, status);
 
 CREATE TABLE IF NOT EXISTS user (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -545,6 +585,33 @@ CREATE TABLE IF NOT EXISTS photo_face_task (
 );
 CREATE INDEX IF NOT EXISTS idx_photo_face_task_status ON photo_face_task(library_id, status, updated_at);
 
+CREATE TABLE IF NOT EXISTS photo_face_thumb_repair_state (
+    name TEXT PRIMARY KEY,
+    phase TEXT NOT NULL DEFAULT 'covers',
+    last_person_id INTEGER NOT NULL DEFAULT 0,
+    last_face_id INTEGER NOT NULL DEFAULT 0,
+    completed_at TIMESTAMP,
+    next_audit_at TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS photo_face_thumb_repair_failure (
+    face_id INTEGER PRIMARY KEY,
+    person_id INTEGER,
+    attempts INTEGER NOT NULL DEFAULT 1,
+    next_retry_at TIMESTAMP NOT NULL,
+    last_error TEXT,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (face_id) REFERENCES photo_face(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_photo_face_thumb_repair_failure_due ON photo_face_thumb_repair_failure(next_retry_at, face_id);
+
+CREATE TABLE IF NOT EXISTS media_file_cleanup_task (
+    path TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+    next_retry_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, last_error TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_media_file_cleanup_due ON media_file_cleanup_task(status, next_retry_at);
+
 CREATE TABLE IF NOT EXISTS atrack_task (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     media_id INTEGER NOT NULL UNIQUE,
@@ -589,6 +656,13 @@ CREATE TABLE IF NOT EXISTS system_options (
 `
 
 func OpenSQLite(path string) (*sql.DB, error) {
+	return OpenSQLiteContext(context.Background(), path)
+}
+
+func OpenSQLiteContext(ctx context.Context, path string) (*sql.DB, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(30000)&_pragma=foreign_keys(ON)")
 	if err != nil {
 		return nil, err
@@ -613,6 +687,10 @@ func OpenSQLite(path string) (*sql.DB, error) {
 	if _, err := db.Exec(schema); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
+	}
+	if err := ensurePlaybackCompletionSchema(context.Background(), db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("playback completion migration: %w", err)
 	}
 	_, _ = db.Exec(`ALTER TABLE transcode_task ADD COLUMN error_message TEXT`)
 	_, _ = db.Exec(`ALTER TABLE library ADD COLUMN enabled INTEGER DEFAULT 1`)
@@ -663,6 +741,7 @@ func OpenSQLite(path string) (*sql.DB, error) {
 	_, _ = db.Exec(`ALTER TABLE play_progress ADD COLUMN completed INTEGER DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE play_progress ADD COLUMN play_count INTEGER DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE scan_task ADD COLUMN total_count INTEGER DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE scan_task ADD COLUMN failed_count INTEGER DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE user ADD COLUMN can_manage INTEGER DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE user ADD COLUMN can_play INTEGER DEFAULT 1`)
 	_, _ = db.Exec(`ALTER TABLE user ADD COLUMN can_download INTEGER DEFAULT 0`)
@@ -806,7 +885,9 @@ func OpenSQLite(path string) (*sql.DB, error) {
 			UNIQUE(media_id, tag),
 			FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
 		)`)
-	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_document_tag_tag ON document_tag(tag)`)
+	_, _ = db.Exec(`DELETE FROM document_tag WHERE id NOT IN (SELECT MIN(id) FROM document_tag GROUP BY media_id, tag COLLATE NOCASE)`)
+	_, _ = db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_document_tag_media_tag_nocase ON document_tag(media_id, tag COLLATE NOCASE)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_document_tag_tag ON document_tag(tag COLLATE NOCASE)`)
 	_, _ = db.Exec(`
 		CREATE TABLE IF NOT EXISTS scan_log (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -891,6 +972,14 @@ func OpenSQLite(path string) (*sql.DB, error) {
 	// Clean up stale transcode tasks that failed due to transient issues (path not found, context canceled).
 	cleanupStaleTranscodeTasks(db)
 	recoverStalePhotoTasks(db)
+	if err := MigrateMediaSortColumns(context.Background(), db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("media sort migration: %w", err)
+	}
+	if err := relationshipmigration.MigrateMediaRelationships(context.Background(), db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("media relationship migration: %w", err)
+	}
 	return db, nil
 }
 

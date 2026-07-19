@@ -8,16 +8,20 @@ import (
 	"sync"
 	"time"
 
-	"knox-media/internal/scanner"
+	"knox-media/internal/scancoord"
 )
 
 const defaultAutoScanInterval = 5 * time.Minute
 
+type ScanSubmitter interface {
+	Submit(context.Context, scancoord.ScanRequest) (scancoord.SubmitResult, error)
+}
+
 type Service struct {
-	DB       *sql.DB
-	Scanner  *scanner.Scanner
-	Interval time.Duration
-	// AutoScanInterval applies when library.auto_scan=1 and realtime_monitor=0.
+	DB        *sql.DB
+	Submitter ScanSubmitter
+	Interval  time.Duration
+	// AutoScanInterval controls periodic scheduled submissions when auto_scan=1.
 	AutoScanInterval time.Duration
 
 	mu           sync.Mutex
@@ -25,13 +29,13 @@ type Service struct {
 	lastAutoScan map[int64]time.Time
 }
 
-func NewService(db *sql.DB, sc *scanner.Scanner, interval time.Duration) *Service {
+func NewService(db *sql.DB, submitter ScanSubmitter, interval time.Duration) *Service {
 	if interval <= 0 {
 		interval = 15 * time.Second
 	}
 	return &Service{
 		DB:               db,
-		Scanner:          sc,
+		Submitter:        submitter,
 		Interval:         interval,
 		AutoScanInterval: defaultAutoScanInterval,
 		running:          make(map[int64]bool),
@@ -47,12 +51,12 @@ func (s *Service) Start(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-tk.C:
-			s.tick()
+			s.tick(ctx)
 		}
 	}
 }
 
-func (s *Service) tick() {
+func (s *Service) tick(ctx context.Context) {
 	rows, err := s.DB.Query(`
 		SELECT id, path, COALESCE(realtime_monitor, 0), COALESCE(auto_scan, 0)
 		FROM library
@@ -70,37 +74,25 @@ func (s *Service) tick() {
 		if rows.Scan(&id, &path, &realtime, &autoScan) != nil || id <= 0 {
 			continue
 		}
-		shouldScan := false
+		var sources []scancoord.Source
 		if realtime == 1 {
-			shouldScan = true
-		} else if autoScan == 1 {
-			shouldScan = s.autoScanDue(id, now)
+			sources = append(sources, scancoord.SourceMonitor)
 		}
-		if !shouldScan {
+		if autoScan == 1 && s.autoScanDue(id, now) {
+			sources = append(sources, scancoord.SourceScheduled)
+		}
+		if len(sources) == 0 || s.Submitter == nil {
 			continue
 		}
 		folders := listFolders(s.DB, id, path.String)
 		if len(folders) == 0 {
 			continue
 		}
-		if !s.tryLock(id) {
-			continue
+		for _, source := range sources {
+			if _, err := s.Submitter.Submit(ctx, scancoord.ScanRequest{LibraryID: id, Source: source, Roots: folders}); err != nil {
+				log.Printf("library scan submit failed library=%d source=%s err=%v", id, source, err)
+			}
 		}
-		go func(libraryID int64, roots []string, periodic bool) {
-			defer s.unlock(libraryID)
-			added, err := s.Scanner.ScanLibraryFolders(libraryID, roots)
-			if err != nil {
-				log.Printf("library monitor scan failed library=%d err=%v", libraryID, err)
-				return
-			}
-			if added > 0 {
-				if periodic {
-					log.Printf("auto scan library=%d added=%d", libraryID, added)
-				} else {
-					log.Printf("realtime monitor scan library=%d added=%d", libraryID, added)
-				}
-			}
-		}(id, folders, realtime != 1)
 	}
 }
 

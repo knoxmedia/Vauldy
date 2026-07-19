@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"knox-media/internal/branding"
@@ -18,6 +19,7 @@ type Config struct {
 	FFmpeg        FFmpegConfig             `yaml:"ffmpeg"`
 	DRMPackaging  DRMPackagingConfig       `yaml:"drm_packaging"`
 	DRM           DRMConfig                `yaml:"drm"`
+	PostIngest    PostIngestConfig         `yaml:"post_ingest"`
 	Scan          ScanConfig               `yaml:"scan"`
 	Subtitle      SubtitleProcessingConfig `yaml:"subtitle"`
 	ATrack        ATrackConfig             `yaml:"atrack"`
@@ -156,6 +158,48 @@ type ScanConfig struct {
 	FastFFprobe *bool `yaml:"fast_ffprobe"`
 }
 
+func defaultPostIngestGlobal() int {
+	global := runtime.NumCPU() / 2
+	if global < 2 {
+		global = 2
+	}
+	if global > 4 {
+		global = 4
+	}
+	return global
+}
+
+type PostIngestConfig struct {
+	MaxConcurrent        int `yaml:"max_concurrent"`
+	PosterMaxConcurrent  int `yaml:"poster_max_concurrent"`
+	PreviewMaxConcurrent int `yaml:"preview_max_concurrent"`
+}
+
+func (c *Config) NormalizePostIngest() {
+	if c.PostIngest.MaxConcurrent == 0 {
+		c.PostIngest.MaxConcurrent = defaultPostIngestGlobal()
+	}
+	if c.PostIngest.PosterMaxConcurrent == 0 {
+		c.PostIngest.PosterMaxConcurrent = min(2, c.PostIngest.MaxConcurrent)
+	}
+	if c.PostIngest.PreviewMaxConcurrent == 0 {
+		c.PostIngest.PreviewMaxConcurrent = 1
+	}
+}
+
+func (c PostIngestConfig) Validate() error {
+	if c.MaxConcurrent < 1 || c.MaxConcurrent > 32 {
+		return fmt.Errorf("PostIngest.MaxConcurrent must be in [1,32]")
+	}
+	if c.PosterMaxConcurrent < 1 || c.PosterMaxConcurrent > 2 || c.PosterMaxConcurrent > c.MaxConcurrent {
+		return fmt.Errorf("PostIngest.PosterMaxConcurrent must be in [1,2] and <= MaxConcurrent")
+	}
+	if c.PreviewMaxConcurrent < 1 || c.PreviewMaxConcurrent > 2 || c.PreviewMaxConcurrent > c.MaxConcurrent {
+		return fmt.Errorf("PostIngest.PreviewMaxConcurrent must be in [1,2] and <= MaxConcurrent")
+	}
+	return nil
+}
+
 type ServerConfig struct {
 	Host string `yaml:"host"`
 	Port int    `yaml:"port"`
@@ -253,6 +297,10 @@ type PhotoFaceConfig struct {
 	PollIntervalSeconds int `yaml:"poll_interval_seconds"`
 	// FailedRetryMinutes waits before re-queuing failed tasks (avoids CPU spin on bad inputs).
 	FailedRetryMinutes int `yaml:"failed_retry_minutes"`
+	// ThumbnailRepairBatch bounds historical face thumbnail checks per scheduler tick.
+	ThumbnailRepairBatch int `yaml:"thumbnail_repair_batch"`
+	// ThumbnailRepairAuditHours controls periodic re-audits after a complete repair scan.
+	ThumbnailRepairAuditHours int `yaml:"thumbnail_repair_audit_hours"`
 }
 
 func (c *Config) PhotoFaceAutoOnScan() bool {
@@ -288,6 +336,13 @@ func (c *Config) PhotoFacePollIntervalSeconds() int {
 		return 10
 	}
 	return c.PhotoFace.PollIntervalSeconds
+}
+
+func (c *Config) PhotoFaceThumbnailRepairBatch() int {
+	if c == nil || c.PhotoFace.ThumbnailRepairBatch <= 0 {
+		return 32
+	}
+	return c.PhotoFace.ThumbnailRepairBatch
 }
 
 func (c *Config) PhotoFaceFailedRetryMinutes() int {
@@ -517,6 +572,14 @@ func Load(path string) (*Config, error) {
 	}
 	if c.DRM.Widevine.PrivateModuleTimeoutSeconds <= 0 {
 		c.DRM.Widevine.PrivateModuleTimeoutSeconds = 8
+	}
+	c.NormalizePostIngest()
+	if err := c.PostIngest.Validate(); err != nil {
+		return nil, fmt.Errorf("validate config: %w", err)
+	}
+	c.NormalizePostIngest()
+	if err := c.PostIngest.Validate(); err != nil {
+		return nil, fmt.Errorf("validate config: %w", err)
 	}
 	return &c, nil
 }

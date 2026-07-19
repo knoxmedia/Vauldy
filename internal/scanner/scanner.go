@@ -14,11 +14,12 @@ import (
 
 	kcrypto "knox-media/internal/crypto"
 	"knox-media/internal/docparse"
+	"knox-media/internal/keystore"
 	"knox-media/internal/musicparse"
 	"knox-media/internal/musicstore"
-	"knox-media/internal/photoparse"
 	"knox-media/internal/photogeocode"
-	"knox-media/internal/keystore"
+	"knox-media/internal/photoparse"
+	"knox-media/internal/relationshipsync"
 	"knox-media/internal/scraper"
 	"knox-media/internal/storage"
 	"knox-media/internal/tvparse"
@@ -50,6 +51,22 @@ func (s *Scanner) ScanLibraryFolders(libraryID int64, roots []string) (added int
 }
 
 func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID int64, roots []string) (added int, err error) {
+	var callback func(context.Context, int64, string, string) error
+	if s.OnMediaAdded != nil {
+		callback = func(_ context.Context, mediaID int64, title, fileType string) error {
+			s.OnMediaAdded(mediaID, title, fileType)
+			return nil
+		}
+	}
+	return s.ScanLibraryFoldersWithContextAndCallbacks(ctx, libraryID, roots, ScanCallbacks{OnFile: s.OnFile, OnMediaAdded: callback})
+}
+
+type ScanCallbacks struct {
+	OnFile       func(string, error)
+	OnMediaAdded func(context.Context, int64, string, string) error
+}
+
+func (s *Scanner) ScanLibraryFoldersWithContextAndCallbacks(ctx context.Context, libraryID int64, roots []string, callbacks ScanCallbacks) (added int, err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -294,17 +311,21 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 			if documentLibrary && ft == "document" {
 				metaJSON = docparse.MergeDocumentMetaJSON(metaJSON, docMeta)
 			}
+			tx, e := s.DB.BeginTx(ctx, nil)
+			if e != nil {
+				return e
+			}
+			defer tx.Rollback()
 			var res sql.Result
-			var e error
 			if existingMediaID > 0 {
-				res, e = s.DB.Exec(`
+				res, e = tx.ExecContext(ctx, `
 				UPDATE media
 				SET library_id = ?, title = ?, file_path = ?, file_type = ?, duration = ?, width = ?, height = ?, bitrate = ?, md5 = ?, format = ?, meta_json = ?, status = 'active', file_mtime = ?
 				WHERE id = ?`,
 					libraryID, title, normPath, ft, nullInt(dur), nullInt(w), nullInt(h), nullInt(br), nullString(md5sum), nullStringVal(format), metaJSON, curMtime, existingMediaID,
 				)
 			} else {
-				res, e = s.DB.Exec(`
+				res, e = tx.ExecContext(ctx, `
 				INSERT INTO media (library_id, file_id, title, file_path, file_type, duration, width, height, bitrate, md5, format, meta_json, status, file_mtime)
 				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)`,
 					libraryID, fileID, title, normPath, ft, nullInt(dur), nullInt(w), nullInt(h), nullInt(br), nullString(md5sum), nullStringVal(format), metaJSON, curMtime,
@@ -328,14 +349,16 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 					mediaID = mid
 				}
 			}
+			if mediaID > 0 && (tvLibrary || musicLibrary) {
+				if e = relationshipsync.SyncTx(ctx, tx, mediaID); e != nil {
+					return e
+				}
+			}
+			if e = tx.Commit(); e != nil {
+				return e
+			}
 			if mediaID > 0 {
 				_ = s.upsertNode(libraryID, parentPath, nodePath, nodeName, "file", &mediaID)
-				if tvInfo != nil {
-					_ = tvstore.LinkEpisode(s.DB, libraryID, mediaID, *tvInfo)
-				}
-				if musicLibrary && ft == "audio" {
-					_ = musicstore.LinkTrack(s.DB, libraryID, mediaID, musicMeta)
-				}
 				if documentLibrary && ft == "document" && s.OnDocumentScanned != nil {
 					s.OnDocumentScanned(mediaID)
 				}

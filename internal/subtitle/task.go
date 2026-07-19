@@ -1,6 +1,7 @@
 package subtitle
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -18,35 +19,51 @@ func (s *Service) EnsurePendingSubtitleTask(mediaID int64) error {
 	return err
 }
 
-func (s *Service) upsertTaskRunning(mediaID int64) {
-	_, _ = s.DB.Exec(`
+func (s *Service) setTaskDoneGuarded(ctx context.Context, mediaID int64) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err = validateCommitGuardTx(ctx, tx); err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE subtitle_task SET status='done',finished_at=CURRENT_TIMESTAMP,message=NULL,updated_at=CURRENT_TIMESTAMP WHERE media_id=?`, mediaID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return fmt.Errorf("subtitle done update affected %d rows", n)
+	}
+	return tx.Commit()
+}
+func (s *Service) upsertTaskRunning(ctx context.Context, mediaID int64) error {
+	_, err := s.DB.ExecContext(ctx, `
 		INSERT INTO subtitle_task (media_id, status, started_at, updated_at)
 		VALUES (?, 'running', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-		ON CONFLICT(media_id) DO UPDATE SET
-			status = 'running',
-			message = NULL,
-			started_at = CURRENT_TIMESTAMP,
-			finished_at = NULL,
-			updated_at = CURRENT_TIMESTAMP
+		ON CONFLICT(media_id) DO UPDATE SET status='running',message=NULL,started_at=CURRENT_TIMESTAMP,finished_at=NULL,updated_at=CURRENT_TIMESTAMP
 	`, mediaID)
+	return err
 }
-
-func (s *Service) upsertTaskDone(mediaID int64) {
-	_, _ = s.DB.Exec(`
-		UPDATE subtitle_task SET status = 'done', finished_at = CURRENT_TIMESTAMP, message = NULL, updated_at = CURRENT_TIMESTAMP
-		WHERE media_id = ?
-	`, mediaID)
+func (s *Service) upsertTaskDone(ctx context.Context, mediaID int64) error {
+	_, err := s.DB.ExecContext(ctx, `UPDATE subtitle_task SET status='done',finished_at=CURRENT_TIMESTAMP,message=NULL,updated_at=CURRENT_TIMESTAMP WHERE media_id=?`, mediaID)
+	return err
 }
-
-func (s *Service) upsertTaskFailed(mediaID int64, msg string) {
+func (s *Service) upsertTaskFailed(ctx context.Context, mediaID int64, msg string) error {
 	msg = strings.TrimSpace(msg)
 	if len(msg) > 2000 {
 		msg = msg[:2000]
 	}
-	_, _ = s.DB.Exec(`
-		UPDATE subtitle_task SET status = 'failed', finished_at = CURRENT_TIMESTAMP, message = ?, updated_at = CURRENT_TIMESTAMP
-		WHERE media_id = ?
-	`, msg, mediaID)
+	_, err := s.DB.ExecContext(ctx, `UPDATE subtitle_task SET status='failed',finished_at=CURRENT_TIMESTAMP,message=?,updated_at=CURRENT_TIMESTAMP WHERE media_id=?`, msg, mediaID)
+	return err
+}
+func (s *Service) setTaskWaiting(ctx context.Context, mediaID int64, msg string) error {
+	_, err := s.DB.ExecContext(ctx, `UPDATE subtitle_task SET status='pending',started_at=NULL,finished_at=NULL,message=?,updated_at=CURRENT_TIMESTAMP WHERE media_id=?`, msg, mediaID)
+	return err
 }
 
 // ResetSubtitleJob removes generated subtitle rows and files, then marks task as pending.

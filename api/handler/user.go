@@ -190,7 +190,7 @@ func (h *Handler) UserHistory(c *gin.Context) {
 		FROM play_progress p
 		LEFT JOIN media m ON m.file_id = p.file_id
 		LEFT JOIN library l ON l.id = m.library_id
-		WHERE p.user_id = ?
+		WHERE p.user_id = ? AND COALESCE(p.completed,0) = 0
 		ORDER BY p.update_at DESC
 		LIMIT ` + strconv.Itoa(scanLimit)
 	rows, err := h.App.DB.Query(q, uid)

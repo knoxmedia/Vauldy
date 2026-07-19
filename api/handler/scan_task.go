@@ -10,27 +10,28 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync/atomic"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"knox-media/internal/photoparse"
 	"knox-media/internal/preview"
-	"knox-media/internal/scanner"
+	"knox-media/internal/scancoord"
 	"knox-media/internal/storage"
-	"knox-media/pkg/ffprobe"
 	"knox-media/pkg/fileutil"
 )
 
 func (h *Handler) ListScanTasks(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+	defer cancel()
 	limit := 100
 	if v := strings.TrimSpace(c.Query("limit")); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 500 {
 			limit = n
 		}
 	}
-	rows, err := h.App.DB.Query(`
-		SELECT t.id, t.library_id, COALESCE(l.name,''), t.status, t.source, t.processed_count, t.total_count, t.added_count, COALESCE(t.error_message,''), t.cancelled,
+	rows, err := h.App.DB.QueryContext(ctx, `
+		SELECT t.id, t.library_id, COALESCE(l.name,''), t.status, t.source, t.processed_count, t.total_count, t.added_count, t.failed_count, COALESCE(t.error_message,''), t.cancelled,
 		       COALESCE(t.started_at,''), COALESCE(t.finished_at,''), t.created_at, t.updated_at
 		FROM scan_task t
 		LEFT JOIN library l ON l.id = t.library_id
@@ -38,16 +39,26 @@ func (h *Handler) ListScanTasks(c *gin.Context) {
 		LIMIT ?
 	`, limit)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			c.JSON(http.StatusGatewayTimeout, gin.H{"code": "scan_tasks_timeout"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"code": "scan_tasks_internal"})
+		}
 		return
 	}
 	defer rows.Close()
 	items := make([]gin.H, 0, limit)
 	for rows.Next() {
-		var id, libraryID, processed, total, added, cancelled sql.NullInt64
+		var id, libraryID, processed, total, added, failed, cancelled sql.NullInt64
 		var libraryName, status, source, errMsg, startedAt, finishedAt, createdAt, updatedAt sql.NullString
-		if rows.Scan(&id, &libraryID, &libraryName, &status, &source, &processed, &total, &added, &errMsg, &cancelled, &startedAt, &finishedAt, &createdAt, &updatedAt) != nil {
-			continue
+		if err := rows.Scan(&id, &libraryID, &libraryName, &status, &source, &processed, &total, &added, &failed, &errMsg, &cancelled, &startedAt, &finishedAt, &createdAt, &updatedAt); err != nil {
+			rows.Close()
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				c.JSON(http.StatusGatewayTimeout, gin.H{"code": "scan_tasks_timeout"})
+			} else {
+				c.JSON(http.StatusInternalServerError, gin.H{"code": "scan_tasks_internal"})
+			}
+			return
 		}
 		items = append(items, gin.H{
 			"id":              id.Int64,
@@ -58,6 +69,7 @@ func (h *Handler) ListScanTasks(c *gin.Context) {
 			"processed_count": processed.Int64,
 			"total_count":     total.Int64,
 			"added_count":     added.Int64,
+			"failed_count":    failed.Int64,
 			"error_message":   errMsg.String,
 			"cancelled":       cancelled.Int64,
 			"started_at":      startedAt.String,
@@ -66,189 +78,87 @@ func (h *Handler) ListScanTasks(c *gin.Context) {
 			"updated_at":      updatedAt.String,
 		})
 	}
+	if err := rows.Err(); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			c.JSON(http.StatusGatewayTimeout, gin.H{"code": "scan_tasks_timeout"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"code": "scan_tasks_internal"})
+		}
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"items": items})
 }
 
+func respondScanQueryError(c *gin.Context, ctx context.Context, err error, prefix string) {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		c.JSON(http.StatusGatewayTimeout, gin.H{"code": prefix + "_timeout"})
+		return
+	}
+	c.JSON(http.StatusInternalServerError, gin.H{"code": prefix + "_internal"})
+}
 func (h *Handler) CancelScanTask(c *gin.Context) {
 	taskID, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || taskID <= 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
 		return
 	}
-	var libraryID int64
-	var status string
-	if err := h.App.DB.QueryRow(`SELECT library_id, status FROM scan_task WHERE id = ? LIMIT 1`, taskID).Scan(&libraryID, &status); err != nil {
-		if err == sql.ErrNoRows {
+	if h == nil || h.ScanCoordinator == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "scan coordinator is not configured"})
+		return
+	}
+	result, err := h.ScanCoordinator.Cancel(c.Request.Context(), taskID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	if status != "running" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "task is not running"})
-		return
+	c.JSON(http.StatusOK, gin.H{"ok": true, "cancelled": result.Cancelled, "status": result.Status})
+}
+
+func (h *Handler) submitLibraryScan(ctx context.Context, libraryID int64, roots []string, source scancoord.Source) (scancoord.SubmitResult, error) {
+	if h == nil || h.ScanCoordinator == nil {
+		return scancoord.SubmitResult{}, errors.New("scan coordinator is not configured")
 	}
-	h.scanMu.Lock()
-	rt, ok := h.runningScans[libraryID]
-	h.scanMu.Unlock()
-	if !ok || rt.TaskID != taskID || rt.Cancel == nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "task is not cancellable"})
-		return
-	}
-	rt.Cancel()
-	c.JSON(http.StatusOK, gin.H{"ok": true, "cancelled": true})
+	return h.ScanCoordinator.Submit(ctx, scancoord.ScanRequest{LibraryID: libraryID, Source: source, Roots: roots})
 }
 
 func (h *Handler) startLibraryScanTask(libraryID int64, source string) (taskID int64, runningTaskID int64, err error) {
-	h.scanMu.Lock()
-	if rt, ok := h.runningScans[libraryID]; ok && rt.TaskID > 0 {
-		h.scanMu.Unlock()
-		return 0, rt.TaskID, nil
+	var root string
+	if h == nil || h.App == nil || h.App.DB == nil {
+		return 0, 0, errors.New("database is not configured")
 	}
-	h.scanMu.Unlock()
-
-	res, err := h.App.DB.Exec(`
-		INSERT INTO scan_task (library_id, status, source, started_at, updated_at)
-		VALUES (?, 'running', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-	`, libraryID, source)
+	if err := h.App.DB.QueryRow(`SELECT path FROM library WHERE id = ?`, libraryID).Scan(&root); err != nil {
+		return 0, 0, err
+	}
+	scanSource := scancoord.SourceManual
+	if source == "schedule" || source == string(scancoord.SourceScheduled) {
+		scanSource = scancoord.SourceScheduled
+	}
+	result, err := h.submitLibraryScan(context.Background(), libraryID, listLibraryFolders(h.App.DB, libraryID, root), scanSource)
 	if err != nil {
 		return 0, 0, err
 	}
-	taskID, _ = res.LastInsertId()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	h.scanMu.Lock()
-	if rt, ok := h.runningScans[libraryID]; ok && rt.TaskID > 0 {
-		h.scanMu.Unlock()
-		cancel()
-		_, _ = h.App.DB.Exec(`UPDATE scan_task SET status='failed', error_message='concurrent scan rejected', finished_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id = ?`, taskID)
-		return 0, rt.TaskID, nil
-	}
-	h.runningScans[libraryID] = scanRuntime{TaskID: taskID, Cancel: cancel}
-	h.scanMu.Unlock()
-
-	var root string
-	if err := h.App.DB.QueryRow(`SELECT path FROM library WHERE id = ?`, libraryID).Scan(&root); err != nil {
-		h.scanMu.Lock()
-		delete(h.runningScans, libraryID)
-		h.scanMu.Unlock()
-		cancel()
-		_, _ = h.App.DB.Exec(`UPDATE scan_task SET status='failed', error_message=?, finished_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id = ?`, err.Error(), taskID)
-		return taskID, 0, err
-	}
-	folders := listLibraryFolders(h.App.DB, libraryID, root)
-	go h.runLibraryScanTask(ctx, taskID, libraryID, folders)
-	return taskID, 0, nil
+	return result.TaskID, result.ExistingTaskID, nil
 }
 
-func (h *Handler) runLibraryScanTask(ctx context.Context, taskID, libraryID int64, folders []string) {
-	var processedCount int64
-	var addedCount int64
-	libraryType := h.loadLibraryType(libraryID)
-	totalCount := countScannableFiles(folders, libraryType)
-	_, _ = h.App.DB.Exec(`UPDATE scan_task SET total_count = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, totalCount, taskID)
-	var ffprobeExtra []string
-	if h.App.Config.LibraryScanFastFFprobe() {
-		ffprobeExtra = ffprobe.ScanProbeExtraFast()
-	}
-	s := &scanner.Scanner{
-		DB:           h.App.DB,
-		Vault:        h.KeyVault,
-		FFprobePath:  h.App.Config.FFmpeg.FFprobePath,
-		SkipHash:     !h.App.Config.LibraryScanFileHash(),
-		PhotoGeocode: h.PhotoGeocode,
-		FFprobeExtra: ffprobeExtra,
-		OnFile: func(path string, fileErr error) {
-			n := atomic.AddInt64(&processedCount, 1)
-			_, _ = h.App.DB.Exec(`UPDATE scan_task SET processed_count = ?, total_count = ?, added_count = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, n, totalCount, atomic.LoadInt64(&addedCount), taskID)
-			action := "processed"
-			msg := ""
-			if fileErr != nil {
-				action = "failed"
-				msg = fileErr.Error()
-			}
-			_, _ = h.App.DB.Exec(`INSERT INTO scan_log (scan_task_id, library_id, file_path, action, message) VALUES (?, ?, ?, ?, ?)`, taskID, libraryID, path, action, msg)
-		},
-		OnMediaAdded: func(mediaID int64, title string, ft string) {
-			_ = atomic.AddInt64(&addedCount, 1)
-			_, _ = h.App.DB.Exec(`UPDATE scan_task SET processed_count = ?, total_count = ?, added_count = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, atomic.LoadInt64(&processedCount), totalCount, atomic.LoadInt64(&addedCount), taskID)
-			var filePath sql.NullString
-			_ = h.App.DB.QueryRow(`SELECT file_path FROM media WHERE id = ?`, mediaID).Scan(&filePath)
-			_, _ = h.App.DB.Exec(`INSERT INTO scan_log (scan_task_id, library_id, file_path, action, message) VALUES (?, ?, ?, 'added', ?)`, taskID, libraryID, filePath.String, title)
-			h.EnqueuePostIngestForNewMedia(mediaID, ft)
-		},
-		OnDocumentScanned: func(mediaID int64) {
-			h.GenerateDocumentCover(mediaID)
-		},
-	}
-	added, err := s.ScanLibraryFoldersWithContext(ctx, libraryID, folders)
-	if added > 0 && int64(added) > atomic.LoadInt64(&addedCount) {
-		atomic.StoreInt64(&addedCount, int64(added))
-	}
-	status := "done"
-	cancelled := 0
-	errMsg := ""
-	if err != nil {
-		if errors.Is(err, context.Canceled) {
-			status = "cancelled"
-			cancelled = 1
-		} else {
-			status = "failed"
-			errMsg = err.Error()
-		}
-	}
-	_, _ = h.App.DB.Exec(`
-		UPDATE scan_task
-		SET status = ?, cancelled = ?, error_message = ?, processed_count = ?, total_count = ?, added_count = ?, finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-		WHERE id = ?
-	`, status, cancelled, errMsg, atomic.LoadInt64(&processedCount), totalCount, atomic.LoadInt64(&addedCount), taskID)
-
-	h.scanMu.Lock()
-	delete(h.runningScans, libraryID)
-	h.scanMu.Unlock()
-	if status == "done" {
-		h.scheduleLibraryPreviewRefresh(libraryID)
-		h.scheduleDocumentCoverBackfill(libraryID)
-	}
+// EnqueuePostIngestForNewMedia synchronously submits unified post-ingest work.
+// Upload callers have no scan task, so their queue rows use a nil scan task ID.
+func (h *Handler) EnqueuePostIngestForNewMedia(mediaID int64, fileType string) error {
+	return h.enqueuePostIngestForNewMedia(context.Background(), mediaID, nil, fileType)
 }
 
-// EnqueuePostIngestForNewMedia matches library-scan ingest: auto scrape, preview sprites (if enabled), local poster frame, optional subtitles.
-// Upload merge/single must call this; realtime scanner uses main.enqueueAutoTasksOnMediaAdded instead.
-func (h *Handler) EnqueuePostIngestForNewMedia(mediaID int64, fileType string) {
-	if h == nil || h.App == nil || h.App.DB == nil || mediaID <= 0 {
-		return
+func (h *Handler) enqueuePostIngestForNewMedia(ctx context.Context, mediaID int64, scanTaskID *int64, fileType string) error {
+	if h == nil || h.PostIngestEnqueuer == nil {
+		return errors.New("post-ingest enqueuer is not configured")
 	}
-	go func(mid int64, ft string) {
-		if ft != "image" {
-			h.enqueueScrapeTask(mid, 0, "auto-scan")
-		}
-		h.enqueuePreviewTask(mid, ft)
-		h.ensurePreviewGeneration(mid, ft)
-		h.capturePosterFromVideo(mid, ft)
-		if ft == "image" {
-			h.GeneratePhotoVariants(mid)
-		}
-		if h.Subtitle != nil && h.App.Config != nil && h.App.Config.SubtitleAutoOnScan() && ft == "video" {
-			_ = h.Subtitle.EnsurePendingSubtitleTask(mid)
-		}
-		if h.LyricWorker != nil && h.App.Config != nil && h.App.Config.LyricAutoOnScan() {
-			_ = h.LyricWorker.EnsurePendingIfNoLyrics(mid, ft)
-		}
-		if h.PhotoClassifyWorker != nil && h.App.Config != nil && h.App.Config.PhotoClassifyAutoOnScan() && ft == "image" {
-			_ = h.PhotoClassifyWorker.EnsurePendingIfPhoto(mid, ft)
-		}
-		if h.PhotoFaceWorker != nil && h.App.Config != nil && h.App.Config.PhotoFaceAutoOnScan() && ft == "image" {
-			_ = h.PhotoFaceWorker.EnsurePendingIfPhoto(mid, ft)
-		}
-		if ft == "document" {
-			h.GenerateDocumentCover(mid)
-		}
-		if ft == "video" && h.KeyframeWorker != nil {
-			h.KeyframeWorker.Enqueue(mid)
-		}
-		h.KickEncryptMediaAsset(mid)
-	}(mediaID, fileType)
+	_, err := h.PostIngestEnqueuer.EnqueueMedia(ctx, mediaID, scanTaskID, fileType)
+	if err != nil && h.OnPostIngestError != nil {
+		h.OnPostIngestError(err)
+	}
+	return err
 }
 
 // enqueuePreviewTask inserts/updates preview_task as waiting when library has preview_extract enabled.
@@ -328,13 +238,15 @@ func countScannableFiles(roots []string, libraryType string) int64 {
 }
 
 func (h *Handler) loadLibraryType(libraryID int64) string {
+	return h.loadLibraryTypeContext(context.Background(), libraryID)
+}
+func (h *Handler) loadLibraryTypeContext(ctx context.Context, libraryID int64) string {
 	if h == nil || h.App == nil || h.App.DB == nil || libraryID <= 0 {
 		return ""
 	}
 	var t sql.NullString
-	if err := h.App.DB.QueryRow(`SELECT type FROM library WHERE id = ?`, libraryID).Scan(&t); err != nil {
+	if err := h.App.DB.QueryRowContext(ctx, `SELECT type FROM library WHERE id = ?`, libraryID).Scan(&t); err != nil {
 		return ""
 	}
 	return t.String
 }
-

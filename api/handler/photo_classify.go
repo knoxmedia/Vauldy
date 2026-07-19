@@ -22,7 +22,7 @@ const (
 
 // StartPhotoClassifyLoop drains pending photo classification tasks.
 func (h *Handler) StartPhotoClassifyLoop(ctx context.Context) {
-	go h.runPhotoClassifyOnce()
+	h.runPhotoClassifyOnce(ctx)
 	tk := time.NewTicker(photoClassifyInterval)
 	defer tk.Stop()
 	for {
@@ -30,12 +30,12 @@ func (h *Handler) StartPhotoClassifyLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-tk.C:
-			h.runPhotoClassifyOnce()
+			h.runPhotoClassifyOnce(ctx)
 		}
 	}
 }
 
-func (h *Handler) runPhotoClassifyOnce() {
+func (h *Handler) runPhotoClassifyOnce(ctx context.Context) {
 	if h == nil || h.PhotoClassifyWorker == nil || h.App == nil || h.App.DB == nil {
 		return
 	}
@@ -48,7 +48,7 @@ func (h *Handler) runPhotoClassifyOnce() {
 	if limit > photoClassifyBatchMax {
 		limit = photoClassifyBatchMax
 	}
-	done, failed := h.PhotoClassifyWorker.RunBatch(context.Background(), limit)
+	done, failed := h.PhotoClassifyWorker.RunBatch(ctx, limit)
 	if done+failed > 0 {
 		log.Printf("photo classify worker: processed=%d ok=%d fail=%d", done+failed, done, failed)
 	}
@@ -60,8 +60,7 @@ func (h *Handler) ListPhotoCategories(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid library id"})
 		return
 	}
-	if _, err := photoclass.RepairLibraryPhotoTags(h.App.DB, libraryID); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	if !h.requirePhotoAggregateAccess(c, libraryID) {
 		return
 	}
 	rows, err := h.App.DB.Query(`
@@ -134,6 +133,9 @@ func (h *Handler) PhotoClassifyProgress(c *gin.Context) {
 	libraryID, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || libraryID <= 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid library id"})
+		return
+	}
+	if !h.requirePhotoAggregateAccess(c, libraryID) {
 		return
 	}
 	total, classified, pending, err := h.PhotoClassifyWorker.LibraryProgress(libraryID)
