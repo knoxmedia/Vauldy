@@ -651,6 +651,10 @@ func OpenSQLiteContext(ctx context.Context, path string) (*sql.DB, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
+	if err := ensurePlaybackCompletionSchema(context.Background(), db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("playback completion migration: %w", err)
+	}
 	_, _ = db.Exec(`ALTER TABLE transcode_task ADD COLUMN error_message TEXT`)
 	_, _ = db.Exec(`ALTER TABLE library ADD COLUMN enabled INTEGER DEFAULT 1`)
 	_, _ = db.Exec(`ALTER TABLE library ADD COLUMN realtime_monitor INTEGER DEFAULT 0`)
