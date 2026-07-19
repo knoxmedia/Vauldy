@@ -1,6 +1,7 @@
 import axios from "axios";
 import { message } from "antd";
 import type { PlayerPrefs } from "../lib/playerPrefs";
+import type { PlaybackEvidencePayload, PlaybackProgressResult } from "../lib/playbackEvidence";
 import { proxyImageSrc } from "../lib/imageUrl";
 import { useAuthStore, type UserRole } from "../store/auth";
 
@@ -33,15 +34,15 @@ api.interceptors.response.use(
       const data = (ax as { response?: { data?: { error?: string } } }).response?.data;
       const errMsg = (data && typeof data.error === "string" && data.error.trim()) || "";
       if (/library access denied|folder access denied/i.test(errMsg)) {
-        message.error("无权限访问该媒体库或目录");
+        message.error("\u65e0\u6743\u9650\u8bbf\u95ee\u8be5\u5a92\u4f53\u5e93\u6216\u76ee\u5f55");
       } else if (/playback denied/i.test(errMsg)) {
-        message.error("无播放权限");
+        message.error("\u65e0\u64ad\u653e\u6743\u9650");
       } else if (/download denied/i.test(errMsg)) {
-        message.error("无下载权限");
+        message.error("\u65e0\u4e0b\u8f7d\u6743\u9650");
       } else if (/parental/i.test(errMsg)) {
-        message.error("家长控制限制：" + errMsg);
+        message.error("\u5bb6\u957f\u63a7\u5236\u9650\u5236\uff1a" + errMsg);
       } else {
-        message.error("权限不足（需要管理员或更高权限）");
+        message.error("\u6743\u9650\u4e0d\u8db3\uff08\u9700\u8981\u7ba1\u7406\u5458\u6216\u66f4\u9ad8\u6743\u9650\uff09");
       }
     }
     return Promise.reject(err);
@@ -120,8 +121,12 @@ export type MediaItem = {
   scraped?: boolean;
     /** Knox 9527 envelope encryption at rest. */
     encrypted_asset?: boolean;
-    /** Video pretranscode requires an on-disk plaintext source file. */
+    /** A usable encrypted optimization source asset is recorded in the database. */
+    optimization_asset_recorded?: boolean;
+    /** @deprecated One-release alias for optimization_asset_recorded. */
     optimization_available?: boolean;
+    /** Detail-only runtime filesystem availability check. */
+    optimization_source_available?: boolean;
   /** Populated for audio tracks linked in music_track. */
   music_album_id?: number;
   music_album_title?: string;
@@ -131,6 +136,10 @@ export type MediaItem = {
 };
 
 /** Normalize poster string from DB (some SQLite/json paths may retain JSON quotes). */
+export function optimizationAssetRecorded(item: MediaItem): boolean {
+  return item.optimization_asset_recorded ?? item.optimization_available ?? false;
+}
+
 export function normalizeListPosterUrl(raw: string): string {
   let s = (raw || "").trim();
   if (s.length >= 2 && s.startsWith('"') && s.endsWith('"')) {
@@ -330,8 +339,8 @@ export type HistoryItem = {
   library_type?: string;
 };
 
-export async function fetchLibraries() {
-  const { data } = await api.get<{ items?: Library[] }>("/api/v1/library");
+export async function fetchLibraries(signal?: AbortSignal) {
+  const { data } = await api.get<{ items?: Library[] }>("/api/v1/library", { signal });
   return data?.items ?? [];
 }
 
@@ -339,12 +348,12 @@ export type EncryptedAssetsConfig = {
   data_dot_encrypted_dir?: string;
 };
 
-export async function fetchLibrariesWithCapabilities() {
+export async function fetchLibrariesWithCapabilities(signal?: AbortSignal) {
   const { data } = await api.get<{
     items?: Library[];
     drm_capabilities?: DRMCapabilities;
     encrypted_assets_config?: EncryptedAssetsConfig;
-  }>("/api/v1/library");
+  }>("/api/v1/library", { signal });
   return {
     items: data?.items ?? [],
     drmCapabilities: data?.drm_capabilities ?? { widevine_enabled: true, powerdrm_enabled: true },
@@ -451,6 +460,7 @@ export async function fetchMedia(
     /** Full-text fuzzy search across title, overview, genres, tags, etc. */
     q?: string;
   },
+  signal?: AbortSignal,
 ) {
   const params: Record<string, string | number> = {};
   if (libraryId !== undefined) params.library_id = libraryId;
@@ -461,7 +471,7 @@ export async function fetchMedia(
   if (opts?.photo_place) params.photo_place = opts.photo_place;
   if (opts?.photo_person) params.photo_person = opts.photo_person;
   if (opts?.q) params.q = opts.q;
-  const { data } = await api.get<{ items?: MediaItem[] }>("/api/v1/media", { params });
+  const { data } = await api.get<{ items?: MediaItem[] }>("/api/v1/media", { params, signal });
   return data?.items ?? [];
 }
 
@@ -581,28 +591,29 @@ export type DocumentNode = {
 export async function fetchDocuments(
   libraryId: number,
   params?: Record<string, string | number | boolean | undefined>,
+  signal?: AbortSignal,
 ): Promise<DocumentItem[]> {
-  const { data } = await api.get<{ items?: DocumentItem[] }>(`/api/v1/library/${libraryId}/documents`, { params });
+  const { data } = await api.get<{ items?: DocumentItem[] }>(`/api/v1/library/${libraryId}/documents`, { params, signal });
   return data?.items ?? [];
 }
 
-export async function fetchDocumentNodes(libraryId: number, parent = ""): Promise<DocumentNode[]> {
+export async function fetchDocumentNodes(libraryId: number, parent = "", signal?: AbortSignal): Promise<DocumentNode[]> {
   const { data } = await api.get<{ items?: DocumentNode[] }>(`/api/v1/library/${libraryId}/document/nodes`, {
-    params: { parent },
+    params: { parent }, signal,
   });
   return data?.items ?? [];
 }
 
-export async function fetchDocumentFacets(libraryId: number, kind: string): Promise<DocumentFacet[]> {
+export async function fetchDocumentFacets(libraryId: number, kind: string, signal?: AbortSignal): Promise<DocumentFacet[]> {
   const { data } = await api.get<{ items?: DocumentFacet[] }>(`/api/v1/library/${libraryId}/document/facets`, {
-    params: { kind },
+    params: { kind }, signal,
   });
   return data?.items ?? [];
 }
 
-export async function fetchRecentDocuments(libraryId?: number): Promise<DocumentItem[]> {
+export async function fetchRecentDocuments(libraryId?: number, signal?: AbortSignal): Promise<DocumentItem[]> {
   const { data } = await api.get<{ items?: DocumentItem[] }>(`/api/v1/library/${libraryId ?? 0}/documents/recent`, {
-    params: libraryId ? { library_id: libraryId } : undefined,
+    params: libraryId ? { library_id: libraryId } : undefined, signal,
   });
   return data?.items ?? [];
 }
@@ -662,6 +673,28 @@ export function isOfficeDocumentFormat(format?: string): boolean {
   return OFFICE_DOCUMENT_FORMATS.has((format || "").trim().toLowerCase());
 }
 
+export type DocumentTagUpdateMode = "add" | "remove" | "replace";
+
+export type DocumentTagBatchResult = {
+  updated: number;
+  items: Array<{ media_id: number; tags: string[] }>;
+  facet_deltas: Array<{ tag: string; delta: number }>;
+};
+
+export async function batchUpdateDocumentTags(
+  mediaIds: number[],
+  mode: DocumentTagUpdateMode,
+  tags: string[],
+  signal?: AbortSignal,
+): Promise<DocumentTagBatchResult> {
+  const { data } = await api.patch<DocumentTagBatchResult>(
+    "/api/v1/documents/tags",
+    { media_ids: mediaIds, mode, tags },
+    { signal },
+  );
+  return data;
+}
+
 export async function batchDownloadDocuments(mediaIds: number[]): Promise<Blob> {
   const { data } = await api.post("/api/v1/documents/download", { media_ids: mediaIds }, { responseType: "blob" });
   return data as Blob;
@@ -689,18 +722,18 @@ export type PhotoPerson = {
   cover_face_id?: number;
 };
 
-export async function fetchPhotoCategories(libraryId: number): Promise<PhotoCategory[]> {
-  const { data } = await api.get<{ items?: PhotoCategory[] }>(`/api/v1/library/${libraryId}/photo/categories`);
+export async function fetchPhotoCategories(libraryId: number, signal?: AbortSignal): Promise<PhotoCategory[]> {
+  const { data } = await api.get<{ items?: PhotoCategory[] }>(`/api/v1/library/${libraryId}/photo/categories`, { signal });
   return data?.items ?? [];
 }
 
-export async function fetchPhotoPlaces(libraryId: number): Promise<PhotoPlace[]> {
-  const { data } = await api.get<{ items?: PhotoPlace[] }>(`/api/v1/library/${libraryId}/photo/places`);
+export async function fetchPhotoPlaces(libraryId: number, signal?: AbortSignal): Promise<PhotoPlace[]> {
+  const { data } = await api.get<{ items?: PhotoPlace[] }>(`/api/v1/library/${libraryId}/photo/places`, { signal });
   return data?.items ?? [];
 }
 
-export async function fetchPhotoPersons(libraryId: number): Promise<PhotoPerson[]> {
-  const { data } = await api.get<{ items?: PhotoPerson[] }>(`/api/v1/library/${libraryId}/photo/persons`);
+export async function fetchPhotoPersons(libraryId: number, signal?: AbortSignal): Promise<PhotoPerson[]> {
+  const { data } = await api.get<{ items?: PhotoPerson[] }>(`/api/v1/library/${libraryId}/photo/persons`, { signal });
   return data?.items ?? [];
 }
 
@@ -716,6 +749,21 @@ export async function updatePhotoPersonName(
   return data ?? { ok: false, name };
 }
 
+export class PhotoFaceThumbnailPendingError extends Error {
+  constructor() { super("face thumbnail not ready"); this.name = "PhotoFaceThumbnailPendingError"; }
+}
+
+export async function fetchPhotoFaceThumbnail(faceId: number, signal?: AbortSignal): Promise<Blob> {
+  try {
+    const { data } = await api.get<Blob>(`/api/v1/photo/face/${faceId}/thumb.jpg`, { responseType: "blob", signal });
+    return data;
+  } catch (error) {
+    if (axios.isAxiosError(error) && error.response?.status === 404 && String(error.response.headers?.["x-knox-thumbnail-pending"] ?? "") === "1") {
+      throw new PhotoFaceThumbnailPendingError();
+    }
+    throw error;
+  }
+}
 export function photoFaceThumbSrc(faceId: number): string {
   const token = useAuthStore.getState().token;
   const params = new URLSearchParams({ v: "2" });
@@ -730,7 +778,7 @@ export async function backfillPhotoFaces(libraryId: number): Promise<{ ok: boole
   return data ?? { ok: false, queued: 0 };
 }
 
-export async function fetchPhotoFaceProgress(libraryId: number): Promise<{
+export async function fetchPhotoFaceProgress(libraryId: number, signal?: AbortSignal): Promise<{
   total: number;
   processed: number;
   detected: number;
@@ -745,7 +793,7 @@ export async function fetchPhotoFaceProgress(libraryId: number): Promise<{
     pending: number;
     failed?: number;
     percent: number;
-  }>(`/api/v1/library/${libraryId}/photo/faces/progress`);
+   }>(`/api/v1/library/${libraryId}/photo/faces/progress`, { signal });
   return {
     total: data?.total ?? 0,
     processed: data?.processed ?? 0,
@@ -763,7 +811,7 @@ export async function backfillPhotoLocations(libraryId: number): Promise<{ ok: b
   return data ?? { ok: false, queued: 0 };
 }
 
-export async function fetchPhotoLocationProgress(libraryId: number): Promise<{
+export async function fetchPhotoLocationProgress(libraryId: number, signal?: AbortSignal): Promise<{
   total: number;
   located: number;
   pending: number;
@@ -771,11 +819,12 @@ export async function fetchPhotoLocationProgress(libraryId: number): Promise<{
 }> {
   const { data } = await api.get<{ total: number; located: number; pending: number; percent: number }>(
     `/api/v1/library/${libraryId}/photo/locations/progress`,
+    { signal },
   );
   return data ?? { total: 0, located: 0, pending: 0, percent: 0 };
 }
 
-export async function fetchPhotoClassifyProgress(libraryId: number): Promise<{
+export async function fetchPhotoClassifyProgress(libraryId: number, signal?: AbortSignal): Promise<{
   total: number;
   classified: number;
   pending: number;
@@ -783,6 +832,7 @@ export async function fetchPhotoClassifyProgress(libraryId: number): Promise<{
 }> {
   const { data } = await api.get<{ total: number; classified: number; pending: number; percent: number }>(
     `/api/v1/library/${libraryId}/photo/classify/progress`,
+    { signal },
   );
   return data ?? { total: 0, classified: 0, pending: 0, percent: 0 };
 }
@@ -1078,23 +1128,23 @@ export async function importMediaCredits(mediaId: number) {
   return data;
 }
 
-export async function fetchLibraryAlbums(libraryId: number) {
-  const { data } = await api.get<{ items?: AlbumSummary[] }>(`/api/v1/library/${libraryId}/albums`);
+export async function fetchLibraryAlbums(libraryId: number, signal?: AbortSignal) {
+  const { data } = await api.get<{ items?: AlbumSummary[] }>(`/api/v1/library/${libraryId}/albums`, { signal });
   return data?.items ?? [];
 }
 
-export async function fetchLibraryArtists(libraryId: number) {
-  const { data } = await api.get<{ items?: ArtistSummary[] }>(`/api/v1/library/${libraryId}/artists`);
+export async function fetchLibraryArtists(libraryId: number, signal?: AbortSignal) {
+  const { data } = await api.get<{ items?: ArtistSummary[] }>(`/api/v1/library/${libraryId}/artists`, { signal });
   return data?.items ?? [];
 }
 
-export async function fetchLibraryGenres(libraryId: number) {
-  const { data } = await api.get<{ items?: GenreSummary[] }>(`/api/v1/library/${libraryId}/genres`);
+export async function fetchLibraryGenres(libraryId: number, signal?: AbortSignal) {
+  const { data } = await api.get<{ items?: GenreSummary[] }>(`/api/v1/library/${libraryId}/genres`, { signal });
   return data?.items ?? [];
 }
 
-export async function fetchLibraryTracks(libraryId: number) {
-  const { data } = await api.get<{ items?: MusicTrackRow[] }>(`/api/v1/library/${libraryId}/tracks`);
+export async function fetchLibraryTracks(libraryId: number, signal?: AbortSignal) {
+  const { data } = await api.get<{ items?: MusicTrackRow[] }>(`/api/v1/library/${libraryId}/tracks`, { signal });
   return data?.items ?? [];
 }
 
@@ -1204,8 +1254,8 @@ export function seriesPosterSrc(s: Pick<SeriesSummary, "id" | "poster_url" | "po
   return u ? withAccessToken(u) : "";
 }
 
-export async function fetchLibrarySeries(libraryId: number) {
-  const { data } = await api.get<{ items?: SeriesSummary[] }>(`/api/v1/library/${libraryId}/series`);
+export async function fetchLibrarySeries(libraryId: number, signal?: AbortSignal) {
+  const { data } = await api.get<{ items?: SeriesSummary[] }>(`/api/v1/library/${libraryId}/series`, { signal });
   return data?.items ?? [];
 }
 
@@ -1304,7 +1354,7 @@ export async function fetchMediaStats(mediaId: number) {
   return data;
 }
 
-/** 继续观看：同一 media 只保留 update_at 最新的一条（与 API 去重一致，前端兜底）。 */
+/** Continue watching: keep only the latest update_at row for each media item. */
 export function dedupeUserHistory(items: HistoryItem[]): HistoryItem[] {
   const out: HistoryItem[] = [];
   const seenMedia = new Set<number>();
@@ -1322,7 +1372,7 @@ export function dedupeUserHistory(items: HistoryItem[]): HistoryItem[] {
   return out;
 }
 
-export async function fetchUserHistory(limit = 24, opts?: { libraryTypes?: readonly string[] }) {
+export async function fetchUserHistory(limit = 24, opts?: { libraryTypes?: readonly string[] }, signal?: AbortSignal) {
   const params: Record<string, string | number> = { limit };
   const types = opts?.libraryTypes?.map((t) => t.trim()).filter(Boolean);
   if (types?.length) {
@@ -1330,6 +1380,7 @@ export async function fetchUserHistory(limit = 24, opts?: { libraryTypes?: reado
   }
   const { data } = await api.get<{ items?: HistoryItem[] }>("/api/v1/user/history", {
     params,
+    signal,
   });
   return dedupeUserHistory(data?.items ?? []);
 }
@@ -1742,11 +1793,14 @@ export async function logout() {
   await api.post("/api/v1/user/logout");
 }
 
-/** Optional `session_id` is the JIT HLS session (e.g. `jit-…`) for correlating access logs after idle recovery. */
+/** Legacy `session_id` remains the JIT HLS ID until Player adopts evidence payloads in Task 7. */
 export type PlaybackLogPayload = {
   position?: number;
   completed?: number;
   session_id?: string;
+  event?: PlaybackEvidencePayload["event"];
+  sequence?: number;
+  jit_session_id?: string;
 };
 
 export async function reportPlaybackStart(mediaId: number, payload?: PlaybackLogPayload) {
@@ -1757,13 +1811,60 @@ export async function reportPlaybackEnd(mediaId: number, payload?: PlaybackLogPa
   await api.post(`/api/v1/media/${mediaId}/playback/end`, payload ?? {});
 }
 
-export async function savePlaybackProgress(
+const PLAYBACK_KEEPALIVE_MAX_BYTES = 16 * 1024;
+
+/** Authenticated unload-safe activity shutdown. Deliberately avoids query-token exposure. */
+export async function reportPlaybackEndKeepalive(
   mediaId: number,
-  payload: { position: number; completed?: number; session_id?: string }
-) {
-  await api.post(`/api/v1/media/${mediaId}/progress`, payload);
+  payload: PlaybackLogPayload = {},
+): Promise<boolean> {
+  const body = JSON.stringify(payload);
+  if (new TextEncoder().encode(body).byteLength > PLAYBACK_KEEPALIVE_MAX_BYTES) return false;
+  const token = useAuthStore.getState().token;
+  const response = await fetch(`/api/v1/media/${mediaId}/playback/end`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body,
+    credentials: "same-origin",
+    keepalive: true,
+  });
+  return response.ok;
 }
 
+export type PlaybackProgressPayload =
+  | PlaybackEvidencePayload
+  | { position: number; completed?: number; session_id?: string; jit_session_id?: string };
+
+export async function savePlaybackProgress(
+  mediaId: number,
+  payload: PlaybackProgressPayload,
+): Promise<PlaybackProgressResult> {
+  const { data } = await api.post<PlaybackProgressResult>(`/api/v1/media/${mediaId}/progress`, payload);
+  return data;
+}
+
+export async function savePlaybackProgressKeepalive(
+  mediaId: number,
+  payload: PlaybackEvidencePayload,
+): Promise<boolean> {
+  const body = JSON.stringify(payload);
+  if (new TextEncoder().encode(body).byteLength > PLAYBACK_KEEPALIVE_MAX_BYTES) return false;
+  const token = useAuthStore.getState().token;
+  const response = await fetch(`/api/v1/media/${mediaId}/progress`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body,
+    credentials: "same-origin",
+    keepalive: true,
+  });
+  return response.ok;
+}
 export async function removePlayProgress(mediaId: number) {
   await api.delete(`/api/v1/media/${mediaId}/progress`);
 }
@@ -1954,10 +2055,56 @@ export type AdminOverview = {
     message: string;
     created_at: string;
   }>;
+  post_ingest_queue: {
+    by_status: Record<string, number>;
+    by_type: Record<string, Record<string, number>>;
+    oldest_waiting_seconds: number;
+    expired_lease_count: number;
+  };
+  running_post_ingest_tasks: Array<{
+    id: number;
+    media_id: number;
+    task_type: string;
+    type: string;
+    scan_task_id: number | null;
+    attempts: number;
+    attempt: number;
+    max_attempts: number;
+    run_seconds: number;
+    started_at: string;
+    lease_owner: string;
+    lease_until: string;
+    lease_expires: string;
+  }>;
+  scan_leases: Array<{
+    library_id: number;
+    scan_task_id: number;
+    owner_id: string;
+    lease_until: string;
+    expired: boolean;
+  }>;
+  resource_budget: {
+    global_limit: number;
+    global_used: number;
+    poster_limit: number;
+    poster_used: number;
+    preview_limit: number;
+    preview_used: number;
+  };
+  sqlite_metrics: {
+    scope: string;
+    persistent: false;
+    busy_retries: number;
+    busy_exhausted: number;
+    progress_batches: number;
+    log_batches: number;
+    log_failures: number;
+    dropped_logs: number;
+  };
 };
 
-export async function fetchAdminOverview() {
-  const { data } = await api.get<AdminOverview>("/api/v1/admin/overview");
+export async function fetchAdminOverview(signal?: AbortSignal) {
+  const { data } = await api.get<AdminOverview>("/api/v1/admin/overview", { signal, timeout: 3000 });
   return data;
 }
 
@@ -2046,7 +2193,7 @@ export async function fetchLyricTasks(limit = 200) {
   return data.items ?? [];
 }
 
-/** Enqueue ASR lyric recognition for an audio track (VTT → sidecar LRC). */
+/** Enqueue ASR lyric recognition for an audio track (VTT 閳?sidecar LRC). */
 export async function enqueueLyricRecognition(mediaId: number) {
   await api.post(`/api/v1/media/${mediaId}/lyrics/recognize`);
 }
@@ -2598,7 +2745,7 @@ export async function fetchSystemOptions() {
 export async function saveSystemOptions(payload: SystemOptions) {
   const { data } = await api.put<{ ok: boolean; options?: SystemOptions }>("/api/v1/admin/system-options", payload);
   if (!data?.options) {
-    throw new Error("保存响应无效");
+    throw new Error("淇濆瓨鍝嶅簲鏃犳晥");
   }
   return data.options;
 }

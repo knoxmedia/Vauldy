@@ -1,130 +1,201 @@
 package handler
 
 import (
+	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"knox-media/api/middleware"
+	"knox-media/internal/mediastore"
 	"knox-media/internal/storage"
 )
 
 type libraryBody struct {
-	Name                  string   `json:"name" binding:"required"`
-	Type                  string   `json:"type" binding:"required"`
-	Path                  string   `json:"path"`
-	Folders               []string `json:"folders"`
-	AutoScan              *int     `json:"auto_scan"`
-	Enabled               *int     `json:"enabled"`
-	RealtimeMonitor       *int     `json:"realtime_monitor"`
-	PreviewExtract        *int     `json:"preview_extract"`
-	DRMEnabled            *int     `json:"drm_enabled"`
-	EncryptionMode        string   `json:"encryption_mode"`
-	CleanupLocalSource    *int     `json:"cleanup_local_source_after_package"`
-	MetadataProviders     []string `json:"metadata_providers"`
-	ImageProviders        []string `json:"image_providers"`
-	MetadataRefreshPolicy string   `json:"metadata_refresh_policy"`
-	Scraper               string   `json:"scraper"`
-	JITPrepareOnIngest                 *int `json:"jit_prepare_on_ingest"`
-	EncryptedAssetsEnabled             *int   `json:"encrypted_assets_enabled"`
-	EncryptedAssetsCleanupPlaintext    *int   `json:"encrypted_assets_cleanup_plaintext"`
-	EncryptedAssetsDirMode             string `json:"encrypted_assets_dir_mode"`
-	EncryptedAssetsCustomDir           string `json:"encrypted_assets_custom_dir"`
-	ScanExcludePatterns                string `json:"scan_exclude_patterns"`
+	Name                            string   `json:"name" binding:"required"`
+	Type                            string   `json:"type" binding:"required"`
+	Path                            string   `json:"path"`
+	Folders                         []string `json:"folders"`
+	AutoScan                        *int     `json:"auto_scan"`
+	Enabled                         *int     `json:"enabled"`
+	RealtimeMonitor                 *int     `json:"realtime_monitor"`
+	PreviewExtract                  *int     `json:"preview_extract"`
+	DRMEnabled                      *int     `json:"drm_enabled"`
+	EncryptionMode                  string   `json:"encryption_mode"`
+	CleanupLocalSource              *int     `json:"cleanup_local_source_after_package"`
+	MetadataProviders               []string `json:"metadata_providers"`
+	ImageProviders                  []string `json:"image_providers"`
+	MetadataRefreshPolicy           string   `json:"metadata_refresh_policy"`
+	Scraper                         string   `json:"scraper"`
+	JITPrepareOnIngest              *int     `json:"jit_prepare_on_ingest"`
+	EncryptedAssetsEnabled          *int     `json:"encrypted_assets_enabled"`
+	EncryptedAssetsCleanupPlaintext *int     `json:"encrypted_assets_cleanup_plaintext"`
+	EncryptedAssetsDirMode          string   `json:"encrypted_assets_dir_mode"`
+	EncryptedAssetsCustomDir        string   `json:"encrypted_assets_custom_dir"`
+	ScanExcludePatterns             string   `json:"scan_exclude_patterns"`
+}
+
+type libraryListRow struct {
+	id, auto, enabled, realtime, preview, drmEnabled, cleanupLocal, jitIngest, encAssets, encCleanupPlain, mediaCount                                      int
+	scanTaskID, scanProcessed, scanTotal, scanAdded                                                                                                        int64
+	name, typ, path, encryptionMode, encDirMode, encCustomDir, metadataProviders, imageProviders, refreshPolicy, scraper, created, scanStatus, scanStarted string
 }
 
 func (h *Handler) ListLibraries(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+	defer cancel()
 	widevineEnabled, powerdrmEnabled := h.drmCapabilities()
 	var profile userPermissionProfile
-	isAdmin := middleware.IsAdmin(c)
-	if !middleware.IsAPIClient(c) {
-		uid := middleware.UserID(c)
-		if uid > 0 {
-			p, err := h.loadUserPermissionProfile(uid)
-			if err == nil {
-				profile = p
+	isAdmin, isAPIClient := middleware.IsAdmin(c), middleware.IsAPIClient(c)
+	tx, err := h.App.DB.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer tx.Rollback()
+	if !isAPIClient {
+		if uid := middleware.UserID(c); uid > 0 {
+			profile, err = loadUserPermissionProfileFrom(ctx, tx, uid)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
 			}
 		}
 	}
-	folderMap, err := libraryFoldersByID(h.App.DB)
+	query := `SELECT l.id,l.name,l.type,l.path,l.auto_scan,l.enabled,l.realtime_monitor,l.preview_extract,l.drm_enabled,COALESCE(l.encryption_mode,'drm'),l.cleanup_local_source_after_package,l.jit_prepare_on_ingest,COALESCE(l.encrypted_assets_enabled,0),COALESCE(l.encrypted_assets_cleanup_plaintext,0),COALESCE(l.encrypted_assets_dir_mode,'library'),COALESCE(l.encrypted_assets_custom_dir,''),l.metadata_providers,l.image_providers,l.metadata_refresh_policy,l.scraper,l.created_at,COALESCE(mc.media_count,0),COALESCE(latest_scan.id,0),COALESCE(latest_scan.status,''),COALESCE(latest_scan.processed_count,0),COALESCE(latest_scan.total_count,0),COALESCE(latest_scan.added_count,0),COALESCE(latest_scan.started_at,'') FROM library l LEFT JOIN (SELECT library_id,COUNT(*) AS media_count FROM media GROUP BY library_id) mc ON mc.library_id=l.id LEFT JOIN (SELECT st.* FROM scan_task st JOIN (SELECT library_id,MAX(id) AS max_id FROM scan_task GROUP BY library_id) latest ON latest.max_id=st.id) latest_scan ON latest_scan.library_id=l.id`
+	args := []any{}
+	if strings.EqualFold(profile.LibraryScope, "selected") {
+		ids := make([]int64, 0, len(profile.AllowedLibraryIDs))
+		for id := range profile.AllowedLibraryIDs {
+			ids = append(ids, id)
+		}
+		if len(ids) == 0 {
+			query += " WHERE 1=0"
+		} else {
+			query += " WHERE l.id IN (" + sqlPlaceholders(len(ids)) + ")"
+			for _, id := range ids {
+				args = append(args, id)
+			}
+		}
+	}
+	query += " ORDER BY l.id"
+	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	rows, err := h.App.DB.Query(`
-		SELECT l.id, l.name, l.type, l.path, l.auto_scan, l.enabled, l.realtime_monitor, l.preview_extract, l.drm_enabled, COALESCE(l.encryption_mode,'drm'), l.cleanup_local_source_after_package, l.jit_prepare_on_ingest, COALESCE(l.encrypted_assets_enabled,0), COALESCE(l.encrypted_assets_cleanup_plaintext,0), COALESCE(l.encrypted_assets_dir_mode,'library'), COALESCE(l.encrypted_assets_custom_dir,''), l.metadata_providers, l.image_providers, l.metadata_refresh_policy, l.scraper, l.created_at,
-			(SELECT COUNT(1) FROM media m WHERE m.library_id = l.id) AS media_count,
-			(SELECT id FROM scan_task st WHERE st.library_id = l.id ORDER BY st.id DESC LIMIT 1) AS scan_task_id,
-			(SELECT COALESCE(status,'') FROM scan_task st WHERE st.library_id = l.id ORDER BY st.id DESC LIMIT 1) AS scan_status,
-			(SELECT COALESCE(processed_count,0) FROM scan_task st WHERE st.library_id = l.id ORDER BY st.id DESC LIMIT 1) AS scan_processed_count,
-			(SELECT COALESCE(total_count,0) FROM scan_task st WHERE st.library_id = l.id ORDER BY st.id DESC LIMIT 1) AS scan_total_count,
-			(SELECT COALESCE(added_count,0) FROM scan_task st WHERE st.library_id = l.id ORDER BY st.id DESC LIMIT 1) AS scan_added_count,
-			(SELECT COALESCE(started_at,'') FROM scan_task st WHERE st.library_id = l.id ORDER BY st.id DESC LIMIT 1) AS scan_started_at
-		FROM library l ORDER BY l.id`)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	defer rows.Close()
-	var list []gin.H
+	visible := make([]libraryListRow, 0)
 	for rows.Next() {
-		var id, auto, enabled, realtime, preview, drmEnabled, cleanupLocal, jitIngest, encAssets, encCleanupPlain, cnt int
-		var name, typ, path, encryptionMode, encDirMode, encCustomDir, metadataProviders, imageProviders, refreshPolicy, scraper, created string
-		var scanTaskID, scanProcessed, scanTotal, scanAdded sql.NullInt64
-		var scanStatus, scanStarted sql.NullString
-		if err := rows.Scan(&id, &name, &typ, &path, &auto, &enabled, &realtime, &preview, &drmEnabled, &encryptionMode, &cleanupLocal, &jitIngest, &encAssets, &encCleanupPlain, &encDirMode, &encCustomDir, &metadataProviders, &imageProviders, &refreshPolicy, &scraper, &created, &cnt, &scanTaskID, &scanStatus, &scanProcessed, &scanTotal, &scanAdded, &scanStarted); err != nil {
+		var r libraryListRow
+		if err := rows.Scan(&r.id, &r.name, &r.typ, &r.path, &r.auto, &r.enabled, &r.realtime, &r.preview, &r.drmEnabled, &r.encryptionMode, &r.cleanupLocal, &r.jitIngest, &r.encAssets, &r.encCleanupPlain, &r.encDirMode, &r.encCustomDir, &r.metadataProviders, &r.imageProviders, &r.refreshPolicy, &r.scraper, &r.created, &r.mediaCount, &r.scanTaskID, &r.scanStatus, &r.scanProcessed, &r.scanTotal, &r.scanAdded, &r.scanStarted); err != nil {
+			rows.Close()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if !isAdmin && !isAPIClient && r.enabled != 1 {
 			continue
 		}
-		folders := foldersForLibrary(folderMap, int64(id), path)
-		if strings.EqualFold(profile.LibraryScope, "selected") {
-			if _, ok := profile.AllowedLibraryIDs[int64(id)]; !ok {
-				continue
-			}
-		}
-		if !isAdmin && !middleware.IsAPIClient(c) && enabled != 1 {
-			continue
-		}
-		item := gin.H{
-			"id": id, "name": name, "type": typ, "path": path,
-			"folders":   folders,
-			"auto_scan": auto, "enabled": enabled, "realtime_monitor": realtime, "preview_extract": preview, "drm_enabled": drmEnabled, "encryption_mode": h.normalizeEncryptionMode(encryptionMode), "cleanup_local_source_after_package": cleanupLocal, "jit_prepare_on_ingest": jitIngest,
-			"encrypted_assets_enabled": encAssets, "encrypted_assets_cleanup_plaintext": encCleanupPlain,
-			"encrypted_assets_dir_mode": storage.NormalizeEncDirMode(encDirMode), "encrypted_assets_custom_dir": encCustomDir,
-			"metadata_providers": splitCSVList(metadataProviders), "image_providers": splitCSVList(imageProviders), "metadata_refresh_policy": refreshPolicy,
-			"scraper": scraper, "created_at": created,
-			"media_count":          cnt,
-			"scan_task_id":         scanTaskID.Int64,
-			"scan_status":          scanStatus.String,
-			"scan_processed_count": scanProcessed.Int64,
-			"scan_total_count":     scanTotal.Int64,
-			"scan_added_count":     scanAdded.Int64,
-			"scan_started_at":      scanStarted.String,
-		}
-		if previewURL := h.libraryPreviewPublicURL(int64(id)); previewURL != "" {
-			item["preview_url"] = previewURL
-		} else if cnt > 0 {
-			h.scheduleLibraryPreviewRefresh(int64(id))
-		}
-		list = append(list, item)
+		visible = append(visible, r)
+	}
+	if err := rows.Close(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
 	}
 	if err := rows.Err(); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"items": list,
-		"drm_capabilities": gin.H{
-			"widevine_enabled": widevineEnabled,
-			"powerdrm_enabled": powerdrmEnabled,
-		},
-		"encrypted_assets_config": gin.H{
-			"data_dot_encrypted_dir": h.dataEncryptedDotDir(),
-		},
-	})
+	ids := make([]int64, len(visible))
+	for i := range visible {
+		ids[i] = int64(visible[i].id)
+	}
+	folderMap, err := libraryFoldersForIDsContext(ctx, tx, ids)
+	if err == nil {
+		err = applyFolderScopedLibraryCounts(ctx, tx, visible, profile, folderMap)
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	list := make([]gin.H, 0, len(visible))
+	for _, r := range visible {
+		item := gin.H{"id": r.id, "name": r.name, "type": r.typ, "path": r.path, "folders": responseFoldersForLibrary(profile, folderMap, int64(r.id), r.path), "auto_scan": r.auto, "enabled": r.enabled, "realtime_monitor": r.realtime, "preview_extract": r.preview, "drm_enabled": r.drmEnabled, "encryption_mode": h.normalizeEncryptionMode(r.encryptionMode), "cleanup_local_source_after_package": r.cleanupLocal, "jit_prepare_on_ingest": r.jitIngest, "encrypted_assets_enabled": r.encAssets, "encrypted_assets_cleanup_plaintext": r.encCleanupPlain, "encrypted_assets_dir_mode": storage.NormalizeEncDirMode(r.encDirMode), "encrypted_assets_custom_dir": r.encCustomDir, "metadata_providers": splitCSVList(r.metadataProviders), "image_providers": splitCSVList(r.imageProviders), "metadata_refresh_policy": r.refreshPolicy, "scraper": r.scraper, "created_at": r.created, "media_count": r.mediaCount, "scan_task_id": r.scanTaskID, "scan_status": r.scanStatus, "scan_processed_count": r.scanProcessed, "scan_total_count": r.scanTotal, "scan_added_count": r.scanAdded, "scan_started_at": r.scanStarted}
+		if u := h.libraryPreviewPublicURL(int64(r.id)); u != "" {
+			item["preview_url"] = u
+		} else if r.mediaCount > 0 {
+			h.scheduleLibraryPreviewIfMissing(int64(r.id))
+		}
+		list = append(list, item)
+	}
+	c.JSON(http.StatusOK, gin.H{"items": list, "drm_capabilities": gin.H{"widevine_enabled": widevineEnabled, "powerdrm_enabled": powerdrmEnabled}, "encrypted_assets_config": gin.H{"data_dot_encrypted_dir": h.dataEncryptedDotDir()}})
+}
+
+func sqlPlaceholders(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
+}
+
+func responseFoldersForLibrary(profile userPermissionProfile, folderMap map[int64][]string, libraryID int64, fallback string) []string {
+	if allowed := profile.AllowedLibraryFolders[libraryID]; len(allowed) > 0 {
+		out := make([]string, 0, len(allowed))
+		for _, p := range allowed {
+			if p = strings.TrimSpace(p); p != "" {
+				out = append(out, p)
+			}
+		}
+		return out
+	}
+	return foldersForLibrary(folderMap, libraryID, fallback)
+}
+func applyFolderScopedLibraryCounts(ctx context.Context, q contextQueryer, visible []libraryListRow, profile userPermissionProfile, folderMap map[int64][]string) error {
+	ids := make([]int64, 0)
+	index := map[int64]int{}
+	for i := range visible {
+		id := int64(visible[i].id)
+		if len(profile.AllowedLibraryFolders[id]) > 0 {
+			ids = append(ids, id)
+			index[id] = i
+			visible[i].mediaCount = 0
+			folderMap[id] = nil
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	query := `SELECT library_id,file_path FROM media WHERE library_id IN (` + sqlPlaceholders(len(ids)) + `)`
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	rows, err := q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var p string
+		if err := rows.Scan(&id, &p); err != nil {
+			return err
+		}
+		if pathMatchesAnyFolder(p, profile.AllowedLibraryFolders[id]) {
+			visible[index[id]].mediaCount++
+		}
+	}
+	return rows.Err()
 }
 
 func (h *Handler) CreateLibrary(c *gin.Context) {
@@ -297,21 +368,15 @@ func (h *Handler) DeleteLibrary(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
 		return
 	}
-	if _, err := h.App.DB.Exec(`DELETE FROM media WHERE library_id = ?`, id); err != nil {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	defer cancel()
+	cleanup, err := mediastore.DeleteLibraryAndCollect(ctx, h.App.DB, id, h.photoCacheDir())
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	if _, err := h.App.DB.Exec(`DELETE FROM library_folder WHERE library_id = ?`, id); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	if _, err := h.App.DB.Exec(`DELETE FROM library_node WHERE library_id = ?`, id); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	if _, err := h.App.DB.Exec(`DELETE FROM library WHERE id = ?`, id); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
+	if err = mediastore.CleanupFiles(ctx, h.App.DB, cleanup, h.mediaCleanupRoots()); err != nil {
+		log.Printf("delete library cleanup library=%d: %v", id, err)
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
@@ -382,27 +447,49 @@ func defaultCSV(in []string, fallback []string) []string {
 
 // libraryFoldersByID returns all library_folder paths in one query (avoids N+1 during list).
 func libraryFoldersByID(db *sql.DB) (map[int64][]string, error) {
-	rows, err := db.Query(`SELECT library_id, path FROM library_folder ORDER BY library_id, sort_order, id`)
+	return libraryFoldersByIDContext(context.Background(), db)
+}
+
+type contextQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func libraryFoldersByIDContext(ctx context.Context, db *sql.DB) (map[int64][]string, error) {
+	return libraryFoldersForIDsContext(ctx, db, nil)
+}
+func libraryFoldersForIDsContext(ctx context.Context, db contextQueryer, ids []int64) (map[int64][]string, error) {
+	query := `SELECT library_id,path FROM library_folder`
+	args := []any{}
+	if ids != nil {
+		if len(ids) == 0 {
+			return map[int64][]string{}, nil
+		}
+		query += ` WHERE library_id IN (` + sqlPlaceholders(len(ids)) + `)`
+		for _, id := range ids {
+			args = append(args, id)
+		}
+	}
+	query += ` ORDER BY library_id,sort_order,id`
+	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := make(map[int64][]string)
 	for rows.Next() {
-		var libID int64
+		var id int64
 		var p string
-		if err := rows.Scan(&libID, &p); err != nil {
-			continue
+		if err := rows.Scan(&id, &p); err != nil {
+			return nil, err
 		}
 		p = strings.TrimSpace(p)
 		if p == "" {
-			continue
+			return nil, fmt.Errorf("library folder row has empty path for library %d", id)
 		}
-		out[libID] = append(out[libID], p)
+		out[id] = append(out[id], p)
 	}
 	return out, rows.Err()
 }
-
 func foldersForLibrary(byID map[int64][]string, libraryID int64, fallbackPath string) []string {
 	if fs := byID[libraryID]; len(fs) > 0 {
 		return fs

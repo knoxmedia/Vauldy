@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"knox-media/internal/processmetrics"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -249,8 +249,8 @@ func (s *Session) runTranscodeOnce(ctx context.Context, cfg TranscodeConfig, ffm
 	if ffmpeg == "" {
 		ffmpeg = "ffmpeg"
 	}
-	cmd := exec.CommandContext(ctx, ffmpeg, args...)
-	s.SetCmd(cmd)
+	cmd := processmetrics.NewFFmpegCommandContext(ctx, ffmpeg, args...)
+	s.SetCmd(cmd.Cmd)
 	if stdin != nil {
 		cmd.Stdin = stdin
 	}

@@ -15,6 +15,7 @@ import (
 	"knox-media/internal/coreiface"
 	"knox-media/internal/mediastore"
 	"knox-media/internal/musicstore"
+	"knox-media/internal/photoface"
 	"knox-media/internal/tvstore"
 )
 
@@ -24,11 +25,12 @@ var sidecarDeleteExts = map[string]struct{}{
 }
 
 type mediaDeleteInfo struct {
-	ID         int64
-	LibraryID  int64
-	FileID     string
-	FilePath   string
-	AbsMain    string
+	ID        int64
+	LibraryID int64
+	FileID    string
+	FilePath  string
+	AbsMain   string
+	FaceIDs   []int64
 }
 
 func (h *Handler) loadMediaDeleteInfo(id int64) (mediaDeleteInfo, error) {
@@ -44,6 +46,15 @@ func (h *Handler) loadMediaDeleteInfo(id int64) (mediaDeleteInfo, error) {
 	info.FileID = strings.TrimSpace(fileID.String)
 	info.FilePath = strings.TrimSpace(filePath.String)
 	info.AbsMain = h.resolveMediaAbsolutePath(info.LibraryID, info.FilePath)
+	if rows, err := h.App.DB.Query(`SELECT id FROM photo_face WHERE media_id = ?`, id); err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var faceID int64
+			if rows.Scan(&faceID) == nil {
+				info.FaceIDs = append(info.FaceIDs, faceID)
+			}
+		}
+	}
 	return info, nil
 }
 
@@ -198,8 +209,8 @@ func (h *Handler) collectMediaDeletionDirs(info mediaDeleteInfo) []string {
 	return dirs
 }
 
-func (h *Handler) deleteMediaRecords(id int64, fileID string) error {
-	return mediastore.DeleteCatalog(h.App.DB, id, fileID)
+func (h *Handler) deleteMediaRecords(ctx context.Context, info mediaDeleteInfo) (mediastore.CleanupInfo, error) {
+	return mediastore.DeleteCatalogAndCollect(ctx, h.App.DB, info.ID, info.FileID, h.photoCacheDir())
 }
 
 func (h *Handler) purgeMediaFiles(info mediaDeleteInfo) {
@@ -211,6 +222,9 @@ func (h *Handler) purgeMediaFiles(info mediaDeleteInfo) {
 	}
 	for _, d := range h.collectMediaDeletionDirs(info) {
 		_ = os.RemoveAll(d)
+	}
+	for _, faceID := range info.FaceIDs {
+		_ = os.Remove(photoface.ExpectedFaceThumbnailPath(h.photoCacheDir(), faceID))
 	}
 }
 
@@ -253,10 +267,12 @@ func (h *Handler) DeleteMedia(c *gin.Context) {
 	if coreiface.PretranscodeMod != nil && info.FileID != "" {
 		_ = coreiface.PretranscodeMod.OnMediaDeleted(c.Request.Context(), info.ID, []string{info.FileID})
 	}
-	if err := h.deleteMediaRecords(info.ID, info.FileID); err != nil {
+	cleanup, err := h.deleteMediaRecords(c.Request.Context(), info)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	_ = mediastore.CleanupFiles(c.Request.Context(), h.App.DB, cleanup, h.mediaCleanupRoots())
 	h.purgeMediaFiles(info)
 	h.scheduleLibraryPreviewRefresh(libraryID)
 	if libraryID > 0 {

@@ -29,10 +29,10 @@ func (h *Handler) DocumentPreviewInfo(c *gin.Context) {
 	}
 	office := doctrans.IsOfficeDocument(path, format)
 	resp := gin.H{
-		"id":              id,
-		"format":          format,
-		"needs_preview":   office,
-		"preview_ready":   false,
+		"id":                 id,
+		"format":             format,
+		"needs_preview":      office,
+		"preview_ready":      false,
 		"conversion_enabled": h.App.Config.DocTransEnabled(),
 	}
 	if !office {

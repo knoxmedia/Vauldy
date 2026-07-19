@@ -44,10 +44,10 @@ func TestWebhookDeliverSuccess(t *testing.T) {
 	db := newTestDB(t)
 	svc := &WebhookService{DB: db}
 	var received int32
-	var gotSig string
+	signatures := make(chan string, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&received, 1)
-		gotSig = r.Header.Get("X-Knox-Signature")
+		signatures <- r.Header.Get("X-Knox-Signature")
 		body, _ := io.ReadAll(r.Body)
 		_ = body
 		w.WriteHeader(200)
@@ -73,8 +73,13 @@ func TestWebhookDeliverSuccess(t *testing.T) {
 	if atomic.LoadInt32(&received) == 0 {
 		t.Fatalf("webhook was not delivered")
 	}
-	if gotSig == "" {
-		t.Errorf("X-Knox-Signature header missing")
+	select {
+	case gotSig := <-signatures:
+		if gotSig == "" {
+			t.Errorf("X-Knox-Signature header missing")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("signature was not received")
 	}
 	// Log row should exist.
 	logs, _ := svc.ListLogs(w.ID, 10)
@@ -154,18 +159,24 @@ func TestWebhookEventFiltering(t *testing.T) {
 func TestWebhookPayloadShape(t *testing.T) {
 	db := newTestDB(t)
 	svc := &WebhookService{DB: db}
-	var got map[string]any
+	payloads := make(chan map[string]any, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
+		var got map[string]any
 		_ = json.Unmarshal(body, &got)
+		payloads <- got
 		w.WriteHeader(200)
 	}))
 	defer srv.Close()
 	w := &Webhook{Name: "shape", URL: srv.URL, Events: []string{"task.completed"}, IsEnabled: true}
 	_ = svc.CreateWebhook(w)
 	svc.SendEvent(context.Background(), "task.completed", map[string]any{"event": "task.completed", "task_id": float64(42)})
-	time.Sleep(200 * time.Millisecond)
-	if got["event"] != "task.completed" || got["task_id"] != float64(42) {
-		t.Errorf("payload shape wrong: %+v", got)
+	select {
+	case got := <-payloads:
+		if got["event"] != "task.completed" || got["task_id"] != float64(42) {
+			t.Errorf("payload shape wrong: %+v", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("payload was not received")
 	}
 }

@@ -1,10 +1,15 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
+	"net/url"
+	"strings"
 
 	_ "modernc.org/sqlite"
+
+	"knox-media/internal/relationshipmigration"
 )
 
 const schema = `
@@ -204,6 +209,7 @@ CREATE TABLE IF NOT EXISTS scan_task (
     processed_count INTEGER DEFAULT 0,
     total_count INTEGER DEFAULT 0,
     added_count INTEGER DEFAULT 0,
+    failed_count INTEGER DEFAULT 0,
     error_message TEXT,
     cancelled INTEGER DEFAULT 0,
     started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -212,6 +218,43 @@ CREATE TABLE IF NOT EXISTS scan_task (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (library_id) REFERENCES library(id)
 );
+
+CREATE TABLE IF NOT EXISTS scan_lease (
+    library_id INTEGER PRIMARY KEY,
+    scan_task_id INTEGER NOT NULL,
+    owner_id TEXT NOT NULL,
+    lease_until TIMESTAMP NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (library_id) REFERENCES library(id) ON DELETE CASCADE,
+    FOREIGN KEY (scan_task_id) REFERENCES scan_task(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_scan_lease_until ON scan_lease(lease_until);
+
+CREATE TABLE IF NOT EXISTS post_ingest_task (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    media_id INTEGER NOT NULL,
+    scan_task_id INTEGER,
+    task_type TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'waiting',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 3,
+    available_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    lease_owner TEXT,
+    lease_until TIMESTAMP,
+    last_error TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    started_at TIMESTAMP,
+    finished_at TIMESTAMP,
+    FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE,
+    FOREIGN KEY (scan_task_id) REFERENCES scan_task(id) ON DELETE SET NULL,
+    UNIQUE(media_id, task_type),
+    CHECK (task_type IN ('poster','preview','keyframe','subtitle','atrack','encrypt')),
+    CHECK (status IN ('waiting','running','done','failed','cancelled'))
+);
+CREATE INDEX IF NOT EXISTS idx_post_ingest_claim ON post_ingest_task(status, available_at, lease_until, created_at);
+CREATE INDEX IF NOT EXISTS idx_post_ingest_scan ON post_ingest_task(scan_task_id, status);
 
 CREATE TABLE IF NOT EXISTS user (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -545,6 +588,34 @@ CREATE TABLE IF NOT EXISTS photo_face_task (
 );
 CREATE INDEX IF NOT EXISTS idx_photo_face_task_status ON photo_face_task(library_id, status, updated_at);
 
+CREATE TABLE IF NOT EXISTS photo_face_thumb_repair_state (
+    name TEXT PRIMARY KEY,
+    phase TEXT NOT NULL DEFAULT 'covers',
+    last_person_id INTEGER NOT NULL DEFAULT 0,
+    last_face_id INTEGER NOT NULL DEFAULT 0,
+    completed_at TIMESTAMP,
+    next_audit_at TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS photo_face_thumb_repair_failure (
+    face_id INTEGER PRIMARY KEY,
+    person_id INTEGER,
+    attempts INTEGER NOT NULL DEFAULT 1,
+    next_retry_at TIMESTAMP NOT NULL,
+    last_error TEXT,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (face_id) REFERENCES photo_face(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_photo_face_thumb_repair_failure_due ON photo_face_thumb_repair_failure(next_retry_at, face_id);
+
+CREATE TABLE IF NOT EXISTS media_file_cleanup_task (
+    path TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+    next_retry_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, last_error TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_media_file_cleanup_task_due ON media_file_cleanup_task(status,next_retry_at,path);
+
 CREATE TABLE IF NOT EXISTS atrack_task (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     media_id INTEGER NOT NULL UNIQUE,
@@ -593,7 +664,7 @@ CREATE TABLE IF NOT EXISTS system_options (
 // via RegisterEnterpriseMigration so the community build excludes them.
 type Migration struct {
 	ID string
-	Up  func(db *sql.DB) error
+	Up func(db *sql.DB) error
 }
 
 // enterpriseMigrations is appended to by commercial init() functions
@@ -607,48 +678,150 @@ func RegisterEnterpriseMigration(m Migration) {
 	enterpriseMigrations = append(enterpriseMigrations, m)
 }
 
-func OpenSQLite(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(30000)&_pragma=foreign_keys(ON)")
+func appendSQLitePragmas(path string) string {
+	separator := "?"
+	if strings.Contains(path, "?") {
+		separator = "&"
+	}
+	if strings.HasSuffix(path, "?") || strings.HasSuffix(path, "&") {
+		separator = ""
+	}
+	return path + separator + "_pragma=busy_timeout(30000)&_pragma=foreign_keys(ON)&_pragma=synchronous(NORMAL)"
+}
+
+func isMemorySQLitePath(path string) bool {
+	raw := strings.TrimSpace(path)
+	if strings.EqualFold(raw, ":memory:") {
+		return true
+	}
+	if !strings.HasPrefix(strings.ToLower(raw), "file:") {
+		return false
+	}
+	if strings.EqualFold(strings.SplitN(raw, "?", 2)[0], "file::memory:") {
+		return true
+	}
+	parts := strings.SplitN(raw, "?", 2)
+	if len(parts) != 2 {
+		return false
+	}
+	values, err := url.ParseQuery(parts[1])
+	if err != nil {
+		return false
+	}
+	for key, vals := range values {
+		if strings.EqualFold(key, "mode") && len(vals) > 0 && strings.EqualFold(strings.TrimSpace(vals[0]), "memory") {
+			return true
+		}
+	}
+	return false
+}
+
+func withStartupBusyRetry(ctx context.Context, fn func() error) error {
+	return WithBusyRetry(ctx, nil, fn)
+}
+
+func startupExecContext(ctx context.Context, db *sql.DB, query string, args ...any) (sql.Result, error) {
+	var result sql.Result
+	err := withStartupBusyRetry(ctx, func() error { var err error; result, err = db.ExecContext(ctx, query, args...); return err })
+	return result, err
+}
+
+func ensureColumnContext(ctx context.Context, db *sql.DB, table, column, definition string) error {
+	var exists int
+	query := fmt.Sprintf("SELECT COUNT(*) FROM pragma_table_info(%q) WHERE name=?", table)
+	if err := withStartupBusyRetry(ctx, func() error { return db.QueryRowContext(ctx, query, column).Scan(&exists) }); err != nil {
+		return err
+	}
+	if exists > 0 {
+		return nil
+	}
+	stmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, definition)
+	_, err := startupExecContext(ctx, db, stmt)
+	if err != nil {
+		var nowExists int
+		if checkErr := db.QueryRowContext(ctx, query, column).Scan(&nowExists); checkErr == nil && nowExists > 0 {
+			return nil
+		}
+	}
+	return err
+}
+
+func OpenSQLite(path string) (*sql.DB, error) { return OpenSQLiteContext(context.Background(), path) }
+
+func OpenSQLiteContext(ctx context.Context, path string) (opened *sql.DB, returnErr error) {
+	defer func() {
+		if returnErr != nil && ctx.Err() != nil {
+			if opened != nil {
+				_ = opened.Close()
+			}
+			opened = nil
+			returnErr = ctx.Err()
+		}
+	}()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	bootstrapDSN := appendSQLitePragmas(path)
+	if !isMemorySQLitePath(path) {
+		bootstrapDSN = strings.Replace(bootstrapDSN, "busy_timeout(30000)", "busy_timeout(100)", 1)
+	}
+	db, err := sql.Open("sqlite", bootstrapDSN)
 	if err != nil {
 		return nil, err
 	}
-	// SQLite: avoid unlimited concurrent connections fighting for the DB lock; WAL allows concurrent readers.
-	db.SetMaxOpenConns(25)
-	db.SetMaxIdleConns(5)
+	// A plain :memory: database is private to each physical connection.
+	if isMemorySQLitePath(path) {
+		db.SetMaxOpenConns(1)
+		db.SetMaxIdleConns(1)
+	} else {
+		// WAL allows concurrent readers while bounding lock contention.
+		db.SetMaxOpenConns(8)
+		db.SetMaxIdleConns(4)
+	}
 	db.SetConnMaxLifetime(0)
-	if err := db.Ping(); err != nil {
+	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
 	// WAL greatly reduces "database is locked" under concurrent API + scanner writes.
-	if _, err := db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+	if err := WithBusyRetry(ctx, nil, func() error { _, err := db.ExecContext(ctx, `PRAGMA journal_mode=WAL`); return err }); err != nil {
 		_ = db.Close()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, fmt.Errorf("pragma journal_mode: %w", err)
 	}
-	if _, err := db.Exec(`PRAGMA synchronous=NORMAL`); err != nil {
+
+	if _, err := startupExecContext(ctx, db, schema); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("pragma synchronous: %w", err)
-	}
-	if _, err := db.Exec(schema); err != nil {
-		_ = db.Close()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
-	_, _ = db.Exec(`ALTER TABLE transcode_task ADD COLUMN error_message TEXT`)
-	_, _ = db.Exec(`ALTER TABLE library ADD COLUMN enabled INTEGER DEFAULT 1`)
-	_, _ = db.Exec(`ALTER TABLE library ADD COLUMN realtime_monitor INTEGER DEFAULT 0`)
-	_, _ = db.Exec(`ALTER TABLE library ADD COLUMN metadata_providers TEXT DEFAULT 'tmdb,omdb'`)
-	_, _ = db.Exec(`ALTER TABLE library ADD COLUMN image_providers TEXT DEFAULT 'tmdb,omdb,embedded,screen_grabber'`)
-	_, _ = db.Exec(`ALTER TABLE library ADD COLUMN metadata_refresh_policy TEXT DEFAULT 'never'`)
-	_, _ = db.Exec(`ALTER TABLE library ADD COLUMN preview_extract INTEGER DEFAULT 0`)
-	_, _ = db.Exec(`ALTER TABLE library ADD COLUMN drm_enabled INTEGER DEFAULT 0`)
-	_, _ = db.Exec(`ALTER TABLE library ADD COLUMN encryption_mode TEXT DEFAULT 'drm'`)
-	_, _ = db.Exec(`ALTER TABLE library ADD COLUMN cleanup_local_source_after_package INTEGER DEFAULT 0`)
-	_, _ = db.Exec(`ALTER TABLE library ADD COLUMN jit_prepare_on_ingest INTEGER DEFAULT 0`)
-	_, _ = db.Exec(`ALTER TABLE library ADD COLUMN encrypted_assets_enabled INTEGER DEFAULT 0`)
-	_, _ = db.Exec(`ALTER TABLE library ADD COLUMN encrypted_assets_cleanup_plaintext INTEGER DEFAULT 0`)
-	_, _ = db.Exec(`ALTER TABLE library ADD COLUMN encrypted_assets_dir_mode TEXT DEFAULT 'library'`)
-	_, _ = db.Exec(`ALTER TABLE library ADD COLUMN encrypted_assets_custom_dir TEXT DEFAULT ''`)
-	_, _ = db.Exec(`
+	if err := ensurePlaybackCompletionSchema(ctx, db); err != nil {
+		_ = db.Close()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("playback completion migration: %w", err)
+	}
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE transcode_task ADD COLUMN error_message TEXT`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE library ADD COLUMN enabled INTEGER DEFAULT 1`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE library ADD COLUMN realtime_monitor INTEGER DEFAULT 0`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE library ADD COLUMN metadata_providers TEXT DEFAULT 'tmdb,omdb'`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE library ADD COLUMN image_providers TEXT DEFAULT 'tmdb,omdb,embedded,screen_grabber'`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE library ADD COLUMN metadata_refresh_policy TEXT DEFAULT 'never'`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE library ADD COLUMN preview_extract INTEGER DEFAULT 0`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE library ADD COLUMN drm_enabled INTEGER DEFAULT 0`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE library ADD COLUMN encryption_mode TEXT DEFAULT 'drm'`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE library ADD COLUMN cleanup_local_source_after_package INTEGER DEFAULT 0`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE library ADD COLUMN jit_prepare_on_ingest INTEGER DEFAULT 0`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE library ADD COLUMN encrypted_assets_enabled INTEGER DEFAULT 0`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE library ADD COLUMN encrypted_assets_cleanup_plaintext INTEGER DEFAULT 0`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE library ADD COLUMN encrypted_assets_dir_mode TEXT DEFAULT 'library'`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE library ADD COLUMN encrypted_assets_custom_dir TEXT DEFAULT ''`)
+	_, _ = startupExecContext(ctx, db, `
 		CREATE TABLE IF NOT EXISTS media_encrypted_assets (
 			media_id INTEGER PRIMARY KEY,
 			enc_path TEXT NOT NULL,
@@ -660,8 +833,8 @@ func OpenSQLite(path string) (*sql.DB, error) {
 			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
 		)`)
-	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_media_encrypted_status ON media_encrypted_assets(status)`)
-	_, _ = db.Exec(`
+	_, _ = startupExecContext(ctx, db, `CREATE INDEX IF NOT EXISTS idx_media_encrypted_status ON media_encrypted_assets(status)`)
+	_, _ = startupExecContext(ctx, db, `
 		CREATE TABLE IF NOT EXISTS media_derived_assets (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			media_id INTEGER NOT NULL,
@@ -674,43 +847,51 @@ func OpenSQLite(path string) (*sql.DB, error) {
 			FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE,
 			UNIQUE(media_id, artifact_kind, logical_name)
 		)`)
-	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_derived_media ON media_derived_assets(media_id)`)
-	_, _ = db.Exec(`ALTER TABLE media ADD COLUMN file_mtime INTEGER DEFAULT 0`)
-	_, _ = db.Exec(`ALTER TABLE scheduled_task ADD COLUMN category TEXT NOT NULL DEFAULT 'media'`)
-	_, _ = db.Exec(`ALTER TABLE play_progress ADD COLUMN play_start_at TIMESTAMP`)
-	_, _ = db.Exec(`ALTER TABLE play_progress ADD COLUMN play_end_at TIMESTAMP`)
-	_, _ = db.Exec(`ALTER TABLE play_progress ADD COLUMN completed INTEGER DEFAULT 0`)
-	_, _ = db.Exec(`ALTER TABLE play_progress ADD COLUMN play_count INTEGER DEFAULT 0`)
-	_, _ = db.Exec(`ALTER TABLE scan_task ADD COLUMN total_count INTEGER DEFAULT 0`)
-	_, _ = db.Exec(`ALTER TABLE user ADD COLUMN can_manage INTEGER DEFAULT 0`)
-	_, _ = db.Exec(`ALTER TABLE user ADD COLUMN can_play INTEGER DEFAULT 1`)
-	_, _ = db.Exec(`ALTER TABLE user ADD COLUMN can_download INTEGER DEFAULT 0`)
-	_, _ = db.Exec(`ALTER TABLE user ADD COLUMN can_access_features INTEGER DEFAULT 1`)
-	_, _ = db.Exec(`ALTER TABLE user ADD COLUMN library_scope TEXT DEFAULT 'all'`)
-	_, _ = db.Exec(`ALTER TABLE user ADD COLUMN parental_enabled INTEGER DEFAULT 0`)
-	_, _ = db.Exec(`ALTER TABLE user ADD COLUMN parental_max_rating TEXT DEFAULT ''`)
-	_, _ = db.Exec(`ALTER TABLE user ADD COLUMN parental_pin_hash TEXT DEFAULT ''`)
-	_, _ = db.Exec(`ALTER TABLE user ADD COLUMN allowed_time_start TEXT DEFAULT ''`)
-	_, _ = db.Exec(`ALTER TABLE user ADD COLUMN allowed_time_end TEXT DEFAULT ''`)
-	_, _ = db.Exec(`ALTER TABLE user ADD COLUMN parental_access_plan_json TEXT DEFAULT '[]'`)
+	_, _ = startupExecContext(ctx, db, `CREATE INDEX IF NOT EXISTS idx_derived_media ON media_derived_assets(media_id)`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE media ADD COLUMN file_mtime INTEGER DEFAULT 0`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE scheduled_task ADD COLUMN category TEXT NOT NULL DEFAULT 'media'`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE play_progress ADD COLUMN play_start_at TIMESTAMP`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE play_progress ADD COLUMN play_end_at TIMESTAMP`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE play_progress ADD COLUMN completed INTEGER DEFAULT 0`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE play_progress ADD COLUMN play_count INTEGER DEFAULT 0`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE scan_task ADD COLUMN total_count INTEGER DEFAULT 0`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE user ADD COLUMN can_manage INTEGER DEFAULT 0`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE user ADD COLUMN can_play INTEGER DEFAULT 1`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE user ADD COLUMN can_download INTEGER DEFAULT 0`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE user ADD COLUMN can_access_features INTEGER DEFAULT 1`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE user ADD COLUMN library_scope TEXT DEFAULT 'all'`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE user ADD COLUMN parental_enabled INTEGER DEFAULT 0`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE user ADD COLUMN parental_max_rating TEXT DEFAULT ''`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE user ADD COLUMN parental_pin_hash TEXT DEFAULT ''`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE user ADD COLUMN allowed_time_start TEXT DEFAULT ''`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE user ADD COLUMN allowed_time_end TEXT DEFAULT ''`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE user ADD COLUMN parental_access_plan_json TEXT DEFAULT '[]'`)
 	// Playlist image columns (added later)
-	_, _ = db.Exec(`ALTER TABLE playlist ADD COLUMN poster_url TEXT DEFAULT ''`)
-	_, _ = db.Exec(`ALTER TABLE playlist ADD COLUMN background_url TEXT DEFAULT ''`)
-	_, _ = db.Exec(`ALTER TABLE playlist ADD COLUMN logo_url TEXT DEFAULT ''`)
-	_, _ = db.Exec(`ALTER TABLE playlist ADD COLUMN square_art_url TEXT DEFAULT ''`)
-	_, _ = db.Exec(`ALTER TABLE user ADD COLUMN avatar_url TEXT DEFAULT ''`)
-	_, _ = db.Exec(`ALTER TABLE user ADD COLUMN ui_locale TEXT DEFAULT 'zh'`)
-	_, _ = db.Exec(`ALTER TABLE user ADD COLUMN player_prefs_json TEXT DEFAULT ''`)
-	_, _ = db.Exec(`ALTER TABLE scrape_task ADD COLUMN fail_count INTEGER DEFAULT 0`)
-	_, _ = db.Exec(`ALTER TABLE photo_person ADD COLUMN media_count INTEGER NOT NULL DEFAULT 0`)
-	_, _ = db.Exec(`
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE playlist ADD COLUMN poster_url TEXT DEFAULT ''`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE playlist ADD COLUMN background_url TEXT DEFAULT ''`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE playlist ADD COLUMN logo_url TEXT DEFAULT ''`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE playlist ADD COLUMN square_art_url TEXT DEFAULT ''`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE user ADD COLUMN avatar_url TEXT DEFAULT ''`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE user ADD COLUMN ui_locale TEXT DEFAULT 'zh'`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE user ADD COLUMN player_prefs_json TEXT DEFAULT ''`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE scrape_task ADD COLUMN fail_count INTEGER DEFAULT 0`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE photo_person ADD COLUMN media_count INTEGER NOT NULL DEFAULT 0`)
+	_, _ = startupExecContext(ctx, db, `
 		UPDATE photo_person
 		SET media_count = (
 			SELECT COUNT(DISTINCT media_id) FROM photo_face WHERE photo_face.person_id = photo_person.id
 		)`)
-	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_photo_face_person_media ON photo_face(person_id, media_id)`)
+	_, _ = startupExecContext(ctx, db, `CREATE INDEX IF NOT EXISTS idx_photo_face_person_media ON photo_face(person_id, media_id)`)
+	if err := ensureColumnContext(ctx, db, "photo_face_thumb_repair_state", "completed_at", "TIMESTAMP"); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate photo face repair completed_at: %w", err)
+	}
+	if err := ensureColumnContext(ctx, db, "photo_face_thumb_repair_state", "next_audit_at", "TIMESTAMP"); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate photo face repair next_audit_at: %w", err)
+	}
 	// TV series / episode linking (added for hierarchical TV library scan).
-	_, _ = db.Exec(`
+	_, _ = startupExecContext(ctx, db, `
 		CREATE TABLE IF NOT EXISTS series (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			library_id INTEGER NOT NULL,
@@ -726,13 +907,13 @@ func OpenSQLite(path string) (*sql.DB, error) {
 			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			FOREIGN KEY (library_id) REFERENCES library(id)
 		)`)
-	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_series_library ON series(library_id)`)
-	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_series_title_norm ON series(library_id, title_norm)`)
-	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_series_tmdb ON series(library_id, tmdb_id)`)
-	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_series_tvdb ON series(library_id, tvdb_id)`)
-	_, _ = db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_season_series_num ON season(tv_id, season_num)`)
-	_, _ = db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_episode_season_num ON episode(season_id, episode_num)`)
-	_, _ = db.Exec(`
+	_, _ = startupExecContext(ctx, db, `CREATE INDEX IF NOT EXISTS idx_series_library ON series(library_id)`)
+	_, _ = startupExecContext(ctx, db, `CREATE INDEX IF NOT EXISTS idx_series_title_norm ON series(library_id, title_norm)`)
+	_, _ = startupExecContext(ctx, db, `CREATE INDEX IF NOT EXISTS idx_series_tmdb ON series(library_id, tmdb_id)`)
+	_, _ = startupExecContext(ctx, db, `CREATE INDEX IF NOT EXISTS idx_series_tvdb ON series(library_id, tvdb_id)`)
+	_, _ = startupExecContext(ctx, db, `CREATE UNIQUE INDEX IF NOT EXISTS idx_season_series_num ON season(tv_id, season_num)`)
+	_, _ = startupExecContext(ctx, db, `CREATE UNIQUE INDEX IF NOT EXISTS idx_episode_season_num ON episode(season_id, episode_num)`)
+	_, _ = startupExecContext(ctx, db, `
 		CREATE TABLE IF NOT EXISTS episode_media (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			episode_id INTEGER NOT NULL,
@@ -741,9 +922,9 @@ func OpenSQLite(path string) (*sql.DB, error) {
 			FOREIGN KEY (episode_id) REFERENCES episode(id),
 			FOREIGN KEY (media_id) REFERENCES media(id)
 		)`)
-	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_episode_media_episode ON episode_media(episode_id)`)
+	_, _ = startupExecContext(ctx, db, `CREATE INDEX IF NOT EXISTS idx_episode_media_episode ON episode_media(episode_id)`)
 	// Music library: artists, albums, tracks (linked to media rows).
-	_, _ = db.Exec(`
+	_, _ = startupExecContext(ctx, db, `
 		CREATE TABLE IF NOT EXISTS music_artist (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			library_id INTEGER NOT NULL,
@@ -755,9 +936,9 @@ func OpenSQLite(path string) (*sql.DB, error) {
 			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			FOREIGN KEY (library_id) REFERENCES library(id)
 		)`)
-	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_music_artist_library ON music_artist(library_id)`)
-	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_music_artist_name_norm ON music_artist(library_id, name_norm)`)
-	_, _ = db.Exec(`
+	_, _ = startupExecContext(ctx, db, `CREATE INDEX IF NOT EXISTS idx_music_artist_library ON music_artist(library_id)`)
+	_, _ = startupExecContext(ctx, db, `CREATE INDEX IF NOT EXISTS idx_music_artist_name_norm ON music_artist(library_id, name_norm)`)
+	_, _ = startupExecContext(ctx, db, `
 		CREATE TABLE IF NOT EXISTS music_album (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			library_id INTEGER NOT NULL,
@@ -778,10 +959,10 @@ func OpenSQLite(path string) (*sql.DB, error) {
 			FOREIGN KEY (library_id) REFERENCES library(id),
 			FOREIGN KEY (album_artist_id) REFERENCES music_artist(id)
 		)`)
-	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_music_album_library ON music_album(library_id)`)
-	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_music_album_title_norm ON music_album(library_id, title_norm)`)
-	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_music_album_artist ON music_album(album_artist_id)`)
-	_, _ = db.Exec(`
+	_, _ = startupExecContext(ctx, db, `CREATE INDEX IF NOT EXISTS idx_music_album_library ON music_album(library_id)`)
+	_, _ = startupExecContext(ctx, db, `CREATE INDEX IF NOT EXISTS idx_music_album_title_norm ON music_album(library_id, title_norm)`)
+	_, _ = startupExecContext(ctx, db, `CREATE INDEX IF NOT EXISTS idx_music_album_artist ON music_album(album_artist_id)`)
+	_, _ = startupExecContext(ctx, db, `
 		CREATE TABLE IF NOT EXISTS music_track (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			album_id INTEGER NOT NULL,
@@ -795,15 +976,15 @@ func OpenSQLite(path string) (*sql.DB, error) {
 			FOREIGN KEY (album_id) REFERENCES music_album(id),
 			FOREIGN KEY (media_id) REFERENCES media(id)
 		)`)
-	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_music_track_album ON music_track(album_id, sort_order)`)
-	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_music_track_media ON music_track(media_id)`)
-	_, _ = db.Exec(`INSERT OR IGNORE INTO scrape_config (id) VALUES (1)`)
-	_, _ = db.Exec(`INSERT OR IGNORE INTO system_options (id, options_json) VALUES (1, '{}')`)
+	_, _ = startupExecContext(ctx, db, `CREATE INDEX IF NOT EXISTS idx_music_track_album ON music_track(album_id, sort_order)`)
+	_, _ = startupExecContext(ctx, db, `CREATE INDEX IF NOT EXISTS idx_music_track_media ON music_track(media_id)`)
+	_, _ = startupExecContext(ctx, db, `INSERT OR IGNORE INTO scrape_config (id) VALUES (1)`)
+	_, _ = startupExecContext(ctx, db, `INSERT OR IGNORE INTO system_options (id, options_json) VALUES (1, '{}')`)
 	// Document library support
-	_, _ = db.Exec(`ALTER TABLE library ADD COLUMN scan_exclude_patterns TEXT DEFAULT ''`)
-	_, _ = db.Exec(`ALTER TABLE library ADD COLUMN scan_recursive INTEGER DEFAULT 1`)
-	_, _ = db.Exec(`UPDATE library_node SET parent_path = '' WHERE parent_path IS NULL`)
-	_, _ = db.Exec(`
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE library ADD COLUMN scan_exclude_patterns TEXT DEFAULT ''`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE library ADD COLUMN scan_recursive INTEGER DEFAULT 1`)
+	_, _ = startupExecContext(ctx, db, `UPDATE library_node SET parent_path = '' WHERE parent_path IS NULL`)
+	_, _ = startupExecContext(ctx, db, `
 		CREATE TABLE IF NOT EXISTS read_progress (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			user_id INTEGER NOT NULL,
@@ -815,8 +996,8 @@ func OpenSQLite(path string) (*sql.DB, error) {
 			FOREIGN KEY (user_id) REFERENCES user(id) ON DELETE CASCADE,
 			FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
 		)`)
-	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_read_progress_user ON read_progress(user_id, update_at DESC)`)
-	_, _ = db.Exec(`
+	_, _ = startupExecContext(ctx, db, `CREATE INDEX IF NOT EXISTS idx_read_progress_user ON read_progress(user_id, update_at DESC)`)
+	_, _ = startupExecContext(ctx, db, `
 		CREATE TABLE IF NOT EXISTS document_tag (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			media_id INTEGER NOT NULL,
@@ -825,8 +1006,10 @@ func OpenSQLite(path string) (*sql.DB, error) {
 			UNIQUE(media_id, tag),
 			FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
 		)`)
-	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_document_tag_tag ON document_tag(tag)`)
-	_, _ = db.Exec(`
+	_, _ = startupExecContext(ctx, db, `DELETE FROM document_tag WHERE id NOT IN (SELECT MIN(id) FROM document_tag GROUP BY media_id, tag COLLATE NOCASE)`)
+	_, _ = startupExecContext(ctx, db, `CREATE UNIQUE INDEX IF NOT EXISTS idx_document_tag_media_tag_nocase ON document_tag(media_id, tag COLLATE NOCASE)`)
+	_, _ = startupExecContext(ctx, db, `CREATE INDEX IF NOT EXISTS idx_document_tag_tag ON document_tag(tag COLLATE NOCASE)`)
+	_, _ = startupExecContext(ctx, db, `
 		CREATE TABLE IF NOT EXISTS scan_log (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			scan_task_id INTEGER,
@@ -837,9 +1020,10 @@ func OpenSQLite(path string) (*sql.DB, error) {
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			FOREIGN KEY (library_id) REFERENCES library(id) ON DELETE CASCADE
 		)`)
-	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_scan_log_task ON scan_log(scan_task_id)`)
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE scan_task ADD COLUMN failed_count INTEGER DEFAULT 0`)
+	_, _ = startupExecContext(ctx, db, `CREATE INDEX IF NOT EXISTS idx_scan_log_task ON scan_log(scan_task_id)`)
 	// Cast/crew persons (film library).
-	_, _ = db.Exec(`
+	_, _ = startupExecContext(ctx, db, `
 		CREATE TABLE IF NOT EXISTS cast_person (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			name TEXT NOT NULL,
@@ -863,10 +1047,10 @@ func OpenSQLite(path string) (*sql.DB, error) {
 			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			deleted_at TIMESTAMP
 		)`)
-	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_cast_person_name_norm ON cast_person(name_norm)`)
-	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_cast_person_tmdb ON cast_person(tmdb_id)`)
-	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_cast_person_deleted ON cast_person(deleted_at)`)
-	_, _ = db.Exec(`
+	_, _ = startupExecContext(ctx, db, `CREATE INDEX IF NOT EXISTS idx_cast_person_name_norm ON cast_person(name_norm)`)
+	_, _ = startupExecContext(ctx, db, `CREATE INDEX IF NOT EXISTS idx_cast_person_tmdb ON cast_person(tmdb_id)`)
+	_, _ = startupExecContext(ctx, db, `CREATE INDEX IF NOT EXISTS idx_cast_person_deleted ON cast_person(deleted_at)`)
+	_, _ = startupExecContext(ctx, db, `
 		CREATE TABLE IF NOT EXISTS media_person (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			media_id INTEGER NOT NULL,
@@ -881,10 +1065,10 @@ func OpenSQLite(path string) (*sql.DB, error) {
 			FOREIGN KEY (person_id) REFERENCES cast_person(id),
 			UNIQUE(media_id, person_id, occupation)
 		)`)
-	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_media_person_media ON media_person(media_id)`)
-	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_media_person_person ON media_person(person_id)`)
-	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_media_person_person_occ ON media_person(person_id, occupation)`)
-	_, _ = db.Exec(`
+	_, _ = startupExecContext(ctx, db, `CREATE INDEX IF NOT EXISTS idx_media_person_media ON media_person(media_id)`)
+	_, _ = startupExecContext(ctx, db, `CREATE INDEX IF NOT EXISTS idx_media_person_person ON media_person(person_id)`)
+	_, _ = startupExecContext(ctx, db, `CREATE INDEX IF NOT EXISTS idx_media_person_person_occ ON media_person(person_id, occupation)`)
+	_, _ = startupExecContext(ctx, db, `
 		CREATE TABLE IF NOT EXISTS person_scrape_task (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			person_id INTEGER,
@@ -899,27 +1083,114 @@ func OpenSQLite(path string) (*sql.DB, error) {
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			FOREIGN KEY (person_id) REFERENCES cast_person(id)
 		)`)
-	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_person_scrape_task_status ON person_scrape_task(status, created_at)`)
+	_, _ = startupExecContext(ctx, db, `CREATE INDEX IF NOT EXISTS idx_person_scrape_task_status ON person_scrape_task(status, created_at)`)
 	// Seed default AI provider configs.
 	seedAIProviders(db)
 	// Remove duplicate scheduled tasks (legacy seed inserted on every restart).
 	if _, err := DedupeScheduledTasks(db); err != nil {
 		return nil, err
 	}
-	_, _ = db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduled_task_type_name ON scheduled_task(task_type, name)`)
+	_, _ = startupExecContext(ctx, db, `CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduled_task_type_name ON scheduled_task(task_type, name)`)
 	// Clean up stale transcode tasks that failed due to transient issues (path not found, context canceled).
 	cleanupStaleTranscodeTasks(db)
 	recoverStalePhotoTasks(db)
+	if _, err := startupExecContext(ctx, db, `PRAGMA busy_timeout=30000`); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("pragma busy_timeout: %w", err)
+	}
+	if err := verifySQLitePragmas(ctx, db, isMemorySQLitePath(path)); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	// This migration is deliberately synchronous: callers never receive a DB handle
+	// until normalized media sort values and their indexes satisfy the read invariant.
+	if err := withStartupBusyRetry(ctx, func() error { return MigrateMediaSortColumns(ctx, db) }); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("media sort migration: %w", err)
+	}
+	if err := withStartupBusyRetry(ctx, func() error { return relationshipmigration.MigrateMediaRelationships(ctx, db) }); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("media relationship migration: %w", err)
+	}
 	// Apply enterprise migrations registered via RegisterEnterpriseMigration.
 	// In the community build this slice is empty; commercial init() functions
 	// append migrations for pretranscode/license tables before main runs.
 	for _, m := range enterpriseMigrations {
+		if err := ctx.Err(); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
 		if err := m.Up(db); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("enterprise migration %s: %w", m.ID, err)
 		}
 	}
+	if isMemorySQLitePath(path) {
+		if _, err := startupExecContext(ctx, db, `PRAGMA busy_timeout=30000`); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+		if err := verifySQLitePragmas(ctx, db, true); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+		return db, nil
+	}
+	if err := db.Close(); err != nil {
+		return nil, err
+	}
+	db, err = sql.Open("sqlite", appendSQLitePragmas(path))
+	if err != nil {
+		return nil, err
+	}
+	if isMemorySQLitePath(path) {
+		db.SetMaxOpenConns(1)
+		db.SetMaxIdleConns(1)
+	} else {
+		db.SetMaxOpenConns(8)
+		db.SetMaxIdleConns(4)
+	}
+	db.SetConnMaxLifetime(0)
+	if err := db.PingContext(ctx); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := verifySQLitePragmas(ctx, db, isMemorySQLitePath(path)); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return db, nil
+}
+
+func verifySQLitePragmas(ctx context.Context, db *sql.DB, allowMemoryJournal bool) error {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("verify sqlite pragmas connection: %w", err)
+	}
+	defer conn.Close()
+
+	var journalMode string
+	var busyTimeout, foreignKeys, synchronous int
+	if err := conn.QueryRowContext(ctx, `PRAGMA journal_mode`).Scan(&journalMode); err != nil {
+		return fmt.Errorf("verify sqlite pragmas journal_mode: %w", err)
+	}
+	if err := conn.QueryRowContext(ctx, `PRAGMA busy_timeout`).Scan(&busyTimeout); err != nil {
+		return fmt.Errorf("verify sqlite pragmas busy_timeout: %w", err)
+	}
+	if err := conn.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil {
+		return fmt.Errorf("verify sqlite pragmas foreign_keys: %w", err)
+	}
+	if err := conn.QueryRowContext(ctx, `PRAGMA synchronous`).Scan(&synchronous); err != nil {
+		return fmt.Errorf("verify sqlite pragmas synchronous: %w", err)
+	}
+	expectedJournal := "wal"
+	if allowMemoryJournal {
+		expectedJournal = "memory"
+	}
+	if journalMode != expectedJournal || busyTimeout != 30000 || foreignKeys != 1 || synchronous != 1 {
+		return fmt.Errorf("sqlite pragma verification failed: journal_mode=%q want %s, busy_timeout=%d want 30000, foreign_keys=%d want 1, synchronous=%d want 1", journalMode, expectedJournal, busyTimeout, foreignKeys, synchronous)
+	}
+	return nil
 }
 
 // seedAIProviders inserts default AI provider configs (OpenAI, DeepSeek, Tongyi, Ollama)
@@ -931,7 +1202,7 @@ func seedAIProviders(db *sql.DB) {
 	for _, p := range []struct{ id, name, apiURL, model string }{
 		{id: "openai", name: "OpenAI", apiURL: "https://api.openai.com/v1", model: "gpt-4o"},
 		{id: "deepseek", name: "DeepSeek", apiURL: "https://api.deepseek.com/v1", model: "deepseek-chat"},
-		{id: "tongyi", name: "通义千问", apiURL: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-plus"},
+		{id: "tongyi", name: "Tongyi Qianwen", apiURL: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-plus"},
 		{id: "ollama", name: "Ollama", apiURL: "http://localhost:11434", model: ""},
 	} {
 		_, _ = db.Exec(

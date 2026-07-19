@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -13,33 +14,40 @@ import (
 
 	"github.com/google/uuid"
 
-	kcrypto "knox-media/internal/crypto"
 	"knox-media/internal/coreiface"
+	kcrypto "knox-media/internal/crypto"
 	"knox-media/internal/docparse"
+	"knox-media/internal/keystore"
 	"knox-media/internal/mediastore"
 	"knox-media/internal/musicparse"
 	"knox-media/internal/musicstore"
-	"knox-media/internal/photoparse"
 	"knox-media/internal/photogeocode"
-	"knox-media/internal/keystore"
+	"knox-media/internal/photoparse"
+	"knox-media/internal/phototags"
+	"knox-media/internal/relationshipsync"
 	"knox-media/internal/scraper"
 	"knox-media/internal/storage"
+	"knox-media/internal/store"
 	"knox-media/internal/tvparse"
 	"knox-media/internal/tvstore"
+	"knox-media/pkg/ffprobe"
 	"knox-media/pkg/fileutil"
 	"knox-media/pkg/hashutil"
 )
 
 type Scanner struct {
-	DB           *sql.DB
-	Vault        *keystore.Vault
-	FFprobePath  string
-	SkipHash     bool
-	PhotoGeocode *photogeocode.Service
+	DB            *sql.DB
+	Vault         *keystore.Vault
+	FFprobePath   string
+	SkipHash      bool
+	PhotoGeocode  *photogeocode.Service
+	PhotoCacheDir string
+	CleanupRoots  []string
 	// FFprobeExtra optional args before the input path (e.g. analyzeduration/probesize for faster scans).
 	FFprobeExtra []string
 	OnFile       func(path string, err error)
 	OnMediaAdded func(mediaID int64, title string, fileType string)
+	ProbePath    func(context.Context, int64, string) (*ffprobe.Summary, error)
 	// OnMediaRemoved is invoked after a stale catalog row is removed during sync.
 	OnMediaRemoved func(mediaID int64, filePath string)
 	// OnDocumentScanned is invoked after a document is inserted or updated during scan.
@@ -55,6 +63,26 @@ func (s *Scanner) ScanLibraryFolders(libraryID int64, roots []string) (added int
 }
 
 func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID int64, roots []string) (added int, err error) {
+	var callback func(context.Context, int64, string, string) error
+	if s.OnMediaAdded != nil {
+		callback = func(_ context.Context, mediaID int64, title, fileType string) error {
+			s.OnMediaAdded(mediaID, title, fileType)
+			return nil
+		}
+	}
+	return s.ScanLibraryFoldersWithContextAndMediaAdded(ctx, libraryID, roots, callback)
+}
+
+type ScanCallbacks struct {
+	OnFile       func(string, error)
+	OnMediaAdded func(context.Context, int64, string, string) error
+}
+
+func (s *Scanner) ScanLibraryFoldersWithContextAndMediaAdded(ctx context.Context, libraryID int64, roots []string, onMediaAdded func(context.Context, int64, string, string) error) (added int, err error) {
+	return s.ScanLibraryFoldersWithContextAndCallbacks(ctx, libraryID, roots, ScanCallbacks{OnFile: s.OnFile, OnMediaAdded: onMediaAdded})
+}
+
+func (s *Scanner) ScanLibraryFoldersWithContextAndCallbacks(ctx context.Context, libraryID int64, roots []string, callbacks ScanCallbacks) (added int, err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -101,8 +129,8 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 				if errors.Is(walkErr, context.Canceled) || errors.Is(walkErr, context.DeadlineExceeded) {
 					return walkErr
 				}
-				if s.OnFile != nil {
-					s.OnFile(path, walkErr)
+				if callbacks.OnFile != nil {
+					callbacks.OnFile(path, walkErr)
 				}
 				if d != nil && d.IsDir() {
 					return filepath.SkipDir
@@ -168,8 +196,8 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 				}
 				if storage.ShouldLinkEncryptedPlainPathScan(s.DB, linkedID, normPath, diskMD5) {
 					_ = s.upsertNode(libraryID, parentPath, nodePath, nodeName, "file", &linkedID)
-					if s.OnFile != nil {
-						s.OnFile(path, nil)
+					if callbacks.OnFile != nil {
+						callbacks.OnFile(path, nil)
 					}
 					return nil
 				}
@@ -195,8 +223,8 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 					if documentLibrary && ft == "document" {
 						s.refreshDocumentMeta(existingMediaID, path)
 					}
-					if s.OnFile != nil {
-						s.OnFile(path, nil)
+					if callbacks.OnFile != nil {
+						callbacks.OnFile(path, nil)
 					}
 					return nil
 				}
@@ -221,7 +249,13 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 			var photoMeta photoparse.PhotoMeta
 			var docMeta docparse.DocumentMeta
 			if ft == "video" || ft == "audio" {
-				if pr, e := storage.ProbePath(s.DB, s.Vault, s.FFprobePath, 0, path, s.FFprobeExtra); e == nil {
+				probe := s.ProbePath
+				if probe == nil {
+					probe = func(_ context.Context, mediaID int64, path string) (*ffprobe.Summary, error) {
+						return storage.ProbePath(s.DB, s.Vault, s.FFprobePath, mediaID, path, s.FFprobeExtra)
+					}
+				}
+				if pr, e := probe(ctx, 0, path); e == nil {
 					dur = pr.DurationSec
 					w = pr.Width
 					h = pr.Height
@@ -258,8 +292,8 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 						oldPath := dupPath.String
 						if storage.IsMediaEncrypted(s.DB, dupMediaID, oldPath) {
 							_ = s.upsertNode(libraryID, parentPath, nodePath, nodeName, "file", &dupMediaID)
-							if s.OnFile != nil {
-								s.OnFile(path, nil)
+							if callbacks.OnFile != nil {
+								callbacks.OnFile(path, nil)
 							}
 							return nil
 						}
@@ -267,8 +301,8 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 							if _, statErr := os.Stat(oldPath); statErr != nil && os.IsNotExist(statErr) {
 								_, _ = s.DB.Exec(`UPDATE media SET file_path = ?, file_mtime = ?, status = 'active' WHERE id = ?`, normPath, curMtime, dupMediaID)
 								_ = s.upsertNode(libraryID, parentPath, nodePath, nodeName, "file", &dupMediaID)
-								if s.OnFile != nil {
-									s.OnFile(path, nil)
+								if callbacks.OnFile != nil {
+									callbacks.OnFile(path, nil)
 								}
 								return nil
 							}
@@ -280,8 +314,8 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 			if md5sum.Valid {
 				if linkedID := storage.FindMediaIDByEncryptedMD5(s.DB, libraryID, md5sum.String); linkedID > 0 {
 					_ = s.upsertNode(libraryID, parentPath, nodePath, nodeName, "file", &linkedID)
-					if s.OnFile != nil {
-						s.OnFile(path, nil)
+					if callbacks.OnFile != nil {
+						callbacks.OnFile(path, nil)
 					}
 					return nil
 				}
@@ -308,33 +342,38 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 			if documentLibrary && ft == "document" {
 				metaJSON = docparse.MergeDocumentMetaJSON(metaJSON, docMeta)
 			}
+			metaJSON = phototags.NormalizeMetaJSON(metaJSON)
 			if existingMediaID == 0 {
 				if adopted := s.tryAdoptRenamedMedia(libraryID, normPath, seenMedia, ft, dur, w, h, md5sum); adopted > 0 {
 					existingMediaID = adopted
 				}
 			}
+			tx, e := s.DB.BeginTx(ctx, nil)
+			if e != nil {
+				return e
+			}
+			defer tx.Rollback()
 			var res sql.Result
-			var e error
 			if existingMediaID > 0 {
-				res, e = s.DB.Exec(`
+				res, e = tx.ExecContext(ctx, `
 				UPDATE media
-				SET library_id = ?, title = ?, file_path = ?, file_type = ?, duration = ?, width = ?, height = ?, bitrate = ?, md5 = ?, format = ?, meta_json = ?, status = 'active', file_mtime = ?
+				SET library_id = ?, title = ?, file_path = ?, file_type = ?, duration = ?, width = ?, height = ?, bitrate = ?, md5 = ?, format = ?, meta_json = ?, photo_taken_at = CASE WHEN ? = 'image' THEN COALESCE(?, created_at_sort) ELSE photo_taken_at END, photo_place_id = CASE WHEN ? = 'image' THEN NULLIF(?, '') ELSE photo_place_id END, status = 'active', file_mtime = ?
 				WHERE id = ?`,
-					libraryID, title, normPath, ft, nullInt(dur), nullInt(w), nullInt(h), nullInt(br), nullString(md5sum), nullStringVal(format), metaJSON, curMtime, existingMediaID,
+					libraryID, title, normPath, ft, nullInt(dur), nullInt(w), nullInt(h), nullInt(br), nullString(md5sum), nullStringVal(format), metaJSON, ft, photoTimelineValue(metaJSON, existingMediaID), ft, store.PhotoPlaceID(metaJSON), curMtime, existingMediaID,
 				)
 			} else {
-				res, e = s.DB.Exec(`
-				INSERT INTO media (library_id, file_id, title, file_path, file_type, duration, width, height, bitrate, md5, format, meta_json, status, file_mtime)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)`,
-					libraryID, fileID, title, normPath, ft, nullInt(dur), nullInt(w), nullInt(h), nullInt(br), nullString(md5sum), nullStringVal(format), metaJSON, curMtime,
+				res, e = tx.ExecContext(ctx, `
+				INSERT INTO media (library_id, file_id, title, file_path, file_type, duration, width, height, bitrate, md5, format, meta_json, status, file_mtime, created_at_sort, photo_taken_at, photo_place_id)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, strftime('%Y-%m-%dT%H:%M:%f000Z','now'), CASE WHEN ? = 'image' THEN COALESCE(?, strftime('%Y-%m-%dT%H:%M:%f000Z','now')) END, NULLIF(?, ''))`,
+					libraryID, fileID, title, normPath, ft, nullInt(dur), nullInt(w), nullInt(h), nullInt(br), nullString(md5sum), nullStringVal(format), metaJSON, curMtime, ft, photoTimelineValue(metaJSON, 0), store.PhotoPlaceID(metaJSON),
 				)
 			}
 			if e != nil {
 				if strings.Contains(e.Error(), "UNIQUE") {
 					return nil
 				}
-				if s.OnFile != nil {
-					s.OnFile(path, e)
+				if callbacks.OnFile != nil {
+					callbacks.OnFile(path, e)
 				}
 				return nil
 			}
@@ -348,22 +387,26 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 				}
 			}
 			if mediaID > 0 {
+				if tvLibrary || musicLibrary {
+					if e = relationshipsync.SyncTx(ctx, tx, mediaID); e != nil {
+						return e
+					}
+				}
+				if e = tx.Commit(); e != nil {
+					return e
+				}
 				_ = s.upsertNode(libraryID, parentPath, nodePath, nodeName, "file", &mediaID)
-				if tvInfo != nil {
-					_ = tvstore.LinkEpisode(s.DB, libraryID, mediaID, *tvInfo)
-				}
-				if musicLibrary && ft == "audio" {
-					_ = musicstore.LinkTrack(s.DB, libraryID, mediaID, musicMeta)
-				}
 				if documentLibrary && ft == "document" && s.OnDocumentScanned != nil {
 					s.OnDocumentScanned(mediaID)
 				}
-				if existingMediaID == 0 && s.OnMediaAdded != nil {
-					s.OnMediaAdded(mediaID, title, ft)
+				if existingMediaID == 0 && callbacks.OnMediaAdded != nil {
+					if callbackErr := callbacks.OnMediaAdded(ctx, mediaID, title, ft); callbackErr != nil && callbacks.OnFile != nil {
+						callbacks.OnFile(path, callbackErr)
+					}
 				}
 			}
-			if s.OnFile != nil {
-				s.OnFile(path, nil)
+			if callbacks.OnFile != nil {
+				callbacks.OnFile(path, nil)
 			}
 			return nil
 		})
@@ -371,15 +414,16 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 			return added, err
 		}
 	}
-	s.syncMissingMedia(ctx, libraryID, cleanRoots, seenMedia)
+	s.syncMissingMedia(ctx, libraryID, cleanRoots, seenMedia, callbacks.OnFile)
 	if tvLibrary {
-		_, _ = tvstore.BackfillLibraryTV(s.DB, libraryID)
-		tvstore.PruneOrphansForLibrary(s.DB, libraryID)
+		if err := tvstore.PruneOrphansForLibraryContext(ctx, s.DB, libraryID); err != nil {
+			return added, err
+		}
 	}
 	if musicLibrary {
-		_ = musicstore.MergeUnknownAlbums(s.DB, libraryID)
-		_, _ = musicstore.BackfillLibraryMusic(s.DB, libraryID)
-		musicstore.PruneOrphansForLibrary(s.DB, libraryID)
+		if err := musicstore.PruneOrphansForLibraryContext(ctx, s.DB, libraryID); err != nil {
+			return added, err
+		}
 	}
 	return added, nil
 }
@@ -532,6 +576,24 @@ func (s *Scanner) linkMusicIfTrack(libraryID, mediaID int64, path, ffprobeJSON s
 	_ = musicstore.LinkTrack(s.DB, libraryID, mediaID, meta)
 }
 
+func updateScannerMediaMeta(ctx context.Context, db *sql.DB, mediaID int64, metaJSON string, update func(*sql.Tx) error) error {
+	metaJSON = phototags.NormalizeMetaJSON(metaJSON)
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if update != nil {
+		if err := update(tx); err != nil {
+			return err
+		}
+	}
+	if err := store.UpdateMediaMetaAndPhotoTime(ctx, tx, mediaID, metaJSON); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *Scanner) refreshPhotoMeta(mediaID int64, path string) {
 	var metaJSON sql.NullString
 	_ = s.DB.QueryRow(`SELECT COALESCE(meta_json,'') FROM media WHERE id = ?`, mediaID).Scan(&metaJSON)
@@ -540,11 +602,13 @@ func (s *Scanner) refreshPhotoMeta(mediaID int64, path string) {
 		s.PhotoGeocode.EnrichMeta(&photoMeta)
 	}
 	merged := photoparse.MergePhotoMetaJSON(metaJSON.String, photoMeta)
-	_, _ = s.DB.Exec(`
-		UPDATE media SET width = ?, height = ?, meta_json = ?, format = ?
-		WHERE id = ?`,
-		nullInt(photoMeta.Width), nullInt(photoMeta.Height), merged, nullStringVal(strings.TrimPrefix(photoMeta.MimeType, "image/")), mediaID,
-	)
+	err := updateScannerMediaMeta(context.Background(), s.DB, mediaID, merged, func(tx *sql.Tx) error {
+		_, err := tx.Exec(`UPDATE media SET width=?,height=?,format=? WHERE id=?`, nullInt(photoMeta.Width), nullInt(photoMeta.Height), nullStringVal(strings.TrimPrefix(photoMeta.MimeType, "image/")), mediaID)
+		return err
+	})
+	if err != nil {
+		log.Printf("scanner photo metadata media=%d: %v", mediaID, err)
+	}
 }
 
 func (s *Scanner) refreshDocumentMeta(mediaID int64, path string) {
@@ -553,11 +617,13 @@ func (s *Scanner) refreshDocumentMeta(mediaID int64, path string) {
 	docMeta := docparse.ParseForMedia(s.DB, s.Vault, mediaID, path)
 	merged := docparse.MergeDocumentMetaJSON(metaJSON.String, docMeta)
 	title := docparse.PickDocumentTitle(path, docMeta.Title)
-	_, _ = s.DB.Exec(`
-		UPDATE media SET meta_json = ?, format = ?, title = ?
-		WHERE id = ?`,
-		merged, nullStringVal(docMeta.Format), title, mediaID,
-	)
+	err := updateScannerMediaMeta(context.Background(), s.DB, mediaID, merged, func(tx *sql.Tx) error {
+		_, err := tx.Exec(`UPDATE media SET format = ?, title = ? WHERE id = ?`, nullStringVal(docMeta.Format), title, mediaID)
+		return err
+	})
+	if err != nil {
+		log.Printf("scanner document metadata media=%d: %v", mediaID, err)
+	}
 }
 
 func (s *Scanner) loadScanExcludePatterns(libraryID int64) []string {
@@ -631,7 +697,7 @@ func padEp(n int) string {
 	return fmt.Sprintf("%d", n)
 }
 
-func (s *Scanner) syncMissingMedia(ctx context.Context, libraryID int64, roots []string, seenMedia map[string]struct{}) {
+func (s *Scanner) syncMissingMedia(ctx context.Context, libraryID int64, roots []string, seenMedia map[string]struct{}, onFile func(string, error)) {
 	if s == nil || s.DB == nil || libraryID <= 0 {
 		return
 	}
@@ -673,9 +739,13 @@ func (s *Scanner) syncMissingMedia(ctx context.Context, libraryID int64, roots [
 		}
 		tvstore.CleanupMedia(s.DB, item.id)
 		musicstore.CleanupMedia(s.DB, item.id)
-		if err := mediastore.DeleteCatalog(s.DB, item.id, item.fileID); err != nil {
-			if s.OnFile != nil {
-				s.OnFile(item.filePath, err)
+		cleanup, err := mediastore.DeleteCatalogAndCollect(ctx, s.DB, item.id, item.fileID, s.PhotoCacheDir)
+		if err == nil {
+			err = mediastore.CleanupFiles(ctx, s.DB, cleanup, append([]string{filepath.Dir(s.PhotoCacheDir)}, s.CleanupRoots...))
+		}
+		if err != nil {
+			if onFile != nil {
+				onFile(item.filePath, err)
 			}
 			continue
 		}
@@ -797,4 +867,12 @@ func metadataMatchesForRename(dur, w, h, rowDur, rowW, rowH int) bool {
 		}
 	}
 	return required > 0 && matched == required
+}
+
+func photoTimelineValue(metaJSON string, fallbackID int64) any {
+	value, _ := store.PhotoTimelineTime(metaJSON, "", fallbackID)
+	if value == "" {
+		return nil
+	}
+	return value
 }

@@ -26,18 +26,18 @@ type playlistItem struct {
 }
 
 type playlistResp struct {
-	ID           int64          `json:"id"`
-	Name         string         `json:"name"`
-	Description  string         `json:"description"`
-	PosterURL    string         `json:"poster_url"`
-	BackgroundURL string        `json:"background_url"`
+	ID            int64          `json:"id"`
+	Name          string         `json:"name"`
+	Description   string         `json:"description"`
+	PosterURL     string         `json:"poster_url"`
+	BackgroundURL string         `json:"background_url"`
 	LogoURL       string         `json:"logo_url"`
 	SquareArtURL  string         `json:"square_art_url"`
 	ItemCount     int            `json:"item_count"`
-	FirstMediaID int64          `json:"first_media_id"`
-	CreatedAt    string         `json:"created_at"`
-	UpdatedAt    string         `json:"updated_at"`
-	Items        []playlistItem `json:"items,omitempty"`
+	FirstMediaID  int64          `json:"first_media_id"`
+	CreatedAt     string         `json:"created_at"`
+	UpdatedAt     string         `json:"updated_at"`
+	Items         []playlistItem `json:"items,omitempty"`
 }
 
 // ListPlaylists returns all playlists for the current user (summary, no items).
@@ -90,8 +90,8 @@ func (h *Handler) ListPlaylists(c *gin.Context) {
 			SquareArtURL:  squareArtURL.String,
 			ItemCount:     itemCount,
 			FirstMediaID:  fm,
-			CreatedAt:    created.String,
-			UpdatedAt:    updated.String,
+			CreatedAt:     created.String,
+			UpdatedAt:     updated.String,
 		})
 	}
 	if playlists == nil {
@@ -169,16 +169,16 @@ func (h *Handler) GetPlaylist(c *gin.Context) {
 		items = []playlistItem{}
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"id":           pid,
-		"name":         name.String,
-		"description":  desc.String,
-		"poster_url":   posterURL.String,
+		"id":             pid,
+		"name":           name.String,
+		"description":    desc.String,
+		"poster_url":     posterURL.String,
 		"background_url": bgURL.String,
-		"logo_url":        logoURL.String,
+		"logo_url":       logoURL.String,
 		"square_art_url": squareArtURL.String,
-		"created_at":    created.String,
-		"updated_at":   updated.String,
-		"items":        items,
+		"created_at":     created.String,
+		"updated_at":     updated.String,
+		"items":          items,
 	})
 }
 
@@ -525,6 +525,6 @@ func (h *Handler) UploadPlaylistImage(c *gin.Context) {
 	}
 	url := "/uploads/playlists/" + filename
 	col := field + "_url"
-	_, _ = h.App.DB.Exec(`UPDATE playlist SET ` + col + ` = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, url, pid)
+	_, _ = h.App.DB.Exec(`UPDATE playlist SET `+col+` = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, url, pid)
 	c.JSON(http.StatusOK, gin.H{"ok": true, "url": url})
 }

@@ -139,6 +139,22 @@ func (c *Cache) readRaw(fileID string, mediaID int64, db *sql.DB, vault *keystor
 	return nil, os.ErrNotExist
 }
 
+// SaveToPath serializes metadata to a caller-owned staging path.
+func SaveToPath(m *Meta, path string) error {
+	if m == nil {
+		return errors.New("keyframes: nil meta")
+	}
+	if strings.TrimSpace(m.FileID) == "" {
+		return errors.New("keyframes: empty file id")
+	}
+	m.UpdatedAt = time.Now()
+	body, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, body, 0644)
+}
+
 // Save persists meta to disk atomically (write tmp + rename).
 func (c *Cache) Save(m *Meta) error {
 	if c == nil || m == nil {
@@ -176,7 +192,7 @@ func (c *Cache) ExtractForMedia(ctx context.Context, db *sql.DB, vault *keystore
 	var pts []float64
 	var pos []int64
 	if storage.InputNeedsPipe(db, mediaID, probePath) {
-		out, cleanup, perr := storage.FFprobeOutput(db, vault, c.FFprobePath, mediaID, probePath, 0, duration, []string{
+		out, cleanup, perr := storage.FFprobeOutputContext(ctx, db, vault, c.FFprobePath, mediaID, probePath, 0, duration, []string{
 			"-v", "error",
 			"-select_streams", "v:0",
 			"-show_packets",

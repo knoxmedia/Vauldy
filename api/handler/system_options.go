@@ -32,9 +32,9 @@ type systemOptionsGetResponse struct {
 }
 
 type SystemOptionsRecognition struct {
-	ASR          SystemOptionsASR `json:"asr"`
-	OCR          SystemOptionsOCR `json:"ocr"`
-	AIProofread  bool             `json:"ai_proofread"`
+	ASR         SystemOptionsASR `json:"asr"`
+	OCR         SystemOptionsOCR `json:"ocr"`
+	AIProofread bool             `json:"ai_proofread"`
 }
 
 type SystemOptionsASR struct {
@@ -110,7 +110,7 @@ func defaultSystemOptions() SystemOptionsJSON {
 			MaxCPUConcurrent:              "unlimited",
 			MaxBackgroundConcurrent:       "1",
 		},
-		Recognition: defaultRecognitionOptions(),
+		Recognition:   defaultRecognitionOptions(),
 		PhotoClassify: defaultPhotoClassifyOptions(),
 		PhotoFace:     defaultPhotoFaceOptions(),
 		DocTrans:      defaultDocTransOptions(),

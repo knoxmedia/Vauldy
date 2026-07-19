@@ -1,19 +1,22 @@
 package handler
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"knox-media/api/middleware"
-	"knox-media/internal/photoclass"
+	"knox-media/internal/playcompletion"
 	"knox-media/internal/scraper"
 	"knox-media/internal/storage"
+	"knox-media/internal/store"
 	"knox-media/internal/textencoding"
 )
 
@@ -30,172 +33,60 @@ type updateMediaAdminBody struct {
 }
 
 func (h *Handler) ListMedia(c *gin.Context) {
+	h.listMediaObserved(c, nil)
+}
+
+func (h *Handler) listMediaObserved(c *gin.Context, afterBatch func(mediaListStats)) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+	defer cancel()
 	var profile userPermissionProfile
 	listUID := int64(0)
 	if !middleware.IsAPIClient(c) {
 		listUID = middleware.UserID(c)
 		if listUID > 0 {
-			p, err := h.loadUserPermissionProfile(listUID)
-			if err == nil {
-				profile = p
-			}
-		}
-	}
-	lib := strings.TrimSpace(c.Query("library_id"))
-	fileType := strings.TrimSpace(c.Query("file_type"))
-	photoTagID := strings.TrimSpace(c.Query("photo_tag"))
-	photoPlaceID := strings.TrimSpace(c.Query("photo_place"))
-	photoPersonID := strings.TrimSpace(c.Query("photo_person"))
-	db := h.App.DB
-	if lib != "" && fileType == "image" {
-		if libID, err := strconv.ParseInt(lib, 10, 64); err == nil && libID > 0 {
-			_, _ = photoclass.RepairLibraryPhotoTags(h.App.DB, libID)
-		}
-	}
-	if lib != "" && strings.EqualFold(profile.LibraryScope, "selected") {
-		if libID, perr := strconv.ParseInt(lib, 10, 64); perr == nil && libID > 0 {
-			if _, ok := profile.AllowedLibraryIDs[libID]; !ok {
-				c.JSON(http.StatusForbidden, gin.H{"error": "library access denied"})
+			var err error
+			profile, err = h.loadUserPermissionProfileContext(ctx, listUID)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 				return
 			}
 		}
 	}
-	q := `SELECT 
-		m.id, m.library_id, m.file_id, m.title, m.original_title, m.file_path, m.file_type, m.duration, m.width, m.height, m.bitrate, m.format, m.status, m.created_at,
-		(SELECT MAX(pp.update_at) FROM play_progress pp WHERE pp.file_id = m.file_id) AS last_play_at,
-		COALESCE((SELECT pp.completed FROM play_progress pp WHERE pp.file_id = m.file_id AND pp.user_id = ?), 0) AS play_completed,
-		COALESCE(NULLIF(json_extract(m.meta_json, '$.scrape.release_date'), ''), NULLIF(json_extract(m.meta_json, '$.release_date'), '')) AS release_date,
-		COALESCE(
-			CAST(NULLIF(json_extract(m.meta_json, '$.scrape.year'), '') AS INTEGER),
-			CAST(NULLIF(json_extract(m.meta_json, '$.year'), '') AS INTEGER),
-			CAST(substr(COALESCE(NULLIF(json_extract(m.meta_json, '$.scrape.release_date'), ''), NULLIF(json_extract(m.meta_json, '$.release_date'), '')), 1, 4) AS INTEGER),
-			0
-		) AS release_year,
-		COALESCE(
-			NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.poster')), ''),
-			NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.extra.poster')), '')
-		) AS poster_url,
-		COALESCE(
-			NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.backdrop')), ''),
-			NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.extra.backdrop')), ''),
-			NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.extra.series_backdrop')), '')
-		) AS backdrop_url,
-		NULLIF(json_extract(m.meta_json, '$.photo.taken_at'), '') AS photo_taken_at,
-		COALESCE(json_extract(m.meta_json, '$.photo.tags'), '[]') AS photo_tags,
-		(SELECT mt.album_id FROM music_track mt WHERE mt.media_id = m.id LIMIT 1) AS music_album_id,
-		(SELECT COALESCE(NULLIF(TRIM(a.title), ''), '') FROM music_track mt JOIN music_album a ON a.id = mt.album_id WHERE mt.media_id = m.id LIMIT 1) AS music_album_title,
-		(SELECT COALESCE(NULLIF(TRIM(mt.artist_display), ''), NULLIF(TRIM(ar.name), ''), '') FROM music_track mt JOIN music_album a ON a.id = mt.album_id LEFT JOIN music_artist ar ON ar.id = a.album_artist_id WHERE mt.media_id = m.id LIMIT 1) AS music_artist,
-		CASE WHEN COALESCE(json_extract(m.meta_json, '$.scrape.source'), '') NOT IN ('', 'aggregated-stub')
-			AND COALESCE(json_extract(m.meta_json, '$.scrape.extra.note'), '') != 'stub'
-			AND (
-				NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.overview')), '') IS NOT NULL
-				OR NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.poster')), '') IS NOT NULL
-				OR NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.extra.poster')), '') IS NOT NULL
-				OR CAST(NULLIF(json_extract(m.meta_json, '$.scrape.rating'), '') AS REAL) > 0
-				OR NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.release_date')), '') IS NOT NULL
-				OR NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.extra.tmdb_id')), '') IS NOT NULL
-				OR NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.extra.imdb_id')), '') IS NOT NULL
-			)
-		THEN 1 ELSE 0 END AS scraped,
-		CASE WHEN EXISTS (
-			SELECT 1 FROM media_encrypted_assets mea
-			WHERE mea.media_id = m.id AND mea.status = 'encrypted'
-		) OR lower(m.file_path) LIKE '%.enc' THEN 1 ELSE 0 END AS encrypted_asset
-	FROM media m WHERE 1=1`
-	args := []any{listUID}
-	if lib != "" {
-		q += ` AND library_id = ?`
-		args = append(args, lib)
+	spec, err := parseMediaListSpec(c, profile, listUID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
 	}
-	if fileType != "" {
-		q += ` AND m.file_type = ?`
-		args = append(args, fileType)
-	}
-	if photoPlaceID != "" {
-		q += ` AND json_extract(m.meta_json, '$.photo.place_id') = ?`
-		args = append(args, photoPlaceID)
-	}
-	if photoPersonID != "" {
-		q += ` AND EXISTS (SELECT 1 FROM photo_face pf WHERE pf.media_id = m.id AND pf.person_id = ?)`
-		args = append(args, photoPersonID)
-	}
-	searchQ := strings.TrimSpace(c.Query("q"))
-	if searchQ != "" {
-		q, args = appendMediaTextSearchFilter(q, args, searchQ)
-	}
-	maxLimit := 500
-	if fileType == "image" {
-		maxLimit = 5000
-	}
-	limit := maxLimit
-	if ls := c.Query("limit"); ls != "" {
-		if n, err := strconv.Atoi(ls); err == nil && n > 0 && n <= maxLimit {
-			limit = n
+	if spec.LibraryID != nil && spec.RestrictLibraries {
+		if _, ok := profile.AllowedLibraryIDs[*spec.LibraryID]; !ok {
+			c.JSON(http.StatusForbidden, gin.H{"error": "library access denied"})
+			return
 		}
 	}
-	switch c.DefaultQuery("sort", "id_desc") {
-	case "created_desc":
-		q += ` ORDER BY datetime(created_at) DESC`
-	case "taken_desc":
-		q += ` ORDER BY datetime(COALESCE(NULLIF(json_extract(m.meta_json, '$.photo.taken_at'), ''), created_at)) DESC`
-	default:
-		q += ` ORDER BY id DESC`
-	}
-	rows, err := h.App.DB.Query(q, args...)
+	rows, _, err := h.listMediaRowsObserved(ctx, spec, afterBatch)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	defer rows.Close()
-	var items []gin.H
-	for rows.Next() {
-		var mid int64
-		var libID sql.NullInt64
-		var fileID, title, orig, path, ftype, format, status, created, lastPlayAt, releaseDate, posterURL, backdropURL, photoTakenAt, photoTagsRaw, musicAlbumTitle, musicArtist sql.NullString
-		var dur, w, h, br, releaseYear, scraped, encryptedAsset, musicAlbumID, playCompleted sql.NullInt64
-		if err := rows.Scan(&mid, &libID, &fileID, &title, &orig, &path, &ftype, &dur, &w, &h, &br, &format, &status, &created, &lastPlayAt, &playCompleted, &releaseDate, &releaseYear, &posterURL, &backdropURL, &photoTakenAt, &photoTagsRaw, &musicAlbumID, &musicAlbumTitle, &musicArtist, &scraped, &encryptedAsset); err != nil {
-			continue
-		}
-		if strings.EqualFold(profile.LibraryScope, "selected") {
-			if _, ok := profile.AllowedLibraryIDs[libID.Int64]; !ok {
-				continue
-			}
-			if folders := profile.AllowedLibraryFolders[libID.Int64]; len(folders) > 0 && !pathMatchesAnyFolder(path.String, folders) {
-				continue
-			}
-		}
-		photoTags := parseJSONStringArray(photoTagsRaw.String)
-		photoTagIDs := photoclass.TagIDs(photoTags)
-		if photoTagID != "" && photoTagID != "all" && !photoTagIDMatches(photoTagID, photoTags, photoTagIDs) {
-			continue
-		}
-		optimizationAvailable := false
-		if strings.EqualFold(ftype.String, "video") {
-			optimizationAvailable = storage.PlaintextSourceAvailable(db, mid, libID.Int64, path.String)
-		}
+	items := make([]gin.H, 0, len(rows))
+	for _, row := range rows {
+		optimizationAssetRecorded := row.OptimizationAssetRecorded.Int64 == 1
 		items = append(items, gin.H{
-			"id": mid, "library_id": libID.Int64, "file_id": fileID.String,
-			"title": title.String, "original_title": orig.String, "file_path": path.String,
-			"file_type": ftype.String, "duration": dur.Int64, "width": w.Int64, "height": h.Int64,
-			"bitrate": br.Int64, "format": format.String, "status": status.String, "created_at": created.String,
-			"last_play_at": lastPlayAt.String, "completed": playCompleted.Int64, "release_date": releaseDate.String, "year": releaseYear.Int64,
-			"poster_url": posterURL.String, "backdrop_url": backdropURL.String, "scraped": scraped.Int64 == 1,
-			"encrypted_asset": encryptedAsset.Int64 == 1,
-			"optimization_available": optimizationAvailable,
-			"photo_taken_at": photoTakenAt.String,
-			"photo_tags":     photoTags,
-			"photo_tag_ids":  photoTagIDs,
-			"music_album_id": musicAlbumID.Int64,
-			"music_album_title": textencoding.FixMetadataString(musicAlbumTitle.String),
-			"music_artist":      textencoding.FixMetadataString(musicArtist.String),
+			"id": row.ID, "library_id": row.LibraryID.Int64, "file_id": row.FileID.String,
+			"title": row.Title.String, "original_title": row.OriginalTitle.String, "file_path": row.FilePath.String,
+			"file_type": row.FileType.String, "duration": row.Duration.Int64, "width": row.Width.Int64, "height": row.Height.Int64,
+			"bitrate": row.Bitrate.Int64, "format": row.Format.String, "status": row.Status.String, "created_at": row.CreatedAt.String,
+			"last_play_at": row.LastPlayAt.String, "completed": row.PlayCompleted.Int64, "release_date": row.ReleaseDate.String, "year": row.ReleaseYear.Int64,
+			"poster_url": row.PosterURL.String, "backdrop_url": row.BackdropURL.String, "scraped": row.Scraped.Int64 == 1,
+			"encrypted_asset": row.EncryptedAsset.Int64 == 1, "optimization_asset_recorded": optimizationAssetRecorded,
+			"optimization_available": optimizationAssetRecorded,
+			"photo_taken_at":         row.PhotoTakenAt.String, "photo_tags": row.PhotoTags, "photo_tag_ids": row.PhotoTagIDs,
+			"music_album_id": row.MusicAlbumID.Int64, "music_album_title": textencoding.FixMetadataString(row.MusicAlbumTitle.String),
+			"music_artist": textencoding.FixMetadataString(row.MusicArtist.String),
 		})
-		if len(items) >= limit {
-			break
-		}
 	}
 	c.JSON(http.StatusOK, gin.H{"items": items})
 }
-
 func photoTagIDMatches(filterID string, tags, tagIDs []string) bool {
 	if filterID == "" || filterID == "all" {
 		return true
@@ -226,13 +117,19 @@ func (h *Handler) GetMedia(c *gin.Context) {
 		return
 	}
 	row := h.App.DB.QueryRow(`
-		SELECT id, library_id, file_id, title, original_title, file_path, file_type, duration, width, height, bitrate, md5, format, meta_json, status, created_at
-		FROM media WHERE id = ?`, id)
+		SELECT m.id, m.library_id, m.file_id, m.title, m.original_title, m.file_path, m.file_type,
+		       m.duration, m.width, m.height, m.bitrate, m.md5, m.format, m.meta_json, m.status, m.created_at,
+		       CASE WHEN mea.status='encrypted' OR lower(m.file_path) LIKE '%.enc' THEN 1 ELSE 0 END,
+		       `+optimizationAssetRecordedSQL+`
+		FROM media m
+		LEFT JOIN library l ON l.id=m.library_id
+		LEFT JOIN media_encrypted_assets mea ON mea.media_id=m.id
+		WHERE m.id = ?`, id)
 	var libID sql.NullInt64
 	var fileID, title, orig, path, ftype, md5, format, meta, status, created sql.NullString
 	var dur, w, hei, br sql.NullInt64
-	var mid int64
-	if err := row.Scan(&mid, &libID, &fileID, &title, &orig, &path, &ftype, &dur, &w, &hei, &br, &md5, &format, &meta, &status, &created); err != nil {
+	var mid, encryptedAsset, optimizationRecorded int64
+	if err := row.Scan(&mid, &libID, &fileID, &title, &orig, &path, &ftype, &dur, &w, &hei, &br, &md5, &format, &meta, &status, &created, &encryptedAsset, &optimizationRecorded); err != nil {
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 			return
@@ -240,14 +137,9 @@ func (h *Handler) GetMedia(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	var encryptedAsset int64
-	_ = h.App.DB.QueryRow(`SELECT CASE WHEN EXISTS (
-			SELECT 1 FROM media_encrypted_assets mea
-			WHERE mea.media_id = ? AND mea.status = 'encrypted'
-		) OR lower(?) LIKE '%.enc' THEN 1 ELSE 0 END`, mid, path.String).Scan(&encryptedAsset)
-	optimizationAvailable := false
+	optimizationSourceAvailable := false
 	if strings.EqualFold(ftype.String, "video") {
-		optimizationAvailable = storage.PlaintextSourceAvailable(h.App.DB, mid, libID.Int64, path.String)
+		optimizationSourceAvailable = storage.PlaintextSourceAvailable(h.App.DB, mid, libID.Int64, path.String)
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"id": mid, "library_id": libID.Int64, "file_id": fileID.String,
@@ -255,8 +147,10 @@ func (h *Handler) GetMedia(c *gin.Context) {
 		"file_type": ftype.String, "duration": dur.Int64, "width": w.Int64, "height": hei.Int64,
 		"bitrate": br.Int64, "md5": md5.String, "format": format.String, "meta_json": meta.String,
 		"status": status.String, "created_at": created.String,
-		"encrypted_asset": encryptedAsset == 1,
-		"optimization_available": optimizationAvailable,
+		"encrypted_asset":               encryptedAsset == 1,
+		"optimization_asset_recorded":   optimizationRecorded == 1,
+		"optimization_available":        optimizationRecorded == 1,
+		"optimization_source_available": optimizationSourceAvailable,
 	})
 }
 
@@ -368,7 +262,10 @@ func (h *Handler) ScrapeMedia(c *gin.Context) {
 	}
 	var fileType string
 	_ = h.App.DB.QueryRow(`SELECT COALESCE(file_type,'') FROM media WHERE id = ?`, id).Scan(&fileType)
-	h.applyScrapeLocalImages(id, libraryID, fileType, cfg, res)
+	if err := h.applyScrapeLocalImages(c.Request.Context(), id, libraryID, fileType, cfg, res, true); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	if !scraper.HasMeaningfulScrapeData(res) {
 		msg := scraper.NoDataFailureMessage(res)
 		if err != nil {
@@ -377,22 +274,15 @@ func (h *Handler) ScrapeMedia(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": msg})
 		return
 	}
-	scraper.PreserveScrapeImagesFromExisting(res, existing.String)
 	if _, pErr := h.persistScrapeArtwork(id, res); pErr != nil {
 		log.Printf("scrape media artwork persist id=%d: %v", id, pErr)
 	}
-	patch := map[string]any{
-		"scrape": res,
-	}
-	newMeta, err := scraper.MergeMetaJSON(existing.String, patch)
+	_, committed, err := h.mergeScrapeResultTx(c.Request.Context(), id, res, res.Title)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	if _, err := h.App.DB.Exec(`UPDATE media SET meta_json = ? WHERE id = ?`, newMeta, id); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
+	res = committed
 	h.scheduleLibraryPreviewRefresh(libraryID)
 	c.JSON(http.StatusOK, gin.H{"scrape": res})
 }
@@ -476,7 +366,25 @@ func (h *Handler) UpdateMediaAdmin(c *gin.Context) {
 	}
 	args = append(args, id)
 	query := "UPDATE media SET " + strings.Join(fields, ", ") + " WHERE id = ?"
-	res, err := h.App.DB.Exec(query, args...)
+	var res sql.Result
+	if body.MetaJSON != nil {
+		tx, txErr := h.App.DB.BeginTx(c.Request.Context(), nil)
+		if txErr != nil {
+			err = txErr
+		} else {
+			res, err = tx.ExecContext(c.Request.Context(), query, args...)
+			if err == nil {
+				err = store.UpdateMediaMetaAndPhotoTime(c.Request.Context(), tx, id, strings.TrimSpace(*body.MetaJSON))
+			}
+			if err == nil {
+				err = tx.Commit()
+			} else {
+				_ = tx.Rollback()
+			}
+		}
+	} else {
+		res, err = h.App.DB.ExecContext(c.Request.Context(), query, args...)
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -497,46 +405,27 @@ func (h *Handler) ToggleWatched(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
 		return
 	}
-
+	if _, ok := h.requireMediaAccess(c, id, true); !ok {
+		return
+	}
+	if middleware.IsAPIClient(c) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "API client credentials cannot sync user progress"})
+		return
+	}
 	userID := middleware.UserID(c)
 	if userID <= 0 {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
-
-	// Get the file_id for this media item.
-	var fileID string
-	if err := h.App.DB.QueryRow(`SELECT file_id FROM media WHERE id = ?`, id).Scan(&fileID); err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "media not found"})
+	progress := playcompletion.Store{DB: h.App.DB, Now: h.PlayCompletionNow}
+	if c.Request.Method == http.MethodPut {
+		err = progress.MarkWatched(c.Request.Context(), userID, id)
+	} else {
+		err = progress.MarkUnwatched(c.Request.Context(), userID, id)
+	}
+	if err != nil {
+		writePlaybackStoreError(c, err)
 		return
 	}
-
-	isPut := c.Request.Method == http.MethodPut
-
-	if isPut {
-		// Mark as watched: upsert play_progress with completed=1.
-		_, err = h.App.DB.Exec(`
-			INSERT INTO play_progress (user_id, file_id, play_end_at, completed)
-			VALUES (?, ?, CURRENT_TIMESTAMP, 1)
-			ON CONFLICT DO NOTHING`,
-			userID, fileID,
-		)
-		if err == nil {
-			// If no conflict, new row created. If conflict, try update.
-		}
-		_, _ = h.App.DB.Exec(`
-			UPDATE play_progress SET completed = 1, play_end_at = CURRENT_TIMESTAMP, update_at = CURRENT_TIMESTAMP
-			WHERE user_id = ? AND file_id = ?`,
-			userID, fileID,
-		)
-		c.JSON(http.StatusOK, gin.H{"ok": true, "watched": true})
-	} else {
-		// Mark as unwatched.
-		_, err = h.App.DB.Exec(`
-			UPDATE play_progress SET completed = 0, play_end_at = NULL, update_at = CURRENT_TIMESTAMP
-			WHERE user_id = ? AND file_id = ?`,
-			userID, fileID,
-		)
-		c.JSON(http.StatusOK, gin.H{"ok": true, "watched": false})
-	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "watched": c.Request.Method == http.MethodPut})
 }

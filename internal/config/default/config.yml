@@ -1,4 +1,4 @@
-server:
+﻿server:
   host: "0.0.0.0"
   port: 8200
   mode: "release"
@@ -46,6 +46,11 @@ playback:
 encrypted_assets:
   enabled: true
   cleanup_plaintext_default: false
+# Optional post-ingest concurrency overrides; omitted values use CPU-based defaults.
+# post_ingest:
+#   max_concurrent: 4
+#   poster_max_concurrent: 2
+#   preview_max_concurrent: 1
 scan:
   file_hash_on_scan: false
   fast_ffprobe: true
@@ -86,6 +91,8 @@ photo_face:
   batch_limit: 1
   poll_interval_seconds: 10
   failed_retry_minutes: 60
+  thumbnail_repair_batch: 32
+  thumbnail_repair_audit_hours: 24
 doc_trans:
   enabled: true
   engine_order:
@@ -102,3 +109,6 @@ jit:
 cors:
   allow_origins:
     - "*"
+
+
+\n

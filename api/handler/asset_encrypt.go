@@ -9,14 +9,6 @@ import (
 	"knox-media/internal/storage"
 )
 
-// KickEncryptMediaAsset encrypts media at rest when the library has encrypted_assets_enabled.
-func (h *Handler) KickEncryptMediaAsset(mediaID int64) {
-	if h == nil || h.App == nil {
-		return
-	}
-	storage.KickEncryptMedia(h.AssetEncryptor, h.App.Config, mediaID)
-}
-
 // EncryptMediaAssets queues on-demand envelope encryption for one media item.
 func (h *Handler) EncryptMediaAssets(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)

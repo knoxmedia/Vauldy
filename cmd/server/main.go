@@ -4,17 +4,22 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math"
+	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/go-redis/redis/v8"
+	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 
 	"knox-media/api"
@@ -29,21 +34,21 @@ import (
 	"knox-media/internal/doccover"
 	"knox-media/internal/imagethumb"
 	"knox-media/internal/jit/hwenc"
-	"knox-media/internal/jit/ingestprepare"
 	jitmetrics "knox-media/internal/jit/metrics"
 	jitsession "knox-media/internal/jit/session"
 	"knox-media/internal/keyframe"
 	"knox-media/internal/keystore"
-	// Enterprise module imports — their init() registers into
+	// Enterprise module imports 闂?their init() registers into
 	// coreiface.EnterpriseModules. The community build excludes these
 	// imports (and the packages themselves), leaving EnterpriseModules empty.
 	_ "knox-media/internal/license"
 	"knox-media/internal/lyrictask"
 	"knox-media/internal/monitor"
-	_ "knox-media/internal/pretranscode"
 	"knox-media/internal/photoclass"
-	"knox-media/internal/photoface"
+	"knox-media/internal/postingest"
+	_ "knox-media/internal/pretranscode"
 	"knox-media/internal/preview"
+	"knox-media/internal/scancoord"
 	"knox-media/internal/scanner"
 	"knox-media/internal/storage"
 	"knox-media/internal/store"
@@ -57,6 +62,9 @@ import (
 func main() {
 	zlog := zapglobal.MustReplaceGlobals()
 	defer func() { _ = zlog.Sync() }()
+
+	serverCtx, serverCancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer serverCancel()
 
 	cfgPath := config.ResolveConfigPath()
 	cfgPath, err := config.EnsureConfigFile(cfgPath)
@@ -73,11 +81,13 @@ func main() {
 	}
 	log.Printf("build marker: no_audio_master_patch=v1")
 
-	db, err := store.OpenSQLite(cfg.Data.DB)
+	// (1) Database, metrics, and validated configuration. Configuration is validated above; OpenSQLite lives here rather than app.New.
+	db, err := store.OpenSQLiteContext(serverCtx, cfg.Data.DB)
 	if err != nil {
 		log.Fatalf("db: %v", err)
 	}
 	defer db.Close()
+	sqliteMetrics := &store.SQLiteMetrics{}
 	store.ResetInterruptedTasks(db)
 
 	if err := seedUsers(db); err != nil {
@@ -97,8 +107,9 @@ func main() {
 			hwenc.DetectHWAccel(cfg.FFmpeg.FFmpegPath),
 		)
 	}
+	// (2) Vault, derived storage, and domain workers.
 	transcodeSettings := loadSystemOptionsTranscodeSettings(db)
-	keyVault, assetEncryptor := storage.NewAssetEncryptorFromConfig(cfg, db)
+	keyVault, assetEnc := storage.NewAssetEncryptorFromConfig(cfg, db)
 	derivedStore := storage.NewDerivedAssetStoreFromConfig(cfg, db, keyVault)
 	worker := transcode.NewWorker(db, cfg.FFmpeg.FFmpegPath, cfg.Data.Transcode)
 	packageWorker := transcode.NewPackageWorker(db, cfg, keyVault)
@@ -146,17 +157,6 @@ func main() {
 	photoClassifyWorker := photoclass.NewWorker(db, keyVault, filepath.Dir(cfgPath), cfg.FFmpeg.FFmpegPath, cfg.Data.Preview, func() config.PhotoClassifyConfig {
 		return cfg.PhotoClassify
 	})
-	photoFaceWorker := photoface.NewWorker(db, keyVault, derivedStore, filepath.Dir(cfgPath), cfg.FFmpeg.FFmpegPath, cfg.Data.Preview, func() config.PhotoFaceConfig {
-		faceCfg := cfg.PhotoFace
-		if strings.TrimSpace(faceCfg.PythonPath) == "" {
-			faceCfg.PythonPath = cfg.PhotoClassify.PythonPath
-		}
-		if strings.TrimSpace(faceCfg.ScriptPath) == "" {
-			faceCfg.ScriptPath = "tools/photo_face/detect.py"
-		}
-		return faceCfg
-	})
-
 	redisAddr := strings.TrimSpace(os.Getenv("KNOX_MEDIA_REDIS_ADDR"))
 	if redisAddr == "" {
 		redisAddr = "127.0.0.1:6379"
@@ -178,8 +178,6 @@ func main() {
 	}
 	storage.SetMediaPlaintextBusy(sessionMgr.HasActiveMedia)
 	go storage.KickPendingPlaintextCleanups(db)
-	go storage.KickEncryptedMP4PipeRepairs(assetEncryptor)
-	go storage.KickPendingMediaEncryption(assetEncryptor, cfg)
 
 	instantSliceWorker := sliceworker.NewSliceWorker(&sliceworker.Config{
 		RedisAddr:   redisAddr,
@@ -225,39 +223,101 @@ func main() {
 		DocTrans:   cfg.DocTrans,
 		TimeoutSec: cfg.DocTransTimeoutSeconds,
 	})
-	sc := &scanner.Scanner{
-		DB:           db,
-		Vault:        keyVault,
-		FFprobePath:  cfg.FFmpeg.FFprobePath,
-		SkipHash:     !cfg.LibraryScanFileHash(),
-		FFprobeExtra: ffprobeExtra,
+	// (3) Shared post-ingest queue, enqueuer, six adapters, and dispatcher.
+	hostname, err := os.Hostname()
+	if err != nil || strings.TrimSpace(hostname) == "" {
+		hostname = "unknown-host"
 	}
-	sc.OnDocumentScanned = func(mediaID int64) {
-		docCoverWorker.Enqueue(mediaID)
+	processID := fmt.Sprintf("%s-%d-%s", hostname, os.Getpid(), uuid.NewString())
+	queueOwner := "postingest-" + processID
+	postIngestQueue := postingest.NewQueue(db, queueOwner, sqliteMetrics)
+	postIngestEnqueuer := postingest.NewEnqueuer(db, cfg, sqliteMetrics)
+	posterRunner := &postingest.LocalPosterRunner{DB: db, Vault: keyVault, Derived: derivedStore, FFmpegPath: cfg.FFmpeg.FFmpegPath, FFprobePath: cfg.FFmpeg.FFprobePath, UploadDir: cfg.Data.Upload}
+	adapters := postingest.AdapterSet{
+		Poster:   postingest.NewPosterAdapter(db, cfg.Data.Upload, derivedStore, posterRunner),
+		Preview:  postingest.NewPreviewAdapter(db, previewWorker),
+		Keyframe: postingest.NewKeyframeAdapter(db, keyframeWorker),
+		Subtitle: postingest.NewSubtitleAdapter(db, subSvc),
+		Atrack:   postingest.NewAtrackAdapter(db, atrackWorker),
+		Encrypt:  postingest.NewEncryptAdapter(assetEnc),
 	}
-	sc.OnMediaAdded = func(mediaID int64, _ string, ft string) {
-		go enqueueAutoTasksOnMediaAdded(db, keyVault, cfg, assetEncryptor, derivedStore, previewWorker, docCoverWorker, subSvc, atrackWorker, keyframeWorker, lyricWorker, photoClassifyWorker, photoFaceWorker, mediaID, ft)
-		if ft == "video" {
-			var drmEnabled int
-			_ = db.QueryRow(`
-				SELECT COALESCE(l.drm_enabled,0) FROM media m LEFT JOIN library l ON l.id = m.library_id WHERE m.id = ?
-			`, mediaID).Scan(&drmEnabled)
-			if drmEnabled == 0 {
-				go func(id int64) {
-					_, _ = packageWorker.EnqueueForMedia(id)
-				}(mediaID)
-			}
-			go ingestprepare.Kick(db, instantScheduler, mediaID)
+	dispatcherOptions := buildDispatcherOptions(cfg, queueOwner)
+	dispatcher, err := postingest.NewDispatcher(postIngestQueue, adapters, dispatcherOptions)
+	if err != nil {
+		log.Fatalf("post-ingest dispatcher: %v", err)
+	}
+	dispatcherDone := make(chan error, 1)
+	go func() {
+		err := dispatcher.Start(serverCtx)
+		dispatcherDone <- err
+		if err != nil && serverCtx.Err() == nil {
+			log.Printf("post-ingest dispatcher stopped: %v", err)
+			serverCancel()
 		}
+	}()
+	// Pending encryption sweep starts only after the shared Queue and Enqueuer exist.
+	if cfg.EncryptedAssetsEnabled() {
+		go func() {
+			if err := postingest.EnqueuePendingMediaEncryption(serverCtx, db, func(ctx context.Context, mediaID int64, scanTaskID *int64, _ postingest.TaskType) (bool, error) {
+				return postIngestQueue.Enqueue(ctx, mediaID, scanTaskID, postingest.TaskEncrypt)
+			}); err != nil && serverCtx.Err() == nil {
+				log.Printf("asset encrypt: pending enqueue: %v", err)
+			}
+		}()
 	}
-	mon := monitor.NewService(db, sc, 15*time.Second)
-	go mon.Start(context.Background())
 
-	engine := api.NewEngine(cfg, application, worker, packageWorker, previewWorker, subSvc, up, instantScheduler, sessionMgr, atrackWorker, keyframeWorker, lyricWorker, photoClassifyWorker, docCoverWorker)
+	// (4) Scanner dependencies and the process-wide scan coordinator.
+	sc := &scanner.Scanner{
+		DB:            db,
+		Vault:         keyVault,
+		FFprobePath:   cfg.FFmpeg.FFprobePath,
+		SkipHash:      !cfg.LibraryScanFileHash(),
+		PhotoCacheDir: filepath.Join(cfg.Data.Preview, "photos"),
+		CleanupRoots:  []string{cfg.Data.Dir, cfg.Data.Preview},
+		FFprobeExtra:  ffprobeExtra,
+	}
+	sc.OnDocumentScanned = func(mediaID int64) { docCoverWorker.Enqueue(mediaID) }
+	coordinator, err := scancoord.New(db, scancoord.Options{
+		LeaseDuration: 60 * time.Second, HeartbeatInterval: 20 * time.Second,
+		OwnerInstanceID: "scancoord-" + processID, Scanner: sc, Metrics: sqliteMetrics,
+
+		OnMediaAdded:    scancoord.MediaAddedFunc(postingest.NewScanMediaAddedEnqueueCallback(postIngestEnqueuer)),
+		OnScanCancelled: func(_ context.Context, taskID int64) error { dispatcher.CancelScan(taskID); return nil },
+
+		OnError: func(err error) { log.Printf("scan coordinator: %v", err) },
+	})
+	if err != nil {
+		log.Fatalf("scan coordinator: %v", err)
+	}
+
+	// (5) Admin overview uses the shared resource-control instances.
+	background := &handler.BackgroundGroup{}
+	deps := handler.Dependencies{
+		ServerContext: serverCtx, Background: background,
+		Coordinator: coordinator, Queue: postIngestQueue, PostIngest: postIngestEnqueuer, Dispatcher: dispatcher, AdminOverviewBuilder: handler.NewAdminOverviewBuilder(db, dispatcher, sqliteMetrics),
+		Worker: worker, PackageWorker: packageWorker, PreviewWorker: previewWorker, Subtitle: subSvc, Upload: up,
+		Instant: instantScheduler, SessionManager: sessionMgr, AtrackWorker: atrackWorker, KeyframeWorker: keyframeWorker,
+		LyricWorker: lyricWorker, PhotoClassifyWorker: photoClassifyWorker, DocCoverWorker: docCoverWorker,
+		KeyVault: keyVault, AssetEncryptor: assetEnc, DerivedStore: derivedStore,
+	}
+
+	// (6) Handler dependencies are injected into the API router.
+	engine := api.NewEngine(cfg, application, deps)
+
+	// (7) Monitor submits through the same coordinator and starts last.
+	mon := monitor.NewService(db, coordinator, 15*time.Second)
+	monitorDone := make(chan struct{})
+	go func() {
+		defer close(monitorDone)
+		mon.Start(serverCtx)
+	}()
+
+	// (8) Root cancellation stops monitor, scans, and dispatcher. HTTP shutdown below stops new requests first;
+	// Dispatcher preserves running leases with FailureShutdown and Coordinator waits for scan finalization.
 
 	// Initialize commercial enterprise modules (license + pretranscode). The
 	// community build leaves EnterpriseModules empty, so this loop is a no-op.
-	enterpriseCtx, enterpriseCancel := context.WithCancel(context.Background())
+	enterpriseCtx, enterpriseCancel := context.WithCancel(serverCtx)
 	defer enterpriseCancel()
 	for _, mod := range coreiface.EnterpriseModules {
 		if err := mod.Init(enterpriseCtx, coreiface.ModuleDeps{
@@ -274,10 +334,56 @@ func main() {
 		}
 	}
 
-	log.Printf("knox-media listening on http://%s", cfg.Addr())
-	if err := engine.Run(cfg.Addr()); err != nil {
-		log.Fatal(err)
+	httpServer := &http.Server{Addr: cfg.Addr(), Handler: engine}
+	serverDone := make(chan error, 1)
+	go func() {
+		log.Printf("knox-media listening on http://%s", cfg.Addr())
+		serverDone <- httpServer.ListenAndServe()
+	}()
+	select {
+	case err := <-serverDone:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("http server stopped: %v", err)
+		}
+		serverCancel()
+	case <-serverCtx.Done():
 	}
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer shutdownCancel()
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		log.Printf("http server shutdown: %v", err)
+	}
+	serverCancel()
+	// Wait for monitor submission to stop before waiting on the Coordinator WaitGroup.
+	select {
+	case <-monitorDone:
+	case <-shutdownCtx.Done():
+		log.Printf("monitor shutdown: %v", shutdownCtx.Err())
+	}
+	if err := background.Wait(shutdownCtx); err != nil {
+		log.Printf("handler background shutdown: %v", err)
+	}
+	if err := coordinator.ShutdownContext(shutdownCtx); err != nil {
+		log.Printf("scan coordinator shutdown: %v", err)
+	}
+	select {
+	case err := <-dispatcherDone:
+		if err != nil {
+			log.Printf("post-ingest dispatcher shutdown: %v", err)
+		}
+	case <-shutdownCtx.Done():
+		log.Printf("post-ingest dispatcher shutdown: %v", shutdownCtx.Err())
+	}
+}
+
+func buildDispatcherOptions(cfg *config.Config, owner string) postingest.DispatcherOptions {
+	opts := postingest.DefaultDispatcherOptions()
+	opts.OwnerID = owner
+	opts.Global = cfg.PostIngest.MaxConcurrent
+	opts.Poster = cfg.PostIngest.PosterMaxConcurrent
+	opts.Preview = cfg.PostIngest.PreviewMaxConcurrent
+	return opts
 }
 
 // seedUsers creates default admin + demo viewer when DB is empty; ensures viewer exists on old DBs.
@@ -333,45 +439,6 @@ func instantMaxConcurrent() int {
 		n = 8
 	}
 	return n
-}
-
-func enqueueAutoTasksOnMediaAdded(db *sql.DB, vault *keystore.Vault, cfg *config.Config, assetEnc *storage.AssetEncryptor, derivedStore *storage.DerivedAssetStore, previewWorker *preview.Worker, dcw *doccover.Worker, subSvc *subtitle.Service, atw *atrack.Worker, kfw *keyframe.Worker, lw *lyrictask.Worker, pcw *photoclass.Worker, pfw *photoface.Worker, mediaID int64, fileType string) {
-	if db == nil || cfg == nil || mediaID <= 0 {
-		return
-	}
-	// 顺序与产品流水线对齐：本地预览图/海报 → 刮削（元数据与远端配图）。
-	// JIT 关键帧索引：仅 jit_prepare_on_ingest 时在 scanner/upload 路径触发；传输流实时加密在点播时处理。
-	enqueueAutoPreviewTask(db, mediaID, fileType)
-	ensureAutoPreviewGeneration(db, previewWorker, mediaID, fileType)
-	capturePosterOnScan(db, vault, derivedStore, cfg, mediaID, fileType)
-	generatePhotoVariantsOnScan(db, vault, cfg, mediaID, fileType)
-	if fileType == "document" && dcw != nil {
-		dcw.Enqueue(mediaID)
-	}
-	if fileType != "image" {
-		enqueueAutoScrapeTask(db, mediaID)
-	}
-	if subSvc != nil && cfg.SubtitleAutoOnScan() && fileType == "video" {
-		_ = subSvc.EnsurePendingSubtitleTask(mediaID)
-	}
-	if lw != nil && cfg.LyricAutoOnScan() {
-		_ = lw.EnsurePendingIfNoLyrics(mediaID, fileType)
-	}
-	if pcw != nil && cfg.PhotoClassifyAutoOnScan() && fileType == "image" {
-		_ = pcw.EnsurePendingIfPhoto(mediaID, fileType)
-	}
-	if pfw != nil && cfg.PhotoFaceAutoOnScan() && fileType == "image" {
-		_ = pfw.EnsurePendingIfPhoto(mediaID, fileType)
-	}
-	if fileType == "video" {
-		if atw != nil && cfg.ATrackAutoOnScan() {
-			atw.Enqueue(mediaID)
-		}
-		if kfw != nil {
-			kfw.Enqueue(mediaID)
-		}
-	}
-	storage.KickEncryptMedia(assetEnc, cfg, mediaID)
 }
 
 func enqueueAutoScrapeTask(db *sql.DB, mediaID int64) {
@@ -438,79 +505,6 @@ func ensureAutoPreviewGeneration(db *sql.DB, previewWorker *preview.Worker, medi
 	_, _ = previewWorker.Ensure(context.Background(), mediaID, inputPath, duration.Int64)
 }
 
-func capturePosterOnScan(db *sql.DB, vault *keystore.Vault, derivedStore *storage.DerivedAssetStore, cfg *config.Config, mediaID int64, fileType string) {
-	if fileType != "video" {
-		return
-	}
-	ffmpegPath := strings.TrimSpace(cfg.FFmpeg.FFmpegPath)
-	uploadDir := strings.TrimSpace(cfg.Data.Upload)
-	if ffmpegPath == "" || uploadDir == "" {
-		return
-	}
-	var filePath sql.NullString
-	var duration sql.NullInt64
-	var metaRaw sql.NullString
-	var libraryID sql.NullInt64
-	if err := db.QueryRow(`SELECT library_id, file_path, COALESCE(duration,0), COALESCE(meta_json,'') FROM media WHERE id = ? LIMIT 1`, mediaID).
-		Scan(&libraryID, &filePath, &duration, &metaRaw); err != nil {
-		return
-	}
-	inputPath := storage.PreferredFFmpegPath(db, mediaID, libraryID.Int64, filePath.String)
-	if inputPath == "" {
-		return
-	}
-	posterDir := filepath.Join(uploadDir, "posters")
-	if err := os.MkdirAll(posterDir, 0o755); err != nil {
-		return
-	}
-	posterFile := filepath.Join(posterDir, fmt.Sprintf("%d.jpg", mediaID))
-
-	snapSec := 10
-	if duration.Int64 > 0 {
-		sec := int(duration.Int64 / 5)
-		if sec < 10 {
-			sec = 10
-		}
-		if sec > 180 {
-			sec = 180
-		}
-		snapSec = sec
-	}
-	post := []string{"-frames:v", "1", "-q:v", "3", posterFile}
-	pre := storage.PosterSeekPreInput(snapSec, inputPath)
-	if _, err := storage.RunFFmpeg(context.Background(), db, vault, ffmpegPath, mediaID, inputPath, 0, 0, pre, post, ""); err != nil {
-		return
-	}
-	posterURL, err := storage.FinalizeLocalPoster(context.Background(), derivedStore, db, mediaID, posterFile)
-	if err != nil {
-		_ = os.Remove(posterFile)
-		return
-	}
-
-	var root map[string]any
-	if strings.TrimSpace(metaRaw.String) != "" {
-		_ = json.Unmarshal([]byte(metaRaw.String), &root)
-	}
-	if root == nil {
-		root = map[string]any{}
-	}
-	scrape, _ := root["scrape"].(map[string]any)
-	if scrape == nil {
-		scrape = map[string]any{}
-	}
-	extra, _ := scrape["extra"].(map[string]any)
-	if extra == nil {
-		extra = map[string]any{}
-	}
-	if strings.TrimSpace(fmt.Sprintf("%v", extra["poster"])) == "" {
-		extra["poster"] = posterURL
-	}
-	scrape["extra"] = extra
-	root["scrape"] = scrape
-	merged, _ := json.Marshal(root)
-	_, _ = db.Exec(`UPDATE media SET meta_json = ? WHERE id = ?`, string(merged), mediaID)
-}
-
 func generatePhotoVariantsOnScan(db *sql.DB, vault *keystore.Vault, cfg *config.Config, mediaID int64, fileType string) {
 	if fileType != "image" || db == nil || cfg == nil || mediaID <= 0 {
 		return
@@ -549,7 +543,9 @@ func generatePhotoVariantsOnScan(db *sql.DB, vault *keystore.Vault, cfg *config.
 	photo["medium_path"] = paths.Medium
 	root["photo"] = photo
 	merged, _ := json.Marshal(root)
-	_, _ = db.Exec(`UPDATE media SET meta_json = ? WHERE id = ?`, string(merged), mediaID)
+	if err := store.UpdateMediaMetaAndPhotoTime(context.Background(), db, mediaID, string(merged)); err != nil {
+		log.Printf("photo thumbnail metadata media=%d: %v", mediaID, err)
+	}
 }
 
 func loadSystemOptionsTranscodeSettings(db *sql.DB) transcode.Settings {

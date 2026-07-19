@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,6 +12,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
+
+	"github.com/google/uuid"
 
 	"knox-media/internal/keystore"
 	"knox-media/internal/storage"
@@ -41,6 +45,7 @@ type Worker struct {
 	OutputDir   string
 	mu          sync.Mutex
 	running     map[int64]bool
+	restoreDir  func(string, string) error
 }
 
 // NewWorker creates a new audio track extraction worker.
@@ -53,6 +58,7 @@ func NewWorker(db *sql.DB, vault *keystore.Vault, derived *storage.DerivedAssetS
 		FFprobePath: ffprobePath,
 		OutputDir:   outputDir,
 		running:     map[int64]bool{},
+		restoreDir:  restoreAtrackDirectory,
 	}
 }
 
@@ -134,6 +140,44 @@ func (w *Worker) RunBatch(limit int) (done, failed int) {
 }
 
 // Run executes audio extraction for a single media item (synchronous, for manual trigger).
+type commitGuardKey struct{}
+type CommitGuard func(context.Context) error
+type CommitGuardTx func(context.Context, *sql.Tx) error
+
+// WithCommitGuard fences filesystem and domain-state commits for a claimed post-ingest generation.
+func WithCommitGuardTx(ctx context.Context, guard func(context.Context, *sql.Tx) error) context.Context {
+	if guard == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, commitGuardTxKey{}, CommitGuardTx(guard))
+}
+
+type commitGuardTxKey struct{}
+
+func WithCommitGuard(ctx context.Context, guard func(context.Context) error) context.Context {
+	if guard == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, commitGuardKey{}, CommitGuard(guard))
+}
+
+func validateCommitGuardTx(ctx context.Context, tx *sql.Tx) error {
+	guard, _ := ctx.Value(commitGuardTxKey{}).(CommitGuardTx)
+	if guard != nil {
+		return guard(ctx, tx)
+	}
+	return validateCommitGuard(ctx)
+}
+
+func validateCommitGuard(ctx context.Context) error {
+	guard, _ := ctx.Value(commitGuardKey{}).(CommitGuard)
+	if guard == nil {
+		return nil
+	}
+	return guard(ctx)
+}
+
+// Run executes audio extraction for a single media item (synchronous, for manual trigger).
 func (w *Worker) Run(ctx context.Context, mediaID int64, inputPath string) error {
 	return w.run(ctx, mediaID, inputPath)
 }
@@ -163,7 +207,7 @@ func (w *Worker) probeAudioStreams(ctx context.Context, mediaID int64, inputPath
 	var out []byte
 	var err error
 	if storage.InputNeedsPipe(w.DB, mediaID, inputPath) {
-		raw, cleanup, perr := storage.FFprobeOutput(w.DB, w.Vault, w.FFprobePath, mediaID, inputPath, 0, 0, args)
+		raw, cleanup, perr := storage.FFprobeOutputContext(ctx, w.DB, w.Vault, w.FFprobePath, mediaID, inputPath, 0, 0, args)
 		if cleanup != nil {
 			defer cleanup()
 		}
@@ -191,7 +235,10 @@ func (w *Worker) probeAudioStreams(ctx context.Context, mediaID int64, inputPath
 	return streams, nil
 }
 
-func (w *Worker) run(ctx context.Context, mediaID int64, inputPath string) error {
+func (w *Worker) run(ctx context.Context, mediaID int64, inputPath string) (err error) {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	w.mu.Lock()
 	if w.running[mediaID] {
 		w.mu.Unlock()
@@ -199,77 +246,180 @@ func (w *Worker) run(ctx context.Context, mediaID int64, inputPath string) error
 	}
 	w.running[mediaID] = true
 	w.mu.Unlock()
-	defer func() {
-		w.mu.Lock()
-		delete(w.running, mediaID)
-		w.mu.Unlock()
-	}()
+	defer func() { w.mu.Lock(); delete(w.running, mediaID); w.mu.Unlock() }()
 
 	var taskStatus string
-	if qerr := w.DB.QueryRow(`SELECT status FROM atrack_task WHERE media_id = ?`, mediaID).Scan(&taskStatus); qerr == nil && taskStatus == "failed" {
-		return nil
+	var savedError sql.NullString
+	qerr := w.DB.QueryRowContext(ctx, `SELECT status,error_message FROM atrack_task WHERE media_id=?`, mediaID).Scan(&taskStatus, &savedError)
+	if qerr != nil {
+		return qerr
 	}
-
-	outDir := filepath.Join(w.OutputDir, strconv.FormatInt(mediaID, 10))
-	// Remove old output to enable re-extraction.
-	_ = os.RemoveAll(outDir)
-	if err := os.MkdirAll(outDir, 0o755); err != nil {
-		w.markFailed(mediaID, err.Error())
+	if taskStatus == "failed" {
+		return fmt.Errorf("atrack task failed: %s", savedError.String)
+	}
+	if err := validateCommitGuard(ctx); err != nil {
 		return err
 	}
 
-	_, _ = w.DB.Exec(
-		`UPDATE atrack_task SET status='running', updated_at=CURRENT_TIMESTAMP WHERE media_id = ?`,
-		mediaID,
-	)
+	finalDir := filepath.Join(w.OutputDir, strconv.FormatInt(mediaID, 10))
+	stagingDir := filepath.Join(w.OutputDir, fmt.Sprintf("%d.tmp-%s", mediaID, uuid.NewString()))
+	defer os.RemoveAll(stagingDir)
+	if err := os.MkdirAll(stagingDir, 0o755); err != nil {
+		return w.failGuarded(ctx, mediaID, err)
+	}
+	if _, err := w.DB.ExecContext(ctx, `UPDATE atrack_task SET status='running',updated_at=CURRENT_TIMESTAMP WHERE media_id=?`, mediaID); err != nil {
+		return err
+	}
 
-	// Probe source for audio streams.
 	streams, err := w.probeAudioStreams(ctx, mediaID, inputPath)
 	if err != nil {
-		w.markFailed(mediaID, err.Error())
-		return err
+		return w.handleRunError(ctx, mediaID, err)
 	}
 	if len(streams) == 0 {
-		w.markFailed(mediaID, "no audio streams found")
-		return fmt.Errorf("no audio streams")
+		return w.failGuarded(ctx, mediaID, fmt.Errorf("no audio streams"))
 	}
-
 	var errs []string
 	for _, st := range streams {
+		if err := ctx.Err(); err != nil {
+			return w.handleRunError(ctx, mediaID, err)
+		}
 		lang := strings.TrimSpace(st.Tags.Language)
 		if lang == "" {
 			lang = "und"
 		}
-		streamDir := filepath.Join(outDir, strconv.Itoa(st.Index))
+		streamDir := filepath.Join(stagingDir, strconv.Itoa(st.Index))
 		if err := os.MkdirAll(streamDir, 0o755); err != nil {
 			errs = append(errs, fmt.Sprintf("stream %d: %v", st.Index, err))
 			continue
 		}
-
-		isAAC := strings.ToLower(st.CodecName) == "aac"
-		if err := w.extractStream(ctx, mediaID, inputPath, st.Index, isAAC, streamDir, lang); err != nil {
+		if err := w.extractStream(ctx, mediaID, inputPath, st.Index, strings.EqualFold(st.CodecName, "aac"), streamDir, lang); err != nil {
 			errs = append(errs, fmt.Sprintf("stream %d: %v", st.Index, err))
-			continue
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return w.handleRunError(ctx, mediaID, err)
+	}
+	if len(errs) == len(streams) {
+		return w.failGuarded(ctx, mediaID, fmt.Errorf("all streams failed: %s", strings.Join(errs, "; ")))
+	}
+	if err := validateCommitGuard(ctx); err != nil {
+		return err
+	}
 
-	if len(errs) > 0 {
-		if len(errs) == len(streams) {
-			w.markFailed(mediaID, strings.Join(errs, "; "))
-			return fmt.Errorf("all streams failed: %s", strings.Join(errs, "; "))
+	var staged []*storage.StagedDerivedAsset
+	if w.Derived != nil && storage.NeedsDerivedEncryption(w.DB, mediaID) {
+		staged, err = w.stageEncryptedOutputs(ctx, mediaID, stagingDir)
+		if err != nil {
+			return w.failGuarded(ctx, mediaID, err)
 		}
-		// Partial success (some streams failed): mark done but log errors.
-		msg := strings.Join(errs, "; ")
-		_, _ = w.DB.Exec(`UPDATE atrack_task SET status='done', output_dir=?, error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id = ?`,
-			outDir, msg, mediaID)
+		defer func() {
+			if staged != nil {
+				w.Derived.AbortStaged(staged...)
+			}
+		}()
+	}
+	backupDir, err := replaceAtrackDirectory(finalDir, stagingDir)
+	if err != nil {
+		return w.failGuarded(ctx, mediaID, err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			restore := w.restoreDir
+			if restore == nil {
+				restore = restoreAtrackDirectory
+			}
+			err = errors.Join(err, restore(finalDir, backupDir))
+		}
+	}()
+	tx, err := w.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err = validateCommitGuardTx(ctx, tx); err != nil {
+		return err
+	}
+	var oldPaths []string
+	if len(staged) > 0 {
+		oldPaths, err = w.Derived.CommitStagedTx(ctx, tx, staged...)
+		if err != nil {
+			return err
+		}
+	}
+	msg := strings.Join(errs, "; ")
+	if _, err = tx.ExecContext(ctx, `UPDATE atrack_task SET status='done',output_dir=?,error_message=?,updated_at=CURRENT_TIMESTAMP WHERE media_id=?`, finalDir, nullString(msg), mediaID); err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	staged = nil
+	if backupDir != "" {
+		_ = os.RemoveAll(backupDir)
+	}
+	if w.Derived != nil {
+		w.Derived.CleanupReplaced(oldPaths)
+	}
+	return nil
+}
+
+func (w *Worker) handleRunError(ctx context.Context, mediaID int64, runErr error) error {
+	if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if err := validateCommitGuard(cleanupCtx); err != nil {
+			return errors.Join(runErr, err)
+		}
+		if err := w.markWaiting(cleanupCtx, mediaID, runErr.Error()); err != nil {
+			return errors.Join(runErr, err)
+		}
+		return runErr
+	}
+	return w.failGuarded(ctx, mediaID, runErr)
+}
+func (w *Worker) failGuarded(ctx context.Context, mediaID int64, runErr error) error {
+	if err := validateCommitGuard(ctx); err != nil {
+		return errors.Join(runErr, err)
+	}
+	if err := w.markFailed(ctx, mediaID, runErr.Error()); err != nil {
+		return errors.Join(runErr, err)
+	}
+	return runErr
+}
+func replaceAtrackDirectory(finalDir, stagingDir string) (string, error) {
+	backup := ""
+	if _, err := os.Stat(finalDir); err == nil {
+		backup = finalDir + ".bak-" + uuid.NewString()
+		if err := os.Rename(finalDir, backup); err != nil {
+			return "", err
+		}
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+	if err := os.Rename(stagingDir, finalDir); err != nil {
+		if backup != "" {
+			_ = os.Rename(backup, finalDir)
+		}
+		return "", err
+	}
+	return backup, nil
+}
+func restoreAtrackDirectory(finalDir, backup string) error {
+	if err := os.RemoveAll(finalDir); err != nil {
+		return err
+	}
+	if backup != "" {
+		return os.Rename(backup, finalDir)
+	}
+	return nil
+}
+func nullString(s string) any {
+	if strings.TrimSpace(s) == "" {
 		return nil
 	}
-
-	_, _ = w.DB.Exec(
-		`UPDATE atrack_task SET status='done', output_dir=?, updated_at=CURRENT_TIMESTAMP, error_message=NULL WHERE media_id = ?`,
-		outDir, mediaID,
-	)
-	return nil
+	return s
 }
 
 // extractStream runs ffmpeg to extract one audio stream as HLS in MPEG-TS container.
@@ -302,43 +452,60 @@ func (w *Worker) extractStream(ctx context.Context, mediaID int64, inputPath str
 	metaPath := filepath.Join(outDir, "meta.json")
 	_ = os.WriteFile(metaPath, []byte(meta), 0o644)
 
-	return w.encryptStreamOutputs(ctx, mediaID, streamIdx, outDir)
-}
-
-func (w *Worker) encryptStreamOutputs(ctx context.Context, mediaID int64, streamIdx int, outDir string) error {
-	if w.Derived == nil || !storage.NeedsDerivedEncryption(w.DB, mediaID) {
-		return nil
-	}
-	streamKey := strconv.Itoa(streamIdx)
-	files, err := os.ReadDir(outDir)
-	if err != nil {
-		return err
-	}
-	for _, ent := range files {
-		if ent.IsDir() {
-			continue
-		}
-		name := ent.Name()
-		full := filepath.Join(outDir, name)
-		kind := "atrack_segment"
-		if strings.EqualFold(name, "index.m3u8") {
-			kind = "atrack_playlist"
-		} else if strings.EqualFold(name, "meta.json") {
-			kind = "atrack_meta"
-		}
-		logical := streamKey + "/" + name
-		if _, err := w.Derived.FinalizePath(ctx, mediaID, kind, logical, full); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
-func (w *Worker) markFailed(mediaID int64, msg string) {
-	_, _ = w.DB.Exec(
+func (w *Worker) stageEncryptedOutputs(ctx context.Context, mediaID int64, root string) ([]*storage.StagedDerivedAsset, error) {
+	var staged []*storage.StagedDerivedAsset
+	abort := func(err error) ([]*storage.StagedDerivedAsset, error) {
+		w.Derived.AbortStaged(staged...)
+		return nil, err
+	}
+	streams, err := os.ReadDir(root)
+	if err != nil {
+		return nil, err
+	}
+	for _, stream := range streams {
+		if !stream.IsDir() {
+			continue
+		}
+		dir := filepath.Join(root, stream.Name())
+		files, err := os.ReadDir(dir)
+		if err != nil {
+			return abort(err)
+		}
+		for _, ent := range files {
+			if ent.IsDir() {
+				continue
+			}
+			name := ent.Name()
+			kind := "atrack_segment"
+			if strings.EqualFold(name, "index.m3u8") {
+				kind = "atrack_playlist"
+			} else if strings.EqualFold(name, "meta.json") {
+				kind = "atrack_meta"
+			}
+			a, err := w.Derived.StagePath(ctx, mediaID, kind, stream.Name()+"/"+name, filepath.Join(dir, name))
+			if err != nil {
+				return abort(err)
+			}
+			staged = append(staged, a)
+			_ = os.Remove(filepath.Join(dir, name))
+		}
+	}
+	return staged, nil
+}
+func (w *Worker) markFailed(ctx context.Context, mediaID int64, msg string) error {
+	_, err := w.DB.ExecContext(ctx,
 		`UPDATE atrack_task SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id = ?`,
 		msg, mediaID,
 	)
+	return err
+}
+
+func (w *Worker) markWaiting(ctx context.Context, mediaID int64, msg string) error {
+	_, err := w.DB.ExecContext(ctx, `UPDATE atrack_task SET status='waiting', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id=?`, msg, mediaID)
+	return err
 }
 
 func trimErr(out string, err error) string {

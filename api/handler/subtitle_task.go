@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	"knox-media/internal/postingest"
 )
 
 const (
@@ -117,11 +119,13 @@ func (h *Handler) ResetSubtitleTask(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid media id"})
 		return
 	}
-	if err := h.Subtitle.ResetSubtitleJob(mediaID); err != nil {
+	reset := subtitleResetTx(mediaID)
+	result, err := enqueueExplicitPostIngest(c.Request.Context(), h.App.DB, mediaID, postingest.TaskSubtitle, true, reset, nil)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	c.JSON(http.StatusAccepted, gin.H{"ok": true, "queued": result.Queued(), "action": result})
 }
 
 func (h *Handler) RetrySubtitleTask(c *gin.Context) {
@@ -134,16 +138,13 @@ func (h *Handler) RetrySubtitleTask(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid media id"})
 		return
 	}
-	go func() {
-		ctx := context.Background()
-		if err := h.Subtitle.ResetSubtitleJob(mediaID); err != nil {
-			return
-		}
-		if err := h.Subtitle.ProcessMedia(ctx, mediaID); err != nil {
-			return
-		}
-	}()
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	reset := subtitleResetTx(mediaID)
+	result, err := enqueueExplicitPostIngest(c.Request.Context(), h.App.DB, mediaID, postingest.TaskSubtitle, true, reset, nil)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"ok": true, "queued": result.Queued(), "action": result})
 }
 
 func (h *Handler) DeleteSubtitleTask(c *gin.Context) {
@@ -227,14 +228,11 @@ func (h *Handler) EnqueueSubtitleProcessing(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "not a video"})
 		return
 	}
-	go func(id int64) {
-		if err := h.Subtitle.ResetSubtitleJob(id); err != nil {
-			log.Printf("subtitle enqueue media=%d reset err=%v", id, err)
-			return
-		}
-		if err := h.Subtitle.ProcessMedia(context.Background(), id); err != nil {
-			log.Printf("subtitle enqueue media=%d process err=%v", id, err)
-		}
-	}(mediaID)
-	c.JSON(http.StatusAccepted, gin.H{"ok": true, "queued": true})
+	reset := subtitleResetTx(mediaID)
+	result, err := enqueueExplicitPostIngest(c.Request.Context(), h.App.DB, mediaID, postingest.TaskSubtitle, true, reset, nil)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"ok": true, "queued": result.Queued(), "action": result})
 }

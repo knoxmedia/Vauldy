@@ -40,7 +40,7 @@ function defaultMatchSource(title: string): string {
   return /[\u4e00-\u9fff]/.test(title) ? "douban" : "tmdb";
 }
 
-function mediaSearchRaw(media: Pick<MediaItem, "title" | "file_path">): string {
+export function mediaSearchRaw(media: Pick<MediaItem, "title" | "file_path">): string {
   const title = (media.title ?? "").trim();
   if (title) return title;
   const path = (media.file_path ?? "").trim();
@@ -50,11 +50,23 @@ function mediaSearchRaw(media: Pick<MediaItem, "title" | "file_path">): string {
   return dot > 0 ? base.slice(0, dot) : base;
 }
 
+export type MediaMatchKind = "series" | "movie";
+
+export function filterMatchCandidates(
+  items: ScrapeMatchCandidate[],
+  matchKind?: MediaMatchKind,
+): ScrapeMatchCandidate[] {
+  if (!matchKind) return items;
+  const allowed = matchKind === "series" ? new Set(["tv", "series", "show"]) : new Set(["movie"]);
+  return items.filter((item) => allowed.has((item.media_type ?? "").trim().toLowerCase()));
+}
+
 export interface MediaMatchModalProps {
   media: Pick<MediaItem, "id" | "title" | "year" | "file_path"> | null;
   open: boolean;
   /** True when correcting an existing scrape (修改匹配). */
   fixMatch?: boolean;
+  matchKind?: MediaMatchKind;
   onClose: () => void;
   onMatched?: (update: MediaMatchListUpdate) => void;
 }
@@ -63,6 +75,7 @@ export default function MediaMatchModal({
   media,
   open,
   fixMatch = false,
+  matchKind,
   onClose,
   onMatched,
 }: MediaMatchModalProps) {
@@ -97,9 +110,9 @@ export default function MediaMatchModal({
           source: params.source,
           language: params.language,
         });
-        setResults(data.items ?? []);
+        setResults(filterMatchCandidates(data.items ?? [], matchKind));
         setBrokenPosters(new Set());
-        if ((data.items ?? []).length === 0) {
+        if (filterMatchCandidates(data.items ?? [], matchKind).length === 0) {
           setSearchMessage(data.message || t("components.media_match_modal.no_similar"));
         }
       } catch (e: unknown) {
@@ -109,7 +122,7 @@ export default function MediaMatchModal({
         setSearching(false);
       }
     },
-    [media, t],
+    [media, matchKind, t],
   );
 
   useEffect(() => {
@@ -153,8 +166,8 @@ export default function MediaMatchModal({
           language: "zh-CN",
         });
         if (openTokenRef.current !== token) return;
-        setResults(data.items ?? []);
-        if ((data.items ?? []).length === 0) {
+        setResults(filterMatchCandidates(data.items ?? [], matchKind));
+        if (filterMatchCandidates(data.items ?? [], matchKind).length === 0) {
           setSearchMessage(data.message || t("components.media_match_modal.no_similar"));
         }
       } catch (e: unknown) {
@@ -165,7 +178,7 @@ export default function MediaMatchModal({
         if (openTokenRef.current === token) setSearching(false);
       }
     })();
-  }, [open, media]);
+  }, [open, media, matchKind]);
 
   async function handleSearch() {
     await runSearch({ query, year, source, language });

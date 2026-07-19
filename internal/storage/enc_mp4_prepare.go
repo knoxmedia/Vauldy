@@ -7,9 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"knox-media/internal/processmetrics"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -94,7 +94,7 @@ func prepareMP4ForEncPipe(ctx context.Context, ffmpegPath, dataDir string, media
 	tmpPath := tmp.Name()
 	_ = tmp.Close()
 
-	cmd := exec.CommandContext(ctx, ffmpegPath,
+	cmd := processmetrics.NewFFmpegCommandContext(ctx, ffmpegPath,
 		"-hide_banner", "-loglevel", "error",
 		"-y",
 		"-i", plainPath,

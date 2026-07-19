@@ -8,12 +8,15 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
 
 	_ "modernc.org/sqlite"
 
+	"knox-media/internal/store"
+	"knox-media/pkg/ffprobe"
 	"knox-media/pkg/hashutil"
 )
 
@@ -44,7 +47,10 @@ CREATE TABLE media (
     md5 TEXT,
     format TEXT,
     meta_json TEXT,
-    status TEXT DEFAULT 'active'
+    status TEXT DEFAULT 'active',
+    created_at_sort TEXT,
+    photo_taken_at TEXT,
+    photo_place_id TEXT
 );
 CREATE TABLE library_node (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -679,14 +685,14 @@ CREATE TABLE IF NOT EXISTS lyric_task (media_id INTEGER);
 CREATE TABLE IF NOT EXISTS atrack_task (media_id INTEGER);
 CREATE TABLE IF NOT EXISTS keyframe_task (media_id INTEGER);
 CREATE TABLE IF NOT EXISTS preview_task (media_id INTEGER);
-CREATE TABLE IF NOT EXISTS media_derived_assets (media_id INTEGER);
+CREATE TABLE IF NOT EXISTS media_derived_assets (media_id INTEGER, enc_path TEXT);
 CREATE TABLE IF NOT EXISTS package_task (media_id INTEGER);
 CREATE TABLE IF NOT EXISTS drm_license_audit (media_id INTEGER);
 CREATE TABLE IF NOT EXISTS drm_key_material (media_id INTEGER);
 CREATE TABLE IF NOT EXISTS drm_asset (media_id INTEGER);
 CREATE TABLE IF NOT EXISTS music_track (media_id INTEGER);
 CREATE TABLE IF NOT EXISTS episode_media (media_id INTEGER);
-CREATE TABLE IF NOT EXISTS photo_face (media_id INTEGER);
+CREATE TABLE IF NOT EXISTS photo_face (id INTEGER PRIMARY KEY, media_id INTEGER, person_id INTEGER);
 CREATE TABLE IF NOT EXISTS photo_face_task (media_id INTEGER);
 CREATE TABLE IF NOT EXISTS photo_classify_task (media_id INTEGER);
 CREATE TABLE IF NOT EXISTS photo_location_task (media_id INTEGER);
@@ -780,5 +786,211 @@ func TestScanLibraryFoldersAdoptsRenamedFileByMetadata(t *testing.T) {
 	}
 	if normalizeMediaPath(path) != normalizeMediaPath(newPath) {
 		t.Fatalf("file_path=%q want %q", path, newPath)
+	}
+}
+
+func TestScannerMaintainsPhotoTakenAt(t *testing.T) {
+	db := newScannerTestDB(t)
+	root := t.TempDir()
+	img := filepath.Join(root, "photo.jpg")
+	if err := os.WriteFile(img, []byte("not-an-image"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE library (id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT,type TEXT,path TEXT,scan_recursive INTEGER DEFAULT 1,scan_exclude_patterns TEXT DEFAULT '')`); err != nil {
+		t.Fatal(err)
+	}
+	res, err := db.Exec(`INSERT INTO library(name,type,path) VALUES('photos','photo',?)`, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	libraryID, _ := res.LastInsertId()
+	scanner := &Scanner{DB: db, SkipHash: true}
+	if _, err := scanner.ScanLibraryFoldersWithContext(context.Background(), libraryID, []string{root}); err != nil {
+		t.Fatal(err)
+	}
+	var created, taken sql.NullString
+	if err := db.QueryRow(`SELECT created_at_sort,photo_taken_at FROM media WHERE library_id=?`, libraryID).Scan(&created, &taken); err != nil {
+		t.Fatal(err)
+	}
+	if !created.Valid || !taken.Valid || len(created.String) != 27 || len(taken.String) != 27 {
+		t.Fatalf("created=%v taken=%v", created, taken)
+	}
+}
+
+func TestUpdateMediaMetaAndPhotoTimeGenericWriterPreservesPhotoDerivedFields(t *testing.T) {
+	db := newScannerTestDB(t)
+	if _, err := db.Exec(`INSERT INTO media(id,file_type,created_at_sort,photo_taken_at,photo_place_id,meta_json) VALUES(98,'image','2026-01-01T00:00:00.000000Z','2026-01-02T00:00:00.000000Z','old','{"photo":{"taken_at":"2026-01-02T00:00:00Z","place_id":"old"}}')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateScannerMediaMeta(context.Background(), db, 98, `{"photo":{"taken_at":"2026-01-02T00:00:00Z","place_id":"old"},"document":{"title":"doc"}}`, nil); err != nil {
+		t.Fatal(err)
+	}
+	var taken, place string
+	if err := db.QueryRow(`SELECT photo_taken_at,photo_place_id FROM media WHERE id=98`).Scan(&taken, &place); err != nil {
+		t.Fatal(err)
+	}
+	if taken != "2026-01-02T00:00:00.000000Z" || place != "old" {
+		t.Fatalf("taken=%q place=%q", taken, place)
+	}
+}
+func TestScannerNormalizesPhotoTagsBeforeMetadataSave(t *testing.T) {
+	db := newScannerTestDB(t)
+	const dirty = `{"photo":{"tags":[" 保存 "," custom ","custom"]}}`
+	if _, err := db.Exec(`INSERT INTO media(id,file_type,created_at_sort,photo_taken_at,meta_json) VALUES(99,'image','2026-01-01T00:00:00.000000Z','2026-01-01T00:00:00.000000Z',?)`, dirty); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateScannerMediaMeta(context.Background(), db, 99, dirty, nil); err != nil {
+		t.Fatal(err)
+	}
+	var raw string
+	if err := db.QueryRow(`SELECT meta_json FROM media WHERE id=99`).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(raw, `"tags":["下载保存","custom"]`) {
+		t.Fatalf("tags not normalized: %s", raw)
+	}
+}
+
+func TestScannerDirectUpdateNormalizesPersistedPhotoTags(t *testing.T) {
+	db := newScannerTestDB(t)
+	root := t.TempDir()
+	path := filepath.Join(root, "photo.jpg")
+	if err := os.WriteFile(path, []byte("not-an-image"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE library(id INTEGER PRIMARY KEY,name TEXT,type TEXT,path TEXT,scan_recursive INTEGER DEFAULT 1,scan_exclude_patterns TEXT DEFAULT ''); INSERT INTO library(id,name,type,path) VALUES(9,'photos','photo',?)`, root); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO media(id,library_id,file_id,title,file_path,file_type,meta_json,status,file_mtime,created_at_sort,photo_taken_at) VALUES(99,9,'existing','photo',?,'image','{"photo":{"tags":[" ?? ","????"," custom ","custom"]}}','active',0,'2026-01-01T00:00:00.000000Z','2026-01-01T00:00:00.000000Z')`, normalizeMediaPath(path)); err != nil {
+		t.Fatal(err)
+	}
+	s := &Scanner{DB: db, SkipHash: true}
+	if _, err := s.ScanLibraryFoldersWithContext(context.Background(), 9, []string{root}); err != nil {
+		t.Fatal(err)
+	}
+	var raw string
+	if err := db.QueryRow(`SELECT meta_json FROM media WHERE id=99`).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(raw, ` ?? `) || strings.Contains(raw, ` custom `) {
+		t.Fatalf("direct scanner update left dirty tags: %s", raw)
+	}
+}
+
+func TestScannerMetadataRefreshRelinksMusicAndTV(t *testing.T) {
+	db, err := store.OpenSQLite(filepath.Join(t.TempDir(), "metadata-refresh.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	_, err = db.Exec(`INSERT INTO library(id,name,type,path) VALUES(501,'music','music','E:/music'),(502,'tv','tv','E:/tv');
+        INSERT INTO media(id,library_id,file_id,title,file_path,file_type,meta_json,status) VALUES
+        (5001,501,'a','Song','E:/music/Song.mp3','audio','{"music":{"title":"Song","album":"New Album","artist":"Artist","album_artist":"Artist"}}','active'),
+        (5002,502,'v','Show S02E03','E:/tv/Show/Show.S02E03.mkv','video','{"tv":{"series_title":"Show","season":2,"episode":3}}','active')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scanner := &Scanner{DB: db}
+	scanner.linkMusicIfTrack(501, 5001, "E:/music/Song.mp3", "")
+	scanner.linkTVIfEpisode(502, 5002, "E:/tv/Show/Show.S02E03.mkv")
+	var album string
+	if err := db.QueryRow(`SELECT a.title FROM music_track mt JOIN music_album a ON a.id=mt.album_id WHERE mt.media_id=5001`).Scan(&album); err != nil || album != "New Album" {
+		t.Fatalf("album=%q err=%v", album, err)
+	}
+	var season, episode int
+	if err := db.QueryRow(`SELECT se.season_num,ep.episode_num FROM episode_media em JOIN episode ep ON ep.id=em.episode_id JOIN season se ON se.id=ep.season_id WHERE em.media_id=5002`).Scan(&season, &episode); err != nil || season != 2 || episode != 3 {
+		t.Fatalf("season=%d episode=%d err=%v", season, episode, err)
+	}
+}
+
+func TestScannerRollsBackMediaInsertWhenRelationshipLinkFails(t *testing.T) {
+	db, err := store.OpenSQLite(filepath.Join(t.TempDir(), "scanner-atomic.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	root := t.TempDir()
+	track := filepath.Join(root, "Song.mp3")
+	if err := os.WriteFile(track, []byte("audio"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1001,'music','music',?);CREATE TRIGGER fail_scanner_track BEFORE INSERT ON music_track BEGIN SELECT RAISE(ABORT,'forced relation failure');END`, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := &Scanner{DB: db, SkipHash: true, ProbePath: func(context.Context, int64, string) (*ffprobe.Summary, error) {
+		return &ffprobe.Summary{RawJSON: `{"format":{"tags":{"title":"Song","album":"Album"}}}`}, nil
+	}}
+	if _, err := sc.ScanLibraryFoldersWithContext(context.Background(), 1001, []string{root}); err == nil {
+		t.Fatal("expected scan error")
+	}
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM media WHERE library_id=1001`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("media rows=%d", n)
+	}
+}
+
+func TestSyncMissingPhotoCleansFaceArtifactsAndRefreshesPerson(t *testing.T) {
+	db, err := store.OpenSQLite(filepath.Join(t.TempDir(), "scanner-photo-delete.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	root := t.TempDir()
+	preview := t.TempDir()
+	missing := filepath.Join(root, "gone.jpg")
+	plain := filepath.Join(preview, "photos", "faces", "7.jpg")
+	enc := filepath.Join(t.TempDir(), "face.enc")
+	if err = os.MkdirAll(filepath.Dir(plain), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(plain, []byte("jpg"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(enc, []byte("enc"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1,'p','photo',?)`, root)
+	if err == nil {
+		_, err = db.Exec(`INSERT INTO media(id,library_id,file_id,file_path,file_type,status) VALUES(10,1,'gone',?,'image','active'),(11,1,'keep',?,'image','active')`, filepath.ToSlash(missing), filepath.ToSlash(filepath.Join(root, "keep.jpg")))
+	}
+	if err == nil {
+		_, err = db.Exec(`INSERT INTO photo_person(id,library_id,label,cover_face_id,face_count,media_count) VALUES(5,1,'p',7,2,2); INSERT INTO photo_face(id,media_id,library_id,person_id,bbox_x,bbox_y,bbox_w,bbox_h,quality) VALUES(7,10,1,5,0,0,1,1,.9),(8,11,1,5,0,0,1,1,.7)`)
+	}
+	if err == nil {
+		_, err = db.Exec(`INSERT INTO media_derived_assets(media_id,artifact_kind,logical_name,enc_path,wrapped_dek,iv) VALUES(10,'photo_face_thumb','face:7',?,'w','i')`, enc)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := &Scanner{DB: db, PhotoCacheDir: filepath.Join(preview, "photos"), CleanupRoots: []string{filepath.Dir(enc)}}
+	seen := map[string]struct{}{normalizeMediaPath(filepath.Join(root, "keep.jpg")): {}}
+	if !sc.mediaPathUnderRoots(filepath.ToSlash(missing), []string{root}) {
+		t.Fatalf("fixture path not under root: %q %q", missing, root)
+	}
+	var cleanupErr error
+	sc.syncMissingMedia(context.Background(), 1, []string{root}, seen, func(_ string, e error) { cleanupErr = e })
+	if cleanupErr != nil {
+		t.Fatalf("cleanup error: %v", cleanupErr)
+	}
+	if _, err = os.Stat(plain); !os.IsNotExist(err) {
+		var n int
+		_ = db.QueryRow(`SELECT COUNT(*) FROM media WHERE id=10`).Scan(&n)
+		var fp string
+		_ = db.QueryRow(`SELECT file_path FROM media WHERE id=10`).Scan(&fp)
+		t.Fatalf("plain remains: %v media=%d fp=%q exists=%v", err, n, fp, mediaPathExistsOnDisk(fp))
+	}
+	if _, err = os.Stat(enc); !os.IsNotExist(err) {
+		t.Fatalf("derived remains: %v", err)
+	}
+	var cover, faces, media int
+	if err = db.QueryRow(`SELECT cover_face_id,face_count,media_count FROM photo_person WHERE id=5`).Scan(&cover, &faces, &media); err != nil {
+		t.Fatal(err)
+	}
+	if cover != 8 || faces != 1 || media != 1 {
+		t.Fatalf("stats=%d/%d/%d", cover, faces, media)
 	}
 }

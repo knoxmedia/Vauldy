@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"knox-media/internal/branding"
@@ -22,6 +23,7 @@ type Config struct {
 	FFmpeg        FFmpegConfig             `yaml:"ffmpeg"`
 	DRMPackaging  DRMPackagingConfig       `yaml:"drm_packaging"`
 	DRM           DRMConfig                `yaml:"drm"`
+	PostIngest    PostIngestConfig         `yaml:"post_ingest"`
 	Scan          ScanConfig               `yaml:"scan"`
 	Subtitle      SubtitleProcessingConfig `yaml:"subtitle"`
 	ATrack        ATrackConfig             `yaml:"atrack"`
@@ -160,6 +162,75 @@ type ScanConfig struct {
 	FastFFprobe *bool `yaml:"fast_ffprobe"`
 }
 
+func defaultPostIngestGlobal() int {
+	return defaultPostIngestGlobalForCPU(runtime.NumCPU())
+}
+
+func defaultPostIngestGlobalForCPU(cpu int) int {
+	global := cpu / 2
+	if global < 2 {
+		global = 2
+	}
+	if global > 4 {
+		global = 4
+	}
+	return global
+}
+
+type PostIngestConfig struct {
+	MaxConcurrent                                                     int `yaml:"max_concurrent"`
+	PosterMaxConcurrent                                               int `yaml:"poster_max_concurrent"`
+	PreviewMaxConcurrent                                              int `yaml:"preview_max_concurrent"`
+	maxConcurrentSet, posterMaxConcurrentSet, previewMaxConcurrentSet bool
+}
+
+func (c *PostIngestConfig) UnmarshalYAML(node *yaml.Node) error {
+	type plain PostIngestConfig
+	var decoded plain
+	if err := node.Decode(&decoded); err != nil {
+		return err
+	}
+	*c = PostIngestConfig(decoded)
+	if node.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			switch node.Content[i].Value {
+			case "max_concurrent":
+				c.maxConcurrentSet = true
+			case "poster_max_concurrent":
+				c.posterMaxConcurrentSet = true
+			case "preview_max_concurrent":
+				c.previewMaxConcurrentSet = true
+			}
+		}
+	}
+	return nil
+}
+
+func (c PostIngestConfig) Validate() error {
+	if c.MaxConcurrent < 1 || c.MaxConcurrent > 32 {
+		return fmt.Errorf("PostIngest.MaxConcurrent must be in [1,32]")
+	}
+	if c.PosterMaxConcurrent < 1 || c.PosterMaxConcurrent > 2 || c.PosterMaxConcurrent > c.MaxConcurrent {
+		return fmt.Errorf("PostIngest.PosterMaxConcurrent must be in [1,2] and <= MaxConcurrent")
+	}
+	if c.PreviewMaxConcurrent < 1 || c.PreviewMaxConcurrent > 2 || c.PreviewMaxConcurrent > c.MaxConcurrent {
+		return fmt.Errorf("PostIngest.PreviewMaxConcurrent must be in [1,2] and <= MaxConcurrent")
+	}
+	return nil
+}
+
+func (c *Config) normalizePostIngest() {
+	if c.PostIngest.MaxConcurrent == 0 && !c.PostIngest.maxConcurrentSet {
+		c.PostIngest.MaxConcurrent = defaultPostIngestGlobal()
+	}
+	if c.PostIngest.PosterMaxConcurrent == 0 && !c.PostIngest.posterMaxConcurrentSet {
+		c.PostIngest.PosterMaxConcurrent = min(2, c.PostIngest.MaxConcurrent)
+	}
+	if c.PostIngest.PreviewMaxConcurrent == 0 && !c.PostIngest.previewMaxConcurrentSet {
+		c.PostIngest.PreviewMaxConcurrent = 1
+	}
+}
+
 type ServerConfig struct {
 	Host string `yaml:"host"`
 	Port int    `yaml:"port"`
@@ -180,7 +251,7 @@ type DataConfig struct {
 	Chunks    string `yaml:"chunks"`
 	ATracks   string `yaml:"atracks"`
 	Keyframes string `yaml:"keyframes"`
-	// MetadataLibrary is the filesystem root for scraped posters/backdrops/logos (HTTP /metadata/library/…).
+	// MetadataLibrary is the filesystem root for scraped posters/backdrops/logos (HTTP /metadata/library/闁?.
 	// Default: {dir}/metadata/library (e.g. /data/metadata/library when data.dir is /data).
 	MetadataLibrary string `yaml:"metadata_library"`
 	// Static is the filesystem root for HTTP path /static/ (e.g. PowerPlayer assets under static/powerplayer6/).
@@ -257,6 +328,9 @@ type PhotoFaceConfig struct {
 	PollIntervalSeconds int `yaml:"poll_interval_seconds"`
 	// FailedRetryMinutes waits before re-queuing failed tasks (avoids CPU spin on bad inputs).
 	FailedRetryMinutes int `yaml:"failed_retry_minutes"`
+	// ThumbnailRepairBatch bounds historical face thumbnail checks per scheduler tick.
+	ThumbnailRepairBatch      int `yaml:"thumbnail_repair_batch"`
+	ThumbnailRepairAuditHours int `yaml:"thumbnail_repair_audit_hours"`
 }
 
 func (c *Config) PhotoFaceAutoOnScan() bool {
@@ -292,6 +366,13 @@ func (c *Config) PhotoFacePollIntervalSeconds() int {
 		return 10
 	}
 	return c.PhotoFace.PollIntervalSeconds
+}
+
+func (c *Config) PhotoFaceThumbnailRepairBatch() int {
+	if c == nil || c.PhotoFace.ThumbnailRepairBatch <= 0 {
+		return 32
+	}
+	return c.PhotoFace.ThumbnailRepairBatch
 }
 
 func (c *Config) PhotoFaceFailedRetryMinutes() int {
@@ -513,6 +594,10 @@ func Load(path string) (*Config, error) {
 	if c.Scan.FileHashOnScan == nil {
 		f := false
 		c.Scan.FileHashOnScan = &f
+	}
+	c.normalizePostIngest()
+	if err := c.PostIngest.Validate(); err != nil {
+		return nil, fmt.Errorf("validate config: %w", err)
 	}
 	c.normalizeDRMPackaging()
 	if c.DRM.Widevine.Enabled == nil {

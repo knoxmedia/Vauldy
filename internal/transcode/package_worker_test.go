@@ -235,8 +235,12 @@ func TestRunCMAFHLSIncludesCENCEncryptionArgs(t *testing.T) {
 		FFmpegPath: ffmpegPath,
 	}
 
+	inputPath := filepath.Join(dir, "input.mp4")
+	if err := os.WriteFile(inputPath, []byte("mock input"), 0o644); err != nil {
+		t.Fatalf("write input: %v", err)
+	}
 	outDir := filepath.Join(dir, "out")
-	_, err := w.runCMAFHLS(context.Background(), 0, 0, filepath.Join(dir, "input.mp4"), outDir, []Rendition{
+	_, err := w.runCMAFHLS(context.Background(), 0, 0, inputPath, outDir, []Rendition{
 		{Name: "360p", Height: 360, VideoRate: "850k", AudioRate: "96k"},
 	}, strings.Repeat("a", 32), strings.Repeat("b", 32))
 	if err != nil {

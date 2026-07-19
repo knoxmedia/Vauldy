@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -113,6 +115,11 @@ func TestAPI_ListPresetsIncludesBuiltin(t *testing.T) {
 
 func TestAPI_CreatePresetAndTask(t *testing.T) {
 	r, db, _ := setupPretranscodeTest(t)
+	mediaDir := t.TempDir()
+	mediaPath := filepath.Join(mediaDir, "x.mp4")
+	if err := os.WriteFile(mediaPath, []byte("mock video"), 0o644); err != nil {
+		t.Fatalf("write media source: %v", err)
+	}
 
 	// Create a preset.
 	body := `{"name":"api-test","output_format":"hls","video_codec":"libx264","audio_codec":"aac","audio_bitrate":"128k","renditions":[{"name":"720p","height":720,"video_bitrate":"2800k"}]}`
@@ -127,8 +134,8 @@ func TestAPI_CreatePresetAndTask(t *testing.T) {
 	_ = json.Unmarshal(w.Body.Bytes(), &preset)
 
 	// Seed media.
-	_, _ = db.Exec(`INSERT INTO library (id, name, type, path) VALUES (1,'L','video','/tmp')`)
-	_, _ = db.Exec(`INSERT INTO media (library_id, file_id, title, file_path, file_type, duration, height) VALUES (1,'fid-api','T','/tmp/x.mp4','video',120,720)`)
+	_, _ = db.Exec(`INSERT INTO library (id, name, type, path) VALUES (1,'L','video',?)`, mediaDir)
+	_, _ = db.Exec(`INSERT INTO media (library_id, file_id, title, file_path, file_type, duration, height) VALUES (1,'fid-api','T',?,'video',120,720)`, mediaPath)
 
 	// Create task.
 	taskBody := `{"media_ids":[1],"preset_id":` + jsonInt(preset.ID) + `,"priority":"normal"}`
@@ -192,8 +199,8 @@ func TestAPI_ClusterNodesStub(t *testing.T) {
 	}
 	var resp struct {
 		Nodes []struct {
-			ID      string `json:"id"`
-			Status  string `json:"status"`
+			ID     string `json:"id"`
+			Status string `json:"status"`
 		} `json:"nodes"`
 	}
 	_ = json.Unmarshal(w.Body.Bytes(), &resp)

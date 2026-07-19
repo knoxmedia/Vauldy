@@ -5,9 +5,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"knox-media/internal/processmetrics"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -31,10 +31,10 @@ type Worker struct {
 	MaxCPU       int
 	MaxGPU       int
 
-	mu         sync.Mutex
-	running    map[int64]context.CancelFunc // jobID -> cancel
-	semCPU     chan struct{}
-	semGPU     chan struct{}
+	mu      sync.Mutex
+	running map[int64]context.CancelFunc // jobID -> cancel
+	semCPU  chan struct{}
+	semGPU  chan struct{}
 }
 
 // NewWorker constructs a standalone worker. MaxCPU/MaxGPU default to 4/2
@@ -262,7 +262,7 @@ func (w *Worker) runRenditionJob(parent context.Context, job *claimedJob, p *Pre
 	fullArgs = append(fullArgs, post...)
 	fullArgs = append(fullArgs, "-progress", "pipe:1")
 
-	cmd := exec.CommandContext(ctx, w.FFmpegPath, fullArgs...)
+	cmd := processmetrics.NewFFmpegCommandContext(ctx, w.FFmpegPath, fullArgs...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		w.failJob(job, fmt.Sprintf("stdout pipe: %v", err), encoder)

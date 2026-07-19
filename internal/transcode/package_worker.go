@@ -252,10 +252,9 @@ func (w *PackageWorker) StartWaiting(ctx context.Context, limit int) int {
 			continue
 		}
 		started++
-		id := taskID
-		go func() {
-			_ = w.RunTask(context.Background(), id)
-		}()
+		if err := w.RunTask(ctx, taskID); err != nil && ctx.Err() != nil {
+			return started
+		}
 	}
 	return started
 }

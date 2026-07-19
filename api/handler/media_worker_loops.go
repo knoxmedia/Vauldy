@@ -141,7 +141,7 @@ func (h *Handler) runPreviewWorkerOnce() {
 
 // StartTranscodeTaskLoop drains waiting HLS transcode and package tasks in the background.
 func (h *Handler) StartTranscodeTaskLoop(ctx context.Context) {
-	go h.runTranscodeWorkerOnce()
+	h.runTranscodeWorkerOnce(ctx)
 	tk := time.NewTicker(transcodeWorkerInterval)
 	defer tk.Stop()
 	for {
@@ -149,12 +149,12 @@ func (h *Handler) StartTranscodeTaskLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-tk.C:
-			h.runTranscodeWorkerOnce()
+			h.runTranscodeWorkerOnce(ctx)
 		}
 	}
 }
 
-func (h *Handler) runTranscodeWorkerOnce() {
+func (h *Handler) runTranscodeWorkerOnce(ctx context.Context) {
 	if h == nil || h.App == nil || h.App.DB == nil {
 		return
 	}
@@ -187,12 +187,12 @@ func (h *Handler) runTranscodeWorkerOnce() {
 
 	started := 0
 	if h.Worker != nil && slots > 0 {
-		n := h.Worker.StartWaiting(context.Background(), slots)
+		n := h.Worker.StartWaiting(ctx, slots)
 		started += n
 		slots -= n
 	}
 	if h.PackageWorker != nil && slots > 0 {
-		n := h.PackageWorker.StartWaiting(context.Background(), slots)
+		n := h.PackageWorker.StartWaiting(ctx, slots)
 		started += n
 	}
 	if started > 0 {
@@ -213,7 +213,7 @@ func (h *Handler) loadTranscoderSettings() transcode.Settings {
 }
 
 func (h *Handler) kickTranscodeWorker() {
-	h.runTranscodeWorkerOnce()
+	h.runTranscodeWorkerOnce(context.Background())
 }
 
 func (h *Handler) countRunningBackgroundTranscodeJobs() int {

@@ -2,16 +2,21 @@ package handler
 
 import (
 	"archive/zip"
+	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 
@@ -19,6 +24,7 @@ import (
 	"knox-media/internal/doccover"
 	"knox-media/internal/doctrans"
 	"knox-media/internal/storage"
+	"knox-media/internal/store"
 )
 
 type documentListQuery struct {
@@ -94,7 +100,9 @@ func (h *Handler) ListDocuments(c *gin.Context) {
 			limit = n
 		}
 	}
-	items, err := h.queryDocuments(libID, qp, limit)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+	defer cancel()
+	items, err := h.queryDocumentsContext(ctx, libID, qp, limit)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -103,6 +111,12 @@ func (h *Handler) ListDocuments(c *gin.Context) {
 }
 
 func (h *Handler) queryDocuments(libID int64, qp documentListQuery, limit int) ([]gin.H, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	return h.queryDocumentsContext(ctx, libID, qp, limit)
+}
+
+func (h *Handler) queryDocumentsContext(ctx context.Context, libID int64, qp documentListQuery, limit int) ([]gin.H, error) {
 	q := `
 		SELECT m.id, m.file_id, m.title, m.file_path, m.format, m.status, m.created_at,
 			COALESCE(json_extract(m.meta_json, '$.document.author'), '') AS author,
@@ -130,7 +144,7 @@ func (h *Handler) queryDocuments(libID int64, qp documentListQuery, limit int) (
 		args = append(args, qp.Year)
 	}
 	if qp.Tag != "" {
-		q += ` AND EXISTS (SELECT 1 FROM document_tag dt WHERE dt.media_id = m.id AND dt.tag = ?)`
+		q += ` AND EXISTS (SELECT 1 FROM document_tag dt WHERE dt.media_id = m.id AND dt.tag = ? COLLATE NOCASE)`
 		args = append(args, qp.Tag)
 	}
 	if qp.Parent != "" {
@@ -175,7 +189,7 @@ func (h *Handler) queryDocuments(libID int64, qp documentListQuery, limit int) (
 	q += fmt.Sprintf(` ORDER BY %s %s LIMIT ?`, orderCol, orderDir)
 	args = append(args, limit)
 
-	rows, err := h.App.DB.Query(q, args...)
+	rows, err := h.App.DB.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -185,10 +199,9 @@ func (h *Handler) queryDocuments(libID int64, qp documentListQuery, limit int) (
 		var id int64
 		var fileID, title, path, format, status, created, author, publisher, modified, desc, docFormat, lastRead sql.NullString
 		var year, fileSize, pageCount sql.NullInt64
-		if rows.Scan(&id, &fileID, &title, &path, &format, &status, &created, &author, &publisher, &year, &fileSize, &modified, &desc, &docFormat, &pageCount, &lastRead) != nil {
-			continue
+		if err := rows.Scan(&id, &fileID, &title, &path, &format, &status, &created, &author, &publisher, &year, &fileSize, &modified, &desc, &docFormat, &pageCount, &lastRead); err != nil {
+			return nil, err
 		}
-		tags, _ := h.loadDocumentTags(id)
 		items = append(items, gin.H{
 			"id":           id,
 			"file_id":      fileID.String,
@@ -204,9 +217,43 @@ func (h *Handler) queryDocuments(libID int64, qp documentListQuery, limit int) (
 			"page_count":   pageCount.Int64,
 			"created_at":   created.String,
 			"last_read_at": lastRead.String,
-			"tags":         tags,
 			"cover_url":    fmt.Sprintf("/api/v1/media/%d/document/cover.jpg", id),
 		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if len(items) == 0 {
+		return items, nil
+	}
+	ids := make([]any, len(items))
+	byID := make(map[int64]gin.H, len(items))
+	for i, item := range items {
+		id := item["id"].(int64)
+		ids[i] = id
+		item["tags"] = []string{}
+		byID[id] = item
+	}
+	tagRows, err := h.App.DB.QueryContext(ctx, `SELECT media_id, tag FROM document_tag WHERE media_id IN (`+documentTagPlaceholders(len(ids))+`) ORDER BY media_id, tag COLLATE NOCASE, tag`, ids...)
+	if err != nil {
+		return nil, err
+	}
+	defer tagRows.Close()
+	for tagRows.Next() {
+		var id int64
+		var tag string
+		if err := tagRows.Scan(&id, &tag); err != nil {
+			return nil, err
+		}
+		if item, ok := byID[id]; ok && tag != "" {
+			item["tags"] = append(item["tags"].([]string), tag)
+		}
+	}
+	if err := tagRows.Err(); err != nil {
+		return nil, err
 	}
 	return items, nil
 }
@@ -237,7 +284,7 @@ func (h *Handler) queryDocumentFacets(libID int64, kind string) ([]gin.H, error)
 	switch kind {
 	case "author":
 		q = `
-			SELECT COALESCE(NULLIF(json_extract(meta_json, '$.document.author'), ''), '未知作者') AS name, COUNT(1) AS cnt
+			SELECT COALESCE(NULLIF(json_extract(meta_json, '$.document.author'), ''), '鏈煡浣滆€?) AS name, COUNT(1) AS cnt
 			FROM media WHERE library_id = ? AND file_type = 'document' AND status = 'active'
 			GROUP BY name ORDER BY cnt DESC, name COLLATE NOCASE LIMIT 200`
 	case "format":
@@ -252,11 +299,11 @@ func (h *Handler) queryDocumentFacets(libID int64, kind string) ([]gin.H, error)
 			GROUP BY name HAVING name != '0' ORDER BY name DESC LIMIT 100`
 	case "tag":
 		q = `
-			SELECT dt.tag AS name, COUNT(1) AS cnt
+			SELECT MIN(dt.tag) AS name, COUNT(1) AS cnt
 			FROM document_tag dt
 			JOIN media m ON m.id = dt.media_id
 			WHERE m.library_id = ? AND m.file_type = 'document' AND m.status = 'active'
-			GROUP BY dt.tag ORDER BY cnt DESC, dt.tag COLLATE NOCASE LIMIT 200`
+			GROUP BY dt.tag COLLATE NOCASE ORDER BY cnt DESC, name COLLATE NOCASE LIMIT 200`
 	}
 	rows, err := h.App.DB.Query(q, libID)
 	if err != nil {
@@ -520,7 +567,7 @@ func (h *Handler) ListRecentDocuments(c *gin.Context) {
 		}
 		items = append(items, gin.H{
 			"id": id, "title": title.String, "author": author.String,
-			"format": firstNonEmpty(docFormat.String, format.String),
+			"format":   firstNonEmpty(docFormat.String, format.String),
 			"position": position.String, "percent": percent.Float64, "update_at": updated.String,
 			"cover_url": fmt.Sprintf("/api/v1/media/%d/document/cover.jpg", id),
 		})
@@ -648,6 +695,371 @@ func (h *Handler) resolveDirDownloadPaths(dirPath string) ([]string, []string, e
 	return paths, titles, nil
 }
 
+type batchUpdateDocumentTagsBody struct {
+	MediaIDs []int64  `json:"media_ids"`
+	Mode     string   `json:"mode"`
+	Tags     []string `json:"tags"`
+}
+
+type documentTagTarget struct {
+	MediaID   int64
+	LibraryID int64
+	FilePath  string
+}
+
+type documentTagBatchItem struct {
+	MediaID int64    `json:"media_id"`
+	Tags    []string `json:"tags"`
+}
+
+type documentTagFacetDelta struct {
+	Tag   string `json:"tag"`
+	Delta int    `json:"delta"`
+}
+
+var (
+	errDocumentTagTargetNotFound = errors.New("document tag target not found")
+	errDocumentTagAccessDenied   = errors.New("document tag access denied")
+	errDocumentTagLimit          = errors.New("document tag limit exceeded")
+)
+
+func normalizeDocumentTags(tags []string) ([]string, error) {
+	out := make([]string, 0, len(tags))
+	for _, raw := range tags {
+		tag := strings.TrimSpace(raw)
+		if tag == "" || !utf8.ValidString(tag) || len([]byte(tag)) > 64 || strings.IndexFunc(tag, unicode.IsControl) >= 0 {
+			return nil, fmt.Errorf("invalid tag")
+		}
+		duplicate := false
+		for _, existing := range out {
+			if strings.EqualFold(existing, tag) {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			out = append(out, tag)
+		}
+	}
+	return out, nil
+}
+
+func normalizeDocumentTagRequest(body batchUpdateDocumentTagsBody) ([]int64, []string, error) {
+	if body.Mode != "add" && body.Mode != "remove" && body.Mode != "replace" {
+		return nil, nil, fmt.Errorf("mode must be add, remove, or replace")
+	}
+	ids := make([]int64, 0, len(body.MediaIDs))
+	seen := make(map[int64]struct{}, len(body.MediaIDs))
+	for _, id := range body.MediaIDs {
+		if id <= 0 {
+			return nil, nil, fmt.Errorf("media_ids must be positive")
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 || len(ids) > 200 {
+		return nil, nil, fmt.Errorf("media_ids must contain 1 to 200 unique ids")
+	}
+	tags, err := normalizeDocumentTags(body.Tags)
+	if err != nil || len(tags) == 0 {
+		return nil, nil, fmt.Errorf("tags must contain at least one valid tag")
+	}
+	if len(tags) > 50 {
+		return nil, nil, fmt.Errorf("tags must contain at most 50 unique tags")
+	}
+	return ids, tags, nil
+}
+
+func documentTagPlaceholders(n int) string {
+	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
+}
+
+func documentTagAccessAllowed(profile userPermissionProfile, target documentTagTarget, now time.Time) bool {
+	if strings.EqualFold(profile.LibraryScope, "selected") {
+		if _, ok := profile.AllowedLibraryIDs[target.LibraryID]; !ok {
+			return false
+		}
+		if folders := profile.AllowedLibraryFolders[target.LibraryID]; len(folders) > 0 && !pathMatchesAnyFolder(target.FilePath, folders) {
+			return false
+		}
+	}
+	return !profile.ParentalEnabled || withinAllowedTimeWindow(profile.AllowedTimeStart, profile.AllowedTimeEnd, profile.ParentalPlans, now)
+}
+
+func applyDocumentTagMode(current, requested []string, mode string) []string {
+	result := make([]string, 0, len(current)+len(requested))
+	contains := func(values []string, value string) bool {
+		for _, candidate := range values {
+			if strings.EqualFold(candidate, value) {
+				return true
+			}
+		}
+		return false
+	}
+	switch mode {
+	case "replace":
+		result = append(result, requested...)
+	case "remove":
+		for _, tag := range current {
+			if !contains(requested, tag) {
+				result = append(result, tag)
+			}
+		}
+	case "add":
+		result = append(result, current...)
+		for _, tag := range requested {
+			if !contains(result, tag) {
+				result = append(result, tag)
+			}
+		}
+	}
+	sort.SliceStable(result, func(i, j int) bool {
+		left, right := strings.ToLower(result[i]), strings.ToLower(result[j])
+		if left == right {
+			return result[i] < result[j]
+		}
+		return left < right
+	})
+	return result
+}
+
+func documentTagTargetsFrom(ctx context.Context, q permissionQueryer, ids []int64) (map[int64]documentTagTarget, error) {
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	rows, err := q.QueryContext(ctx, `SELECT id, library_id, COALESCE(file_path,'') FROM media WHERE id IN (`+documentTagPlaceholders(len(ids))+`) AND file_type='document' AND status='active'`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	targets := make(map[int64]documentTagTarget, len(ids))
+	for rows.Next() {
+		var target documentTagTarget
+		if err = rows.Scan(&target.MediaID, &target.LibraryID, &target.FilePath); err != nil {
+			return nil, err
+		}
+		targets[target.MediaID] = target
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(targets) != len(ids) {
+		return nil, errDocumentTagTargetNotFound
+	}
+	return targets, nil
+}
+
+func authorizeDocumentTagTargets(profile userPermissionProfile, targets map[int64]documentTagTarget, ids []int64, now time.Time) error {
+	for _, id := range ids {
+		if !documentTagAccessAllowed(profile, targets[id], now) {
+			return errDocumentTagAccessDenied
+		}
+	}
+	return nil
+}
+
+func (h *Handler) BatchUpdateDocumentTags(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 64<<10)
+	var body batchUpdateDocumentTagsBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"code": "document_tags_body_too_large"})
+		} else {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		}
+		return
+	}
+	ids, tags, err := normalizeDocumentTagRequest(body)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+	defer cancel()
+	apiClient := middleware.IsAPIClient(c)
+	uid := middleware.UserID(c)
+	if !apiClient && uid <= 0 {
+		c.JSON(http.StatusForbidden, gin.H{"error": "access denied"})
+		return
+	}
+	preflightTargets, err := documentTagTargetsFrom(ctx, h.App.DB, ids)
+	if err == nil && !apiClient {
+		var profile userPermissionProfile
+		profile, err = loadUserPermissionProfileFrom(ctx, h.App.DB, uid)
+		if err == nil {
+			err = authorizeDocumentTagTargets(profile, preflightTargets, ids, time.Now())
+		}
+	}
+	if err != nil {
+		switch {
+		case errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled):
+			c.JSON(http.StatusRequestTimeout, gin.H{"code": "document_tags_canceled"})
+		case errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded):
+			c.JSON(http.StatusGatewayTimeout, gin.H{"code": "document_tags_timeout"})
+		case errors.Is(err, errDocumentTagTargetNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		case errors.Is(err, errDocumentTagAccessDenied):
+			c.JSON(http.StatusForbidden, gin.H{"error": "access denied"})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		}
+		return
+	}
+	var result []documentTagBatchItem
+	var facetDeltas []documentTagFacetDelta
+	err = store.WithBusyRetry(ctx, nil, func() error {
+		result = nil
+		facetDeltas = nil
+		conn, txErr := h.App.DB.Conn(ctx)
+		if txErr != nil {
+			return txErr
+		}
+		var originalBusyTimeout int64
+		if txErr = conn.QueryRowContext(ctx, `PRAGMA busy_timeout`).Scan(&originalBusyTimeout); txErr != nil {
+			conn.Close()
+			return txErr
+		}
+		remaining := int64(2900)
+		if deadline, ok := ctx.Deadline(); ok {
+			remaining = time.Until(deadline).Milliseconds() - 100
+			if remaining < 1 {
+				remaining = 1
+			}
+		}
+		if _, txErr = conn.ExecContext(ctx, fmt.Sprintf(`PRAGMA busy_timeout=%d`, remaining)); txErr != nil {
+			conn.Close()
+			return txErr
+		}
+		defer func() {
+			restoreCtx, cancelRestore := context.WithTimeout(context.Background(), time.Second)
+			defer cancelRestore()
+			_, _ = conn.ExecContext(restoreCtx, fmt.Sprintf(`PRAGMA busy_timeout=%d`, originalBusyTimeout))
+			_ = conn.Close()
+		}()
+		tx, txErr := conn.BeginTx(ctx, nil)
+		if txErr != nil {
+			return txErr
+		}
+		defer tx.Rollback()
+		if _, txErr = tx.ExecContext(ctx, `UPDATE document_tag SET tag=tag WHERE 0`); txErr != nil {
+			return txErr
+		}
+
+		var profile userPermissionProfile
+		if !apiClient {
+			profile, txErr = loadUserPermissionProfileFrom(ctx, tx, uid)
+			if txErr != nil {
+				return txErr
+			}
+		}
+		targets, txErr := documentTagTargetsFrom(ctx, tx, ids)
+		if txErr != nil {
+			return txErr
+		}
+		if !apiClient {
+			if txErr = authorizeDocumentTagTargets(profile, targets, ids, time.Now()); txErr != nil {
+				return txErr
+			}
+		}
+		args := make([]any, len(ids))
+		for i, id := range ids {
+			args[i] = id
+		}
+
+		current := make(map[int64][]string, len(ids))
+		rows, txErr := tx.QueryContext(ctx, `SELECT media_id, tag FROM document_tag WHERE media_id IN (`+documentTagPlaceholders(len(ids))+`) ORDER BY media_id, tag COLLATE NOCASE, tag`, args...)
+		if txErr != nil {
+			return txErr
+		}
+		for rows.Next() {
+			var id int64
+			var tag string
+			if txErr = rows.Scan(&id, &tag); txErr != nil {
+				rows.Close()
+				return txErr
+			}
+			if strings.TrimSpace(tag) != "" {
+				current[id] = append(current[id], tag)
+			}
+		}
+		if txErr = rows.Err(); txErr != nil {
+			rows.Close()
+			return txErr
+		}
+		if txErr = rows.Close(); txErr != nil {
+			return txErr
+		}
+
+		result = make([]documentTagBatchItem, 0, len(ids))
+		facetCounts := make(map[string]int)
+		rowsToInsert := make([]documentTagBatchItem, 0, len(ids))
+		for _, id := range ids {
+			finalTags := applyDocumentTagMode(current[id], tags, body.Mode)
+			if len(finalTags) > 50 {
+				return errDocumentTagLimit
+			}
+			for _, tag := range current[id] {
+				facetCounts[strings.ToLower(tag)]--
+			}
+			for _, tag := range finalTags {
+				facetCounts[strings.ToLower(tag)]++
+			}
+			item := documentTagBatchItem{MediaID: id, Tags: finalTags}
+			result = append(result, item)
+			rowsToInsert = append(rowsToInsert, item)
+		}
+		facetDeltas = make([]documentTagFacetDelta, 0, len(facetCounts))
+		for tag, delta := range facetCounts {
+			if delta != 0 {
+				facetDeltas = append(facetDeltas, documentTagFacetDelta{Tag: tag, Delta: delta})
+			}
+		}
+		sort.Slice(facetDeltas, func(i, j int) bool { return facetDeltas[i].Tag < facetDeltas[j].Tag })
+		idsJSON, txErr := json.Marshal(ids)
+		if txErr != nil {
+			return txErr
+		}
+		if _, txErr = tx.ExecContext(ctx, `DELETE FROM document_tag WHERE media_id IN (SELECT CAST(value AS INTEGER) FROM json_each(?))`, string(idsJSON)); txErr != nil {
+			return txErr
+		}
+		rowsJSON, txErr := json.Marshal(rowsToInsert)
+		if txErr != nil {
+			return txErr
+		}
+		if _, txErr = tx.ExecContext(ctx, `
+			INSERT INTO document_tag(media_id, tag)
+			SELECT CAST(json_extract(item.value, '$.media_id') AS INTEGER), CAST(tag.value AS TEXT)
+			FROM json_each(?) AS item
+			JOIN json_each(json_extract(item.value, '$.tags')) AS tag`, string(rowsJSON)); txErr != nil {
+			return txErr
+		}
+		return tx.Commit()
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled):
+			c.JSON(http.StatusRequestTimeout, gin.H{"code": "document_tags_canceled"})
+		case errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded):
+			c.JSON(http.StatusGatewayTimeout, gin.H{"code": "document_tags_timeout"})
+		case errors.Is(err, errDocumentTagTargetNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		case errors.Is(err, errDocumentTagAccessDenied):
+			c.JSON(http.StatusForbidden, gin.H{"error": "access denied"})
+		case errors.Is(err, errDocumentTagLimit):
+			c.JSON(http.StatusBadRequest, gin.H{"error": "a document cannot have more than 50 tags"})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		}
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"updated": len(result), "items": result, "facet_deltas": facetDeltas})
+}
+
 type updateDocumentMetaBody struct {
 	Title       *string  `json:"title"`
 	Author      *string  `json:"author"`
@@ -704,10 +1116,25 @@ func (h *Handler) UpdateDocumentMeta(c *gin.Context) {
 		root["title"] = newTitle
 	}
 	out, _ := json.Marshal(root)
+	tx, err := h.App.DB.BeginTx(c.Request.Context(), nil)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer tx.Rollback()
 	if newTitle != "" {
-		_, _ = h.App.DB.Exec(`UPDATE media SET title = ?, meta_json = ? WHERE id = ?`, newTitle, string(out), id)
-	} else {
-		_, _ = h.App.DB.Exec(`UPDATE media SET meta_json = ? WHERE id = ?`, string(out), id)
+		if _, err = tx.ExecContext(c.Request.Context(), `UPDATE media SET title=? WHERE id=?`, newTitle, id); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if err = store.UpdateMediaMetaAndPhotoTime(c.Request.Context(), tx, id, string(out)); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if err = tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
 	}
 	if body.Tags != nil {
 		_, _ = h.App.DB.Exec(`DELETE FROM document_tag WHERE media_id = ?`, id)
@@ -723,6 +1150,8 @@ func (h *Handler) UpdateDocumentMeta(c *gin.Context) {
 }
 
 func (h *Handler) ListScanLogs(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+	defer cancel()
 	taskID := strings.TrimSpace(c.Query("task_id"))
 	libID := strings.TrimSpace(c.Query("library_id"))
 	limit := 200
@@ -738,9 +1167,9 @@ func (h *Handler) ListScanLogs(c *gin.Context) {
 	}
 	q += ` ORDER BY id DESC LIMIT ?`
 	args = append(args, limit)
-	rows, err := h.App.DB.Query(q, args...)
+	rows, err := h.App.DB.QueryContext(ctx, q, args...)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		respondScanQueryError(c, ctx, err, "scan_logs")
 		return
 	}
 	defer rows.Close()
@@ -748,13 +1177,19 @@ func (h *Handler) ListScanLogs(c *gin.Context) {
 	for rows.Next() {
 		var id, task, library sql.NullInt64
 		var path, action, msg, created sql.NullString
-		if rows.Scan(&id, &task, &library, &path, &action, &msg, &created) != nil {
-			continue
+		if err := rows.Scan(&id, &task, &library, &path, &action, &msg, &created); err != nil {
+			rows.Close()
+			respondScanQueryError(c, ctx, err, "scan_logs")
+			return
 		}
 		items = append(items, gin.H{
 			"id": id.Int64, "scan_task_id": task.Int64, "library_id": library.Int64,
 			"file_path": path.String, "action": action.String, "message": msg.String, "created_at": created.String,
 		})
+	}
+	if err := rows.Err(); err != nil {
+		respondScanQueryError(c, ctx, err, "scan_logs")
+		return
 	}
 	c.JSON(http.StatusOK, gin.H{"items": items})
 }

@@ -1,4 +1,4 @@
-import { Dropdown, Modal, Popover, Progress, Spin, Tag, Typography, message } from "antd";
+import { Dropdown, Modal, Popover, Progress, Tag, Typography, message } from "antd";
 import type { MenuProps } from "antd";
 import {
   CaretRightOutlined,
@@ -48,11 +48,16 @@ import {
   CONTINUE_WATCHING_LIBRARY_TYPES,
   flattenHomeRecent,
   loadHomeRecentBySection,
+  stableHomeRecentMap,
 } from "../lib/homeRecentSections";
+import { HomeRequestCoordinator } from "../lib/homeRequestCoordinator";
+import { useLibraryRequestScope } from "../lib/libraryRequestScope";
 import { useFavoriteFolderMenuRecents } from "../lib/useFavoriteFolderMenuRecents";
 import { readRecentPlaylists, rememberPlaylistAdded } from "../lib/recentPlaylists";
 import { useT, type TranslateFn } from "../i18n";
+import { useAuthStore } from "../store/auth";
 import styles from "./Home.module.css";
+import HomeLoadingBoundary from "./HomeLoadingBoundary";
 
 const { Title } = Typography;
 
@@ -90,7 +95,7 @@ function historyRowKey(h: HistoryItem): string {
   return String(h.media_id);
 }
 
-/** 继续观看：悬停遮罩与角标逻辑对齐「最近添加的电影」；批量点选同详情页 */
+/** 缂佈呯敾鐟欏倻婀呴敍姘亾閸嬫粓浼勭純鈺€绗岀憴鎺撶垼闁槒绶€靛綊缍堥妴灞炬付鏉╂垶鍧婇崝鐘垫畱閻㈤潧濂栭妴宥忕幢閹靛綊鍣洪悙褰掆偓澶婃倱鐠囷附鍎忔い?*/
 function HistoryContinueCard({
   h,
   nav,
@@ -235,7 +240,7 @@ function HistoryContinueCard({
       >
         <div className={styles.thumb169Title}>{h.title || t("pages.home.untitled")}</div>
         <div className={styles.thumb169Sub}>
-          {pct}% · {formatYear(h.file_path)}
+          {pct}% 璺?{formatYear(h.file_path)}
         </div>
         <div className={styles.thumb169Tags}>
           {h.completed === 1 ? <Tag color="green" style={{ marginInlineEnd: 0, flexShrink: 0 }}>{t("pages.home.completed")}</Tag> : null}
@@ -637,8 +642,16 @@ function RecentAddedRow({
 }
 
 export default function HomePage() {
+  const token = useAuthStore((state) => state.token);
+  const username = useAuthStore((state) => state.username);
+  const sessionIdentity = `${username ?? ""}:${token ?? ""}`;
+  return <HomePageSession key={sessionIdentity} />;
+}
+
+export function HomePageSession() {
   const nav = useNavigate();
   const t = useT();
+  const libraryRequests = useLibraryRequestScope();
   const RECENT_SECTIONS = useMemo(() => buildHomeRecentSections(t), [t]);
   const [loading, setLoading] = useState(true);
   const [libs, setLibs] = useState<Library[]>([]);
@@ -653,7 +666,25 @@ export default function HomePage() {
   const [showHistoryRight, setShowHistoryRight] = useState(false);
   const [showLibLeft, setShowLibLeft] = useState(false);
   const [showLibRight, setShowLibRight] = useState(false);
+  const coordinatorRef = useRef<HomeRequestCoordinator | null>(null);
+  const hasCommittedContentRef = useRef(false);
 
+  const updateHistoryArrows = () => {
+    const el = historyScrollRef.current;
+    if (!el) { setShowHistoryLeft(false); setShowHistoryRight(false); return; }
+    const maxLeft = el.scrollWidth - el.clientWidth;
+    setShowHistoryLeft(el.scrollLeft > 4);
+    setShowHistoryRight(maxLeft > 4 && el.scrollLeft < maxLeft - 4);
+  };
+  const scrollHistoryBy = (delta: number) => historyScrollRef.current?.scrollBy({ left: delta, behavior: "smooth" });
+  const updateLibArrows = () => {
+    const el = libScrollRef.current;
+    if (!el) { setShowLibLeft(false); setShowLibRight(false); return; }
+    const maxLeft = el.scrollWidth - el.clientWidth;
+    setShowLibLeft(el.scrollLeft > 4);
+    setShowLibRight(maxLeft > 4 && el.scrollLeft < maxLeft - 4);
+  };
+  const scrollLibsBy = (delta: number) => libScrollRef.current?.scrollBy({ left: delta, behavior: "smooth" });
   const toggleHistoryRow = useCallback((key: string) => {
     setHistorySelectedKeys((prev) => {
       const next = new Set(prev);
@@ -664,125 +695,41 @@ export default function HomePage() {
   }, []);
 
   useEffect(() => {
-    const valid = new Set(history.map(historyRowKey));
-    setHistorySelectedKeys((prev) => {
-      const next = new Set<string>();
-      for (const k of prev) {
-        if (valid.has(k)) next.add(k);
-      }
-      if (next.size === prev.size && [...next].every((k) => prev.has(k))) return prev;
-      return next;
-    });
-  }, [history]);
-
-  const updateHistoryArrows = () => {
-    const el = historyScrollRef.current;
-    if (!el) {
-      setShowHistoryLeft(false);
-      setShowHistoryRight(false);
-      return;
-    }
-    const maxLeft = el.scrollWidth - el.clientWidth;
-    setShowHistoryLeft(el.scrollLeft > 4);
-    setShowHistoryRight(maxLeft > 4 && el.scrollLeft < maxLeft - 4);
-  };
-
-  const scrollHistoryBy = (delta: number) => {
-    const el = historyScrollRef.current;
-    if (!el) return;
-    el.scrollBy({ left: delta, behavior: "smooth" });
-  };
-
-  const updateLibArrows = () => {
-    const el = libScrollRef.current;
-    if (!el) {
-      setShowLibLeft(false);
-      setShowLibRight(false);
-      return;
-    }
-    const maxLeft = el.scrollWidth - el.clientWidth;
-    setShowLibLeft(el.scrollLeft > 4);
-    setShowLibRight(maxLeft > 4 && el.scrollLeft < maxLeft - 4);
-  };
-
-  const scrollLibsBy = (delta: number) => {
-    const el = libScrollRef.current;
-    if (!el) return;
-    el.scrollBy({ left: delta, behavior: "smooth" });
-  };
-
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    // 分项处理：任一接口失败不应清空其它接口的成功数据（Promise.all 会全失败）
-    void (async () => {
-      const [libR, histR] = await Promise.allSettled([
-        fetchLibraries(),
-        fetchUserHistory(24, { libraryTypes: CONTINUE_WATCHING_LIBRARY_TYPES }),
-      ]);
-      if (cancelled) return;
-      const libsData = libR.status === "fulfilled" && Array.isArray(libR.value) ? libR.value : [];
-      setLibs(libsData);
-      if (histR.status === "fulfilled") {
-        setHistory(histR.value.filter((h) => h.media_id > 0));
-      } else {
-        setHistory([]);
-      }
-      const sections = buildHomeRecentSections(t);
-      const recentMap = libsData.length
-        ? await loadHomeRecentBySection(libsData, sections)
-        : new Map<string, MediaItem[]>();
-      if (!cancelled) {
-        setRecentBySection(recentMap);
-        setLoading(false);
-      }
-    })();
+    const coordinator = new HomeRequestCoordinator(
+      {
+        fetchLibraries: (signal) => libraryRequests
+          ? libraryRequests.load(signal).then((result) => result.items)
+          : fetchLibraries(signal),
+        fetchHistory: (signal) => fetchUserHistory(24, { libraryTypes: CONTINUE_WATCHING_LIBRARY_TYPES }, signal),
+        loadRecent: loadHomeRecentBySection,
+      },
+      {
+        onLoading: setLoading,
+        onLibraries: (items) => {
+          hasCommittedContentRef.current = true;
+          setLibs((previous) => JSON.stringify(previous) === JSON.stringify(items) ? previous : items);
+        },
+        onHistory: (items) => {
+          hasCommittedContentRef.current = true;
+          setHistory(items);
+        },
+        onSection: (key, items) => {
+          hasCommittedContentRef.current = true;
+          setRecentBySection((previous) => stableHomeRecentMap(previous, key, items));
+        },
+      },
+    );
+    coordinatorRef.current = coordinator;
+    coordinator.start(RECENT_SECTIONS, { showInitialLoading: !hasCommittedContentRef.current });
     return () => {
-      cancelled = true;
+      if (coordinatorRef.current === coordinator) coordinatorRef.current = null;
+      coordinator.stop();
     };
-  }, [t]);
-
-  useEffect(() => {
-    let cancelled = false;
-    const timer = window.setInterval(() => {
-      void fetchLibraries()
-        .then((items) => {
-          if (!cancelled) {
-            setLibs(Array.isArray(items) ? items : []);
-          }
-        })
-        .catch(() => {
-          // keep existing list on transient polling failures
-        });
-    }, 3000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, []);
-
-  useEffect(() => {
-    if (libs.length === 0) {
-      setRecentBySection(new Map());
-      return;
-    }
-    let cancelled = false;
-    const refreshRecent = () => {
-      void loadHomeRecentBySection(libs, RECENT_SECTIONS).then((map) => {
-        if (!cancelled) setRecentBySection(map);
-      });
-    };
-    refreshRecent();
-    const timer = window.setInterval(refreshRecent, 10000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [libs, RECENT_SECTIONS]);
+  }, [RECENT_SECTIONS, libraryRequests]);
 
   const allRecent = useMemo(() => flattenHomeRecent(recentBySection), [recentBySection]);
 
-  /** Prefer poster_url from recent list when the same media appears in「继续观看」. */
+  /** Prefer poster_url from recent list when the same media appears in閵嗗瞼鎴风紒顓☆潎閻鈧? */
   const recentPosterById = useMemo(() => {
     const m = new Map<number, string>();
     for (const r of allRecent) {
@@ -803,10 +750,16 @@ export default function HomePage() {
   const [recentPlaylistMenu, setRecentPlaylistMenu] = useState(readRecentPlaylists);
   const { recentFavoriteFolders, rememberFolderMenuAdded } = useFavoriteFolderMenuRecents();
 
+  const refreshHomeAfterBulk = useCallback(async () => {
+    await coordinatorRef.current?.refreshAfterMutation();
+  }, []);
+
   const buildHomeMediaMenu = useCallback(
     (mediaId: number, menuExtra?: { isWatched?: boolean; fromContinueWatching?: boolean }) =>
       buildMediaMenuItems({ id: mediaId }, nav, {
         ...menuExtra,
+        afterToggleWatched: refreshHomeAfterBulk,
+        afterDelete: refreshHomeAfterBulk,
         onAddToPlaylist: (mid) => setAddToPlaylistMediaId(mid),
         recentPlaylists: recentPlaylistMenu,
         onQuickAddToPlaylist: async (mid, pid) => {
@@ -847,10 +800,11 @@ export default function HomePage() {
                 return next;
               });
               message.success(t("pages.home.removed_from_continue"));
+              await refreshHomeAfterBulk();
             }
           : undefined,
       }),
-    [nav, recentPlaylistMenu, recentFavoriteFolders, rememberFolderMenuAdded, t],
+    [nav, recentPlaylistMenu, recentFavoriteFolders, rememberFolderMenuAdded, refreshHomeAfterBulk, t],
   );
 
   const addToPlaylistDefaultTitle = useMemo(() => {
@@ -885,19 +839,6 @@ export default function HomePage() {
     setHistorySelectedKeys(new Set());
     setMovieSelectedIds(new Set());
   }, []);
-
-  const refreshHomeAfterBulk = useCallback(async () => {
-    const [histR, recentR] = await Promise.allSettled([
-      fetchUserHistory(24, { libraryTypes: CONTINUE_WATCHING_LIBRARY_TYPES }),
-      libs.length > 0 ? loadHomeRecentBySection(libs, RECENT_SECTIONS) : Promise.resolve(new Map<string, MediaItem[]>()),
-    ]);
-    if (histR.status === "fulfilled") {
-      setHistory(histR.value.filter((h) => h.media_id > 0));
-    }
-    if (recentR.status === "fulfilled") {
-      setRecentBySection(recentR.value);
-    }
-  }, [libs, RECENT_SECTIONS]);
 
   const homeBulkSelectedMediaIds = useMemo(() => {
     const ids = new Set<number>();
@@ -1291,13 +1232,7 @@ export default function HomePage() {
 
   const homeBulkSelectAllDisabled = history.length === 0 && movieShelfItems.length === 0;
 
-  if (loading) {
-    return (
-      <div className={styles.page} style={{ display: "flex", justifyContent: "center", paddingTop: 80 }}>
-        <Spin size="large" />
-      </div>
-    );
-  }
+  if (loading) return <HomeLoadingBoundary loading>{null}</HomeLoadingBoundary>;
 
   return (
     <div className={styles.page}>
@@ -1597,3 +1532,9 @@ export default function HomePage() {
     </div>
   );
 }
+
+
+
+
+
+\n

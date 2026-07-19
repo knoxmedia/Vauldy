@@ -1,6 +1,7 @@
 package crypto
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"encoding/binary"
@@ -20,10 +21,17 @@ func ctrIV(nonce [IVSize]byte, blockNum uint32) []byte {
 }
 
 func encryptCTR(src io.Reader, dst io.Writer, block cipher.Block, nonce [IVSize]byte) error {
+	return encryptCTRContext(context.Background(), src, dst, block, nonce)
+}
+
+func encryptCTRContext(ctx context.Context, src io.Reader, dst io.Writer, block cipher.Block, nonce [IVSize]byte) error {
 	stream := cipher.NewCTR(block, ctrIV(nonce, 0))
 	buf := make([]byte, ctrEncryptChunk)
 	out := make([]byte, ctrEncryptChunk)
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		n, err := io.ReadFull(src, buf)
 		if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
 			return err
@@ -31,15 +39,21 @@ func encryptCTR(src io.Reader, dst io.Writer, block cipher.Block, nonce [IVSize]
 		if n == 0 {
 			break
 		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		stream.XORKeyStream(out[:n], buf[:n])
-		if _, werr := dst.Write(out[:n]); werr != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if werr := writeExact(dst, out[:n]); werr != nil {
 			return werr
 		}
 		if err != nil {
 			break
 		}
 	}
-	return nil
+	return ctx.Err()
 }
 
 // ctrReadSeeker decrypts AES-CTR ciphertext on the fly with random access.

@@ -28,18 +28,6 @@ func ResetInterruptedTasks(db *sql.DB) {
 		SET status = 'waiting', progress = 0, message = ?
 		WHERE status = 'running'`, restartResetMessage)
 
-	reset("scan_task", `
-		UPDATE scan_task
-		SET status = 'failed',
-		    cancelled = 1,
-		    error_message = CASE
-		      WHEN COALESCE(error_message, '') = '' THEN 'scan interrupted (service restarted)'
-		      ELSE error_message
-		    END,
-		    finished_at = CURRENT_TIMESTAMP,
-		    updated_at = CURRENT_TIMESTAMP
-		WHERE status = 'running'`)
-
 	reset("transcode_task", `
 		UPDATE transcode_task
 		SET status = 'waiting', progress = 0, error_message = ?

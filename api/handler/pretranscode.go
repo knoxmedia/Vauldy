@@ -102,7 +102,9 @@ func (h *Handler) DeletePreset(c *gin.Context) {
 
 func (h *Handler) ClonePreset(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
-	var body struct{ Name string `json:"name"` }
+	var body struct {
+		Name string `json:"name"`
+	}
 	_ = c.ShouldBindJSON(&body)
 	mod := pretranscodeModule()
 	p, err := mod.Preset.ClonePreset(id, body.Name)
@@ -181,7 +183,9 @@ func (h *Handler) DeleteRendition(c *gin.Context) {
 
 func (h *Handler) SortRenditions(c *gin.Context) {
 	pid, _ := strconv.ParseInt(c.Param("id"), 10, 64)
-	var body struct{ OrderedIDs []int64 `json:"ordered_ids"` }
+	var body struct {
+		OrderedIDs []int64 `json:"ordered_ids"`
+	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(400, gin.H{"error": err.Error()})
 		return
@@ -342,7 +346,9 @@ func (h *Handler) RetryRenditionJob(c *gin.Context) {
 }
 
 func (h *Handler) CleanupFailedPretranscodeTasks(c *gin.Context) {
-	var body struct{ Days int `json:"days"` }
+	var body struct {
+		Days int `json:"days"`
+	}
 	_ = c.ShouldBindJSON(&body)
 	mod := pretranscodeModule()
 	n, err := mod.Task.CleanupFailedTasks(body.Days)
@@ -364,7 +370,9 @@ func (h *Handler) GetPretranscodeStorage(c *gin.Context) {
 }
 
 func (h *Handler) CleanupPretranscodeOutputs(c *gin.Context) {
-	var body struct{ FileID string `json:"file_id"` }
+	var body struct {
+		FileID string `json:"file_id"`
+	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(400, gin.H{"error": err.Error()})
 		return
@@ -456,25 +464,25 @@ func (h *Handler) ListClusterNodes(c *gin.Context) {
 	// Standalone mode: a single self node.
 	c.JSON(200, gin.H{
 		"nodes": []gin.H{{
-			"id":        "self",
-			"host":      "localhost",
-			"status":    "online",
+			"id":                "self",
+			"host":              "localhost",
+			"status":            "online",
 			"hardware_encoders": h.App.AvailableHardwareAcceleration,
-			"current_tasks": 0,
-			"max_concurrent": 4,
+			"current_tasks":     0,
+			"max_concurrent":    4,
 		}},
-		"queue_depth": 0,
+		"queue_depth":        0,
 		"total_active_tasks": 0,
 	})
 }
 
 func (h *Handler) GetClusterStats(c *gin.Context) {
 	c.JSON(200, gin.H{
-		"nodes":          1,
-		"online":         1,
-		"queue_depth":    0,
-		"active_tasks":   0,
-		"mode":           "standalone",
+		"nodes":        1,
+		"online":       1,
+		"queue_depth":  0,
+		"active_tasks": 0,
+		"mode":         "standalone",
 	})
 }
 
@@ -542,7 +550,7 @@ func (h *Handler) GetMediaOptimization(c *gin.Context) {
 func (h *Handler) CreateMediaOptimization(c *gin.Context) {
 	mediaID, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 	var body struct {
-		PresetID      int64 `json:"preset_id"`
+		PresetID        int64 `json:"preset_id"`
 		ExcludeExisting bool  `json:"exclude_existing"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {

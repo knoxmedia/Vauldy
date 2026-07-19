@@ -9,22 +9,10 @@ import (
 
 	"knox-media/api/handler"
 	"knox-media/api/middleware"
-	"knox-media/cmd/scheduler"
 	"knox-media/internal/app"
-	"knox-media/internal/atrack"
 	"knox-media/internal/config"
 	"knox-media/internal/coreiface"
-	"knox-media/internal/doccover"
-	"knox-media/internal/jit/session"
-	"knox-media/internal/keyframe"
-	"knox-media/internal/lyrictask"
 	"knox-media/internal/metadatalib"
-	"knox-media/internal/photoclass"
-	"knox-media/internal/preview"
-	"knox-media/internal/storage"
-	"knox-media/internal/subtitle"
-	"knox-media/internal/transcode"
-	"knox-media/internal/upload"
 )
 
 // pretranscodeLicenseMiddleware gates the commercial pretranscode routes on
@@ -34,7 +22,10 @@ func pretranscodeLicenseMiddleware() gin.HandlerFunc {
 	return handler.PretranscodeLicenseMiddleware()
 }
 
-func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worker, packageWorker *transcode.PackageWorker, previewWorker *preview.Worker, sub *subtitle.Service, up *upload.Service, instant *scheduler.Scheduler, sm *session.Manager, atw *atrack.Worker, kfw *keyframe.Worker, lw *lyrictask.Worker, pcw *photoclass.Worker, dcw *doccover.Worker) *gin.Engine {
+func NewEngine(cfg *config.Config, application *app.App, deps handler.Dependencies) *gin.Engine {
+	if deps.ServerContext == nil || deps.Background == nil {
+		panic("api: ServerContext and Background dependencies are required")
+	}
 	if cfg.Server.Mode == "release" {
 		gin.SetMode(gin.ReleaseMode)
 	}
@@ -47,30 +38,30 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 	mountStaticRoutes(r, cfg.Data.Static, resolvePowerPlayerStatic(webBundle))
 	r.Static(metadatalib.PublicURLPrefix, cfg.Data.MetadataLibrary)
 
-	keyVault, assetEnc := storage.NewAssetEncryptorFromConfig(cfg, application.DB)
-	derivedStore := storage.NewDerivedAssetStoreFromConfig(cfg, application.DB, keyVault)
-	h := handler.New(application, worker, packageWorker, previewWorker, sub, up, instant, sm, atw, kfw, lw, pcw, dcw, keyVault, assetEnc, derivedStore)
-	if dcw != nil {
-		dcw.SetOnCoverReady(h.ScheduleLibraryPreviewRefreshForMedia)
+	h := handler.New(application, deps)
+	if deps.DocCoverWorker != nil {
+		deps.DocCoverWorker.SetOnCoverReady(h.ScheduleLibraryPreviewRefreshForMedia)
 	}
-	go h.StartScheduleLoop(context.Background())
-	go h.StartScrapeTaskLoop(context.Background())
-	go h.StartSubtitleTaskLoop(context.Background())
-	go h.StartKeyframeTaskLoop(context.Background())
-	go h.StartAtrackTaskLoop(context.Background())
-	go h.StartPreviewTaskLoop(context.Background())
-	go h.StartTranscodeTaskLoop(context.Background())
-	go h.StartLyricTaskLoop(context.Background())
-	go h.StartPhotoClassifyLoop(context.Background())
-	go h.StartPhotoLocationLoop(context.Background())
-	go h.StartPhotoFaceLoop(context.Background())
-	if dcw != nil {
-		go dcw.Start(context.Background())
-		go func() {
-			// Allow worker loop to start before backfill storm.
-			time.Sleep(500 * time.Millisecond)
-			dcw.BackfillAllLibraries()
-		}()
+	deps.Background.Go(deps.ServerContext, h.StartScheduleLoop)
+	deps.Background.Go(deps.ServerContext, h.StartScrapeTaskLoop)
+	deps.Background.Go(deps.ServerContext, h.StartTranscodeTaskLoop)
+	deps.Background.Go(deps.ServerContext, h.StartLyricTaskLoop)
+	deps.Background.Go(deps.ServerContext, h.StartPhotoClassifyLoop)
+	deps.Background.Go(deps.ServerContext, h.StartPhotoLocationLoop)
+	deps.Background.Go(deps.ServerContext, h.StartPhotoFaceLoop)
+	deps.Background.Go(deps.ServerContext, h.StartMediaFileCleanupLoop)
+	if deps.DocCoverWorker != nil {
+		deps.Background.Go(deps.ServerContext, deps.DocCoverWorker.Start)
+		deps.Background.Go(deps.ServerContext, func(ctx context.Context) {
+			timer := time.NewTimer(500 * time.Millisecond)
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+				return
+			case <-timer.C:
+				deps.DocCoverWorker.BackfillAllLibrariesContext(ctx)
+			}
+		})
 	}
 
 	r.GET("/health", func(c *gin.Context) {
@@ -126,6 +117,7 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 			auth.GET("/media/:id/read-progress", h.GetReadProgress)
 			auth.POST("/media/:id/read-progress", h.SaveReadProgress)
 			auth.POST("/documents/download", h.BatchDownloadDocuments)
+			auth.PATCH("/documents/tags", h.BatchUpdateDocumentTags)
 			auth.GET("/scan-logs", h.ListScanLogs)
 			auth.GET("/album/:id", h.GetAlbum)
 			auth.GET("/album/:id/play-target", h.GetAlbumPlayTarget)
@@ -227,11 +219,11 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 			play.GET("/drm/hls/aes128/key", h.HLSAES128Key)
 			play.GET("/drm/fairplay/cert", h.FairPlayCert)
 			play.POST("/drm/fairplay/license", h.FairPlayLicense)
-			if instant != nil {
-				instant.RegisterRoutes(play)
+			if deps.Instant != nil {
+				deps.Instant.RegisterRoutes(play)
 			}
 			// New Redis-free JIT session routes.
-			if sm != nil {
+			if deps.SessionManager != nil {
 				play.GET("/jit/session/:sessionID/*asset", h.ServeJITAsset)
 				play.POST("/jit/session/:sessionID/pause", h.PauseJITSession)
 				play.POST("/jit/session/:sessionID/resume", h.ResumeJITSession)
@@ -380,7 +372,7 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 				mod.RegisterRoutes(adm, coreiface.ModuleDeps{
 					DB:           application.DB,
 					Config:       cfg,
-					Vault:        keyVault,
+					Vault:        deps.KeyVault,
 					TranscodeDir: cfg.Data.Transcode,
 					FFmpegPath:   cfg.FFmpeg.FFmpegPath,
 					FFprobePath:  cfg.FFmpeg.FFprobePath,

@@ -1,5 +1,5 @@
 import { ArrowLeftOutlined, EnvironmentOutlined, PictureOutlined, SyncOutlined, TagOutlined, UserOutlined } from "@ant-design/icons";
-import { Button, Empty, Input, Progress, Select, Space, Spin, Tabs, Tooltip, message } from "antd";
+import { Alert, Button, Empty, Input, Progress, Select, Space, Spin, Tabs, Tooltip, message } from "antd";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   MediaItem,
@@ -36,15 +36,17 @@ import {
   type MainTab,
   type SortMode,
 } from "../lib/photoBrowseUtils";
+import { linkAbortSignal } from "../lib/abortSignal";
 import styles from "./PhotoBrowse.module.css";
 
 type Props = {
   libraryId: number;
   libraryName?: string;
   onEmpty?: () => void;
+  signal?: AbortSignal;
 };
 
-export default function PhotoBrowse({ libraryId, libraryName, onEmpty }: Props) {
+export default function PhotoBrowse({ libraryId, libraryName, onEmpty, signal }: Props) {
   const t = useT();
   const [rows, setRows] = useState<MediaItem[]>([]);
   const [categories, setCategories] = useState<PhotoCategory[]>([]);
@@ -52,7 +54,10 @@ export default function PhotoBrowse({ libraryId, libraryName, onEmpty }: Props) 
   const [persons, setPersons] = useState<PhotoPerson[]>([]);
   const [mainTab, setMainTab] = useState<MainTab>("timeline");
   const [drillDown, setDrillDown] = useState<DrillDown | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [rowsLoading, setRowsLoading] = useState(false);
+  const [metaLoading, setMetaLoading] = useState(false);
+  const [metaErrors, setMetaErrors] = useState<Partial<Record<MetadataKind, string>>>({});
+  const [progressError, setProgressError] = useState<string | null>(null);
   const [sortMode, setSortMode] = useState<SortMode>("taken_desc");
   const [layoutMode, setLayoutMode] = useState<LayoutMode>("grid");
   const [q, setQ] = useState("");
@@ -66,7 +71,13 @@ export default function PhotoBrowse({ libraryId, libraryName, onEmpty }: Props) 
   const isAdmin = isAdminRole(useAuthStore((s) => s.role));
   const onEmptyRef = useRef(onEmpty);
   const onEmptyCalledRef = useRef(false);
+  type MetadataKind = "categories" | "places" | "persons";
   const taskPendingRef = useRef({ classify: 0, location: 0, face: 0 });
+  const rowsGenerationRef = useRef(0);
+  const metadataRootGenerationRef = useRef(0);
+  const metadataRequestsRef = useRef<Partial<Record<MetadataKind, { rootGeneration: number; generation: number; controller: AbortController; cleanup: () => void; promise: Promise<void>; dirty: boolean }>>>({});
+  const progressGenerationRef = useRef(0);
+  const progressInFlightRef = useRef<{ generation: number; promise: Promise<void> } | null>(null);
 
   onEmptyRef.current = onEmpty;
 
@@ -75,104 +86,165 @@ export default function PhotoBrowse({ libraryId, libraryName, onEmpty }: Props) 
     setDrillDown(null);
     setMainTab("timeline");
     setRows([]);
-  }, [libraryId]);
+  }, [libraryId, signal]);
 
-  const refreshSmartMeta = useCallback(async () => {
-    try {
-      const [cats, pls, ppl] = await Promise.all([
-        fetchPhotoCategories(libraryId),
-        fetchPhotoPlaces(libraryId),
-        fetchPhotoPersons(libraryId),
-      ]);
-      setCategories(cats);
-      setPlaces(pls);
-      setPersons(ppl);
-    } catch {
-      /* optional */
+  const refreshMetadataKind = useCallback((kind: MetadataKind): Promise<void> => {
+    const rootGeneration = metadataRootGenerationRef.current;
+    const existing = metadataRequestsRef.current[kind];
+    if (existing?.rootGeneration === rootGeneration) {
+      existing.dirty = true;
+      return existing.promise;
     }
-  }, [libraryId]);
+    const linked = linkAbortSignal(signal);
+    const token = {
+      rootGeneration,
+      generation: (existing?.generation ?? 0) + 1,
+      controller: linked.controller,
+      cleanup: linked.cleanup,
+      promise: Promise.resolve() as Promise<void>,
+      dirty: false,
+    };
+    const fetchKind = () => {
+      if (kind === "categories") return fetchPhotoCategories(libraryId, token.controller.signal);
+      if (kind === "places") return fetchPhotoPlaces(libraryId, token.controller.signal);
+      return fetchPhotoPersons(libraryId, token.controller.signal);
+    };
+    setMetaLoading(true);
+    token.promise = (async () => {
+      do {
+        token.dirty = false;
+        const [result] = await Promise.allSettled([fetchKind()]);
+        if (token.controller.signal.aborted || token.rootGeneration !== metadataRootGenerationRef.current || metadataRequestsRef.current[kind] !== token) return;
+        if (result.status === "fulfilled") {
+          if (kind === "categories") setCategories(result.value as PhotoCategory[]);
+          if (kind === "places") setPlaces(result.value as PhotoPlace[]);
+          if (kind === "persons") setPersons(result.value as PhotoPerson[]);
+          setMetaErrors((prev) => { const next = { ...prev }; delete next[kind]; return next; });
+        } else {
+          setMetaErrors((prev) => ({ ...prev, [kind]: `Photo metadata unavailable: ${kind}` }));
+        }
+      } while (token.dirty && !token.controller.signal.aborted && token.rootGeneration === metadataRootGenerationRef.current);
+    })().finally(() => {
+      token.cleanup();
+      if (metadataRequestsRef.current[kind] === token) {
+        delete metadataRequestsRef.current[kind];
+        if (Object.keys(metadataRequestsRef.current).length === 0) setMetaLoading(false);
+      }
+    });
+    metadataRequestsRef.current[kind] = token;
+    return token.promise;
+  }, [libraryId, signal]);
 
-  const refreshProgress = useCallback(async () => {
-    try {
-      const [classifyProg, locationProg, faceProg] = await Promise.all([
-        fetchPhotoClassifyProgress(libraryId),
-        fetchPhotoLocationProgress(libraryId),
-        fetchPhotoFaceProgress(libraryId),
+  const refreshMetadataKinds = useCallback(async (kinds: Set<MetadataKind>) => {
+    await Promise.allSettled([...kinds].map((kind) => refreshMetadataKind(kind)));
+  }, [refreshMetadataKind]);
+
+  const refreshSmartMeta = useCallback(() => refreshMetadataKinds(new Set<MetadataKind>(["categories", "places", "persons"])), [refreshMetadataKinds]);
+
+  const refreshProgress = useCallback((requestSignal = signal) => {
+    const generation = progressGenerationRef.current;
+    const current = progressInFlightRef.current;
+    if (current?.generation === generation) return current.promise;
+    setProgressError(null);
+    const token = { generation, promise: Promise.resolve() as Promise<void> };
+    token.promise = (async () => {
+      const results = await Promise.allSettled([
+        fetchPhotoClassifyProgress(libraryId, requestSignal),
+        fetchPhotoLocationProgress(libraryId, requestSignal),
+        fetchPhotoFaceProgress(libraryId, requestSignal),
       ]);
-      const next = {
-        classify: classifyProg.pending,
-        location: locationProg.pending,
-        face: faceProg.pending,
-      };
+      if (requestSignal?.aborted || generation !== progressGenerationRef.current) return;
+      const failures = ["classify", "location", "face"].filter((_, index) => results[index].status === "rejected");
+      setProgressError(failures.length > 0 ? `Photo progress unavailable: ${failures.join(", ")}` : null);
       const prev = taskPendingRef.current;
-      const taskFinished =
-        (prev.classify > 0 && next.classify <= 0) ||
-        (prev.location > 0 && next.location <= 0) ||
-        (prev.face > 0 && next.face <= 0);
-
+      const next = { ...prev };
+      const completed = new Set<MetadataKind>();
+      const setters = [setClassifyProgress, setLocationProgress, setFaceProgress] as const;
+      const keys = ["classify", "location", "face"] as const;
+      const metadataKinds: MetadataKind[] = ["categories", "places", "persons"];
+      results.forEach((result, index) => {
+        if (result.status === "rejected") { setters[index](null); return; }
+        const value = result.value;
+        const key = keys[index];
+        next[key] = value.pending;
+        setters[index]({ percent: value.percent, pending: value.pending });
+        if (prev[key] > 0 && value.pending <= 0) completed.add(metadataKinds[index]);
+        if (key === "face" && prev.face > 0 && value.pending <= 0 && ("failed" in value ? value.failed : 0) > 0) message.warning(t("pages.photo_browse.face_partial_failed", { count: "failed" in value ? value.failed : 0 }));
+      });
       taskPendingRef.current = next;
+      if (completed.size > 0) await refreshMetadataKinds(completed);
+    })().finally(() => {
+      if (progressInFlightRef.current === token) progressInFlightRef.current = null;
+    });
+    progressInFlightRef.current = token;
+    return token.promise;
+  }, [libraryId, refreshMetadataKinds, signal, t]);
 
-      setClassifyProgress({ percent: classifyProg.percent, pending: classifyProg.pending });
-      setLocationProgress({ percent: locationProg.percent, pending: locationProg.pending });
-      setFaceProgress({ percent: faceProg.percent, pending: faceProg.pending });
-
-      if (prev.face > 0 && next.face <= 0 && (faceProg.failed ?? 0) > 0) {
-        message.warning(t("pages.photo_browse.face_partial_failed", { count: faceProg.failed }));
-      }
-
-      if (taskFinished) {
-        await refreshSmartMeta();
-      }
-    } catch {
-      /* optional */
-    }
-  }, [libraryId, refreshSmartMeta, t]);
-
-  const refreshMeta = useCallback(async () => {
-    await Promise.all([refreshSmartMeta(), refreshProgress()]);
-  }, [refreshSmartMeta, refreshProgress]);
-
-  const load = useCallback(async () => {
-    setLoading(true);
+  const loadRows = useCallback(async (requestSignal = signal) => {
+    const generation = ++rowsGenerationRef.current;
+    setRowsLoading(true);
     try {
       const items = await fetchMedia(libraryId, {
-        sort: sortMode,
-        limit: 5000,
-        file_type: "image",
+        sort: sortMode, limit: 5000, file_type: "image",
         photo_tag: drillDown && drillDown.section !== "place" && drillDown.section !== "person" ? drillDown.categoryId : undefined,
-        photo_place:
-          drillDown?.section === "place" && !isPlaceAllDrill(drillDown) ? drillDown.categoryId : undefined,
+        photo_place: drillDown?.section === "place" && !isPlaceAllDrill(drillDown) ? drillDown.categoryId : undefined,
         photo_person: drillDown?.section === "person" && !isPersonAllDrill(drillDown) ? drillDown.categoryId : undefined,
-      });
+      }, requestSignal);
+      if (requestSignal?.aborted || generation !== rowsGenerationRef.current) return;
       setRows(items);
-      if (items.length === 0 && !drillDown && !onEmptyCalledRef.current) {
-        onEmptyCalledRef.current = true;
-        onEmptyRef.current?.();
-      }
-      await refreshMeta();
+      if (items.length === 0 && !drillDown && !onEmptyCalledRef.current) { onEmptyCalledRef.current = true; onEmptyRef.current?.(); }
     } catch (e: unknown) {
-      message.error((e as Error).message || t("pages.photo_browse.load_failed"));
+      if (!requestSignal?.aborted) message.error((e as Error).message || t("pages.photo_browse.load_failed"));
     } finally {
-      setLoading(false);
+      if (generation === rowsGenerationRef.current) setRowsLoading(false);
     }
-  }, [libraryId, sortMode, drillDown, refreshMeta, t]);
+  }, [libraryId, sortMode, drillDown, signal, t]);
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    const linked = linkAbortSignal(signal);
+    void loadRows(linked.controller.signal);
+    return () => { linked.controller.abort(); linked.cleanup(); };
+  }, [loadRows, signal]);
 
-  const anyTaskPending =
-    (classifyProgress?.pending ?? 0) > 0 ||
-    (locationProgress?.pending ?? 0) > 0 ||
-    (faceProgress?.pending ?? 0) > 0;
+  useEffect(() => {
+    const progress = linkAbortSignal(signal);
+    metadataRootGenerationRef.current++;
+    for (const request of Object.values(metadataRequestsRef.current)) request?.controller.abort();
+    metadataRequestsRef.current = {};
+    setCategories([]); setPlaces([]); setPersons([]);
+    setMetaLoading(false);
+    progressGenerationRef.current++;
+    progressInFlightRef.current = null;
+    taskPendingRef.current = { classify: 0, location: 0, face: 0 };
+    setClassifyProgress(null); setLocationProgress(null); setFaceProgress(null);
+    setMetaErrors({}); setProgressError(null);
+    void refreshSmartMeta();
+    void refreshProgress(progress.controller.signal);
+    return () => {
+      metadataRootGenerationRef.current++;
+      for (const request of Object.values(metadataRequestsRef.current)) request?.controller.abort();
+      metadataRequestsRef.current = {};
+      progressGenerationRef.current++;
+      progress.controller.abort(); progress.cleanup();
+    };
+  }, [libraryId, refreshProgress, refreshSmartMeta, signal]);
+
+  const anyTaskPending = (classifyProgress?.pending ?? 0) > 0 || (locationProgress?.pending ?? 0) > 0 || (faceProgress?.pending ?? 0) > 0;
 
   useEffect(() => {
     if (!anyTaskPending) return;
-    const t = window.setInterval(() => {
-      void refreshProgress();
-    }, 8000);
-    return () => window.clearInterval(t);
-  }, [anyTaskPending, refreshProgress]);
+    const linked = linkAbortSignal(signal);
+    let timer: number | undefined;
+    const schedule = () => {
+      timer = window.setTimeout(async () => {
+        if (document.hidden) { schedule(); return; }
+        await refreshProgress(linked.controller.signal);
+        if (!linked.controller.signal.aborted && (taskPendingRef.current.classify > 0 || taskPendingRef.current.location > 0 || taskPendingRef.current.face > 0)) schedule();
+      }, 8000);
+    };
+    schedule();
+    return () => { if (timer !== undefined) window.clearTimeout(timer); linked.controller.abort(); linked.cleanup(); };
+  }, [anyTaskPending, refreshProgress, signal]);
 
   const filtered = useMemo(() => filterPhotos(rows, q), [rows, q]);
   const months = useMemo(() => groupByMonth(filtered, sortMode), [filtered, sortMode]);
@@ -243,7 +315,7 @@ export default function PhotoBrowse({ libraryId, libraryName, onEmpty }: Props) 
     setMainTab("smart");
   }
 
-  const showTimelineRail = mainTab === "timeline" && !loading && filtered.length > 0;
+  const showTimelineRail = mainTab === "timeline" && !rowsLoading && filtered.length > 0;
   const showPersonAll = isPersonAllDrill(drillDown);
   const showPlaceAll = isPlaceAllDrill(drillDown);
   const showShelfAll = isShelfAllDrill(drillDown);
@@ -289,6 +361,7 @@ export default function PhotoBrowse({ libraryId, libraryName, onEmpty }: Props) 
           <PictureOutlined style={{ color: "rgba(255,255,255,0.65)" }} />
           <span className={styles.libraryName}>{libraryName || t("pages.photo_browse.library_fallback")}</span>
           <span className={styles.count}>{t("pages.photo_browse.count_photos", { count: filtered.length })}</span>
+          {metaLoading && mainTab === "smart" ? <Spin size="small" /> : null}
         </Space>
         <Space wrap>
           {isAdmin && mainTab !== "timeline" ? (
@@ -359,6 +432,9 @@ export default function PhotoBrowse({ libraryId, libraryName, onEmpty }: Props) 
         </Space>
       </div>
 
+      {Object.values(metaErrors).map((error) => <Alert key={error} type="warning" showIcon message={error} />)}
+      {progressError ? <Alert type="warning" showIcon message={progressError} /> : null}
+
       {classifyProgress != null && classifyProgress.pending > 0 ? (
         <div className={styles.progressBar}>
           <TagOutlined style={{ marginRight: 8 }} />
@@ -386,7 +462,7 @@ export default function PhotoBrowse({ libraryId, libraryName, onEmpty }: Props) 
         </div>
       ) : null}
 
-      {loading && rows.length === 0 && !showShelfAll ? (
+      {rowsLoading && rows.length === 0 && !showShelfAll ? (
         <div className={styles.loadingWrap}>
           <Spin />
         </div>

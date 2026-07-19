@@ -26,6 +26,7 @@ import { fetchLibrariesWithCapabilities, type Library } from "../api/client";
 import { libraryTypeIcon } from "../lib/libraryTypeIcon";
 import { isAdminRole, useAuthStore } from "../store/auth";
 import { useT } from "../i18n";
+import { useLibraryRequestScope } from "../lib/libraryRequestScope";
 import CollapsedMainNavMenu, { flattenNavMenuItems } from "./CollapsedMainNavMenu";
 
 type MainNavProps = {
@@ -43,31 +44,31 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
   const search = loc.search;
   const role = useAuthStore((s) => s.role);
   const admin = isAdminRole(role);
+  const libraryRequests = useLibraryRequestScope();
 
   const [libs, setLibs] = useState<Library[]>([]);
   const [libsLoading, setLibsLoading] = useState(true);
   const [widevineEnabled, setWidevineEnabled] = useState(false);
 
   useEffect(() => {
-    let cancelled = false;
+    const controller = new AbortController();
     setLibsLoading(true);
-    void fetchLibrariesWithCapabilities()
+    const request = libraryRequests?.load(controller.signal) ?? fetchLibrariesWithCapabilities(controller.signal);
+    void request
       .then(({ items, drmCapabilities }) => {
-        if (!cancelled) {
+        if (!controller.signal.aborted) {
           setLibs(Array.isArray(items) ? items : []);
           setWidevineEnabled(!!drmCapabilities.widevine_enabled);
         }
       })
       .catch(() => {
-        if (!cancelled) setLibs([]);
+        if (!controller.signal.aborted) setLibs([]);
       })
       .finally(() => {
-        if (!cancelled) setLibsLoading(false);
+        if (!controller.signal.aborted) setLibsLoading(false);
       });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    return () => controller.abort();
+  }, [libraryRequests]);
 
   const selectedKeys = useMemo(() => {
     if (path === "/" || path === "") return ["home"];
