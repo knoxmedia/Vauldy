@@ -66,15 +66,8 @@ func (h *Handler) servePhotoVariant(c *gin.Context, variant string) {
 		}
 	}
 	if st, err := os.Stat(target); err != nil || st.IsDir() || st.Size() == 0 {
-		if genErr := h.ensurePhotoVariants(id, filePath.String); genErr != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": genErr.Error()})
-			return
-		}
-		paths = imagethumb.ResolvedPaths(h.App.DB, h.photoCacheDir(), id)
-		target = paths.Thumb
-		if variant == "medium" {
-			target = paths.Medium
-		}
+		c.JSON(http.StatusNotFound, gin.H{"error": "photo variant not ready"})
+		return
 	}
 	h.serveDerivedAsset(c, id, target, "image/jpeg")
 }
@@ -118,13 +111,13 @@ func (h *Handler) PhotoPreviewInfo(c *gin.Context) {
 	thumbReady := fileExists(paths.Thumb)
 	mediumReady := fileExists(paths.Medium)
 	resp := gin.H{
-		"thumb_url":   base + "/api/v1/media/" + c.Param("id") + "/photo/thumb.jpg" + qs,
-		"medium_url":  base + "/api/v1/media/" + c.Param("id") + "/photo/medium.jpg" + qs,
+		"thumb_url":    base + "/api/v1/media/" + c.Param("id") + "/photo/thumb.jpg" + qs,
+		"medium_url":   base + "/api/v1/media/" + c.Param("id") + "/photo/medium.jpg" + qs,
 		"original_url": base + "/api/v1/media/" + c.Param("id") + "/play" + qs,
-		"thumb_ready": thumbReady,
+		"thumb_ready":  thumbReady,
 		"medium_ready": mediumReady,
-		"width":       w.Int64,
-		"height":      hei.Int64,
+		"width":        w.Int64,
+		"height":       hei.Int64,
 	}
 	if photo := decodePhotoMeta(metaJSON.String); photo != nil {
 		if photo.TakenAt != "" {
@@ -166,7 +159,9 @@ func (h *Handler) ensurePhotoVariants(mediaID int64, srcPath string) error {
 	photo["medium_path"] = paths.Medium
 	root["photo"] = photo
 	b, _ := json.Marshal(root)
-	_, _ = h.App.DB.Exec(`UPDATE media SET meta_json = ? WHERE id = ?`, string(b), mediaID)
+	if _, err := h.App.DB.Exec(`UPDATE media SET meta_json = ? WHERE id = ?`, string(b), mediaID); err != nil {
+		return err
+	}
 	h.scheduleLibraryPreviewRefreshForMedia(mediaID)
 	return nil
 }
@@ -195,7 +190,7 @@ func fileExists(path string) bool {
 
 // resolvePhotoThumbSource returns a readable JPEG path for face crop / detection.
 // Encrypted Knox .enc thumbs are materialized to a temp file when needed.
-func (h *Handler) resolvePhotoThumbSource(mediaID int64, catalogPath string) (workPath string, cleanup func(), err error) {
+func (h *Handler) resolvePhotoThumbSource(mediaID int64, _ string) (workPath string, cleanup func(), err error) {
 	cleanup = func() {}
 	if h == nil || mediaID <= 0 {
 		return "", cleanup, fmt.Errorf("invalid media id")
@@ -206,13 +201,6 @@ func (h *Handler) resolvePhotoThumbSource(mediaID int64, catalogPath string) (wo
 		if enc, ok := storage.LookupEncPath(h.App.DB, mediaID, "photo_thumb", "thumb.jpg"); ok && fileExists(enc) {
 			thumb = enc
 		}
-	}
-	if thumb == "" || !fileExists(thumb) {
-		if genErr := h.ensurePhotoVariants(mediaID, catalogPath); genErr != nil {
-			return "", cleanup, genErr
-		}
-		paths = imagethumb.ResolvedPaths(h.App.DB, h.photoCacheDir(), mediaID)
-		thumb = strings.TrimSpace(paths.Thumb)
 	}
 	if thumb == "" || !fileExists(thumb) {
 		return "", cleanup, fmt.Errorf("photo thumb unavailable")

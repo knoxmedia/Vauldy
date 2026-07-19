@@ -548,6 +548,33 @@ CREATE TABLE IF NOT EXISTS photo_face_task (
 );
 CREATE INDEX IF NOT EXISTS idx_photo_face_task_status ON photo_face_task(library_id, status, updated_at);
 
+CREATE TABLE IF NOT EXISTS photo_face_thumb_repair_state (
+    name TEXT PRIMARY KEY,
+    phase TEXT NOT NULL DEFAULT 'covers',
+    last_person_id INTEGER NOT NULL DEFAULT 0,
+    last_face_id INTEGER NOT NULL DEFAULT 0,
+    completed_at TIMESTAMP,
+    next_audit_at TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS photo_face_thumb_repair_failure (
+    face_id INTEGER PRIMARY KEY,
+    person_id INTEGER,
+    attempts INTEGER NOT NULL DEFAULT 1,
+    next_retry_at TIMESTAMP NOT NULL,
+    last_error TEXT,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (face_id) REFERENCES photo_face(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_photo_face_thumb_repair_failure_due ON photo_face_thumb_repair_failure(next_retry_at, face_id);
+
+CREATE TABLE IF NOT EXISTS media_file_cleanup_task (
+    path TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+    next_retry_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, last_error TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_media_file_cleanup_due ON media_file_cleanup_task(status, next_retry_at);
+
 CREATE TABLE IF NOT EXISTS atrack_task (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     media_id INTEGER NOT NULL UNIQUE,
@@ -816,7 +843,9 @@ func OpenSQLiteContext(ctx context.Context, path string) (*sql.DB, error) {
 			UNIQUE(media_id, tag),
 			FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE
 		)`)
-	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_document_tag_tag ON document_tag(tag)`)
+	_, _ = db.Exec(`DELETE FROM document_tag WHERE id NOT IN (SELECT MIN(id) FROM document_tag GROUP BY media_id, tag COLLATE NOCASE)`)
+	_, _ = db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_document_tag_media_tag_nocase ON document_tag(media_id, tag COLLATE NOCASE)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_document_tag_tag ON document_tag(tag COLLATE NOCASE)`)
 	_, _ = db.Exec(`
 		CREATE TABLE IF NOT EXISTS scan_log (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -901,9 +930,9 @@ func OpenSQLiteContext(ctx context.Context, path string) (*sql.DB, error) {
 	// Clean up stale transcode tasks that failed due to transient issues (path not found, context canceled).
 	cleanupStaleTranscodeTasks(db)
 	recoverStalePhotoTasks(db)
-	if err := WithBusyRetry(ctx, nil, func() error { return relationshipmigration.MigrateMediaRelationships(ctx, db) }); err != nil {
+	if err := MigrateMediaSortColumns(context.Background(), db); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("media relationship migration: %w", err)
+		return nil, fmt.Errorf("media sort migration: %w", err)
 	}
 	return db, nil
 }

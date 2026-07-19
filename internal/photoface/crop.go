@@ -2,11 +2,13 @@ package photoface
 
 import (
 	"bytes"
+	"fmt"
 	"image"
-	_ "image/jpeg"
 	"image/jpeg"
+	_ "image/jpeg"
 	"math"
 	"os"
+	"path/filepath"
 )
 
 // Portrait avatar crop: wider than the detector box (hair/hat, shoulders), similar to cloud album UIs.
@@ -119,4 +121,24 @@ func CropFaceJPEG(srcPath string, bboxX, bboxY, bboxW, bboxH float64, quality in
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+func ExpectedFaceThumbnailPath(photoCache string, faceID int64) string {
+	return filepath.Join(photoCache, "faces", fmt.Sprintf("%d.jpg", faceID))
+}
+
+func WriteFaceThumbnail(srcPath, photoCache string, faceID int64, x, y, w, h float64) error {
+	data, err := CropFaceJPEG(srcPath, x, y, w, h, 88)
+	if err != nil {
+		return err
+	}
+	target := ExpectedFaceThumbnailPath(photoCache, faceID)
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return err
+	}
+	temp := target + ".tmp"
+	if err := os.WriteFile(temp, data, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(temp, target)
 }

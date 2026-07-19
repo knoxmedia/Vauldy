@@ -12,13 +12,27 @@ type personCandidate struct {
 }
 
 // AssignPerson links a detected face to an existing or new person cluster.
+type assignQueryer interface {
+	Query(string, ...any) (*sql.Rows, error)
+	QueryRow(string, ...any) *sql.Row
+	Exec(string, ...any) (sql.Result, error)
+}
+
 func AssignPerson(db *sql.DB, libraryID, faceID int64, embedding []float32, threshold float32) error {
 	if db == nil || libraryID <= 0 || faceID <= 0 || len(embedding) == 0 {
 		return fmt.Errorf("invalid assign args")
 	}
 	embedding = normalizeEmbedding(embedding)
 
-	candidates, err := loadPersonCandidates(db, libraryID)
+	return assignPersonWith(db, libraryID, faceID, embedding, threshold)
+}
+
+func assignPersonWith(q assignQueryer, libraryID, faceID int64, embedding []float32, threshold float32) error {
+	if q == nil || libraryID <= 0 || faceID <= 0 || len(embedding) == 0 {
+		return fmt.Errorf("invalid assign args")
+	}
+	embedding = normalizeEmbedding(embedding)
+	candidates, err := loadPersonCandidates(q, libraryID)
 	if err != nil {
 		return err
 	}
@@ -33,12 +47,12 @@ func AssignPerson(db *sql.DB, libraryID, faceID int64, embedding []float32, thre
 	}
 
 	if bestID > 0 && bestSim >= threshold {
-		return attachFaceToPerson(db, libraryID, faceID, bestID, embedding, bestSim)
+		return attachFaceToPersonWith(q, libraryID, faceID, bestID, embedding, bestSim)
 	}
-	return createPersonForFace(db, libraryID, faceID, embedding)
+	return createPersonForFaceWith(q, libraryID, faceID, embedding)
 }
 
-func loadPersonCandidates(db *sql.DB, libraryID int64) ([]personCandidate, error) {
+func loadPersonCandidates(db assignQueryer, libraryID int64) ([]personCandidate, error) {
 	rows, err := db.Query(`
 		SELECT id, embedding, face_count
 		FROM photo_person
@@ -61,46 +75,40 @@ func loadPersonCandidates(db *sql.DB, libraryID int64) ([]personCandidate, error
 	return out, nil
 }
 
-func attachFaceToPerson(db *sql.DB, libraryID, faceID, personID int64, embedding []float32, score float32) error {
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
+func attachFaceToPersonWith(q assignQueryer, libraryID, faceID, personID int64, embedding []float32, score float32) error {
 	var prevBlob []byte
 	var prevCount int
-	if err := tx.QueryRow(`SELECT embedding, face_count FROM photo_person WHERE id = ? AND library_id = ?`, personID, libraryID).Scan(&prevBlob, &prevCount); err != nil {
+	if err := q.QueryRow(`SELECT embedding, face_count FROM photo_person WHERE id = ? AND library_id = ?`, personID, libraryID).Scan(&prevBlob, &prevCount); err != nil {
 		return err
 	}
 	centroid := mergeCentroid(unpackEmbedding(prevBlob), prevCount, embedding)
 	newCount := prevCount + 1
 
-	if _, err := tx.Exec(`
+	if _, err := q.Exec(`
 		UPDATE photo_face SET person_id = ?, match_score = ? WHERE id = ?`,
 		personID, score, faceID); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`
+	if _, err := q.Exec(`
 		UPDATE photo_person SET embedding = ?, face_count = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 		packEmbedding(centroid), newCount, personID); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`
+	if _, err := q.Exec(`
 		UPDATE photo_person SET media_count = (
 			SELECT COUNT(DISTINCT media_id) FROM photo_face WHERE person_id = ?
 		) WHERE id = ?`, personID, personID); err != nil {
 		return err
 	}
 	var cover sql.NullInt64
-	_ = tx.QueryRow(`SELECT cover_face_id FROM photo_person WHERE id = ?`, personID).Scan(&cover)
+	_ = q.QueryRow(`SELECT cover_face_id FROM photo_person WHERE id = ?`, personID).Scan(&cover)
 	if !cover.Valid || cover.Int64 <= 0 {
-		_, _ = tx.Exec(`UPDATE photo_person SET cover_face_id = ? WHERE id = ?`, faceID, personID)
+		_, _ = q.Exec(`UPDATE photo_person SET cover_face_id = ? WHERE id = ?`, faceID, personID)
 	}
-	return tx.Commit()
+	return nil
 }
 
-func createPersonForFace(db *sql.DB, libraryID, faceID int64, embedding []float32) error {
+func createPersonForFaceWith(db assignQueryer, libraryID, faceID int64, embedding []float32) error {
 	var nextLabel int
 	_ = db.QueryRow(`SELECT COUNT(1) FROM photo_person WHERE library_id = ?`, libraryID).Scan(&nextLabel)
 	nextLabel++

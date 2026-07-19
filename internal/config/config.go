@@ -253,6 +253,10 @@ type PhotoFaceConfig struct {
 	PollIntervalSeconds int `yaml:"poll_interval_seconds"`
 	// FailedRetryMinutes waits before re-queuing failed tasks (avoids CPU spin on bad inputs).
 	FailedRetryMinutes int `yaml:"failed_retry_minutes"`
+	// ThumbnailRepairBatch bounds historical face thumbnail checks per scheduler tick.
+	ThumbnailRepairBatch int `yaml:"thumbnail_repair_batch"`
+	// ThumbnailRepairAuditHours controls periodic re-audits after a complete repair scan.
+	ThumbnailRepairAuditHours int `yaml:"thumbnail_repair_audit_hours"`
 }
 
 func (c *Config) PhotoFaceAutoOnScan() bool {
@@ -288,6 +292,13 @@ func (c *Config) PhotoFacePollIntervalSeconds() int {
 		return 10
 	}
 	return c.PhotoFace.PollIntervalSeconds
+}
+
+func (c *Config) PhotoFaceThumbnailRepairBatch() int {
+	if c == nil || c.PhotoFace.ThumbnailRepairBatch <= 0 {
+		return 32
+	}
+	return c.PhotoFace.ThumbnailRepairBatch
 }
 
 func (c *Config) PhotoFaceFailedRetryMinutes() int {

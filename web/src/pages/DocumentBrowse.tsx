@@ -2,18 +2,21 @@ import {
   AppstoreOutlined,
   DeleteOutlined,
   DownloadOutlined,
+  TagsOutlined,
   FolderOutlined,
   ReadOutlined,
   UnorderedListOutlined,
 } from "@ant-design/icons";
 import { Breadcrumb, Button, Checkbox, Empty, Input, Modal, Select, Space, Spin, Tabs, Tree, message } from "antd";
 import type { DataNode } from "antd/es/tree";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   DocumentFacet,
   DocumentItem,
   batchDownloadDocuments,
+  batchUpdateDocumentTags,
+  DocumentTagUpdateMode,
   deleteMedia,
   documentCoverSrc,
   fetchDocumentFacets,
@@ -23,11 +26,14 @@ import {
 } from "../api/client";
 import { useAuthStore } from "../store/auth";
 import { useT } from "../i18n";
+import { linkAbortSignal } from "../lib/abortSignal";
+import { applyDocumentTagUpdates } from "../lib/documentTagUpdates";
 import styles from "./DocumentBrowse.module.css";
 
 type Props = {
   libraryId: number;
   libraryName?: string;
+  signal?: AbortSignal;
 };
 
 type ViewMode = "grid" | "list";
@@ -55,8 +61,8 @@ function updateTreeData(list: DataNode[], key: React.Key, children: DataNode[]):
   });
 }
 
-async function loadFolderTreeNodes(libraryId: number, parent: string): Promise<DataNode[]> {
-  const nodes = await fetchDocumentNodes(libraryId, parent);
+async function loadFolderTreeNodes(libraryId: number, parent: string, signal?: AbortSignal): Promise<DataNode[]> {
+  const nodes = await fetchDocumentNodes(libraryId, parent, signal);
   return nodes
     .filter((n) => n.node_type === "dir")
     .map((n) => ({
@@ -74,7 +80,7 @@ function formatSize(n?: number): string {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export default function DocumentBrowse({ libraryId, libraryName }: Props) {
+export default function DocumentBrowse({ libraryId, libraryName, signal }: Props) {
   const nav = useNavigate();
   const t = useT();
   const token = useAuthStore((s) => s.token);
@@ -96,8 +102,35 @@ export default function DocumentBrowse({ libraryId, libraryName }: Props) {
   const [fullText, setFullText] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [tagModalOpen, setTagModalOpen] = useState(false);
+  const [tagMode, setTagMode] = useState<DocumentTagUpdateMode>("add");
+  const [tagInput, setTagInput] = useState("");
+  const [tagUpdating, setTagUpdating] = useState(false);
+  const mutationGeneration = useRef(0);
+  const itemsRequest = useRef<{ generation: number; controller?: AbortController }>({ generation: 0 });
+  const facetsRequest = useRef<{ generation: number; controller?: AbortController }>({ generation: 0 });
+  const mutationRequest = useRef<AbortController | undefined>(undefined);
 
-  const loadItems = useCallback(async () => {
+  useEffect(() => {
+    mutationGeneration.current += 1;
+    mutationRequest.current?.abort();
+    mutationRequest.current = undefined;
+    itemsRequest.current.controller?.abort();
+    itemsRequest.current.generation += 1;
+    facetsRequest.current.controller?.abort();
+    facetsRequest.current.generation += 1;
+    setSelected(new Set());
+    setTagModalOpen(false);
+    setTagInput("");
+    setTagUpdating(false);
+    return () => mutationRequest.current?.abort();
+  }, [libraryId, signal]);
+
+  const loadItems = useCallback(async (requestSignal = signal) => {
+    itemsRequest.current.controller?.abort();
+    const linked = linkAbortSignal(requestSignal);
+    const generation = ++itemsRequest.current.generation;
+    itemsRequest.current.controller = linked.controller;
     setLoading(true);
     try {
       const params: Record<string, string | number | boolean> = {
@@ -111,23 +144,25 @@ export default function DocumentBrowse({ libraryId, libraryName }: Props) {
       if (filter.kind === "tag" && filter.value) params.tag = filter.value;
       if (filter.kind === "year" && filter.value) params.year = filter.value;
       if (selectedFolder && sidebarTab === "tree" && !filter.kind) params.parent = selectedFolder;
-      const rows = await fetchDocuments(libraryId, params);
-      setItems(rows);
+      const rows = await fetchDocuments(libraryId, params, linked.controller.signal);
+      if (!linked.controller.signal.aborted && generation === itemsRequest.current.generation) setItems(rows);
     } catch {
-      message.error(t("pages.document_browse.load_failed"));
+      if (!linked.controller.signal.aborted && generation === itemsRequest.current.generation) message.error(t("pages.document_browse.load_failed"));
     } finally {
-      setLoading(false);
+      linked.cleanup();
+      if (generation === itemsRequest.current.generation) setLoading(false);
     }
-  }, [libraryId, q, sort, order, filter, selectedFolder, sidebarTab, fullText, t]);
+  }, [libraryId, q, sort, order, filter, selectedFolder, sidebarTab, fullText, signal, t]);
 
   useEffect(() => {
-    void loadItems();
-  }, [loadItems]);
+    void loadItems(signal);
+    return () => itemsRequest.current.controller?.abort();
+  }, [loadItems, signal]);
 
-  const loadRootTree = useCallback(async () => {
+  const loadRootTree = useCallback(async (requestSignal = signal) => {
     setTreeLoading(true);
     try {
-      const children = await loadFolderTreeNodes(libraryId, "");
+      const children = await loadFolderTreeNodes(libraryId, "", requestSignal);
       setTreeData([
         {
           key: LIBRARY_ROOT_KEY,
@@ -139,28 +174,40 @@ export default function DocumentBrowse({ libraryId, libraryName }: Props) {
       ]);
       setExpandedKeys([LIBRARY_ROOT_KEY]);
     } catch {
+      if (requestSignal?.aborted) return;
       setTreeData([]);
       message.error(t("pages.document_browse.load_tree_failed"));
     } finally {
-      setTreeLoading(false);
+      if (!requestSignal?.aborted) setTreeLoading(false);
     }
-  }, [libraryId, libraryName, t]);
+  }, [libraryId, libraryName, signal, t]);
 
   useEffect(() => {
     setSelectedFolder("");
     setFilter({});
     if (sidebarTab === "tree") {
-      void loadRootTree();
+      const linked = linkAbortSignal(signal);
+      void loadRootTree(linked.controller.signal);
+      return () => { linked.controller.abort(); linked.cleanup(); };
     }
   }, [libraryId, sidebarTab, loadRootTree]);
 
   useEffect(() => {
+    facetsRequest.current.controller?.abort();
+    const linked = linkAbortSignal(signal);
+    const generation = ++facetsRequest.current.generation;
+    facetsRequest.current.controller = linked.controller;
     if (sidebarTab === "recent") {
-      void fetchRecentDocuments(libraryId).then(setRecent).catch(() => setRecent([]));
+      void fetchRecentDocuments(libraryId, linked.controller.signal).then((rows) => {
+        if (!linked.controller.signal.aborted && generation === facetsRequest.current.generation) setRecent(rows);
+      }).catch(() => { if (!linked.controller.signal.aborted && generation === facetsRequest.current.generation) setRecent([]); });
     } else if (["author", "format", "tag", "year"].includes(sidebarTab)) {
-      void fetchDocumentFacets(libraryId, sidebarTab).then(setFacets).catch(() => setFacets([]));
+      void fetchDocumentFacets(libraryId, sidebarTab, linked.controller.signal).then((rows) => {
+        if (!linked.controller.signal.aborted && generation === facetsRequest.current.generation) setFacets(rows);
+      }).catch(() => { if (!linked.controller.signal.aborted && generation === facetsRequest.current.generation) setFacets([]); });
     }
-  }, [libraryId, sidebarTab]);
+    return () => { linked.controller.abort(); linked.cleanup(); };
+  }, [libraryId, sidebarTab, signal]);
 
   const breadcrumbParts = useMemo(() => {
     const parts = [{ label: libraryName || t("pages.document_browse.library_fallback"), path: "" }];
@@ -175,7 +222,7 @@ export default function DocumentBrowse({ libraryId, libraryName }: Props) {
   const onTreeLoadData = async (node: DataNode) => {
     if (node.key === LIBRARY_ROOT_KEY || node.children?.length) return;
     try {
-      const children = await loadFolderTreeNodes(libraryId, String(node.key));
+      const children = await loadFolderTreeNodes(libraryId, String(node.key), signal);
       setTreeData((prev) => updateTreeData(prev, node.key, children));
     } catch {
       message.error(t("pages.document_browse.load_subtree_failed"));
@@ -210,6 +257,63 @@ export default function DocumentBrowse({ libraryId, libraryName }: Props) {
       message.error(t("pages.document_browse.download_failed"));
     } finally {
       setDownloading(false);
+    }
+  };
+
+  const openBatchTags = () => {
+    if (selected.size === 0) {
+      message.warning(t("pages.document_browse.select_file_first"));
+      return;
+    }
+    if (selected.size > 200) {
+      message.error(t("pages.document_browse.batch_tags_too_many"));
+      return;
+    }
+    setTagMode("add");
+    setTagInput("");
+    setTagModalOpen(true);
+  };
+
+  const handleBatchTags = async () => {
+    const tags = tagInput.split(",").map((tag) => tag.trim()).filter(Boolean);
+    if (tags.length === 0) {
+      message.warning(t("pages.document_browse.batch_tags_enter"));
+      return;
+    }
+    const ids = [...selected];
+    const generation = mutationGeneration.current;
+    mutationRequest.current?.abort();
+    const linked = linkAbortSignal(signal);
+    mutationRequest.current = linked.controller;
+    setTagUpdating(true);
+    try {
+      const response = await batchUpdateDocumentTags(ids, tagMode, tags, linked.controller.signal);
+      if (linked.controller.signal.aborted || generation !== mutationGeneration.current) return;
+      itemsRequest.current.controller?.abort();
+      itemsRequest.current.generation += 1;
+      facetsRequest.current.controller?.abort();
+      facetsRequest.current.generation += 1;
+      const updates = new Map(response.items.map((item) => [item.media_id, item.tags]));
+      setItems((previousItems) => {
+        const next = applyDocumentTagUpdates(
+          previousItems,
+          facets,
+          updates,
+          filter.kind === "tag" ? filter.value : undefined,
+          response.facet_deltas,
+          sidebarTab === "tag",
+        );
+        if (sidebarTab === "tag") setFacets(next.facets);
+        return next.items;
+      });
+      setTagModalOpen(false);
+      message.success(t("pages.document_browse.batch_tags_updated", { count: response.updated }));
+    } catch {
+      if (!linked.controller.signal.aborted && generation === mutationGeneration.current) message.error(t("pages.document_browse.batch_tags_failed"));
+    } finally {
+      linked.cleanup();
+      if (mutationRequest.current === linked.controller) mutationRequest.current = undefined;
+      if (generation === mutationGeneration.current) setTagUpdating(false);
     }
   };
 
@@ -273,6 +377,7 @@ export default function DocumentBrowse({ libraryId, libraryName }: Props) {
             <div className={styles.cardTitle}>{doc.title || t("pages.document_browse.untitled")}</div>
             {doc.author && <div className={styles.cardMeta}>{doc.author}</div>}
             <span className={styles.formatBadge}>{doc.format || "doc"}</span>
+            {(doc.tags ?? []).length > 0 && <div className={styles.cardMeta}>{doc.tags!.join(", ")}</div>}
           </div>
         </div>
       ))}
@@ -288,7 +393,7 @@ export default function DocumentBrowse({ libraryId, libraryName }: Props) {
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontWeight: 500 }}>{doc.title}</div>
             <div style={{ fontSize: 12, color: "rgba(255,255,255,0.5)" }}>
-              {[doc.author, doc.format?.toUpperCase(), formatSize(doc.file_size)].filter(Boolean).join(" · ")}
+              {[doc.author, doc.format?.toUpperCase(), formatSize(doc.file_size)].filter(Boolean).join(" 路 ")}
             </div>
           </div>
           <Button type="link" icon={<ReadOutlined />} onClick={(e) => { e.stopPropagation(); openReader(doc.id); }}>
@@ -415,6 +520,11 @@ export default function DocumentBrowse({ libraryId, libraryName }: Props) {
             {t("pages.document_browse.batch_download", { count: selected.size })}
           </Button>
           {selected.size > 0 ? (
+            <Button icon={<TagsOutlined />} onClick={openBatchTags}>
+              {t("pages.document_browse.batch_tags", { count: selected.size })}
+            </Button>
+          ) : null}
+          {selected.size > 0 ? (
             <Button
               danger
               icon={<DeleteOutlined />}
@@ -425,6 +535,37 @@ export default function DocumentBrowse({ libraryId, libraryName }: Props) {
             </Button>
           ) : null}
         </div>
+
+        <Modal
+          open={tagModalOpen}
+          title={t("pages.document_browse.batch_tags_title", { count: selected.size })}
+          okText={t("components.media_menu.ok")}
+          cancelText={t("components.media_menu.cancel")}
+          confirmLoading={tagUpdating}
+          onCancel={() => setTagModalOpen(false)}
+          onOk={handleBatchTags}
+          destroyOnHidden
+        >
+          <Space direction="vertical" style={{ width: "100%" }}>
+            <Select
+              aria-label={t("pages.document_browse.batch_tags_mode")}
+              value={tagMode}
+              onChange={setTagMode}
+              style={{ width: "100%" }}
+              options={[
+                { value: "add", label: t("pages.document_browse.batch_tags_add") },
+                { value: "remove", label: t("pages.document_browse.batch_tags_remove") },
+                { value: "replace", label: t("pages.document_browse.batch_tags_replace") },
+              ]}
+            />
+            <Input
+              aria-label={t("pages.document_browse.batch_tags_input")}
+              placeholder={t("pages.document_browse.batch_tags_placeholder")}
+              value={tagInput}
+              onChange={(event) => setTagInput(event.target.value)}
+            />
+          </Space>
+        </Modal>
 
         {loading ? (
           <div style={{ textAlign: "center", padding: 48 }}><Spin /></div>
