@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	dbstore "knox-media/internal/store"
 )
 
 // Store atomically persists playback evidence and user progress.
@@ -303,7 +305,7 @@ func (s *Store) write(ctx context.Context, fn func(*sql.Tx, time.Time) error) er
 	if s == nil || s.DB == nil {
 		return errors.New("playcompletion: nil database")
 	}
-	return func() error {
+	return dbstore.WithBusyRetry(ctx, nil, func() error {
 		tx, err := s.DB.BeginTx(ctx, nil)
 		if err != nil {
 			return err
@@ -330,7 +332,7 @@ func (s *Store) write(ctx context.Context, fn func(*sql.Tx, time.Time) error) er
 		}
 		committed = true
 		return nil
-	}()
+	})
 }
 
 func requireUser(ctx context.Context, tx *sql.Tx, userID int64) error {

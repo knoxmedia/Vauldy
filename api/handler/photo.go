@@ -16,6 +16,7 @@ import (
 	"knox-media/internal/imagethumb"
 	"knox-media/internal/photoparse"
 	"knox-media/internal/storage"
+	"knox-media/internal/store"
 )
 
 func (h *Handler) photoCacheDir() string {
@@ -159,7 +160,7 @@ func (h *Handler) ensurePhotoVariants(mediaID int64, srcPath string) error {
 	photo["medium_path"] = paths.Medium
 	root["photo"] = photo
 	b, _ := json.Marshal(root)
-	if _, err := h.App.DB.Exec(`UPDATE media SET meta_json = ? WHERE id = ?`, string(b), mediaID); err != nil {
+	if err := store.UpdateMediaMetaAndPhotoTime(context.Background(), h.App.DB, mediaID, string(b)); err != nil {
 		return err
 	}
 	h.scheduleLibraryPreviewRefreshForMedia(mediaID)

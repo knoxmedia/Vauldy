@@ -18,12 +18,8 @@ func SyncTx(ctx context.Context, tx *sql.Tx, mediaID int64) error {
 	}
 	var oldEpisodeID, oldSeasonID, oldSeriesID, oldAlbumID int64
 	var oldArtistID sql.NullInt64
-	if tableExists(ctx, tx, "episode_media") {
-		_ = tx.QueryRowContext(ctx, `SELECT e.id,e.season_id,s.tv_id FROM episode_media em JOIN episode e ON e.id=em.episode_id JOIN season s ON s.id=e.season_id WHERE em.media_id=?`, mediaID).Scan(&oldEpisodeID, &oldSeasonID, &oldSeriesID)
-	}
-	if tableExists(ctx, tx, "music_track") {
-		_ = tx.QueryRowContext(ctx, `SELECT a.id,a.album_artist_id FROM music_track mt JOIN music_album a ON a.id=mt.album_id WHERE mt.media_id=?`, mediaID).Scan(&oldAlbumID, &oldArtistID)
-	}
+	_ = tx.QueryRowContext(ctx, `SELECT e.id,e.season_id,s.tv_id FROM episode_media em JOIN episode e ON e.id=em.episode_id JOIN season s ON s.id=e.season_id WHERE em.media_id=?`, mediaID).Scan(&oldEpisodeID, &oldSeasonID, &oldSeriesID)
+	_ = tx.QueryRowContext(ctx, `SELECT a.id,a.album_artist_id FROM music_track mt JOIN music_album a ON a.id=mt.album_id WHERE mt.media_id=?`, mediaID).Scan(&oldAlbumID, &oldArtistID)
 	switch {
 	case fileType == "audio" && musicparse.IsMusicLibraryType(libraryType):
 		if _, err := tx.ExecContext(ctx, `DELETE FROM episode_media WHERE media_id=?`, mediaID); err != nil {
@@ -33,10 +29,8 @@ func SyncTx(ctx context.Context, tx *sql.Tx, mediaID int64) error {
 			return err
 		}
 	case fileType == "video" && tvparse.IsTVLibraryType(libraryType):
-		if tableExists(ctx, tx, "music_track") {
-			if _, err := tx.ExecContext(ctx, `DELETE FROM music_track WHERE media_id=?`, mediaID); err != nil {
-				return err
-			}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM music_track WHERE media_id=?`, mediaID); err != nil {
+			return err
 		}
 		info, ok := tvparse.ParseEpisodeFromMedia(path, meta)
 		if ok && strings.TrimSpace(info.SeriesTitleNorm) != "" {
@@ -79,9 +73,4 @@ func prune(ctx context.Context, tx *sql.Tx, episodeID, seasonID, seriesID, album
 		}
 	}
 	return nil
-}
-
-func tableExists(ctx context.Context, tx *sql.Tx, name string) bool {
-	var n int
-	return tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, name).Scan(&n) == nil && n > 0
 }
