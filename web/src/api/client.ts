@@ -1930,32 +1930,18 @@ export async function retryTranscodeTask(id: number) {
 }
 
 export type AdminOverview = {
-  monitor: {
-    cpu_percent: number;
-    memory_percent: number;
-    disk_percent: number;
-    transcode_task_count: number;
-    media_total: number;
-  };
-  system: {
-    cpu_count: number;
-    memory_total: number;
-    os: string;
-    database: string;
-    software_version: string;
-  };
-  activities: Array<{
-    id: number;
-    username: string;
-    action: string;
-    media_id: number;
-    message: string;
-    created_at: string;
-  }>;
+  monitor: { cpu_percent: number; memory_percent: number; disk_percent: number; transcode_task_count: number; media_total: number };
+  system: { cpu_count: number; memory_total: number; os: string; database: string; software_version: string };
+  activities: Array<{ id: number; username: string; action: string; media_id: number; message: string; created_at: string }>;
+  post_ingest_queue: { by_status: Record<string, number>; by_type: Record<string, Record<string, number>>; oldest_waiting_seconds: number; expired_lease_count: number };
+  running_post_ingest_tasks: Array<{ id: number; media_id: number; task_type: string; type: string; scan_task_id: number | null; attempts: number; attempt: number; max_attempts: number; run_seconds: number; started_at: string; lease_owner: string; lease_until: string; lease_expires: string }>;
+  scan_leases: Array<{ library_id: number; scan_task_id: number; owner_id: string; lease_until: string; expired: boolean }>;
+  resource_budget: { global_limit: number; global_used: number; poster_limit: number; poster_used: number; preview_limit: number; preview_used: number };
+  sqlite_metrics: { scope: string; persistent: false; busy_retries: number; busy_exhausted: number; progress_batches: number; log_batches: number; log_failures: number; dropped_logs: number };
 };
 
-export async function fetchAdminOverview() {
-  const { data } = await api.get<AdminOverview>("/api/v1/admin/overview");
+export async function fetchAdminOverview(signal?: AbortSignal) {
+  const { data } = await api.get<AdminOverview>("/api/v1/admin/overview", { signal, timeout: 3000 });
   return data;
 }
 

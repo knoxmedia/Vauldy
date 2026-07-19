@@ -1,32 +1,18 @@
 package api
 
 import (
-	"context"
 	"net/http"
-	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"knox-media/api/handler"
 	"knox-media/api/middleware"
-	"knox-media/cmd/scheduler"
 	"knox-media/internal/app"
-	"knox-media/internal/atrack"
-	"knox-media/internal/metadatalib"
 	"knox-media/internal/config"
-	"knox-media/internal/doccover"
-	"knox-media/internal/jit/session"
-	"knox-media/internal/keyframe"
-	"knox-media/internal/lyrictask"
-	"knox-media/internal/photoclass"
-	"knox-media/internal/preview"
-	"knox-media/internal/subtitle"
-	"knox-media/internal/storage"
-	"knox-media/internal/transcode"
-	"knox-media/internal/upload"
+	"knox-media/internal/metadatalib"
 )
 
-func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worker, packageWorker *transcode.PackageWorker, previewWorker *preview.Worker, sub *subtitle.Service, up *upload.Service, instant *scheduler.Scheduler, sm *session.Manager, atw *atrack.Worker, kfw *keyframe.Worker, lw *lyrictask.Worker, pcw *photoclass.Worker, dcw *doccover.Worker) *gin.Engine {
+func NewEngine(cfg *config.Config, application *app.App, deps handler.Dependencies) *gin.Engine {
 	if cfg.Server.Mode == "release" {
 		gin.SetMode(gin.ReleaseMode)
 	}
@@ -39,31 +25,24 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 	mountStaticRoutes(r, cfg.Data.Static, resolvePowerPlayerStatic(webBundle))
 	r.Static(metadatalib.PublicURLPrefix, cfg.Data.MetadataLibrary)
 
-	keyVault, assetEnc := storage.NewAssetEncryptorFromConfig(cfg, application.DB)
-	derivedStore := storage.NewDerivedAssetStoreFromConfig(cfg, application.DB, keyVault)
-	h := handler.New(application, worker, packageWorker, previewWorker, sub, up, instant, sm, atw, kfw, lw, pcw, dcw, keyVault, assetEnc, derivedStore)
-	if dcw != nil {
-		dcw.SetOnCoverReady(h.ScheduleLibraryPreviewRefreshForMedia)
+	if deps.ServerContext == nil || deps.Background == nil {
+		panic("api: lifecycle dependencies are required")
 	}
-	go h.StartScheduleLoop(context.Background())
-	go h.StartScrapeTaskLoop(context.Background())
-	go h.StartSubtitleTaskLoop(context.Background())
-	go h.StartKeyframeTaskLoop(context.Background())
-	go h.StartAtrackTaskLoop(context.Background())
-	go h.StartPreviewTaskLoop(context.Background())
-	go h.StartTranscodeTaskLoop(context.Background())
-	go h.StartLyricTaskLoop(context.Background())
-	go h.StartPhotoClassifyLoop(context.Background())
-	go h.StartPhotoLocationLoop(context.Background())
-	go h.StartPhotoFaceLoop(context.Background())
-	if dcw != nil {
-		go dcw.Start(context.Background())
-		go func() {
-			// Allow worker loop to start before backfill storm.
-			time.Sleep(500 * time.Millisecond)
-			dcw.BackfillAllLibraries()
-		}()
+	h := handler.New(application, deps)
+	if deps.DocCoverWorker != nil {
+		deps.DocCoverWorker.SetOnCoverReady(h.ScheduleLibraryPreviewRefreshForMedia)
 	}
+	deps.Background.Go(deps.ServerContext, h.StartScheduleLoop)
+	deps.Background.Go(deps.ServerContext, h.StartScrapeTaskLoop)
+	deps.Background.Go(deps.ServerContext, h.StartSubtitleTaskLoop)
+	deps.Background.Go(deps.ServerContext, h.StartKeyframeTaskLoop)
+	deps.Background.Go(deps.ServerContext, h.StartAtrackTaskLoop)
+	deps.Background.Go(deps.ServerContext, h.StartPreviewTaskLoop)
+	deps.Background.Go(deps.ServerContext, h.StartTranscodeTaskLoop)
+	deps.Background.Go(deps.ServerContext, h.StartLyricTaskLoop)
+	deps.Background.Go(deps.ServerContext, h.StartPhotoClassifyLoop)
+	deps.Background.Go(deps.ServerContext, h.StartPhotoLocationLoop)
+	deps.Background.Go(deps.ServerContext, h.StartPhotoFaceLoop)
 
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "knox-media"})
@@ -201,11 +180,11 @@ func NewEngine(cfg *config.Config, application *app.App, worker *transcode.Worke
 			play.GET("/drm/hls/aes128/key", h.HLSAES128Key)
 			play.GET("/drm/fairplay/cert", h.FairPlayCert)
 			play.POST("/drm/fairplay/license", h.FairPlayLicense)
-			if instant != nil {
-				instant.RegisterRoutes(play)
+			if deps.Instant != nil {
+				deps.Instant.RegisterRoutes(play)
 			}
 			// New Redis-free JIT session routes.
-			if sm != nil {
+			if deps.SessionManager != nil {
 				play.GET("/jit/session/:sessionID/*asset", h.ServeJITAsset)
 				play.POST("/jit/session/:sessionID/pause", h.PauseJITSession)
 				play.POST("/jit/session/:sessionID/resume", h.ResumeJITSession)

@@ -14,11 +14,11 @@ import (
 
 	kcrypto "knox-media/internal/crypto"
 	"knox-media/internal/docparse"
+	"knox-media/internal/keystore"
 	"knox-media/internal/musicparse"
 	"knox-media/internal/musicstore"
-	"knox-media/internal/photoparse"
 	"knox-media/internal/photogeocode"
-	"knox-media/internal/keystore"
+	"knox-media/internal/photoparse"
 	"knox-media/internal/scraper"
 	"knox-media/internal/storage"
 	"knox-media/internal/tvparse"
@@ -50,6 +50,22 @@ func (s *Scanner) ScanLibraryFolders(libraryID int64, roots []string) (added int
 }
 
 func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID int64, roots []string) (added int, err error) {
+	var callback func(context.Context, int64, string, string) error
+	if s.OnMediaAdded != nil {
+		callback = func(_ context.Context, mediaID int64, title, fileType string) error {
+			s.OnMediaAdded(mediaID, title, fileType)
+			return nil
+		}
+	}
+	return s.ScanLibraryFoldersWithContextAndCallbacks(ctx, libraryID, roots, ScanCallbacks{OnFile: s.OnFile, OnMediaAdded: callback})
+}
+
+type ScanCallbacks struct {
+	OnFile       func(string, error)
+	OnMediaAdded func(context.Context, int64, string, string) error
+}
+
+func (s *Scanner) ScanLibraryFoldersWithContextAndCallbacks(ctx context.Context, libraryID int64, roots []string, callbacks ScanCallbacks) (added int, err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}

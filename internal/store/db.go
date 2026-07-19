@@ -204,6 +204,7 @@ CREATE TABLE IF NOT EXISTS scan_task (
     processed_count INTEGER DEFAULT 0,
     total_count INTEGER DEFAULT 0,
     added_count INTEGER DEFAULT 0,
+    failed_count INTEGER DEFAULT 0,
     error_message TEXT,
     cancelled INTEGER DEFAULT 0,
     started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -212,6 +213,42 @@ CREATE TABLE IF NOT EXISTS scan_task (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (library_id) REFERENCES library(id)
 );
+
+CREATE TABLE IF NOT EXISTS scan_lease (
+    library_id INTEGER PRIMARY KEY,
+    scan_task_id INTEGER NOT NULL,
+    owner_id TEXT NOT NULL,
+    lease_until TIMESTAMP NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (library_id) REFERENCES library(id) ON DELETE CASCADE,
+    FOREIGN KEY (scan_task_id) REFERENCES scan_task(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_scan_lease_until ON scan_lease(lease_until);
+CREATE TABLE IF NOT EXISTS post_ingest_task (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    media_id INTEGER NOT NULL,
+    scan_task_id INTEGER,
+    task_type TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'waiting',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 3,
+    available_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    lease_owner TEXT,
+    lease_until TIMESTAMP,
+    last_error TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    started_at TIMESTAMP,
+    finished_at TIMESTAMP,
+    FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE,
+    FOREIGN KEY (scan_task_id) REFERENCES scan_task(id) ON DELETE SET NULL,
+    UNIQUE(media_id, task_type),
+    CHECK (task_type IN ('poster','preview','keyframe','subtitle','atrack')),
+    CHECK (status IN ('waiting','running','done','failed','cancelled'))
+);
+CREATE INDEX IF NOT EXISTS idx_post_ingest_claim ON post_ingest_task(status, available_at, lease_until, created_at);
+CREATE INDEX IF NOT EXISTS idx_post_ingest_scan ON post_ingest_task(scan_task_id, status);
 
 CREATE TABLE IF NOT EXISTS user (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -663,6 +700,7 @@ func OpenSQLite(path string) (*sql.DB, error) {
 	_, _ = db.Exec(`ALTER TABLE play_progress ADD COLUMN completed INTEGER DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE play_progress ADD COLUMN play_count INTEGER DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE scan_task ADD COLUMN total_count INTEGER DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE scan_task ADD COLUMN failed_count INTEGER DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE user ADD COLUMN can_manage INTEGER DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE user ADD COLUMN can_play INTEGER DEFAULT 1`)
 	_, _ = db.Exec(`ALTER TABLE user ADD COLUMN can_download INTEGER DEFAULT 0`)
