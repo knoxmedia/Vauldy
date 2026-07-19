@@ -239,14 +239,14 @@ func (h *Handler) executeScheduledTask(taskType string, payload map[string]any) 
 		}
 		return fmt.Sprintf("已启动扫描任务 #%d", taskID), nil
 	case "scrape_run":
-		if !h.isScrapeEnabled() {
+		if !h.isScrapeEnabled(context.Background()) {
 			return "刮削已禁用，跳过执行", nil
 		}
 		limit := anyToInt(payload["limit"])
 		if limit <= 0 {
 			limit = scrapeWorkerBatchMax
 		}
-		done, failed := h.runScrapeTasksWithLimit(nil, limit)
+		done, failed := h.runScrapeTasksWithLimit(context.Background(), nil, limit)
 		return fmt.Sprintf("刮削执行完成：成功 %d，失败 %d", done, failed), nil
 	case "transcode_cleanup_failed_before":
 		days := anyToInt(payload["days"])

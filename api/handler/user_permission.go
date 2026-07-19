@@ -15,21 +15,21 @@ import (
 )
 
 type userPermissionProfile struct {
-	UserID             int64
-	Role               string
-	CanManage          bool
-	CanPlay            bool
-	CanDownload        bool
-	CanAccessFeatures  bool
-	LibraryScope       string
-	AllowedLibraryIDs  map[int64]struct{}
+	UserID                int64
+	Role                  string
+	CanManage             bool
+	CanPlay               bool
+	CanDownload           bool
+	CanAccessFeatures     bool
+	LibraryScope          string
+	AllowedLibraryIDs     map[int64]struct{}
 	AllowedLibraryFolders map[int64][]string
-	ParentalEnabled    bool
-	ParentalMaxRating  string
-	ParentalPinHash    string
-	AllowedTimeStart   string
-	AllowedTimeEnd     string
-	ParentalPlans      []parentalAccessPlan
+	ParentalEnabled       bool
+	ParentalMaxRating     string
+	ParentalPinHash       string
+	AllowedTimeStart      string
+	AllowedTimeEnd        string
+	ParentalPlans         []parentalAccessPlan
 }
 
 type parentalAccessPlan struct {
@@ -94,6 +94,34 @@ func (h *Handler) loadUserPermissionProfile(userID int64) (userPermissionProfile
 		}
 	}
 	return p, nil
+}
+
+func (h *Handler) requireSpecializedAggregateAccess(c *gin.Context, libraryID int64) bool {
+	if h == nil || h.App == nil || libraryID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid library"})
+		return false
+	}
+	uid := middleware.UserID(c)
+	if uid <= 0 {
+		return true
+	}
+	profile, err := h.loadUserPermissionProfile(uid)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return false
+	}
+	if !strings.EqualFold(profile.LibraryScope, "selected") {
+		return true
+	}
+	if _, ok := profile.AllowedLibraryIDs[libraryID]; !ok {
+		c.JSON(http.StatusForbidden, gin.H{"error": "library access denied"})
+		return false
+	}
+	if len(profile.AllowedLibraryFolders[libraryID]) > 0 {
+		c.JSON(http.StatusForbidden, gin.H{"error": "folder-scoped media aggregate unavailable"})
+		return false
+	}
+	return true
 }
 
 func (h *Handler) requireMediaAccess(c *gin.Context, mediaID int64, needPlay bool) (int64, bool) {
@@ -373,4 +401,3 @@ func isRatingAllowed(maxRating, mediaRating string) bool {
 	}
 	return cur <= max
 }
-

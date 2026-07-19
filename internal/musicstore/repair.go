@@ -1,6 +1,7 @@
 package musicstore
 
 import (
+	"context"
 	"database/sql"
 	"strings"
 
@@ -9,9 +10,9 @@ import (
 )
 
 // RefreshAlbumEncoding re-parses track metadata and updates garbled album/track/media titles.
-func RefreshAlbumEncoding(db *sql.DB, albumID int64) {
+func RefreshAlbumEncoding(db *sql.DB, albumID int64) error {
 	if db == nil || albumID <= 0 {
-		return
+		return nil
 	}
 	rows, err := db.Query(`
 		SELECT m.id, COALESCE(m.file_path,''), COALESCE(m.meta_json,'')
@@ -20,7 +21,7 @@ func RefreshAlbumEncoding(db *sql.DB, albumID int64) {
 		WHERE mt.album_id = ?
 	`, albumID)
 	if err != nil {
-		return
+		return nil
 	}
 	defer rows.Close()
 	var firstMeta *musicparse.TrackMeta
@@ -40,15 +41,17 @@ func RefreshAlbumEncoding(db *sql.DB, albumID int64) {
 			fixedTitle = meta.Title
 		}
 		_, _ = db.Exec(`UPDATE media SET title = ? WHERE id = ?`, fixedTitle, mediaID)
-		_, _ = db.Exec(`UPDATE media SET meta_json = ? WHERE id = ?`, MergeMusicMetaJSON(metaJSON, meta), mediaID)
-		_ = linkTrackMedia(db, albumID, mediaID, meta)
+		if _, err := db.ExecContext(context.Background(), `UPDATE media SET meta_json=? WHERE id=?`, MergeMusicMetaJSON(metaJSON, meta), mediaID); err != nil {
+			return err
+		}
+		_ = linkTrackMedia(context.Background(), db, albumID, mediaID, meta)
 	}
 	if firstMeta == nil {
-		return
+		return nil
 	}
 	albumTitle := textencoding.FixMetadataString(firstMeta.Album)
 	if albumTitle == "" || albumTitle == musicparse.UnknownAlbum {
-		return
+		return nil
 	}
 	artistName := textencoding.FixMetadataString(firstMeta.AlbumArtist)
 	if artistName == "" {
@@ -56,11 +59,11 @@ func RefreshAlbumEncoding(db *sql.DB, albumID int64) {
 	}
 	var libID int64
 	if db.QueryRow(`SELECT library_id FROM music_album WHERE id = ?`, albumID).Scan(&libID) != nil || libID <= 0 {
-		return
+		return nil
 	}
-	artistID, err := findOrCreateArtist(db, libID, artistName)
+	artistID, err := findOrCreateArtist(context.Background(), db, libID, artistName)
 	if err != nil || artistID <= 0 {
-		return
+		return nil
 	}
 	_, _ = db.Exec(`
 		UPDATE music_album
@@ -73,4 +76,5 @@ func RefreshAlbumEncoding(db *sql.DB, albumID int64) {
 	if firstMeta.Year > 0 {
 		_, _ = db.Exec(`UPDATE music_album SET year = COALESCE(NULLIF(year, 0), ?) WHERE id = ?`, firstMeta.Year, albumID)
 	}
+	return nil
 }
