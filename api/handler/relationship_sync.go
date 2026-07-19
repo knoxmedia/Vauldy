@@ -2,7 +2,6 @@ package handler
 
 import (
 	"context"
-	"database/sql"
 	"knox-media/internal/relationshipsync"
 	"knox-media/internal/store"
 )
@@ -22,7 +21,4 @@ func (h *Handler) syncMediaRelationship(ctx context.Context, mediaID int64) erro
 		}
 		return tx.Commit()
 	})
-}
-func pruneRelationshipShells(ctx context.Context, tx *sql.Tx, episodeID, albumID int64) error {
-	return nil
 }
