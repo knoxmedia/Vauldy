@@ -103,6 +103,3 @@ export function flattenHomeRecent(map: Map<string, MediaItem[]>): MediaItem[] {
   for (const arr of map.values()) for (const item of arr) if (!seen.has(item.id)) { seen.add(item.id); items.push(item); }
   return items;
 }
-
-
-\n

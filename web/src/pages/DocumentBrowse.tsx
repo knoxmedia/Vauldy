@@ -576,5 +576,3 @@ export default function DocumentBrowse({ libraryId, libraryName, signal }: Props
     </div>
   );
 }
-
-\n

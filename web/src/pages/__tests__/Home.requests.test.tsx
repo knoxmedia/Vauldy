@@ -164,11 +164,3 @@ describe("HomePage request effect", () => {
     await waitFor(() => expect(mocks.fetchLibraries).toHaveBeenCalledTimes(2));
     expect(firstSignal.aborted).toBe(true);
   });});
-
-
-
-
-
-
-
-\n

@@ -142,5 +142,3 @@ describe("playback evidence API", () => {
   });
 
 });
-
-\n

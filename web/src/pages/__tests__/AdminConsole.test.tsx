@@ -353,5 +353,3 @@ describe("AdminConsolePage", () => {
     expect(screen.getByText("pages.admin_console.polling_mode")).toBeInTheDocument();
   });
 });
-
-\n

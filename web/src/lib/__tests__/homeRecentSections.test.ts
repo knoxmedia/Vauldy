@@ -1,4 +1,4 @@
-﻿import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Library, MediaItem } from "../../api/client";
 import { homeRecentProjectionSignature, loadHomeRecentBySection, stableHomeRecentMap, type HomeRecentSection } from "../homeRecentSections";
 
@@ -125,11 +125,3 @@ describe("stableHomeRecentMap", () => {
     const right = media(1, { title: "a", original_title: "b|c=d", photo_tags: ["x", "y|z"] });
     expect(homeRecentProjectionSignature(left)).not.toBe(homeRecentProjectionSignature(right));
   });});
-
-
-
-
-
-
-
-\n
