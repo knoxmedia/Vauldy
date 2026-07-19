@@ -3,7 +3,9 @@ package subtitle
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"knox-media/internal/processmetrics"
 	"log"
 	"os"
 	"os/exec"
@@ -11,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"knox-media/internal/keystore"
 	"knox-media/internal/scraper"
@@ -46,8 +49,9 @@ type Service struct {
 	// ai_provider_config is enabled. Mirrors config.SubtitleProcessingConfig.AIProofread.
 	AIProofread bool
 
-	cfgMu      sync.RWMutex
-	mediaLocks sync.Map // mediaID -> *sync.Mutex
+	cfgMu            sync.RWMutex
+	mediaLocks       sync.Map // mediaID -> *sync.Mutex
+	processMediaHook func(context.Context, int64) error
 }
 
 func (s *Service) lockMedia(mediaID int64) func() {
@@ -126,16 +130,16 @@ func NewService(db *sql.DB, vault *keystore.Vault, derived *storage.DerivedAsset
 		ffprobePath = "ffprobe"
 	}
 	return &Service{
-		DB:           db,
-		Vault:        vault,
-		Derived:      derived,
-		MediaRoot:    strings.TrimSpace(mediaRoot),
-		FFmpegPath:   ffmpegPath,
-		FFprobePath:  ffprobePath,
-		SubtitleDir:  subtitleDir,
-		ASR:          asr,
-		OCR:          ocr,
-		AIProofread:  true,
+		DB:          db,
+		Vault:       vault,
+		Derived:     derived,
+		MediaRoot:   strings.TrimSpace(mediaRoot),
+		FFmpegPath:  ffmpegPath,
+		FFprobePath: ffprobePath,
+		SubtitleDir: subtitleDir,
+		ASR:         asr,
+		OCR:         ocr,
+		AIProofread: true,
 	}
 }
 
@@ -204,71 +208,97 @@ WHERE m.library_id = ? AND m.file_type = 'video' AND COALESCE(m.status, 'active'
 }
 
 // ProcessMedia scans sidecars, embedded tracks, and optional ASR for one media row.
-func (s *Service) ProcessMedia(ctx context.Context, mediaID int64) (err error) {
+func (s *Service) ProcessMedia(ctx context.Context, mediaID int64) error {
 	var status string
-	if qerr := s.DB.QueryRow(`SELECT status FROM subtitle_task WHERE media_id = ?`, mediaID).Scan(&status); qerr == nil && status == "failed" {
-		return nil
+	var savedMessage sql.NullString
+	qerr := s.DB.QueryRowContext(ctx, `SELECT status,message FROM subtitle_task WHERE media_id=?`, mediaID).Scan(&status, &savedMessage)
+	if qerr != nil && !errors.Is(qerr, sql.ErrNoRows) {
+		return qerr
+	}
+	if qerr == nil && status == "failed" {
+		return fmt.Errorf("subtitle task failed: %s", savedMessage.String)
 	}
 
 	unlock := s.lockMedia(mediaID)
 	defer unlock()
-
-	s.upsertTaskRunning(mediaID)
-	defer func() {
-		if err != nil {
-			s.upsertTaskFailed(mediaID, err.Error())
-			return
+	if err := validateCommitGuard(ctx); err != nil {
+		return err
+	}
+	if err := s.upsertTaskRunning(ctx, mediaID); err != nil {
+		return err
+	}
+	process := s.processMediaContent
+	if s.processMediaHook != nil {
+		process = s.processMediaHook
+	}
+	processErr := process(ctx, mediaID)
+	if processErr != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if guardErr := validateCommitGuard(cleanupCtx); guardErr != nil {
+			return errors.Join(processErr, guardErr)
 		}
-		s.upsertTaskDone(mediaID)
-	}()
+		if errors.Is(processErr, context.Canceled) || errors.Is(processErr, context.DeadlineExceeded) {
+			if stateErr := s.setTaskWaiting(cleanupCtx, mediaID, processErr.Error()); stateErr != nil {
+				return errors.Join(processErr, stateErr)
+			}
+			return processErr
+		}
+		if stateErr := s.upsertTaskFailed(cleanupCtx, mediaID, processErr.Error()); stateErr != nil {
+			return errors.Join(processErr, stateErr)
+		}
+		return processErr
+	}
+	return s.setTaskDoneGuarded(ctx, mediaID)
+}
 
+func (s *Service) processMediaContent(ctx context.Context, mediaID int64) error {
 	var videoPath string
-	if err = s.DB.QueryRow(`SELECT file_path FROM media WHERE id = ? AND file_type = 'video'`, mediaID).Scan(&videoPath); err != nil {
+	if err := s.DB.QueryRowContext(ctx, `SELECT file_path FROM media WHERE id=? AND file_type='video'`, mediaID).Scan(&videoPath); err != nil {
 		return err
 	}
 	videoPath = strings.TrimSpace(videoPath)
 	if videoPath == "" {
 		return fmt.Errorf("empty path")
 	}
-	if fi, statErr := os.Stat(videoPath); statErr != nil || fi.IsDir() {
+	if fi, err := os.Stat(videoPath); err != nil || fi.IsDir() {
 		return fmt.Errorf("video missing")
 	}
-
 	outDir := filepath.Join(s.SubtitleDir, strconv.FormatInt(mediaID, 10))
 	if root := s.toolWorkDir(); root != "" && !filepath.IsAbs(outDir) {
 		outDir = filepath.Clean(filepath.Join(root, outDir))
 	}
-	if err = os.MkdirAll(outDir, 0o755); err != nil {
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return err
 	}
-
-	if err = s.syncEmbedded(ctx, mediaID, videoPath, outDir); err != nil {
+	if err := s.syncEmbedded(ctx, mediaID, videoPath, outDir); err != nil {
 		return err
 	}
-	if err = s.syncSidecars(ctx, mediaID, videoPath, outDir); err != nil {
+	if err := s.syncSidecars(ctx, mediaID, videoPath, outDir); err != nil {
 		return err
 	}
-
-	hasAny, errSub := s.hasAnySubtitle(mediaID)
-	if errSub != nil {
-		return errSub
+	hasAny, err := s.hasAnySubtitleContext(ctx, mediaID)
+	if err != nil {
+		return err
 	}
 	if !hasAny && s.shouldRunASR() {
-		errASR := s.runASR(ctx, mediaID, videoPath, outDir)
-		if errASR != nil {
-			log.Printf("subtitle asr media=%d err=%v", mediaID, errASR)
+		asrErr := s.runASR(ctx, mediaID, videoPath, outDir)
+		hasAny, err = s.hasAnySubtitleContext(ctx, mediaID)
+		if err != nil {
+			return err
 		}
-		hasAny, errSub = s.hasAnySubtitle(mediaID)
-		if errSub != nil {
-			return errSub
-		}
-		if !hasAny && errASR != nil {
-			return fmt.Errorf("asr failed: %w", errASR)
+		if !hasAny && asrErr != nil {
+			return fmt.Errorf("asr failed: %w", asrErr)
 		}
 	}
 	return nil
 }
 
+func (s *Service) hasAnySubtitleContext(ctx context.Context, mediaID int64) (bool, error) {
+	var n int
+	err := s.DB.QueryRowContext(ctx, `SELECT COUNT(1) FROM media_subtitle WHERE media_id=? AND status='ready'`, mediaID).Scan(&n)
+	return n > 0, err
+}
 func (s *Service) hasAnySubtitle(mediaID int64) (bool, error) {
 	var n int
 	if err := s.DB.QueryRow(`SELECT COUNT(1) FROM media_subtitle WHERE media_id = ? AND status = 'ready'`, mediaID).Scan(&n); err != nil {
@@ -303,24 +333,36 @@ func (s *Service) syncEmbedded(ctx context.Context, mediaID int64, videoPath, ou
 			}
 			label := strings.TrimSpace(st.Title)
 			outPath := filepath.Join(outDir, fmt.Sprintf("embedded-ocr-%d.vtt", st.Index))
-			if err := s.upsertPlaceholder(mediaID, dedupe, "embedded_ocr", st.Index, codec, lang, langSrc, label, "", outPath); err != nil {
+			if err := s.upsertPlaceholder(ctx, mediaID, dedupe, "embedded_ocr", st.Index, codec, lang, langSrc, label, "", outPath); err != nil {
 				return err
 			}
 			if !s.OCR.Enabled || strings.TrimSpace(s.OCR.ScriptPath) == "" {
 				msg := "graphic/bitmap subtitle (PGS/VobSub); enable subtitle.graphical_ocr and set script_path"
-				_, _ = s.DB.Exec(`UPDATE media_subtitle SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`,
-					msg, mediaID, dedupe)
+				if guardErr := validateCommitGuard(ctx); guardErr != nil {
+					return guardErr
+				}
+				if _, dbErr := s.DB.ExecContext(ctx, `UPDATE media_subtitle SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`,
+					msg, mediaID, dedupe); dbErr != nil {
+					return dbErr
+				}
 				continue
 			}
 			if err := s.RunBitmapSubtitleOCR(ctx, mediaID, videoPath, st.Index, outPath); err != nil {
-				_, _ = s.DB.Exec(`UPDATE media_subtitle SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`,
-					trimErr(err), mediaID, dedupe)
+				if guardErr := validateCommitGuard(ctx); guardErr != nil {
+					return guardErr
+				}
+				if _, dbErr := s.DB.ExecContext(ctx, `UPDATE media_subtitle SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`,
+					trimErr(err), mediaID, dedupe); dbErr != nil {
+					return dbErr
+				}
 				continue
 			}
 			if perr := s.ProofreadFileInPlace(ctx, outPath, lang); perr != nil {
 				log.Printf("subtitle ai-proofread media=%d dedupe=%s err=%v", mediaID, dedupe, perr)
 			}
-			_ = s.markSubtitleReady(ctx, mediaID, dedupe, filepath.Base(outPath), outPath)
+			if err := s.markSubtitleReady(ctx, mediaID, dedupe, filepath.Base(outPath), outPath); err != nil {
+				return err
+			}
 			continue
 		}
 
@@ -333,25 +375,34 @@ func (s *Service) syncEmbedded(ctx context.Context, mediaID int64, videoPath, ou
 		}
 		label := strings.TrimSpace(st.Title)
 		outPath := filepath.Join(outDir, fmt.Sprintf("embedded-%d.vtt", st.Index))
-		if err := s.upsertPlaceholder(mediaID, dedupe, "embedded", st.Index, codec, lang, langSrc, label, "", outPath); err != nil {
+		if err := s.upsertPlaceholder(ctx, mediaID, dedupe, "embedded", st.Index, codec, lang, langSrc, label, "", outPath); err != nil {
 			return err
 		}
 		if err := s.extractEmbedded(ctx, mediaID, videoPath, st.Index, outPath); err != nil {
-			_, _ = s.DB.Exec(`UPDATE media_subtitle SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`,
-				trimErr(err), mediaID, dedupe)
+			if guardErr := validateCommitGuard(ctx); guardErr != nil {
+				return guardErr
+			}
+			if _, dbErr := s.DB.ExecContext(ctx, `UPDATE media_subtitle SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`, trimErr(err), mediaID, dedupe); dbErr != nil {
+				return dbErr
+			}
 			continue
 		}
-		_ = s.markSubtitleReady(ctx, mediaID, dedupe, filepath.Base(outPath), outPath)
+		if err := s.markSubtitleReady(ctx, mediaID, dedupe, filepath.Base(outPath), outPath); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-func (s *Service) upsertPlaceholder(mediaID int64, dedupe, kind string, streamIdx int, codec, lang, langSrc, label, srcPath, vttPath string) error {
+func (s *Service) upsertPlaceholder(ctx context.Context, mediaID int64, dedupe, kind string, streamIdx int, codec, lang, langSrc, label, srcPath, vttPath string) error {
+	if err := validateCommitGuard(ctx); err != nil {
+		return err
+	}
 	var si any
 	if streamIdx >= 0 {
 		si = streamIdx
 	}
-	_, err := s.DB.Exec(`
+	_, err := s.DB.ExecContext(ctx, `
 		INSERT INTO media_subtitle (media_id, dedupe_key, source_kind, stream_index, codec_name, lang, lang_source, label, source_path, vtt_path, status, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', CURRENT_TIMESTAMP)
 		ON CONFLICT(media_id, dedupe_key) DO UPDATE SET
@@ -422,17 +473,24 @@ func (s *Service) syncSidecars(ctx context.Context, mediaID int64, videoPath, ou
 			}
 			outName := fmt.Sprintf("sidecar-ocr-%s.vtt", safeFileToken(strings.TrimSuffix(name, ext)))
 			outPath := filepath.Join(outDir, outName)
-			if err := s.upsertPlaceholder(mediaID, dedupe, "external_ocr", -1, "vobsub", lang, langSrc, "", full, outPath); err != nil {
+			if err := s.upsertPlaceholder(ctx, mediaID, dedupe, "external_ocr", -1, "vobsub", lang, langSrc, "", full, outPath); err != nil {
 				return err
 			}
 			if err := s.RunVobSubIdxOCR(ctx, full, outPath); err != nil {
-				_, _ = s.DB.Exec(`UPDATE media_subtitle SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`, trimErr(err), mediaID, dedupe)
+				if guardErr := validateCommitGuard(ctx); guardErr != nil {
+					return guardErr
+				}
+				if _, dbErr := s.DB.ExecContext(ctx, `UPDATE media_subtitle SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`, trimErr(err), mediaID, dedupe); dbErr != nil {
+					return dbErr
+				}
 				continue
 			}
 			if perr := s.ProofreadFileInPlace(ctx, outPath, lang); perr != nil {
 				log.Printf("subtitle ai-proofread media=%d dedupe=%s err=%v", mediaID, dedupe, perr)
 			}
-			_ = s.markSubtitleReady(ctx, mediaID, dedupe, filepath.Base(outPath), outPath)
+			if err := s.markSubtitleReady(ctx, mediaID, dedupe, filepath.Base(outPath), outPath); err != nil {
+				return err
+			}
 			continue
 		}
 		if ext == ".sub" {
@@ -449,41 +507,94 @@ func (s *Service) syncSidecars(ctx context.Context, mediaID int64, videoPath, ou
 		}
 		outName := fmt.Sprintf("sidecar-%s.vtt", safeFileToken(strings.TrimSuffix(name, ext)))
 		outPath := filepath.Join(outDir, outName)
-		if err := s.upsertPlaceholder(mediaID, dedupe, "external", -1, strings.TrimPrefix(ext, "."), lang, langSrc, "", full, outPath); err != nil {
+		if err := s.upsertPlaceholder(ctx, mediaID, dedupe, "external", -1, strings.TrimPrefix(ext, "."), lang, langSrc, "", full, outPath); err != nil {
 			return err
 		}
 		if strings.EqualFold(ext, ".vtt") {
 			if err := copyOrWriteVTT(ctx, s.FFmpegPath, full, outPath); err != nil {
-				_, _ = s.DB.Exec(`UPDATE media_subtitle SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`, err.Error(), mediaID, dedupe)
+				if guardErr := validateCommitGuard(ctx); guardErr != nil {
+					return guardErr
+				}
+				if _, dbErr := s.DB.ExecContext(ctx, `UPDATE media_subtitle SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`, err.Error(), mediaID, dedupe); dbErr != nil {
+					return dbErr
+				}
 				continue
 			}
 		} else {
-			cmd := exec.CommandContext(ctx, s.FFmpegPath, "-y", "-i", full, "-c:s", "webvtt", outPath)
+			cmd := processmetrics.NewFFmpegCommandContext(ctx, s.FFmpegPath, "-y", "-i", full, "-c:s", "webvtt", outPath)
 			out, err := cmd.CombinedOutput()
 			if err != nil {
-				_, _ = s.DB.Exec(`UPDATE media_subtitle SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`, trimBytes(out), mediaID, dedupe)
+				if guardErr := validateCommitGuard(ctx); guardErr != nil {
+					return guardErr
+				}
+				if _, dbErr := s.DB.ExecContext(ctx, `UPDATE media_subtitle SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`, trimBytes(out), mediaID, dedupe); dbErr != nil {
+					return dbErr
+				}
 				continue
 			}
 		}
-		_ = s.markSubtitleReady(ctx, mediaID, dedupe, filepath.Base(outPath), outPath)
+		if err := s.markSubtitleReady(ctx, mediaID, dedupe, filepath.Base(outPath), outPath); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
 func (s *Service) markSubtitleReady(ctx context.Context, mediaID int64, dedupe, logicalName, plainPath string) error {
+	if err := validateCommitGuard(ctx); err != nil {
+		return err
+	}
 	stored := plainPath
-	if s.Derived != nil {
+	var staged *storage.StagedDerivedAsset
+	var oldPaths []string
+	if s.Derived != nil && storage.NeedsDerivedEncryption(s.DB, mediaID) {
 		var err error
-		stored, err = s.Derived.FinalizePath(ctx, mediaID, "subtitle", logicalName, plainPath)
+		staged, err = s.Derived.StagePath(ctx, mediaID, "subtitle", logicalName, plainPath)
 		if err != nil {
-			_, _ = s.DB.Exec(`UPDATE media_subtitle SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`, trimErr(err), mediaID, dedupe)
+			return err
+		}
+		defer func() {
+			if staged != nil {
+				s.Derived.AbortStaged(staged)
+			}
+		}()
+		stored = staged.EncPath()
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err = validateCommitGuardTx(ctx, tx); err != nil {
+		return err
+	}
+	if staged != nil {
+		oldPaths, err = s.Derived.CommitStagedTx(ctx, tx, staged)
+		if err != nil {
 			return err
 		}
 	}
-	_, _ = s.DB.Exec(`UPDATE media_subtitle SET status='ready', vtt_path=?, error_message=NULL, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`, stored, mediaID, dedupe)
+	res, err := tx.ExecContext(ctx, `UPDATE media_subtitle SET status='ready',vtt_path=?,error_message=NULL,updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`, stored, mediaID, dedupe)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return fmt.Errorf("subtitle ready update affected %d rows", n)
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	if staged != nil {
+		staged = nil
+		_ = os.Remove(plainPath)
+		s.Derived.CleanupReplaced(oldPaths)
+	}
 	return nil
 }
-
 func safeFileToken(s string) string {
 	s = strings.Map(func(r rune) rune {
 		switch {
@@ -512,7 +623,7 @@ func copyOrWriteVTT(ctx context.Context, ffmpegPath, src, dst string) error {
 	if strings.HasPrefix(strings.TrimSpace(string(b)), "WEBVTT") {
 		return os.WriteFile(dst, b, 0o644)
 	}
-	cmd := exec.CommandContext(ctx, ffmpegPath, "-y", "-i", src, "-c:s", "webvtt", dst)
+	cmd := processmetrics.NewFFmpegCommandContext(ctx, ffmpegPath, "-y", "-i", src, "-c:s", "webvtt", dst)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%w: %s", err, trimBytes(out))
@@ -523,11 +634,18 @@ func copyOrWriteVTT(ctx context.Context, ffmpegPath, src, dst string) error {
 func (s *Service) runASR(ctx context.Context, mediaID int64, videoPath, outDir string) error {
 	dedupe := "asr:auto"
 	outPath := filepath.Join(outDir, "asr.vtt")
-	_ = s.upsertPlaceholder(mediaID, dedupe, "asr", -1, "", "und", "asr", "", "", outPath)
+	if err := s.upsertPlaceholder(ctx, mediaID, dedupe, "asr", -1, "", "und", "asr", "", "", outPath); err != nil {
+		return err
+	}
 
 	asrInput, asrCleanup, err := s.asrInputPath(ctx, mediaID, videoPath, outDir)
 	if err != nil {
-		_, _ = s.DB.Exec(`UPDATE media_subtitle SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`, trimErr(err), mediaID, dedupe)
+		if guardErr := validateCommitGuard(ctx); guardErr != nil {
+			return guardErr
+		}
+		if _, dbErr := s.DB.ExecContext(ctx, `UPDATE media_subtitle SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`, trimErr(err), mediaID, dedupe); dbErr != nil {
+			return errors.Join(err, dbErr)
+		}
 		return err
 	}
 	defer asrCleanup()
@@ -547,7 +665,12 @@ func (s *Service) runASR(ctx context.Context, mediaID int64, videoPath, outDir s
 		}
 		out, err := cmd.CombinedOutput()
 		if err != nil {
-			_, _ = s.DB.Exec(`UPDATE media_subtitle SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`, trimBytes(out), mediaID, dedupe)
+			if guardErr := validateCommitGuard(ctx); guardErr != nil {
+				return guardErr
+			}
+			if _, dbErr := s.DB.ExecContext(ctx, `UPDATE media_subtitle SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`, trimBytes(out), mediaID, dedupe); dbErr != nil {
+				return errors.Join(err, dbErr)
+			}
 			return err
 		}
 		// whisper writes <basename>.vtt next to input by default in output_dir
@@ -558,7 +681,12 @@ func (s *Service) runASR(ctx context.Context, mediaID int64, videoPath, outDir s
 			if b, e := os.ReadFile(gen); e == nil {
 				_ = os.WriteFile(outPath, b, 0o644)
 			} else {
-				_, _ = s.DB.Exec(`UPDATE media_subtitle SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`, err.Error(), mediaID, dedupe)
+				if guardErr := validateCommitGuard(ctx); guardErr != nil {
+					return guardErr
+				}
+				if _, dbErr := s.DB.ExecContext(ctx, `UPDATE media_subtitle SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`, err.Error(), mediaID, dedupe); dbErr != nil {
+					return dbErr
+				}
 				return err
 			}
 		}
@@ -574,7 +702,12 @@ func (s *Service) runASR(ctx context.Context, mediaID int64, videoPath, outDir s
 			var matErr error
 			shellInput, shellCleanup, matErr = storage.MaterializePlaintextTemp(s.DB, s.Vault, mediaID, videoPath)
 			if matErr != nil {
-				_, _ = s.DB.Exec(`UPDATE media_subtitle SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`, trimErr(matErr), mediaID, dedupe)
+				if guardErr := validateCommitGuard(ctx); guardErr != nil {
+					return guardErr
+				}
+				if _, dbErr := s.DB.ExecContext(ctx, `UPDATE media_subtitle SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`, trimErr(matErr), mediaID, dedupe); dbErr != nil {
+					return dbErr
+				}
 				return matErr
 			}
 		}
@@ -585,7 +718,12 @@ func (s *Service) runASR(ctx context.Context, mediaID int64, videoPath, outDir s
 		sh = resolveShellMediaPaths(sh, s.MediaRoot)
 		out, err := s.runShellCommand(ctx, sh)
 		if err != nil {
-			_, _ = s.DB.Exec(`UPDATE media_subtitle SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`, trimErr(err), mediaID, dedupe)
+			if guardErr := validateCommitGuard(ctx); guardErr != nil {
+				return guardErr
+			}
+			if _, dbErr := s.DB.ExecContext(ctx, `UPDATE media_subtitle SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`, trimErr(err), mediaID, dedupe); dbErr != nil {
+				return errors.Join(err, dbErr)
+			}
 			return err
 		}
 		_ = out

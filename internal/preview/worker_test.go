@@ -6,9 +6,14 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"knox-media/internal/keystore"
+	"knox-media/internal/storage"
 
 	_ "modernc.org/sqlite"
 )
@@ -24,8 +29,21 @@ func newTestDB(t *testing.T) *sql.DB {
 	t.Cleanup(func() { _ = db.Close() })
 
 	_, err = db.Exec(`
+CREATE TABLE library (
+    id INTEGER PRIMARY KEY,
+    path TEXT
+);
 CREATE TABLE media (
-    id INTEGER PRIMARY KEY
+    id INTEGER PRIMARY KEY,
+    library_id INTEGER,
+    file_path TEXT,
+    file_type TEXT,
+    duration INTEGER
+);
+CREATE TABLE media_encrypted_assets (
+    media_id INTEGER,
+    plain_path TEXT,
+    status TEXT
 );
 CREATE TABLE preview_task (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -242,8 +260,10 @@ func TestRunSuccessUpdatesReadyAndWritesFiles(t *testing.T) {
 	}
 
 	previewDir := t.TempDir()
-	ffmpegPath := writeFakeFFmpeg(t, t.TempDir(), true)
-	w := NewWorker(db, nil, nil, ffmpegPath, previewDir)
+	w := NewWorker(db, nil, nil, "ffmpeg", previewDir)
+	w.runFFmpeg = func(_ context.Context, _ *sql.DB, _ *keystore.Vault, _ string, _ int64, _ string, _ float64, _ float64, _ []string, post []string, _ string) ([]byte, error) {
+		return nil, os.WriteFile(post[len(post)-1], []byte("sprite"), 0o644)
+	}
 
 	err = w.run(context.Background(), 201, "input.mp4", 25, 10, 3)
 	if err != nil {
@@ -287,8 +307,10 @@ func TestRunFailUpdatesFailedStatus(t *testing.T) {
 	}
 
 	previewDir := t.TempDir()
-	ffmpegPath := writeFakeFFmpeg(t, t.TempDir(), false)
-	w := NewWorker(db, nil, nil, ffmpegPath, previewDir)
+	w := NewWorker(db, nil, nil, "ffmpeg", previewDir)
+	w.runFFmpeg = func(context.Context, *sql.DB, *keystore.Vault, string, int64, string, float64, float64, []string, []string, string) ([]byte, error) {
+		return []byte("ffmpeg failed for test"), errors.New("ffmpeg failed")
+	}
 
 	err = w.run(context.Background(), 202, "input.mp4", 30, 10, 3)
 	if err == nil {
@@ -343,13 +365,23 @@ func TestStartOnceSameMediaIDRunsOnlyOneWorker(t *testing.T) {
 		t.Fatalf("insert preview task: %v", err)
 	}
 
-	counterFile := filepath.Join(t.TempDir(), "ffmpeg-count.txt")
-	ffmpegPath := writeCountingFFmpeg(t, t.TempDir(), counterFile)
-	w := NewWorker(db, nil, nil, ffmpegPath, t.TempDir())
+	w := NewWorker(db, nil, nil, "ffmpeg", t.TempDir())
+	var counterMu sync.Mutex
+	var calls int
+	started := make(chan struct{}, 2)
+	w.runFFmpeg = func(_ context.Context, _ *sql.DB, _ *keystore.Vault, _ string, _ int64, _ string, _ float64, _ float64, _ []string, post []string, _ string) ([]byte, error) {
+		counterMu.Lock()
+		calls++
+		counterMu.Unlock()
+		started <- struct{}{}
+		time.Sleep(100 * time.Millisecond)
+		return nil, os.WriteFile(post[len(post)-1], []byte("sprite"), 0o644)
+	}
 
 	ctx := context.Background()
 	w.startOnce(ctx, 203, "input.mp4", 25, 10, 3)
 	w.startOnce(ctx, 203, "input.mp4", 25, 10, 3)
+	<-started
 
 	deadline := time.Now().Add(3 * time.Second)
 	for {
@@ -365,13 +397,11 @@ func TestStartOnceSameMediaIDRunsOnlyOneWorker(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 
-	raw, err := os.ReadFile(counterFile)
-	if err != nil {
-		t.Fatalf("read counter file: %v", err)
-	}
-	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
-	if len(lines) != 1 {
-		t.Fatalf("ffmpeg invocation count=%d want 1", len(lines))
+	counterMu.Lock()
+	gotCalls := calls
+	counterMu.Unlock()
+	if gotCalls != 1 {
+		t.Fatalf("ffmpeg invocation count=%d want 1", gotCalls)
 	}
 }
 
@@ -384,13 +414,24 @@ func TestStartOnceDifferentMediaIDCanRunConcurrently(t *testing.T) {
 		t.Fatalf("insert preview tasks: %v", err)
 	}
 
-	counterFile := filepath.Join(t.TempDir(), "ffmpeg-count-all.txt")
-	ffmpegPath := writeCountingFFmpeg(t, t.TempDir(), counterFile)
-	w := NewWorker(db, nil, nil, ffmpegPath, t.TempDir())
+	w := NewWorker(db, nil, nil, "ffmpeg", t.TempDir())
+	var counterMu sync.Mutex
+	var calls int
+	started := make(chan struct{}, 2)
+	w.runFFmpeg = func(_ context.Context, _ *sql.DB, _ *keystore.Vault, _ string, _ int64, _ string, _ float64, _ float64, _ []string, post []string, _ string) ([]byte, error) {
+		counterMu.Lock()
+		calls++
+		counterMu.Unlock()
+		started <- struct{}{}
+		time.Sleep(100 * time.Millisecond)
+		return nil, os.WriteFile(post[len(post)-1], []byte("sprite"), 0o644)
+	}
 
 	ctx := context.Background()
 	w.startOnce(ctx, 204, "input-a.mp4", 25, 10, 3)
 	w.startOnce(ctx, 205, "input-b.mp4", 25, 10, 3)
+	<-started
+	<-started
 
 	deadline := time.Now().Add(4 * time.Second)
 	for {
@@ -407,13 +448,11 @@ func TestStartOnceDifferentMediaIDCanRunConcurrently(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 
-	raw, err := os.ReadFile(counterFile)
-	if err != nil {
-		t.Fatalf("read counter file: %v", err)
-	}
-	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("ffmpeg invocation count=%d want 2", len(lines))
+	counterMu.Lock()
+	gotCalls := calls
+	counterMu.Unlock()
+	if gotCalls != 2 {
+		t.Fatalf("ffmpeg invocation count=%d want 2", gotCalls)
 	}
 
 	var statusA, statusB, spriteA, spriteB, vttA, vttB string
@@ -493,5 +532,369 @@ func TestUpsertWaitingPreviewTaskPreservesFailed(t *testing.T) {
 	}
 	if interval != 20 || count != 8 {
 		t.Fatalf("interval/count updated: %d %d", interval, count)
+	}
+}
+
+func TestRunOneMissingTaskReturnsError(t *testing.T) {
+	db := newTestDB(t)
+	if _, err := db.Exec(`INSERT INTO media(id, library_id, file_path, file_type, duration) VALUES (501, 1, 'movie.mp4', 'video', 30)`); err != nil {
+		t.Fatal(err)
+	}
+	w := NewWorker(db, nil, nil, "ffmpeg", t.TempDir())
+	if err := w.RunOne(context.Background(), 501); err == nil || !strings.Contains(err.Error(), "preview task") {
+		t.Fatalf("RunOne error=%v want explicit missing preview task error", err)
+	}
+}
+
+func TestRunOneReadyWithExistingFilesIsIdempotent(t *testing.T) {
+	db := newTestDB(t)
+	dir := t.TempDir()
+	sprite, vtt := filepath.Join(dir, "sprite.jpg"), filepath.Join(dir, "thumbs.vtt")
+	if err := os.WriteFile(sprite, []byte("sprite"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(vtt, []byte("WEBVTT"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO media VALUES (502, 1, 'movie.mp4', 'video', 30)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO preview_task(media_id,status,sprite_path,vtt_path) VALUES (502,'ready',?,?)`, sprite, vtt); err != nil {
+		t.Fatal(err)
+	}
+	w := NewWorker(db, nil, nil, "ffmpeg", dir)
+	w.runFFmpeg = func(context.Context, *sql.DB, *keystore.Vault, string, int64, string, float64, float64, []string, []string, string) ([]byte, error) {
+		t.Fatal("ffmpeg must not run for intact ready task")
+		return nil, nil
+	}
+	if err := w.RunOne(context.Background(), 502); err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+}
+
+func TestRunOneFailedReturnsStoredErrorWithoutRerun(t *testing.T) {
+	db := newTestDB(t)
+	if _, err := db.Exec(`INSERT INTO media VALUES (503, 1, 'movie.mp4', 'video', 30)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO preview_task(media_id,status,error_message) VALUES (503,'failed','old failure')`); err != nil {
+		t.Fatal(err)
+	}
+	w := NewWorker(db, nil, nil, "ffmpeg", t.TempDir())
+	w.runFFmpeg = func(context.Context, *sql.DB, *keystore.Vault, string, int64, string, float64, float64, []string, []string, string) ([]byte, error) {
+		t.Fatal("ffmpeg must not rerun failed task")
+		return nil, nil
+	}
+	err := w.RunOne(context.Background(), 503)
+	if err == nil || err.Error() != "old failure" {
+		t.Fatalf("RunOne error=%v want stored error", err)
+	}
+}
+
+func TestRunOneUsesPreferredPathAndContext(t *testing.T) {
+	db := newTestDB(t)
+	root := t.TempDir()
+	input := filepath.Join(root, "movie.mp4")
+	if err := os.WriteFile(input, []byte("video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO library(id,path) VALUES (1,?)`, root); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO media VALUES (504, 1, 'movie.mp4', 'video', 25)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO preview_task(media_id,status,interval_sec,thumb_count) VALUES (504,'waiting',10,3)`); err != nil {
+		t.Fatal(err)
+	}
+	w := NewWorker(db, nil, nil, "ffmpeg", t.TempDir())
+	ctx := context.WithValue(context.Background(), struct{}{}, "identity")
+	w.runFFmpeg = func(got context.Context, _ *sql.DB, _ *keystore.Vault, _ string, _ int64, gotPath string, _ float64, _ float64, _ []string, post []string, _ string) ([]byte, error) {
+		if got != ctx {
+			t.Error("context identity not preserved")
+		}
+		if gotPath != input {
+			t.Errorf("input=%q want preferred %q", gotPath, input)
+		}
+		if err := os.WriteFile(post[len(post)-1], []byte("sprite"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return nil, nil
+	}
+	if err := w.RunOne(ctx, 504); err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+}
+
+func TestRunOnePreCancelledLeavesWaiting(t *testing.T) {
+	db := newTestDB(t)
+	if _, err := db.Exec(`INSERT INTO media VALUES (505, 1, 'movie.mp4', 'video', 25)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO preview_task(media_id,status,interval_sec,thumb_count) VALUES (505,'waiting',10,3)`); err != nil {
+		t.Fatal(err)
+	}
+	w := NewWorker(db, nil, nil, "ffmpeg", t.TempDir())
+	w.runFFmpeg = storage.RunFFmpeg
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := w.RunOne(ctx, 505); !errors.Is(err, context.Canceled) {
+		t.Fatalf("RunOne error=%v want canceled", err)
+	}
+	var status string
+	if err := db.QueryRow(`SELECT status FROM preview_task WHERE media_id=505`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "waiting" {
+		t.Fatalf("status=%q want waiting", status)
+	}
+}
+
+func TestWorker_RunOneContextCancellation(t *testing.T) {
+	tests := []struct {
+		name          string
+		initialStatus string
+	}{
+		{name: "waiting", initialStatus: "waiting"},
+		{name: "ready with missing assets", initialStatus: "ready"},
+	}
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db := newTestDB(t)
+			root := t.TempDir()
+			input := filepath.Join(root, "movie.mp4")
+			if err := os.WriteFile(input, []byte("video"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`INSERT INTO library(id,path) VALUES (1,?)`, root); err != nil {
+				t.Fatal(err)
+			}
+			mediaID := int64(506 + i)
+			if _, err := db.Exec(`INSERT INTO media VALUES (?, 1, 'movie.mp4', 'video', 25)`, mediaID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`INSERT INTO preview_task(media_id,status,interval_sec,thumb_count,sprite_path,vtt_path) VALUES (?,?,10,3,'missing-sprite','missing-vtt')`, mediaID, tt.initialStatus); err != nil {
+				t.Fatal(err)
+			}
+
+			previewDir := t.TempDir()
+			w := NewWorker(db, nil, nil, "ffmpeg", previewDir)
+			ctx, cancel := context.WithCancel(context.Background())
+			runnerStarted := make(chan struct{})
+			releaseRunner := make(chan struct{})
+			w.runFFmpeg = func(got context.Context, _ *sql.DB, _ *keystore.Vault, _ string, _ int64, _ string, _ float64, _ float64, _ []string, post []string, _ string) ([]byte, error) {
+				if got != ctx {
+					t.Errorf("runner context identity changed")
+				}
+				if err := os.WriteFile(post[len(post)-1], []byte("partial sprite"), 0o644); err != nil {
+					t.Errorf("write partial sprite: %v", err)
+				}
+
+				close(runnerStarted)
+				<-got.Done()
+				<-releaseRunner
+				return nil, got.Err()
+			}
+
+			result := make(chan error, 1)
+			go func() { result <- w.RunOne(ctx, mediaID) }()
+			<-runnerStarted
+			cancel()
+			select {
+			case err := <-result:
+				t.Fatalf("RunOne returned before runner completed: %v", err)
+			default:
+			}
+			close(releaseRunner)
+			if err := <-result; !errors.Is(err, context.Canceled) {
+				t.Fatalf("RunOne error=%v want context.Canceled", err)
+			}
+
+			outDir := filepath.Join(previewDir, strconv.FormatInt(mediaID, 10))
+			for _, path := range []string{filepath.Join(outDir, "sprite.jpg"), filepath.Join(outDir, "thumbs.vtt")} {
+				if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("temporary output %q remains: %v", path, err)
+				}
+			}
+			var status, errorMessage string
+			if err := db.QueryRow(`SELECT status, COALESCE(error_message,'') FROM preview_task WHERE media_id=?`, mediaID).Scan(&status, &errorMessage); err != nil {
+				t.Fatal(err)
+			}
+			if status != "waiting" {
+				t.Fatalf("status=%q want waiting", status)
+			}
+			if !strings.Contains(strings.ToLower(errorMessage), "cancel") {
+				t.Fatalf("error_message=%q want cancellation reason", errorMessage)
+			}
+		})
+	}
+}
+
+func TestWorker_RunOneReturnsReadyPersistenceError(t *testing.T) {
+	db := newTestDB(t)
+	root := t.TempDir()
+	input := filepath.Join(root, "movie.mp4")
+	if err := os.WriteFile(input, []byte("video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO library(id,path) VALUES (1,?)`, root); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO media VALUES (508, 1, 'movie.mp4', 'video', 25)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO preview_task(media_id,status,interval_sec,thumb_count) VALUES (508,'waiting',10,3)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+		CREATE TRIGGER block_preview_ready
+		BEFORE UPDATE ON preview_task
+		WHEN NEW.status='ready'
+		BEGIN
+			SELECT RAISE(ABORT, 'ready blocked');
+		END`); err != nil {
+		t.Fatal(err)
+	}
+
+	w := NewWorker(db, nil, nil, "ffmpeg", t.TempDir())
+	w.runFFmpeg = func(_ context.Context, _ *sql.DB, _ *keystore.Vault, _ string, _ int64, _ string, _ float64, _ float64, _ []string, post []string, _ string) ([]byte, error) {
+		return nil, os.WriteFile(post[len(post)-1], []byte("sprite"), 0o644)
+	}
+	err := w.RunOne(context.Background(), 508)
+	if err == nil || !strings.Contains(err.Error(), "ready blocked") {
+		t.Fatalf("RunOne error=%v want ready persistence failure", err)
+	}
+	var status string
+	if err := db.QueryRow(`SELECT status FROM preview_task WHERE media_id=508`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status == "ready" {
+		t.Fatal("task must not report ready after persistence failure")
+	}
+}
+
+func TestTaskParametersMatchPreviewScheduling(t *testing.T) {
+	interval, count := TaskParameters(120)
+	if interval != 5 || count != 24 || count <= 1 {
+		t.Fatalf("parameters=(%d,%d)", interval, count)
+	}
+}
+
+func TestEnsureWaitingTaskInitializesParametersWithoutResettingExisting(t *testing.T) {
+	db := newTestDB(t)
+	if err := EnsureWaitingTask(context.Background(), db, 601, 120); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	var interval, count int
+	if err := db.QueryRow(`SELECT status,interval_sec,thumb_count FROM preview_task WHERE media_id=601`).Scan(&status, &interval, &count); err != nil {
+		t.Fatal(err)
+	}
+	if status != "waiting" || interval != 5 || count != 24 {
+		t.Fatalf("new row=%s/%d/%d", status, interval, count)
+	}
+	if _, err := db.Exec(`UPDATE preview_task SET status='ready',interval_sec=9,thumb_count=7 WHERE media_id=601`); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureWaitingTask(context.Background(), db, 601, 999); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT status,interval_sec,thumb_count FROM preview_task WHERE media_id=601`).Scan(&status, &interval, &count); err != nil {
+		t.Fatal(err)
+	}
+	if status != "ready" || interval != 9 || count != 7 {
+		t.Fatalf("existing row reset=%s/%d/%d", status, interval, count)
+	}
+}
+
+func TestRunOneStaleCommitGuardPreservesPublishedPreview(t *testing.T) {
+	db := newTestDB(t)
+	root := t.TempDir()
+	input := filepath.Join(root, "movie.mp4")
+	_ = os.WriteFile(input, []byte("video"), 0644)
+	_, _ = db.Exec(`INSERT INTO library(id,path) VALUES(1,?)`, root)
+	_, _ = db.Exec(`INSERT INTO media VALUES(901,1,'movie.mp4','video',25)`)
+	outDir := filepath.Join(t.TempDir(), "901")
+	_ = os.MkdirAll(outDir, 0755)
+	sprite := filepath.Join(outDir, "sprite.jpg")
+	vtt := filepath.Join(outDir, "thumbs.vtt")
+	_ = os.WriteFile(sprite, []byte("old sprite"), 0644)
+	_ = os.WriteFile(vtt, []byte("old vtt"), 0644)
+	_, _ = db.Exec(`INSERT INTO preview_task(media_id,status,interval_sec,thumb_count,sprite_path,vtt_path) VALUES(901,'waiting',10,3,?,?)`, sprite, vtt)
+	w := NewWorker(db, nil, nil, "ffmpeg", filepath.Dir(outDir))
+	runnerDone := make(chan struct{})
+	release := make(chan struct{})
+	w.runFFmpeg = func(_ context.Context, _ *sql.DB, _ *keystore.Vault, _ string, _ int64, _ string, _ float64, _ float64, _ []string, post []string, _ string) ([]byte, error) {
+		if err := os.WriteFile(post[len(post)-1], []byte("new sprite"), 0644); err != nil {
+			return nil, err
+		}
+		close(runnerDone)
+		<-release
+		return nil, nil
+	}
+	stale := false
+	ctx := WithCommitGuard(context.Background(), func(context.Context) error {
+		if stale {
+			return errors.New("stale lease")
+		}
+		return nil
+	})
+	ctx = WithCommitGuardTx(ctx, func(context.Context, *sql.Tx) error {
+		if stale {
+			return errors.New("stale lease")
+		}
+		return nil
+	})
+	done := make(chan error, 1)
+	go func() { done <- w.RunOne(ctx, 901) }()
+	<-runnerDone
+	stale = true
+	close(release)
+	err := <-done
+	if err == nil || !strings.Contains(err.Error(), "stale lease") {
+		t.Fatalf("err=%v", err)
+	}
+	if got, _ := os.ReadFile(sprite); string(got) != "old sprite" {
+		t.Fatalf("sprite=%q", got)
+	}
+	if got, _ := os.ReadFile(vtt); string(got) != "old vtt" {
+		t.Fatalf("vtt=%q", got)
+	}
+	var status string
+	_ = db.QueryRow(`SELECT status FROM preview_task WHERE media_id=901`).Scan(&status)
+	if status == "ready" || status == "failed" {
+		t.Fatalf("status=%s", status)
+	}
+}
+
+func TestRunOneTxGuardTakeoverRollsBackPreviewPair(t *testing.T) {
+	db := newTestDB(t)
+	root := t.TempDir()
+	input := filepath.Join(root, "movie.mp4")
+	_ = os.WriteFile(input, []byte("v"), 0644)
+	_, _ = db.Exec(`INSERT INTO library(id,path) VALUES(1,?)`, root)
+	_, _ = db.Exec(`INSERT INTO media VALUES(902,1,'movie.mp4','video',25)`)
+	base := t.TempDir()
+	dir := filepath.Join(base, "902")
+	_ = os.MkdirAll(dir, 0755)
+	sprite := filepath.Join(dir, "sprite.jpg")
+	vtt := filepath.Join(dir, "thumbs.vtt")
+	_ = os.WriteFile(sprite, []byte("old sprite"), 0644)
+	_ = os.WriteFile(vtt, []byte("old vtt"), 0644)
+	_, _ = db.Exec(`INSERT INTO preview_task(media_id,status,interval_sec,thumb_count,sprite_path,vtt_path) VALUES(902,'waiting',10,3,?,?)`, sprite, vtt)
+	w := NewWorker(db, nil, nil, "ffmpeg", base)
+	w.runFFmpeg = func(_ context.Context, _ *sql.DB, _ *keystore.Vault, _ string, _ int64, _ string, _ float64, _ float64, _ []string, post []string, _ string) ([]byte, error) {
+		return nil, os.WriteFile(post[len(post)-1], []byte("new sprite"), 0644)
+	}
+	ctx := WithCommitGuardTx(context.Background(), func(context.Context, *sql.Tx) error { return errors.New("tx takeover") })
+	err := w.RunOne(ctx, 902)
+	if err == nil || !strings.Contains(err.Error(), "tx takeover") {
+		t.Fatalf("err=%v", err)
+	}
+	if got, _ := os.ReadFile(sprite); string(got) != "old sprite" {
+		t.Fatalf("sprite=%q", got)
+	}
+	if got, _ := os.ReadFile(vtt); string(got) != "old vtt" {
+		t.Fatalf("vtt=%q", got)
 	}
 }

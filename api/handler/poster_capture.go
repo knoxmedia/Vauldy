@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"knox-media/internal/atomicfile"
 	"knox-media/internal/scraper"
 	"knox-media/internal/storage"
 	"knox-media/pkg/ffprobe"
@@ -73,19 +74,48 @@ func (h *Handler) captureLocalPoster(mediaID, libraryID int64, cfg scraper.Confi
 		return "", ""
 	}
 	posterFile := filepath.Join(posterDir, fmt.Sprintf("%d.jpg", mediaID))
+	stagedPoster, err := newPosterStagingPath(posterFile)
+	if err != nil {
+		return "", ""
+	}
+	defer os.Remove(stagedPoster)
 
 	if imageSourceEnabled(cfg, "embedded") {
-		if ffprobePath != "" && h.extractEmbeddedCover(ffprobePath, ffmpegPath, mediaID, absPath, posterFile) {
-			return h.finalizeCapturedPosterURL(mediaID, posterFile, "embedded")
+		if ffprobePath != "" && h.extractEmbeddedCover(ffprobePath, ffmpegPath, mediaID, absPath, stagedPoster) {
+			return h.publishCapturedPoster(mediaID, stagedPoster, posterFile, "embedded")
 		}
 	}
 	if !skipScreenGrabber && imageSourceEnabled(cfg, "screen_grabber") {
-		if h.extractFramePoster(ffmpegPath, mediaID, absPath, posterFile, duration) {
-			return h.finalizeCapturedPosterURL(mediaID, posterFile, "screen_grabber")
+		if h.extractFramePoster(ffmpegPath, mediaID, absPath, stagedPoster, duration) {
+			return h.publishCapturedPoster(mediaID, stagedPoster, posterFile, "screen_grabber")
 		}
 	}
-	_ = os.Remove(posterFile)
 	return "", ""
+}
+
+func newPosterStagingPath(target string) (string, error) {
+	f, err := os.CreateTemp(filepath.Dir(target), filepath.Base(target)+".tmp-")
+	if err != nil {
+		return "", err
+	}
+	path := f.Name()
+	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
+		return "", err
+	}
+	_ = os.Remove(path)
+	return path, nil
+}
+
+func (h *Handler) publishCapturedPoster(mediaID int64, stagedPoster, targetPoster, source string) (posterURL, src string) {
+	if h.DerivedStore == nil || !storage.NeedsDerivedEncryption(h.App.DB, mediaID) {
+		if err := atomicfile.ReplaceFile(stagedPoster, targetPoster); err != nil {
+			log.Printf("poster publish media=%d: %v", mediaID, err)
+			return "", ""
+		}
+		return storage.PlainPosterURL(mediaID), source
+	}
+	return h.finalizeCapturedPosterURL(mediaID, stagedPoster, source)
 }
 
 func (h *Handler) finalizeCapturedPosterURL(mediaID int64, plainPosterFile, source string) (posterURL, src string) {

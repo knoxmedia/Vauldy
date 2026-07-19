@@ -110,7 +110,7 @@ func (s *Service) ImportSubtitleFile(ctx context.Context, mediaID int64, filenam
 	if err := os.WriteFile(outPath, []byte(vtt), 0o644); err != nil {
 		return nil, err
 	}
-	if err := s.upsertPlaceholder(mediaID, dedupe, "imported", -1, "vtt", lang, langSrc, "", filename, outPath); err != nil {
+	if err := s.upsertPlaceholder(ctx, mediaID, dedupe, "imported", -1, "vtt", lang, langSrc, "", filename, outPath); err != nil {
 		return nil, err
 	}
 	if err := s.markSubtitleReady(ctx, mediaID, dedupe, outName, outPath); err != nil {
