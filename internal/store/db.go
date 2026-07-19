@@ -6,6 +6,8 @@ import (
 	"fmt"
 
 	_ "modernc.org/sqlite"
+
+	"knox-media/internal/relationshipmigration"
 )
 
 const schema = `
@@ -617,6 +619,13 @@ CREATE TABLE IF NOT EXISTS system_options (
 `
 
 func OpenSQLite(path string) (*sql.DB, error) {
+	return OpenSQLiteContext(context.Background(), path)
+}
+
+func OpenSQLiteContext(ctx context.Context, path string) (*sql.DB, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(30000)&_pragma=foreign_keys(ON)")
 	if err != nil {
 		return nil, err

@@ -1,6 +1,7 @@
 package musicstore
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"path/filepath"
@@ -11,34 +12,46 @@ import (
 
 // LinkTrack associates a scanned audio media file with artist/album/track records.
 func LinkTrack(db *sql.DB, libraryID, mediaID int64, meta musicparse.TrackMeta) error {
+	return linkTrackContext(context.Background(), db, libraryID, mediaID, meta)
+}
+func LinkTrackTx(ctx context.Context, tx *sql.Tx, libraryID, mediaID int64, meta musicparse.TrackMeta) error {
+	return linkTrackContext(ctx, tx, libraryID, mediaID, meta)
+}
+
+type relationDB interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func linkTrackContext(ctx context.Context, db relationDB, libraryID, mediaID int64, meta musicparse.TrackMeta) error {
 	if db == nil || libraryID <= 0 || mediaID <= 0 {
 		return nil
 	}
-	artistID, err := findOrCreateArtist(db, libraryID, meta.AlbumArtist)
+	artistID, err := findOrCreateArtist(ctx, db, libraryID, meta.AlbumArtist)
 	if err != nil {
 		return err
 	}
-	albumID, err := findOrCreateAlbum(db, libraryID, artistID, meta)
+	albumID, err := findOrCreateAlbum(ctx, db, libraryID, artistID, meta)
 	if err != nil {
 		return err
 	}
-	return linkTrackMedia(db, albumID, mediaID, meta)
+	return linkTrackMedia(ctx, db, albumID, mediaID, meta)
 }
 
-func findOrCreateArtist(db *sql.DB, libraryID int64, name string) (int64, error) {
+func findOrCreateArtist(ctx context.Context, db relationDB, libraryID int64, name string) (int64, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		name = musicparse.VariousArtists
 	}
 	norm := musicparse.NormKey(name)
 	var id int64
-	err := db.QueryRow(`
+	err := db.QueryRowContext(ctx, `
 		SELECT id FROM music_artist WHERE library_id = ? AND name_norm = ? LIMIT 1
 	`, libraryID, norm).Scan(&id)
 	if err == nil && id > 0 {
 		return id, nil
 	}
-	res, err := db.Exec(`
+	res, err := db.ExecContext(ctx, `
 		INSERT INTO music_artist (library_id, name, name_norm)
 		VALUES (?, ?, ?)
 	`, libraryID, name, norm)
@@ -48,7 +61,7 @@ func findOrCreateArtist(db *sql.DB, libraryID int64, name string) (int64, error)
 	return res.LastInsertId()
 }
 
-func findOrCreateAlbum(db *sql.DB, libraryID, artistID int64, meta musicparse.TrackMeta) (int64, error) {
+func findOrCreateAlbum(ctx context.Context, db relationDB, libraryID, artistID int64, meta musicparse.TrackMeta) (int64, error) {
 	title := strings.TrimSpace(meta.Album)
 	if title == "" {
 		title = musicparse.UnknownAlbum
@@ -61,27 +74,27 @@ func findOrCreateAlbum(db *sql.DB, libraryID, artistID int64, meta musicparse.Tr
 	var id int64
 	if isUnknown == 1 {
 		// One shared unknown-album bucket per library (Plex-style).
-		err := db.QueryRow(`
+		err := db.QueryRowContext(ctx, `
 			SELECT id FROM music_album
 			WHERE library_id = ? AND is_unknown = 1
 			LIMIT 1
 		`, libraryID).Scan(&id)
 		if err == nil && id > 0 {
-			_, _ = db.Exec(`UPDATE music_album SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`, id)
+			_, _ = db.ExecContext(ctx, `UPDATE music_album SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`, id)
 			return id, nil
 		}
 	} else {
-		err := db.QueryRow(`
+		err := db.QueryRowContext(ctx, `
 			SELECT id FROM music_album
 			WHERE library_id = ? AND title_norm = ? AND COALESCE(album_artist_id, 0) = ?
 			LIMIT 1
 		`, libraryID, norm, artistID).Scan(&id)
 		if err == nil && id > 0 {
 			if meta.Year > 0 {
-				_, _ = db.Exec(`UPDATE music_album SET year = COALESCE(NULLIF(year, 0), ?), updated_at = CURRENT_TIMESTAMP WHERE id = ?`, meta.Year, id)
+				_, _ = db.ExecContext(ctx, `UPDATE music_album SET year = COALESCE(NULLIF(year, 0), ?), updated_at = CURRENT_TIMESTAMP WHERE id = ?`, meta.Year, id)
 			}
 			if strings.TrimSpace(meta.Genre) != "" {
-				_, _ = db.Exec(`UPDATE music_album SET genre = COALESCE(NULLIF(TRIM(genre), ''), ?), updated_at = CURRENT_TIMESTAMP WHERE id = ?`, meta.Genre, id)
+				_, _ = db.ExecContext(ctx, `UPDATE music_album SET genre = COALESCE(NULLIF(TRIM(genre), ''), ?), updated_at = CURRENT_TIMESTAMP WHERE id = ?`, meta.Genre, id)
 			}
 			return id, nil
 		}
@@ -91,7 +104,7 @@ func findOrCreateAlbum(db *sql.DB, libraryID, artistID int64, meta musicparse.Tr
 		year = meta.Year
 	}
 	genre := strings.TrimSpace(meta.Genre)
-	res, err := db.Exec(`
+	res, err := db.ExecContext(ctx, `
 		INSERT INTO music_album (library_id, title, title_norm, album_artist_id, year, genre, is_unknown)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 	`, libraryID, title, norm, nullIfZero64(artistID), year, nullIfEmpty(genre), isUnknown)
@@ -101,7 +114,7 @@ func findOrCreateAlbum(db *sql.DB, libraryID, artistID int64, meta musicparse.Tr
 	return res.LastInsertId()
 }
 
-func linkTrackMedia(db *sql.DB, albumID, mediaID int64, meta musicparse.TrackMeta) error {
+func linkTrackMedia(ctx context.Context, db relationDB, albumID, mediaID int64, meta musicparse.TrackMeta) error {
 	sortOrder := meta.TrackNumber
 	if sortOrder <= 0 {
 		sortOrder = 9999
@@ -114,7 +127,7 @@ func linkTrackMedia(db *sql.DB, albumID, mediaID int64, meta musicparse.TrackMet
 	if discNum < 0 {
 		discNum = 0
 	}
-	_, err := db.Exec(`
+	_, err := db.ExecContext(ctx, `
 		INSERT INTO music_track (album_id, media_id, track_number, disc_number, title, artist_display, sort_order)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(media_id) DO UPDATE SET
@@ -177,7 +190,7 @@ func BackfillAlbumTracks(db *sql.DB, albumID int64) (linked int, err error) {
 		} else if !albumMetaMatches(titleNorm, artistNorm, meta) {
 			continue
 		}
-		if linkErr := linkTrackMedia(db, albumID, mediaID, meta); linkErr == nil {
+		if linkErr := linkTrackMedia(context.Background(), db, albumID, mediaID, meta); linkErr == nil {
 			linked++
 		}
 	}
@@ -305,19 +318,17 @@ func CleanupMedia(db *sql.DB, mediaID int64) {
 
 // PruneOrphansForLibrary removes albums/artists with no tracks in the library.
 func PruneOrphansForLibrary(db *sql.DB, libraryID int64) {
+	_ = PruneOrphansForLibraryContext(context.Background(), db, libraryID)
+}
+func PruneOrphansForLibraryContext(ctx context.Context, db *sql.DB, libraryID int64) error {
 	if db == nil || libraryID <= 0 {
-		return
+		return nil
 	}
-	_, _ = db.Exec(`
-		DELETE FROM music_album
-		WHERE library_id = ?
-		  AND id NOT IN (SELECT DISTINCT album_id FROM music_track mt JOIN media m ON m.id = mt.media_id WHERE m.library_id = ?)
-	`, libraryID, libraryID)
-	_, _ = db.Exec(`
-		DELETE FROM music_artist
-		WHERE library_id = ?
-		  AND id NOT IN (SELECT DISTINCT album_artist_id FROM music_album WHERE library_id = ? AND album_artist_id IS NOT NULL)
-	`, libraryID, libraryID)
+	if _, err := db.ExecContext(ctx, `DELETE FROM music_album WHERE library_id=? AND id NOT IN (SELECT DISTINCT album_id FROM music_track mt JOIN media m ON m.id=mt.media_id WHERE m.library_id=?)`, libraryID, libraryID); err != nil {
+		return err
+	}
+	_, err := db.ExecContext(ctx, `DELETE FROM music_artist WHERE library_id=? AND id NOT IN (SELECT DISTINCT album_artist_id FROM music_album WHERE library_id=? AND album_artist_id IS NOT NULL)`, libraryID, libraryID)
+	return err
 }
 
 func nullIfEmpty(s string) any {
