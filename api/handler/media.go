@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"knox-media/api/middleware"
+	"knox-media/internal/playcompletion"
 	"knox-media/internal/scraper"
 	"knox-media/internal/textencoding"
 )

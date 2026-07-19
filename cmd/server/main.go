@@ -4,8 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"net/http"
+	"os/signal"
+	"syscall"
+
+	"github.com/google/uuid"
 	"math"
 	"os"
 	"path/filepath"
@@ -26,18 +32,19 @@ import (
 	"knox-media/internal/atrack"
 	"knox-media/internal/config"
 	"knox-media/internal/doccover"
-	"knox-media/internal/jit/hwenc"
 	"knox-media/internal/imagethumb"
-	jitsession "knox-media/internal/jit/session"
-	"knox-media/internal/jit/ingestprepare"
-	"knox-media/internal/keystore"
+	"knox-media/internal/jit/hwenc"
 	jitmetrics "knox-media/internal/jit/metrics"
+	jitsession "knox-media/internal/jit/session"
 	"knox-media/internal/keyframe"
+	"knox-media/internal/keystore"
 	"knox-media/internal/lyrictask"
 	"knox-media/internal/monitor"
 	"knox-media/internal/photoclass"
 	"knox-media/internal/photoface"
+	"knox-media/internal/postingest"
 	"knox-media/internal/preview"
+	"knox-media/internal/scancoord"
 	"knox-media/internal/scanner"
 	"knox-media/internal/storage"
 	"knox-media/internal/store"
@@ -51,6 +58,8 @@ import (
 func main() {
 	zlog := zapglobal.MustReplaceGlobals()
 	defer func() { _ = zlog.Sync() }()
+	serverCtx, serverCancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer serverCancel()
 
 	cfgPath := config.ResolveConfigPath()
 	cfgPath, err := config.EnsureConfigFile(cfgPath)
@@ -72,6 +81,7 @@ func main() {
 		log.Fatalf("db: %v", err)
 	}
 	defer db.Close()
+	sqliteMetrics := &store.SQLiteMetrics{}
 	store.ResetInterruptedTasks(db)
 
 	if err := seedUsers(db); err != nil {
@@ -115,23 +125,23 @@ func main() {
 			ocrScript = abs
 		}
 	}
-subSvc := subtitle.NewService(db, keyVault, derivedStore, filepath.Dir(cfgPath), cfg.FFmpeg.FFmpegPath, cfg.FFmpeg.FFprobePath, cfg.Data.Subtitle, subtitle.ASRConfig{
-	Provider:    cfg.Subtitle.ASR.Provider,
-	WhisperPath: cfg.Subtitle.ASR.WhisperPath,
-	ExtraArgs:   cfg.Subtitle.ASR.ExtraArgs,
-	Shell:       cfg.Subtitle.ASR.Shell,
-}, subtitle.OCRConfig{
-	Enabled:        cfg.Subtitle.GraphicalOCR.Enabled,
-	TesseractPath:  cfg.Subtitle.GraphicalOCR.TesseractPath,
-	TessdataPrefix: cfg.Subtitle.GraphicalOCR.TessdataPrefix,
-	Languages:      cfg.Subtitle.GraphicalOCR.Languages,
-	PythonPath:     cfg.Subtitle.GraphicalOCR.PythonPath,
-	ScriptPath:     ocrScript,
-	PgsripPath:     cfg.Subtitle.GraphicalOCR.PgsripPath,
-	MkvextractPath: cfg.Subtitle.GraphicalOCR.MkvextractPath,
-	MkvmergePath:   cfg.Subtitle.GraphicalOCR.MkvmergePath,
-})
-subSvc.AIProofread = cfg.SubtitleAIProofreadEnabled()
+	subSvc := subtitle.NewService(db, keyVault, derivedStore, filepath.Dir(cfgPath), cfg.FFmpeg.FFmpegPath, cfg.FFmpeg.FFprobePath, cfg.Data.Subtitle, subtitle.ASRConfig{
+		Provider:    cfg.Subtitle.ASR.Provider,
+		WhisperPath: cfg.Subtitle.ASR.WhisperPath,
+		ExtraArgs:   cfg.Subtitle.ASR.ExtraArgs,
+		Shell:       cfg.Subtitle.ASR.Shell,
+	}, subtitle.OCRConfig{
+		Enabled:        cfg.Subtitle.GraphicalOCR.Enabled,
+		TesseractPath:  cfg.Subtitle.GraphicalOCR.TesseractPath,
+		TessdataPrefix: cfg.Subtitle.GraphicalOCR.TessdataPrefix,
+		Languages:      cfg.Subtitle.GraphicalOCR.Languages,
+		PythonPath:     cfg.Subtitle.GraphicalOCR.PythonPath,
+		ScriptPath:     ocrScript,
+		PgsripPath:     cfg.Subtitle.GraphicalOCR.PgsripPath,
+		MkvextractPath: cfg.Subtitle.GraphicalOCR.MkvextractPath,
+		MkvmergePath:   cfg.Subtitle.GraphicalOCR.MkvmergePath,
+	})
+	subSvc.AIProofread = cfg.SubtitleAIProofreadEnabled()
 	up := &upload.Service{UploadDir: cfg.Data.Upload, ChunksDir: cfg.Data.Chunks}
 	atrackWorker := atrack.NewWorker(db, keyVault, derivedStore, cfg.FFmpeg.FFmpegPath, cfg.FFmpeg.FFprobePath, cfg.Data.ATracks)
 	keyframeWorker := keyframe.NewWorker(db, keyVault, derivedStore, cfg.FFmpeg.FFprobePath, cfg.Data.Keyframes)
@@ -140,7 +150,7 @@ subSvc.AIProofread = cfg.SubtitleAIProofreadEnabled()
 	photoClassifyWorker := photoclass.NewWorker(db, keyVault, filepath.Dir(cfgPath), cfg.FFmpeg.FFmpegPath, cfg.Data.Preview, func() config.PhotoClassifyConfig {
 		return cfg.PhotoClassify
 	})
-	photoFaceWorker := photoface.NewWorker(db, keyVault, derivedStore, filepath.Dir(cfgPath), cfg.FFmpeg.FFmpegPath, cfg.Data.Preview, func() config.PhotoFaceConfig {
+	_ = photoface.NewWorker(db, keyVault, derivedStore, filepath.Dir(cfgPath), cfg.FFmpeg.FFmpegPath, cfg.Data.Preview, func() config.PhotoFaceConfig {
 		faceCfg := cfg.PhotoFace
 		if strings.TrimSpace(faceCfg.PythonPath) == "" {
 			faceCfg.PythonPath = cfg.PhotoClassify.PythonPath
@@ -219,39 +229,64 @@ subSvc.AIProofread = cfg.SubtitleAIProofreadEnabled()
 		DocTrans:   cfg.DocTrans,
 		TimeoutSec: cfg.DocTransTimeoutSeconds,
 	})
-	sc := &scanner.Scanner{
-		DB:           db,
-		Vault:        keyVault,
-		FFprobePath:  cfg.FFmpeg.FFprobePath,
-		SkipHash:     !cfg.LibraryScanFileHash(),
-		FFprobeExtra: ffprobeExtra,
+	processID := fmt.Sprintf("%s-%d-%s", hostnameOrUnknown(), os.Getpid(), uuid.NewString())
+	queueOwner := "postingest-" + processID
+	postIngestQueue := postingest.NewQueue(db, queueOwner, sqliteMetrics)
+	postIngestEnqueuer := postingest.NewEnqueuer(db, cfg, sqliteMetrics)
+	adapters := postingest.AdapterSet{
+		Poster:  postingest.NewPosterAdapter(db, cfg.Data.Upload, derivedStore, &postingest.LocalPosterRunner{DB: db, Vault: keyVault, Derived: derivedStore, FFmpegPath: cfg.FFmpeg.FFmpegPath, FFprobePath: cfg.FFmpeg.FFprobePath, UploadDir: cfg.Data.Upload}),
+		Preview: postingest.NewPreviewAdapter(db, previewWorker), Keyframe: postingest.NewKeyframeAdapter(db, keyframeWorker),
+		Subtitle: postingest.NewSubtitleAdapter(db, subSvc), Atrack: postingest.NewAtrackAdapter(db, atrackWorker),
 	}
-	sc.OnDocumentScanned = func(mediaID int64) {
-		docCoverWorker.Enqueue(mediaID)
+	dispatcher, err := postingest.NewDispatcher(postIngestQueue, adapters, buildDispatcherOptions(cfg, queueOwner))
+	if err != nil {
+		log.Fatalf("post-ingest dispatcher: %v", err)
 	}
-	sc.OnMediaAdded = func(mediaID int64, _ string, ft string) {
-		go enqueueAutoTasksOnMediaAdded(db, keyVault, cfg, assetEncryptor, derivedStore, previewWorker, docCoverWorker, subSvc, atrackWorker, keyframeWorker, lyricWorker, photoClassifyWorker, photoFaceWorker, mediaID, ft)
-		if ft == "video" {
-			var drmEnabled int
-			_ = db.QueryRow(`
-				SELECT COALESCE(l.drm_enabled,0) FROM media m LEFT JOIN library l ON l.id = m.library_id WHERE m.id = ?
-			`, mediaID).Scan(&drmEnabled)
-			if drmEnabled == 0 {
-				go func(id int64) {
-					_, _ = packageWorker.EnqueueForMedia(id)
-				}(mediaID)
-			}
-			go ingestprepare.Kick(db, instantScheduler, mediaID)
-		}
-	}
-	mon := monitor.NewService(db, sc, 15*time.Second)
-	go mon.Start(context.Background())
+	dispatcherDone := make(chan error, 1)
+	go func() { dispatcherDone <- dispatcher.Start(serverCtx) }()
 
-	engine := api.NewEngine(cfg, application, worker, packageWorker, previewWorker, subSvc, up, instantScheduler, sessionMgr, atrackWorker, keyframeWorker, lyricWorker, photoClassifyWorker, docCoverWorker)
-	log.Printf("knox-media listening on http://%s", cfg.Addr())
-	if err := engine.Run(cfg.Addr()); err != nil {
-		log.Fatal(err)
+	sc := &scanner.Scanner{DB: db, Vault: keyVault, FFprobePath: cfg.FFmpeg.FFprobePath, SkipHash: !cfg.LibraryScanFileHash(), FFprobeExtra: ffprobeExtra}
+	sc.OnDocumentScanned = func(mediaID int64) { docCoverWorker.Enqueue(mediaID) }
+	coordinator, err := scancoord.New(db, scancoord.Options{LeaseDuration: 60 * time.Second, HeartbeatInterval: 20 * time.Second, OwnerInstanceID: "scancoord-" + processID, Scanner: sc, Metrics: sqliteMetrics, OnMediaAdded: scancoord.MediaAddedFunc(postingest.NewScanMediaAddedEnqueueCallback(postIngestEnqueuer)), OnScanCancelled: func(_ context.Context, taskID int64) error { dispatcher.CancelScan(taskID); return nil }, OnError: func(err error) { log.Printf("scan coordinator: %v", err) }})
+	if err != nil {
+		log.Fatalf("scan coordinator: %v", err)
 	}
+	background := &handler.BackgroundGroup{}
+	deps := handler.Dependencies{ServerContext: serverCtx, Background: background, Coordinator: coordinator, Queue: postIngestQueue, PostIngest: postIngestEnqueuer, Dispatcher: dispatcher, AdminOverviewBuilder: handler.NewAdminOverviewBuilder(db, dispatcher, sqliteMetrics), Worker: worker, PackageWorker: packageWorker, PreviewWorker: previewWorker, Subtitle: subSvc, Upload: up, Instant: instantScheduler, SessionManager: sessionMgr, AtrackWorker: atrackWorker, KeyframeWorker: keyframeWorker, LyricWorker: lyricWorker, PhotoClassifyWorker: photoClassifyWorker, DocCoverWorker: docCoverWorker, KeyVault: keyVault, AssetEncryptor: assetEncryptor, DerivedStore: derivedStore}
+	engine := api.NewEngine(cfg, application, deps)
+	mon := monitor.NewService(db, coordinator, 15*time.Second)
+	monitorDone := make(chan struct{})
+	go func() { defer close(monitorDone); mon.Start(serverCtx) }()
+	httpServer := &http.Server{Addr: cfg.Addr(), Handler: engine}
+	serverDone := make(chan error, 1)
+	go func() {
+		log.Printf("knox-media listening on http://%s", cfg.Addr())
+		serverDone <- httpServer.ListenAndServe()
+	}()
+	select {
+	case err := <-serverDone:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("http server stopped: %v", err)
+		}
+		serverCancel()
+	case <-serverCtx.Done():
+	}
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer shutdownCancel()
+	_ = httpServer.Shutdown(shutdownCtx)
+	serverCancel()
+	<-monitorDone
+	_ = background.Wait(shutdownCtx)
+	_ = coordinator.ShutdownContext(shutdownCtx)
+	select {
+	case err := <-dispatcherDone:
+		if err != nil {
+			log.Printf("post-ingest dispatcher shutdown: %v", err)
+		}
+	case <-shutdownCtx.Done():
+		log.Printf("post-ingest dispatcher shutdown: %v", shutdownCtx.Err())
+	}
+
 }
 
 // seedUsers creates default admin + demo viewer when DB is empty; ensures viewer exists on old DBs.
@@ -535,4 +570,20 @@ func loadSystemOptionsTranscodeSettings(db *sql.DB) transcode.Settings {
 		return transcode.DefaultSettings()
 	}
 	return transcode.SettingsFromOptionsJSON(raw.String)
+}
+
+func hostnameOrUnknown() string {
+	h, err := os.Hostname()
+	if err != nil || strings.TrimSpace(h) == "" {
+		return "unknown-host"
+	}
+	return h
+}
+func buildDispatcherOptions(cfg *config.Config, owner string) postingest.DispatcherOptions {
+	opts := postingest.DefaultDispatcherOptions()
+	opts.OwnerID = owner
+	opts.Global = cfg.PostIngest.MaxConcurrent
+	opts.Poster = cfg.PostIngest.PosterMaxConcurrent
+	opts.Preview = cfg.PostIngest.PreviewMaxConcurrent
+	return opts
 }
