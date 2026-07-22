@@ -242,7 +242,7 @@ func insertDependenciesTx(ctx context.Context, tx *sql.Tx, dependencies []Depend
 	}
 	return nil
 }
-func validateDependencyTx(ctx context.Context, tx *sql.Tx, stepID int64, dependsOn any, mediaID, generation, runID int64) error {
+func validateDependencyTx(ctx context.Context, tx *sql.Tx, stepID int64, dependsOn any, mediaID, generation, runID int64) (retErr error) {
 	if stepID <= 0 {
 		return errors.New("dependency step does not exist")
 	}
@@ -283,7 +283,11 @@ func validateDependencyTx(ctx context.Context, tx *sql.Tx, stepID int64, depends
 		closed = true
 		return rows.Close()
 	}
-	defer func() { _ = closeRows() }()
+	defer func() {
+		if closeErr := closeRows(); closeErr != nil {
+			retErr = errors.Join(retErr, closeErr)
+		}
+	}()
 	for rows.Next() {
 		var from, to int64
 		if err := rows.Scan(&from, &to); err != nil {
