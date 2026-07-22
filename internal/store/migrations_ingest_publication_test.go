@@ -1997,3 +1997,58 @@ func TestExactPublicationTableRejectsNamedConflictAndInlineConstraintDrift(t *te
 		t.Fatalf("canonical named constraints rejected: %v", err)
 	}
 }
+
+func TestPublicationConstraintFingerprintsPreserveLiteralBytes(t *testing.T) {
+	cases := []struct {
+		name, a, b string
+		equal      bool
+	}{
+		{"keyword-format-comments", `CREATE TABLE x(v TEXT CHECK(v IN ('ready')))`, `create table x ( v text /* outside */ check ( v in ( 'ready' ) ) )`, true},
+		{"literal-case", `CREATE TABLE x(v TEXT CHECK(v='READY'))`, `CREATE TABLE x(v TEXT CHECK(v='ready'))`, false},
+		{"literal-space", `CREATE TABLE x(v TEXT CHECK(v='a b'))`, `CREATE TABLE x(v TEXT CHECK(v='ab'))`, false},
+		{"escaped-quote", `CREATE TABLE x(v TEXT CHECK(v='it''s READY'))`, `CREATE TABLE x(v TEXT CHECK(v='it''s ready'))`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, ddl := range []string{tc.a, tc.b} {
+				db := openIngestPublicationMigrationTestDB(t)
+				if _, err := db.Exec(ddl); err != nil {
+					t.Fatalf("real SQLite rejected %q: %v", ddl, err)
+				}
+				db.Close()
+			}
+			a, err := publicationManagedConstraintMultiset(tc.a)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, err := publicationManagedConstraintMultiset(tc.b)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := strings.Join(a, "|") == strings.Join(b, "|")
+			if got != tc.equal {
+				t.Fatalf("equal=%t want=%t a=%v b=%v", got, tc.equal, a, b)
+			}
+		})
+	}
+}
+
+func TestExactPublicationTableRejectsLiteralConstraintDrift(t *testing.T) {
+	for _, tc := range []struct{ name, actual, want string }{
+		{"case", `CREATE TABLE literal_drift(v TEXT CHECK(v='READY'))`, `CREATE TABLE literal_drift(v TEXT CHECK(v='ready'))`},
+		{"space", `CREATE TABLE literal_drift(v TEXT CHECK(v='a b'))`, `CREATE TABLE literal_drift(v TEXT CHECK(v='ab'))`},
+		{"escaped", `CREATE TABLE literal_drift(v TEXT CHECK(v='it''s READY'))`, `CREATE TABLE literal_drift(v TEXT CHECK(v='it''s ready'))`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openIngestPublicationMigrationTestDB(t)
+			if _, err := db.Exec(tc.actual); err != nil {
+				t.Fatal(err)
+			}
+			conn, _ := db.Conn(context.Background())
+			defer conn.Close()
+			if err := exactPublicationTable(context.Background(), conn, "literal_drift", tc.want); err == nil {
+				t.Fatal("literal constraint drift accepted")
+			}
+		})
+	}
+}

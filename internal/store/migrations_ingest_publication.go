@@ -2428,6 +2428,52 @@ func stripPublicationSQLComments(s string) (string, error) {
 	return out.String(), nil
 }
 
+func canonicalPublicationConstraintSQL(s string) (string, error) {
+	clean, err := stripPublicationSQLComments(s)
+	if err != nil {
+		return "", err
+	}
+	var out strings.Builder
+	for i := 0; i < len(clean); {
+		c := clean[i]
+		if c == ' ' || c == '\t' || c == '\r' || c == '\n' {
+			i++
+			continue
+		}
+		if c == '\'' || c == '"' || c == '`' || c == '[' {
+			close := c
+			if c == '[' {
+				close = ']'
+			}
+			start := i
+			i++
+			for i < len(clean) {
+				if clean[i] == close {
+					if c != '[' && i+1 < len(clean) && clean[i+1] == close {
+						i += 2
+						continue
+					}
+					i++
+					break
+				}
+				i++
+			}
+			if i > len(clean) || clean[i-1] != close {
+				return "", fmt.Errorf("unterminated quoted SQL token")
+			}
+			out.WriteString(clean[start:i])
+			continue
+		}
+		if c >= 'A' && c <= 'Z' {
+			out.WriteByte(c + ('a' - 'A'))
+		} else {
+			out.WriteByte(c)
+		}
+		i++
+	}
+	return out.String(), nil
+}
+
 func publicationSQLTokens(s string) ([]publicationSQLToken, error) {
 	clean, err := stripPublicationSQLComments(s)
 	if err != nil {
@@ -2514,7 +2560,8 @@ func publicationConstraintFragment(clean string, tokens []publicationSQLToken, a
 		if end >= len(tokens) {
 			return "", at, fmt.Errorf("CHECK body unterminated")
 		}
-		return normalizePublicationSQL(clean[tokens[at].start:tokens[end].end]), end + 1, nil
+		fingerprint, err := canonicalPublicationConstraintSQL(clean[tokens[at].start:tokens[end].end])
+		return fingerprint, end + 1, err
 	}
 	if kind == "unique" || kind == "primary" {
 		end := at + 1
@@ -2541,7 +2588,8 @@ func publicationConstraintFragment(clean string, tokens []publicationSQLToken, a
 		if end < len(tokens) && tokens[end].word == "autoincrement" {
 			end++
 		}
-		return normalizePublicationSQL(clean[tokens[at].start:tokens[end-1].end]), end, nil
+		fingerprint, err := canonicalPublicationConstraintSQL(clean[tokens[at].start:tokens[end-1].end])
+		return fingerprint, end, err
 	}
 	return "", at, nil
 }
