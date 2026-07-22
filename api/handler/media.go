@@ -55,6 +55,7 @@ func (h *Handler) listMediaObserved(c *gin.Context, afterBatch func(mediaListSta
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	spec.IncludeUnpublished = middleware.IsAdmin(c)
 	if spec.LibraryID != nil && spec.RestrictLibraries {
 		if _, ok := profile.AllowedLibraryIDs[*spec.LibraryID]; !ok {
 			c.JSON(http.StatusForbidden, gin.H{"error": "library access denied"})

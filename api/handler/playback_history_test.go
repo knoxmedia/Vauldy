@@ -77,3 +77,41 @@ func TestParsePlaybackUserAgentEmpty(t *testing.T) {
 		t.Fatalf("got player=%q platform=%q", player, platform)
 	}
 }
+
+func TestListPlaybackHistoryFiltersPublicationStateInBothSources(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := setupPlaybackHistoryTestDB(t)
+	if _, err := h.App.DB.Exec(`DELETE FROM play_progress;
+		UPDATE media SET publication_state='processing' WHERE id=10;
+		INSERT INTO media(id,library_id,file_id,title,file_path,file_type,publication_state) VALUES
+		(11,1,'f-11','Failed','E:/movies/11.mp4','video','failed'),
+		(12,1,'f-12','Cancelled','E:/movies/12.mp4','video','cancelled'),
+		(13,1,'f-13','Degraded','E:/movies/13.mp4','video','degraded'),
+		(14,1,'f-14','Published','E:/movies/14.mp4','video','published');
+		INSERT INTO activity_log(user_id,username,action,media_id,message) VALUES
+		(1,'viewer','playback_start',10,'processing'),(1,'viewer','playback_start',11,'failed'),(1,'viewer','playback_start',13,'degraded');
+		INSERT INTO play_progress(user_id,file_id,position,play_count) VALUES
+		(1,'f-12',12,1),(1,'f-14',14,1)`); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/playback-history?range=all", nil)
+	setUserCtx(c, 1, "user", "viewer")
+	h.ListPlaybackHistory(c)
+	var payload struct {
+		Items []struct {
+			MediaID int64 `json:"media_id"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	seen := map[int64]bool{}
+	for _, item := range payload.Items {
+		seen[item.MediaID] = true
+	}
+	if w.Code != http.StatusOK || len(seen) != 2 || !seen[13] || !seen[14] {
+		t.Fatalf("items=%+v body=%s", payload.Items, w.Body.String())
+	}
+}

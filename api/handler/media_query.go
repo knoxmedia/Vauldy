@@ -35,6 +35,7 @@ type mediaListSpec struct {
 	Limit, BatchSize                                    int
 	Cursor                                              *mediaCursor
 	UserID                                              int64
+	IncludeUnpublished                                  bool
 }
 type mediaQuery struct {
 	SQL           string
@@ -132,6 +133,7 @@ func buildMediaQuery(spec mediaListSpec, cursor *mediaCursor, batchLimit int) (m
 	q := `WITH params AS (SELECT ? AS user_id),
 candidates AS MATERIALIZED (SELECT m.* FROM media m WHERE 1=1`
 	args := []any{spec.UserID}
+	q += ` AND ` + mediaPublicationVisibilityPredicate("m", spec.IncludeUnpublished)
 	if spec.LibraryID != nil {
 		q += ` AND m.library_id=?`
 		args = append(args, *spec.LibraryID)

@@ -58,7 +58,7 @@ func (h *Handler) ListLibraries(c *gin.Context) {
 	}
 	rows, err := h.App.DB.Query(`
 		SELECT l.id, l.name, l.type, l.path, l.auto_scan, l.enabled, l.realtime_monitor, l.preview_extract, l.drm_enabled, COALESCE(l.encryption_mode,'drm'), l.cleanup_local_source_after_package, l.jit_prepare_on_ingest, COALESCE(l.encrypted_assets_enabled,0), COALESCE(l.encrypted_assets_cleanup_plaintext,0), COALESCE(l.encrypted_assets_dir_mode,'library'), COALESCE(l.encrypted_assets_custom_dir,''), l.metadata_providers, l.image_providers, l.metadata_refresh_policy, l.scraper, l.created_at,
-			(SELECT COUNT(1) FROM media m WHERE m.library_id = l.id) AS media_count,
+			(SELECT COUNT(1) FROM media m WHERE m.library_id = l.id AND m.publication_state IN ('published','degraded')) AS media_count,
 			(SELECT id FROM scan_task st WHERE st.library_id = l.id ORDER BY st.id DESC LIMIT 1) AS scan_task_id,
 			(SELECT COALESCE(status,'') FROM scan_task st WHERE st.library_id = l.id ORDER BY st.id DESC LIMIT 1) AS scan_status,
 			(SELECT COALESCE(processed_count,0) FROM scan_task st WHERE st.library_id = l.id ORDER BY st.id DESC LIMIT 1) AS scan_processed_count,

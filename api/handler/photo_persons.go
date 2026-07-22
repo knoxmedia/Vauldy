@@ -23,10 +23,15 @@ func (h *Handler) ListPhotoPersons(c *gin.Context) {
 		return
 	}
 	rows, err := h.App.DB.Query(`
-		SELECT id, label, cover_face_id, media_count
-		FROM photo_person
-		WHERE library_id = ? AND media_count > 0
-		ORDER BY media_count DESC, label ASC`, libraryID)
+		SELECT p.id, p.label,
+			(SELECT MIN(pf.id) FROM photo_face pf JOIN media cm ON cm.id=pf.media_id WHERE pf.person_id=p.id AND pf.library_id=p.library_id AND cm.library_id=p.library_id AND cm.file_type='image' AND cm.status='active' AND cm.publication_state IN ('published','degraded')) AS cover_face_id,
+			COUNT(DISTINCT m.id) AS media_count
+		FROM photo_person p
+		JOIN photo_face f ON f.person_id=p.id
+		JOIN media m ON m.id=f.media_id AND m.library_id=p.library_id AND m.file_type='image' AND m.status='active' AND m.publication_state IN ('published','degraded')
+		WHERE p.library_id = ? AND f.library_id=p.library_id
+		GROUP BY p.id,p.label
+		ORDER BY media_count DESC, p.label ASC`, libraryID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

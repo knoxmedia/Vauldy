@@ -37,7 +37,7 @@ func (h *Handler) ListPhotoPlaces(c *gin.Context) {
 			COUNT(1) AS cnt,
 			MIN(id) AS cover_id
 		FROM media
-		WHERE library_id = ? AND file_type = 'image' AND status = 'active'
+		WHERE library_id = ? AND file_type = 'image' AND status = 'active' AND publication_state IN ('published','degraded')
 			AND NULLIF(json_extract(meta_json, '$.photo.place_id'), '') IS NOT NULL
 		GROUP BY place_id, location_name
 		ORDER BY cnt DESC, location_name ASC`, libraryID)
