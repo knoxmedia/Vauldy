@@ -3,6 +3,7 @@ package publication
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -35,8 +36,9 @@ func RetryIngest(ctx context.Context, db *sql.DB, mediaID int64, prepare coreifa
 	var runID int64
 	var runState string
 	var snapshot string
+	var policyVersion int
 	var scanTaskID sql.NullInt64
-	err = tx.QueryRowContext(ctx, `SELECT id,status,config_snapshot_json,scan_task_id FROM media_ingest_run WHERE media_id=? AND generation=?`, mediaID, generation).Scan(&runID, &runState, &snapshot, &scanTaskID)
+	err = tx.QueryRowContext(ctx, `SELECT id,status,config_snapshot_json,policy_version,scan_task_id FROM media_ingest_run WHERE media_id=? AND generation=?`, mediaID, generation).Scan(&runID, &runState, &snapshot, &policyVersion, &scanTaskID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrIngestNotFound
 	}
@@ -63,6 +65,9 @@ func RetryIngest(ctx context.Context, db *sql.DB, mediaID int64, prepare coreifa
 	if mediaState != "failed" && mediaState != "cancelled" {
 		return ErrNoRetryableWork
 	}
+	if err = validateRetryPolicySnapshot(policyVersion, snapshot); err != nil {
+		return err
+	}
 	result, err := tx.ExecContext(ctx, `UPDATE media SET ingest_generation=ingest_generation+1,publication_state='processing',publication_error='' WHERE id=? AND ingest_generation=? AND publication_state IN ('failed','cancelled')`, mediaID, generation)
 	if err != nil {
 		return err
@@ -72,7 +77,7 @@ func RetryIngest(ctx context.Context, db *sql.DB, mediaID int64, prepare coreifa
 		return ErrNoRetryableWork
 	}
 	newGeneration := generation + 1
-	result, err = tx.ExecContext(ctx, `INSERT INTO media_ingest_run(media_id,generation,scan_task_id,reason,status,preserve_visibility,config_snapshot_json) VALUES(?,?,?,'manual_retry','processing',0,?)`, mediaID, newGeneration, nullInt(scanTaskID), snapshot)
+	result, err = tx.ExecContext(ctx, `INSERT INTO media_ingest_run(media_id,generation,scan_task_id,reason,status,preserve_visibility,config_snapshot_json,policy_version) VALUES(?,?,?,'manual_retry','processing',0,?,?)`, mediaID, newGeneration, nullInt(scanTaskID), snapshot, policyVersion)
 	if err != nil {
 		return fmt.Errorf("retry ingest insert run: %w", err)
 	}
@@ -104,12 +109,17 @@ func RetryIngest(ctx context.Context, db *sql.DB, mediaID int64, prepare coreifa
 	if len(steps) == 0 {
 		return ErrNoRetryableWork
 	}
+	stepIDMap := make(map[int64]int64, len(steps))
 	for _, s := range steps {
 		result, err = tx.ExecContext(ctx, `INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status,max_attempts,available_at) VALUES(?,?,?,?,?,'waiting',?,?)`, newRunID, mediaID, newGeneration, s.typ, s.required, s.max, available)
 		if err != nil {
 			return err
 		}
-		stepID, _ := result.LastInsertId()
+		stepID, idErr := result.LastInsertId()
+		if idErr != nil {
+			return idErr
+		}
+		stepIDMap[s.id] = stepID
 		switch s.typ {
 		case "scrape":
 			_, err = tx.ExecContext(ctx, `INSERT INTO scrape_task(media_id,source,status,progress,available_at,ingest_run_id,ingest_step_id,generation) VALUES(?,'manual-retry','waiting',0,?,?,?,?)`, mediaID, available, newRunID, stepID, newGeneration)
@@ -129,6 +139,9 @@ func RetryIngest(ctx context.Context, db *sql.DB, mediaID int64, prepare coreifa
 		if err != nil {
 			return fmt.Errorf("retry ingest enqueue %s: %w", s.typ, err)
 		}
+	}
+	if err = cloneRetryDependenciesTx(ctx, tx, runID, mediaID, generation, newRunID, newGeneration, stepIDMap); err != nil {
+		return err
 	}
 	if err = tx.Commit(); err != nil {
 		return err
@@ -199,6 +212,94 @@ func clonePrepareExecutionTx(ctx context.Context, tx *sql.Tx, oldStepID, newRunI
 	n, _ := res.RowsAffected()
 	if n == 0 {
 		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func validateRetryPolicySnapshot(policyVersion int, snapshot string) error {
+	if policyVersion == 1 {
+		return nil
+	}
+	if policyVersion != PolicyV2 {
+		return fmt.Errorf("publication retry: unsupported policy version %d", policyVersion)
+	}
+	var decoded struct {
+		PolicyVersion int `json:"policy_version"`
+	}
+	if err := json.Unmarshal([]byte(snapshot), &decoded); err != nil {
+		return fmt.Errorf("publication retry: decode v2 policy snapshot: %w", err)
+	}
+	if decoded.PolicyVersion != policyVersion {
+		return fmt.Errorf("publication retry: policy snapshot version %d does not match run version %d", decoded.PolicyVersion, policyVersion)
+	}
+	return nil
+}
+
+func cloneRetryDependenciesTx(ctx context.Context, tx *sql.Tx, oldRunID, mediaID, oldGeneration, newRunID, newGeneration int64, stepIDMap map[int64]int64) (retErr error) {
+	rows, err := tx.QueryContext(ctx, `
+SELECT d.step_id,d.depends_on_step_id,d.dependency_kind,
+       s.run_id,s.media_id,s.generation,
+       t.run_id,t.media_id,t.generation
+FROM media_ingest_step_dependency d
+JOIN media_ingest_step s ON s.id=d.step_id
+LEFT JOIN media_ingest_step t ON t.id=d.depends_on_step_id
+WHERE s.run_id=?
+ORDER BY d.step_id,d.dependency_kind,d.depends_on_step_id`, oldRunID)
+	if err != nil {
+		return fmt.Errorf("retry ingest query dependencies: %w", err)
+	}
+	defer func() { retErr = errors.Join(retErr, rows.Close()) }()
+	type oldDependency struct {
+		newStepID int64
+		dependsOn sql.NullInt64
+		kind      string
+	}
+	var dependencies []oldDependency
+	for rows.Next() {
+		var oldStepID, sourceRun, sourceMedia, sourceGeneration int64
+		var oldTargetID, targetRun, targetMedia, targetGeneration sql.NullInt64
+		var kind string
+		if err := rows.Scan(&oldStepID, &oldTargetID, &kind, &sourceRun, &sourceMedia, &sourceGeneration, &targetRun, &targetMedia, &targetGeneration); err != nil {
+			return fmt.Errorf("retry ingest scan dependency: %w", err)
+		}
+		newStepID, ok := stepIDMap[oldStepID]
+		if !ok || sourceRun != oldRunID || sourceMedia != mediaID || sourceGeneration != oldGeneration {
+			return errors.New("publication retry: dependency source belongs to a different run/media/generation")
+		}
+		dep := oldDependency{newStepID: newStepID, dependsOn: oldTargetID, kind: kind}
+		if kind == string(DependencyMediaVisible) {
+			if oldTargetID.Valid {
+				return errors.New("publication retry: media_visible dependency has target")
+			}
+		} else if kind == string(DependencyStepDone) {
+			if !oldTargetID.Valid || !targetRun.Valid || !targetMedia.Valid || !targetGeneration.Valid || targetRun.Int64 != oldRunID || targetMedia.Int64 != mediaID || targetGeneration.Int64 != oldGeneration {
+				return errors.New("publication retry: dependency target belongs to a different run/media/generation")
+			}
+			if _, ok := stepIDMap[oldTargetID.Int64]; !ok {
+				return errors.New("publication retry: dependency target has no cloned step")
+			}
+		} else {
+			return fmt.Errorf("publication retry: unsupported dependency kind %q", kind)
+		}
+		dependencies = append(dependencies, dep)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("retry ingest iterate dependencies: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("retry ingest close dependencies: %w", err)
+	}
+	for _, dep := range dependencies {
+		var target any
+		if dep.dependsOn.Valid {
+			target = stepIDMap[dep.dependsOn.Int64]
+		}
+		if err := validateDependencyTx(ctx, tx, dep.newStepID, target, mediaID, newGeneration, newRunID); err != nil {
+			return fmt.Errorf("retry ingest validate dependency: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(?,?,?)`, dep.newStepID, target, dep.kind); err != nil {
+			return fmt.Errorf("retry ingest insert dependency: %w", err)
+		}
 	}
 	return nil
 }
