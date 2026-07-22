@@ -251,6 +251,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("scan coordinator: %v", err)
 	}
+	finalizeRecoveryDone := startFinalizeRecoveryLoop(serverCtx, db, 10*time.Second, func(err error) { log.Printf("scan finalize recovery: %v", err) })
 	background := &handler.BackgroundGroup{}
 	deps := handler.Dependencies{ServerContext: serverCtx, Background: background, Coordinator: coordinator, Queue: postIngestQueue, PostIngest: postIngestEnqueuer, Dispatcher: dispatcher, AdminOverviewBuilder: handler.NewAdminOverviewBuilder(db, dispatcher, sqliteMetrics), Worker: worker, PackageWorker: packageWorker, PreviewWorker: previewWorker, Subtitle: subSvc, Upload: up, Instant: instantScheduler, SessionManager: sessionMgr, AtrackWorker: atrackWorker, KeyframeWorker: keyframeWorker, LyricWorker: lyricWorker, PhotoClassifyWorker: photoClassifyWorker, DocCoverWorker: docCoverWorker, KeyVault: keyVault, AssetEncryptor: assetEncryptor, DerivedStore: derivedStore}
 	engine := api.NewEngine(cfg, application, deps)
@@ -275,6 +276,11 @@ func main() {
 	defer shutdownCancel()
 	_ = httpServer.Shutdown(shutdownCtx)
 	serverCancel()
+	select {
+	case <-finalizeRecoveryDone:
+	case <-shutdownCtx.Done():
+		log.Printf("scan finalize recovery shutdown: %v", shutdownCtx.Err())
+	}
 	<-monitorDone
 	_ = background.Wait(shutdownCtx)
 	_ = coordinator.ShutdownContext(shutdownCtx)

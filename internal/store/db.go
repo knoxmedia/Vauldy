@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 
 	_ "modernc.org/sqlite"
 
@@ -228,6 +229,27 @@ CREATE TABLE IF NOT EXISTS scan_lease (
     FOREIGN KEY (scan_task_id) REFERENCES scan_task(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_scan_lease_until ON scan_lease(lease_until);
+
+CREATE TABLE IF NOT EXISTS scan_finalize_recovery (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL,
+    library_id INTEGER NOT NULL,
+    owner_id TEXT NOT NULL,
+    desired_status TEXT NOT NULL CHECK (desired_status IN ('done','failed','cancelled')),
+    error_message TEXT,
+    cancelled INTEGER NOT NULL DEFAULT 0,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_available_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    claim_owner TEXT,
+    claim_until TIMESTAMP,
+    last_error TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(task_id,owner_id),
+    FOREIGN KEY (task_id) REFERENCES scan_task(id) ON DELETE CASCADE,
+    FOREIGN KEY (library_id) REFERENCES library(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_scan_finalize_recovery_available ON scan_finalize_recovery(next_available_at,id);
 CREATE TABLE IF NOT EXISTS post_ingest_task (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     media_id INTEGER NOT NULL,
@@ -655,6 +677,16 @@ CREATE TABLE IF NOT EXISTS system_options (
 );
 `
 
+func appendSQLitePragmas(path string) string {
+	separator := "?"
+	if strings.Contains(path, "?") {
+		separator = "&"
+	}
+	if strings.HasSuffix(path, "?") || strings.HasSuffix(path, "&") {
+		separator = ""
+	}
+	return path + separator + "_pragma=busy_timeout(30000)&_pragma=foreign_keys(ON)&_pragma=synchronous(NORMAL)"
+}
 func OpenSQLite(path string) (*sql.DB, error) {
 	return OpenSQLiteContext(context.Background(), path)
 }
@@ -663,13 +695,17 @@ func OpenSQLiteContext(ctx context.Context, path string) (*sql.DB, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(30000)&_pragma=foreign_keys(ON)")
+	db, err := sql.Open("sqlite", appendSQLitePragmas(path))
 	if err != nil {
 		return nil, err
 	}
-	// SQLite: avoid unlimited concurrent connections fighting for the DB lock; WAL allows concurrent readers.
-	db.SetMaxOpenConns(25)
-	db.SetMaxIdleConns(5)
+	if isMemorySQLitePath(path) {
+		db.SetMaxOpenConns(1)
+		db.SetMaxIdleConns(1)
+	} else {
+		db.SetMaxOpenConns(8)
+		db.SetMaxIdleConns(4)
+	}
 	db.SetConnMaxLifetime(0)
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
@@ -992,7 +1028,7 @@ func seedAIProviders(db *sql.DB) {
 	for _, p := range []struct{ id, name, apiURL, model string }{
 		{id: "openai", name: "OpenAI", apiURL: "https://api.openai.com/v1", model: "gpt-4o"},
 		{id: "deepseek", name: "DeepSeek", apiURL: "https://api.deepseek.com/v1", model: "deepseek-chat"},
-		{id: "tongyi", name: "通义千问", apiURL: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-plus"},
+		{id: "tongyi", name: "閫氫箟鍗冮棶", apiURL: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-plus"},
 		{id: "ollama", name: "Ollama", apiURL: "http://localhost:11434", model: ""},
 	} {
 		_, _ = db.Exec(

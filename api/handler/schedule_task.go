@@ -32,7 +32,7 @@ func (h *Handler) StartScheduleLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-tk.C:
-			h.runDueScheduledTasks()
+			h.runDueScheduledTasks(ctx)
 		}
 	}
 }
@@ -170,7 +170,7 @@ func (h *Handler) RunScheduledTask(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
 		return
 	}
-	msg, runErr := h.runOneScheduledTask(id)
+	msg, runErr := h.runOneScheduledTask(c.Request.Context(), id)
 	if runErr != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": runErr.Error(), "message": msg})
 		return
@@ -178,7 +178,7 @@ func (h *Handler) RunScheduledTask(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true, "message": msg})
 }
 
-func (h *Handler) runDueScheduledTasks() {
+func (h *Handler) runDueScheduledTasks(ctx context.Context) {
 	rows, err := h.App.DB.Query(`
 		SELECT id FROM scheduled_task
 		WHERE enabled = 1
@@ -195,11 +195,11 @@ func (h *Handler) runDueScheduledTasks() {
 		if rows.Scan(&id) != nil {
 			continue
 		}
-		_, _ = h.runOneScheduledTask(id)
+		_, _ = h.runOneScheduledTask(ctx, id)
 	}
 }
 
-func (h *Handler) runOneScheduledTask(id int64) (string, error) {
+func (h *Handler) runOneScheduledTask(ctx context.Context, id int64) (string, error) {
 	var taskType, payloadJSON sql.NullString
 	if err := h.App.DB.QueryRow(`SELECT task_type, payload_json FROM scheduled_task WHERE id = ? LIMIT 1`, id).Scan(&taskType, &payloadJSON); err != nil {
 		if err == sql.ErrNoRows {
@@ -209,7 +209,7 @@ func (h *Handler) runOneScheduledTask(id int64) (string, error) {
 	}
 	payload := map[string]any{}
 	_ = json.Unmarshal([]byte(payloadJSON.String), &payload)
-	msg, runErr := h.executeScheduledTask(taskType.String, payload)
+	msg, runErr := h.executeScheduledTask(ctx, taskType.String, payload)
 	status := "done"
 	if runErr != nil {
 		status = "failed"
@@ -223,19 +223,19 @@ func (h *Handler) runOneScheduledTask(id int64) (string, error) {
 	return msg, runErr
 }
 
-func (h *Handler) executeScheduledTask(taskType string, payload map[string]any) (string, error) {
+func (h *Handler) executeScheduledTask(ctx context.Context, taskType string, payload map[string]any) (string, error) {
 	switch taskType {
 	case "library_scan":
 		libraryID := int64(anyToInt(payload["library_id"]))
 		if libraryID <= 0 {
 			return "", fmt.Errorf("payload.library_id required")
 		}
-		taskID, runningTaskID, err := h.startLibraryScanTask(libraryID, "schedule")
+		taskID, runningTaskID, err := h.startLibraryScanTask(ctx, libraryID, "schedule")
 		if err != nil {
 			return "", err
 		}
 		if runningTaskID > 0 {
-			return "", fmt.Errorf("library scan already running (task #%d)", runningTaskID)
+			return fmt.Sprintf("扫描请求已合并到任务 #%d", runningTaskID), nil
 		}
 		return fmt.Sprintf("已启动扫描任务 #%d", taskID), nil
 	case "scrape_run":

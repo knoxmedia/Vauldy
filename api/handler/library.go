@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"net/http"
@@ -14,27 +15,27 @@ import (
 )
 
 type libraryBody struct {
-	Name                  string   `json:"name" binding:"required"`
-	Type                  string   `json:"type" binding:"required"`
-	Path                  string   `json:"path"`
-	Folders               []string `json:"folders"`
-	AutoScan              *int     `json:"auto_scan"`
-	Enabled               *int     `json:"enabled"`
-	RealtimeMonitor       *int     `json:"realtime_monitor"`
-	PreviewExtract        *int     `json:"preview_extract"`
-	DRMEnabled            *int     `json:"drm_enabled"`
-	EncryptionMode        string   `json:"encryption_mode"`
-	CleanupLocalSource    *int     `json:"cleanup_local_source_after_package"`
-	MetadataProviders     []string `json:"metadata_providers"`
-	ImageProviders        []string `json:"image_providers"`
-	MetadataRefreshPolicy string   `json:"metadata_refresh_policy"`
-	Scraper               string   `json:"scraper"`
-	JITPrepareOnIngest                 *int `json:"jit_prepare_on_ingest"`
-	EncryptedAssetsEnabled             *int   `json:"encrypted_assets_enabled"`
-	EncryptedAssetsCleanupPlaintext    *int   `json:"encrypted_assets_cleanup_plaintext"`
-	EncryptedAssetsDirMode             string `json:"encrypted_assets_dir_mode"`
-	EncryptedAssetsCustomDir           string `json:"encrypted_assets_custom_dir"`
-	ScanExcludePatterns                string `json:"scan_exclude_patterns"`
+	Name                            string   `json:"name" binding:"required"`
+	Type                            string   `json:"type" binding:"required"`
+	Path                            string   `json:"path"`
+	Folders                         []string `json:"folders"`
+	AutoScan                        *int     `json:"auto_scan"`
+	Enabled                         *int     `json:"enabled"`
+	RealtimeMonitor                 *int     `json:"realtime_monitor"`
+	PreviewExtract                  *int     `json:"preview_extract"`
+	DRMEnabled                      *int     `json:"drm_enabled"`
+	EncryptionMode                  string   `json:"encryption_mode"`
+	CleanupLocalSource              *int     `json:"cleanup_local_source_after_package"`
+	MetadataProviders               []string `json:"metadata_providers"`
+	ImageProviders                  []string `json:"image_providers"`
+	MetadataRefreshPolicy           string   `json:"metadata_refresh_policy"`
+	Scraper                         string   `json:"scraper"`
+	JITPrepareOnIngest              *int     `json:"jit_prepare_on_ingest"`
+	EncryptedAssetsEnabled          *int     `json:"encrypted_assets_enabled"`
+	EncryptedAssetsCleanupPlaintext *int     `json:"encrypted_assets_cleanup_plaintext"`
+	EncryptedAssetsDirMode          string   `json:"encrypted_assets_dir_mode"`
+	EncryptedAssetsCustomDir        string   `json:"encrypted_assets_custom_dir"`
+	ScanExcludePatterns             string   `json:"scan_exclude_patterns"`
 }
 
 func (h *Handler) ListLibraries(c *gin.Context) {
@@ -331,7 +332,7 @@ func (h *Handler) ScanLibrary(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	taskID, runningTaskID, err := h.startLibraryScanTask(id, "manual")
+	taskID, runningTaskID, err := h.startLibraryScanTask(c.Request.Context(), id, "manual")
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -414,7 +415,11 @@ func foldersForLibrary(byID map[int64][]string, libraryID int64, fallbackPath st
 }
 
 func listLibraryFolders(db *sql.DB, libraryID int64, fallbackPath string) []string {
-	rows, err := db.Query(`SELECT path FROM library_folder WHERE library_id = ? ORDER BY sort_order, id`, libraryID)
+	return listLibraryFoldersContext(context.Background(), db, libraryID, fallbackPath)
+}
+
+func listLibraryFoldersContext(ctx context.Context, db *sql.DB, libraryID int64, fallbackPath string) []string {
+	rows, err := db.QueryContext(ctx, `SELECT path FROM library_folder WHERE library_id = ? ORDER BY sort_order, id`, libraryID)
 	if err != nil {
 		if strings.TrimSpace(fallbackPath) == "" {
 			return nil

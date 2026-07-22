@@ -259,3 +259,65 @@ func TestListScanTasksTimesOutWhileWaitingForConnection(t *testing.T) {
 		t.Fatalf("elapsed=%s", elapsed)
 	}
 }
+
+func TestScheduledTaskUsesSharedCoordinatorCoalescing(t *testing.T) {
+	db, err := store.OpenSQLite(filepath.Join(t.TempDir(), "scheduled-scan.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	root := t.TempDir()
+	res, err := db.Exec(`INSERT INTO library(name,type,path) VALUES('scheduled','video',?)`, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	libraryID, _ := res.LastInsertId()
+	spy := &scanSubmitterSpy{result: scancoord.SubmitResult{ExistingTaskID: 77, Started: false}}
+	h := &Handler{App: &app.App{DB: db, Config: &config.Config{}}, ScanCoordinator: spy}
+	msg, err := h.executeScheduledTask(context.Background(), "library_scan", map[string]any{"library_id": float64(libraryID)})
+	if err != nil {
+		t.Fatalf("coalesced scheduled scan must not fail: msg=%q err=%v", msg, err)
+	}
+	if len(spy.requests) != 1 {
+		t.Fatalf("requests=%+v want shared coordinator submission", spy.requests)
+	}
+	got := spy.requests[0]
+	if got.LibraryID != libraryID || got.Source != scancoord.SourceScheduled || len(got.Roots) != 1 || got.Roots[0] != root {
+		t.Fatalf("request=%+v", got)
+	}
+	if !strings.Contains(msg, "77") || !strings.Contains(msg, "合并") {
+		t.Fatalf("message=%q want coalesced existing task", msg)
+	}
+}
+
+func TestStartLibraryScanTaskPropagatesCancelledContext(t *testing.T) {
+	db, err := store.OpenSQLite(filepath.Join(t.TempDir(), "cancelled-scan.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	root := t.TempDir()
+	res, err := db.Exec(`INSERT INTO library(name,type,path) VALUES('cancelled','video',?)`, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	libraryID, _ := res.LastInsertId()
+	spy := &scanSubmitterSpy{}
+	h := &Handler{App: &app.App{DB: db, Config: &config.Config{}}, ScanCoordinator: spy}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _, err = h.startLibraryScanTask(ctx, libraryID, "manual")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err=%v want context canceled", err)
+	}
+	if len(spy.requests) != 0 {
+		t.Fatalf("requests=%+v want no submit after cancelled query", spy.requests)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM scan_task`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("scan tasks=%d want 0", count)
+	}
+}
