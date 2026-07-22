@@ -134,6 +134,30 @@ func TestScanLibraryFoldersAddsMediaAndNodes(t *testing.T) {
 	}
 }
 
+func TestScannerCallbackRegressionUsesCallbacksField(t *testing.T) {
+	db := newScannerTestDB(t)
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "movie.mp4"), []byte("video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	s := &Scanner{DB: db, SkipHash: true, OnMediaAdded: func(int64, string, string) {
+		panic("scanner field callback must not run")
+	}}
+	_, err := s.ScanLibraryFoldersWithContextAndCallbacks(context.Background(), 1, []string{root}, ScanCallbacks{
+		OnMediaAdded: func(context.Context, int64, string, string) error {
+			calls++
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("argument callback calls=%d want 1", calls)
+	}
+}
+
 func TestScanLibraryFoldersSkipsPretranscodeOutput(t *testing.T) {
 	t.Parallel()
 
