@@ -73,10 +73,28 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 	return s.ScanLibraryFoldersWithContextAndMediaAdded(ctx, libraryID, roots, callback)
 }
 
+type MetadataDiagnostic struct {
+	Source  string
+	Message string
+}
+
+type MetadataAttempt struct {
+	Attempted bool
+	Fields    []string
+	Errors    []MetadataDiagnostic
+}
+
+type ScanDiscovery struct {
+	MediaID         int64
+	Title           string
+	FileType        string
+	MetadataAttempt MetadataAttempt
+}
+
 type ScanCallbacks struct {
 	OnFile              func(string, error)
 	OnMediaAdded        func(context.Context, int64, string, string) error
-	OnMediaDiscoveredTx func(context.Context, *sql.Tx, int64, string, string) error
+	OnMediaDiscoveredTx func(context.Context, *sql.Tx, ScanDiscovery) error
 }
 
 func (s *Scanner) ScanLibraryFoldersWithContextAndMediaAdded(ctx context.Context, libraryID int64, roots []string, onMediaAdded func(context.Context, int64, string, string) error) (added int, err error) {
@@ -249,6 +267,7 @@ func (s *Scanner) ScanLibraryFoldersWithContextAndCallbacks(ctx context.Context,
 			var format, meta string
 			var photoMeta photoparse.PhotoMeta
 			var docMeta docparse.DocumentMeta
+			metadataAttempt := MetadataAttempt{}
 			if ft == "video" || ft == "audio" {
 				probe := s.ProbePath
 				if probe == nil {
@@ -256,19 +275,27 @@ func (s *Scanner) ScanLibraryFoldersWithContextAndCallbacks(ctx context.Context,
 						return storage.ProbePath(s.DB, s.Vault, s.FFprobePath, mediaID, path, s.FFprobeExtra)
 					}
 				}
-				if pr, e := probe(ctx, 0, path); e == nil {
+				metadataAttempt.Attempted = true
+				pr, probeErr := probe(ctx, 0, path)
+				if pr != nil {
 					dur = pr.DurationSec
 					w = pr.Width
 					h = pr.Height
 					br = pr.Bitrate
 					format = pr.Format
 					meta = pr.RawJSON
+					metadataAttempt.Fields = probeMetadataFields(pr)
+				}
+				if probeErr != nil {
+					metadataAttempt.addError("probe", probeErr)
 				}
 			} else if ft == "image" {
+				metadataAttempt.Attempted = true
 				photoMeta = photoparse.ParseFromFile(path)
 				if s.PhotoGeocode != nil {
 					s.PhotoGeocode.EnrichMeta(&photoMeta)
 				}
+				metadataAttempt.Fields = photoMetadataFields(photoMeta)
 				w = photoMeta.Width
 				h = photoMeta.Height
 				format = strings.TrimPrefix(photoMeta.MimeType, "image/")
@@ -276,8 +303,10 @@ func (s *Scanner) ScanLibraryFoldersWithContextAndCallbacks(ctx context.Context,
 					title = photoMeta.Title
 				}
 			} else if ft == "document" {
+				metadataAttempt.Attempted = true
 				docMeta = docparse.ParseFromFile(path)
 				format = docMeta.Format
+				metadataAttempt.Fields = documentMetadataFields(docMeta)
 				if strings.TrimSpace(docMeta.Title) != "" {
 					title = docMeta.Title
 				}
@@ -394,7 +423,7 @@ func (s *Scanner) ScanLibraryFoldersWithContextAndCallbacks(ctx context.Context,
 					}
 				}
 				if existingMediaID == 0 && callbacks.OnMediaDiscoveredTx != nil {
-					if e = callbacks.OnMediaDiscoveredTx(ctx, tx, mediaID, title, ft); e != nil {
+					if e = callbacks.OnMediaDiscoveredTx(ctx, tx, ScanDiscovery{MediaID: mediaID, Title: title, FileType: ft, MetadataAttempt: metadataAttempt}); e != nil {
 						return e
 					}
 				}
@@ -432,6 +461,88 @@ func (s *Scanner) ScanLibraryFoldersWithContextAndCallbacks(ctx context.Context,
 		}
 	}
 	return added, nil
+}
+
+const maxMetadataDiagnosticMessage = 512
+
+func (a *MetadataAttempt) addError(source string, err error) {
+	if err == nil || len(a.Errors) >= 8 {
+		return
+	}
+	message := err.Error()
+	if len(message) > maxMetadataDiagnosticMessage {
+		message = message[:maxMetadataDiagnosticMessage]
+	}
+	a.Errors = append(a.Errors, MetadataDiagnostic{Source: source, Message: message})
+}
+
+func probeMetadataFields(pr *ffprobe.Summary) []string {
+	fields := make([]string, 0, 6)
+	if pr.DurationSec > 0 {
+		fields = append(fields, "duration")
+	}
+	if pr.Width > 0 {
+		fields = append(fields, "width")
+	}
+	if pr.Height > 0 {
+		fields = append(fields, "height")
+	}
+	if pr.Bitrate > 0 {
+		fields = append(fields, "bitrate")
+	}
+	if strings.TrimSpace(pr.Format) != "" {
+		fields = append(fields, "format")
+	}
+	if strings.TrimSpace(pr.RawJSON) != "" {
+		fields = append(fields, "meta_json")
+	}
+	return fields
+}
+
+func photoMetadataFields(meta photoparse.PhotoMeta) []string {
+	fields := make([]string, 0, 12)
+	if strings.TrimSpace(meta.Title) != "" {
+		fields = append(fields, "title")
+	}
+	if meta.Width > 0 {
+		fields = append(fields, "width")
+	}
+	if meta.Height > 0 {
+		fields = append(fields, "height")
+	}
+	if strings.TrimSpace(meta.MimeType) != "" {
+		fields = append(fields, "format")
+	}
+	if strings.TrimSpace(meta.TakenAt) != "" {
+		fields = append(fields, "taken_at")
+	}
+	if strings.TrimSpace(meta.CameraMake) != "" {
+		fields = append(fields, "camera_make")
+	}
+	if strings.TrimSpace(meta.CameraModel) != "" {
+		fields = append(fields, "camera_model")
+	}
+	if meta.HasGPS {
+		fields = append(fields, "latitude", "longitude")
+	}
+	if strings.TrimSpace(meta.PlaceID) != "" {
+		fields = append(fields, "place_id")
+	}
+	if strings.TrimSpace(meta.LocationName) != "" {
+		fields = append(fields, "location_name")
+	}
+	return fields
+}
+
+func documentMetadataFields(meta docparse.DocumentMeta) []string {
+	fields := make([]string, 0, 2)
+	if strings.TrimSpace(meta.Title) != "" {
+		fields = append(fields, "title")
+	}
+	if strings.TrimSpace(meta.Format) != "" {
+		fields = append(fields, "format")
+	}
+	return fields
 }
 
 func normalizeMediaPath(p string) string {

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"knox-media/internal/publication"
+	"knox-media/internal/scanner"
 )
 
 type callbackEnqueuerFunc func(context.Context, int64, *int64, string) ([]TaskType, error)
@@ -58,9 +59,12 @@ func TestNewScanMediaDiscoveredTxCallbackPlansInCallerTransaction(t *testing.T) 
 		if media.MediaID != 42 || media.ScanTaskID != 7 || media.FileType != "video" {
 			t.Fatalf("tx=%v media=%+v", tx, media)
 		}
+		if !media.MetadataAttempt.Attempted || len(media.MetadataAttempt.Fields) != 1 || media.MetadataAttempt.Fields[0] != "duration" || len(media.MetadataAttempt.Errors) != 1 || media.MetadataAttempt.Errors[0].Source != "ffprobe" {
+			t.Fatalf("metadata=%+v", media.MetadataAttempt)
+		}
 		return publication.Run{}, want
 	}))
-	if err := callback(context.Background(), nil, 7, 42, "title", "video"); !errors.Is(err, want) {
+	if err := callback(context.Background(), nil, 7, scanner.ScanDiscovery{MediaID: 42, Title: "title", FileType: "video", MetadataAttempt: scanner.MetadataAttempt{Attempted: true, Fields: []string{"duration"}, Errors: []scanner.MetadataDiagnostic{{Source: "ffprobe", Message: "partial"}}}}); !errors.Is(err, want) {
 		t.Fatalf("callback error=%v want %v", err, want)
 	}
 	if calls != 1 {

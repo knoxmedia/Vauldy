@@ -73,8 +73,15 @@ func newPublicationE2E(t *testing.T, all bool) *publicationE2E {
 		return &ffprobe.Summary{Width: 1, Height: 1}, nil
 	}}
 	planner := publication.NewPlanner(opts)
-	added, err := sc.ScanLibraryFoldersWithContextAndCallbacks(context.Background(), libraryID, []string{root}, scanner.ScanCallbacks{OnMediaDiscoveredTx: func(ctx context.Context, tx *sql.Tx, mediaID int64, _ string, ft string) error {
-		_, e := planner.PlanNewMediaTx(ctx, tx, publication.NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: ft})
+	added, err := sc.ScanLibraryFoldersWithContextAndCallbacks(context.Background(), libraryID, []string{root}, scanner.ScanCallbacks{OnMediaDiscoveredTx: func(ctx context.Context, tx *sql.Tx, discovery scanner.ScanDiscovery) error {
+		diagnostics := make([]publication.MetadataDiagnostic, len(discovery.MetadataAttempt.Errors))
+		for i, diagnostic := range discovery.MetadataAttempt.Errors {
+			diagnostics[i] = publication.MetadataDiagnostic{Source: diagnostic.Source, Message: diagnostic.Message}
+		}
+		_, e := planner.PlanNewMediaTx(ctx, tx, publication.NewMedia{
+			MediaID: discovery.MediaID, ScanTaskID: scanID, FileType: discovery.FileType,
+			MetadataAttempt: publication.MetadataAttempt{Attempted: discovery.MetadataAttempt.Attempted, Fields: append([]string(nil), discovery.MetadataAttempt.Fields...), Errors: diagnostics},
+		})
 		return e
 	}})
 	if err != nil || added != 1 {
@@ -382,7 +389,7 @@ func TestScannerDuplicateUnchangedDoesNotCreateGeneration(t *testing.T) {
 	sc := &scanner.Scanner{DB: e.db, SkipHash: true, ProbePath: func(context.Context, int64, string) (*ffprobe.Summary, error) {
 		return &ffprobe.Summary{Width: 1, Height: 1}, nil
 	}}
-	added, err := sc.ScanLibraryFoldersWithContextAndCallbacks(context.Background(), e.libraryID, []string{e.root}, scanner.ScanCallbacks{OnMediaDiscoveredTx: func(context.Context, *sql.Tx, int64, string, string) error { callbacks++; return nil }})
+	added, err := sc.ScanLibraryFoldersWithContextAndCallbacks(context.Background(), e.libraryID, []string{e.root}, scanner.ScanCallbacks{OnMediaDiscoveredTx: func(context.Context, *sql.Tx, scanner.ScanDiscovery) error { callbacks++; return nil }})
 	if err != nil || added != 0 {
 		t.Fatalf("second scan added=%d err=%v", added, err)
 	}

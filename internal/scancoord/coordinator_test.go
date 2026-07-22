@@ -1585,3 +1585,46 @@ func TestFinalizeAndReleaseDoesNotMutateAfterTakeover(t *testing.T) {
 		t.Fatalf("old=%s/%q lease=%d/%q", status, message, leaseTask, leaseOwner)
 	}
 }
+
+type discoveryCallbackScanner struct {
+	discovery scanner.ScanDiscovery
+}
+
+func (s *discoveryCallbackScanner) ScanLibraryFoldersWithContextAndCallbacks(ctx context.Context, _ int64, _ []string, callbacks scanner.ScanCallbacks) (int, error) {
+	return 1, callbacks.OnMediaDiscoveredTx(ctx, nil, s.discovery)
+}
+
+func TestCoordinatorForwardsDiscoveryDiagnosticsWithTaskID(t *testing.T) {
+	db, libraries := openCoordinatorTestDB(t, 1)
+	discovery := scanner.ScanDiscovery{MediaID: 99, FileType: "video", MetadataAttempt: scanner.MetadataAttempt{Attempted: true, Fields: []string{"duration"}, Errors: []scanner.MetadataDiagnostic{{Source: "probe", Message: "partial"}}}}
+	seen := make(chan struct {
+		taskID int64
+		value  scanner.ScanDiscovery
+	}, 1)
+	coordinator, err := New(db, Options{
+		LeaseDuration: time.Minute, HeartbeatInterval: 20 * time.Second,
+		OwnerInstanceID: "discovery-callback-test", Scanner: &discoveryCallbackScanner{discovery: discovery},
+		OnMediaDiscoveredTx: func(_ context.Context, _ *sql.Tx, taskID int64, got scanner.ScanDiscovery) error {
+			seen <- struct {
+				taskID int64
+				value  scanner.ScanDiscovery
+			}{taskID: taskID, value: got}
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := coordinator.Submit(context.Background(), ScanRequest{LibraryID: libraries[0], Source: SourceManual, Roots: []string{t.TempDir()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-seen:
+		if got.taskID != result.TaskID || got.value.MediaID != 99 || !got.value.MetadataAttempt.Attempted || len(got.value.MetadataAttempt.Errors) != 1 {
+			t.Fatalf("callback task=%d discovery=%+v", got.taskID, got.value)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for discovery callback")
+	}
+}

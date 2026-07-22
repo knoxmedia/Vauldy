@@ -5,6 +5,7 @@ import (
 	"crypto/md5"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -166,8 +167,8 @@ func TestScanNewVideoRollsBackMediaWhenPlanFails(t *testing.T) {
 		return &ffprobe.Summary{}, nil
 	}}
 	_, err = s.ScanLibraryFoldersWithContextAndCallbacks(context.Background(), libraryID, []string{root}, ScanCallbacks{
-		OnMediaDiscoveredTx: func(ctx context.Context, tx *sql.Tx, mediaID int64, _, fileType string) error {
-			_, planErr := publication.NewPlanner(publication.PlanOptions{}).PlanNewMediaTx(ctx, tx, publication.NewMedia{MediaID: mediaID, ScanTaskID: taskID, FileType: fileType})
+		OnMediaDiscoveredTx: func(ctx context.Context, tx *sql.Tx, discovery ScanDiscovery) error {
+			_, planErr := publication.NewPlanner(publication.PlanOptions{}).PlanNewMediaTx(ctx, tx, publication.NewMedia{MediaID: discovery.MediaID, ScanTaskID: taskID, FileType: discovery.FileType})
 			if planErr != nil {
 				return planErr
 			}
@@ -213,8 +214,8 @@ func TestScanNewVideoCommitsMediaAndPlanTogether(t *testing.T) {
 		return &ffprobe.Summary{}, nil
 	}}
 	added, err := s.ScanLibraryFoldersWithContextAndCallbacks(context.Background(), libraryID, []string{root}, ScanCallbacks{
-		OnMediaDiscoveredTx: func(ctx context.Context, tx *sql.Tx, mediaID int64, _, fileType string) error {
-			_, err := planner.PlanNewMediaTx(ctx, tx, publication.NewMedia{MediaID: mediaID, ScanTaskID: taskID, FileType: fileType})
+		OnMediaDiscoveredTx: func(ctx context.Context, tx *sql.Tx, discovery ScanDiscovery) error {
+			_, err := planner.PlanNewMediaTx(ctx, tx, publication.NewMedia{MediaID: discovery.MediaID, ScanTaskID: taskID, FileType: discovery.FileType})
 			return err
 		},
 	})
@@ -233,6 +234,117 @@ func TestScanNewVideoCommitsMediaAndPlanTogether(t *testing.T) {
 			t.Fatalf("%s rows=%d want %d", table, count, want)
 		}
 	}
+}
+
+func TestScannerDiscoveryCarriesExistingProbeDiagnostics(t *testing.T) {
+	db, err := store.OpenSQLite(filepath.Join(t.TempDir(), "scan-metadata-diagnostics.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "movie.mp4"), []byte("video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := db.Exec(`INSERT INTO library(name,type,path) VALUES('videos','video',?)`, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	libraryID, _ := res.LastInsertId()
+	res, err = db.Exec(`INSERT INTO scan_task(library_id,status,source) VALUES(?,'running','manual')`, libraryID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, _ := res.LastInsertId()
+
+	probeCalls := 0
+	s := &Scanner{DB: db, SkipHash: true, ProbePath: func(context.Context, int64, string) (*ffprobe.Summary, error) {
+		probeCalls++
+		return &ffprobe.Summary{DurationSec: 95, Width: 1920, Height: 1080, Format: "matroska", RawJSON: `{"format":{"duration":"95"}}`}, errors.New(strings.Repeat("probe partial ", 100))
+	}}
+	planner := publication.NewPlanner(publication.PlanOptions{})
+	var got ScanDiscovery
+	added, err := s.ScanLibraryFoldersWithContextAndCallbacks(context.Background(), libraryID, []string{root}, ScanCallbacks{
+		OnMediaDiscoveredTx: func(ctx context.Context, tx *sql.Tx, discovery ScanDiscovery) error {
+			got = discovery
+			_, err := planner.PlanNewMediaTx(ctx, tx, publication.NewMedia{
+				MediaID: discovery.MediaID, ScanTaskID: taskID, FileType: discovery.FileType,
+				MetadataAttempt: publication.MetadataAttempt{
+					Attempted: discovery.MetadataAttempt.Attempted,
+					Fields:    append([]string(nil), discovery.MetadataAttempt.Fields...),
+					Errors:    []publication.MetadataDiagnostic{{Source: discovery.MetadataAttempt.Errors[0].Source, Message: discovery.MetadataAttempt.Errors[0].Message}},
+				},
+			})
+			return err
+		},
+	})
+	if err != nil || added != 1 {
+		t.Fatalf("scan added=%d err=%v", added, err)
+	}
+	if probeCalls != 1 {
+		t.Fatalf("probe calls=%d want 1", probeCalls)
+	}
+	if !got.MetadataAttempt.Attempted {
+		t.Fatal("metadata attempt not recorded")
+	}
+	for _, field := range []string{"duration", "width", "height", "format", "meta_json"} {
+		if !containsString(got.MetadataAttempt.Fields, field) {
+			t.Fatalf("fields=%v missing %q", got.MetadataAttempt.Fields, field)
+		}
+	}
+	if len(got.MetadataAttempt.Errors) != 1 || got.MetadataAttempt.Errors[0].Source != "probe" || len(got.MetadataAttempt.Errors[0].Message) > 512 {
+		t.Fatalf("bounded probe diagnostics=%+v", got.MetadataAttempt.Errors)
+	}
+	var duration, width, height int
+	var format, raw, snapshotJSON string
+	if err := db.QueryRow(`SELECT duration,width,height,format,meta_json FROM media WHERE id=?`, got.MediaID).Scan(&duration, &width, &height, &format, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if duration != 95 || width != 1920 || height != 1080 || format != "matroska" || raw == "" {
+		t.Fatalf("stored metadata duration=%d size=%dx%d format=%q raw=%q", duration, width, height, format, raw)
+	}
+	if err := db.QueryRow(`SELECT config_snapshot_json FROM media_ingest_run WHERE media_id=?`, got.MediaID).Scan(&snapshotJSON); err != nil {
+		t.Fatal(err)
+	}
+	var snapshot publication.ConfigSnapshot
+	if err := json.Unmarshal([]byte(snapshotJSON), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if !snapshot.Metadata.Attempted || len(snapshot.Metadata.Errors) != 1 || snapshot.Metadata.Errors[0].Source != "probe" {
+		t.Fatalf("snapshot metadata=%+v", snapshot.Metadata)
+	}
+}
+
+func TestScannerDiscoveryCarriesFailedProbeDiagnostics(t *testing.T) {
+	db := newScannerTestDB(t)
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "broken.mp4"), []byte("video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	s := &Scanner{DB: db, SkipHash: true, ProbePath: func(context.Context, int64, string) (*ffprobe.Summary, error) {
+		calls++
+		return nil, errors.New("invalid media")
+	}}
+	var got ScanDiscovery
+	added, err := s.ScanLibraryFoldersWithContextAndCallbacks(context.Background(), 1, []string{root}, ScanCallbacks{
+		OnMediaDiscoveredTx: func(_ context.Context, _ *sql.Tx, discovery ScanDiscovery) error { got = discovery; return nil },
+	})
+	if err != nil || added != 1 {
+		t.Fatalf("scan added=%d err=%v", added, err)
+	}
+	if calls != 1 || !got.MetadataAttempt.Attempted || len(got.MetadataAttempt.Fields) != 0 || len(got.MetadataAttempt.Errors) != 1 {
+		t.Fatalf("calls=%d diagnostics=%+v", calls, got.MetadataAttempt)
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestScannerCallbackRegressionUsesCallbacksField(t *testing.T) {

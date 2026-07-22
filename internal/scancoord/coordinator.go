@@ -62,7 +62,7 @@ type Scanner interface {
 }
 
 type MediaAddedFunc func(context.Context, int64, int64, string, string) error
-type MediaDiscoveredTxFunc func(context.Context, *sql.Tx, int64, int64, string, string) error
+type MediaDiscoveredTxFunc func(context.Context, *sql.Tx, int64, scanner.ScanDiscovery) error
 
 type ScanCancelledFunc func(context.Context, int64) error
 
@@ -388,11 +388,11 @@ func (c *Coordinator) run(ctx context.Context, taskID, libraryID int64, owner st
 			var enqueueErrors []error
 			callbacks := scanner.ScanCallbacks{
 				OnFile: progress.File,
-				OnMediaDiscoveredTx: func(callbackCtx context.Context, tx *sql.Tx, mediaID int64, title, fileType string) error {
+				OnMediaDiscoveredTx: func(callbackCtx context.Context, tx *sql.Tx, discovery scanner.ScanDiscovery) error {
 					if c.onMediaDiscoveredTx == nil {
 						return nil
 					}
-					return c.onMediaDiscoveredTx(callbackCtx, tx, taskID, mediaID, title, fileType)
+					return c.onMediaDiscoveredTx(callbackCtx, tx, taskID, discovery)
 				},
 				OnMediaAdded: func(callbackCtx context.Context, mediaID int64, title, fileType string) error {
 					progress.MediaAdded(mediaID, title, fileType)
