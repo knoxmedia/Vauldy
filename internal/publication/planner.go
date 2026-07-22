@@ -225,6 +225,74 @@ VALUES(?,?,?,?,?,?,'waiting')`, media.MediaID, nullScanTask(media.ScanTaskID), r
 	}, nil
 }
 
+func validateDependencyTx(ctx context.Context, tx *sql.Tx, stepID int64, dependsOn any, mediaID, generation, runID int64) error {
+	if stepID <= 0 {
+		return errors.New("dependency step does not exist")
+	}
+	var stepRun, stepMedia, stepGeneration int64
+	if err := tx.QueryRowContext(ctx, `SELECT run_id,media_id,generation FROM media_ingest_step WHERE id=?`, stepID).Scan(&stepRun, &stepMedia, &stepGeneration); err != nil {
+		return err
+	}
+	if stepRun != runID || stepMedia != mediaID || stepGeneration != generation {
+		return errors.New("dependency step belongs to a different run/media/generation")
+	}
+	if dependsOn == nil {
+		return nil
+	}
+	depID, ok := dependsOn.(int64)
+	if !ok || depID <= 0 {
+		return errors.New("dependency target does not exist")
+	}
+	if depID == stepID {
+		return errors.New("dependency self-edge")
+	}
+	var depRun, depMedia, depGeneration int64
+	if err := tx.QueryRowContext(ctx, `SELECT run_id,media_id,generation FROM media_ingest_step WHERE id=?`, depID).Scan(&depRun, &depMedia, &depGeneration); err != nil {
+		return err
+	}
+	if depRun != runID || depMedia != mediaID || depGeneration != generation {
+		return errors.New("dependency target belongs to a different run/media/generation")
+	}
+	graph := map[int64][]int64{}
+	rows, err := tx.QueryContext(ctx, `SELECT d.step_id,d.depends_on_step_id FROM media_ingest_step_dependency d JOIN media_ingest_step s ON s.id=d.step_id WHERE s.run_id=? AND d.dependency_kind='step_done' AND d.depends_on_step_id IS NOT NULL`, runID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var from, to int64
+		if err := rows.Scan(&from, &to); err != nil {
+			return err
+		}
+		graph[from] = append(graph[from], to)
+	}
+	graph[stepID] = append(graph[stepID], depID)
+	visiting, visited := map[int64]bool{}, map[int64]bool{}
+	var visit func(int64) bool
+	visit = func(node int64) bool {
+		if visiting[node] {
+			return true
+		}
+		if visited[node] {
+			return false
+		}
+		visiting[node] = true
+		for _, next := range graph[node] {
+			if visit(next) {
+				return true
+			}
+		}
+		delete(visiting, node)
+		visited[node] = true
+		return false
+	}
+	for node := range graph {
+		if visit(node) {
+			return errors.New("dependency cycle")
+		}
+	}
+	return rows.Err()
+}
 func boolDB(v bool) int {
 	if v {
 		return 1

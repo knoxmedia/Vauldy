@@ -387,3 +387,47 @@ func TestPlannerV2CarriesMetadataPartialDiagnostics(t *testing.T) {
 		t.Fatalf("metadata=%+v", snapshot.Metadata)
 	}
 }
+
+func TestPlannerRejectsInvalidDependencyGraphAtomically(t *testing.T) {
+	db := openPlannerTestDB(t)
+	_, mediaID, scanID := seedPlannerMedia(t, db, "video", 0, 1, 0)
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = NewPlanner(PlanOptions{EncryptGlobal: true}).PlanNewMediaTx(context.Background(), tx, NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	var ids []int64
+	rows, err := tx.Query(`SELECT id FROM media_ingest_step ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	_ = rows.Close()
+	if len(ids) < 2 {
+		t.Fatal("expected two steps")
+	}
+	if err = validateDependencyTx(context.Background(), tx, ids[0], ids[0], mediaID, 1, 1); err == nil {
+		t.Fatal("expected self-edge rejection")
+	}
+	_ = tx.Rollback()
+	var runs, deps int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM media_ingest_run`).Scan(&runs); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM media_ingest_step_dependency`).Scan(&deps); err != nil {
+		t.Fatal(err)
+	}
+	if runs != 0 || deps != 0 {
+		t.Fatalf("partial rows runs=%d deps=%d", runs, deps)
+	}
+}
