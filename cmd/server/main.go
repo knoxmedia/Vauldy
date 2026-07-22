@@ -307,6 +307,11 @@ func main() {
 		prepareCapabilities = publication.NewCapabilityMatrix([]string{"prepare"})
 	}
 
+	publicationPlanner := publication.NewPlanner(publication.PlanOptions{
+		SubtitleAuto: cfg.SubtitleAutoOnScan(), ATrackAuto: cfg.ATrackAutoOnScan(),
+		EncryptGlobal: cfg.EncryptedAssetsEnabled(), PreparePlanner: preparePlanner, Capabilities: prepareCapabilities,
+	})
+
 	// (4) Scanner dependencies and the process-wide scan coordinator.
 	sc := &scanner.Scanner{
 		DB:            db,
@@ -322,7 +327,7 @@ func main() {
 		LeaseDuration: 60 * time.Second, HeartbeatInterval: 20 * time.Second,
 		OwnerInstanceID: "scancoord-" + processID, Scanner: sc, Metrics: sqliteMetrics,
 
-		OnMediaDiscoveredTx: scancoord.MediaDiscoveredTxFunc(postingest.NewScanMediaDiscoveredTxCallback(publication.NewPlanner(publication.PlanOptions{SubtitleAuto: cfg.SubtitleAutoOnScan(), ATrackAuto: cfg.ATrackAutoOnScan(), EncryptGlobal: cfg.EncryptedAssetsEnabled(), PreparePlanner: preparePlanner, Capabilities: prepareCapabilities}))),
+		OnMediaDiscoveredTx: scancoord.MediaDiscoveredTxFunc(postingest.NewScanMediaDiscoveredTxCallback(publicationPlanner)),
 		OnScanCancelled: func(ctx context.Context, taskID int64) error {
 			return handleScanCancelled(ctx, taskID, postIngestQueue.CancelScan, dispatcher.CancelScan)
 		},
@@ -361,7 +366,7 @@ func main() {
 		Worker: worker, PackageWorker: packageWorker, PreviewWorker: previewWorker, Subtitle: subSvc, Upload: up,
 		Instant: instantScheduler, SessionManager: sessionMgr, AtrackWorker: atrackWorker, KeyframeWorker: keyframeWorker,
 		LyricWorker: lyricWorker, PhotoClassifyWorker: photoClassifyWorker, DocCoverWorker: docCoverWorker,
-		KeyVault: keyVault, AssetEncryptor: assetEnc, DerivedStore: derivedStore, IngestPreparePlanner: coreiface.IngestPreparePlannerHandle(),
+		KeyVault: keyVault, AssetEncryptor: assetEnc, DerivedStore: derivedStore, PublicationPlanner: publicationPlanner,
 	}
 
 	// (6) Handler dependencies are injected into the API router.
@@ -388,10 +393,7 @@ func main() {
 
 	// Repair runs only after post-ingest, scrape/API, and enterprise prepare workers exist.
 	// ResetInterruptedTasks already ran, so a restarted current repair suppresses duplicates.
-	repairPlanner := publication.NewPlanner(publication.PlanOptions{
-		SubtitleAuto: cfg.SubtitleAutoOnScan(), ATrackAuto: cfg.ATrackAutoOnScan(),
-		EncryptGlobal: cfg.EncryptedAssetsEnabled(), PreparePlanner: preparePlanner, Capabilities: prepareCapabilities,
-	})
+	repairPlanner := publicationPlanner
 	background.Go(serverCtx, func(repairCtx context.Context) {
 		repaired, repairErr := publication.RepairLegacyMedia(repairCtx, db, repairPlanner, 64)
 		if repairErr != nil && repairCtx.Err() == nil {

@@ -31,7 +31,7 @@ func (h *Handler) AdminRetryMediaIngest(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
 		return
 	}
-	err = publication.RetryIngest(c.Request.Context(), h.App.DB, id, h.IngestPreparePlanner)
+	err = publication.RetryIngest(c.Request.Context(), h.App.DB, id, h.PublicationPlanner)
 	switch {
 	case errors.Is(err, publication.ErrIngestNotFound):
 		c.JSON(http.StatusNotFound, gin.H{"error": "ingest not found"})

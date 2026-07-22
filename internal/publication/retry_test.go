@@ -3,7 +3,11 @@ package publication
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"path/filepath"
+	"reflect"
+	"sync"
 	"testing"
 
 	"knox-media/internal/store"
@@ -19,157 +23,235 @@ func openRetryTestDB(t *testing.T) *sql.DB {
 	return db
 }
 
-func seedRetryV2(t *testing.T, db *sql.DB) (mediaID, runID, posterID, scrapeID int64, snapshot string) {
+type retryPreparePlanner struct {
+	err   error
+	calls int
+}
+
+func (p *retryPreparePlanner) PlanIngestPrepareTx(ctx context.Context, tx store.SQLExecutor, mediaID, runID, stepID, generation int64) error {
+	p.calls++
+	return p.err
+}
+
+func seedTerminalRetry(t *testing.T, db *sql.DB, state string) (mediaID, runID int64, oldSnapshot string) {
 	t.Helper()
-	snapshot = `{"policy_version":2,"library_id":1,"file_type":"video","steps":["poster","scrape"],"required_steps":["poster"],"optional_steps":["scrape"],"dependencies":[{"step":"poster","kind":"media_visible"},{"step":"scrape","kind":"step_done","depends_on":"poster"}]}`
-	res, err := db.Exec(`INSERT INTO library(name,type,path) VALUES('retry','video','/retry')`)
+	oldSnapshot = `{"policy_version":2,"library_id":1,"file_type":"video","steps":["poster","keyframe","atrack","prepare"],"required_steps":["poster","keyframe","atrack"],"optional_steps":["prepare"]}`
+	res, err := db.Exec(`INSERT INTO library(name,type,path,preview_extract,encrypted_assets_enabled,jit_prepare_on_ingest) VALUES('retry','video','/retry',1,1,1)`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	libraryID, _ := res.LastInsertId()
-	res, err = db.Exec(`INSERT INTO media(library_id,file_id,file_type,publication_state,ingest_generation) VALUES(?,'retry-v2','video','failed',1)`, libraryID)
+	res, err = db.Exec(`INSERT INTO media(library_id,file_id,file_type,publication_state,publication_error,ingest_generation) VALUES(?,'retry-v2','video',?,'old outcome',1)`, libraryID, state)
 	if err != nil {
 		t.Fatal(err)
 	}
 	mediaID, _ = res.LastInsertId()
-	res, err = db.Exec(`INSERT INTO media_ingest_run(media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(?,1,'scan','failed',?,2)`, mediaID, snapshot)
+	res, err = db.Exec(`INSERT INTO media_ingest_run(media_id,generation,reason,status,config_snapshot_json,policy_version,error_message,finished_at) VALUES(?,1,'scan',?,?,2,'old run outcome',CURRENT_TIMESTAMP)`, mediaID, state, oldSnapshot)
 	if err != nil {
 		t.Fatal(err)
 	}
 	runID, _ = res.LastInsertId()
-	res, err = db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status,max_attempts) VALUES(?,?,1,'poster',1,'failed',4)`, runID, mediaID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	posterID, _ = res.LastInsertId()
-	res, err = db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status,max_attempts) VALUES(?,?,1,'scrape',0,'cancelled',5)`, runID, mediaID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	scrapeID, _ = res.LastInsertId()
-	if _, err = db.Exec(`INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(?,NULL,'media_visible'),(?,?,'step_done')`, posterID, scrapeID, posterID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = db.Exec(`INSERT INTO post_ingest_task(media_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(?,?,?,1,'poster','failed')`, mediaID, runID, posterID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = db.Exec(`INSERT INTO scrape_task(media_id,source,status,ingest_run_id,ingest_step_id,generation) VALUES(?,'auto-scan','failed',?,?,1)`, mediaID, runID, scrapeID); err != nil {
-		t.Fatal(err)
+	for _, step := range []string{"poster", "keyframe", "atrack", "prepare"} {
+		res, err = db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status,last_error) VALUES(?,?,1,?,1,?,'old step outcome')`, runID, mediaID, step, state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stepID, _ := res.LastInsertId()
+		if step == "prepare" {
+			task, e := db.Exec(`INSERT INTO transcode_task(file_id,status,task_type,media_id,ingest_run_id,ingest_step_id,generation) VALUES('old','failed','pretranscode',?,?,?,1)`, mediaID, runID, stepID)
+			if e != nil {
+				t.Fatal(e)
+			}
+			taskID, _ := task.LastInsertId()
+			if _, e = db.Exec(`INSERT INTO pretranscode_rendition_job(task_id,rendition_id,rendition_name,status,config_snapshot_json) VALUES(?,1,'old','failed','{"old":true}')`, taskID); e != nil {
+				t.Fatal(e)
+			}
+		}
 	}
 	return
 }
 
-func TestRetryIngestV2PreservesPolicyAndDependencies(t *testing.T) {
-	db := openRetryTestDB(t)
-	mediaID, oldRunID, _, _, snapshot := seedRetryV2(t, db)
-	if err := RetryIngest(context.Background(), db, mediaID, nil); err != nil {
-		t.Fatalf("retry: %v", err)
-	}
+func currentRetryPlanner(prepare *retryPreparePlanner) *Planner {
+	return NewPlanner(PlanOptions{SubtitleAuto: true, EncryptGlobal: true, PreparePlanner: prepare, Capabilities: NewCapabilityMatrix([]string{"prepare"})})
+}
 
-	var newRunID int64
-	var policy int
-	var gotSnapshot string
-	if err := db.QueryRow(`SELECT id,policy_version,config_snapshot_json FROM media_ingest_run WHERE media_id=? AND generation=2`, mediaID).Scan(&newRunID, &policy, &gotSnapshot); err != nil {
+func TestRetryIngestFailedCreatesCurrentPolicyManualRetryGeneration(t *testing.T) {
+	db := openRetryTestDB(t)
+	mediaID, oldRun, oldSnapshot := seedTerminalRetry(t, db, "failed")
+	prepare := &retryPreparePlanner{}
+	if err := RetryIngest(context.Background(), db, mediaID, currentRetryPlanner(prepare)); err != nil {
 		t.Fatal(err)
 	}
-	if newRunID == oldRunID || policy != PolicyV2 || gotSnapshot != snapshot {
-		t.Fatalf("new run=%d policy=%d snapshot=%s", newRunID, policy, gotSnapshot)
+	var generation int64
+	var state, mediaErr string
+	if err := db.QueryRow(`SELECT ingest_generation,publication_state,publication_error FROM media WHERE id=?`, mediaID).Scan(&generation, &state, &mediaErr); err != nil {
+		t.Fatal(err)
 	}
+	if generation != 2 || state != "processing" || mediaErr != "" {
+		t.Fatalf("media=%d/%s/%q", generation, state, mediaErr)
+	}
+	var reason, status, snapshot string
+	var preserve int
+	if err := db.QueryRow(`SELECT reason,status,preserve_visibility,config_snapshot_json FROM media_ingest_run WHERE media_id=? AND generation=2`, mediaID).Scan(&reason, &status, &preserve, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if reason != "manual_retry" || status != "processing" || preserve != 0 || snapshot == oldSnapshot {
+		t.Fatalf("new run=%s/%s/%d snapshotEqual=%v", reason, status, preserve, snapshot == oldSnapshot)
+	}
+	var oldStatus, oldError string
+	if err := db.QueryRow(`SELECT status,error_message FROM media_ingest_run WHERE id=?`, oldRun).Scan(&oldStatus, &oldError); err != nil {
+		t.Fatal(err)
+	}
+	if oldStatus != "failed" || oldError != "old run outcome" {
+		t.Fatalf("old run changed=%s/%q", oldStatus, oldError)
+	}
+}
 
-	rows, err := db.Query(`SELECT s.step_type,s.required,s.status,s.max_attempts,d.dependency_kind,COALESCE(t.step_type,'') FROM media_ingest_step_dependency d JOIN media_ingest_step s ON s.id=d.step_id LEFT JOIN media_ingest_step t ON t.id=d.depends_on_step_id WHERE s.run_id=? ORDER BY s.step_type`, newRunID)
+func TestRetryIngestCancelledCreatesCurrentPolicyManualRetryGeneration(t *testing.T) {
+	db := openRetryTestDB(t)
+	mediaID, oldRun, _ := seedTerminalRetry(t, db, "cancelled")
+	if err := RetryIngest(context.Background(), db, mediaID, currentRetryPlanner(&retryPreparePlanner{})); err != nil {
+		t.Fatal(err)
+	}
+	var generation int
+	var oldStatus string
+	_ = db.QueryRow(`SELECT ingest_generation FROM media WHERE id=?`, mediaID).Scan(&generation)
+	_ = db.QueryRow(`SELECT status FROM media_ingest_run WHERE id=?`, oldRun).Scan(&oldStatus)
+	if generation != 2 || oldStatus != "cancelled" {
+		t.Fatalf("generation=%d old=%s", generation, oldStatus)
+	}
+}
+
+func TestRetryIngestAddsNewlyRequiredEncrypt(t *testing.T) {
+	db := openRetryTestDB(t)
+	mediaID, _, _ := seedTerminalRetry(t, db, "failed")
+	if err := RetryIngest(context.Background(), db, mediaID, currentRetryPlanner(&retryPreparePlanner{})); err != nil {
+		t.Fatal(err)
+	}
+	var required int
+	if err := db.QueryRow(`SELECT required FROM media_ingest_step WHERE media_id=? AND generation=2 AND step_type='encrypt'`, mediaID).Scan(&required); err != nil {
+		t.Fatal(err)
+	}
+	if required != 1 {
+		t.Fatalf("encrypt required=%d", required)
+	}
+}
+
+func TestRetryIngestDropsRemovedOptionalAndOldKeyframeAtrack(t *testing.T) {
+	db := openRetryTestDB(t)
+	mediaID, _, _ := seedTerminalRetry(t, db, "failed")
+	if err := RetryIngest(context.Background(), db, mediaID, currentRetryPlanner(&retryPreparePlanner{})); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.Query(`SELECT step_type FROM media_ingest_step WHERE media_id=? AND generation=2 ORDER BY id`, mediaID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer rows.Close()
-	type edge struct {
-		step         string
-		required     int
-		status       string
-		max          int
-		kind, target string
-	}
-	var got []edge
+	var got []string
 	for rows.Next() {
-		var e edge
-		if err := rows.Scan(&e.step, &e.required, &e.status, &e.max, &e.kind, &e.target); err != nil {
+		var s string
+		if err := rows.Scan(&s); err != nil {
 			t.Fatal(err)
 		}
-		got = append(got, e)
+		got = append(got, s)
 	}
-	if err := rows.Err(); err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 2 || got[0] != (edge{"poster", 1, "waiting", 4, "media_visible", ""}) || got[1] != (edge{"scrape", 0, "waiting", 5, "step_done", "poster"}) {
-		t.Fatalf("dependencies=%+v", got)
-	}
-	for _, table := range []string{"post_ingest_task", "scrape_task"} {
-		var bad int
-		q := `SELECT COUNT(*) FROM ` + table + ` q JOIN media_ingest_step s ON s.id=q.ingest_step_id WHERE q.ingest_run_id=? AND (s.run_id<>q.ingest_run_id OR s.generation<>q.generation)`
-		if err := db.QueryRow(q, newRunID).Scan(&bad); err != nil || bad != 0 {
-			t.Fatalf("%s linkage bad=%d err=%v", table, bad, err)
-		}
+	want := []string{"poster", "encrypt", "scrape", "preview", "subtitle", "prepare"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("steps=%v want=%v", got, want)
 	}
 }
 
-func TestRetryIngestV2LeavesEvidenceAndStagesBehind(t *testing.T) {
+func TestRetryIngestDoesNotCopyOldSnapshotOrPrepareRows(t *testing.T) {
 	db := openRetryTestDB(t)
-	mediaID, runID, posterID, _, _ := seedRetryV2(t, db)
-	if _, err := db.Exec(`INSERT INTO media_asset_stage_journal(stage_id,media_id,run_id,step_id,generation,owner_token,source_fingerprint,artifact_kind,state,staged_path,hashes_sizes_json) VALUES('stage-old',?,?,?,1,'owner','fp','poster','committed','/stage','{}')`, mediaID, runID, posterID); err != nil {
+	mediaID, _, oldSnapshot := seedTerminalRetry(t, db, "failed")
+	if err := RetryIngest(context.Background(), db, mediaID, currentRetryPlanner(&retryPreparePlanner{})); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO media_ingest_evidence(run_id,step_id,media_id,generation,kind,source_fingerprint,artifact_refs_json,verified_at,stage_id) VALUES(?,?,?,1,'poster','fp','{}',CURRENT_TIMESTAMP,'stage-old')`, runID, posterID, mediaID); err != nil {
+	var snapshot string
+	_ = db.QueryRow(`SELECT config_snapshot_json FROM media_ingest_run WHERE media_id=? AND generation=2`, mediaID).Scan(&snapshot)
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(snapshot), &parsed); err != nil {
 		t.Fatal(err)
 	}
-	if err := RetryIngest(context.Background(), db, mediaID, nil); err != nil {
-		t.Fatal(err)
-	}
-	for _, table := range []string{"media_ingest_evidence", "media_asset_stage_journal"} {
-		var oldCount, newCount int
-		if err := db.QueryRow(`SELECT COUNT(*) FROM `+table+` WHERE run_id=?`, runID).Scan(&oldCount); err != nil {
-			t.Fatal(err)
-		}
-		if err := db.QueryRow(`SELECT COUNT(*) FROM `+table+` WHERE media_id=? AND generation=2`, mediaID).Scan(&newCount); err != nil {
-			t.Fatal(err)
-		}
-		if oldCount != 1 || newCount != 0 {
-			t.Fatalf("%s old=%d new=%d", table, oldCount, newCount)
-		}
+	var copied int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM pretranscode_rendition_job j JOIN transcode_task t ON t.id=j.task_id WHERE t.media_id=? AND t.generation=2 AND j.config_snapshot_json='{"old":true}'`, mediaID).Scan(&copied)
+	if snapshot == oldSnapshot || copied != 0 {
+		t.Fatalf("snapshotEqual=%v copiedPrepare=%d", snapshot == oldSnapshot, copied)
 	}
 }
 
-func TestRetryIngestMalformedOldDependencyRollsBack(t *testing.T) {
+func TestRetryIngestConcurrentOneGeneration(t *testing.T) {
 	db := openRetryTestDB(t)
-	mediaID, runID, _, scrapeID, _ := seedRetryV2(t, db)
-	res, err := db.Exec(`INSERT INTO media(library_id,file_id,file_type,publication_state,ingest_generation) SELECT library_id,'other','video','processing',1 FROM media WHERE id=?`, mediaID)
-	if err != nil {
-		t.Fatal(err)
+	mediaID, _, _ := seedTerminalRetry(t, db, "failed")
+	db.SetMaxOpenConns(2)
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			errs <- RetryIngest(context.Background(), db, mediaID, currentRetryPlanner(&retryPreparePlanner{}))
+		}()
 	}
-	otherMedia, _ := res.LastInsertId()
-	res, err = db.Exec(`INSERT INTO media_ingest_run(media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(?,1,'scan','processing','{"policy_version":2}',2)`, otherMedia)
-	if err != nil {
-		t.Fatal(err)
-	}
-	otherRun, _ := res.LastInsertId()
-	res, err = db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status) VALUES(?,?,1,'poster',1,'waiting')`, otherRun, otherMedia)
-	if err != nil {
-		t.Fatal(err)
-	}
-	foreignStep, _ := res.LastInsertId()
-	if _, err = db.Exec(`UPDATE media_ingest_step_dependency SET depends_on_step_id=? WHERE step_id=? AND dependency_kind='step_done'`, foreignStep, scrapeID); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := RetryIngest(context.Background(), db, mediaID, nil); err == nil {
-		t.Fatal("retry accepted cross-run old dependency")
+	close(start)
+	wg.Wait()
+	close(errs)
+	successes := 0
+	conflicts := 0
+	for err := range errs {
+		if err == nil {
+			successes++
+		} else if errors.Is(err, ErrNoRetryableWork) || errors.Is(err, ErrGenerationConflict) {
+			conflicts++
+		} else {
+			t.Fatalf("retry err=%v", err)
+		}
 	}
 	var generation, runs int
-	if err := db.QueryRow(`SELECT ingest_generation FROM media WHERE id=?`, mediaID).Scan(&generation); err != nil {
+	_ = db.QueryRow(`SELECT ingest_generation FROM media WHERE id=?`, mediaID).Scan(&generation)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM media_ingest_run WHERE media_id=? AND generation=2`, mediaID).Scan(&runs)
+	if successes != 1 || conflicts != 1 || generation != 2 || runs != 1 {
+		t.Fatalf("success=%d conflict=%d generation=%d runs=%d", successes, conflicts, generation, runs)
+	}
+}
+
+func TestRetryIngestPlannerFailureRollback(t *testing.T) {
+	db := openRetryTestDB(t)
+	mediaID, _, _ := seedTerminalRetry(t, db, "failed")
+	prepare := &retryPreparePlanner{err: errors.New("prepare plan failed")}
+	if err := RetryIngest(context.Background(), db, mediaID, currentRetryPlanner(prepare)); err == nil || !errors.Is(err, prepare.err) {
+		t.Fatalf("err=%v", err)
+	}
+	var generation, runs int
+	var state, mediaErr string
+	_ = db.QueryRow(`SELECT ingest_generation,publication_state,publication_error FROM media WHERE id=?`, mediaID).Scan(&generation, &state, &mediaErr)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM media_ingest_run WHERE media_id=?`, mediaID).Scan(&runs)
+	if generation != 1 || runs != 1 || state != "failed" || mediaErr != "old outcome" {
+		t.Fatalf("rollback=%d/%d/%s/%q", generation, runs, state, mediaErr)
+	}
+}
+
+func TestRetryIngestHistoricalEvidenceStagesImmutable(t *testing.T) {
+	db := openRetryTestDB(t)
+	mediaID, runID, _ := seedTerminalRetry(t, db, "failed")
+	var stepID int64
+	_ = db.QueryRow(`SELECT id FROM media_ingest_step WHERE run_id=? ORDER BY id LIMIT 1`, runID).Scan(&stepID)
+	_, err := db.Exec(`INSERT INTO media_asset_stage_journal(stage_id,media_id,run_id,step_id,generation,owner_token,source_fingerprint,artifact_kind,state,staged_path,hashes_sizes_json) VALUES('old-stage',?,?,?,1,'owner','fp','poster','committed','/old','{}'); INSERT INTO media_ingest_evidence(run_id,step_id,media_id,generation,kind,source_fingerprint,artifact_refs_json,verified_at,stage_id) VALUES(?,?,?,1,'poster','fp','{}',CURRENT_TIMESTAMP,'old-stage')`, mediaID, runID, stepID, runID, stepID, mediaID)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow(`SELECT COUNT(*) FROM media_ingest_run WHERE media_id=?`, mediaID).Scan(&runs); err != nil {
+	if err := RetryIngest(context.Background(), db, mediaID, currentRetryPlanner(&retryPreparePlanner{})); err != nil {
 		t.Fatal(err)
 	}
-	if generation != 1 || runs != 1 {
-		t.Fatalf("rollback generation=%d runs=%d oldRun=%d", generation, runs, runID)
+	for _, table := range []string{"media_asset_stage_journal", "media_ingest_evidence"} {
+		var old, new int
+		_ = db.QueryRow(`SELECT COUNT(*) FROM `+table+` WHERE run_id=?`, runID).Scan(&old)
+		_ = db.QueryRow(`SELECT COUNT(*) FROM `+table+` WHERE media_id=? AND generation=2`, mediaID).Scan(&new)
+		if old != 1 || new != 0 {
+			t.Fatalf("%s old=%d new=%d", table, old, new)
+		}
 	}
 }

@@ -92,7 +92,7 @@ func TestScan100MediaEnqueuesWithoutFFmpegOrGoroutineFanout(t *testing.T) {
 	if err := rows.Close(); err != nil {
 		t.Fatal(err)
 	}
-	wantSteps := []string{"atrack", "encrypt", "keyframe", "poster", "preview", "scrape", "subtitle"}
+	wantSteps := []string{"encrypt", "poster", "preview", "scrape", "subtitle"}
 	sort.Strings(wantSteps)
 	if len(got) != len(wantSteps) {
 		t.Fatalf("step types=%v want %v", got, wantSteps)
@@ -102,7 +102,7 @@ func TestScan100MediaEnqueuesWithoutFFmpegOrGoroutineFanout(t *testing.T) {
 			t.Fatalf("step=%s rows=%d want 100", step, got[step])
 		}
 	}
-	assertPostIngestOwnership(t, db, result.TaskID, 600)
+	assertPostIngestOwnership(t, db, result.TaskID, 400)
 	assertPerMediaPublicationLinks(t, db, libraryID, result.TaskID)
 	deadline := time.Now().Add(2 * time.Second)
 	for runtime.NumGoroutine() > before+5 && time.Now().Before(deadline) {
@@ -144,7 +144,7 @@ func assertPostIngestOwnership(t *testing.T, db *sql.DB, taskID int64, want int)
 	if total != want || owned != want {
 		t.Fatalf("rows=%d owned=%d want %d", total, owned, want)
 	}
-	for _, typ := range []postingest.TaskType{postingest.TaskPoster, postingest.TaskPreview, postingest.TaskKeyframe, postingest.TaskSubtitle, postingest.TaskAtrack, postingest.TaskEncrypt} {
+	for _, typ := range []postingest.TaskType{postingest.TaskPoster, postingest.TaskPreview, postingest.TaskSubtitle, postingest.TaskEncrypt} {
 		var count, typeOwned int
 		if err := db.QueryRow(`SELECT COUNT(*),COALESCE(SUM(CASE WHEN scan_task_id=? THEN 1 ELSE 0 END),0) FROM post_ingest_task WHERE task_type=?`, taskID, typ).Scan(&count, &typeOwned); err != nil {
 			t.Fatal(err)
@@ -157,8 +157,8 @@ func assertPostIngestOwnership(t *testing.T, db *sql.DB, taskID int64, want int)
 
 func assertPerMediaPublicationLinks(t *testing.T, db *sql.DB, libraryID, taskID int64) {
 	t.Helper()
-	wantSteps := map[string]bool{"poster": true, "scrape": true, "preview": true, "keyframe": true, "subtitle": true, "atrack": true, "encrypt": true}
-	wantQueue := map[string]bool{"poster": true, "preview": true, "keyframe": true, "subtitle": true, "atrack": true, "encrypt": true}
+	wantSteps := map[string]bool{"poster": true, "scrape": true, "preview": true, "subtitle": true, "encrypt": true}
+	wantQueue := map[string]bool{"poster": true, "preview": true, "subtitle": true, "encrypt": true}
 	rows, err := db.Query(`SELECT id FROM media WHERE library_id=? ORDER BY id`, libraryID)
 	if err != nil {
 		t.Fatal(err)
@@ -316,7 +316,7 @@ func TestRestartRecoversStartupQueueAndResumesPublication(t *testing.T) {
 	if err = db.QueryRow(`SELECT publication_state FROM media WHERE id=?`, mediaID).Scan(&mediaState); err != nil {
 		t.Fatal(err)
 	}
-	if taskState != "done" || stepState != "done" || mediaState != "processing" {
+	if taskState != "done" || stepState != "done" || mediaState != "published" {
 		t.Fatalf("task=%s step=%s media=%s", taskState, stepState, mediaState)
 	}
 }

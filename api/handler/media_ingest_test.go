@@ -13,6 +13,7 @@ import (
 
 	"knox-media/api/middleware"
 	"knox-media/internal/app"
+	"knox-media/internal/publication"
 	"knox-media/internal/store"
 )
 
@@ -47,7 +48,7 @@ INSERT INTO scrape_task(media_id,source,status,progress,ingest_run_id,ingest_ste
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &Handler{App: &app.App{DB: db}, runningScans: map[int64]scanRuntime{}}
+	return New(&app.App{DB: db}, Dependencies{PublicationPlanner: publication.NewPlanner(publication.PlanOptions{})})
 }
 
 func adminIngestContext(method, target, id string) (*gin.Context, *httptest.ResponseRecorder) {
@@ -304,6 +305,10 @@ func TestAdminMediaIngestValidationAndNoRun(t *testing.T) {
 func TestAdminRetryTerminalIngestCreatesNewGenerationWithAllExecutions(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	h := setupMediaIngestTestHandler(t)
+	h.PublicationPlanner = publication.NewPlanner(publication.PlanOptions{EncryptGlobal: true})
+	if _, err := h.App.DB.Exec(`UPDATE library SET encrypted_assets_enabled=1 WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := h.App.DB.Exec(`UPDATE media SET publication_state='failed' WHERE id=101; UPDATE media_ingest_run SET status='failed' WHERE id=201; UPDATE media_ingest_step SET status='failed' WHERE run_id=201; INSERT INTO post_ingest_task(media_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(101,201,301,1,'poster','failed'); INSERT INTO scrape_task(media_id,source,status,ingest_run_id,ingest_step_id,generation) VALUES(101,'auto-scan','failed',201,302,1)`); err != nil {
 		t.Fatal(err)
 	}
@@ -312,14 +317,15 @@ func TestAdminRetryTerminalIngestCreatesNewGenerationWithAllExecutions(t *testin
 	if w.Code != 200 {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
-	var generation, runs, steps, post, scrape int
+	var generation, runs, steps, post, scrape, encrypt int
 	h.App.DB.QueryRow(`SELECT ingest_generation FROM media WHERE id=101`).Scan(&generation)
 	h.App.DB.QueryRow(`SELECT COUNT(*) FROM media_ingest_run WHERE media_id=101 AND reason='manual_retry'`).Scan(&runs)
 	h.App.DB.QueryRow(`SELECT COUNT(*) FROM media_ingest_step WHERE media_id=101 AND generation=2`).Scan(&steps)
 	h.App.DB.QueryRow(`SELECT COUNT(*) FROM post_ingest_task WHERE media_id=101 AND generation=2`).Scan(&post)
 	h.App.DB.QueryRow(`SELECT COUNT(*) FROM scrape_task WHERE media_id=101 AND generation=2`).Scan(&scrape)
-	if generation != 2 || runs != 1 || steps != 2 || post != 1 || scrape != 1 {
-		t.Fatalf("generation=%d runs=%d steps=%d post=%d scrape=%d", generation, runs, steps, post, scrape)
+	h.App.DB.QueryRow(`SELECT COUNT(*) FROM media_ingest_step WHERE media_id=101 AND generation=2 AND step_type='encrypt' AND required=1`).Scan(&encrypt)
+	if generation != 2 || runs != 1 || steps != 3 || post != 2 || scrape != 1 || encrypt != 1 {
+		t.Fatalf("generation=%d runs=%d steps=%d post=%d scrape=%d encrypt=%d", generation, runs, steps, post, scrape, encrypt)
 	}
 	c, w = adminIngestContext(http.MethodPost, "/api/v1/admin/media/101/ingest/retry", "101")
 	h.AdminRetryMediaIngest(c)
