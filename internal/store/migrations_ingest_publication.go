@@ -678,6 +678,11 @@ func publicationV2CurrentDB(ctx context.Context, db *sql.DB) (bool, error) {
 	if !tableExists(ctx, conn, "media_ingest_step_dependency") || !tableExists(ctx, conn, "media_ingest_evidence") || !tableExists(ctx, conn, "media_asset_stage_journal") {
 		return false, nil
 	}
+	if ok, childErr := publicationManagedChildrenCurrent(ctx, conn); childErr != nil {
+		return false, childErr
+	} else if !ok {
+		return false, nil
+	}
 	if err = validatePublicationV2Schema(ctx, conn); err != nil {
 		return false, err
 	}
@@ -693,10 +698,14 @@ func publicationV2CurrentDB(ctx context.Context, db *sql.DB) (bool, error) {
 	if tableExists(ctx, conn, "transcode_task") && !publicationTranscodeSchemaCurrent(ctx, conn) {
 		return false, nil
 	}
-	if ok, err := publicationManagedChildrenCurrent(ctx, conn); err != nil {
+	variant, err := detectPublicationProductVariant(ctx, conn)
+	if err != nil {
 		return false, err
-	} else if !ok {
-		return false, nil
+	}
+	if variant == publicationProductEnterprise {
+		if err := validateEnterprisePublicationChildren(ctx, conn); err != nil {
+			return false, nil
+		}
 	}
 	if err = validateSupersessionRows(ctx, conn); err != nil {
 		return false, err
@@ -951,29 +960,53 @@ func publicationTranscodeExpectedIdentity(ctx context.Context, q SQLExecutor, m 
 	for _, c := range m.columns {
 		cols[strings.ToLower(c)] = true
 	}
-	for _, c := range []string{"media_id", "ingest_run_id", "ingest_step_id", "generation"} {
-		if !cols[c] {
-			return nil
+	if cols["ingest_step_id"] {
+		var bad int
+		if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+quoteIdent(m.backup)+` b WHERE b.ingest_step_id IS NOT NULL AND (`+
+			`b.ingest_run_id IS NULL OR b.generation IS NULL OR NOT EXISTS(SELECT 1 FROM media_ingest_step s WHERE s.id=b.ingest_step_id AND s.run_id=b.ingest_run_id AND s.generation=b.generation`+
+			func() string {
+				if cols["media_id"] {
+					return ` AND (b.media_id IS NULL OR b.media_id=s.media_id)`
+				}
+				return ``
+			}()+`))`).Scan(&bad); err != nil {
+			return err
+		}
+		if bad != 0 {
+			return fmt.Errorf("transcode linkage invalid or ambiguous: rows=%d", bad)
 		}
 	}
-	var bad int
-	if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+quoteIdent(m.backup)+` b WHERE b.ingest_step_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM media_ingest_step s WHERE s.id=b.ingest_step_id AND s.run_id=b.ingest_run_id AND s.generation=b.generation AND (b.media_id IS NULL OR b.media_id=s.media_id))`).Scan(&bad); err != nil {
+	expected := m.backup + "__expected"
+	ddl, err := canonicalTranscodeSQL(m.sql)
+	if err != nil {
 		return err
 	}
-	if bad != 0 {
-		return fmt.Errorf("transcode linkage invalid or ambiguous: rows=%d", bad)
-	}
-	expected := m.backup + "__expected"
-	if _, err := q.ExecContext(ctx, `CREATE TABLE `+quoteIdent(expected)+` AS SELECT * FROM `+quoteIdent(m.backup)); err != nil {
+	ddl = strings.Replace(ddl, "transcode_task", expected, 1)
+	if _, err = q.ExecContext(ctx, ddl); err != nil {
 		return err
 	}
 	defer q.ExecContext(context.WithoutCancel(ctx), `DROP TABLE IF EXISTS `+quoteIdent(expected))
-	if _, err := q.ExecContext(ctx, `UPDATE `+quoteIdent(expected)+` SET media_id=(SELECT s.media_id FROM media_ingest_step s WHERE s.id=`+quoteIdent(expected)+`.ingest_step_id AND s.run_id=`+quoteIdent(expected)+`.ingest_run_id AND s.generation=`+quoteIdent(expected)+`.generation) WHERE media_id IS NULL AND ingest_step_id IS NOT NULL`); err != nil {
+	targetCols, err := publicationColumnNames(ctx, q, expected)
+	if err != nil {
+		return err
+	}
+	var insertCols, selectCols []string
+	for _, c := range targetCols {
+		if !cols[strings.ToLower(c)] {
+			continue
+		}
+		insertCols = append(insertCols, quoteIdent(c))
+		if strings.EqualFold(c, "media_id") && cols["ingest_step_id"] {
+			selectCols = append(selectCols, `CASE WHEN b.ingest_step_id IS NOT NULL THEN (SELECT s.media_id FROM media_ingest_step s WHERE s.id=b.ingest_step_id AND s.run_id=b.ingest_run_id AND s.generation=b.generation) ELSE b.media_id END`)
+		} else {
+			selectCols = append(selectCols, `b.`+quoteIdent(c))
+		}
+	}
+	if _, err = q.ExecContext(ctx, `INSERT INTO `+quoteIdent(expected)+`(`+strings.Join(insertCols, ",")+`) SELECT `+strings.Join(selectCols, ",")+` FROM `+quoteIdent(m.backup)+` b`); err != nil {
 		return err
 	}
 	return publicationIdentity(ctx, q, expected, &m.expectedCount, &m.expectedChecksum)
 }
-
 func publicationColumnNames(ctx context.Context, q SQLExecutor, table string) ([]string, error) {
 	rows, e := q.QueryContext(ctx, fmt.Sprintf(`PRAGMA table_info(%q)`, table))
 	if e != nil {
@@ -1425,6 +1458,29 @@ func canonicalTranscodeSQL(original string) (string, error) {
 		publicationTranscodeStrictCheck)
 	return original[:openAt+1] + strings.Join(kept, ",") + original[closeAt:], nil
 }
+
+const canonicalIngestDependencySchema = `CREATE TABLE media_ingest_step_dependency(
+ step_id INTEGER NOT NULL REFERENCES media_ingest_step(id) ON DELETE CASCADE,
+ depends_on_step_id INTEGER REFERENCES media_ingest_step(id) ON DELETE CASCADE,
+ dependency_kind TEXT NOT NULL CHECK(dependency_kind IN ('step_done','media_visible')),
+ CHECK((dependency_kind='step_done' AND depends_on_step_id IS NOT NULL) OR (dependency_kind='media_visible' AND depends_on_step_id IS NULL)),
+ UNIQUE(step_id,dependency_kind,depends_on_step_id))`
+const canonicalIngestEvidenceSchema = `CREATE TABLE media_ingest_evidence(
+ id INTEGER PRIMARY KEY AUTOINCREMENT,run_id INTEGER NOT NULL,step_id INTEGER NOT NULL,media_id INTEGER NOT NULL,generation INTEGER NOT NULL,
+ kind TEXT NOT NULL CHECK(kind IN ('poster','thumbnail','encrypt')),source_fingerprint TEXT NOT NULL,artifact_refs_json TEXT NOT NULL CHECK(json_valid(artifact_refs_json)),
+ reused_from_evidence_id INTEGER REFERENCES media_ingest_evidence(id) ON DELETE SET NULL,reason TEXT NOT NULL DEFAULT '',created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ verified_at TIMESTAMP NOT NULL,stage_id TEXT NOT NULL,
+ FOREIGN KEY(run_id,media_id,generation) REFERENCES media_ingest_run(id,media_id,generation) ON DELETE CASCADE,
+ FOREIGN KEY(step_id,media_id,generation) REFERENCES media_ingest_step(id,media_id,generation) ON DELETE CASCADE,
+ FOREIGN KEY(media_id) REFERENCES media(id) ON DELETE CASCADE,UNIQUE(step_id,kind),UNIQUE(stage_id))`
+const canonicalAssetStageJournalSchema = `CREATE TABLE media_asset_stage_journal(
+ stage_id TEXT PRIMARY KEY,media_id INTEGER NOT NULL,run_id INTEGER NOT NULL,step_id INTEGER NOT NULL,generation INTEGER NOT NULL,owner_token TEXT NOT NULL,source_fingerprint TEXT NOT NULL,
+ artifact_kind TEXT NOT NULL CHECK(artifact_kind IN ('poster','thumbnail','encrypt')),state TEXT NOT NULL CHECK(state IN ('staged','quarantined','committed')),
+ original_path TEXT NOT NULL DEFAULT '',quarantine_path TEXT NOT NULL DEFAULT '',staged_path TEXT NOT NULL,hashes_sizes_json TEXT NOT NULL CHECK(json_valid(hashes_sizes_json)),
+ recovery_error TEXT NOT NULL DEFAULT '',created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ FOREIGN KEY(run_id,media_id,generation) REFERENCES media_ingest_run(id,media_id,generation) ON DELETE CASCADE,
+ FOREIGN KEY(step_id,media_id,generation) REFERENCES media_ingest_step(id,media_id,generation) ON DELETE CASCADE)`
+
 func createPublicationChildren(ctx context.Context, q SQLExecutor, g []publicationGraphTable) error {
 	if _, ok := graphMeta(g, "post_ingest_task"); ok {
 		if _, e := q.ExecContext(ctx, strings.Replace(postIngestTaskPublicationSchema, "post_ingest_task_new", "post_ingest_task", 1)); e != nil {
@@ -1446,11 +1502,14 @@ func createPublicationChildren(ctx context.Context, q SQLExecutor, g []publicati
 			}
 		}
 	}
-	for _, n := range []string{"pretranscode_task_meta", "pretranscode_rendition_job"} {
-		if m, ok := graphMeta(g, n); ok {
-			if _, e := q.ExecContext(ctx, m.sql); e != nil {
-				return fmt.Errorf("create %s: %w", n, e)
-			}
+	if _, ok := graphMeta(g, "pretranscode_task_meta"); ok {
+		if _, e := q.ExecContext(ctx, canonicalPretranscodeTaskMetaSchema); e != nil {
+			return fmt.Errorf("create pretranscode_task_meta: %w", e)
+		}
+	}
+	if _, ok := graphMeta(g, "pretranscode_rendition_job"); ok {
+		if _, e := q.ExecContext(ctx, canonicalPretranscodeRenditionJobSchema); e != nil {
+			return fmt.Errorf("create pretranscode_rendition_job: %w", e)
 		}
 	}
 	if _, ok := graphMeta(g, "pretranscode_rendition_job"); ok {
@@ -1460,7 +1519,7 @@ func createPublicationChildren(ctx context.Context, q SQLExecutor, g []publicati
 			}
 		}
 	}
-	for _, stmt := range []string{`CREATE TABLE IF NOT EXISTS media_ingest_step_dependency(step_id INTEGER NOT NULL REFERENCES media_ingest_step(id) ON DELETE CASCADE,depends_on_step_id INTEGER REFERENCES media_ingest_step(id) ON DELETE CASCADE,dependency_kind TEXT NOT NULL CHECK(dependency_kind IN ('step_done','media_visible')),CHECK((dependency_kind='step_done' AND depends_on_step_id IS NOT NULL) OR (dependency_kind='media_visible' AND depends_on_step_id IS NULL)),UNIQUE(step_id,dependency_kind,depends_on_step_id))`, `CREATE UNIQUE INDEX IF NOT EXISTS idx_ingest_dependency_visible ON media_ingest_step_dependency(step_id) WHERE dependency_kind='media_visible'`, `CREATE TABLE IF NOT EXISTS media_ingest_evidence(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id INTEGER NOT NULL,step_id INTEGER NOT NULL,media_id INTEGER NOT NULL,generation INTEGER NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('poster','thumbnail','encrypt')),source_fingerprint TEXT NOT NULL,artifact_refs_json TEXT NOT NULL CHECK(json_valid(artifact_refs_json)),reused_from_evidence_id INTEGER REFERENCES media_ingest_evidence(id) ON DELETE SET NULL,reason TEXT NOT NULL DEFAULT '',created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,verified_at TIMESTAMP NOT NULL,stage_id TEXT NOT NULL,FOREIGN KEY(run_id,media_id,generation) REFERENCES media_ingest_run(id,media_id,generation) ON DELETE CASCADE,FOREIGN KEY(step_id,media_id,generation) REFERENCES media_ingest_step(id,media_id,generation) ON DELETE CASCADE,FOREIGN KEY(media_id) REFERENCES media(id) ON DELETE CASCADE,UNIQUE(step_id,kind),UNIQUE(stage_id))`, `CREATE TABLE IF NOT EXISTS media_asset_stage_journal(stage_id TEXT PRIMARY KEY,media_id INTEGER NOT NULL,run_id INTEGER NOT NULL,step_id INTEGER NOT NULL,generation INTEGER NOT NULL,owner_token TEXT NOT NULL,source_fingerprint TEXT NOT NULL,artifact_kind TEXT NOT NULL CHECK(artifact_kind IN ('poster','thumbnail','encrypt')),state TEXT NOT NULL CHECK(state IN ('staged','quarantined','committed')),original_path TEXT NOT NULL DEFAULT '',quarantine_path TEXT NOT NULL DEFAULT '',staged_path TEXT NOT NULL,hashes_sizes_json TEXT NOT NULL CHECK(json_valid(hashes_sizes_json)),recovery_error TEXT NOT NULL DEFAULT '',created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,FOREIGN KEY(run_id,media_id,generation) REFERENCES media_ingest_run(id,media_id,generation) ON DELETE CASCADE,FOREIGN KEY(step_id,media_id,generation) REFERENCES media_ingest_step(id,media_id,generation) ON DELETE CASCADE)`, `CREATE INDEX IF NOT EXISTS idx_asset_stage_recovery ON media_asset_stage_journal(state,updated_at)`} {
+	for _, stmt := range []string{canonicalIngestDependencySchema, publicationManagedIndexes["media_ingest_step_dependency"]["idx_ingest_dependency_visible"], canonicalIngestEvidenceSchema, canonicalAssetStageJournalSchema, publicationManagedIndexes["media_asset_stage_journal"]["idx_asset_stage_recovery"]} {
 		if _, e := q.ExecContext(ctx, stmt); e != nil {
 			return e
 		}
@@ -1572,20 +1631,18 @@ func copyPublicationGraph(ctx context.Context, q SQLExecutor, g []publicationGra
 			continue
 		}
 		cols := m.columns
-		if n == "transcode_task" {
-			current, e := publicationColumnNames(ctx, q, n)
-			if e != nil {
-				return e
-			}
-			have := map[string]bool{}
-			for _, c := range cols {
-				have[c] = true
-			}
-			cols = nil
-			for _, c := range current {
-				if have[c] {
-					cols = append(cols, c)
-				}
+		current, e := publicationColumnNames(ctx, q, n)
+		if e != nil {
+			return e
+		}
+		have := map[string]bool{}
+		for _, c := range cols {
+			have[strings.ToLower(c)] = true
+		}
+		cols = nil
+		for _, c := range current {
+			if have[strings.ToLower(c)] {
+				cols = append(cols, c)
 			}
 		}
 		var quoted []string
@@ -1854,6 +1911,9 @@ func publicationMigrationPreflightDB(ctx context.Context, db *sql.DB) error {
 	return publicationMigrationPreflight(ctx, conn)
 }
 func publicationMigrationPreflight(ctx context.Context, q SQLExecutor) error {
+	if _, err := detectPublicationProductVariant(ctx, q); err != nil {
+		return err
+	}
 	rows, err := q.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' AND (name GLOB '*_v2' OR name GLOB '*__publication_v2_backup')`)
 	if err != nil {
 		return err
@@ -1898,30 +1958,8 @@ func publicationMigrationPreflight(ctx context.Context, q SQLExecutor) error {
 			return e
 		}
 	}
-	for parent := range publicationRebuiltParents {
-		refs, e := q.QueryContext(ctx, `SELECT DISTINCT m.name FROM sqlite_master m JOIN pragma_foreign_key_list(m.name) f WHERE m.type='table' AND m.name NOT LIKE 'sqlite_%' AND f."table"=?`, parent)
-		if e != nil {
-			return e
-		}
-		for refs.Next() {
-			var child string
-			if e = refs.Scan(&child); e != nil {
-				refs.Close()
-				return e
-			}
-			if !publicationApprovedChildren[child] {
-				refs.Close()
-				return fmt.Errorf("publication migration unknown reference %s -> %s", child, parent)
-			}
-		}
-		if e = refs.Close(); e != nil {
-			return e
-		}
-	}
-	if tableExists(ctx, q, "media_ingest_step_dependency") {
-		if err := validatePublicationV2Schema(ctx, q); err != nil {
-			return err
-		}
+	if err := validatePublicationKnownReferences(ctx, q); err != nil {
+		return err
 	}
 	if tableExists(ctx, q, "media_ingest_run") {
 		cols, e := publicationColumns(ctx, q, "media_ingest_run")
@@ -2013,51 +2051,449 @@ func publicationForeignKeys(ctx context.Context, q SQLExecutor, table string) (m
 	return out, nil
 }
 
-func validatePublicationV2Schema(ctx context.Context, q SQLExecutor) error {
-	rows, err := q.QueryContext(ctx, `PRAGMA index_list(media_ingest_step_dependency)`)
+func requirePublicationClauses(ctx context.Context, q SQLExecutor, table string, clauses ...string) error {
+	raw, err := publicationRawTableSQL(ctx, q, table)
 	if err != nil {
 		return err
 	}
-	visibleUnique, visiblePartial := 0, 0
-	for rows.Next() {
-		var seq, unique, partial int
-		var name, origin string
-		if err = rows.Scan(&seq, &name, &unique, &origin, &partial); err != nil {
-			rows.Close()
-			return err
-		}
-		if name == "idx_ingest_dependency_visible" {
-			visibleUnique = unique
-			visiblePartial = partial
+	n := normalizePublicationSQL(raw)
+	for _, clause := range clauses {
+		if strings.Count(n, normalizePublicationSQL(clause)) != 1 {
+			return fmt.Errorf("%s managed clause %q count=%d", table, clause, strings.Count(n, normalizePublicationSQL(clause)))
 		}
 	}
-	if err = rows.Close(); err != nil {
+	return nil
+}
+
+func requirePublicationFKSet(ctx context.Context, q SQLExecutor, table string, want ...string) error {
+	got, err := publicationForeignKeys(ctx, q, table)
+	if err != nil {
 		return err
 	}
-	if visibleUnique != 1 || visiblePartial != 1 {
-		return fmt.Errorf("publication v2 dependency visible index drift: unique=%d partial=%d", visibleUnique, visiblePartial)
+	if len(got) != len(want) {
+		return fmt.Errorf("%s FK count=%d want=%d: %v", table, len(got), len(want), got)
 	}
-	for table := range map[string]bool{"media_ingest_evidence": true, "media_asset_stage_journal": true} {
+	for _, key := range want {
+		if !got[key] {
+			return fmt.Errorf("%s FK missing %s", table, key)
+		}
+	}
+	return nil
+}
+
+func requirePublicationIndex(ctx context.Context, q SQLExecutor, table, name, ddl string, unique, partial int) error {
+	var gotSQL string
+	if err := q.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='index' AND name=? AND tbl_name=?`, name, table).Scan(&gotSQL); err != nil {
+		return err
+	}
+	if normalizePublicationSQL(gotSQL) != normalizePublicationSQL(ddl) {
+		return fmt.Errorf("%s index %s SQL drift: %s", table, name, gotSQL)
+	}
+	rows, err := q.QueryContext(ctx, fmt.Sprintf(`PRAGMA index_list(%q)`, table))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	found := false
+	for rows.Next() {
+		var seq, u, p int
+		var n, origin string
+		if err = rows.Scan(&seq, &n, &u, &origin, &p); err != nil {
+			return err
+		}
+		if n == name {
+			found = true
+			if u != unique || p != partial {
+				return fmt.Errorf("%s index %s flags=%d/%d want=%d/%d", table, name, u, p, unique, partial)
+			}
+		}
+	}
+	if err = rows.Err(); err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("%s index %s absent", table, name)
+	}
+	return nil
+}
+
+func validatePublicationV2Schema(ctx context.Context, q SQLExecutor) error {
+	if err := validatePublicationRunV2(ctx, q); err != nil {
+		return err
+	}
+	if err := validatePublicationParentChildren(ctx, q); err != nil {
+		return err
+	}
+	for table, indexes := range publicationManagedIndexes {
+		if !tableExists(ctx, q, table) {
+			continue
+		}
+		for name, ddl := range indexes {
+			unique, partial := 0, 0
+			if table == "media_ingest_step_dependency" {
+				unique, partial = 1, 1
+			}
+			if err := requirePublicationIndex(ctx, q, table, name, ddl, unique, partial); err != nil {
+				return err
+			}
+		}
+	}
+	for _, table := range []string{"media_ingest_step_dependency", "media_ingest_evidence", "media_asset_stage_journal"} {
 		if !tableExists(ctx, q, table) {
 			return fmt.Errorf("publication v2 missing table %s", table)
 		}
 	}
-	deps, err := publicationForeignKeys(ctx, q, "media_ingest_evidence")
-	if err != nil {
+	if err := exactPublicationTable(ctx, q, "media_ingest_step_dependency", canonicalIngestDependencySchema); err != nil {
 		return err
 	}
-	for _, key := range []string{"media:media_id:id:cascade", "media_ingest_run:run_id,media_id,generation:id,media_id,generation:cascade", "media_ingest_step:step_id,media_id,generation:id,media_id,generation:cascade", "media_ingest_evidence:reused_from_evidence_id:id:set null"} {
-		if !deps[key] {
-			return fmt.Errorf("publication v2 evidence FK missing %s", key)
+	if err := exactPublicationTable(ctx, q, "media_ingest_evidence", canonicalIngestEvidenceSchema); err != nil {
+		return err
+	}
+	if err := exactPublicationTable(ctx, q, "media_asset_stage_journal", canonicalAssetStageJournalSchema); err != nil {
+		return err
+	}
+	if err := requirePublicationClauses(ctx, q, "media_ingest_step_dependency",
+		`CHECK(dependency_kind IN ('step_done','media_visible'))`,
+		`CHECK((dependency_kind='step_done' AND depends_on_step_id IS NOT NULL) OR (dependency_kind='media_visible' AND depends_on_step_id IS NULL))`,
+		`UNIQUE(step_id,dependency_kind,depends_on_step_id)`); err != nil {
+		return err
+	}
+	if err := requirePublicationFKSet(ctx, q, "media_ingest_step_dependency", "media_ingest_step:step_id:id:cascade", "media_ingest_step:depends_on_step_id:id:cascade"); err != nil {
+		return err
+	}
+	if err := requirePublicationIndex(ctx, q, "media_ingest_step_dependency", "idx_ingest_dependency_visible", publicationManagedIndexes["media_ingest_step_dependency"]["idx_ingest_dependency_visible"], 1, 1); err != nil {
+		return err
+	}
+	if err := requirePublicationClauses(ctx, q, "media_ingest_evidence", `CHECK(kind IN ('poster','thumbnail','encrypt'))`, `CHECK(json_valid(artifact_refs_json))`, `UNIQUE(step_id,kind)`, `UNIQUE(stage_id)`); err != nil {
+		return err
+	}
+	if err := requirePublicationFKSet(ctx, q, "media_ingest_evidence", "media:media_id:id:cascade", "media_ingest_run:run_id,media_id,generation:id,media_id,generation:cascade", "media_ingest_step:step_id,media_id,generation:id,media_id,generation:cascade", "media_ingest_evidence:reused_from_evidence_id:id:set null"); err != nil {
+		return err
+	}
+	if err := requirePublicationClauses(ctx, q, "media_asset_stage_journal", `CHECK(artifact_kind IN ('poster','thumbnail','encrypt'))`, `CHECK(state IN ('staged','quarantined','committed'))`, `CHECK(json_valid(hashes_sizes_json))`); err != nil {
+		return err
+	}
+	if err := requirePublicationFKSet(ctx, q, "media_asset_stage_journal", "media_ingest_run:run_id,media_id,generation:id,media_id,generation:cascade", "media_ingest_step:step_id,media_id,generation:id,media_id,generation:cascade"); err != nil {
+		return err
+	}
+	if err := requirePublicationIndex(ctx, q, "media_asset_stage_journal", "idx_asset_stage_recovery", publicationManagedIndexes["media_asset_stage_journal"]["idx_asset_stage_recovery"], 0, 0); err != nil {
+		return err
+	}
+	if tableExists(ctx, q, "media_ingest_step") {
+		if err := requirePublicationClauses(ctx, q, "media_ingest_step", `CHECK(step_type IN ('poster','scrape','preview','keyframe','subtitle','atrack','encrypt','prepare','thumbnail'))`, `UNIQUE(run_id,step_type)`, `UNIQUE(id,media_id,generation)`); err != nil {
+			return err
 		}
 	}
-	journal, err := publicationForeignKeys(ctx, q, "media_asset_stage_journal")
+	if tableExists(ctx, q, "post_ingest_task") {
+		if err := exactPublicationTable(ctx, q, "post_ingest_task", strings.Replace(postIngestTaskPublicationSchema, "post_ingest_task_new", "post_ingest_task", 1)); err != nil {
+			return err
+		}
+		if err := requirePublicationFKSet(ctx, q, "post_ingest_task", "media:media_id:id:cascade", "scan_task:scan_task_id:id:set null", "media_ingest_run:ingest_run_id:id:cascade", "media_ingest_step:ingest_step_id:id:cascade", "media_ingest_run:ingest_run_id,media_id,generation:id,media_id,generation:no action", "media_ingest_step:ingest_step_id,media_id,generation:id,media_id,generation:no action"); err != nil {
+			return err
+		}
+	}
+	if tableExists(ctx, q, "scrape_task") {
+		if err := exactPublicationTable(ctx, q, "scrape_task", strings.Replace(scrapeTaskPublicationSchema, "scrape_task_new", "scrape_task", 1)); err != nil {
+			return err
+		}
+		if err := requirePublicationFKSet(ctx, q, "scrape_task", "media:media_id:id:cascade", "media_ingest_run:ingest_run_id:id:cascade", "media_ingest_step:ingest_step_id:id:cascade", "media_ingest_run:ingest_run_id,media_id,generation:id,media_id,generation:no action", "media_ingest_step:ingest_step_id,media_id,generation:id,media_id,generation:no action"); err != nil {
+			return err
+		}
+	}
+	variant, err := detectPublicationProductVariant(ctx, q)
 	if err != nil {
 		return err
 	}
-	for _, key := range []string{"media_ingest_run:run_id,media_id,generation:id,media_id,generation:cascade", "media_ingest_step:step_id,media_id,generation:id,media_id,generation:cascade"} {
-		if !journal[key] {
-			return fmt.Errorf("publication v2 journal FK missing %s", key)
+	if variant == publicationProductEnterprise {
+		return validateEnterprisePublicationChildren(ctx, q)
+	}
+	return nil
+}
+
+const canonicalPretranscodeTaskMetaSchema = `CREATE TABLE pretranscode_task_meta (
+ task_id INTEGER PRIMARY KEY,
+ preset_id INTEGER NOT NULL,
+ output_format TEXT NOT NULL,
+ encryption_mode TEXT DEFAULT 'none',
+ priority TEXT DEFAULT 'normal',
+ output_path TEXT,
+ ingest_jobs_snapshot_json TEXT,
+ FOREIGN KEY(task_id) REFERENCES transcode_task(id) ON DELETE CASCADE,
+ FOREIGN KEY(preset_id) REFERENCES transcode_preset(id)
+)`
+
+const canonicalPretranscodeRenditionJobSchema = `CREATE TABLE pretranscode_rendition_job (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ task_id INTEGER NOT NULL,
+ rendition_id INTEGER,
+ rendition_name TEXT NOT NULL,
+ status TEXT DEFAULT 'waiting',
+ progress INTEGER DEFAULT 0,
+ output_path TEXT,
+ error_message TEXT,
+ encoder_used TEXT,
+ started_at TIMESTAMP,
+ completed_at TIMESTAMP,
+ created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+ available_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+ lease_owner TEXT,
+ lease_until TIMESTAMP,
+ config_snapshot_json TEXT,
+ FOREIGN KEY(task_id) REFERENCES transcode_task(id) ON DELETE CASCADE,
+ FOREIGN KEY(rendition_id) REFERENCES preset_rendition(id) ON DELETE SET NULL
+)`
+
+type publicationProductVariant uint8
+
+const (
+	publicationProductCommunity publicationProductVariant = iota
+	publicationProductEnterprise
+)
+
+func detectPublicationProductVariant(ctx context.Context, q SQLExecutor) (publicationProductVariant, error) {
+	meta := tableExists(ctx, q, "pretranscode_task_meta")
+	jobs := tableExists(ctx, q, "pretranscode_rendition_job")
+	if meta != jobs {
+		return 0, fmt.Errorf("publication migration partial enterprise graph: meta=%t jobs=%t", meta, jobs)
+	}
+	if !meta {
+		return publicationProductCommunity, nil
+	}
+	// Fail closed on schemas that cannot safely be copied into the canonical constructors.
+	required := map[string][]string{
+		"pretranscode_task_meta":     {"task_id", "preset_id", "output_format", "encryption_mode", "priority", "output_path", "ingest_jobs_snapshot_json"},
+		"pretranscode_rendition_job": {"id", "task_id", "rendition_id", "rendition_name", "status", "progress", "output_path", "error_message", "encoder_used", "started_at", "completed_at", "created_at", "available_at", "lease_owner", "lease_until", "config_snapshot_json"},
+	}
+	for table, names := range required {
+		cols, err := publicationColumns(ctx, q, table)
+		if err != nil {
+			return 0, err
+		}
+		for _, name := range names {
+			if !cols[name] {
+				return 0, fmt.Errorf("publication migration unrecognized enterprise schema: %s.%s missing", table, name)
+			}
+		}
+	}
+	return publicationProductEnterprise, nil
+}
+
+func publicationColumnSpecs(ctx context.Context, q SQLExecutor, table string) ([]string, error) {
+	rows, err := q.QueryContext(ctx, fmt.Sprintf(`PRAGMA table_xinfo(%q)`, table))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var cid, nn, pk, hidden int
+		var name, typ string
+		var d sql.NullString
+		if err = rows.Scan(&cid, &name, &typ, &nn, &d, &pk, &hidden); err != nil {
+			return nil, err
+		}
+		out = append(out, fmt.Sprintf("%s|%s|%d|%s|%d|%d", strings.ToLower(name), strings.ToUpper(typ), nn, normalizePublicationSQL(d.String), pk, hidden))
+	}
+	return out, rows.Err()
+}
+
+func exactPublicationTable(ctx context.Context, q SQLExecutor, table, ddl string) error {
+	open, close, err := findCreateTableBody(ddl)
+	if err != nil {
+		return err
+	}
+	clauses, err := splitPublicationSQLClauses(ddl[open+1 : close])
+	if err != nil {
+		return err
+	}
+	expectedCols, err := extractTopLevelColumnNames(clauses)
+	if err != nil {
+		return err
+	}
+	actual, err := publicationColumns(ctx, q, table)
+	if err != nil {
+		return err
+	}
+	if len(actual) != len(expectedCols) {
+		return fmt.Errorf("%s columns count=%d want=%d", table, len(actual), len(expectedCols))
+	}
+	for name := range expectedCols {
+		if !actual[name] {
+			return fmt.Errorf("%s missing column %s", table, name)
+		}
+	}
+	// Column metadata must match a temporary canonical table, including defaults and PK shape.
+	temp := "__publication_schema_expected"
+	if _, err = q.ExecContext(ctx, `DROP TABLE IF EXISTS `+quoteIdent(temp)); err != nil {
+		return err
+	}
+	tempDDL := strings.Replace(ddl, table, temp, 1)
+	if _, err = q.ExecContext(ctx, tempDDL); err != nil {
+		return err
+	}
+	defer q.ExecContext(context.WithoutCancel(ctx), `DROP TABLE IF EXISTS `+quoteIdent(temp))
+	got, err := publicationColumnSpecs(ctx, q, table)
+	if err != nil {
+		return err
+	}
+	want, err := publicationColumnSpecs(ctx, q, temp)
+	if err != nil {
+		return err
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		return fmt.Errorf("%s column metadata drift: got=%v want=%v", table, got, want)
+	}
+	return nil
+}
+
+func validateEnterprisePublicationChildren(ctx context.Context, q SQLExecutor) error {
+	variant, err := detectPublicationProductVariant(ctx, q)
+	if err != nil {
+		return err
+	}
+	if variant != publicationProductEnterprise {
+		return fmt.Errorf("enterprise children absent")
+	}
+	for table, ddl := range map[string]string{"pretranscode_task_meta": canonicalPretranscodeTaskMetaSchema, "pretranscode_rendition_job": canonicalPretranscodeRenditionJobSchema} {
+		if err = exactPublicationTable(ctx, q, table, ddl); err != nil {
+			return err
+		}
+	}
+	meta, err := publicationForeignKeys(ctx, q, "pretranscode_task_meta")
+	if err != nil {
+		return err
+	}
+	if len(meta) != 2 || !meta["transcode_task:task_id:id:cascade"] || !meta["transcode_preset:preset_id:id:no action"] {
+		return fmt.Errorf("pretranscode_task_meta FK drift: %v", meta)
+	}
+	jobs, err := publicationForeignKeys(ctx, q, "pretranscode_rendition_job")
+	if err != nil {
+		return err
+	}
+	if len(jobs) != 2 || !jobs["transcode_task:task_id:id:cascade"] || !jobs["preset_rendition:rendition_id:id:set null"] {
+		return fmt.Errorf("pretranscode_rendition_job FK drift: %v", jobs)
+	}
+	for name, want := range publicationManagedIndexes["pretranscode_rendition_job"] {
+		var got string
+		if err = q.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='index' AND name=? AND tbl_name='pretranscode_rendition_job'`, name).Scan(&got); err != nil {
+			return err
+		}
+		if normalizePublicationSQL(got) != normalizePublicationSQL(want) {
+			return fmt.Errorf("enterprise index %s drift", name)
+		}
+	}
+	return nil
+}
+
+func publicationReferencingChildren(ctx context.Context, q SQLExecutor, parent string) (map[string]bool, error) {
+	rows, err := q.QueryContext(ctx, `SELECT DISTINCT m.name FROM sqlite_master m JOIN pragma_foreign_key_list(m.name) f WHERE m.type='table' AND m.name NOT LIKE 'sqlite_%' AND f."table"=? ORDER BY m.name`, parent)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var n string
+		if err = rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		out[n] = true
+	}
+	return out, rows.Err()
+}
+func exactChildSet(parent string, got, want map[string]bool) error {
+	if len(got) != len(want) {
+		return fmt.Errorf("publication migration %s children=%v want=%v", parent, got, want)
+	}
+	for n := range want {
+		if !got[n] {
+			return fmt.Errorf("publication migration %s missing child %s", parent, n)
+		}
+	}
+	return nil
+}
+func validatePublicationParentChildren(ctx context.Context, q SQLExecutor) error {
+	if tableExists(ctx, q, "media_ingest_step") {
+		want := map[string]bool{"post_ingest_task": true}
+		if tableExists(ctx, q, "scrape_task") {
+			want["scrape_task"] = true
+		}
+		if tableExists(ctx, q, "transcode_task") {
+			cols, e := publicationColumns(ctx, q, "transcode_task")
+			if e != nil {
+				return e
+			}
+			if cols["ingest_step_id"] {
+				want["transcode_task"] = true
+			}
+		}
+		for _, n := range []string{"media_ingest_step_dependency", "media_ingest_evidence", "media_asset_stage_journal"} {
+			if tableExists(ctx, q, n) {
+				want[n] = true
+			}
+		}
+		got, e := publicationReferencingChildren(ctx, q, "media_ingest_step")
+		if e != nil {
+			return e
+		}
+		if e = exactChildSet("media_ingest_step", got, want); e != nil {
+			return e
+		}
+	}
+	if tableExists(ctx, q, "transcode_task") {
+		variant, e := detectPublicationProductVariant(ctx, q)
+		if e != nil {
+			return e
+		}
+		want := map[string]bool{}
+		if variant == publicationProductEnterprise {
+			want["pretranscode_task_meta"] = true
+			want["pretranscode_rendition_job"] = true
+		}
+		got, e := publicationReferencingChildren(ctx, q, "transcode_task")
+		if e != nil {
+			return e
+		}
+		if e = exactChildSet("transcode_task", got, want); e != nil {
+			return e
+		}
+	}
+	return nil
+}
+func validatePublicationRunV2(ctx context.Context, q SQLExecutor) error {
+	cols, err := publicationColumnSpecs(ctx, q, "media_ingest_run")
+	if err != nil {
+		return err
+	}
+	byName := map[string]string{}
+	for _, v := range cols {
+		byName[strings.Split(v, "|")[0]] = v
+	}
+	want := map[string]string{"policy_version": "policy_version|INTEGER|1|1|0|0", "terminal_reason": "terminal_reason|TEXT|1|''|0|0", "superseded_by_generation": "superseded_by_generation|INTEGER|0||0|0", "superseded_at": "superseded_at|TIMESTAMP|0||0|0"}
+	for n, v := range want {
+		if byName[n] != v {
+			return fmt.Errorf("media_ingest_run.%s metadata=%q want=%q", n, byName[n], v)
+		}
+	}
+	return requirePublicationClauses(ctx, q, "media_ingest_run", `CHECK(policy_version IN (1,2))`, `UNIQUE(media_id,generation)`, `UNIQUE(id,media_id,generation)`)
+}
+
+func validatePublicationKnownReferences(ctx context.Context, q SQLExecutor) error {
+	for parent, allowed := range map[string]map[string]bool{
+		"media_ingest_step": {"post_ingest_task": true, "scrape_task": true, "transcode_task": true, "media_ingest_step_dependency": true, "media_ingest_evidence": true, "media_asset_stage_journal": true},
+		"transcode_task":    {"pretranscode_task_meta": true, "pretranscode_rendition_job": true},
+	} {
+		if !tableExists(ctx, q, parent) {
+			continue
+		}
+		got, err := publicationReferencingChildren(ctx, q, parent)
+		if err != nil {
+			return err
+		}
+		for child := range got {
+			if !allowed[child] {
+				return fmt.Errorf("publication migration unknown reference %s -> %s", child, parent)
+			}
 		}
 	}
 	return nil

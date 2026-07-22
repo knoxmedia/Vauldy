@@ -772,6 +772,7 @@ func TestMigrateIngestPublicationV2FaultStagesRollbackGraph(t *testing.T) {
 			if err := migrateIngestPublicationV1(context.Background(), db); err != nil {
 				t.Fatal(err)
 			}
+			installCompletePublicationFaultFixture(t, db)
 			before := snapshotPublicationGraph(t, db)
 			old := publicationMigrationTestHook
 			publicationMigrationTestHook = func(g publicationMigrationStage) error {
@@ -797,10 +798,48 @@ func TestMigrateIngestPublicationV2FaultStagesRollbackGraph(t *testing.T) {
 	}
 }
 
+func installCompletePublicationFaultFixture(t *testing.T, db *sql.DB) {
+	t.Helper()
+	if _, err := db.Exec(`DROP TABLE IF EXISTS scrape_task`); err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE transcode_preset(id INTEGER PRIMARY KEY)`,
+		`CREATE TABLE preset_rendition(id INTEGER PRIMARY KEY)`,
+		`CREATE TABLE transcode_task(id INTEGER PRIMARY KEY,file_id TEXT,status TEXT DEFAULT 'waiting',progress INTEGER DEFAULT 0,error_message TEXT,output_path TEXT,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,task_type TEXT DEFAULT 'batch',started_at TIMESTAMP,completed_at TIMESTAMP,preset_id INTEGER,ingest_run_id INTEGER,ingest_step_id INTEGER,generation INTEGER,media_id INTEGER,lease_owner TEXT,lease_until TIMESTAMP)`,
+		canonicalPretranscodeTaskMetaSchema,
+		canonicalPretranscodeRenditionJobSchema,
+		`INSERT INTO transcode_preset VALUES(1)`, `INSERT INTO preset_rendition VALUES(2)`,
+		`INSERT INTO media_ingest_run(media_id,generation,reason,status,config_snapshot_json) VALUES(20,1,'repair','processing','{"fixture":1}')`,
+		`INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status,attempts,max_attempts,available_at,lease_owner,lease_until,last_error,started_at,created_at,updated_at) VALUES(70,1,20,1,'prepare',1,'running',2,4,'2030-01-01','step-owner','2030-01-02','step-error','2029-01-01','2029-01-01','2029-01-02')`,
+		`INSERT INTO post_ingest_task(id,media_id,scan_task_id,ingest_run_id,ingest_step_id,generation,task_type,status,attempts,max_attempts,available_at,lease_owner,lease_until,last_error,created_at,updated_at,started_at) VALUES(71,20,10,1,70,1,'poster','running',2,4,'2030-01-01','post-owner','2030-01-02','post-error','2029-01-01','2029-01-02','2029-01-03')`,
+		`CREATE TABLE scrape_task(id INTEGER PRIMARY KEY AUTOINCREMENT,media_id INTEGER NOT NULL,task_type TEXT DEFAULT 'media',source TEXT DEFAULT 'auto',query TEXT,year INTEGER,status TEXT DEFAULT 'waiting',progress INTEGER DEFAULT 0,fail_count INTEGER DEFAULT 0,available_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,message TEXT,created_by INTEGER DEFAULT 0,ingest_run_id INTEGER,ingest_step_id INTEGER,generation INTEGER,lease_owner TEXT,lease_until TIMESTAMP,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,started_at TIMESTAMP,finished_at TIMESTAMP)`,
+		`INSERT INTO scrape_task VALUES(72,20,'media','fixture','query',2026,'running',37,2,'2030-01-01','scrape-error',9,1,70,1,'scrape-owner','2030-01-02','2029-01-01','2029-01-02',NULL)`,
+		`INSERT INTO transcode_task(id,file_id,status,progress,error_message,output_path,task_type,ingest_run_id,ingest_step_id,generation,media_id,lease_owner,lease_until) VALUES(73,'fixture-file','running',55,'transcode-error','output','pretranscode',1,70,1,20,'transcode-owner','2030-01-02')`,
+		`INSERT INTO pretranscode_task_meta(task_id,preset_id,output_format,encryption_mode,priority,output_path,ingest_jobs_snapshot_json) VALUES(73,1,'hls','aes128','high','meta-output','{"jobs":[1]}')`,
+		`INSERT INTO pretranscode_rendition_job(id,task_id,rendition_id,rendition_name,status,progress,output_path,error_message,encoder_used,started_at,created_at,available_at,lease_owner,lease_until,config_snapshot_json) VALUES(74,73,2,'720p','running',66,'job-output','job-error','nvenc','2029-01-01','2029-01-01','2030-01-01','job-owner','2030-01-02','{"job":1}')`,
+		canonicalIngestDependencySchema,
+		`INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(70,70,'step_done')`,
+		canonicalIngestEvidenceSchema,
+		`INSERT INTO media_ingest_evidence(id,run_id,step_id,media_id,generation,kind,source_fingerprint,artifact_refs_json,reason,verified_at,stage_id) VALUES(75,1,70,20,1,'poster','fp','{"path":"x"}','fixture','2029-01-01','stage-75')`,
+		canonicalAssetStageJournalSchema,
+		`INSERT INTO media_asset_stage_journal(stage_id,media_id,run_id,step_id,generation,owner_token,source_fingerprint,artifact_kind,state,original_path,quarantine_path,staged_path,hashes_sizes_json,recovery_error,created_at,updated_at) VALUES('stage-75',20,1,70,1,'journal-owner','fp','poster','staged','original','quarantine','staged','{"size":1}','recovery','2029-01-01','2029-01-02')`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("complete fixture %q: %v", stmt, err)
+		}
+	}
+	for table, cols := range map[string]string{"media_ingest_step": "id,status", "post_ingest_task": "id,status", "scrape_task": "id,status", "transcode_task": "id,status", "pretranscode_task_meta": "task_id,priority", "pretranscode_rendition_job": "id,status", "media_ingest_step_dependency": "step_id,dependency_kind", "media_ingest_evidence": "id,kind", "media_asset_stage_journal": "stage_id,state"} {
+		if _, err := db.Exec(`CREATE INDEX custom_fault_` + table + ` ON ` + table + `(` + cols + `)`); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func snapshotPublicationGraph(t *testing.T, db *sql.DB) string {
 	t.Helper()
 	var out strings.Builder
-	for _, table := range []string{"media_ingest_step", "post_ingest_task", "scrape_task", "transcode_task", "pretranscode_task_meta", "pretranscode_rendition_job"} {
+	for _, table := range publicationGraphOrder {
 		var sqlText sql.NullString
 		_ = db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&sqlText)
 		if !sqlText.Valid {
@@ -1413,5 +1452,74 @@ func TestFindCreateTableBodyRejectsMalformedLexicalHeader(t *testing.T) {
 		if _, _, err := findCreateTableBody(ddl); err == nil {
 			t.Fatalf("accepted malformed DDL %q", ddl)
 		}
+	}
+}
+
+func TestPublicationProductVariantRejectsPartialEnterpriseGraph(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if err := migrateIngestPublicationV1(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE transcode_task(id INTEGER PRIMARY KEY); CREATE TABLE pretranscode_task_meta(task_id INTEGER PRIMARY KEY REFERENCES transcode_task(id) ON DELETE CASCADE)`); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotPublicationGraph(t, db)
+	err := migratePublicationV2(context.Background(), db)
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "partial enterprise") {
+		t.Fatalf("error=%v", err)
+	}
+	if after := snapshotPublicationGraph(t, db); after != before {
+		t.Fatal("partial enterprise rejection mutated graph")
+	}
+}
+
+func TestPublicationProductVariantCommunityHasNoEnterpriseChildren(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if _, err := db.Exec(`CREATE TABLE transcode_task(id INTEGER PRIMARY KEY,file_id TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"pretranscode_task_meta", "pretranscode_rendition_job"} {
+		var n int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&n); err != nil || n != 0 {
+			t.Fatalf("community table %s count=%d err=%v", table, n, err)
+		}
+	}
+}
+
+func TestPublicationEnterpriseChildrenRebuiltCanonical(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if err := migrateIngestPublicationV1(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE transcode_preset(id INTEGER PRIMARY KEY)`,
+		`CREATE TABLE preset_rendition(id INTEGER PRIMARY KEY)`,
+		`CREATE TABLE transcode_task(id INTEGER PRIMARY KEY,file_id TEXT)`,
+		`CREATE TABLE pretranscode_task_meta(task_id INTEGER PRIMARY KEY,preset_id INTEGER NOT NULL,output_format TEXT NOT NULL DEFAULT 'hls',encryption_mode TEXT DEFAULT 'none',priority TEXT DEFAULT 'normal',output_path TEXT,ingest_jobs_snapshot_json TEXT,FOREIGN KEY(task_id) REFERENCES transcode_task(id))`,
+		`CREATE TABLE pretranscode_rendition_job(id INTEGER PRIMARY KEY,task_id INTEGER NOT NULL,rendition_id INTEGER,rendition_name TEXT NOT NULL DEFAULT '',status TEXT DEFAULT 'waiting',progress INTEGER DEFAULT 0,output_path TEXT,error_message TEXT,encoder_used TEXT,started_at TIMESTAMP,completed_at TIMESTAMP,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,available_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,lease_owner TEXT,lease_until TIMESTAMP,config_snapshot_json TEXT,FOREIGN KEY(task_id) REFERENCES transcode_task(id),FOREIGN KEY(rendition_id) REFERENCES preset_rendition(id))`,
+		`INSERT INTO transcode_preset VALUES(1)`, `INSERT INTO preset_rendition VALUES(2)`, `INSERT INTO transcode_task VALUES(3,'f')`,
+		`INSERT INTO pretranscode_task_meta(task_id,preset_id,ingest_jobs_snapshot_json) VALUES(3,1,'{"jobs":[1]}')`,
+		`INSERT INTO pretranscode_rendition_job(id,task_id,rendition_id,rendition_name,status,progress,lease_owner,lease_until,config_snapshot_json) VALUES(4,3,2,'720p','running',41,'owner','2040-01-01','{"snapshot":1}')`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("fixture %q: %v", stmt, err)
+		}
+	}
+	if err := migratePublicationV2(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	conn, _ := db.Conn(context.Background())
+	if err := validateEnterprisePublicationChildren(context.Background(), conn); err != nil {
+		conn.Close()
+		t.Fatal(err)
+	}
+	conn.Close()
+	var snapshot, owner string
+	var progress int
+	if err := db.QueryRow(`SELECT config_snapshot_json,lease_owner,progress FROM pretranscode_rendition_job WHERE id=4`).Scan(&snapshot, &owner, &progress); err != nil || snapshot != `{"snapshot":1}` || owner != "owner" || progress != 41 {
+		t.Fatalf("preserved=%q/%q/%d err=%v", snapshot, owner, progress, err)
 	}
 }
