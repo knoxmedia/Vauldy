@@ -643,6 +643,9 @@ var publicationMigrationPostCommitValidation = validatePublicationForeignKeys
 func migrateIngestPublication(ctx context.Context, db *sql.DB) error {
 	publicationMigrationMu.Lock()
 	defer publicationMigrationMu.Unlock()
+	if err := publicationMigrationPreflightDB(ctx, db); err != nil {
+		return err
+	}
 	if err := migrateIngestPublicationV1(ctx, db); err != nil {
 		return err
 	}
@@ -650,6 +653,9 @@ func migrateIngestPublication(ctx context.Context, db *sql.DB) error {
 }
 
 func migratePublicationV2(ctx context.Context, db *sql.DB) (err error) {
+	if err := publicationMigrationPreflightDB(ctx, db); err != nil {
+		return err
+	}
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		return err
@@ -722,9 +728,6 @@ func migratePublicationV2(ctx context.Context, db *sql.DB) (err error) {
 		}
 	}
 	if tableExists(ctx, conn, "transcode_task") {
-		if _, err = conn.ExecContext(ctx, `CREATE TRIGGER IF NOT EXISTS trg_transcode_task_fill_media AFTER INSERT ON transcode_task WHEN NEW.ingest_step_id IS NOT NULL AND NEW.media_id IS NULL BEGIN UPDATE transcode_task SET media_id=(SELECT media_id FROM media_ingest_step WHERE id=NEW.ingest_step_id) WHERE id=NEW.id; END`); err != nil {
-			return err
-		}
 	}
 	if _, err = conn.ExecContext(ctx, `COMMIT`); err != nil {
 		return fmt.Errorf("publication v2 commit: %w", err)
@@ -824,10 +827,10 @@ func rebuildPublicationTranscodeTask(ctx context.Context, conn *sql.Conn) error 
 		return err
 	}
 	normalized := strings.ToLower(strings.Join(strings.Fields(original), ""))
-	if strings.Contains(normalized, "foreignkey(ingest_step_id,media_id,generation)referencesmedia_ingest_step(id,media_id,generation)ondeletecascade") && strings.Contains(normalized, "check((ingest_run_idisnull") {
+	if strings.Contains(normalized, "foreignkey(ingest_step_id,media_id,generation)referencesmedia_ingest_step(id,media_id,generation)ondeletecascade") && publicationTranscodeSchemaCurrent(ctx, conn) {
 		return nil
 	}
-	approved := map[string]bool{"pretranscode_task_meta": true, "pretranscode_rendition_job": true}
+	approved := map[string]bool{"pretranscode_task_meta": true, "pretranscode_rendition_job": true, "media_ingest_step_dependency": true, "media_ingest_evidence": true, "media_asset_stage_journal": true}
 	refs, err := conn.QueryContext(ctx, `SELECT m.name FROM sqlite_master m,pragma_foreign_key_list(m.name) f WHERE m.type='table' AND f."table"='transcode_task'`)
 	if err != nil {
 		return err
@@ -871,7 +874,7 @@ func rebuildPublicationTranscodeTask(ctx context.Context, conn *sql.Conn) error 
  FOREIGN KEY(media_id) REFERENCES media(id) ON DELETE CASCADE,
  FOREIGN KEY(ingest_run_id,media_id,generation) REFERENCES media_ingest_run(id,media_id,generation) ON DELETE CASCADE,
  FOREIGN KEY(ingest_step_id,media_id,generation) REFERENCES media_ingest_step(id,media_id,generation) ON DELETE CASCADE,
- CHECK((ingest_run_id IS NULL AND ingest_step_id IS NULL AND generation IS NULL AND media_id IS NULL) OR (ingest_run_id IS NOT NULL AND ingest_step_id IS NOT NULL AND generation IS NOT NULL)))` + original[closeAt+1:]
+ CHECK((ingest_run_id IS NULL AND ingest_step_id IS NULL AND generation IS NULL AND media_id IS NULL) OR (ingest_run_id IS NOT NULL AND ingest_step_id IS NOT NULL AND generation IS NOT NULL AND media_id IS NOT NULL)))` + original[closeAt+1:]
 	if _, err = conn.ExecContext(ctx, `DROP TABLE IF EXISTS transcode_task_v2`); err != nil {
 		return err
 	}
@@ -922,4 +925,185 @@ func publicationRawTableSQL(ctx context.Context, q SQLExecutor, table string) (s
 	var s string
 	err := q.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&s)
 	return s, err
+}
+
+var publicationRebuiltParents = map[string]bool{"media_ingest_step": true, "transcode_task": true}
+var publicationApprovedChildren = map[string]bool{"post_ingest_task": true, "scrape_task": true, "transcode_task": true, "pretranscode_task_meta": true, "pretranscode_rendition_job": true, "media_ingest_step_dependency": true, "media_ingest_evidence": true, "media_asset_stage_journal": true}
+
+func publicationMigrationPreflightDB(ctx context.Context, db *sql.DB) error {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	return publicationMigrationPreflight(ctx, conn)
+}
+func publicationMigrationPreflight(ctx context.Context, q SQLExecutor) error {
+	rows, err := q.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' AND (name LIKE '%_v2' OR name LIKE 'publication_backup_%')`)
+	if err != nil {
+		return err
+	}
+	if rows.Next() {
+		var n string
+		_ = rows.Scan(&n)
+		rows.Close()
+		return fmt.Errorf("publication migration mixed temporary schema: %s", n)
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	for parent := range publicationRebuiltParents {
+		refs, e := q.QueryContext(ctx, `SELECT DISTINCT m.name FROM sqlite_master m JOIN pragma_foreign_key_list(m.name) f WHERE m.type='table' AND m.name NOT LIKE 'sqlite_%' AND f."table"=?`, parent)
+		if e != nil {
+			return e
+		}
+		for refs.Next() {
+			var child string
+			if e = refs.Scan(&child); e != nil {
+				refs.Close()
+				return e
+			}
+			if !publicationApprovedChildren[child] {
+				refs.Close()
+				return fmt.Errorf("publication migration unknown reference %s -> %s", child, parent)
+			}
+		}
+		if e = refs.Close(); e != nil {
+			return e
+		}
+		tr, e := q.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name=?`, parent)
+		if e != nil {
+			return e
+		}
+		if tr.Next() {
+			var n string
+			_ = tr.Scan(&n)
+			tr.Close()
+			return fmt.Errorf("publication migration unknown trigger %s on %s", n, parent)
+		}
+		if e = tr.Close(); e != nil {
+			return e
+		}
+	}
+	if tableExists(ctx, q, "media_ingest_step_dependency") {
+		if err := validatePublicationV2Schema(ctx, q); err != nil {
+			return err
+		}
+	}
+	if tableExists(ctx, q, "media_ingest_run") {
+		cols, e := publicationColumns(ctx, q, "media_ingest_run")
+		if e != nil {
+			return e
+		}
+		present := 0
+		for _, n := range []string{"policy_version", "terminal_reason", "superseded_by_generation", "superseded_at"} {
+			if cols[n] {
+				present++
+			}
+		}
+		if present != 0 && present != 4 {
+			return fmt.Errorf("publication migration mixed run schema: %d/4 v2 columns", present)
+		}
+	}
+	return nil
+}
+func publicationTranscodeSchemaCurrent(ctx context.Context, q SQLExecutor) bool {
+	cols, err := publicationColumns(ctx, q, "transcode_task")
+	if err != nil {
+		return false
+	}
+	for _, n := range []string{"media_id", "ingest_run_id", "ingest_step_id", "generation", "lease_owner", "lease_until"} {
+		if !cols[n] {
+			return false
+		}
+	}
+	groups, err := publicationForeignKeys(ctx, q, "transcode_task")
+	if err != nil {
+		return false
+	}
+	return groups["media:media_id:id:cascade"] && groups["media_ingest_run:ingest_run_id,media_id,generation:id,media_id,generation:cascade"] && groups["media_ingest_step:ingest_step_id,media_id,generation:id,media_id,generation:cascade"]
+}
+func publicationForeignKeys(ctx context.Context, q SQLExecutor, table string) (map[string]bool, error) {
+	rows, e := q.QueryContext(ctx, fmt.Sprintf(`PRAGMA foreign_key_list(%q)`, table))
+	if e != nil {
+		return nil, e
+	}
+	defer rows.Close()
+	type p struct {
+		seq                  int
+		table, from, to, del string
+	}
+	g := map[int][]p{}
+	for rows.Next() {
+		var id, seq int
+		var table, from, to, upd, del, match string
+		if e = rows.Scan(&id, &seq, &table, &from, &to, &upd, &del, &match); e != nil {
+			return nil, e
+		}
+		g[id] = append(g[id], p{seq, strings.ToLower(table), strings.ToLower(from), strings.ToLower(to), strings.ToLower(del)})
+	}
+	if e = rows.Err(); e != nil {
+		return nil, e
+	}
+	out := map[string]bool{}
+	for _, ps := range g {
+		sort.Slice(ps, func(i, j int) bool { return ps[i].seq < ps[j].seq })
+		var from, to []string
+		for _, x := range ps {
+			from = append(from, x.from)
+			to = append(to, x.to)
+		}
+		out[ps[0].table+":"+strings.Join(from, ",")+":"+strings.Join(to, ",")+":"+ps[0].del] = true
+	}
+	return out, nil
+}
+
+func validatePublicationV2Schema(ctx context.Context, q SQLExecutor) error {
+	rows, err := q.QueryContext(ctx, `PRAGMA index_list(media_ingest_step_dependency)`)
+	if err != nil {
+		return err
+	}
+	visibleUnique, visiblePartial := 0, 0
+	for rows.Next() {
+		var seq, unique, partial int
+		var name, origin string
+		if err = rows.Scan(&seq, &name, &unique, &origin, &partial); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == "idx_ingest_dependency_visible" {
+			visibleUnique = unique
+			visiblePartial = partial
+		}
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	if visibleUnique != 1 || visiblePartial != 1 {
+		return fmt.Errorf("publication v2 dependency visible index drift: unique=%d partial=%d", visibleUnique, visiblePartial)
+	}
+	for table := range map[string]bool{"media_ingest_evidence": true, "media_asset_stage_journal": true} {
+		if !tableExists(ctx, q, table) {
+			return fmt.Errorf("publication v2 missing table %s", table)
+		}
+	}
+	deps, err := publicationForeignKeys(ctx, q, "media_ingest_evidence")
+	if err != nil {
+		return err
+	}
+	for _, key := range []string{"media:media_id:id:cascade", "media_ingest_run:run_id,media_id,generation:id,media_id,generation:cascade", "media_ingest_step:step_id,media_id,generation:id,media_id,generation:cascade", "media_ingest_evidence:reused_from_evidence_id:id:set null"} {
+		if !deps[key] {
+			return fmt.Errorf("publication v2 evidence FK missing %s", key)
+		}
+	}
+	journal, err := publicationForeignKeys(ctx, q, "media_asset_stage_journal")
+	if err != nil {
+		return err
+	}
+	for _, key := range []string{"media_ingest_run:run_id,media_id,generation:id,media_id,generation:cascade", "media_ingest_step:step_id,media_id,generation:id,media_id,generation:cascade"} {
+		if !journal[key] {
+			return fmt.Errorf("publication v2 journal FK missing %s", key)
+		}
+	}
+	return nil
 }

@@ -320,7 +320,7 @@ func TestRetryDegradedRunsRequeuesLinkedPrepareWithFutureAvailability(t *testing
 		t.Fatal(err)
 	}
 	stepID, _ := res.LastInsertId()
-	res, err = db.Exec(`INSERT INTO transcode_task(file_id,status,task_type,ingest_run_id,ingest_step_id,generation) VALUES('f','failed','pretranscode',?,?,1)`, runID, stepID)
+	res, err = db.Exec(`INSERT INTO transcode_task(file_id,status,task_type,media_id,ingest_run_id,ingest_step_id,generation) VALUES('f','failed','pretranscode',?,?,?,1)`, mediaID, runID, stepID)
 	if err != nil {
 		t.Fatal(err)
 	}

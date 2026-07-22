@@ -180,7 +180,7 @@ func clonePrepareExecutionTx(ctx context.Context, tx *sql.Tx, oldStepID, newRunI
 	if invalid > 0 {
 		return errors.New("publication retry: malformed prepare immutable snapshot")
 	}
-	res, err := tx.ExecContext(ctx, `INSERT INTO transcode_task(file_id,quality,status,progress,task_type,preset_id,ingest_run_id,ingest_step_id,generation) SELECT file_id,quality,'waiting',0,task_type,preset_id,?,?,? FROM transcode_task WHERE id=?`, newRunID, newStepID, newGeneration, oldTaskID)
+	res, err := tx.ExecContext(ctx, `INSERT INTO transcode_task(file_id,quality,status,progress,task_type,preset_id,media_id,ingest_run_id,ingest_step_id,generation) SELECT file_id,quality,'waiting',0,task_type,preset_id,media_id,?,?,? FROM transcode_task WHERE id=?`, newRunID, newStepID, newGeneration, oldTaskID)
 	if err != nil {
 		return err
 	}

@@ -216,7 +216,7 @@ func TestRecoverLinkedMalformedSnapshotFailsStepAndDegrades(t *testing.T) {
 	runID, _ := res.LastInsertId()
 	res, _ = db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status) VALUES(?,?,1,'prepare',1,'waiting')`, runID, mediaID)
 	stepID, _ := res.LastInsertId()
-	res, _ = db.Exec(`INSERT INTO transcode_task(file_id,status,task_type,ingest_run_id,ingest_step_id,generation) SELECT file_id,'waiting','pretranscode',?,?,1 FROM media WHERE id=?`, runID, stepID, mediaID)
+	res, _ = db.Exec(`INSERT INTO transcode_task(file_id,status,task_type,media_id,ingest_run_id,ingest_step_id,generation) SELECT file_id,'waiting','pretranscode',id,?,?,1 FROM media WHERE id=?`, runID, stepID, mediaID)
 	taskID, _ := res.LastInsertId()
 	_, _ = db.Exec(`INSERT INTO pretranscode_task_meta(task_id,preset_id,output_format,ingest_jobs_snapshot_json) VALUES(?,1,'hls','{bad')`, taskID)
 	svc := &TaskService{DB: db}

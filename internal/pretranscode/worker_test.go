@@ -132,7 +132,7 @@ func TestPrepareCompletionPublishesFinalRequiredStep(t *testing.T) {
 		t.Fatal(err)
 	}
 	stepID, _ := res.LastInsertId()
-	res, err = db.Exec(`INSERT INTO transcode_task(file_id,quality,status,progress,task_type,ingest_run_id,ingest_step_id,generation) VALUES('fid-prepare-publish','360p','running',99,'pretranscode',?,?,1)`, runID, stepID)
+	res, err = db.Exec(`INSERT INTO transcode_task(file_id,quality,status,progress,task_type,media_id,ingest_run_id,ingest_step_id,generation) VALUES('fid-prepare-publish','360p','running',99,'pretranscode',?,?,?,1)`, mediaID, runID, stepID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +180,7 @@ func seedLinkedPrepareTerminal(t *testing.T, db *sql.DB, generation int64) (task
 		t.Fatal(err)
 	}
 	stepID, _ = res.LastInsertId()
-	res, err = db.Exec(`INSERT INTO transcode_task(file_id,quality,status,progress,task_type,ingest_run_id,ingest_step_id,generation) VALUES('fid-linked-terminal','360p','running',50,'pretranscode',?,?,?)`, runID, stepID, generation)
+	res, err = db.Exec(`INSERT INTO transcode_task(file_id,quality,status,progress,task_type,media_id,ingest_run_id,ingest_step_id,generation) VALUES('fid-linked-terminal','360p','running',50,'pretranscode',?,?,?,?)`, mediaID, runID, stepID, generation)
 	if err != nil {
 		t.Fatal(err)
 	}

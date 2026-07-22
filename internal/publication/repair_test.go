@@ -130,7 +130,7 @@ func (repairPreparePlanner) PlanIngestPrepareTx(ctx context.Context, tx *sql.Tx,
 	if err := tx.QueryRowContext(ctx, `SELECT file_id FROM media WHERE id=?`, mediaID).Scan(&fileID); err != nil {
 		return err
 	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO transcode_task(file_id,status,task_type,ingest_run_id,ingest_step_id,generation) VALUES(?,'waiting','pretranscode',?,?,?)`, fileID, runID, stepID, generation)
+	_, err := tx.ExecContext(ctx, `INSERT INTO transcode_task(file_id,status,task_type,media_id,ingest_run_id,ingest_step_id,generation) VALUES(?,'waiting','pretranscode',?,?,?,?)`, fileID, mediaID, runID, stepID, generation)
 	return err
 }
 

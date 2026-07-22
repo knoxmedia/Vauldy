@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -565,5 +566,179 @@ func TestScrapeTaskWrongNamedIndexesAreRebuiltWithExactColumns(t *testing.T) {
 	}
 	if err := migrateIngestPublication(context.Background(), db); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestMigrateIngestPublicationV2RejectsUnknownStepReferenceBeforeMutation(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if err := migrateIngestPublicationV1(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE extension_step_ref(id INTEGER PRIMARY KEY,step_id INTEGER REFERENCES media_ingest_step(id)); CREATE TRIGGER extension_task_trigger AFTER INSERT ON post_ingest_task BEGIN SELECT 1; END`); err != nil {
+		t.Fatal(err)
+	}
+	err := migratePublicationV2(context.Background(), db)
+	if err == nil || !strings.Contains(err.Error(), "extension_step_ref") {
+		t.Fatalf("error=%v", err)
+	}
+	for _, object := range []string{"extension_step_ref", "extension_task_trigger"} {
+		var n int
+		_ = db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name=?`, object).Scan(&n)
+		if n != 1 {
+			t.Fatalf("object %s lost", object)
+		}
+	}
+	var columns int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('media_ingest_run') WHERE name='policy_version'`).Scan(&columns)
+	if columns != 0 {
+		t.Fatal("migration mutated schema before graph rejection")
+	}
+}
+
+func TestMigrateIngestPublicationV2RejectsUnknownTriggerBeforeMutation(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if err := migrateIngestPublicationV1(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TRIGGER extension_step_trigger AFTER INSERT ON media_ingest_step BEGIN SELECT 1; END`); err != nil {
+		t.Fatal(err)
+	}
+	err := migratePublicationV2(context.Background(), db)
+	if err == nil || !strings.Contains(err.Error(), "extension_step_trigger") {
+		t.Fatalf("error=%v", err)
+	}
+	var n int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='extension_step_trigger'`).Scan(&n)
+	if n != 1 {
+		t.Fatal("unknown trigger lost")
+	}
+	_ = db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('media_ingest_run') WHERE name='policy_version'`).Scan(&n)
+	if n != 0 {
+		t.Fatal("schema changed before trigger rejection")
+	}
+}
+
+func TestMigrateIngestPublicationV2TranscodeLinkageCheckIsExact(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if err := migrateIngestPublicationV1(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE transcode_task(id INTEGER PRIMARY KEY,file_id TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migratePublicationV2(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO transcode_task(file_id) VALUES('legacy')`); err != nil {
+		t.Fatalf("all-null insert: %v", err)
+	}
+	res, _ := db.Exec(`INSERT INTO media_ingest_run(media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(20,1,'scan','processing','{}',2)`)
+	runID, _ := res.LastInsertId()
+	res, _ = db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status) VALUES(?,20,1,'prepare',1,'waiting')`, runID)
+	stepID, _ := res.LastInsertId()
+	if _, err := db.Exec(`INSERT INTO transcode_task(file_id,media_id,ingest_run_id,ingest_step_id,generation) VALUES('linked',20,?,?,1)`, runID, stepID); err != nil {
+		t.Fatalf("exact linked insert: %v", err)
+	}
+	for _, q := range []string{
+		`INSERT INTO transcode_task(file_id,ingest_run_id,ingest_step_id,generation) VALUES('missing-media',1,1,1)`,
+		`INSERT INTO transcode_task(file_id,media_id,ingest_run_id,ingest_step_id,generation) VALUES('wrong-media',21,1,1,1)`,
+	} {
+		if _, err := db.Exec(q); err == nil {
+			t.Fatalf("invalid linkage accepted: %s", q)
+		}
+	}
+	var triggers int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND tbl_name='transcode_task'`).Scan(&triggers)
+	if triggers != 0 {
+		t.Fatalf("migration trigger workaround remains: %d", triggers)
+	}
+}
+
+func TestMigrateIngestPublicationV2RejectsMixedSchema(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if err := migrateIngestPublicationV1(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`ALTER TABLE media_ingest_run ADD COLUMN policy_version INTEGER NOT NULL DEFAULT 1 CHECK(policy_version IN (1,2))`); err != nil {
+		t.Fatal(err)
+	}
+	err := migratePublicationV2(context.Background(), db)
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "mixed") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestMigrateIngestPublicationV2WaitsForRealWriter(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "locked.db")
+	db, err := OpenSQLite(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	writer, err := sql.Open("sqlite", appendSQLitePragmas(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	conn, err := writer.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err = conn.ExecContext(context.Background(), `BEGIN IMMEDIATE`); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		opened, e := OpenSQLiteContext(ctx, path)
+		if opened != nil {
+			opened.Close()
+		}
+		done <- e
+	}()
+	select {
+	case e := <-done:
+		t.Fatalf("open did not wait for writer: %v", e)
+	case <-time.After(150 * time.Millisecond):
+	}
+	if _, err = conn.ExecContext(context.Background(), `COMMIT`); err != nil {
+		t.Fatal(err)
+	}
+	if e := <-done; e != nil {
+		t.Fatalf("open after release: %v", e)
+	}
+}
+
+func TestMigrateIngestPublicationV2PreservesUserVersion(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if _, err := db.Exec(`PRAGMA user_version=37`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	var got int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&got); err != nil || got != 37 {
+		t.Fatalf("user_version=%d err=%v", got, err)
+	}
+	var temps int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name LIKE '%_v2' OR name LIKE 'publication_backup_%'`).Scan(&temps)
+	if temps != 0 {
+		t.Fatalf("temporary tables=%d", temps)
+	}
+}
+
+func TestMigrateIngestPublicationV2ExactSchemaRejectsDrift(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DROP INDEX idx_ingest_dependency_visible; CREATE INDEX idx_ingest_dependency_visible ON media_ingest_step_dependency(step_id)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateIngestPublication(context.Background(), db); err == nil {
+		t.Fatal("drifted v2 schema accepted")
 	}
 }

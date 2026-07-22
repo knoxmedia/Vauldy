@@ -74,7 +74,7 @@ func (ingestPreparePlanner) PlanIngestPrepareTx(ctx context.Context, tx *sql.Tx,
 	preset.IsBuiltin = builtin == 1
 	preset.IsEnabled = enabled == 1
 	outputRoot := computeIngestOutputRoot(preset.OutputDirMode, preset.OutputDirCustom, fileID, preset.ID, sourcePath)
-	res, err := tx.ExecContext(ctx, `INSERT INTO transcode_task(file_id,quality,status,progress,task_type,preset_id,started_at,completed_at,ingest_run_id,ingest_step_id,generation) VALUES(?,?,'waiting',0,'pretranscode',?,NULL,NULL,?,?,?)`, fileID, strings.Join(names, "+"), preset.ID, runID, stepID, generation)
+	res, err := tx.ExecContext(ctx, `INSERT INTO transcode_task(file_id,quality,status,progress,task_type,preset_id,started_at,completed_at,media_id,ingest_run_id,ingest_step_id,generation) VALUES(?,?,'waiting',0,'pretranscode',?,NULL,NULL,?,?,?,?)`, fileID, strings.Join(names, "+"), preset.ID, mediaID, runID, stepID, generation)
 	if err != nil {
 		return fmt.Errorf("pretranscode ingest prepare: insert task: %w", err)
 	}
