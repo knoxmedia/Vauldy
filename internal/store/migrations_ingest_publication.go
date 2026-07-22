@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -649,6 +650,11 @@ var publicationMigrationPostCommitValidation = validatePublicationForeignKeys
 func migrateIngestPublication(ctx context.Context, db *sql.DB) error {
 	publicationMigrationMu.Lock()
 	defer publicationMigrationMu.Unlock()
+	// The base schema still declares this legacy index on every open. Remove it
+	// before current-schema detection so rebuild paths cannot preserve it.
+	if _, err := db.ExecContext(ctx, `DROP INDEX IF EXISTS idx_scrape_task_status`); err != nil {
+		return fmt.Errorf("drop obsolete scrape status index: %w", err)
+	}
 	if current, err := publicationV2CurrentDB(ctx, db); err != nil {
 		return err
 	} else if current {
@@ -657,9 +663,6 @@ func migrateIngestPublication(ctx context.Context, db *sql.DB) error {
 			return err
 		}
 		if legacy == 0 {
-			if _, err := db.ExecContext(ctx, `DROP INDEX IF EXISTS idx_scrape_task_status`); err != nil {
-				return fmt.Errorf("drop obsolete scrape status index: %w", err)
-			}
 			return nil
 		}
 	}
@@ -2006,6 +2009,18 @@ func publicationTranscodeSchemaCurrent(ctx context.Context, q SQLExecutor) bool 
 			return false
 		}
 	}
+	specs, err := publicationColumnSpecs(ctx, q, "transcode_task")
+	if err != nil {
+		return false
+	}
+	wantSpecs := map[string]string{"media_id": "media_id|INTEGER|0||0|0", "ingest_run_id": "ingest_run_id|INTEGER|0||0|0", "ingest_step_id": "ingest_step_id|INTEGER|0||0|0", "generation": "generation|INTEGER|0||0|0", "lease_owner": "lease_owner|TEXT|0||0|0", "lease_until": "lease_until|TIMESTAMP|0||0|0"}
+	for _, spec := range specs {
+		parts := strings.SplitN(spec, "|", 2)
+		if want, wanted := wantSpecs[parts[0]]; wanted && spec != want {
+			return false
+		}
+	}
+
 	raw, err := publicationRawTableSQL(ctx, q, "transcode_task")
 	if err != nil {
 		return false
@@ -2322,6 +2337,215 @@ func publicationColumnSpecs(ctx context.Context, q SQLExecutor, table string) ([
 	return out, rows.Err()
 }
 
+type publicationSQLToken struct {
+	word              string
+	start, end, depth int
+}
+
+func stripPublicationSQLComments(s string) (string, error) {
+	var out strings.Builder
+	const (
+		plain = iota
+		single
+		double
+		backtick
+		bracket
+		line
+		block
+	)
+	state := plain
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch state {
+		case single, double, backtick:
+			out.WriteByte(c)
+			close := byte('\'')
+			if state == double {
+				close = '"'
+			} else if state == backtick {
+				close = '`'
+			}
+			if c == close {
+				if i+1 < len(s) && s[i+1] == close {
+					out.WriteByte(s[i+1])
+					i++
+				} else {
+					state = plain
+				}
+			}
+			continue
+		case bracket:
+			out.WriteByte(c)
+			if c == ']' {
+				state = plain
+			}
+			continue
+		case line:
+			if c == '\n' || c == '\r' {
+				out.WriteByte(c)
+				state = plain
+			} else {
+				out.WriteByte(' ')
+			}
+			continue
+		case block:
+			if c == '*' && i+1 < len(s) && s[i+1] == '/' {
+				out.WriteString("  ")
+				i++
+				state = plain
+			} else {
+				out.WriteByte(' ')
+			}
+			continue
+		}
+		if c == '-' && i+1 < len(s) && s[i+1] == '-' {
+			out.WriteString("  ")
+			i++
+			state = line
+			continue
+		}
+		if c == '/' && i+1 < len(s) && s[i+1] == '*' {
+			out.WriteString("  ")
+			i++
+			state = block
+			continue
+		}
+		out.WriteByte(c)
+		switch c {
+		case '\'':
+			state = single
+		case '"':
+			state = double
+		case '`':
+			state = backtick
+		case '[':
+			state = bracket
+		}
+	}
+	if state == block || state == single || state == double || state == backtick || state == bracket {
+		return "", fmt.Errorf("unterminated SQL lexical form")
+	}
+	return out.String(), nil
+}
+
+func publicationSQLTokens(s string) ([]publicationSQLToken, error) {
+	clean, err := stripPublicationSQLComments(s)
+	if err != nil {
+		return nil, err
+	}
+	var out []publicationSQLToken
+	depth := 0
+	for i := 0; i < len(clean); {
+		c := clean[i]
+		if c == ' ' || c == '\t' || c == '\r' || c == '\n' {
+			i++
+			continue
+		}
+		start := i
+		if c == '\'' || c == '"' || c == '`' || c == '[' {
+			close := c
+			if c == '[' {
+				close = ']'
+			}
+			i++
+			for i < len(clean) {
+				if clean[i] == close {
+					if c != '[' && i+1 < len(clean) && clean[i+1] == close {
+						i += 2
+						continue
+					}
+					i++
+					break
+				}
+				i++
+			}
+			if i > len(clean) || clean[i-1] != close {
+				return nil, fmt.Errorf("unterminated SQL token")
+			}
+			out = append(out, publicationSQLToken{"", start, i, depth})
+			continue
+		}
+		if c == '(' {
+			out = append(out, publicationSQLToken{"(", i, i + 1, depth})
+			depth++
+			i++
+			continue
+		}
+		if c == ')' {
+			depth--
+			out = append(out, publicationSQLToken{")", i, i + 1, depth})
+			i++
+			continue
+		}
+		if strings.ContainsRune(",", rune(c)) {
+			out = append(out, publicationSQLToken{string(c), i, i + 1, depth})
+			i++
+			continue
+		}
+		for i < len(clean) {
+			x := clean[i]
+			if x == ' ' || x == '\t' || x == '\r' || x == '\n' || x == '(' || x == ')' || x == ',' {
+				break
+			}
+			i++
+		}
+		out = append(out, publicationSQLToken{strings.ToLower(clean[start:i]), start, i, depth})
+	}
+	if depth != 0 {
+		return nil, fmt.Errorf("unbalanced SQL tokens")
+	}
+	return out, nil
+}
+
+func publicationConstraintFragment(clean string, tokens []publicationSQLToken, at int) (string, int, error) {
+	if at >= len(tokens) {
+		return "", at, nil
+	}
+	kind := tokens[at].word
+	if kind == "check" {
+		if at+1 >= len(tokens) || tokens[at+1].word != "(" {
+			return "", at, fmt.Errorf("CHECK body missing")
+		}
+		base := tokens[at+1].depth
+		end := at + 2
+		for end < len(tokens) && !(tokens[end].word == ")" && tokens[end].depth == base) {
+			end++
+		}
+		if end >= len(tokens) {
+			return "", at, fmt.Errorf("CHECK body unterminated")
+		}
+		return normalizePublicationSQL(clean[tokens[at].start:tokens[end].end]), end + 1, nil
+	}
+	if kind == "unique" || kind == "primary" {
+		end := at + 1
+		if kind == "primary" {
+			if end >= len(tokens) || tokens[end].word != "key" {
+				return "", at, nil
+			}
+			end++
+		}
+		if end < len(tokens) && tokens[end].word == "(" {
+			base := tokens[end].depth
+			end++
+			for end < len(tokens) && !(tokens[end].word == ")" && tokens[end].depth == base) {
+				end++
+			}
+			if end >= len(tokens) {
+				return "", at, fmt.Errorf("constraint columns unterminated")
+			}
+			end++
+		}
+		if end+2 < len(tokens) && tokens[end].word == "on" && tokens[end+1].word == "conflict" {
+			end += 3
+		}
+		if end < len(tokens) && tokens[end].word == "autoincrement" {
+			end++
+		}
+		return normalizePublicationSQL(clean[tokens[at].start:tokens[end-1].end]), end, nil
+	}
+	return "", at, nil
+}
+
 func publicationManagedConstraintMultiset(ddl string) ([]string, error) {
 	open, close, err := findCreateTableBody(ddl)
 	if err != nil {
@@ -2332,66 +2556,85 @@ func publicationManagedConstraintMultiset(ddl string) ([]string, error) {
 		return nil, err
 	}
 	var out []string
-	for _, clause := range clauses {
-		n := normalizePublicationSQL(clause)
-		if strings.HasPrefix(n, "unique(") || strings.HasPrefix(n, "check(") {
-			out = append(out, n)
+	for _, raw := range clauses {
+		clean, err := stripPublicationSQLComments(raw)
+		if err != nil {
+			return nil, err
+		}
+		tokens, err := publicationSQLTokens(clean)
+		if err != nil {
+			return nil, err
+		}
+		if len(tokens) == 0 {
 			continue
 		}
-		for at := 0; at < len(n); {
-			rel := strings.Index(n[at:], "check(")
-			if rel < 0 {
-				break
+		at := 0
+		if tokens[0].word == "constraint" {
+			if len(tokens) < 3 {
+				return nil, fmt.Errorf("named constraint malformed")
 			}
-			start := at + rel
-			end, err := publicationBalancedConstraintEnd(n, start+len("check"))
+			at = 2
+		}
+		tableConstraint := tokens[at].word == "check" || tokens[at].word == "unique" || tokens[at].word == "primary"
+		if tableConstraint {
+			frag, _, err := publicationConstraintFragment(clean, tokens, at)
 			if err != nil {
 				return nil, err
 			}
-			out = append(out, n[start:end])
-			at = end
+			if frag != "" {
+				out = append(out, frag)
+			}
+			continue
 		}
-		if strings.HasSuffix(n, "unique") {
-			out = append(out, "inlineunique:"+strings.SplitN(n, "unique", 2)[0])
+		for i := 1; i < len(tokens); {
+			if tokens[i].depth != 0 {
+				i++
+				continue
+			}
+			switch tokens[i].word {
+			case "check", "unique", "primary":
+				frag, next, err := publicationConstraintFragment(clean, tokens, i)
+				if err != nil {
+					return nil, err
+				}
+				if frag != "" {
+					out = append(out, frag)
+					i = next
+					continue
+				}
+			}
+			i++
 		}
 	}
 	sort.Strings(out)
 	return out, nil
 }
 
-func publicationBalancedConstraintEnd(s string, openAt int) (int, error) {
-	if openAt >= len(s) || s[openAt] != '(' {
-		return 0, fmt.Errorf("constraint opening parenthesis missing")
+var publicationExpectedTableSequence atomic.Uint64
+
+func replaceCreateTableNameLexically(ddl, newName string) (string, error) {
+	open, _, err := findCreateTableBody(ddl)
+	if err != nil {
+		return "", err
 	}
-	depth := 0
-	quoted := byte(0)
-	for i := openAt; i < len(s); i++ {
-		c := s[i]
-		if quoted != 0 {
-			if c == quoted {
-				if i+1 < len(s) && s[i+1] == quoted {
-					i++
-					continue
-				}
-				quoted = 0
-			}
+	tokens, err := publicationSQLTokens(ddl[:open])
+	if err != nil {
+		return "", err
+	}
+	for i, t := range tokens {
+		if t.word != "table" {
 			continue
 		}
-		if c == '\'' || c == '"' {
-			quoted = c
-			continue
+		j := i + 1
+		if j+2 < len(tokens) && tokens[j].word == "if" && tokens[j+1].word == "not" && tokens[j+2].word == "exists" {
+			j += 3
 		}
-		if c == '(' {
-			depth++
+		if j >= len(tokens) {
+			return "", fmt.Errorf("CREATE TABLE name missing")
 		}
-		if c == ')' {
-			depth--
-			if depth == 0 {
-				return i + 1, nil
-			}
-		}
+		return ddl[:tokens[j].start] + quoteIdent(newName) + ddl[tokens[j].end:], nil
 	}
-	return 0, fmt.Errorf("unterminated managed constraint")
+	return "", fmt.Errorf("CREATE TABLE keyword missing")
 }
 
 func exactPublicationTable(ctx context.Context, q SQLExecutor, table, ddl string) error {
@@ -2419,16 +2662,30 @@ func exactPublicationTable(ctx context.Context, q SQLExecutor, table, ddl string
 			return fmt.Errorf("%s missing column %s", table, name)
 		}
 	}
-	// Column metadata must match a temporary canonical table, including defaults and PK shape.
-	temp := "__publication_schema_expected"
-	if _, err = q.ExecContext(ctx, `DROP TABLE IF EXISTS `+quoteIdent(temp)); err != nil {
-		return err
+	// Column metadata must match a uniquely named canonical table. Never drop a pre-existing object.
+	var temp, tempDDL string
+	for attempts := 0; attempts < 32; attempts++ {
+		temp = fmt.Sprintf("__publication_schema_expected_%x", publicationExpectedTableSequence.Add(1))
+		var exists int
+		if err = q.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE name=?`, temp).Scan(&exists); err != nil {
+			return err
+		}
+		if exists != 0 {
+			continue
+		}
+		tempDDL, err = replaceCreateTableNameLexically(ddl, temp)
+		if err != nil {
+			return err
+		}
+		if _, err = q.ExecContext(ctx, tempDDL); err == nil {
+			break
+		}
+		temp = ""
 	}
-	tempDDL := strings.Replace(ddl, table, temp, 1)
-	if _, err = q.ExecContext(ctx, tempDDL); err != nil {
-		return err
+	if temp == "" {
+		return fmt.Errorf("allocate unique publication expected table")
 	}
-	defer q.ExecContext(context.WithoutCancel(ctx), `DROP TABLE IF EXISTS `+quoteIdent(temp))
+	defer q.ExecContext(context.WithoutCancel(ctx), `DROP TABLE `+quoteIdent(temp))
 	got, err := publicationColumnSpecs(ctx, q, table)
 	if err != nil {
 		return err

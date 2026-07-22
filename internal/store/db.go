@@ -1208,6 +1208,12 @@ func OpenSQLiteContext(ctx context.Context, path string) (opened *sql.DB, return
 			return nil, fmt.Errorf("enterprise migration %s: %w", m.ID, err)
 		}
 	}
+	if len(enterpriseMigrations) > 0 {
+		if err := withStartupBusyRetry(ctx, func() error { return migrateIngestPublication(ctx, db) }); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("enterprise publication migration: %w", err)
+		}
+	}
 	if isMemorySQLitePath(path) {
 		if _, err := startupExecContext(ctx, db, `PRAGMA busy_timeout=30000`); err != nil {
 			_ = db.Close()
