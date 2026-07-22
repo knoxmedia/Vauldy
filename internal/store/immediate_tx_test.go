@@ -3,9 +3,12 @@ package store
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -134,5 +137,154 @@ func TestWithImmediateConnTxSerializesWriters(t *testing.T) {
 		if err := <-errs; err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+type immediateRollbackTestDriver struct {
+	opens       atomic.Int32
+	closes      atomic.Int32
+	beginErr    error
+	rollbackErr error
+}
+
+func (d *immediateRollbackTestDriver) Open(string) (driver.Conn, error) {
+	d.opens.Add(1)
+	return &immediateRollbackTestConn{driver: d}, nil
+}
+
+type immediateRollbackTestConn struct {
+	driver *immediateRollbackTestDriver
+}
+
+func (c *immediateRollbackTestConn) Prepare(string) (driver.Stmt, error) {
+	return nil, errors.New("prepare unsupported")
+}
+func (c *immediateRollbackTestConn) Close() error {
+	c.driver.closes.Add(1)
+	return nil
+}
+func (c *immediateRollbackTestConn) Begin() (driver.Tx, error) {
+	return nil, errors.New("begin unsupported")
+}
+func (c *immediateRollbackTestConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
+	switch query {
+	case "BEGIN IMMEDIATE":
+		return driver.RowsAffected(0), c.driver.beginErr
+	case "ROLLBACK":
+		return driver.RowsAffected(0), c.driver.rollbackErr
+	default:
+		return driver.RowsAffected(0), nil
+	}
+}
+
+var immediateRollbackDriverSequence atomic.Int64
+
+func openImmediateRollbackTestDB(t *testing.T, testDriver *immediateRollbackTestDriver) *sql.DB {
+	t.Helper()
+	name := fmt.Sprintf("immediate-rollback-%d", immediateRollbackDriverSequence.Add(1))
+	sql.Register(name, testDriver)
+	db, err := sql.Open(name, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
+type immediateTestRollbackError struct{ message string }
+
+func (e *immediateTestRollbackError) Error() string { return e.message }
+
+func TestWithImmediateConnTxRollbackFailurePreservesErrorsAndDiscardsConnection(t *testing.T) {
+	rollbackErr := &immediateTestRollbackError{message: "rollback failed"}
+	testDriver := &immediateRollbackTestDriver{rollbackErr: rollbackErr}
+	db := openImmediateRollbackTestDB(t, testDriver)
+	callbackErr := errors.New("callback failed")
+
+	_, err := WithImmediateConnTx(context.Background(), db, func(ImmediateConnTx) error {
+		return callbackErr
+	})
+	if !errors.Is(err, callbackErr) || !errors.Is(err, rollbackErr) {
+		t.Fatalf("error=%v want callback and rollback errors", err)
+	}
+	var typedRollback *immediateTestRollbackError
+	if !errors.As(err, &typedRollback) || typedRollback != rollbackErr {
+		t.Fatalf("error=%v does not preserve typed rollback error", err)
+	}
+	if got := testDriver.closes.Load(); got != 1 {
+		t.Fatalf("closed connections=%d want failed transaction connection discarded", got)
+	}
+	if _, err := db.ExecContext(context.Background(), "probe"); err != nil {
+		t.Fatal(err)
+	}
+	if got := testDriver.opens.Load(); got != 2 {
+		t.Fatalf("opened connections=%d want replacement after discard", got)
+	}
+}
+
+func TestWithImmediateConnTxBeginContextCancellationDoesNotDiscardConnection(t *testing.T) {
+	testDriver := &immediateRollbackTestDriver{beginErr: context.Canceled}
+	db := openImmediateRollbackTestDB(t, testDriver)
+
+	_, err := WithImmediateConnTx(context.Background(), db, func(ImmediateConnTx) error {
+		t.Fatal("callback called after failed begin")
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error=%v want context cancellation", err)
+	}
+	if got := testDriver.closes.Load(); got != 0 {
+		t.Fatalf("closed connections=%d want begin cancellation connection retained", got)
+	}
+	testDriver.beginErr = nil
+	if _, err := db.ExecContext(context.Background(), "probe"); err != nil {
+		t.Fatal(err)
+	}
+	if got := testDriver.opens.Load(); got != 1 {
+		t.Fatalf("opened connections=%d want original connection reused", got)
+	}
+}
+
+func TestWithImmediateConnTxCallbackContextCancellationRetainsConnectionAfterRollback(t *testing.T) {
+	testDriver := &immediateRollbackTestDriver{}
+	db := openImmediateRollbackTestDB(t, testDriver)
+
+	_, err := WithImmediateConnTx(context.Background(), db, func(ImmediateConnTx) error {
+		return context.Canceled
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error=%v want context cancellation", err)
+	}
+	if got := testDriver.closes.Load(); got != 0 {
+		t.Fatalf("closed connections=%d want successfully rolled back connection retained", got)
+	}
+	if _, err := db.ExecContext(context.Background(), "probe"); err != nil {
+		t.Fatal(err)
+	}
+	if got := testDriver.opens.Load(); got != 1 {
+		t.Fatalf("opened connections=%d want original connection reused", got)
+	}
+}
+
+func TestWithImmediateConnTxCommitAndRollbackFailurePreservesBothAndDiscardsConnection(t *testing.T) {
+	rollbackErr := &immediateTestRollbackError{message: "rollback after commit failed"}
+	testDriver := &immediateRollbackTestDriver{rollbackErr: rollbackErr}
+	db := openImmediateRollbackTestDB(t, testDriver)
+	original := immediateCommit
+	commitErr := errors.New("commit failed")
+	immediateCommit = func(context.Context, *sql.Conn) error { return commitErr }
+	t.Cleanup(func() { immediateCommit = original })
+
+	outcome, err := WithImmediateConnTx(context.Background(), db, func(ImmediateConnTx) error { return nil })
+	var uncertain *ImmediateCommitError
+	if !errors.As(err, &uncertain) || !errors.Is(err, commitErr) || !errors.Is(err, rollbackErr) {
+		t.Fatalf("error=%v want commit uncertainty and rollback errors", err)
+	}
+	if !outcome.CommitAttempted || outcome.CommitConfirmed {
+		t.Fatalf("outcome=%+v want attempted but unconfirmed", outcome)
+	}
+	if got := testDriver.closes.Load(); got != 1 {
+		t.Fatalf("closed connections=%d want failed transaction connection discarded", got)
 	}
 }

@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
+	"errors"
 	"fmt"
 )
 
@@ -51,8 +53,14 @@ func WithImmediateConnTx(ctx context.Context, db *sql.DB, fn func(ImmediateConnT
 	}
 	finished := false
 	defer func() {
-		if !finished {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+		if finished {
+			return
+		}
+		if _, rollbackErr := conn.ExecContext(context.Background(), `ROLLBACK`); rollbackErr != nil {
+			err = errors.Join(err, fmt.Errorf("store: rollback immediate transaction: %w", rollbackErr))
+			if discardErr := conn.Raw(func(any) error { return driver.ErrBadConn }); discardErr != nil && !errors.Is(discardErr, driver.ErrBadConn) {
+				err = errors.Join(err, fmt.Errorf("store: discard connection after rollback failure: %w", discardErr))
+			}
 		}
 	}()
 
