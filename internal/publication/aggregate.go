@@ -30,14 +30,16 @@ func AggregateTx(ctx context.Context, tx *sql.Tx, runID int64) error {
 		next = "failed"
 	case pending > 0:
 		next = "processing"
-	case failed > 0:
-		next = "degraded"
-	case cancelled > 0:
-		next = "cancelled"
+	case failed > 0 || cancelled > 0:
+		if preserve == 1 {
+			next = "degraded"
+		} else {
+			next = "failed"
+		}
 	default:
 		next = "published"
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE media_ingest_run SET status=?,error_message=CASE WHEN ?='degraded' THEN COALESCE(NULLIF((SELECT last_error FROM media_ingest_step WHERE run_id=? AND required=1 AND status='failed' ORDER BY id LIMIT 1),''),'required step exhausted') ELSE '' END,finished_at=CASE WHEN ? IN ('published','degraded','failed','cancelled') THEN COALESCE(finished_at,CURRENT_TIMESTAMP) ELSE NULL END WHERE id=?`, next, next, runID, next, runID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE media_ingest_run SET status=?,error_message=CASE WHEN ? IN ('degraded','failed') THEN COALESCE(NULLIF((SELECT last_error FROM media_ingest_step WHERE run_id=? AND required=1 AND status='failed' ORDER BY id LIMIT 1),''),'required step exhausted') ELSE '' END,finished_at=CASE WHEN ? IN ('published','degraded','failed','cancelled') THEN COALESCE(finished_at,CURRENT_TIMESTAMP) ELSE NULL END WHERE id=?`, next, next, runID, next, runID); err != nil {
 		return err
 	}
 	var current int64
@@ -59,7 +61,7 @@ func AggregateTx(ctx context.Context, tx *sql.Tx, runID int64) error {
 		return err
 	}
 	if next == "cancelled" || next == "failed" {
-		_, err := tx.ExecContext(ctx, `UPDATE media SET publication_state=?,publication_error=CASE WHEN ?='cancelled' THEN 'cancelled' ELSE 'ingest failed' END WHERE id=?`, next, next, mediaID)
+		_, err := tx.ExecContext(ctx, `UPDATE media SET publication_state=?,publication_error=CASE WHEN ?='cancelled' THEN 'cancelled' ELSE COALESCE(NULLIF((SELECT last_error FROM media_ingest_step WHERE run_id=? AND required=1 AND status='failed' ORDER BY id LIMIT 1),''),'required step exhausted') END WHERE id=?`, next, next, runID, mediaID)
 		return err
 	}
 	_, err := tx.ExecContext(ctx, `UPDATE media SET publication_state='processing',publication_error='' WHERE id=?`, mediaID)

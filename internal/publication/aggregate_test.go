@@ -77,13 +77,78 @@ func TestAggregatePublishesWhenRequiredStepsDone(t *testing.T) {
 		t.Fatal("published_at changed")
 	}
 }
-func TestAggregateDegradesWhenRequiredStepExhausted(t *testing.T) {
-	db, r, m := aggregateFixture(t, "processing", 1, map[string]string{"poster": "failed"})
-	db.Exec("UPDATE media_ingest_step SET attempts=max_attempts WHERE run_id=?", r)
-	aggregateCall(t, db, r)
-	s, _, e := mediaState(t, db, m)
-	if s != "degraded" || e == "" {
-		t.Fatalf("got %s %q", s, e)
+func TestAggregateInitialRequiredExhaustionFailsClosed(t *testing.T) {
+	for _, stepType := range []string{"poster", "thumbnail", "encrypt"} {
+		t.Run(stepType, func(t *testing.T) {
+			db, runID, mediaID := aggregateFixture(t, "processing", 1, map[string]string{stepType: "failed"})
+			if _, err := db.Exec(`UPDATE media_ingest_step SET attempts=max_attempts,last_error=? WHERE run_id=?`, stepType+" exhausted", runID); err != nil {
+				t.Fatal(err)
+			}
+
+			aggregateCall(t, db, runID)
+
+			var runState string
+			if err := db.QueryRow(`SELECT status FROM media_ingest_run WHERE id=?`, runID).Scan(&runState); err != nil {
+				t.Fatal(err)
+			}
+			state, publishedAt, publicationError := mediaState(t, db, mediaID)
+			if runState != "failed" || state != "failed" || publishedAt.Valid || publicationError == "" {
+				t.Fatalf("run=%s media=%s published_at=%v error=%q", runState, state, publishedAt, publicationError)
+			}
+		})
+	}
+}
+
+func TestAggregateRepairRequiredFailureDegradesAndPreservesPublication(t *testing.T) {
+	db, runID, mediaID := aggregateFixture(t, "processing", 1, map[string]string{"poster": "failed"})
+	const priorPublishedAt = "2026-07-01 02:03:04"
+	if _, err := db.Exec(`UPDATE media_ingest_run SET preserve_visibility=1 WHERE id=?`, runID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE media SET publication_state='published',published_at=? WHERE id=?`, priorPublishedAt, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE media_ingest_step SET attempts=max_attempts,last_error='poster exhausted' WHERE run_id=?`, runID); err != nil {
+		t.Fatal(err)
+	}
+
+	aggregateCall(t, db, runID)
+
+	var runState string
+	if err := db.QueryRow(`SELECT status FROM media_ingest_run WHERE id=?`, runID).Scan(&runState); err != nil {
+		t.Fatal(err)
+	}
+	state, publishedAt, publicationError := mediaState(t, db, mediaID)
+	if runState != "degraded" || state != "degraded" || !publishedAt.Valid || publishedAt.Time.Format("2006-01-02 15:04:05") != priorPublishedAt || publicationError != "poster exhausted" {
+		t.Fatalf("run=%s media=%s published_at=%v error=%q", runState, state, publishedAt, publicationError)
+	}
+}
+
+func TestAggregateRequiredPendingRespectsRepairVisibility(t *testing.T) {
+	for _, tc := range []struct {
+		name, initial, want string
+		preserve            int
+		wantPublishedAt     bool
+	}{
+		{name: "initial ingest hidden", initial: "processing", want: "processing"},
+		{name: "repair remains visible", initial: "published", want: "published", preserve: 1, wantPublishedAt: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, runID, mediaID := aggregateFixture(t, "processing", 1, map[string]string{"poster": "waiting"})
+			if _, err := db.Exec(`UPDATE media_ingest_run SET preserve_visibility=? WHERE id=?`, tc.preserve, runID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`UPDATE media SET publication_state=?,published_at=CASE WHEN ? THEN '2026-07-01 02:03:04' ELSE NULL END WHERE id=?`, tc.initial, tc.wantPublishedAt, mediaID); err != nil {
+				t.Fatal(err)
+			}
+
+			aggregateCall(t, db, runID)
+
+			state, publishedAt, _ := mediaState(t, db, mediaID)
+			if state != tc.want || publishedAt.Valid != tc.wantPublishedAt {
+				t.Fatalf("media=%s published_at=%v", state, publishedAt)
+			}
+		})
 	}
 }
 func TestAggregateOptionalFailureDoesNotBlock(t *testing.T) {
@@ -225,12 +290,12 @@ func TestAggregateRequiredTerminalBoundaries(t *testing.T) {
 		wantRun   string
 		wantMedia string
 	}{
-		{name: "required cancelled", required: []string{"cancelled"}, wantRun: "cancelled", wantMedia: "cancelled"},
+		{name: "required cancelled", required: []string{"cancelled"}, wantRun: "failed", wantMedia: "failed"},
 		{name: "required failed below max", required: []string{"failed"}, mutate: func(t *testing.T, db *sql.DB, runID int64) {
 			if _, err := db.Exec(`UPDATE media_ingest_step SET attempts=1,max_attempts=3 WHERE run_id=?`, runID); err != nil {
 				t.Fatal(err)
 			}
-		}, wantRun: "degraded", wantMedia: "degraded"},
+		}, wantRun: "failed", wantMedia: "failed"},
 		{name: "optional cancelled", required: []string{"done"}, optional: []string{"cancelled"}, wantRun: "published", wantMedia: "published"},
 		{name: "zero required", optional: []string{"cancelled"}, wantRun: "published", wantMedia: "published"},
 	}

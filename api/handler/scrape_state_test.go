@@ -186,7 +186,7 @@ func TestScrapeExhaustionDegradesMedia(t *testing.T) {
 	if _, err := db.Exec(`UPDATE media SET ingest_generation=1 WHERE id=?`, mediaID); err != nil {
 		t.Fatal(err)
 	}
-	run, err := db.Exec(`INSERT INTO media_ingest_run(media_id,generation,scan_task_id,reason,status,config_snapshot_json) VALUES(?,1,NULL,'manual_retry','processing','{}')`, mediaID)
+	run, err := db.Exec(`INSERT INTO media_ingest_run(media_id,generation,scan_task_id,reason,status,preserve_visibility,config_snapshot_json) VALUES(?,1,NULL,'manual_retry','processing',1,'{}')`, mediaID)
 	if err != nil {
 		t.Fatal(err)
 	}
