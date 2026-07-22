@@ -9,7 +9,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -1199,6 +1198,94 @@ func splitPublicationSQLClauses(body string) ([]string, error) {
 	return out, nil
 }
 
+func skipPublicationSQLSpaceComments(s string, at int) (int, error) {
+	for at < len(s) {
+		if s[at] == ' ' || s[at] == '\t' || s[at] == '\r' || s[at] == '\n' {
+			at++
+			continue
+		}
+		if at+1 < len(s) && s[at:at+2] == "--" {
+			at += 2
+			for at < len(s) && s[at] != '\n' && s[at] != '\r' {
+				at++
+			}
+			continue
+		}
+		if at+1 < len(s) && s[at:at+2] == "/*" {
+			end := strings.Index(s[at+2:], "*/")
+			if end < 0 {
+				return 0, fmt.Errorf("unterminated transcode SQL comment")
+			}
+			at += end + 4
+			continue
+		}
+		break
+	}
+	return at, nil
+}
+
+func publicationSQLIdentifierToken(s string, at int) (string, int, error) {
+	at, err := skipPublicationSQLSpaceComments(s, at)
+	if err != nil || at >= len(s) {
+		return "", at, err
+	}
+	start := at
+	switch s[at] {
+	case '[', '"', '`':
+		open := s[at]
+		close := open
+		if open == '[' {
+			close = ']'
+		}
+		at++
+		var name strings.Builder
+		for at < len(s) {
+			if s[at] == close {
+				if open != '[' && at+1 < len(s) && s[at+1] == close {
+					name.WriteByte(close)
+					at += 2
+					continue
+				}
+				return name.String(), at + 1, nil
+			}
+			name.WriteByte(s[at])
+			at++
+		}
+		return "", at, fmt.Errorf("unterminated transcode SQL identifier")
+	default:
+		for at < len(s) {
+			c := s[at]
+			if c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '(' || c == ')' || c == ',' {
+				break
+			}
+			if at+1 < len(s) && (s[at:at+2] == "--" || s[at:at+2] == "/*") {
+				break
+			}
+			at++
+		}
+		if at == start {
+			return "", at, nil
+		}
+		return s[start:at], at, nil
+	}
+}
+
+func extractTopLevelColumnNames(clauses []string) (map[string]bool, error) {
+	out := map[string]bool{}
+	constraints := map[string]bool{"constraint": true, "primary": true, "unique": true, "check": true, "foreign": true}
+	for _, clause := range clauses {
+		name, _, err := publicationSQLIdentifierToken(clause, 0)
+		if err != nil {
+			return nil, err
+		}
+		if name == "" || constraints[strings.ToLower(name)] {
+			continue
+		}
+		out[strings.ToLower(name)] = true
+	}
+	return out, nil
+}
+
 var publicationTranscodeManagedClauses = map[string]bool{
 	"foreignkey(media_id)referencesmedia(id)ondeletecascade":                                                                                                                                true,
 	"foreignkey(ingest_run_id,media_id,generation)referencesmedia_ingest_run(id,media_id,generation)ondeletecascade":                                                                        true,
@@ -1225,12 +1312,15 @@ func canonicalTranscodeSQL(original string) (string, error) {
 			kept = append(kept, clause)
 		}
 	}
-	body := strings.Join(kept, ",")
+	columnNames, err := extractTopLevelColumnNames(kept)
+	if err != nil {
+		return "", err
+	}
 	for _, c := range []string{"media_id INTEGER", "ingest_run_id INTEGER", "ingest_step_id INTEGER", "generation INTEGER", "lease_owner TEXT", "lease_until TIMESTAMP"} {
-		name := strings.Fields(c)[0]
-		if !regexp.MustCompile(`(?i)\b` + name + `\b`).MatchString(body) {
+		name := strings.ToLower(strings.Fields(c)[0])
+		if !columnNames[name] {
 			kept = append(kept, c)
-			body = strings.Join(kept, ",")
+			columnNames[name] = true
 		}
 	}
 	kept = append(kept,

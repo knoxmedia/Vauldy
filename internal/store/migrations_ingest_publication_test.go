@@ -1264,3 +1264,87 @@ func TestMigrateIngestPublicationV2PreservesCustomIndexOnEveryGraphTableOnce(t *
 		}
 	}
 }
+
+func TestCanonicalTranscodeSQLDetectsColumnsStructurally(t *testing.T) {
+	cases := []struct{ name, decoy string }{
+		{"leading comment", `/* media_id INTEGER, ingest_run_id INTEGER, ingest_step_id INTEGER, generation INTEGER, lease_owner TEXT, lease_until TIMESTAMP */ payload TEXT`},
+		{"line comment", "-- media_id INTEGER, ingest_run_id INTEGER, ingest_step_id INTEGER, generation INTEGER, lease_owner TEXT, lease_until TIMESTAMP\npayload TEXT"},
+		{"string default", `payload TEXT DEFAULT 'media_id ingest_run_id ingest_step_id generation lease_owner lease_until'`},
+		{"generated expression", `payload TEXT GENERATED ALWAYS AS ('media_id ingest_run_id ingest_step_id generation lease_owner lease_until') VIRTUAL`},
+		{"check expression", `payload TEXT CHECK(payload <> 'media_id ingest_run_id ingest_step_id generation lease_owner lease_until')`},
+		{"bracket decoy", `[media_id decoy] TEXT DEFAULT 'ingest_run_id ingest_step_id generation lease_owner lease_until'`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openIngestPublicationMigrationTestDB(t)
+			original := `CREATE TABLE transcode_task(id INTEGER PRIMARY KEY,` + tc.decoy + `)`
+			if _, err := db.Exec(original); err != nil {
+				t.Fatalf("source DDL: %v\n%s", err, original)
+			}
+			if _, err := db.Exec(`DROP TABLE transcode_task`); err != nil {
+				t.Fatal(err)
+			}
+			got, err := canonicalTranscodeSQL(original)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = db.Exec(got); err != nil {
+				t.Fatalf("canonical DDL: %v\n%s", err, got)
+			}
+			cols, err := publicationColumnNames(context.Background(), db, "transcode_task")
+			if err != nil {
+				t.Fatal(err)
+			}
+			have := map[string]int{}
+			for _, c := range cols {
+				have[strings.ToLower(c)]++
+			}
+			for _, want := range []string{"media_id", "ingest_run_id", "ingest_step_id", "generation", "lease_owner", "lease_until"} {
+				if have[want] != 1 {
+					t.Fatalf("column %s count=%d cols=%v SQL=%s", want, have[want], cols, got)
+				}
+			}
+		})
+	}
+}
+
+func TestCanonicalTranscodeSQLRecognizesQuotedManagedColumnsOnce(t *testing.T) {
+	for _, quoted := range []struct{ name, value string }{
+		{"bracket", `[media_id]`}, {"double", `"INGEST_RUN_ID"`}, {"backtick", "`ingest_step_id`"},
+	} {
+		t.Run(quoted.name, func(t *testing.T) {
+			columns := map[string]string{"media_id": "media_id", "ingest_run_id": "ingest_run_id", "ingest_step_id": "ingest_step_id"}
+			for name := range columns {
+				if strings.Contains(strings.ToLower(quoted.value), name) {
+					columns[name] = quoted.value
+				}
+			}
+			original := `CREATE TABLE transcode_task(` + columns["media_id"] + ` INTEGER,` + columns["ingest_run_id"] + ` INTEGER,` + columns["ingest_step_id"] + ` INTEGER,generation INTEGER,lease_owner TEXT,lease_until TIMESTAMP)`
+			one, err := canonicalTranscodeSQL(original)
+			if err != nil {
+				t.Fatal(err)
+			}
+			two, err := canonicalTranscodeSQL(one)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if one != two {
+				t.Fatalf("not idempotent\none=%s\ntwo=%s", one, two)
+			}
+			db := openIngestPublicationMigrationTestDB(t)
+			if _, err = db.Exec(one); err != nil {
+				t.Fatal(err)
+			}
+			cols, _ := publicationColumnNames(context.Background(), db, "transcode_task")
+			counts := map[string]int{}
+			for _, c := range cols {
+				counts[strings.ToLower(c)]++
+			}
+			for _, want := range []string{"media_id", "ingest_run_id", "ingest_step_id", "generation", "lease_owner", "lease_until"} {
+				if counts[want] != 1 {
+					t.Fatalf("%s count=%d cols=%v", want, counts[want], cols)
+				}
+			}
+		})
+	}
+}
