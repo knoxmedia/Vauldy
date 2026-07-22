@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
+	"sync"
 )
 
 const mediaIngestRunSchema = `CREATE TABLE IF NOT EXISTS media_ingest_run (
@@ -31,7 +33,7 @@ const mediaIngestStepSchema = `CREATE TABLE IF NOT EXISTS media_ingest_step (
     run_id INTEGER NOT NULL,
     media_id INTEGER NOT NULL,
     generation INTEGER NOT NULL CHECK (generation > 0),
-    step_type TEXT NOT NULL CHECK (step_type IN ('poster','scrape','preview','keyframe','subtitle','atrack','encrypt','prepare')),
+    step_type TEXT NOT NULL CHECK (step_type IN ('poster','scrape','preview','keyframe','subtitle','atrack','encrypt','prepare','thumbnail')),
     required INTEGER NOT NULL CHECK (required IN (0,1)),
     status TEXT NOT NULL CHECK (status IN ('waiting','running','done','skipped','failed','cancelled')),
     attempts INTEGER NOT NULL DEFAULT 0,
@@ -107,11 +109,11 @@ const postIngestTaskPublicationSchema = `CREATE TABLE post_ingest_task_new (
     FOREIGN KEY (ingest_run_id,media_id,generation) REFERENCES media_ingest_run(id,media_id,generation),
     FOREIGN KEY (ingest_step_id,media_id,generation) REFERENCES media_ingest_step(id,media_id,generation),
     UNIQUE(media_id,generation,task_type),
-    CHECK (task_type IN ('poster','preview','keyframe','subtitle','atrack','encrypt')),
+    CHECK (task_type IN ('poster','preview','keyframe','subtitle','atrack','encrypt','thumbnail')),
     CHECK (status IN ('waiting','running','done','failed','cancelled'))
 )`
 
-func migrateIngestPublication(ctx context.Context, db *sql.DB) (err error) {
+func migrateIngestPublicationV1(ctx context.Context, db *sql.DB) (err error) {
 	if db == nil {
 		return fmt.Errorf("ingest publication migration: nil database")
 	}
@@ -342,7 +344,6 @@ func validateMediaIngestStepSchema(ctx context.Context, tx *sql.Tx) error {
 	}
 	for _, required := range []string{
 		"generationintegernotnullcheck(generation>0)",
-		"check(step_typein('poster','scrape','preview','keyframe','subtitle','atrack','encrypt','prepare'))",
 		"check(requiredin(0,1))",
 		"check(statusin('waiting','running','done','skipped','failed','cancelled'))",
 		"foreignkey(run_id)referencesmedia_ingest_run(id)ondeletecascade",
@@ -377,7 +378,7 @@ func postIngestPublicationSchemaCurrent(ctx context.Context, tx *sql.Tx, columns
 	for _, required := range []string{
 		"generationintegernotnulldefault0check(generation>=0)",
 		"unique(media_id,generation,task_type)",
-		"check(task_typein('poster','preview','keyframe','subtitle','atrack','encrypt'))",
+		"check(task_typein('poster','preview','keyframe','subtitle','atrack','encrypt','thumbnail'))",
 		"check(statusin('waiting','running','done','failed','cancelled'))",
 	} {
 		if !strings.Contains(normalized, required) {
@@ -624,4 +625,301 @@ SELECT id,media_id,task_type,source,query,year,status,progress,COALESCE(fail_cou
 		}
 	}
 	return nil
+}
+
+var publicationMigrationMu sync.Mutex
+
+// PostCommitMigrationValidationError means schema changes committed but the
+// restored FK graph did not validate. Startup must stop; rollback is impossible.
+type PostCommitMigrationValidationError struct{ Cause error }
+
+func (e *PostCommitMigrationValidationError) Error() string {
+	return fmt.Sprintf("publication migration post-commit validation failed: %v", e.Cause)
+}
+func (e *PostCommitMigrationValidationError) Unwrap() error { return e.Cause }
+
+var publicationMigrationPostCommitValidation = validatePublicationForeignKeys
+
+func migrateIngestPublication(ctx context.Context, db *sql.DB) error {
+	publicationMigrationMu.Lock()
+	defer publicationMigrationMu.Unlock()
+	if err := migrateIngestPublicationV1(ctx, db); err != nil {
+		return err
+	}
+	return migratePublicationV2(ctx, db)
+}
+
+func migratePublicationV2(ctx context.Context, db *sql.DB) (err error) {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if _, err = conn.ExecContext(ctx, `PRAGMA foreign_keys=OFF`); err != nil {
+		return fmt.Errorf("disable foreign keys: %w", err)
+	}
+	var fk int
+	if err = conn.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&fk); err != nil || fk != 0 {
+		return fmt.Errorf("foreign keys not disabled: value=%d err=%v", fk, err)
+	}
+	if _, err = conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return fmt.Errorf("publication v2 begin immediate: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+		}
+		_, _ = conn.ExecContext(context.Background(), `PRAGMA foreign_keys=ON`)
+	}()
+	for _, alter := range []string{
+		`ALTER TABLE media_ingest_run ADD COLUMN policy_version INTEGER NOT NULL DEFAULT 1 CHECK(policy_version IN (1,2))`,
+		`ALTER TABLE media_ingest_run ADD COLUMN terminal_reason TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE media_ingest_run ADD COLUMN superseded_by_generation INTEGER`,
+		`ALTER TABLE media_ingest_run ADD COLUMN superseded_at TIMESTAMP`,
+	} {
+		if _, e := conn.ExecContext(ctx, alter); e != nil && !strings.Contains(strings.ToLower(e.Error()), "duplicate column") {
+			return e
+		}
+	}
+	if tableExists(ctx, conn, "transcode_task") {
+		if err = rebuildPublicationTranscodeTask(ctx, conn); err != nil {
+			return err
+		}
+	}
+	// Rebuild the step table only when its CHECK predates thumbnail.
+	stepSQL, e := publicationTableSQL(ctx, conn, "media_ingest_step")
+	if e != nil {
+		return e
+	}
+	if !strings.Contains(stepSQL, "'thumbnail'") {
+		if _, e = conn.ExecContext(ctx, `DROP TABLE IF EXISTS media_ingest_step_v2`); e != nil {
+			return e
+		}
+		create := strings.Replace(mediaIngestStepSchema, "CREATE TABLE IF NOT EXISTS media_ingest_step", "CREATE TABLE media_ingest_step_v2", 1)
+		if _, e = conn.ExecContext(ctx, create); e != nil {
+			return e
+		}
+		if _, e = conn.ExecContext(ctx, `INSERT INTO media_ingest_step_v2 SELECT * FROM media_ingest_step`); e != nil {
+			return e
+		}
+		if _, e = conn.ExecContext(ctx, `DROP TABLE media_ingest_step`); e != nil {
+			return e
+		}
+		if _, e = conn.ExecContext(ctx, `ALTER TABLE media_ingest_step_v2 RENAME TO media_ingest_step`); e != nil {
+			return e
+		}
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE IF NOT EXISTS media_ingest_step_dependency(step_id INTEGER NOT NULL REFERENCES media_ingest_step(id) ON DELETE CASCADE,depends_on_step_id INTEGER REFERENCES media_ingest_step(id) ON DELETE CASCADE,dependency_kind TEXT NOT NULL CHECK(dependency_kind IN ('step_done','media_visible')),CHECK((dependency_kind='step_done' AND depends_on_step_id IS NOT NULL) OR (dependency_kind='media_visible' AND depends_on_step_id IS NULL)),UNIQUE(step_id,dependency_kind,depends_on_step_id))`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_ingest_dependency_visible ON media_ingest_step_dependency(step_id) WHERE dependency_kind='media_visible'`,
+		`CREATE TABLE IF NOT EXISTS media_ingest_evidence(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id INTEGER NOT NULL,step_id INTEGER NOT NULL,media_id INTEGER NOT NULL,generation INTEGER NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('poster','thumbnail','encrypt')),source_fingerprint TEXT NOT NULL,artifact_refs_json TEXT NOT NULL CHECK(json_valid(artifact_refs_json)),reused_from_evidence_id INTEGER REFERENCES media_ingest_evidence(id) ON DELETE SET NULL,reason TEXT NOT NULL DEFAULT '',created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,verified_at TIMESTAMP NOT NULL,stage_id TEXT NOT NULL,FOREIGN KEY(run_id,media_id,generation) REFERENCES media_ingest_run(id,media_id,generation) ON DELETE CASCADE,FOREIGN KEY(step_id,media_id,generation) REFERENCES media_ingest_step(id,media_id,generation) ON DELETE CASCADE,FOREIGN KEY(media_id) REFERENCES media(id) ON DELETE CASCADE,UNIQUE(step_id,kind),UNIQUE(stage_id))`,
+		`CREATE TABLE IF NOT EXISTS media_asset_stage_journal(stage_id TEXT PRIMARY KEY,media_id INTEGER NOT NULL,run_id INTEGER NOT NULL,step_id INTEGER NOT NULL,generation INTEGER NOT NULL,owner_token TEXT NOT NULL,source_fingerprint TEXT NOT NULL,artifact_kind TEXT NOT NULL CHECK(artifact_kind IN ('poster','thumbnail','encrypt')),state TEXT NOT NULL CHECK(state IN ('staged','quarantined','committed')),original_path TEXT NOT NULL DEFAULT '',quarantine_path TEXT NOT NULL DEFAULT '',staged_path TEXT NOT NULL,hashes_sizes_json TEXT NOT NULL CHECK(json_valid(hashes_sizes_json)),recovery_error TEXT NOT NULL DEFAULT '',created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,FOREIGN KEY(run_id,media_id,generation) REFERENCES media_ingest_run(id,media_id,generation) ON DELETE CASCADE,FOREIGN KEY(step_id,media_id,generation) REFERENCES media_ingest_step(id,media_id,generation) ON DELETE CASCADE)`,
+		`CREATE INDEX IF NOT EXISTS idx_asset_stage_recovery ON media_asset_stage_journal(state,updated_at)`,
+	} {
+		if _, e = conn.ExecContext(ctx, stmt); e != nil {
+			return e
+		}
+	}
+	if tableExists(ctx, conn, "transcode_task") {
+		if _, err = conn.ExecContext(ctx, `CREATE TRIGGER IF NOT EXISTS trg_transcode_task_fill_media AFTER INSERT ON transcode_task WHEN NEW.ingest_step_id IS NOT NULL AND NEW.media_id IS NULL BEGIN UPDATE transcode_task SET media_id=(SELECT media_id FROM media_ingest_step WHERE id=NEW.ingest_step_id) WHERE id=NEW.id; END`); err != nil {
+			return err
+		}
+	}
+	if _, err = conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return fmt.Errorf("publication v2 commit: %w", err)
+	}
+	committed = true
+	if _, err = conn.ExecContext(ctx, `PRAGMA foreign_keys=ON`); err != nil {
+		return &PostCommitMigrationValidationError{err}
+	}
+	if err = publicationMigrationPostCommitValidation(ctx, conn); err != nil {
+		return &PostCommitMigrationValidationError{err}
+	}
+	return nil
+}
+
+func tableExists(ctx context.Context, q SQLExecutor, table string) bool {
+	var n int
+	return q.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&n) == nil && n == 1
+}
+func publicationColumns(ctx context.Context, q SQLExecutor, table string) (map[string]bool, error) {
+	rows, e := q.QueryContext(ctx, fmt.Sprintf(`PRAGMA table_info(%q)`, table))
+	if e != nil {
+		return nil, e
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var cid, nn, pk int
+		var name, typ string
+		var d sql.NullString
+		if e = rows.Scan(&cid, &name, &typ, &nn, &d, &pk); e != nil {
+			return nil, e
+		}
+		out[strings.ToLower(name)] = true
+	}
+	return out, rows.Err()
+}
+func publicationTableSQL(ctx context.Context, q SQLExecutor, table string) (string, error) {
+	var s string
+	e := q.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&s)
+	return strings.ToLower(strings.Join(strings.Fields(s), "")), e
+}
+func validatePublicationForeignKeys(ctx context.Context, conn *sql.Conn) error {
+	var enabled int
+	if e := conn.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&enabled); e != nil || enabled != 1 {
+		return fmt.Errorf("foreign_keys=%d err=%v", enabled, e)
+	}
+	rows, e := conn.QueryContext(ctx, `PRAGMA foreign_key_check`)
+	if e != nil {
+		return e
+	}
+	defer rows.Close()
+	if rows.Next() {
+		var table, parent string
+		var row sql.NullInt64
+		var id int
+		_ = rows.Scan(&table, &row, &parent, &id)
+		return fmt.Errorf("foreign key check: table=%s row=%v parent=%s fk=%d", table, row, parent, id)
+	}
+	return rows.Err()
+}
+
+func rebuildPublicationTranscodeTask(ctx context.Context, conn *sql.Conn) error {
+	cols, err := publicationColumns(ctx, conn, "transcode_task")
+	if err != nil {
+		return err
+	}
+	// Reject partial or mismatched linkage before any table is dropped.
+	for _, name := range []string{"ingest_run_id", "ingest_step_id", "generation"} {
+		if !cols[name] {
+			if _, err = conn.ExecContext(ctx, `ALTER TABLE transcode_task ADD COLUMN `+name+` INTEGER`); err != nil {
+				return err
+			}
+		}
+	}
+	for _, def := range []string{"media_id INTEGER", "lease_owner TEXT", "lease_until TIMESTAMP"} {
+		name := strings.Fields(def)[0]
+		if !cols[name] {
+			if _, err = conn.ExecContext(ctx, `ALTER TABLE transcode_task ADD COLUMN `+def); err != nil {
+				return err
+			}
+		}
+	}
+	var bad int
+	err = conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM transcode_task t WHERE NOT ((t.ingest_run_id IS NULL AND t.ingest_step_id IS NULL AND t.generation IS NULL AND t.media_id IS NULL) OR (t.ingest_run_id IS NOT NULL AND t.ingest_step_id IS NOT NULL AND t.generation IS NOT NULL AND EXISTS(SELECT 1 FROM media_ingest_step s WHERE s.id=t.ingest_step_id AND s.run_id=t.ingest_run_id AND s.generation=t.generation AND (t.media_id IS NULL OR t.media_id=s.media_id))))`).Scan(&bad)
+	if err != nil {
+		return err
+	}
+	if bad != 0 {
+		return fmt.Errorf("transcode linkage invalid or ambiguous: rows=%d", bad)
+	}
+	if _, err = conn.ExecContext(ctx, `UPDATE transcode_task SET media_id=(SELECT media_id FROM media_ingest_step WHERE id=transcode_task.ingest_step_id) WHERE ingest_step_id IS NOT NULL`); err != nil {
+		return err
+	}
+
+	original, err := publicationRawTableSQL(ctx, conn, "transcode_task")
+	if err != nil {
+		return err
+	}
+	normalized := strings.ToLower(strings.Join(strings.Fields(original), ""))
+	if strings.Contains(normalized, "foreignkey(ingest_step_id,media_id,generation)referencesmedia_ingest_step(id,media_id,generation)ondeletecascade") && strings.Contains(normalized, "check((ingest_run_idisnull") {
+		return nil
+	}
+	approved := map[string]bool{"pretranscode_task_meta": true, "pretranscode_rendition_job": true}
+	refs, err := conn.QueryContext(ctx, `SELECT m.name FROM sqlite_master m,pragma_foreign_key_list(m.name) f WHERE m.type='table' AND f."table"='transcode_task'`)
+	if err != nil {
+		return err
+	}
+	for refs.Next() {
+		var name string
+		if err = refs.Scan(&name); err != nil {
+			refs.Close()
+			return err
+		}
+		if !approved[name] {
+			refs.Close()
+			return fmt.Errorf("unknown foreign key reference to transcode_task from %s", name)
+		}
+	}
+	if err = refs.Close(); err != nil {
+		return err
+	}
+	indexRows, err := conn.QueryContext(ctx, `SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='transcode_task' AND sql IS NOT NULL`)
+	if err != nil {
+		return err
+	}
+	var indexes []string
+	for indexRows.Next() {
+		var q string
+		if err = indexRows.Scan(&q); err != nil {
+			indexRows.Close()
+			return err
+		}
+		indexes = append(indexes, q)
+	}
+	if err = indexRows.Close(); err != nil {
+		return err
+	}
+	closeAt := strings.LastIndex(original, ")")
+	if closeAt < 0 {
+		return fmt.Errorf("transcode_task CREATE SQL malformed")
+	}
+	body := original[:closeAt]
+	create := strings.Replace(body, "transcode_task", "transcode_task_v2", 1) + `,
+ FOREIGN KEY(media_id) REFERENCES media(id) ON DELETE CASCADE,
+ FOREIGN KEY(ingest_run_id,media_id,generation) REFERENCES media_ingest_run(id,media_id,generation) ON DELETE CASCADE,
+ FOREIGN KEY(ingest_step_id,media_id,generation) REFERENCES media_ingest_step(id,media_id,generation) ON DELETE CASCADE,
+ CHECK((ingest_run_id IS NULL AND ingest_step_id IS NULL AND generation IS NULL AND media_id IS NULL) OR (ingest_run_id IS NOT NULL AND ingest_step_id IS NOT NULL AND generation IS NOT NULL)))` + original[closeAt+1:]
+	if _, err = conn.ExecContext(ctx, `DROP TABLE IF EXISTS transcode_task_v2`); err != nil {
+		return err
+	}
+	if _, err = conn.ExecContext(ctx, create); err != nil {
+		return fmt.Errorf("create transcode_task v2: %w", err)
+	}
+	cols, err = publicationColumns(ctx, conn, "transcode_task")
+	if err != nil {
+		return err
+	}
+	var names []string
+	for name := range cols {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	quoted := make([]string, len(names))
+	for i, n := range names {
+		quoted[i] = `"` + strings.ReplaceAll(n, `"`, `""`) + `"`
+	}
+	list := strings.Join(quoted, ",")
+	if _, err = conn.ExecContext(ctx, `INSERT INTO transcode_task_v2(`+list+`) SELECT `+list+` FROM transcode_task`); err != nil {
+		return fmt.Errorf("copy transcode_task: %w", err)
+	}
+	var before, after int
+	if err = conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM transcode_task`).Scan(&before); err != nil {
+		return err
+	}
+	if err = conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM transcode_task_v2`).Scan(&after); err != nil {
+		return err
+	}
+	if before != after {
+		return fmt.Errorf("transcode row count changed: %d/%d", before, after)
+	}
+	if _, err = conn.ExecContext(ctx, `DROP TABLE transcode_task`); err != nil {
+		return err
+	}
+	if _, err = conn.ExecContext(ctx, `ALTER TABLE transcode_task_v2 RENAME TO transcode_task`); err != nil {
+		return err
+	}
+	for _, q := range indexes {
+		if _, err = conn.ExecContext(ctx, q); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+func publicationRawTableSQL(ctx context.Context, q SQLExecutor, table string) (string, error) {
+	var s string
+	err := q.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&s)
+	return s, err
 }

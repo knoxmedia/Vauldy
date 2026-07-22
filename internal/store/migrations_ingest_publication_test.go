@@ -3,7 +3,11 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -138,9 +142,111 @@ func TestMigrateIngestPublicationCreatesRunStepConstraints(t *testing.T) {
 			t.Fatalf("index %s count=%d err=%v", index, n, err)
 		}
 	}
+	var policyVersion int
+	var terminalReason string
+	if err := db.QueryRow(`SELECT policy_version,terminal_reason FROM media_ingest_run WHERE id=?`, runID).Scan(&policyVersion, &terminalReason); err != nil || policyVersion != 1 || terminalReason != "" {
+		t.Fatalf("v2 run fields=%d/%q err=%v", policyVersion, terminalReason, err)
+	}
+	if _, err := db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status) VALUES(?,?,?,?,?,?)`, runID, 20, 1, "thumbnail", 1, "waiting"); err != nil {
+		t.Fatalf("thumbnail step rejected: %v", err)
+	}
+	for _, table := range []string{"media_ingest_step_dependency", "media_ingest_evidence", "media_asset_stage_journal"} {
+		var n int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&n); err != nil || n != 1 {
+			t.Fatalf("table %s count=%d err=%v", table, n, err)
+		}
+	}
 	assertNoForeignKeyViolations(t, db)
 }
 
+func TestMigrateIngestPublicationEvidenceDirectMediaCascade(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	res, err := db.Exec(`INSERT INTO media_ingest_run(media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(20,1,'scan','processing','{}',2)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID, _ := res.LastInsertId()
+	res, err = db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status) VALUES(?,20,1,'thumbnail',1,'done')`, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stepID, _ := res.LastInsertId()
+	if _, err = db.Exec(`INSERT INTO media_ingest_evidence(run_id,step_id,media_id,generation,kind,source_fingerprint,artifact_refs_json,verified_at,stage_id) VALUES(?,?,20,1,'thumbnail','fp','{}',CURRENT_TIMESTAMP,'stage-1')`, runID, stepID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`DELETE FROM media WHERE id=20`); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM media_ingest_evidence`).Scan(&n)
+	if n != 0 {
+		t.Fatalf("evidence rows after media delete=%d", n)
+	}
+}
+
+func TestMigrateIngestPublicationV2RejectsAmbiguousTranscodeBackfill(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if _, err := db.Exec(`CREATE TABLE transcode_task(id INTEGER PRIMARY KEY,file_id TEXT,ingest_run_id INTEGER,ingest_step_id INTEGER,generation INTEGER); INSERT INTO transcode_task VALUES(1,'f',7,99,1)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateIngestPublication(context.Background(), db); err == nil || !strings.Contains(strings.ToLower(err.Error()), "transcode") {
+		t.Fatalf("error=%v", err)
+	}
+	var fileID string
+	if err := db.QueryRow(`SELECT file_id FROM transcode_task WHERE id=1`).Scan(&fileID); err != nil || fileID != "f" {
+		t.Fatalf("legacy row=%q err=%v", fileID, err)
+	}
+}
+
+func TestMigrateIngestPublicationV2PostCommitForeignKeyFailureIsFatal(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	old := publicationMigrationPostCommitValidation
+	publicationMigrationPostCommitValidation = func(context.Context, *sql.Conn) error { return fmt.Errorf("injected foreign key failure") }
+	t.Cleanup(func() { publicationMigrationPostCommitValidation = old })
+	err := migrateIngestPublication(context.Background(), db)
+	var fatal *PostCommitMigrationValidationError
+	if !errors.As(err, &fatal) {
+		t.Fatalf("error=%T %v", err, err)
+	}
+}
+
+func TestOpenSQLiteConcurrentPublicationV2MigrationSerializes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "publication.db")
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			db, err := OpenSQLite(path)
+			if db != nil {
+				_ = db.Close()
+			}
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	db, err := OpenSQLite(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, table := range []string{"media_ingest_step_dependency", "media_ingest_evidence", "media_asset_stage_journal"} {
+		var n int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&n); err != nil || n != 1 {
+			t.Fatalf("%s count=%d err=%v", table, n, err)
+		}
+	}
+}
 func TestMigrateIngestPublicationRebuildsPostIngestGenerationUniqueness(t *testing.T) {
 	db := openIngestPublicationMigrationTestDB(t)
 	if err := migrateIngestPublication(context.Background(), db); err != nil {
