@@ -36,7 +36,7 @@ func TestResolvePosterFilePath(t *testing.T) {
 	}
 
 	h := &Handler{App: &app.App{Config: &config.Config{Data: config.DataConfig{
-		Upload:           upload,
+		Upload:          upload,
 		MetadataLibrary: meta,
 	}}}}
 
@@ -188,7 +188,7 @@ func TestLatestLibraryPreviewSourcesMusic(t *testing.T) {
 	if err := writeTestJPEG(art, color.RGBA{255, 128, 0, 255}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO music_album (id, library_id, title, title_norm, artwork_path) VALUES (1, 3, 'A', 'a', ?)`, art); err != nil {
+	if _, err := db.Exec(`INSERT INTO music_album (id, library_id, title, title_norm, artwork_path) VALUES (1, 3, 'A', 'a', ?); INSERT INTO media(id,library_id,file_id,title,file_path,file_type,status,publication_state) VALUES(301,3,'track','Track','/music/track.mp3','audio','active','published'); INSERT INTO music_track(album_id,media_id,title) VALUES(1,301,'Track')`, art); err != nil {
 		t.Fatal(err)
 	}
 

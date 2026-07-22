@@ -28,7 +28,7 @@ func (h *Handler) resolveAlbumArtworkPath(albumID, libID int64, stored sql.NullS
 	rows, err := h.App.DB.Query(`
 		SELECT mt.media_id, COALESCE(m.file_path, '')
 		FROM music_track mt
-		JOIN media m ON m.id = mt.media_id AND m.status = 'active'
+		JOIN media m ON m.id = mt.media_id AND m.status = 'active' AND m.publication_state IN ('published','degraded')
 		WHERE mt.album_id = ?
 		ORDER BY mt.sort_order ASC, mt.track_number ASC, mt.media_id ASC
 	`, albumID)
@@ -384,11 +384,15 @@ func (h *Handler) ServeArtistArtwork(c *gin.Context) {
 	}
 	var libID int64
 	var artworkPath sql.NullString
-	if err := h.App.DB.QueryRowContext(c.Request.Context(), `SELECT library_id, artwork_path FROM music_artist WHERE id = ?`, artistID).Scan(&libID, &artworkPath); err != nil {
-		c.Status(http.StatusNotFound)
+	if err := h.App.DB.QueryRowContext(c.Request.Context(), `SELECT library_id FROM music_artist WHERE id=?`, artistID).Scan(&libID); err != nil {
+		c.AbortWithStatus(http.StatusNotFound)
 		return
 	}
 	if !h.requireLibraryAccess(c, libID) {
+		return
+	}
+	if err := h.App.DB.QueryRowContext(c.Request.Context(), `SELECT ar.artwork_path FROM music_artist ar WHERE ar.id = ? AND EXISTS (SELECT 1 FROM music_album a JOIN music_track mt ON mt.album_id=a.id JOIN media m ON m.id=mt.media_id WHERE a.album_artist_id=ar.id AND m.publication_state IN ('published','degraded'))`, artistID).Scan(&artworkPath); err != nil {
+		c.AbortWithStatus(http.StatusNotFound)
 		return
 	}
 	stored := strings.TrimSpace(artworkPath.String)

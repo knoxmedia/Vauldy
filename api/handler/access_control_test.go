@@ -306,3 +306,136 @@ func TestGetMediaAllowsWhenCanPlayDisabled(t *testing.T) {
 		t.Fatalf("expected 200 so browsing works without play, got status=%d body=%s", w.Code, w.Body.String())
 	}
 }
+
+func TestRequireMediaAccessPublicationVisibilityForOrdinaryAndAdmin(t *testing.T) {
+	for _, tc := range []struct {
+		state          string
+		ordinaryStatus int
+		ordinaryOK     bool
+	}{
+		{"processing", http.StatusNotFound, false},
+		{"failed", http.StatusNotFound, false},
+		{"cancelled", http.StatusNotFound, false},
+		{"published", http.StatusOK, true},
+		{"degraded", http.StatusOK, true},
+	} {
+		t.Run(tc.state, func(t *testing.T) {
+			h := setupAccessTestDB(t)
+			if _, err := h.App.DB.Exec(`UPDATE media SET publication_state=? WHERE id=10`, tc.state); err != nil {
+				t.Fatal(err)
+			}
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/media/10/meta", nil)
+			setUserCtx(c, 1, "user", "normal")
+			_, ok := h.requireMediaAccess(c, 10, false)
+			if ok != tc.ordinaryOK || (!ok && w.Code != tc.ordinaryStatus) {
+				t.Fatalf("ordinary state=%s ok=%v status=%d body=%s", tc.state, ok, w.Code, w.Body.String())
+			}
+			w = httptest.NewRecorder()
+			c, _ = gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/media/10/meta", nil)
+			setUserCtx(c, 2, "admin", "admin")
+			if _, ok = h.requireMediaAccess(c, 10, false); !ok {
+				t.Fatalf("admin state=%s status=%d body=%s", tc.state, w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestListMediaPublicationVisibilityAndAdminBypass(t *testing.T) {
+	h := setupAccessTestDB(t)
+	if _, err := h.App.DB.Exec(`UPDATE media SET publication_state='processing', title='Processing Search' WHERE id=10;
+		INSERT INTO media(id,library_id,file_id,title,file_path,file_type,publication_state) VALUES
+		(11,1,'published-11','Published Search','E:/lib1/published.mp4','video','published'),
+		(12,1,'degraded-12','Degraded Search','E:/lib1/degraded.mp4','video','degraded'),
+		(13,1,'failed-13','Failed Search','E:/lib1/failed.mp4','video','failed'),
+		(14,1,'cancelled-14','Cancelled Search','E:/lib1/cancelled.mp4','video','cancelled')`); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, role string
+		uid        int64
+		want       int
+	}{{"ordinary", "user", 1, 2}, {"admin", "admin", 2, 5}} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/media?q=Search&library_id=1&limit=20", nil)
+			setUserCtx(c, tc.uid, tc.role, tc.name)
+			h.ListMedia(c)
+			var payload struct {
+				Items []map[string]any `json:"items"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+				t.Fatal(err)
+			}
+			if w.Code != http.StatusOK || len(payload.Items) != tc.want {
+				t.Fatalf("status=%d items=%d body=%s", w.Code, len(payload.Items), w.Body.String())
+			}
+		})
+	}
+}
+
+func TestMediaDetailMetaAndPlayHideUnpublishedFromOrdinaryUsers(t *testing.T) {
+	for _, state := range []string{"processing", "failed", "cancelled"} {
+		t.Run(state, func(t *testing.T) {
+			h := setupAccessTestDB(t)
+			if _, err := h.App.DB.Exec(`UPDATE media SET publication_state=? WHERE id=10`, state); err != nil {
+				t.Fatal(err)
+			}
+			for _, endpoint := range []struct {
+				name   string
+				target string
+				call   func(*gin.Context)
+			}{
+				{"detail", "/api/v1/media/10", h.GetMedia},
+				{"meta", "/api/v1/media/10/meta", h.GetMediaMeta},
+				{"play", "/api/v1/media/10/play", h.PlayMedia},
+			} {
+				t.Run(endpoint.name, func(t *testing.T) {
+					w := httptest.NewRecorder()
+					c, _ := gin.CreateTestContext(w)
+					c.Request = httptest.NewRequest(http.MethodGet, endpoint.target, nil)
+					c.Params = gin.Params{{Key: "id", Value: "10"}}
+					setUserCtx(c, 1, "user", "normal")
+					endpoint.call(c)
+					if w.Code != http.StatusNotFound {
+						t.Fatalf("state=%s status=%d body=%s", state, w.Code, w.Body.String())
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestMediaDetailMetaAndPlayAllowVisiblePublicationStates(t *testing.T) {
+	for _, state := range []string{"published", "degraded"} {
+		t.Run(state, func(t *testing.T) {
+			h := setupAccessTestDB(t)
+			if _, err := h.App.DB.Exec(`UPDATE media SET publication_state=? WHERE id=10`, state); err != nil {
+				t.Fatal(err)
+			}
+			for _, endpoint := range []struct {
+				name   string
+				target string
+				call   func(*gin.Context)
+			}{
+				{"detail", "/api/v1/media/10", h.GetMedia},
+				{"meta", "/api/v1/media/10/meta", h.GetMediaMeta},
+			} {
+				t.Run(endpoint.name, func(t *testing.T) {
+					w := httptest.NewRecorder()
+					c, _ := gin.CreateTestContext(w)
+					c.Request = httptest.NewRequest(http.MethodGet, endpoint.target, nil)
+					c.Params = gin.Params{{Key: "id", Value: "10"}}
+					setUserCtx(c, 1, "user", "normal")
+					endpoint.call(c)
+					if w.Code != http.StatusOK {
+						t.Fatalf("state=%s status=%d body=%s", state, w.Code, w.Body.String())
+					}
+				})
+			}
+		})
+	}
+}

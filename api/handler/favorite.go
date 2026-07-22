@@ -33,7 +33,7 @@ func (h *Handler) ListFavorites(c *gin.Context) {
 		FROM favorite f
 		INNER JOIN media m ON m.id = f.media_id
 		LEFT JOIN library l ON l.id = m.library_id
-		WHERE f.user_id = ?
+		WHERE f.user_id = ? AND m.publication_state IN ('published','degraded')
 		ORDER BY datetime(f.created_at) DESC
 		LIMIT 500`
 	rows, err := h.App.DB.Query(q, uid)

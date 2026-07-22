@@ -188,7 +188,7 @@ func (h *Handler) UserHistory(c *gin.Context) {
 		       COALESCE(p.play_start_at,''), COALESCE(p.play_end_at,''), COALESCE(p.completed,0), COALESCE(p.play_count,0),
 		       COALESCE(l.type, '')
 		FROM play_progress p
-		LEFT JOIN media m ON m.file_id = p.file_id
+		INNER JOIN media m ON m.file_id = p.file_id AND m.publication_state IN ('published','degraded')
 		LEFT JOIN library l ON l.id = m.library_id
 		WHERE p.user_id = ? AND COALESCE(p.completed,0) = 0
 		ORDER BY p.update_at DESC
