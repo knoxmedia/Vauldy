@@ -99,6 +99,23 @@ func TestAggregateInitialRequiredExhaustionFailsClosed(t *testing.T) {
 	}
 }
 
+func TestAggregateNonPreservingRequiredFailureClearsPriorPublishedAt(t *testing.T) {
+	db, runID, mediaID := aggregateFixture(t, "processing", 1, map[string]string{"encrypt": "failed"})
+	if _, err := db.Exec(`UPDATE media SET publication_state='processing',published_at='2026-07-01 02:03:04' WHERE id=?`, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE media_ingest_step SET attempts=max_attempts,last_error='encrypt exhausted' WHERE run_id=?`, runID); err != nil {
+		t.Fatal(err)
+	}
+
+	aggregateCall(t, db, runID)
+
+	state, publishedAt, _ := mediaState(t, db, mediaID)
+	if state != "failed" || publishedAt.Valid {
+		t.Fatalf("media=%s published_at=%v, want failed with null publish time", state, publishedAt)
+	}
+}
+
 func TestAggregateRepairRequiredFailureDegradesAndPreservesPublication(t *testing.T) {
 	db, runID, mediaID := aggregateFixture(t, "processing", 1, map[string]string{"poster": "failed"})
 	const priorPublishedAt = "2026-07-01 02:03:04"
