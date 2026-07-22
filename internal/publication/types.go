@@ -2,6 +2,26 @@ package publication
 
 import "knox-media/internal/coreiface"
 
+type PlanReason string
+
+const (
+	PlanReasonScan        PlanReason = "scan"
+	PlanReasonRepair      PlanReason = "repair"
+	PlanReasonManualRetry PlanReason = "manual_retry"
+)
+
+type ReplacementOptions struct {
+	Reason             PlanReason
+	PreserveVisibility bool
+	ExpectedGeneration int64
+}
+
+type ReplacementResult struct {
+	Run           Run
+	OldGeneration int64
+	NewGeneration int64
+}
+
 type State string
 
 const (

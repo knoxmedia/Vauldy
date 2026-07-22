@@ -527,3 +527,196 @@ func TestInsertDependenciesRejectsCrossIdentityAndCycle(t *testing.T) {
 		t.Fatalf("generation=%d", generation)
 	}
 }
+
+func planReplacementAndCommit(t *testing.T, db *sql.DB, p *Planner, mediaID int64, opts ReplacementOptions) ReplacementResult {
+	t.Helper()
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := p.PlanReplacementTx(context.Background(), tx, mediaID, opts)
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("plan replacement: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func loadPlannerSnapshot(t *testing.T, db *sql.DB, runID int64) ConfigSnapshot {
+	t.Helper()
+	var raw string
+	if err := db.QueryRow(`SELECT config_snapshot_json FROM media_ingest_run WHERE id=?`, runID).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	var snapshot ConfigSnapshot
+	if err := json.Unmarshal([]byte(raw), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	return snapshot
+}
+
+func TestPlannerManualRetryUsesCurrentPolicy(t *testing.T) {
+	db := openPlannerTestDB(t)
+	_, mediaID, scanID := seedPlannerMedia(t, db, "video", 0, 1, 1)
+	first := planAndCommit(t, db, NewPlanner(PlanOptions{}), NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
+	if _, err := db.Exec(`UPDATE media SET publication_state='published' WHERE id=?`, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE library SET preview_extract=1 WHERE id=(SELECT library_id FROM media WHERE id=?)`, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	prepare := &recordingPreparePlanner{}
+	result := planReplacementAndCommit(t, db, NewPlanner(PlanOptions{SubtitleAuto: true, EncryptGlobal: true, PreparePlanner: prepare, Capabilities: NewCapabilityMatrix([]string{"prepare"})}), mediaID, ReplacementOptions{Reason: PlanReasonManualRetry, ExpectedGeneration: first.Generation})
+	want := []StepType{StepPoster, StepEncrypt, StepScrape, StepPreview, StepSubtitle, StepPrepare}
+	if result.OldGeneration != first.Generation || result.NewGeneration != first.Generation+1 || !reflect.DeepEqual(result.Run.Steps, want) {
+		t.Fatalf("result=%+v want steps=%v", result, want)
+	}
+	var reason string
+	var preserve int
+	if err := db.QueryRow(`SELECT reason,preserve_visibility FROM media_ingest_run WHERE id=?`, result.Run.ID).Scan(&reason, &preserve); err != nil {
+		t.Fatal(err)
+	}
+	if reason != string(PlanReasonManualRetry) || preserve != 0 {
+		t.Fatalf("reason=%q preserve=%d", reason, preserve)
+	}
+	var state string
+	if err := db.QueryRow(`SELECT publication_state FROM media WHERE id=?`, mediaID).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state != string(StateProcessing) {
+		t.Fatalf("manual retry state=%q", state)
+	}
+	if prepare.calls != 1 || prepare.runID != result.Run.ID || prepare.generation != result.NewGeneration {
+		t.Fatalf("prepare=%+v result=%+v", prepare, result)
+	}
+}
+
+func TestReplacementLoadsDBFileTypeVideoAndPhoto(t *testing.T) {
+	for _, tc := range []struct {
+		fileType string
+		want     []StepType
+	}{{"video", []StepType{StepPoster, StepScrape}}, {"image", []StepType{StepThumbnail, StepScrape}}} {
+		t.Run(tc.fileType, func(t *testing.T) {
+			db := openPlannerTestDB(t)
+			_, mediaID, _ := seedPlannerMedia(t, db, tc.fileType, 0, 0, 0)
+			result := planReplacementAndCommit(t, db, NewPlanner(PlanOptions{}), mediaID, ReplacementOptions{Reason: PlanReasonRepair, ExpectedGeneration: 0, PreserveVisibility: true})
+			if !reflect.DeepEqual(result.Run.Steps, tc.want) {
+				t.Fatalf("steps=%v want=%v", result.Run.Steps, tc.want)
+			}
+			snapshot := loadPlannerSnapshot(t, db, result.Run.ID)
+			if snapshot.FileType != tc.fileType {
+				t.Fatalf("snapshot file type=%q", snapshot.FileType)
+			}
+		})
+	}
+	for _, fileType := range []string{"audio", "document"} {
+		t.Run(fileType, func(t *testing.T) {
+			db := openPlannerTestDB(t)
+			_, mediaID, _ := seedPlannerMedia(t, db, fileType, 0, 0, 0)
+			result := planReplacementAndCommit(t, db, NewPlanner(PlanOptions{}), mediaID, ReplacementOptions{Reason: PlanReasonRepair, ExpectedGeneration: 0})
+			if result.Run.ID != 0 || result.NewGeneration != 0 {
+				t.Fatalf("unexpected plan=%+v", result)
+			}
+		})
+	}
+}
+
+func TestReplacementOmitsOldKeyframeAtrack(t *testing.T) {
+	db := openPlannerTestDB(t)
+	_, mediaID, scanID := seedPlannerMedia(t, db, "video", 0, 0, 0)
+	first := planAndCommit(t, db, NewPlanner(PlanOptions{}), NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
+	for _, step := range []StepType{StepKeyframe, StepAtrack} {
+		if _, err := db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status) VALUES(?,?,?,?,1,'failed')`, first.ID, mediaID, first.Generation, step); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result := planReplacementAndCommit(t, db, NewPlanner(PlanOptions{ATrackAuto: true}), mediaID, ReplacementOptions{Reason: PlanReasonRepair, ExpectedGeneration: first.Generation, PreserveVisibility: true})
+	for _, step := range result.Run.Steps {
+		if step == StepKeyframe || step == StepAtrack {
+			t.Fatalf("copied old step %q", step)
+		}
+	}
+}
+
+func TestReplacementReflectsChangedEncryptionPreviewCapabilities(t *testing.T) {
+	db := openPlannerTestDB(t)
+	_, mediaID, scanID := seedPlannerMedia(t, db, "video", 0, 0, 1)
+	first := planAndCommit(t, db, NewPlanner(PlanOptions{}), NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
+	if _, err := db.Exec(`UPDATE library SET preview_extract=1, encrypted_assets_enabled=1 WHERE id=(SELECT library_id FROM media WHERE id=?)`, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	prepare := &recordingPreparePlanner{}
+	result := planReplacementAndCommit(t, db, NewPlanner(PlanOptions{EncryptGlobal: true, PreparePlanner: prepare, Capabilities: NewCapabilityMatrix([]string{"prepare"})}), mediaID, ReplacementOptions{Reason: PlanReasonRepair, ExpectedGeneration: first.Generation})
+	want := []StepType{StepPoster, StepEncrypt, StepScrape, StepPreview, StepPrepare}
+	if !reflect.DeepEqual(result.Run.Steps, want) {
+		t.Fatalf("steps=%v want=%v", result.Run.Steps, want)
+	}
+	snapshot := loadPlannerSnapshot(t, db, result.Run.ID)
+	if !snapshot.Encrypt || !snapshot.PreviewExtract || !snapshot.Prepare {
+		t.Fatalf("snapshot=%+v", snapshot)
+	}
+}
+
+func TestReplacementCASRollsBackConcurrentLoser(t *testing.T) {
+	db := openPlannerTestDB(t)
+	_, mediaID, scanID := seedPlannerMedia(t, db, "video", 0, 0, 0)
+	first := planAndCommit(t, db, NewPlanner(PlanOptions{}), NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
+	winner := planReplacementAndCommit(t, db, NewPlanner(PlanOptions{}), mediaID, ReplacementOptions{Reason: PlanReasonRepair, ExpectedGeneration: first.Generation})
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = NewPlanner(PlanOptions{}).PlanReplacementTx(context.Background(), tx, mediaID, ReplacementOptions{Reason: PlanReasonRepair, ExpectedGeneration: first.Generation})
+	if !errors.Is(err, ErrGenerationConflict) {
+		t.Fatalf("err=%v want generation conflict", err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	var generation, runs int64
+	if err := db.QueryRow(`SELECT ingest_generation FROM media WHERE id=?`, mediaID).Scan(&generation); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM media_ingest_run WHERE media_id=?`, mediaID).Scan(&runs); err != nil {
+		t.Fatal(err)
+	}
+	if generation != winner.NewGeneration || runs != 2 {
+		t.Fatalf("generation=%d runs=%d winner=%+v", generation, runs, winner)
+	}
+}
+
+func TestReplacementDoesNotCopyOldSteps(t *testing.T) {
+	db := openPlannerTestDB(t)
+	_, mediaID, scanID := seedPlannerMedia(t, db, "video", 0, 0, 0)
+	first := planAndCommit(t, db, NewPlanner(PlanOptions{}), NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
+	if _, err := db.Exec(`UPDATE media SET publication_state='published' WHERE id=?`, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE media_ingest_step SET status='failed',last_error='old failure' WHERE run_id=?`, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	result := planReplacementAndCommit(t, db, NewPlanner(PlanOptions{}), mediaID, ReplacementOptions{Reason: PlanReasonRepair, ExpectedGeneration: first.Generation, PreserveVisibility: true})
+	var oldFailed, newWaiting, copiedErrors int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM media_ingest_step WHERE run_id=? AND status='failed'`, first.ID).Scan(&oldFailed); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM media_ingest_step WHERE run_id=? AND status='waiting'`, result.Run.ID).Scan(&newWaiting); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM media_ingest_step WHERE run_id=? AND last_error<>''`, result.Run.ID).Scan(&copiedErrors); err != nil {
+		t.Fatal(err)
+	}
+	if oldFailed == 0 || newWaiting != len(result.Run.Steps) || copiedErrors != 0 {
+		t.Fatalf("oldFailed=%d newWaiting=%d copiedErrors=%d", oldFailed, newWaiting, copiedErrors)
+	}
+	var state string
+	if err := db.QueryRow(`SELECT publication_state FROM media WHERE id=?`, mediaID).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state != string(StatePublished) {
+		t.Fatalf("preserved state=%q", state)
+	}
+}

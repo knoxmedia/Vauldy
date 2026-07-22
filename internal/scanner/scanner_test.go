@@ -225,7 +225,7 @@ func TestScanNewVideoCommitsMediaAndPlanTogether(t *testing.T) {
 	if added != 1 {
 		t.Fatalf("added=%d want 1", added)
 	}
-	for table, want := range map[string]int{"media": 1, "media_ingest_run": 1, "media_ingest_step": 4, "post_ingest_task": 3} {
+	for table, want := range map[string]int{"media": 1, "media_ingest_run": 1, "media_ingest_step": 3, "post_ingest_task": 2} {
 		var count int
 		if err := db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil {
 			t.Fatal(err)
