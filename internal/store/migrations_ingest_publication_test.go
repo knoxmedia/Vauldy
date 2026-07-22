@@ -578,7 +578,7 @@ func TestMigrateIngestPublicationV2RejectsUnknownStepReferenceBeforeMutation(t *
 		t.Fatal(err)
 	}
 	err := migratePublicationV2(context.Background(), db)
-	if err == nil || !strings.Contains(err.Error(), "extension_step_ref") {
+	if err == nil || (!strings.Contains(err.Error(), "extension_step_ref") && !strings.Contains(err.Error(), "extension_task_trigger")) {
 		t.Fatalf("error=%v", err)
 	}
 	for _, object := range []string{"extension_step_ref", "extension_task_trigger"} {
@@ -835,4 +835,84 @@ func snapshotPublicationGraph(t *testing.T, db *sql.DB) string {
 		idx.Close()
 	}
 	return out.String()
+}
+
+func TestMigrateIngestPublicationV2ManagedConstraintsBehavior(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	res, _ := db.Exec(`INSERT INTO media_ingest_run(media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(20,1,'scan','processing','{}',2)`)
+	runID, _ := res.LastInsertId()
+	res, _ = db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status) VALUES(?,20,1,'poster',1,'done')`, runID)
+	stepID, _ := res.LastInsertId()
+	if _, err := db.Exec(`INSERT INTO media_ingest_run(media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(21,1,'scan','processing','{}',3)`); err == nil {
+		t.Fatal("invalid policy accepted")
+	}
+	if _, err := db.Exec(`INSERT INTO media_ingest_step_dependency(step_id,dependency_kind) VALUES(?,'step_done')`, stepID); err == nil {
+		t.Fatal("dependency null edge accepted")
+	}
+	if _, err := db.Exec(`INSERT INTO media_ingest_step_dependency(step_id,dependency_kind) VALUES(?,'media_visible'),(?,'media_visible')`, stepID, stepID); err == nil {
+		t.Fatal("duplicate visible dependency accepted")
+	}
+	if _, err := db.Exec(`INSERT INTO media_ingest_evidence(run_id,step_id,media_id,generation,kind,source_fingerprint,artifact_refs_json,verified_at,stage_id) VALUES(?,?,20,1,'poster','fp','bad',CURRENT_TIMESTAMP,'stage')`, runID, stepID); err == nil {
+		t.Fatal("invalid evidence json accepted")
+	}
+	if _, err := db.Exec(`INSERT INTO media_asset_stage_journal(stage_id,media_id,run_id,step_id,generation,owner_token,source_fingerprint,artifact_kind,state,staged_path,hashes_sizes_json) VALUES('j',20,?,?,1,'o','fp','poster','bad','p','{}')`, runID, stepID); err == nil {
+		t.Fatal("invalid journal state accepted")
+	}
+	if _, err := db.Exec(`UPDATE media_ingest_run SET superseded_by_generation=1,superseded_at=CURRENT_TIMESTAMP WHERE id=?`, runID); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateIngestPublication(context.Background(), db); err == nil {
+		t.Fatal("invalid supersession existing row accepted")
+	}
+}
+
+func TestMigrateIngestPublicationV2NoOpSchemaByteIdentical(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if _, err := db.Exec(`CREATE TABLE transcode_task(id INTEGER PRIMARY KEY,file_id TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotPublicationGraph(t, db)
+	for i := 0; i < 10; i++ {
+		if err := migrateIngestPublication(context.Background(), db); err != nil {
+			t.Fatal(err)
+		}
+	}
+	after := snapshotPublicationGraph(t, db)
+	if before != after {
+		t.Fatal("complete v2 reentry changed sqlite graph")
+	}
+}
+
+func TestMigrateIngestPublicationV2RejectsChildTriggerBeforeMutation(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if err := migrateIngestPublicationV1(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TRIGGER extension_post_trigger AFTER INSERT ON post_ingest_task BEGIN SELECT 1; END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migratePublicationV2(context.Background(), db); err == nil {
+		t.Fatal("child trigger accepted")
+	}
+	var n int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name='extension_post_trigger'`).Scan(&n)
+	if n != 1 {
+		t.Fatal("child trigger lost")
+	}
+}
+
+func TestMigrateIngestPublicationV2RejectsExactBackupResidue(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if _, err := db.Exec(`CREATE TABLE media_ingest_step__publication_v2_backup(id INTEGER)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateIngestPublication(context.Background(), db); err == nil || !strings.Contains(err.Error(), "mixed") {
+		t.Fatalf("error=%v", err)
+	}
 }
