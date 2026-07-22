@@ -47,3 +47,9 @@ type RenditionStatus struct {
 type IngestPreparePlanner interface {
 	PlanIngestPrepareTx(ctx context.Context, tx store.SQLExecutor, mediaID, runID, stepID, generation int64) error
 }
+
+// CapabilityRegistry is the narrow contract for checking registered
+// publication capabilities.
+type CapabilityRegistry interface {
+	Available(step string) bool
+}
