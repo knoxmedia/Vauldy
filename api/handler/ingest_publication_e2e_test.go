@@ -219,8 +219,9 @@ func TestNewVideoHiddenUntilRequiredIngestCompletes(t *testing.T) {
 			ID int64 `json:"id"`
 		} `json:"run"`
 		Steps []struct {
-			Type   string `json:"type"`
-			Status string `json:"status"`
+			Type     string `json:"type"`
+			Required bool   `json:"required"`
+			Status   string `json:"status"`
 		} `json:"steps"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &ingest); err != nil {
@@ -228,29 +229,32 @@ func TestNewVideoHiddenUntilRequiredIngestCompletes(t *testing.T) {
 	}
 	got := []string{}
 	for _, s := range ingest.Steps {
-		got = append(got, s.Type+":"+s.Status)
+		requiredness := "optional"
+		if s.Required {
+			requiredness = "required"
+		}
+		got = append(got, s.Type+":"+s.Status+":"+requiredness)
 	}
 	sort.Strings(got)
-	want := []string{"atrack:waiting", "encrypt:waiting", "keyframe:waiting", "poster:waiting", "prepare:waiting", "preview:waiting", "scrape:waiting", "subtitle:waiting"}
+	want := []string{"encrypt:waiting:required", "poster:waiting:required", "prepare:waiting:optional", "preview:waiting:optional", "scrape:waiting:optional", "subtitle:waiting:optional"}
 	if fmt.Sprint(got) != fmt.Sprint(want) || ingest.Run.ID != e.runID {
 		t.Fatalf("run=%d steps=%v", ingest.Run.ID, got)
 	}
 }
 
-func TestNewVideoPublishesOnlyAfterAllConfiguredRequiredSteps(t *testing.T) {
+func TestNewVideoPublishesAfterRequiredStepsWhileOptionalRemainWaiting(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	e := newPublicationE2E(t, true)
-	completeScrape(t, e)
-	for _, typ := range []postingest.TaskType{postingest.TaskPoster, postingest.TaskPreview, postingest.TaskKeyframe, postingest.TaskSubtitle, postingest.TaskAtrack} {
-		completePostIngest(t, e, typ)
-	}
-	completePrepare(t, e)
+	completePostIngest(t, e, postingest.TaskPoster)
 	var state string
-	e.db.QueryRow(`SELECT publication_state FROM media WHERE id=?`, e.mediaID).Scan(&state)
+	if err := e.db.QueryRow(`SELECT publication_state FROM media WHERE id=?`, e.mediaID).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
 	if state != "processing" {
 		t.Fatalf("published before encrypt: %s", state)
 	}
 	completePostIngest(t, e, postingest.TaskEncrypt)
+
 	w := e2eRequest(t, e, false, http.MethodGet, "/api/v1/media", e.h.ListMedia)
 	var p struct {
 		Items []struct {
@@ -265,21 +269,24 @@ func TestNewVideoPublishesOnlyAfterAllConfiguredRequiredSteps(t *testing.T) {
 	if len(p.Items) != 1 || p.Items[0].ID != e.mediaID || p.Items[0].State != "published" || p.Items[0].Poster != storage.PlainPosterURL(e.mediaID) {
 		t.Fatalf("published payload=%+v body=%s", p.Items, w.Body.String())
 	}
+	var optionalWaiting int
+	if err := e.db.QueryRow(`SELECT COUNT(*) FROM media_ingest_step WHERE run_id=? AND required=0 AND status='waiting'`, e.runID).Scan(&optionalWaiting); err != nil {
+		t.Fatal(err)
+	}
+	if optionalWaiting != 4 {
+		t.Fatalf("optional waiting steps=%d, want 4", optionalWaiting)
+	}
 	w = e2eRequest(t, e, false, http.MethodGet, fmt.Sprintf("/api/v1/media/%d/poster.jpg", e.mediaID), e.h.ServeMediaPoster)
 	if w.Code != 200 || w.Body.String() != "jpeg" {
 		t.Fatalf("poster status=%d body=%q", w.Code, w.Body.String())
 	}
 }
 
-func TestNewVideoBecomesDegradedVisibleAfterExhaustion(t *testing.T) {
+func TestNewVideoBecomesFailedAndRemainsHiddenAfterRequiredExhaustion(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	e := newPublicationE2E(t, false)
-	completeScrape(t, e)
-	completePostIngest(t, e, postingest.TaskKeyframe)
-	var task *postingest.Task
-	var err error
 	for attempt := 0; attempt < 3; attempt++ {
-		task, err = e.h.Queue.Claim(context.Background(), postingest.TaskPoster)
+		task, err := e.h.Queue.Claim(context.Background(), postingest.TaskPoster)
 		if err != nil || task == nil {
 			t.Fatalf("claim attempt %d task=%v err=%v", attempt, task, err)
 		}
@@ -292,28 +299,18 @@ func TestNewVideoBecomesDegradedVisibleAfterExhaustion(t *testing.T) {
 			}
 		}
 	}
-	var state string
-	e.db.QueryRow(`SELECT publication_state FROM media WHERE id=?`, e.mediaID).Scan(&state)
-	if state != "degraded" {
-		t.Fatalf("state=%s", state)
-	}
-	if w := e2eRequest(t, e, false, http.MethodGet, fmt.Sprintf("/api/v1/media/%d", e.mediaID), e.h.GetMedia); w.Code != 200 {
-		t.Fatalf("degraded detail=%d %s", w.Code, w.Body.String())
-	}
-	if n, err := publication.RetryDegradedRuns(context.Background(), e.db, 1); err != nil || n != 1 {
-		t.Fatalf("retry=(%d,%v)", n, err)
-	}
-	var available int64
-	if err = e.db.QueryRow(`SELECT unixepoch(available_at)>unixepoch(CURRENT_TIMESTAMP) FROM post_ingest_task WHERE id=?`, task.ID).Scan(&available); err != nil || available != 1 {
-		t.Fatalf("bounded delay=%d err=%v", available, err)
-	}
-	if _, err = e.db.Exec(`UPDATE post_ingest_task SET available_at=CURRENT_TIMESTAMP WHERE id=?; UPDATE media_ingest_step SET available_at=CURRENT_TIMESTAMP WHERE run_id=? AND step_type='poster'`, task.ID, e.runID); err != nil {
+	var mediaState, runState string
+	if err := e.db.QueryRow(`SELECT publication_state FROM media WHERE id=?`, e.mediaID).Scan(&mediaState); err != nil {
 		t.Fatal(err)
 	}
-	completePostIngest(t, e, postingest.TaskPoster)
-	e.db.QueryRow(`SELECT publication_state FROM media WHERE id=?`, e.mediaID).Scan(&state)
-	if state != "published" {
-		t.Fatalf("retry success state=%s", state)
+	if err := e.db.QueryRow(`SELECT status FROM media_ingest_run WHERE id=?`, e.runID).Scan(&runState); err != nil {
+		t.Fatal(err)
+	}
+	if mediaState != "failed" || runState != "failed" {
+		t.Fatalf("media state=%s run state=%s, want failed/failed", mediaState, runState)
+	}
+	if w := e2eRequest(t, e, false, http.MethodGet, fmt.Sprintf("/api/v1/media/%d", e.mediaID), e.h.GetMedia); w.Code != http.StatusNotFound {
+		t.Fatalf("failed media became visible: %d %s", w.Code, w.Body.String())
 	}
 }
 
@@ -333,8 +330,6 @@ func TestRestartRecoversRunningGeneration(t *testing.T) {
 	}
 	e.h.Queue = restarted
 	completePostIngest(t, e, postingest.TaskPoster)
-	completePostIngest(t, e, postingest.TaskKeyframe)
-	completeScrape(t, e)
 	var state string
 	e.db.QueryRow(`SELECT publication_state FROM media WHERE id=?`, e.mediaID).Scan(&state)
 	if state != "published" {
@@ -364,19 +359,32 @@ func TestNewVideoGenerationFencingStaleWorkerCannotPublishCurrentGeneration(t *t
 	if next.Generation != 2 {
 		t.Fatalf("next generation=%d", next.Generation)
 	}
-	if err = e.h.Queue.Complete(context.Background(), *stale); err != nil {
+	var beforeRunState, beforeTaskState string
+	if err = e.db.QueryRow(`SELECT status FROM media_ingest_run WHERE id=?`, e.runID).Scan(&beforeRunState); err != nil {
 		t.Fatal(err)
 	}
+	if err = e.db.QueryRow(`SELECT status FROM post_ingest_task WHERE id=?`, stale.ID).Scan(&beforeTaskState); err != nil {
+		t.Fatal(err)
+	}
+	completionErr := e.h.Queue.Complete(context.Background(), *stale)
+
 	var mediaGeneration int64
-	var state, staleRunState string
+	var supersededGeneration sql.NullInt64
+	var state, staleRunState, terminalReason, staleTaskState string
 	if err = e.db.QueryRow(`SELECT ingest_generation,publication_state FROM media WHERE id=?`, e.mediaID).Scan(&mediaGeneration, &state); err != nil {
 		t.Fatal(err)
 	}
-	if err = e.db.QueryRow(`SELECT status FROM media_ingest_run WHERE id=?`, e.runID).Scan(&staleRunState); err != nil {
+	if err = e.db.QueryRow(`SELECT status,terminal_reason,superseded_by_generation FROM media_ingest_run WHERE id=?`, e.runID).Scan(&staleRunState, &terminalReason, &supersededGeneration); err != nil {
 		t.Fatal(err)
 	}
-	if mediaGeneration != 2 || state != "processing" || staleRunState != "processing" {
-		t.Fatalf("generation=%d state=%s stale_run=%s", mediaGeneration, state, staleRunState)
+	if err = e.db.QueryRow(`SELECT status FROM post_ingest_task WHERE id=?`, stale.ID).Scan(&staleTaskState); err != nil {
+		t.Fatal(err)
+	}
+	if completionErr == nil || staleRunState != beforeRunState || staleTaskState != beforeTaskState {
+		t.Fatalf("stale completion err=%v changed run %s->%s task %s->%s", completionErr, beforeRunState, staleRunState, beforeTaskState, staleTaskState)
+	}
+	if mediaGeneration != 2 || state != "processing" || staleRunState != "cancelled" || terminalReason != "superseded_by_policy_v2" || !supersededGeneration.Valid || supersededGeneration.Int64 != 2 || staleTaskState != "cancelled" {
+		t.Fatalf("generation=%d state=%s stale_run=%s reason=%q superseded_by=%v stale_task=%s", mediaGeneration, state, staleRunState, terminalReason, supersededGeneration, staleTaskState)
 	}
 	if w := e2eRequest(t, e, false, http.MethodGet, fmt.Sprintf("/api/v1/media/%d", e.mediaID), e.h.GetMedia); w.Code != http.StatusNotFound {
 		t.Fatalf("stale completion exposed media: %d %s", w.Code, w.Body.String())
