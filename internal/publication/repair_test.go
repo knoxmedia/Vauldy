@@ -125,7 +125,7 @@ func TestRepairLegacyMediaPreservesPublishedVisibility(t *testing.T) {
 
 type repairPreparePlanner struct{}
 
-func (repairPreparePlanner) PlanIngestPrepareTx(ctx context.Context, tx *sql.Tx, mediaID, runID, stepID, generation int64) error {
+func (repairPreparePlanner) PlanIngestPrepareTx(ctx context.Context, tx store.SQLExecutor, mediaID, runID, stepID, generation int64) error {
 	var fileID string
 	if err := tx.QueryRowContext(ctx, `SELECT file_id FROM media WHERE id=?`, mediaID).Scan(&fileID); err != nil {
 		return err

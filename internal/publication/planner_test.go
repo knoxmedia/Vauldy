@@ -236,7 +236,7 @@ type recordingPreparePlanner struct {
 	err                                error
 }
 
-func (p *recordingPreparePlanner) PlanIngestPrepareTx(_ context.Context, _ *sql.Tx, mediaID, runID, stepID, generation int64) error {
+func (p *recordingPreparePlanner) PlanIngestPrepareTx(_ context.Context, _ store.SQLExecutor, mediaID, runID, stepID, generation int64) error {
 	p.calls++
 	p.mediaID, p.runID, p.stepID, p.generation = mediaID, runID, stepID, generation
 	return p.err

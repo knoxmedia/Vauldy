@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"knox-media/internal/coreiface"
+	"knox-media/internal/store"
 )
 
 type ingestPreparePlanner struct{}
@@ -26,7 +27,7 @@ type ingestPrepareJobSnapshot struct {
 	Priority   string    `json:"priority"`
 }
 
-func (ingestPreparePlanner) PlanIngestPrepareTx(ctx context.Context, tx *sql.Tx, mediaID, runID, stepID, generation int64) error {
+func (ingestPreparePlanner) PlanIngestPrepareTx(ctx context.Context, tx store.SQLExecutor, mediaID, runID, stepID, generation int64) error {
 	if tx == nil || mediaID <= 0 || runID <= 0 || stepID <= 0 || generation <= 0 {
 		return errors.New("pretranscode ingest prepare: invalid linkage")
 	}

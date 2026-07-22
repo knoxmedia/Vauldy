@@ -2,7 +2,8 @@ package coreiface
 
 import (
 	"context"
-	"database/sql"
+
+	"knox-media/internal/store"
 )
 
 // PretranscodeModule is the playback-facing capability contract for the
@@ -44,5 +45,5 @@ type RenditionStatus struct {
 // publication planner. Implementations must create executable work linked to
 // the supplied immutable ingest run and step within the caller transaction.
 type IngestPreparePlanner interface {
-	PlanIngestPrepareTx(ctx context.Context, tx *sql.Tx, mediaID, runID, stepID, generation int64) error
+	PlanIngestPrepareTx(ctx context.Context, tx store.SQLExecutor, mediaID, runID, stepID, generation int64) error
 }
