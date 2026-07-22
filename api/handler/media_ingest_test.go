@@ -365,7 +365,7 @@ func TestAdminRetryPrepareDefersWorkerClaimUntilAvailable(t *testing.T) {
 		t.Fatal(err)
 	}
 	stepID, _ := res.LastInsertId()
-	res, err = h.App.DB.Exec(`INSERT INTO transcode_task(file_id,status,task_type,ingest_run_id,ingest_step_id,generation) VALUES('degraded','failed','pretranscode',202,?,1)`, stepID)
+	res, err = h.App.DB.Exec(`INSERT INTO transcode_task(file_id,status,task_type,media_id,ingest_run_id,ingest_step_id,generation) VALUES('degraded','failed','pretranscode',102,202,?,1)`, stepID)
 	if err != nil {
 		t.Fatal(err)
 	}

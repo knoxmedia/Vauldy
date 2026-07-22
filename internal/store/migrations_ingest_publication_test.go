@@ -742,3 +742,97 @@ func TestMigrateIngestPublicationV2ExactSchemaRejectsDrift(t *testing.T) {
 		t.Fatal("drifted v2 schema accepted")
 	}
 }
+
+func TestMigrateIngestPublicationV2UpgradesKnownD725Trigger(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if _, err := db.Exec(`CREATE TABLE transcode_task(id INTEGER PRIMARY KEY,file_id TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TRIGGER trg_transcode_task_fill_media AFTER INSERT ON transcode_task WHEN NEW.ingest_step_id IS NOT NULL AND NEW.media_id IS NULL BEGIN UPDATE transcode_task SET media_id=(SELECT media_id FROM media_ingest_step WHERE id=NEW.ingest_step_id) WHERE id=NEW.id; END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatalf("d725 upgrade: %v", err)
+	}
+	var n int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='trg_transcode_task_fill_media'`).Scan(&n)
+	if n != 0 {
+		t.Fatal("legacy trigger remains")
+	}
+}
+
+func TestMigrateIngestPublicationV2FaultStagesRollbackGraph(t *testing.T) {
+	stages := []publicationMigrationStage{publicationStageAfterBackup, publicationStageAfterChildDrop, publicationStageAfterParentCreate, publicationStageAfterChildCreate, publicationStageAfterCopy, publicationStageBeforeSchemaValidate, publicationStageBeforeFKCheck}
+	for _, stage := range stages {
+		t.Run(string(stage), func(t *testing.T) {
+			db := openIngestPublicationMigrationTestDB(t)
+			if err := migrateIngestPublicationV1(context.Background(), db); err != nil {
+				t.Fatal(err)
+			}
+			before := snapshotPublicationGraph(t, db)
+			old := publicationMigrationTestHook
+			publicationMigrationTestHook = func(g publicationMigrationStage) error {
+				if g == stage {
+					return fmt.Errorf("injected %s", stage)
+				}
+				return nil
+			}
+			t.Cleanup(func() { publicationMigrationTestHook = old })
+			if err := migratePublicationV2(context.Background(), db); err == nil {
+				t.Fatal("fault accepted")
+			}
+			after := snapshotPublicationGraph(t, db)
+			if before != after {
+				t.Fatalf("graph changed\nbefore=%s\nafter=%s", before, after)
+			}
+			var temp int
+			_ = db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name LIKE '%__publication_v2_backup' OR name LIKE '%_v2'`).Scan(&temp)
+			if temp != 0 {
+				t.Fatalf("temp objects=%d", temp)
+			}
+		})
+	}
+}
+
+func snapshotPublicationGraph(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	var out strings.Builder
+	for _, table := range []string{"media_ingest_step", "post_ingest_task", "scrape_task", "transcode_task", "pretranscode_task_meta", "pretranscode_rendition_job"} {
+		var sqlText sql.NullString
+		_ = db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&sqlText)
+		if !sqlText.Valid {
+			continue
+		}
+		fmt.Fprintf(&out, "%s:%s:", table, sqlText.String)
+		rows, err := db.Query(`SELECT * FROM ` + table + ` ORDER BY 1`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cols, _ := rows.Columns()
+		fmt.Fprint(&out, cols)
+		for rows.Next() {
+			vals := make([]any, len(cols))
+			ptr := make([]any, len(cols))
+			for i := range vals {
+				ptr[i] = &vals[i]
+			}
+			if err := rows.Scan(ptr...); err != nil {
+				t.Fatal(err)
+			}
+			fmt.Fprint(&out, vals)
+		}
+		rows.Close()
+		idx, _ := db.Query(`SELECT name,sql FROM sqlite_master WHERE type IN ('index','trigger') AND tbl_name=? ORDER BY type,name`, table)
+		for idx.Next() {
+			var n string
+			var q sql.NullString
+			_ = idx.Scan(&n, &q)
+			fmt.Fprint(&out, n, q.String)
+		}
+		idx.Close()
+	}
+	return out.String()
+}
