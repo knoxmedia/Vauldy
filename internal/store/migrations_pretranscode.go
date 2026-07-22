@@ -82,7 +82,7 @@ func init() {
 					id INTEGER PRIMARY KEY AUTOINCREMENT,
 					task_id INTEGER NOT NULL,
 					rendition_id INTEGER,
-					rendition_name TEXT NOT NULL,
+					rendition_name TEXT NOT NULL DEFAULT '',
 					status TEXT DEFAULT 'waiting',
 					progress INTEGER DEFAULT 0,
 					output_path TEXT,

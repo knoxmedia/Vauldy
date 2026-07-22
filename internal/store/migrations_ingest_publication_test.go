@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -1521,5 +1522,300 @@ func TestPublicationEnterpriseChildrenRebuiltCanonical(t *testing.T) {
 	var progress int
 	if err := db.QueryRow(`SELECT config_snapshot_json,lease_owner,progress FROM pretranscode_rendition_job WHERE id=4`).Scan(&snapshot, &owner, &progress); err != nil || snapshot != `{"snapshot":1}` || owner != "owner" || progress != 41 {
 		t.Fatalf("preserved=%q/%q/%d err=%v", snapshot, owner, progress, err)
+	}
+}
+
+func TestMigrateIngestPublicationV2EnterpriseCompleteNoOpTenAndReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "enterprise-noop.sqlite")
+	db, err := OpenSQLiteContext(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 10; i++ {
+		if err = migrateIngestPublication(context.Background(), db); err != nil {
+			t.Fatalf("migration %d: %v", i, err)
+		}
+	}
+	before := snapshotWholeSQLite(t, db)
+	assertNoForeignKeyViolations(t, db)
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		db, err = OpenSQLiteContext(context.Background(), path)
+		if err != nil {
+			t.Fatalf("reopen %d: %v", i, err)
+		}
+		got := snapshotWholeSQLite(t, db)
+		if got != before {
+			db.Close()
+			t.Fatalf("reopen %d changed sqlite database", i)
+		}
+		assertNoForeignKeyViolations(t, db)
+		if err = db.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func snapshotWholeSQLite(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	var out strings.Builder
+	rows, err := db.Query(`SELECT type,name,tbl_name,COALESCE(sql,'') FROM sqlite_master ORDER BY type,name`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tables []string
+	for rows.Next() {
+		var typ, name, table, ddl string
+		if err := rows.Scan(&typ, &name, &table, &ddl); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		fmt.Fprint(&out, typ, name, table, ddl)
+		if typ == "table" && !strings.HasPrefix(name, "sqlite_") {
+			tables = append(tables, name)
+		}
+	}
+	rows.Close()
+	sort.Strings(tables)
+	for _, table := range tables {
+		data, err := db.Query(`SELECT * FROM ` + quoteIdent(table) + ` ORDER BY rowid`)
+		if err != nil {
+			data, err = db.Query(`SELECT * FROM ` + quoteIdent(table))
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		cols, _ := data.Columns()
+		fmt.Fprint(&out, table, cols)
+		for data.Next() {
+			vals := make([]any, len(cols))
+			ptr := make([]any, len(cols))
+			for i := range vals {
+				ptr[i] = &vals[i]
+			}
+			if err := data.Scan(ptr...); err != nil {
+				data.Close()
+				t.Fatal(err)
+			}
+			fmt.Fprint(&out, vals)
+		}
+		data.Close()
+	}
+	return out.String()
+}
+
+func TestValidatePublicationV2SchemaRejectsExtraManagedConstraints(t *testing.T) {
+	for _, tc := range []struct{ table, extra string }{
+		{"media_ingest_run", `CHECK(id > 0)`},
+		{"media_ingest_step", `UNIQUE(id,status)`},
+		{"post_ingest_task", `CHECK(id > 0)`},
+		{"scrape_task", `UNIQUE(id,status)`},
+		{"media_ingest_step_dependency", `CHECK(step_id > 0)`},
+		{"media_ingest_evidence", `UNIQUE(id,kind)`},
+		{"media_asset_stage_journal", `CHECK(length(stage_id) > 0)`},
+	} {
+		t.Run(tc.table, func(t *testing.T) {
+			db := openIngestPublicationMigrationTestDB(t)
+			if err := migrateIngestPublication(context.Background(), db); err != nil {
+				t.Fatal(err)
+			}
+			if err := rebuildTableWithExtraConstraintForTest(db, tc.table, tc.extra); err != nil {
+				t.Fatal(err)
+			}
+			conn, err := db.Conn(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = validatePublicationV2Schema(context.Background(), conn)
+			conn.Close()
+			if err == nil {
+				t.Fatalf("extra constraint accepted: %s", tc.extra)
+			}
+		})
+	}
+}
+
+func rebuildTableWithExtraConstraintForTest(db *sql.DB, table, extra string) error {
+	var ddl string
+	if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&ddl); err != nil {
+		return err
+	}
+	_, closeAt, err := findCreateTableBody(ddl)
+	if err != nil {
+		return err
+	}
+	newName := table + "__extra"
+	create := strings.Replace(ddl[:closeAt]+`,`+extra+ddl[closeAt:], table, newName, 1)
+	if _, err = db.Exec(`PRAGMA foreign_keys=OFF`); err != nil {
+		return err
+	}
+	defer db.Exec(`PRAGMA foreign_keys=ON`)
+	if _, err = db.Exec(create); err != nil {
+		return err
+	}
+	cols, err := publicationColumnNames(context.Background(), db, table)
+	if err != nil {
+		return err
+	}
+	var q []string
+	for _, c := range cols {
+		q = append(q, quoteIdent(c))
+	}
+	list := strings.Join(q, ",")
+	if _, err = db.Exec(`INSERT INTO ` + quoteIdent(newName) + `(` + list + `) SELECT ` + list + ` FROM ` + quoteIdent(table)); err != nil {
+		return err
+	}
+	if _, err = db.Exec(`DROP TABLE ` + quoteIdent(table)); err != nil {
+		return err
+	}
+	_, err = db.Exec(`ALTER TABLE ` + quoteIdent(newName) + ` RENAME TO ` + quoteIdent(table))
+	return err
+}
+
+func TestPublicationTranscodeSchemaCurrentRejectsExtraFK(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if err := migrateIngestPublicationV1(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	_, err := db.Exec(`CREATE TABLE transcode_task(id INTEGER PRIMARY KEY,file_id TEXT,media_id INTEGER,ingest_run_id INTEGER,ingest_step_id INTEGER,generation INTEGER,lease_owner TEXT,lease_until TIMESTAMP,extra_media_id INTEGER,FOREIGN KEY(media_id) REFERENCES media(id) ON DELETE CASCADE,FOREIGN KEY(ingest_run_id,media_id,generation) REFERENCES media_ingest_run(id,media_id,generation) ON DELETE CASCADE,FOREIGN KEY(ingest_step_id,media_id,generation) REFERENCES media_ingest_step(id,media_id,generation) ON DELETE CASCADE,FOREIGN KEY(extra_media_id) REFERENCES media(id),CHECK((ingest_run_id IS NULL AND ingest_step_id IS NULL AND generation IS NULL AND media_id IS NULL) OR (ingest_run_id IS NOT NULL AND ingest_step_id IS NOT NULL AND generation IS NOT NULL AND media_id IS NOT NULL)))`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, _ := db.Conn(context.Background())
+	defer conn.Close()
+	if publicationTranscodeSchemaCurrent(context.Background(), conn) {
+		t.Fatal("transcode extra FK accepted")
+	}
+}
+
+func TestMigrateIngestPublicationV2UpgradesFullD725EnterpriseGraph(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	installFullD725EnterpriseGraph(t, db)
+	beforeRows := snapshotPublicationGraphRows(t, db)
+	if err := migratePublicationV2(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range publicationGraphOrder {
+		if !tableExists(context.Background(), db, table) {
+			t.Fatalf("d725 graph table missing: %s", table)
+		}
+	}
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = validatePublicationV2Schema(context.Background(), conn); err != nil {
+		conn.Close()
+		t.Fatal(err)
+	}
+	conn.Close()
+	afterRows := snapshotPublicationGraphRows(t, db)
+	if beforeRows == afterRows {
+		t.Fatal("d725 fixture did not exercise media_id transform")
+	}
+	for _, table := range []string{"media_ingest_step", "post_ingest_task", "scrape_task", "pretranscode_task_meta", "pretranscode_rendition_job", "media_ingest_step_dependency", "media_ingest_evidence", "media_asset_stage_journal"} {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM ` + quoteIdent(table)).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("%s rows=%d err=%v", table, count, err)
+		}
+	}
+	assertNoForeignKeyViolations(t, db)
+	var mediaID int64
+	if err := db.QueryRow(`SELECT media_id FROM transcode_task WHERE id=73`).Scan(&mediaID); err != nil || mediaID != 20 {
+		t.Fatalf("transcode media transform=%d err=%v", mediaID, err)
+	}
+	for _, table := range publicationGraphOrder {
+		var n int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?`, `custom_fault_`+table).Scan(&n); err != nil || n != 1 {
+			t.Fatalf("custom index %s count=%d err=%v", table, n, err)
+		}
+	}
+}
+
+func installFullD725EnterpriseGraph(t *testing.T, db *sql.DB) {
+	t.Helper()
+	if _, err := db.Exec(`PRAGMA foreign_keys=OFF`); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"post_ingest_task", "scrape_task", "media_ingest_step_dependency", "media_ingest_evidence", "media_asset_stage_journal", "pretranscode_rendition_job", "pretranscode_task_meta", "transcode_task", "media_ingest_step", "media_ingest_run"} {
+		if _, err := db.Exec(`DROP TABLE IF EXISTS ` + quoteIdent(table)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE media_ingest_run(id INTEGER PRIMARY KEY AUTOINCREMENT,media_id INTEGER NOT NULL,generation INTEGER NOT NULL CHECK(generation>0),scan_task_id INTEGER,reason TEXT NOT NULL CHECK(reason IN ('scan','repair','manual_retry')),status TEXT NOT NULL CHECK(status IN ('processing','published','degraded','failed','cancelled')),preserve_visibility INTEGER NOT NULL DEFAULT 0 CHECK(preserve_visibility IN (0,1)),config_snapshot_json TEXT NOT NULL CHECK(json_valid(config_snapshot_json)),error_message TEXT NOT NULL DEFAULT '',created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,finished_at TIMESTAMP,FOREIGN KEY(media_id) REFERENCES media(id) ON DELETE CASCADE,FOREIGN KEY(scan_task_id) REFERENCES scan_task(id) ON DELETE SET NULL,UNIQUE(media_id,generation),UNIQUE(id,media_id,generation))`,
+		`CREATE INDEX idx_media_ingest_run_status_updated ON media_ingest_run(status,updated_at)`, `CREATE INDEX idx_media_ingest_run_scan_status ON media_ingest_run(scan_task_id,status)`,
+		`CREATE TABLE media_ingest_step(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id INTEGER NOT NULL,media_id INTEGER NOT NULL,generation INTEGER NOT NULL CHECK(generation>0),step_type TEXT NOT NULL CHECK(step_type IN ('poster','scrape','preview','keyframe','subtitle','atrack','encrypt','prepare','thumbnail')),required INTEGER NOT NULL CHECK(required IN (0,1)),status TEXT NOT NULL CHECK(status IN ('waiting','running','done','skipped','failed','cancelled')),attempts INTEGER NOT NULL DEFAULT 0,max_attempts INTEGER NOT NULL DEFAULT 3,available_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,lease_owner TEXT,lease_until TIMESTAMP,last_error TEXT NOT NULL DEFAULT '',started_at TIMESTAMP,finished_at TIMESTAMP,created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,FOREIGN KEY(run_id) REFERENCES media_ingest_run(id) ON DELETE CASCADE,FOREIGN KEY(media_id) REFERENCES media(id) ON DELETE CASCADE,FOREIGN KEY(media_id,generation) REFERENCES media_ingest_run(media_id,generation),FOREIGN KEY(run_id,media_id,generation) REFERENCES media_ingest_run(id,media_id,generation),UNIQUE(run_id,step_type),UNIQUE(id,media_id,generation))`,
+		`CREATE TABLE post_ingest_task(id INTEGER PRIMARY KEY AUTOINCREMENT,media_id INTEGER NOT NULL,scan_task_id INTEGER,ingest_run_id INTEGER,ingest_step_id INTEGER,generation INTEGER NOT NULL DEFAULT 0,task_type TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'waiting',attempts INTEGER NOT NULL DEFAULT 0,max_attempts INTEGER NOT NULL DEFAULT 3,available_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,lease_owner TEXT,lease_until TIMESTAMP,last_error TEXT NOT NULL DEFAULT '',created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,started_at TIMESTAMP,finished_at TIMESTAMP,FOREIGN KEY(media_id) REFERENCES media(id),UNIQUE(media_id,generation,task_type))`,
+		`CREATE INDEX idx_post_ingest_claim ON post_ingest_task(status,available_at,lease_until,created_at)`, `CREATE INDEX custom_fault_post_ingest_task ON post_ingest_task(id,status)`,
+		`CREATE TABLE scrape_task(id INTEGER PRIMARY KEY AUTOINCREMENT,media_id INTEGER NOT NULL,task_type TEXT DEFAULT 'media',source TEXT DEFAULT 'auto',query TEXT,year INTEGER,status TEXT DEFAULT 'waiting',progress INTEGER DEFAULT 0,fail_count INTEGER DEFAULT 0,available_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,message TEXT,created_by INTEGER DEFAULT 0,ingest_run_id INTEGER,ingest_step_id INTEGER,generation INTEGER,lease_owner TEXT,lease_until TIMESTAMP,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,started_at TIMESTAMP,finished_at TIMESTAMP,FOREIGN KEY(media_id) REFERENCES media(id))`,
+		`CREATE INDEX idx_scrape_task_status ON scrape_task(status,created_at)`, `CREATE INDEX custom_fault_scrape_task ON scrape_task(id,status)`,
+		d725TranscodeTaskDDL, `CREATE INDEX custom_fault_transcode_task ON transcode_task(id,status)`,
+		`CREATE TABLE transcode_preset(id INTEGER PRIMARY KEY)`, `CREATE TABLE preset_rendition(id INTEGER PRIMARY KEY)`,
+		`CREATE TABLE pretranscode_task_meta(task_id INTEGER PRIMARY KEY,preset_id INTEGER NOT NULL,output_format TEXT NOT NULL,encryption_mode TEXT DEFAULT 'none',priority TEXT DEFAULT 'normal',output_path TEXT,ingest_jobs_snapshot_json TEXT,FOREIGN KEY(task_id) REFERENCES transcode_task(id),FOREIGN KEY(preset_id) REFERENCES transcode_preset(id))`, `CREATE INDEX custom_fault_pretranscode_task_meta ON pretranscode_task_meta(task_id,priority)`,
+		`CREATE TABLE pretranscode_rendition_job(id INTEGER PRIMARY KEY AUTOINCREMENT,task_id INTEGER NOT NULL,rendition_id INTEGER,rendition_name TEXT NOT NULL DEFAULT '',status TEXT DEFAULT 'waiting',progress INTEGER DEFAULT 0,output_path TEXT,error_message TEXT,encoder_used TEXT,started_at TIMESTAMP,completed_at TIMESTAMP,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,available_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,lease_owner TEXT,lease_until TIMESTAMP,config_snapshot_json TEXT,FOREIGN KEY(task_id) REFERENCES transcode_task(id),FOREIGN KEY(rendition_id) REFERENCES preset_rendition(id))`, `CREATE INDEX idx_pretranscode_job_status ON pretranscode_rendition_job(status,created_at)`, `CREATE INDEX idx_pretranscode_job_task ON pretranscode_rendition_job(task_id)`, `CREATE INDEX custom_fault_pretranscode_rendition_job ON pretranscode_rendition_job(id,status)`,
+		canonicalIngestDependencySchema, `CREATE UNIQUE INDEX idx_ingest_dependency_visible ON media_ingest_step_dependency(step_id) WHERE dependency_kind='media_visible'`, `CREATE INDEX custom_fault_media_ingest_step_dependency ON media_ingest_step_dependency(step_id,dependency_kind)`,
+		canonicalIngestEvidenceSchema, `CREATE INDEX custom_fault_media_ingest_evidence ON media_ingest_evidence(id,kind)`, canonicalAssetStageJournalSchema, `CREATE INDEX idx_asset_stage_recovery ON media_asset_stage_journal(state,updated_at)`, `CREATE INDEX custom_fault_media_asset_stage_journal ON media_asset_stage_journal(stage_id,state)`,
+		`CREATE INDEX custom_fault_media_ingest_step ON media_ingest_step(id,status)`,
+		`INSERT INTO transcode_preset VALUES(1)`, `INSERT INTO preset_rendition VALUES(2)`, `INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json) VALUES(1,20,1,'repair','processing','{"d725":1}')`, `INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status,attempts,lease_owner,lease_until,last_error) VALUES(70,1,20,1,'prepare',1,'running',2,'step-owner','2030-01-02','step-error')`, `INSERT INTO post_ingest_task(id,media_id,scan_task_id,ingest_run_id,ingest_step_id,generation,task_type,status,attempts,lease_owner,lease_until,last_error) VALUES(71,20,10,1,70,1,'poster','running',2,'post-owner','2030-01-02','post-error')`, `INSERT INTO scrape_task(id,media_id,status,progress,fail_count,ingest_run_id,ingest_step_id,generation,lease_owner,lease_until) VALUES(72,20,'running',37,2,1,70,1,'scrape-owner','2030-01-02')`, `INSERT INTO transcode_task(id,file_id,status,progress,error_message,output_path,task_type,ingest_run_id,ingest_step_id,generation,media_id,lease_owner,lease_until) VALUES(73,'d725-file','running',55,'transcode-error','output','pretranscode',1,70,1,NULL,'transcode-owner','2030-01-02')`, `INSERT INTO pretranscode_task_meta VALUES(73,1,'hls','aes128','high','meta-output','{"jobs":[1]}')`, `INSERT INTO pretranscode_rendition_job(id,task_id,rendition_id,rendition_name,status,progress,lease_owner,lease_until,config_snapshot_json) VALUES(74,73,2,'720p','running',66,'job-owner','2030-01-02','{"job":1}')`, `INSERT INTO media_ingest_step_dependency VALUES(70,70,'step_done')`, `INSERT INTO media_ingest_evidence(id,run_id,step_id,media_id,generation,kind,source_fingerprint,artifact_refs_json,verified_at,stage_id) VALUES(75,1,70,20,1,'poster','fp','{}','2029-01-01','stage-75')`, `INSERT INTO media_asset_stage_journal(stage_id,media_id,run_id,step_id,generation,owner_token,source_fingerprint,artifact_kind,state,staged_path,hashes_sizes_json) VALUES('stage-75',20,1,70,1,'owner','fp','poster','staged','path','{}')`, legacyPublicationFillMediaTriggerSQL,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("d725 fixture %q: %v", stmt, err)
+		}
+	}
+	if _, err := db.Exec(`PRAGMA foreign_keys=ON`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func snapshotPublicationGraphRows(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	var out strings.Builder
+	for _, table := range publicationGraphOrder {
+		if !tableExists(context.Background(), db, table) {
+			continue
+		}
+		rows, err := db.Query(`SELECT * FROM ` + quoteIdent(table) + ` ORDER BY 1`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cols, _ := rows.Columns()
+		fmt.Fprint(&out, table, cols)
+		for rows.Next() {
+			vals := make([]any, len(cols))
+			ptr := make([]any, len(cols))
+			for i := range vals {
+				ptr[i] = &vals[i]
+			}
+			if err := rows.Scan(ptr...); err != nil {
+				rows.Close()
+				t.Fatal(err)
+			}
+			fmt.Fprint(&out, vals)
+		}
+		rows.Close()
+	}
+	return out.String()
+}
+
+func TestPublicationTranscodeSchemaCurrentRejectsExtraCheckAndUnique(t *testing.T) {
+	for _, extra := range []string{`CHECK(id > 0)`, `UNIQUE(id,file_id)`} {
+		t.Run(extra, func(t *testing.T) {
+			db := openIngestPublicationMigrationTestDB(t)
+			if err := migrateIngestPublicationV1(context.Background(), db); err != nil {
+				t.Fatal(err)
+			}
+			ddl := `CREATE TABLE transcode_task(id INTEGER PRIMARY KEY,file_id TEXT,media_id INTEGER,ingest_run_id INTEGER,ingest_step_id INTEGER,generation INTEGER,lease_owner TEXT,lease_until TIMESTAMP,FOREIGN KEY(media_id) REFERENCES media(id) ON DELETE CASCADE,FOREIGN KEY(ingest_run_id,media_id,generation) REFERENCES media_ingest_run(id,media_id,generation) ON DELETE CASCADE,FOREIGN KEY(ingest_step_id,media_id,generation) REFERENCES media_ingest_step(id,media_id,generation) ON DELETE CASCADE,CHECK((ingest_run_id IS NULL AND ingest_step_id IS NULL AND generation IS NULL AND media_id IS NULL) OR (ingest_run_id IS NOT NULL AND ingest_step_id IS NOT NULL AND generation IS NOT NULL AND media_id IS NOT NULL)),` + extra + `)`
+			if _, err := db.Exec(ddl); err != nil {
+				t.Fatal(err)
+			}
+			conn, _ := db.Conn(context.Background())
+			defer conn.Close()
+			if publicationTranscodeSchemaCurrent(context.Background(), conn) {
+				t.Fatalf("transcode extra constraint accepted: %s", extra)
+			}
+		})
 	}
 }

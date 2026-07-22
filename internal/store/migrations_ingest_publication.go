@@ -657,6 +657,9 @@ func migrateIngestPublication(ctx context.Context, db *sql.DB) error {
 			return err
 		}
 		if legacy == 0 {
+			if _, err := db.ExecContext(ctx, `DROP INDEX IF EXISTS idx_scrape_task_status`); err != nil {
+				return fmt.Errorf("drop obsolete scrape status index: %w", err)
+			}
 			return nil
 		}
 	}
@@ -770,6 +773,21 @@ func migratePublicationV2(ctx context.Context, db *sql.DB) (err error) {
 	}()
 	if err = publicationMigrationHook(publicationStagePreflight); err != nil {
 		return err
+	}
+	if tableExists(ctx, conn, "media_ingest_step_dependency") {
+		cols, inspectErr := publicationColumns(ctx, conn, "media_ingest_run")
+		if inspectErr != nil {
+			return inspectErr
+		}
+		complete := true
+		for _, name := range []string{"policy_version", "terminal_reason", "superseded_by_generation", "superseded_at"} {
+			complete = complete && cols[name]
+		}
+		if complete {
+			if err = validatePublicationV2Schema(ctx, conn); err != nil {
+				return fmt.Errorf("publication v2 precommit existing schema: %w", err)
+			}
+		}
 	}
 	for _, alter := range []string{`ALTER TABLE media_ingest_run ADD COLUMN policy_version INTEGER NOT NULL DEFAULT 1 CHECK(policy_version IN (1,2))`, `ALTER TABLE media_ingest_run ADD COLUMN terminal_reason TEXT NOT NULL DEFAULT ''`, `ALTER TABLE media_ingest_run ADD COLUMN superseded_by_generation INTEGER`, `ALTER TABLE media_ingest_run ADD COLUMN superseded_at TIMESTAMP`} {
 		if _, e := conn.ExecContext(ctx, alter); e != nil && !strings.Contains(strings.ToLower(e.Error()), "duplicate column") {
@@ -2010,11 +2028,15 @@ func publicationTranscodeSchemaCurrent(ctx context.Context, q SQLExecutor) bool 
 	if strictCount != 1 {
 		return false
 	}
+	managed, err := publicationManagedConstraintMultiset(raw)
+	if err != nil || len(managed) != 1 || managed[0] != strict {
+		return false
+	}
 	groups, err := publicationForeignKeys(ctx, q, "transcode_task")
 	if err != nil {
 		return false
 	}
-	return groups["media:media_id:id:cascade"] && groups["media_ingest_run:ingest_run_id,media_id,generation:id,media_id,generation:cascade"] && groups["media_ingest_step:ingest_step_id,media_id,generation:id,media_id,generation:cascade"]
+	return len(groups) == 3 && groups["media:media_id:id:cascade"] && groups["media_ingest_run:ingest_run_id,media_id,generation:id,media_id,generation:cascade"] && groups["media_ingest_step:ingest_step_id,media_id,generation:id,media_id,generation:cascade"]
 }
 func publicationForeignKeys(ctx context.Context, q SQLExecutor, table string) (map[string]bool, error) {
 	rows, e := q.QueryContext(ctx, fmt.Sprintf(`PRAGMA foreign_key_list(%q)`, table))
@@ -2180,7 +2202,10 @@ func validatePublicationV2Schema(ctx context.Context, q SQLExecutor) error {
 		return err
 	}
 	if tableExists(ctx, q, "media_ingest_step") {
-		if err := requirePublicationClauses(ctx, q, "media_ingest_step", `CHECK(step_type IN ('poster','scrape','preview','keyframe','subtitle','atrack','encrypt','prepare','thumbnail'))`, `UNIQUE(run_id,step_type)`, `UNIQUE(id,media_id,generation)`); err != nil {
+		if err := exactPublicationTable(ctx, q, "media_ingest_step", strings.Replace(mediaIngestStepSchema, "CREATE TABLE IF NOT EXISTS", "CREATE TABLE", 1)); err != nil {
+			return err
+		}
+		if err := requirePublicationFKSet(ctx, q, "media_ingest_step", "media_ingest_run:run_id:id:cascade", "media:media_id:id:cascade", "media_ingest_run:media_id,generation:media_id,generation:no action", "media_ingest_run:run_id,media_id,generation:id,media_id,generation:no action"); err != nil {
 			return err
 		}
 	}
@@ -2226,7 +2251,7 @@ const canonicalPretranscodeRenditionJobSchema = `CREATE TABLE pretranscode_rendi
  id INTEGER PRIMARY KEY AUTOINCREMENT,
  task_id INTEGER NOT NULL,
  rendition_id INTEGER,
- rendition_name TEXT NOT NULL,
+ rendition_name TEXT NOT NULL DEFAULT '',
  status TEXT DEFAULT 'waiting',
  progress INTEGER DEFAULT 0,
  output_path TEXT,
@@ -2297,6 +2322,78 @@ func publicationColumnSpecs(ctx context.Context, q SQLExecutor, table string) ([
 	return out, rows.Err()
 }
 
+func publicationManagedConstraintMultiset(ddl string) ([]string, error) {
+	open, close, err := findCreateTableBody(ddl)
+	if err != nil {
+		return nil, err
+	}
+	clauses, err := splitPublicationSQLClauses(ddl[open+1 : close])
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, clause := range clauses {
+		n := normalizePublicationSQL(clause)
+		if strings.HasPrefix(n, "unique(") || strings.HasPrefix(n, "check(") {
+			out = append(out, n)
+			continue
+		}
+		for at := 0; at < len(n); {
+			rel := strings.Index(n[at:], "check(")
+			if rel < 0 {
+				break
+			}
+			start := at + rel
+			end, err := publicationBalancedConstraintEnd(n, start+len("check"))
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, n[start:end])
+			at = end
+		}
+		if strings.HasSuffix(n, "unique") {
+			out = append(out, "inlineunique:"+strings.SplitN(n, "unique", 2)[0])
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func publicationBalancedConstraintEnd(s string, openAt int) (int, error) {
+	if openAt >= len(s) || s[openAt] != '(' {
+		return 0, fmt.Errorf("constraint opening parenthesis missing")
+	}
+	depth := 0
+	quoted := byte(0)
+	for i := openAt; i < len(s); i++ {
+		c := s[i]
+		if quoted != 0 {
+			if c == quoted {
+				if i+1 < len(s) && s[i+1] == quoted {
+					i++
+					continue
+				}
+				quoted = 0
+			}
+			continue
+		}
+		if c == '\'' || c == '"' {
+			quoted = c
+			continue
+		}
+		if c == '(' {
+			depth++
+		}
+		if c == ')' {
+			depth--
+			if depth == 0 {
+				return i + 1, nil
+			}
+		}
+	}
+	return 0, fmt.Errorf("unterminated managed constraint")
+}
+
 func exactPublicationTable(ctx context.Context, q SQLExecutor, table, ddl string) error {
 	open, close, err := findCreateTableBody(ddl)
 	if err != nil {
@@ -2342,6 +2439,25 @@ func exactPublicationTable(ctx context.Context, q SQLExecutor, table, ddl string
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		return fmt.Errorf("%s column metadata drift: got=%v want=%v", table, got, want)
+	}
+	actualSQL, err := publicationRawTableSQL(ctx, q, table)
+	if err != nil {
+		return err
+	}
+	expectedSQL, err := publicationRawTableSQL(ctx, q, temp)
+	if err != nil {
+		return err
+	}
+	actualConstraints, err := publicationManagedConstraintMultiset(actualSQL)
+	if err != nil {
+		return err
+	}
+	expectedConstraints, err := publicationManagedConstraintMultiset(expectedSQL)
+	if err != nil {
+		return err
+	}
+	if strings.Join(actualConstraints, "\n") != strings.Join(expectedConstraints, "\n") {
+		return fmt.Errorf("%s managed constraints drift: got=%v want=%v", table, actualConstraints, expectedConstraints)
 	}
 	return nil
 }
@@ -2460,22 +2576,30 @@ func validatePublicationParentChildren(ctx context.Context, q SQLExecutor) error
 	}
 	return nil
 }
+func canonicalMediaIngestRunV2Schema() string {
+	return strings.Replace(strings.Replace(mediaIngestRunSchema,
+		`    FOREIGN KEY (media_id)`,
+		`    policy_version INTEGER NOT NULL DEFAULT 1 CHECK(policy_version IN (1,2)),
+    terminal_reason TEXT NOT NULL DEFAULT '',
+    superseded_by_generation INTEGER,
+    superseded_at TIMESTAMP,
+    FOREIGN KEY (media_id)`, 1),
+		"CREATE TABLE IF NOT EXISTS", "CREATE TABLE", 1)
+}
+
 func validatePublicationRunV2(ctx context.Context, q SQLExecutor) error {
-	cols, err := publicationColumnSpecs(ctx, q, "media_ingest_run")
-	if err != nil {
+	if err := exactPublicationTable(ctx, q, "media_ingest_run", canonicalMediaIngestRunV2Schema()); err != nil {
 		return err
 	}
-	byName := map[string]string{}
-	for _, v := range cols {
-		byName[strings.Split(v, "|")[0]] = v
+	if err := requirePublicationFKSet(ctx, q, "media_ingest_run", "media:media_id:id:cascade", "scan_task:scan_task_id:id:set null"); err != nil {
+		return err
 	}
-	want := map[string]string{"policy_version": "policy_version|INTEGER|1|1|0|0", "terminal_reason": "terminal_reason|TEXT|1|''|0|0", "superseded_by_generation": "superseded_by_generation|INTEGER|0||0|0", "superseded_at": "superseded_at|TIMESTAMP|0||0|0"}
-	for n, v := range want {
-		if byName[n] != v {
-			return fmt.Errorf("media_ingest_run.%s metadata=%q want=%q", n, byName[n], v)
+	for name, ddl := range map[string]string{"idx_media_ingest_run_status_updated": `CREATE INDEX idx_media_ingest_run_status_updated ON media_ingest_run(status,updated_at)`, "idx_media_ingest_run_scan_status": `CREATE INDEX idx_media_ingest_run_scan_status ON media_ingest_run(scan_task_id,status)`} {
+		if err := requirePublicationIndex(ctx, q, "media_ingest_run", name, ddl, 0, 0); err != nil {
+			return err
 		}
 	}
-	return requirePublicationClauses(ctx, q, "media_ingest_run", `CHECK(policy_version IN (1,2))`, `UNIQUE(media_id,generation)`, `UNIQUE(id,media_id,generation)`)
+	return nil
 }
 
 func validatePublicationKnownReferences(ctx context.Context, q SQLExecutor) error {

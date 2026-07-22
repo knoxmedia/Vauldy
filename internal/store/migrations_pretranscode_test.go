@@ -1,7 +1,9 @@
 package store
 
 import (
+	"context"
 	"database/sql"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -340,4 +342,27 @@ func TestFullEnterpriseMigrationBackfillsRenditionAvailabilityWithoutLegacyFKReb
 			t.Fatalf("second migration %s: %v", m.ID, err)
 		}
 	}
+}
+
+func TestOpenSQLiteContextEnterprisePublicationReopensByteIdentical(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "enterprise-reopen.sqlite")
+	db, err := OpenSQLiteContext(context.Background(), path)
+	if err != nil {
+		t.Fatalf("fresh enterprise open: %v", err)
+	}
+	before := snapshotPublicationGraph(t, db)
+	assertNoForeignKeyViolations(t, db)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = OpenSQLiteContext(context.Background(), path)
+	if err != nil {
+		t.Fatalf("enterprise reopen: %v", err)
+	}
+	defer db.Close()
+	after := snapshotPublicationGraph(t, db)
+	if after != before {
+		t.Fatalf("enterprise reopen changed publication graph\nbefore=%s\nafter=%s", before, after)
+	}
+	assertNoForeignKeyViolations(t, db)
 }
