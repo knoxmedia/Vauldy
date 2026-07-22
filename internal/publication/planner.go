@@ -60,9 +60,10 @@ func (p *Planner) PlanNewMediaTx(ctx context.Context, tx *sql.Tx, media NewMedia
 	return p.persistPlanTx(ctx, tx, plan, plan.policy.generation)
 }
 
-// PlanReplacementTx creates a fresh generation from current database policy in
-// the caller-owned transaction. It never copies rows or snapshots from an old run.
-func (p *Planner) PlanReplacementTx(ctx context.Context, tx store.SQLExecutor, mediaID int64, opts ReplacementOptions) (ReplacementResult, error) {
+// PlanReplacementTx creates a fresh generation from current database policy.
+// The caller owns tx and is responsible for committing or rolling it back. It
+// never copies rows or snapshots from an old run.
+func (p *Planner) PlanReplacementTx(ctx context.Context, tx *sql.Tx, mediaID int64, opts ReplacementOptions) (ReplacementResult, error) {
 	if opts.Reason != PlanReasonRepair && opts.Reason != PlanReasonManualRetry {
 		return ReplacementResult{}, fmt.Errorf("publication planner: invalid replacement reason %q", opts.Reason)
 	}

@@ -720,3 +720,10 @@ func TestReplacementDoesNotCopyOldSteps(t *testing.T) {
 		t.Fatalf("preserved state=%q", state)
 	}
 }
+
+func TestPlanReplacementTxRequiresSQLTransaction(t *testing.T) {
+	var replacement func(context.Context, *sql.Tx, int64, ReplacementOptions) (ReplacementResult, error) = NewPlanner(PlanOptions{}).PlanReplacementTx
+	if replacement == nil {
+		t.Fatal("replacement planner method is nil")
+	}
+}
