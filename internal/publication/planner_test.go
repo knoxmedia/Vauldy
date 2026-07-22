@@ -395,13 +395,12 @@ func TestPlannerRejectsInvalidDependencyGraphAtomically(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = NewPlanner(PlanOptions{EncryptGlobal: true}).PlanNewMediaTx(context.Background(), tx, NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
+	run, err := NewPlanner(PlanOptions{EncryptGlobal: true}).PlanNewMediaTx(context.Background(), tx, NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
 	if err != nil {
-		_ = tx.Rollback()
 		t.Fatal(err)
 	}
 	var ids []int64
-	rows, err := tx.Query(`SELECT id FROM media_ingest_step ORDER BY id`)
+	rows, err := tx.Query(`SELECT id FROM media_ingest_step WHERE run_id=? ORDER BY id`, run.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -412,22 +411,42 @@ func TestPlannerRejectsInvalidDependencyGraphAtomically(t *testing.T) {
 		}
 		ids = append(ids, id)
 	}
-	_ = rows.Close()
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if len(ids) < 2 {
 		t.Fatal("expected two steps")
 	}
-	if err = validateDependencyTx(context.Background(), tx, ids[0], ids[0], mediaID, 1, 1); err == nil {
-		t.Fatal("expected self-edge rejection")
+	bad := []struct {
+		name string
+		deps []Dependency
+		ids  map[StepType]int64
+	}{
+		{"self", []Dependency{{Step: StepPoster, Kind: DependencyStepDone, DependsOn: stepPtr(StepPoster)}}, map[StepType]int64{StepPoster: ids[0]}},
+		{"missing target", []Dependency{{Step: StepPoster, Kind: DependencyStepDone, DependsOn: stepPtr(StepThumbnail)}}, map[StepType]int64{StepPoster: ids[0]}},
+	}
+	for _, tc := range bad {
+		if err := insertDependenciesTx(context.Background(), tx, tc.deps, tc.ids, mediaID, run.Generation, run.ID); err == nil {
+			t.Fatalf("%s: expected error", tc.name)
+		}
 	}
 	_ = tx.Rollback()
-	var runs, deps int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM media_ingest_run`).Scan(&runs); err != nil {
+	for _, q := range []string{`SELECT COUNT(*) FROM media_ingest_run`, `SELECT COUNT(*) FROM media_ingest_step`, `SELECT COUNT(*) FROM media_ingest_step_dependency`, `SELECT COUNT(*) FROM post_ingest_task`} {
+		var n int
+		if err := db.QueryRow(q).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 0 {
+			t.Fatalf("%s=%d", q, n)
+		}
+	}
+	var generation int
+	if err := db.QueryRow(`SELECT ingest_generation FROM media WHERE id=?`, mediaID).Scan(&generation); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow(`SELECT COUNT(*) FROM media_ingest_step_dependency`).Scan(&deps); err != nil {
-		t.Fatal(err)
-	}
-	if runs != 0 || deps != 0 {
-		t.Fatalf("partial rows runs=%d deps=%d", runs, deps)
+	if generation != 0 {
+		t.Fatalf("generation=%d", generation)
 	}
 }
+
+func stepPtr(step StepType) *StepType { return &step }

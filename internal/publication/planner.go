@@ -275,9 +275,19 @@ func validateDependencyTx(ctx context.Context, tx *sql.Tx, stepID int64, depends
 	if err != nil {
 		return err
 	}
+	closed := false
+	closeRows := func() error {
+		if closed {
+			return nil
+		}
+		closed = true
+		return rows.Close()
+	}
+	defer func() { _ = closeRows() }()
 	for rows.Next() {
 		var from, to int64
 		if err := rows.Scan(&from, &to); err != nil {
+			_ = closeRows()
 			return err
 		}
 		graph[from] = append(graph[from], to)
@@ -304,14 +314,17 @@ func validateDependencyTx(ctx context.Context, tx *sql.Tx, stepID int64, depends
 	}
 	for node := range graph {
 		if visit(node) {
+			_ = closeRows()
 			return errors.New("dependency cycle")
 		}
 	}
-	if err := rows.Close(); err != nil {
+	rowsErr := rows.Err()
+	if err := closeRows(); err != nil {
 		return fmt.Errorf("close dependency rows: %w", err)
 	}
-	return rows.Err()
+	return rowsErr
 }
+
 func boolDB(v bool) int {
 	if v {
 		return 1
