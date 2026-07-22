@@ -899,7 +899,7 @@ func backupPublicationGraph(ctx context.Context, q SQLExecutor) ([]publicationGr
 				rows.Close()
 				return nil, err
 			}
-			if !publicationManagedIndex(name, indexName) {
+			if !publicationManagedIndex(name, indexName, indexSQL) {
 				m.indexes = append(m.indexes, indexSQL)
 			}
 		}
@@ -923,16 +923,30 @@ func backupPublicationGraph(ctx context.Context, q SQLExecutor) ([]publicationGr
 	return out, nil
 }
 
-func publicationManagedIndex(table, name string) bool {
-	managed := map[string]map[string]bool{
-		"post_ingest_task":             {"idx_post_ingest_claim": true, "idx_post_ingest_scan": true, "idx_post_ingest_run": true, "idx_post_ingest_step": true},
-		"scrape_task":                  {"idx_scrape_task_claim": true, "idx_scrape_task_ingest": true, "idx_scrape_task_media": true},
-		"media_ingest_step_dependency": {"idx_ingest_dependency_visible": true},
-		"media_asset_stage_journal":    {"idx_asset_stage_recovery": true},
-	}
-	return managed[table][name]
+var publicationManagedIndexes = map[string]map[string]string{
+	"post_ingest_task": {
+		"idx_post_ingest_claim": `CREATE INDEX idx_post_ingest_claim ON post_ingest_task(status,available_at,lease_until,created_at)`,
+		"idx_post_ingest_scan":  `CREATE INDEX idx_post_ingest_scan ON post_ingest_task(scan_task_id,status)`,
+		"idx_post_ingest_run":   `CREATE INDEX idx_post_ingest_run ON post_ingest_task(ingest_run_id,status)`,
+		"idx_post_ingest_step":  `CREATE INDEX idx_post_ingest_step ON post_ingest_task(ingest_step_id,status)`,
+	},
+	"scrape_task": {
+		"idx_scrape_task_claim":  `CREATE INDEX idx_scrape_task_claim ON scrape_task(status,lease_until,created_at)`,
+		"idx_scrape_task_ingest": `CREATE INDEX idx_scrape_task_ingest ON scrape_task(ingest_run_id,ingest_step_id,generation)`,
+		"idx_scrape_task_media":  `CREATE INDEX idx_scrape_task_media ON scrape_task(media_id,created_at)`,
+	},
+	"pretranscode_rendition_job": {
+		"idx_pretranscode_job_status": `CREATE INDEX idx_pretranscode_job_status ON pretranscode_rendition_job(status,created_at)`,
+		"idx_pretranscode_job_task":   `CREATE INDEX idx_pretranscode_job_task ON pretranscode_rendition_job(task_id)`,
+	},
+	"media_ingest_step_dependency": {"idx_ingest_dependency_visible": `CREATE UNIQUE INDEX idx_ingest_dependency_visible ON media_ingest_step_dependency(step_id) WHERE dependency_kind='media_visible'`},
+	"media_asset_stage_journal":    {"idx_asset_stage_recovery": `CREATE INDEX idx_asset_stage_recovery ON media_asset_stage_journal(state,updated_at)`},
 }
 
+func publicationManagedIndex(table, name, sqlText string) bool {
+	want, ok := publicationManagedIndexes[table][strings.ToLower(name)]
+	return ok && normalizePublicationSQL(want) == normalizePublicationSQL(sqlText)
+}
 func publicationTranscodeExpectedIdentity(ctx context.Context, q SQLExecutor, m *publicationGraphTable) error {
 	cols := map[string]bool{}
 	for _, c := range m.columns {
@@ -1096,24 +1110,71 @@ func createPublicationParents(ctx context.Context, q SQLExecutor, g []publicatio
 func splitPublicationSQLClauses(body string) ([]string, error) {
 	var out []string
 	start, depth := 0, 0
-	var quote byte
+	const (
+		plain = iota
+		singleQuoted
+		doubleQuoted
+		backtickQuoted
+		bracketQuoted
+		lineComment
+		blockComment
+	)
+	state := plain
 	for i := 0; i < len(body); i++ {
 		c := body[i]
-		if quote != 0 {
-			if c == quote {
-				if i+1 < len(body) && body[i+1] == quote {
+		switch state {
+		case singleQuoted, doubleQuoted, backtickQuoted:
+			close := byte('\'')
+			if state == doubleQuoted {
+				close = '"'
+			} else if state == backtickQuoted {
+				close = '`'
+			}
+			if c == close {
+				if i+1 < len(body) && body[i+1] == close {
 					i++
 					continue
 				}
-				quote = 0
+				state = plain
+			}
+			continue
+		case bracketQuoted:
+			// SQLite terminates a bracket identifier at the first ']'; unlike SQL Server, ']]' is not an escape.
+			if c == ']' {
+				state = plain
+			}
+			continue
+		case lineComment:
+			if c == '\n' || c == '\r' {
+				state = plain
+			}
+			continue
+		case blockComment:
+			if c == '*' && i+1 < len(body) && body[i+1] == '/' {
+				i++
+				state = plain
 			}
 			continue
 		}
-		if c == '\'' || c == '"' || c == '`' {
-			quote = c
+		if c == '-' && i+1 < len(body) && body[i+1] == '-' {
+			i++
+			state = lineComment
+			continue
+		}
+		if c == '/' && i+1 < len(body) && body[i+1] == '*' {
+			i++
+			state = blockComment
 			continue
 		}
 		switch c {
+		case '\'':
+			state = singleQuoted
+		case '"':
+			state = doubleQuoted
+		case '`':
+			state = backtickQuoted
+		case '[':
+			state = bracketQuoted
 		case '(':
 			depth++
 		case ')':
@@ -1128,7 +1189,10 @@ func splitPublicationSQLClauses(body string) ([]string, error) {
 			}
 		}
 	}
-	if quote != 0 || depth != 0 {
+	if state != plain && state != lineComment {
+		return nil, fmt.Errorf("unterminated transcode SQL lexical form")
+	}
+	if depth != 0 {
 		return nil, fmt.Errorf("unbalanced transcode SQL")
 	}
 	out = append(out, strings.TrimSpace(body[start:]))
@@ -1202,10 +1266,12 @@ func createPublicationChildren(ctx context.Context, q SQLExecutor, g []publicati
 			if _, e := q.ExecContext(ctx, m.sql); e != nil {
 				return fmt.Errorf("create %s: %w", n, e)
 			}
-			for _, idx := range m.indexes {
-				if _, e := q.ExecContext(ctx, idx); e != nil {
-					return e
-				}
+		}
+	}
+	if _, ok := graphMeta(g, "pretranscode_rendition_job"); ok {
+		for _, name := range []string{"idx_pretranscode_job_status", "idx_pretranscode_job_task"} {
+			if _, e := q.ExecContext(ctx, publicationManagedIndexes["pretranscode_rendition_job"][name]); e != nil {
+				return e
 			}
 		}
 	}
