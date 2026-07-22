@@ -55,3 +55,25 @@ func TestParseFromFilePNG(t *testing.T) {
 		t.Fatal("expected fallback taken_at")
 	}
 }
+
+func TestParseFromFileWithDiagnosticsReturnsPartialMetadataAndErrors(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "broken.jpg")
+	if err := os.WriteFile(path, []byte("not-an-image"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	meta, diagnostics := ParseFromFileWithDiagnostics(path)
+	if meta.Title != "broken" || meta.MimeType != "image/jpeg" || meta.TakenAt == "" {
+		t.Fatalf("partial meta=%+v", meta)
+	}
+	if len(diagnostics) == 0 {
+		t.Fatal("expected diagnostics")
+	}
+}
+
+func TestParseFromFileWithDiagnosticsReportsMissingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing.jpg")
+	meta, diagnostics := ParseFromFileWithDiagnostics(path)
+	if meta.Title != "missing" || len(diagnostics) == 0 {
+		t.Fatalf("meta=%+v diagnostics=%v", meta, diagnostics)
+	}
+}

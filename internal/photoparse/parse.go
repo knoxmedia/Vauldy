@@ -1,8 +1,10 @@
 package photoparse
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"image"
 	_ "image/gif"
 	_ "image/jpeg"
@@ -26,6 +28,8 @@ type PhotoMeta struct {
 	TakenAt          string  `json:"taken_at,omitempty"` // RFC3339 UTC
 	CameraMake       string  `json:"camera_make,omitempty"`
 	CameraModel      string  `json:"camera_model,omitempty"`
+	LensModel        string  `json:"lens_model,omitempty"`
+	Orientation      int     `json:"orientation,omitempty"`
 	MimeType         string  `json:"mime_type,omitempty"`
 	ThumbPath        string  `json:"thumb_path,omitempty"`
 	MediumPath       string  `json:"medium_path,omitempty"`
@@ -59,36 +63,65 @@ func ShouldScanFile(libraryType, fileType string) bool {
 }
 
 // ParseFromFile extracts dimensions and EXIF metadata from a local image file.
+// It preserves the historical best-effort API; callers needing extraction
+// diagnostics should use ParseFromFileWithDiagnostics.
 func ParseFromFile(filePath string) PhotoMeta {
+	meta, _ := ParseFromFileWithDiagnostics(filePath)
+	return meta
+}
+
+// ParseFromFileWithDiagnostics extracts all available photo metadata and
+// returns non-fatal extraction errors alongside any partial result.
+func ParseFromFileWithDiagnostics(filePath string) (PhotoMeta, []error) {
 	meta := PhotoMeta{
-		Title: strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filePath)),
+		Title:    strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filePath)),
+		MimeType: guessMime(filePath),
 	}
-	meta.MimeType = guessMime(filePath)
-	if w, h, ok := decodeDimensions(filePath); ok {
-		meta.Width = w
-		meta.Height = h
+	data, readErr := os.ReadFile(filePath)
+	if readErr != nil {
+		return meta, []error{fmt.Errorf("read file: %w", readErr)}
 	}
-	taken, camMake, camModel := readEXIF(filePath)
-	if taken != "" {
-		meta.TakenAt = taken
+	var diagnostics []error
+	if w, h, err := decodeDimensions(data); err != nil {
+		diagnostics = append(diagnostics, fmt.Errorf("decode dimensions: %w", err))
+	} else {
+		meta.Width, meta.Height = w, h
 	}
-	if camMake != "" {
-		meta.CameraMake = camMake
-	}
-	if camModel != "" {
-		meta.CameraModel = camModel
-	}
-	if lat, lon, gpsOK := readGPS(filePath); gpsOK {
-		meta.Latitude = lat
-		meta.Longitude = lon
-		meta.HasGPS = true
+	if values, err := readEXIF(data); err != nil {
+		if expectsEXIF(filePath) {
+			diagnostics = append(diagnostics, fmt.Errorf("read EXIF: %w", err))
+		}
+	} else {
+		meta.TakenAt = values.takenAt
+		meta.CameraMake = values.cameraMake
+		meta.CameraModel = values.cameraModel
+		meta.LensModel = values.lensModel
+		meta.Orientation = values.orientation
+		if _, gpsTagErr := values.exif.Get(exif.GPSInfoIFDPointer); gpsTagErr == nil {
+			if lat, lon, gpsErr := values.exif.LatLong(); gpsErr != nil {
+				diagnostics = append(diagnostics, fmt.Errorf("read GPS: %w", gpsErr))
+			} else {
+				meta.Latitude, meta.Longitude, meta.HasGPS = lat, lon, true
+			}
+		}
 	}
 	if meta.TakenAt == "" {
-		if st, err := os.Stat(filePath); err == nil {
+		if st, err := os.Stat(filePath); err != nil {
+			diagnostics = append(diagnostics, fmt.Errorf("read file time: %w", err))
+		} else {
 			meta.TakenAt = st.ModTime().UTC().Format(time.RFC3339)
 		}
 	}
-	return meta
+	return meta, diagnostics
+}
+
+func expectsEXIF(filePath string) bool {
+	switch strings.ToLower(filepath.Ext(filePath)) {
+	case ".jpg", ".jpeg", ".tif", ".tiff", ".heic", ".heif":
+		return true
+	default:
+		return false
+	}
 }
 
 // ParseForMedia extracts photo metadata, materializing Knox .enc to a temp file when needed.
@@ -109,46 +142,53 @@ func ParseForMedia(db *sql.DB, vault *keystore.Vault, mediaID int64, filePath st
 	return ParseFromFile(work)
 }
 
-func decodeDimensions(filePath string) (int, int, bool) {
-	f, err := os.Open(filePath)
+func decodeDimensions(data []byte) (int, int, error) {
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
 	if err != nil {
-		return 0, 0, false
-	}
-	defer f.Close()
-	cfg, _, err := image.DecodeConfig(f)
-	if err != nil {
-		return 0, 0, false
+		return 0, 0, err
 	}
 	if cfg.Width <= 0 || cfg.Height <= 0 {
-		return 0, 0, false
+		return 0, 0, fmt.Errorf("invalid dimensions %dx%d", cfg.Width, cfg.Height)
 	}
-	return cfg.Width, cfg.Height, true
+	return cfg.Width, cfg.Height, nil
 }
 
-func readEXIF(filePath string) (takenAt, makeName, modelName string) {
-	f, err := os.Open(filePath)
+type exifValues struct {
+	takenAt, cameraMake, cameraModel, lensModel string
+	orientation                                 int
+	exif                                        *exif.Exif
+}
+
+func readEXIF(data []byte) (exifValues, error) {
+	x, err := exif.Decode(bytes.NewReader(data))
 	if err != nil {
-		return "", "", ""
+		return exifValues{}, err
 	}
-	defer f.Close()
-	x, err := exif.Decode(f)
-	if err != nil {
-		return "", "", ""
-	}
+	values := exifValues{exif: x}
 	if tm, err := x.DateTime(); err == nil {
-		takenAt = tm.UTC().Format(time.RFC3339)
+		values.takenAt = tm.UTC().Format(time.RFC3339)
 	}
-	if tag, err := x.Get(exif.Make); err == nil {
-		if v, err := tag.StringVal(); err == nil {
-			makeName = strings.TrimSpace(v)
+	values.cameraMake = exifString(x, exif.Make)
+	values.cameraModel = exifString(x, exif.Model)
+	values.lensModel = exifString(x, exif.LensModel)
+	if tag, err := x.Get(exif.Orientation); err == nil {
+		if orientation, err := tag.Int(0); err == nil {
+			values.orientation = orientation
 		}
 	}
-	if tag, err := x.Get(exif.Model); err == nil {
-		if v, err := tag.StringVal(); err == nil {
-			modelName = strings.TrimSpace(v)
-		}
+	return values, nil
+}
+
+func exifString(x *exif.Exif, field exif.FieldName) string {
+	tag, err := x.Get(field)
+	if err != nil {
+		return ""
 	}
-	return takenAt, makeName, modelName
+	value, err := tag.StringVal()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(value)
 }
 
 func guessMime(filePath string) string {

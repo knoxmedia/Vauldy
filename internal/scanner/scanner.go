@@ -10,7 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -48,6 +50,7 @@ type Scanner struct {
 	OnFile       func(path string, err error)
 	OnMediaAdded func(mediaID int64, title string, fileType string)
 	ProbePath    func(context.Context, int64, string) (*ffprobe.Summary, error)
+	ParsePhoto   func(string) (photoparse.PhotoMeta, []error)
 	// OnMediaRemoved is invoked after a stale catalog row is removed during sync.
 	OnMediaRemoved func(mediaID int64, filePath string)
 	// OnDocumentScanned is invoked after a document is inserted or updated during scan.
@@ -291,7 +294,15 @@ func (s *Scanner) ScanLibraryFoldersWithContextAndCallbacks(ctx context.Context,
 				}
 			} else if ft == "image" {
 				metadataAttempt.Attempted = true
-				photoMeta = photoparse.ParseFromFile(path)
+				parsePhoto := s.ParsePhoto
+				if parsePhoto == nil {
+					parsePhoto = photoparse.ParseFromFileWithDiagnostics
+				}
+				var photoErrors []error
+				photoMeta, photoErrors = parsePhoto(path)
+				for _, photoErr := range photoErrors {
+					metadataAttempt.addError("photo", photoErr)
+				}
 				if s.PhotoGeocode != nil {
 					s.PhotoGeocode.EnrichMeta(&photoMeta)
 				}
@@ -472,6 +483,9 @@ func (a *MetadataAttempt) addError(source string, err error) {
 	message := err.Error()
 	if len(message) > maxMetadataDiagnosticMessage {
 		message = message[:maxMetadataDiagnosticMessage]
+		for !utf8.ValidString(message) {
+			message = message[:len(message)-1]
+		}
 	}
 	a.Errors = append(a.Errors, MetadataDiagnostic{Source: source, Message: message})
 }
@@ -500,37 +514,19 @@ func probeMetadataFields(pr *ffprobe.Summary) []string {
 }
 
 func photoMetadataFields(meta photoparse.PhotoMeta) []string {
-	fields := make([]string, 0, 12)
-	if strings.TrimSpace(meta.Title) != "" {
-		fields = append(fields, "title")
+	encoded, err := json.Marshal(meta)
+	if err != nil {
+		return nil
 	}
-	if meta.Width > 0 {
-		fields = append(fields, "width")
+	var values map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &values); err != nil {
+		return nil
 	}
-	if meta.Height > 0 {
-		fields = append(fields, "height")
+	fields := make([]string, 0, len(values))
+	for field := range values {
+		fields = append(fields, field)
 	}
-	if strings.TrimSpace(meta.MimeType) != "" {
-		fields = append(fields, "format")
-	}
-	if strings.TrimSpace(meta.TakenAt) != "" {
-		fields = append(fields, "taken_at")
-	}
-	if strings.TrimSpace(meta.CameraMake) != "" {
-		fields = append(fields, "camera_make")
-	}
-	if strings.TrimSpace(meta.CameraModel) != "" {
-		fields = append(fields, "camera_model")
-	}
-	if meta.HasGPS {
-		fields = append(fields, "latitude", "longitude")
-	}
-	if strings.TrimSpace(meta.PlaceID) != "" {
-		fields = append(fields, "place_id")
-	}
-	if strings.TrimSpace(meta.LocationName) != "" {
-		fields = append(fields, "location_name")
-	}
+	sort.Strings(fields)
 	return fields
 }
 
