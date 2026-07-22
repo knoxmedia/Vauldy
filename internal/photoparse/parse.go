@@ -88,23 +88,18 @@ func ParseFromFileWithDiagnostics(filePath string) (PhotoMeta, []error) {
 	} else {
 		meta.Width, meta.Height = w, h
 	}
-	if values, err := readEXIF(data); err != nil {
+	if values, fieldDiagnostics, err := readEXIF(data); err != nil {
 		if hasEXIFPayload(data) {
 			diagnostics = append(diagnostics, fmt.Errorf("read EXIF: %w", err))
 		}
 	} else {
+		diagnostics = append(diagnostics, fieldDiagnostics...)
 		meta.TakenAt = values.takenAt
 		meta.CameraMake = values.cameraMake
 		meta.CameraModel = values.cameraModel
 		meta.LensModel = values.lensModel
 		meta.Orientation = values.orientation
-		if _, gpsTagErr := values.exif.Get(exif.GPSInfoIFDPointer); gpsTagErr == nil {
-			if lat, lon, gpsErr := values.exif.LatLong(); gpsErr != nil {
-				diagnostics = append(diagnostics, fmt.Errorf("read GPS: %w", gpsErr))
-			} else {
-				meta.Latitude, meta.Longitude, meta.HasGPS = lat, lon, true
-			}
-		}
+		meta.Latitude, meta.Longitude, meta.HasGPS = values.latitude, values.longitude, values.hasGPS
 	}
 	if meta.TakenAt == "" {
 		if st, err := os.Stat(filePath); err != nil {
@@ -255,39 +250,63 @@ func decodeDimensions(data []byte) (int, int, error) {
 type exifValues struct {
 	takenAt, cameraMake, cameraModel, lensModel string
 	orientation                                 int
-	exif                                        *exif.Exif
+	latitude, longitude                         float64
+	hasGPS                                      bool
 }
 
-func readEXIF(data []byte) (exifValues, error) {
+func readEXIF(data []byte) (exifValues, []error, error) {
 	x, err := exif.Decode(bytes.NewReader(data))
 	if err != nil {
-		return exifValues{}, err
+		return exifValues{}, nil, err
 	}
-	values := exifValues{exif: x}
-	if tm, err := x.DateTime(); err == nil {
-		values.takenAt = tm.UTC().Format(time.RFC3339)
+	values := exifValues{}
+	var diagnostics []error
+	if hasAnyEXIFTag(x, exif.DateTime, exif.DateTimeOriginal, exif.DateTimeDigitized) {
+		if tm, err := x.DateTime(); err != nil {
+			diagnostics = append(diagnostics, fmt.Errorf("date_time: %w", err))
+		} else {
+			values.takenAt = tm.UTC().Format(time.RFC3339)
+		}
 	}
-	values.cameraMake = exifString(x, exif.Make)
-	values.cameraModel = exifString(x, exif.Model)
-	values.lensModel = exifString(x, exif.LensModel)
+	values.cameraMake, diagnostics = exifStringWithDiagnostics(x, exif.Make, "camera_make", diagnostics)
+	values.cameraModel, diagnostics = exifStringWithDiagnostics(x, exif.Model, "camera_model", diagnostics)
+	values.lensModel, diagnostics = exifStringWithDiagnostics(x, exif.LensModel, "lens_model", diagnostics)
 	if tag, err := x.Get(exif.Orientation); err == nil {
-		if orientation, err := tag.Int(0); err == nil {
+		if orientation, err := tag.Int(0); err != nil {
+			diagnostics = append(diagnostics, fmt.Errorf("orientation: %w", err))
+		} else {
 			values.orientation = orientation
 		}
 	}
-	return values, nil
+	if _, err := x.Get(exif.GPSInfoIFDPointer); err == nil {
+		if lat, lon, err := x.LatLong(); err != nil {
+			diagnostics = append(diagnostics, fmt.Errorf("gps: %w", err))
+		} else {
+			values.latitude, values.longitude, values.hasGPS = lat, lon, true
+		}
+	}
+	return values, diagnostics, nil
 }
 
-func exifString(x *exif.Exif, field exif.FieldName) string {
+func hasAnyEXIFTag(x *exif.Exif, fields ...exif.FieldName) bool {
+	for _, field := range fields {
+		if _, err := x.Get(field); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func exifStringWithDiagnostics(x *exif.Exif, field exif.FieldName, detail string, diagnostics []error) (string, []error) {
 	tag, err := x.Get(field)
 	if err != nil {
-		return ""
+		return "", diagnostics
 	}
 	value, err := tag.StringVal()
 	if err != nil {
-		return ""
+		return "", append(diagnostics, fmt.Errorf("%s: %w", detail, err))
 	}
-	return strings.TrimSpace(value)
+	return strings.TrimSpace(value), diagnostics
 }
 
 func guessMime(filePath string) string {
