@@ -261,13 +261,7 @@ func readEXIF(data []byte) (exifValues, []error, error) {
 	}
 	values := exifValues{}
 	var diagnostics []error
-	if hasAnyEXIFTag(x, exif.DateTime, exif.DateTimeOriginal, exif.DateTimeDigitized) {
-		if tm, err := x.DateTime(); err != nil {
-			diagnostics = append(diagnostics, fmt.Errorf("date_time: %w", err))
-		} else {
-			values.takenAt = tm.UTC().Format(time.RFC3339)
-		}
-	}
+	values.takenAt, diagnostics = exifDateTime(x, diagnostics)
 	values.cameraMake, diagnostics = exifStringWithDiagnostics(x, exif.Make, "camera_make", diagnostics)
 	values.cameraModel, diagnostics = exifStringWithDiagnostics(x, exif.Model, "camera_model", diagnostics)
 	values.lensModel, diagnostics = exifStringWithDiagnostics(x, exif.LensModel, "lens_model", diagnostics)
@@ -288,13 +282,33 @@ func readEXIF(data []byte) (exifValues, []error, error) {
 	return values, diagnostics, nil
 }
 
-func hasAnyEXIFTag(x *exif.Exif, fields ...exif.FieldName) bool {
-	for _, field := range fields {
-		if _, err := x.Get(field); err == nil {
-			return true
-		}
+func exifDateTime(x *exif.Exif, diagnostics []error) (string, []error) {
+	candidates := []struct {
+		field  exif.FieldName
+		detail string
+	}{
+		{field: exif.DateTimeOriginal, detail: "date_time_original"},
+		{field: exif.DateTime, detail: "date_time"},
+		{field: exif.DateTimeDigitized, detail: "date_time_digitized"},
 	}
-	return false
+	for _, candidate := range candidates {
+		tag, err := x.Get(candidate.field)
+		if err != nil {
+			continue
+		}
+		value, err := tag.StringVal()
+		if err != nil {
+			diagnostics = append(diagnostics, fmt.Errorf("%s: %w", candidate.detail, err))
+			continue
+		}
+		parsed, err := time.ParseInLocation("2006:01:02 15:04:05", strings.TrimSpace(value), time.UTC)
+		if err != nil {
+			diagnostics = append(diagnostics, fmt.Errorf("%s: %w", candidate.detail, err))
+			continue
+		}
+		return parsed.Format(time.RFC3339), diagnostics
+	}
+	return "", diagnostics
 }
 
 func exifStringWithDiagnostics(x *exif.Exif, field exif.FieldName, detail string, diagnostics []error) (string, []error) {

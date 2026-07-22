@@ -228,3 +228,62 @@ func jpegWithEXIF(t *testing.T, tiff []byte) []byte {
 	result = append(result, segment...)
 	return append(result, jpegData[2:]...)
 }
+
+func TestReadEXIFDatePriorityAndFallback(t *testing.T) {
+	tests := []struct {
+		name           string
+		tags           []tiffTestTag
+		want           string
+		wantDiagnostic string
+	}{
+		{name: "original wins", tags: []tiffTestTag{{0x9003, "2024:01:02 03:04:05"}, {0x0132, "2023:02:03 04:05:06"}, {0x9004, "2022:03:04 05:06:07"}}, want: "2024-01-02T03:04:05Z"},
+		{name: "date time fallback", tags: []tiffTestTag{{0x0132, "2023:02:03 04:05:06"}, {0x9004, "2022:03:04 05:06:07"}}, want: "2023-02-03T04:05:06Z"},
+		{name: "digitized fallback", tags: []tiffTestTag{{0x9004, "2022:03:04 05:06:07"}}, want: "2022-03-04T05:06:07Z"},
+		{name: "malformed original falls back", tags: []tiffTestTag{{0x9003, "bad"}, {0x0132, "2023:02:03 04:05:06"}}, want: "2023-02-03T04:05:06Z", wantDiagnostic: "date_time_original"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			values, diagnostics, err := readEXIF(tiffWithStringTags(tt.tags))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if values.takenAt != tt.want {
+				t.Fatalf("takenAt=%q want %q diagnostics=%v", values.takenAt, tt.want, diagnostics)
+			}
+			if tt.wantDiagnostic == "" && len(diagnostics) != 0 {
+				t.Fatalf("diagnostics=%v", diagnostics)
+			}
+			if tt.wantDiagnostic != "" && !diagnosticsContain(diagnostics, tt.wantDiagnostic) {
+				t.Fatalf("diagnostics=%v", diagnostics)
+			}
+		})
+	}
+}
+
+type tiffTestTag struct {
+	id    uint16
+	value string
+}
+
+func tiffWithStringTags(tags []tiffTestTag) []byte {
+	ifdSize := 2 + len(tags)*12 + 4
+	offset := 8 + ifdSize
+	total := offset
+	for _, tag := range tags {
+		total += len(tag.value) + 1
+	}
+	data := make([]byte, total)
+	copy(data, []byte{'I', 'I', 42, 0, 8, 0, 0, 0})
+	binary.LittleEndian.PutUint16(data[8:10], uint16(len(tags)))
+	for i, tag := range tags {
+		entry := 10 + i*12
+		value := tag.value + "\x00"
+		binary.LittleEndian.PutUint16(data[entry:entry+2], tag.id)
+		binary.LittleEndian.PutUint16(data[entry+2:entry+4], 2)
+		binary.LittleEndian.PutUint32(data[entry+4:entry+8], uint32(len(value)))
+		binary.LittleEndian.PutUint32(data[entry+8:entry+12], uint32(offset))
+		copy(data[offset:], value)
+		offset += len(value)
+	}
+	return data
+}
