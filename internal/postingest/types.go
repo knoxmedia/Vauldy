@@ -16,6 +16,7 @@ const (
 	TaskKeyframe TaskType = "keyframe"
 	TaskSubtitle TaskType = "subtitle"
 	TaskAtrack   TaskType = "atrack"
+	TaskEncrypt  TaskType = "encrypt"
 )
 
 type Status string

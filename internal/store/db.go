@@ -254,6 +254,9 @@ CREATE TABLE IF NOT EXISTS post_ingest_task (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     media_id INTEGER NOT NULL,
     scan_task_id INTEGER,
+    ingest_run_id INTEGER,
+    ingest_step_id INTEGER,
+    generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0),
     task_type TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'waiting',
     attempts INTEGER NOT NULL DEFAULT 0,
@@ -268,8 +271,8 @@ CREATE TABLE IF NOT EXISTS post_ingest_task (
     finished_at TIMESTAMP,
     FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE,
     FOREIGN KEY (scan_task_id) REFERENCES scan_task(id) ON DELETE SET NULL,
-    UNIQUE(media_id, task_type),
-    CHECK (task_type IN ('poster','preview','keyframe','subtitle','atrack')),
+    UNIQUE(media_id, generation, task_type),
+    CHECK (task_type IN ('poster','preview','keyframe','subtitle','atrack','encrypt')),
     CHECK (status IN ('waiting','running','done','failed','cancelled'))
 );
 CREATE INDEX IF NOT EXISTS idx_post_ingest_claim ON post_ingest_task(status, available_at, lease_until, created_at);
@@ -998,6 +1001,10 @@ func OpenSQLiteContext(ctx context.Context, path string) (*sql.DB, error) {
 			FOREIGN KEY (person_id) REFERENCES cast_person(id)
 		)`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_person_scrape_task_status ON person_scrape_task(status, created_at)`)
+	if err := migrateIngestPublication(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("ingest publication migration: %w", err)
+	}
 	// Seed default AI provider configs.
 	seedAIProviders(db)
 	// Remove duplicate scheduled tasks (legacy seed inserted on every restart).

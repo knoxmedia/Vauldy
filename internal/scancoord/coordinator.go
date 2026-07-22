@@ -62,19 +62,21 @@ type Scanner interface {
 }
 
 type MediaAddedFunc func(context.Context, int64, int64, string, string) error
+type MediaDiscoveredTxFunc func(context.Context, *sql.Tx, int64, int64, string, string) error
 
 type ScanCancelledFunc func(context.Context, int64) error
 
 type Options struct {
-	LeaseDuration     time.Duration
-	HeartbeatInterval time.Duration
-	FinalizeTimeout   time.Duration
-	OwnerInstanceID   string
-	Scanner           Scanner
-	OnMediaAdded      MediaAddedFunc
-	OnScanCancelled   ScanCancelledFunc
-	Metrics           *store.SQLiteMetrics
-	OnError           func(error)
+	LeaseDuration       time.Duration
+	HeartbeatInterval   time.Duration
+	FinalizeTimeout     time.Duration
+	OwnerInstanceID     string
+	Scanner             Scanner
+	OnMediaAdded        MediaAddedFunc
+	OnMediaDiscoveredTx MediaDiscoveredTxFunc
+	OnScanCancelled     ScanCancelledFunc
+	Metrics             *store.SQLiteMetrics
+	OnError             func(error)
 }
 
 type Coordinator struct {
@@ -85,6 +87,7 @@ type Coordinator struct {
 	ownerInstanceID        string
 	scanner                Scanner
 	onMediaAdded           MediaAddedFunc
+	onMediaDiscoveredTx    MediaDiscoveredTxFunc
 	onScanCancelled        ScanCancelledFunc
 	metrics                *store.SQLiteMetrics
 	onError                func(error)
@@ -151,23 +154,24 @@ func New(db *sql.DB, opts Options) (*Coordinator, error) {
 	}
 	recoveryCtx, recoveryCancel := context.WithCancel(context.Background())
 	return &Coordinator{
-		db:                db,
-		leaseDuration:     opts.LeaseDuration,
-		heartbeatInterval: opts.HeartbeatInterval,
-		finalizeTimeout:   opts.FinalizeTimeout,
-		ownerInstanceID:   opts.OwnerInstanceID,
-		scanner:           opts.Scanner,
-		onMediaAdded:      opts.OnMediaAdded,
-		onScanCancelled:   opts.OnScanCancelled,
-		metrics:           opts.Metrics,
-		onError:           opts.OnError,
-		now:               func() time.Time { return time.Now().UTC() },
-		heartbeatSafety:   min(opts.HeartbeatInterval/4, 250*time.Millisecond),
-		cancels:           make(map[int64]context.CancelFunc),
-		recoveryPending:   make(map[string]finalizeRecovery),
-		recoveryWake:      make(chan struct{}, 1),
-		recoveryCtx:       recoveryCtx,
-		recoveryCancel:    recoveryCancel,
+		db:                  db,
+		leaseDuration:       opts.LeaseDuration,
+		heartbeatInterval:   opts.HeartbeatInterval,
+		finalizeTimeout:     opts.FinalizeTimeout,
+		ownerInstanceID:     opts.OwnerInstanceID,
+		scanner:             opts.Scanner,
+		onMediaAdded:        opts.OnMediaAdded,
+		onMediaDiscoveredTx: opts.OnMediaDiscoveredTx,
+		onScanCancelled:     opts.OnScanCancelled,
+		metrics:             opts.Metrics,
+		onError:             opts.OnError,
+		now:                 func() time.Time { return time.Now().UTC() },
+		heartbeatSafety:     min(opts.HeartbeatInterval/4, 250*time.Millisecond),
+		cancels:             make(map[int64]context.CancelFunc),
+		recoveryPending:     make(map[string]finalizeRecovery),
+		recoveryWake:        make(chan struct{}, 1),
+		recoveryCtx:         recoveryCtx,
+		recoveryCancel:      recoveryCancel,
 	}, nil
 }
 
@@ -400,6 +404,12 @@ func (c *Coordinator) run(ctx context.Context, taskID, libraryID int64, owner st
 			var enqueueErrors []error
 			callbacks := scanner.ScanCallbacks{
 				OnFile: progress.File,
+				OnMediaDiscoveredTx: func(callbackCtx context.Context, tx *sql.Tx, mediaID int64, title, fileType string) error {
+					if c.onMediaDiscoveredTx == nil {
+						return nil
+					}
+					return c.onMediaDiscoveredTx(callbackCtx, tx, taskID, mediaID, title, fileType)
+				},
 				OnMediaAdded: func(callbackCtx context.Context, mediaID int64, title, fileType string) error {
 					progress.MediaAdded(mediaID, title, fileType)
 					if c.onMediaAdded == nil {

@@ -62,8 +62,9 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 }
 
 type ScanCallbacks struct {
-	OnFile       func(string, error)
-	OnMediaAdded func(context.Context, int64, string, string) error
+	OnFile              func(string, error)
+	OnMediaAdded        func(context.Context, int64, string, string) error
+	OnMediaDiscoveredTx func(context.Context, *sql.Tx, int64, string, string) error
 }
 
 func (s *Scanner) ScanLibraryFoldersWithContextAndCallbacks(ctx context.Context, libraryID int64, roots []string, callbacks ScanCallbacks) (added int, err error) {
@@ -351,6 +352,11 @@ func (s *Scanner) ScanLibraryFoldersWithContextAndCallbacks(ctx context.Context,
 			}
 			if mediaID > 0 && (tvLibrary || musicLibrary) {
 				if e = relationshipsync.SyncTx(ctx, tx, mediaID); e != nil {
+					return e
+				}
+			}
+			if existingMediaID == 0 && mediaID > 0 && callbacks.OnMediaDiscoveredTx != nil {
+				if e = callbacks.OnMediaDiscoveredTx(ctx, tx, mediaID, title, ft); e != nil {
 					return e
 				}
 			}

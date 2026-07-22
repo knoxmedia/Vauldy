@@ -99,9 +99,9 @@ WHERE s.id=?`, mediaID, *scanTaskID).Scan(&exists)
 		}
 		for _, typ := range planned {
 			if _, err := tx.ExecContext(ctx, `
-INSERT INTO post_ingest_task (media_id,scan_task_id,task_type)
-VALUES (?,?,?)
-ON CONFLICT(media_id,task_type) DO NOTHING`, mediaID, scanTaskID, typ); err != nil {
+INSERT INTO post_ingest_task (media_id,scan_task_id,generation,task_type)
+SELECT ?,?,COALESCE(ingest_generation,0),? FROM media WHERE id=?
+ON CONFLICT(media_id,generation,task_type) DO NOTHING`, mediaID, scanTaskID, typ, mediaID); err != nil {
 				return err
 			}
 		}

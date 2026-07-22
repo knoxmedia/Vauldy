@@ -44,6 +44,7 @@ import (
 	"knox-media/internal/photoface"
 	"knox-media/internal/postingest"
 	"knox-media/internal/preview"
+	"knox-media/internal/publication"
 	"knox-media/internal/scancoord"
 	"knox-media/internal/scanner"
 	"knox-media/internal/storage"
@@ -233,6 +234,7 @@ func main() {
 	queueOwner := "postingest-" + processID
 	postIngestQueue := postingest.NewQueue(db, queueOwner, sqliteMetrics)
 	postIngestEnqueuer := postingest.NewEnqueuer(db, cfg, sqliteMetrics)
+	publicationPlanner := publication.NewPlanner(publication.PlanOptions{SubtitleAuto: cfg.SubtitleAutoOnScan(), ATrackAuto: cfg.ATrackAutoOnScan(), EncryptGlobal: cfg.EncryptedAssetsEnabled()})
 	adapters := postingest.AdapterSet{
 		Poster:  postingest.NewPosterAdapter(db, cfg.Data.Upload, derivedStore, &postingest.LocalPosterRunner{DB: db, Vault: keyVault, Derived: derivedStore, FFmpegPath: cfg.FFmpeg.FFmpegPath, FFprobePath: cfg.FFmpeg.FFprobePath, UploadDir: cfg.Data.Upload}),
 		Preview: postingest.NewPreviewAdapter(db, previewWorker), Keyframe: postingest.NewKeyframeAdapter(db, keyframeWorker),
@@ -242,12 +244,26 @@ func main() {
 	if err != nil {
 		log.Fatalf("post-ingest dispatcher: %v", err)
 	}
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-serverCtx.Done():
+				return
+			case <-ticker.C:
+				if _, err := publication.RetryDegradedRuns(serverCtx, db, 8); err != nil && serverCtx.Err() == nil {
+					log.Printf("publication degraded retry: %v", err)
+				}
+			}
+		}
+	}()
 	dispatcherDone := make(chan error, 1)
 	go func() { dispatcherDone <- dispatcher.Start(serverCtx) }()
 
 	sc := &scanner.Scanner{DB: db, Vault: keyVault, FFprobePath: cfg.FFmpeg.FFprobePath, SkipHash: !cfg.LibraryScanFileHash(), FFprobeExtra: ffprobeExtra}
 	sc.OnDocumentScanned = func(mediaID int64) { docCoverWorker.Enqueue(mediaID) }
-	coordinator, err := scancoord.New(db, scancoord.Options{LeaseDuration: 60 * time.Second, HeartbeatInterval: 20 * time.Second, OwnerInstanceID: "scancoord-" + processID, Scanner: sc, Metrics: sqliteMetrics, OnMediaAdded: scancoord.MediaAddedFunc(postingest.NewScanMediaAddedEnqueueCallback(postIngestEnqueuer)), OnScanCancelled: func(_ context.Context, taskID int64) error { dispatcher.CancelScan(taskID); return nil }, OnError: func(err error) { log.Printf("scan coordinator: %v", err) }})
+	coordinator, err := scancoord.New(db, scancoord.Options{LeaseDuration: 60 * time.Second, HeartbeatInterval: 20 * time.Second, OwnerInstanceID: "scancoord-" + processID, Scanner: sc, Metrics: sqliteMetrics, OnMediaAdded: scancoord.MediaAddedFunc(postingest.NewScanMediaAddedEnqueueCallback(postIngestEnqueuer)), OnMediaDiscoveredTx: scancoord.MediaDiscoveredTxFunc(postingest.NewScanMediaDiscoveredTxCallback(publicationPlanner)), OnScanCancelled: func(_ context.Context, taskID int64) error { dispatcher.CancelScan(taskID); return nil }, OnError: func(err error) { log.Printf("scan coordinator: %v", err) }})
 	if err != nil {
 		log.Fatalf("scan coordinator: %v", err)
 	}
