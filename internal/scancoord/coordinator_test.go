@@ -202,11 +202,12 @@ func TestCoordinatorCommitErrorAfterCommitConfirmsAndStartsScanner(t *testing.T)
 	scanner := newBlockingScanner()
 	defer close(scanner.release)
 	coordinator := newTestCoordinator(t, db, "commit-confirm", scanner)
-	coordinator.submitCommit = func(ctx context.Context, conn *sql.Conn) error {
-		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-			return err
+	coordinator.withImmediateTx = func(ctx context.Context, db *sql.DB, fn func(store.ImmediateConnTx) error) (store.ImmediateOutcome, error) {
+		outcome, err := store.WithImmediateConnTx(ctx, db, fn)
+		if err != nil {
+			return outcome, err
 		}
-		return errors.New("injected error after actual commit")
+		return store.ImmediateOutcome{CommitAttempted: true}, &store.ImmediateCommitError{Cause: errors.New("injected error after actual commit")}
 	}
 	got, err := coordinator.Submit(context.Background(), ScanRequest{LibraryID: libraries[0], Source: SourceManual, Roots: []string{"/root"}})
 	if err != nil || !got.Started || got.TaskID == 0 {
@@ -230,9 +231,22 @@ func TestCoordinatorAmbiguousCommitConfirmationDoesNotRetryInsert(t *testing.T) 
 	db, libraries := openCoordinatorTestDB(t, 1)
 	coordinator := newTestCoordinator(t, db, "commit-ambiguous", &countingScanner{})
 	commitCalls := 0
-	coordinator.submitCommit = func(context.Context, *sql.Conn) error {
+	coordinator.withImmediateTx = func(ctx context.Context, db *sql.DB, fn func(store.ImmediateConnTx) error) (store.ImmediateOutcome, error) {
 		commitCalls++
-		return errors.New("commit outcome unknown")
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			return store.ImmediateOutcome{}, err
+		}
+		defer conn.Close()
+		if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+			return store.ImmediateOutcome{}, err
+		}
+		if err := fn(conn); err != nil {
+			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+			return store.ImmediateOutcome{}, err
+		}
+		_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+		return store.ImmediateOutcome{CommitAttempted: true}, &store.ImmediateCommitError{Cause: errors.New("commit outcome unknown")}
 	}
 	coordinator.confirmSubmit = func(int64, int64, string) (time.Time, bool, error) {
 		return time.Time{}, false, errors.New("database is locked (5)")
