@@ -68,7 +68,7 @@ func TestRepairLegacyMediaCreatesGenerationForMissingPoster(t *testing.T) {
 	_ = db.QueryRow(`SELECT COUNT(*) FROM media_ingest_step WHERE media_id=?`, mediaID).Scan(&steps)
 	_ = db.QueryRow(`SELECT COUNT(*) FROM post_ingest_task WHERE media_id=? AND generation=1`, mediaID).Scan(&post)
 	_ = db.QueryRow(`SELECT COUNT(*) FROM scrape_task WHERE media_id=? AND generation=1`, mediaID).Scan(&scrape)
-	if steps != 3 || post != 2 || scrape != 1 {
+	if steps != 2 || post != 1 || scrape != 1 {
 		t.Fatalf("steps=%d post=%d scrape=%d", steps, post, scrape)
 	}
 }
@@ -182,69 +182,24 @@ func seedAllRequiredLegacyVideo(t *testing.T, db *sql.DB) int64 {
 }
 
 func TestRepairLegacyMediaSkipsCompleteEvidence(t *testing.T) {
-	allSteps := []StepType{StepPoster, StepScrape, StepPreview, StepKeyframe, StepSubtitle, StepAtrack, StepEncrypt, StepPrepare}
-	for _, missing := range allSteps {
-		missing := missing
-		t.Run(string(missing), func(t *testing.T) {
-			t.Run("missing creates", func(t *testing.T) {
-				db := openRepairTestDB(t)
-				mediaID := seedAllRequiredLegacyVideo(t, db)
-				for _, step := range allSteps {
-					if step != missing {
-						addRepairEvidence(t, db, mediaID, step)
-					}
-				}
-				repaired, err := RepairLegacyMedia(context.Background(), db, allRepairPlanner(t), 4)
-				if err != nil || repaired != 1 {
-					t.Fatalf("missing %s repaired=%d err=%v", missing, repaired, err)
-				}
-			})
-			t.Run("evidence skips", func(t *testing.T) {
-				db := openRepairTestDB(t)
-				mediaID := seedAllRequiredLegacyVideo(t, db)
-				for _, step := range allSteps {
-					addRepairEvidence(t, db, mediaID, step)
-				}
-				repaired, err := RepairLegacyMedia(context.Background(), db, allRepairPlanner(t), 4)
-				if err != nil || repaired != 0 || repairRunCount(t, db, mediaID) != 0 {
-					t.Fatalf("complete %s repaired=%d runs=%d err=%v", missing, repaired, repairRunCount(t, db, mediaID), err)
-				}
-			})
-		})
+	db := openRepairTestDB(t)
+	mediaID := seedAllRequiredLegacyVideo(t, db)
+	addRepairEvidence(t, db, mediaID, StepPoster)
+	addRepairEvidence(t, db, mediaID, StepEncrypt)
+	if repaired, err := RepairLegacyMedia(context.Background(), db, allRepairPlanner(t), 4); err != nil || repaired != 0 {
+		t.Fatalf("repaired=%d err=%v", repaired, err)
 	}
 }
 
 func TestRepairLegacyMediaCreatesNextGenerationWhenRequirementsExpand(t *testing.T) {
 	db := openRepairTestDB(t)
 	mediaID := seedLegacyVideo(t, db, 1, "published")
-	for _, step := range []StepType{StepPoster, StepScrape, StepKeyframe} {
-		addRepairEvidence(t, db, mediaID, step)
-	}
-	if _, err := db.Exec(`DELETE FROM keyframe_task WHERE media_id=?`, mediaID); err != nil {
+	addRepairEvidence(t, db, mediaID, StepPoster)
+	if _, err := db.Exec(`UPDATE library SET encrypted_assets_enabled=1 WHERE id=(SELECT library_id FROM media WHERE id=?)`, mediaID); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := RepairLegacyMedia(context.Background(), db, NewPlanner(PlanOptions{}), 4); err != nil || n != 1 {
-		t.Fatalf("initial repaired=%d err=%v", n, err)
-	}
-	if _, err := db.Exec(`UPDATE media_ingest_step SET status='done' WHERE media_id=?; UPDATE media_ingest_run SET status='published',finished_at=CURRENT_TIMESTAMP WHERE media_id=?`, mediaID, mediaID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`UPDATE library SET preview_extract=1 WHERE id=(SELECT library_id FROM media WHERE id=?)`, mediaID); err != nil {
-		t.Fatal(err)
-	}
-
-	if n, err := RepairLegacyMedia(context.Background(), db, NewPlanner(PlanOptions{}), 4); err != nil || n != 1 {
-		t.Fatalf("expanded repaired=%d err=%v", n, err)
-	}
-	var generation, runs, previewSteps int
-	_ = db.QueryRow(`SELECT ingest_generation FROM media WHERE id=?`, mediaID).Scan(&generation)
-	_ = db.QueryRow(`SELECT COUNT(*) FROM media_ingest_run WHERE media_id=? AND reason='repair'`, mediaID).Scan(&runs)
-	_ = db.QueryRow(`SELECT COUNT(*) FROM media_ingest_step WHERE media_id=? AND step_type='preview'`, mediaID).Scan(&previewSteps)
-	if generation != 2 || runs != 2 || previewSteps != 1 {
-		t.Fatalf("generation=%d runs=%d previewSteps=%d", generation, runs, previewSteps)
-	}
-	if n, err := RepairLegacyMedia(context.Background(), db, NewPlanner(PlanOptions{}), 4); err != nil || n != 0 {
-		t.Fatalf("repeat repaired=%d err=%v", n, err)
+	if n, err := RepairLegacyMedia(context.Background(), db, NewPlanner(PlanOptions{EncryptGlobal: true}), 4); err != nil || n != 1 {
+		t.Fatalf("expanded=%d err=%v", n, err)
 	}
 }
 
@@ -259,37 +214,6 @@ func TestRepairLegacyMediaPendingCurrentRepairSkipsDuplicate(t *testing.T) {
 	}
 	if repairRunCount(t, db, mediaID) != 1 {
 		t.Fatalf("runs=%d", repairRunCount(t, db, mediaID))
-	}
-}
-
-func TestRepairLegacyMediaScrapeEvidenceUsesMeaningfulMetadata(t *testing.T) {
-	cases := []struct {
-		name       string
-		meta       string
-		wantRepair int
-	}{
-		{"aggregated stub", `{"scrape":{"source":"aggregated-stub","title":"Movie","overview":"placeholder"}}`, 1},
-		{"extra note stub", `{"scrape":{"source":"tmdb","overview":"placeholder","extra":{"note":"stub"}}}`, 1},
-		{"empty fields", `{"scrape":{"source":"tmdb","title":"","overview":"","poster":"","extra":{}}}`, 1},
-		{"real overview", `{"scrape":{"source":"tmdb","overview":"A real synopsis"}}`, 0},
-		{"real title", `{"scrape":{"source":"ai","title":"A real title"}}`, 0},
-		{"real poster", `{"scrape":{"source":"tmdb","poster":"/poster.jpg"}}`, 0},
-		{"real person identifier", `{"scrape":{"source":"tmdb","extra":{"imdb_id":"tt123"}}}`, 0},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			db := openRepairTestDB(t)
-			mediaID := seedLegacyVideo(t, db, 1, "published")
-			addRepairEvidence(t, db, mediaID, StepPoster)
-			addRepairEvidence(t, db, mediaID, StepKeyframe)
-			if _, err := db.Exec(`UPDATE media SET meta_json=? WHERE id=?`, tc.meta, mediaID); err != nil {
-				t.Fatal(err)
-			}
-			n, err := RepairLegacyMedia(context.Background(), db, NewPlanner(PlanOptions{}), 4)
-			if err != nil || n != tc.wantRepair {
-				t.Fatalf("repaired=%d want=%d err=%v", n, tc.wantRepair, err)
-			}
-		})
 	}
 }
 
@@ -375,7 +299,7 @@ func TestRepairLegacyMediaConcurrentCallsCreateOneGeneration(t *testing.T) {
 	_ = db1.QueryRow(`SELECT COUNT(*) FROM media_ingest_step WHERE media_id=?`, mediaID).Scan(&steps)
 	_ = db1.QueryRow(`SELECT COUNT(*) FROM post_ingest_task WHERE media_id=?`, mediaID).Scan(&post)
 	_ = db1.QueryRow(`SELECT COUNT(*) FROM scrape_task WHERE media_id=? AND ingest_run_id IS NOT NULL`, mediaID).Scan(&scrape)
-	if generation != 1 || runs != 1 || current != 1 || steps != 3 || post != 2 || scrape != 1 {
+	if generation != 1 || runs != 1 || current != 1 || steps != 2 || post != 1 || scrape != 1 {
 		t.Fatalf("generation=%d runs=%d current=%d steps=%d post=%d scrape=%d", generation, runs, current, steps, post, scrape)
 	}
 }

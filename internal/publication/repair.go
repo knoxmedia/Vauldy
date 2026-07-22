@@ -200,26 +200,22 @@ func hasCompleteEvidenceForStepsTx(ctx context.Context, tx *sql.Tx, mediaID int6
 }
 
 func (p *Planner) requiredStepsTx(ctx context.Context, tx *sql.Tx, mediaID int64) ([]StepType, error) {
-	var preview, encrypted, prepare int
-	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(l.preview_extract,0),COALESCE(l.encrypted_assets_enabled,0),COALESCE(l.jit_prepare_on_ingest,0) FROM media m JOIN library l ON l.id=m.library_id WHERE m.id=?`, mediaID).Scan(&preview, &encrypted, &prepare); err != nil {
+	var fileType string
+	var encrypted int
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(m.file_type,''),COALESCE(l.encrypted_assets_enabled,0) FROM media m JOIN library l ON l.id=m.library_id WHERE m.id=?`, mediaID).Scan(&fileType, &encrypted); err != nil {
 		return nil, err
 	}
-	steps := []StepType{StepPoster, StepScrape}
-	if preview == 1 {
-		steps = append(steps, StepPreview)
-	}
-	steps = append(steps, StepKeyframe)
-	if p.options.SubtitleAuto {
-		steps = append(steps, StepSubtitle)
-	}
-	if p.options.ATrackAuto {
-		steps = append(steps, StepAtrack)
+	var steps []StepType
+	switch strings.TrimSpace(fileType) {
+	case "video":
+		steps = []StepType{StepPoster}
+	case "image":
+		steps = []StepType{StepThumbnail}
+	default:
+		return nil, nil
 	}
 	if p.options.EncryptGlobal && encrypted == 1 {
 		steps = append(steps, StepEncrypt)
-	}
-	if p.options.PreparePlanner != nil && p.options.Capabilities != nil && p.options.Capabilities.Available(string(StepPrepare)) && prepare == 1 {
-		steps = append(steps, StepPrepare)
 	}
 	return steps, nil
 }
@@ -239,6 +235,8 @@ func stepEvidenceTx(ctx context.Context, tx *sql.Tx, mediaID int64, step StepTyp
 	switch step {
 	case StepPoster:
 		query = `SELECT EXISTS(SELECT 1 FROM media_derived_assets WHERE media_id=? AND artifact_kind='poster' AND TRIM(COALESCE(enc_path,''))<>'') OR EXISTS(SELECT 1 FROM media WHERE id=? AND (json_valid(meta_json) AND (TRIM(COALESCE(json_extract(meta_json,'$.scrape.poster'),''))<>'' OR TRIM(COALESCE(json_extract(meta_json,'$.scrape.extra.poster'),''))<>''))) OR EXISTS(SELECT 1 FROM post_ingest_task WHERE media_id=? AND task_type='poster' AND status='done')`
+	case StepThumbnail:
+		query = `SELECT EXISTS(SELECT 1 FROM post_ingest_task WHERE media_id=? AND task_type='thumbnail' AND status='done')`
 	case StepScrape:
 		var taskDone int
 		var metaJSON string

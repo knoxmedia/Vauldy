@@ -64,17 +64,13 @@ func TestPlannerVideoSnapshotsRequiredSteps(t *testing.T) {
 	db := openPlannerTestDB(t)
 	libraryID, mediaID, scanID := seedPlannerMedia(t, db, "video", 1, 1, 1)
 	run := planAndCommit(t, db, NewPlanner(PlanOptions{SubtitleAuto: true, ATrackAuto: true, EncryptGlobal: true, PreparePlanner: &recordingPreparePlanner{}, Capabilities: NewCapabilityMatrix([]string{"prepare"})}), NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
-	wantSteps := []StepType{StepPoster, StepScrape, StepPreview, StepKeyframe, StepSubtitle, StepAtrack, StepEncrypt, StepPrepare}
+	wantSteps := []StepType{StepPoster, StepEncrypt, StepScrape, StepPreview, StepSubtitle, StepPrepare}
 	if run.ID == 0 || run.MediaID != mediaID || run.Generation != 1 || !reflect.DeepEqual(run.Steps, wantSteps) {
 		t.Fatalf("run=%+v want steps=%v", run, wantSteps)
 	}
 	var raw string
 	if err := db.QueryRow(`SELECT config_snapshot_json FROM media_ingest_run WHERE id=?`, run.ID).Scan(&raw); err != nil {
 		t.Fatal(err)
-	}
-	wantJSON := fmt.Sprintf(`{"library_id":%d,"file_type":"video","preview":true,"subtitle":true,"atrack":true,"encrypt":true,"prepare":true,"steps":["poster","scrape","preview","keyframe","subtitle","atrack","encrypt","prepare"]}`, libraryID)
-	if raw != wantJSON {
-		t.Fatalf("snapshot=%s\nwant    =%s", raw, wantJSON)
 	}
 	var snapshot ConfigSnapshot
 	if err := json.Unmarshal([]byte(raw), &snapshot); err != nil {
@@ -97,7 +93,7 @@ func TestPlannerDisabledFeaturesAreOmitted(t *testing.T) {
 	db := openPlannerTestDB(t)
 	_, mediaID, scanID := seedPlannerMedia(t, db, "video", 0, 1, 1)
 	run := planAndCommit(t, db, NewPlanner(PlanOptions{}), NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
-	want := []StepType{StepPoster, StepScrape, StepKeyframe}
+	want := []StepType{StepPoster, StepScrape}
 	if !reflect.DeepEqual(run.Steps, want) {
 		t.Fatalf("steps=%v want %v", run.Steps, want)
 	}
@@ -135,7 +131,7 @@ func TestPlannerQueueRowsLinkExactStepsAndGeneration(t *testing.T) {
 		}
 		got = append(got, taskType)
 	}
-	want := []StepType{StepPoster, StepPreview, StepKeyframe, StepSubtitle, StepAtrack, StepEncrypt}
+	want := []StepType{StepPoster, StepEncrypt, StepPreview, StepSubtitle}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("queued=%v want %v", got, want)
 	}
@@ -145,8 +141,8 @@ func TestPlannerNonVideoLeavesPublishedWithoutPlan(t *testing.T) {
 	db := openPlannerTestDB(t)
 	_, mediaID, scanID := seedPlannerMedia(t, db, "image", 1, 1, 1)
 	run := planAndCommit(t, db, NewPlanner(PlanOptions{SubtitleAuto: true, ATrackAuto: true, EncryptGlobal: true, PreparePlanner: &recordingPreparePlanner{}, Capabilities: NewCapabilityMatrix([]string{"prepare"})}), NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "image"})
-	if run.ID != 0 {
-		t.Fatalf("non-video run=%+v", run)
+	if run.ID == 0 {
+		t.Fatalf("photo run=%+v", run)
 	}
 	var state string
 	var generation, runs, steps, queued int
@@ -156,7 +152,7 @@ func TestPlannerNonVideoLeavesPublishedWithoutPlan(t *testing.T) {
 	_ = db.QueryRow(`SELECT COUNT(*) FROM media_ingest_run WHERE media_id=?`, mediaID).Scan(&runs)
 	_ = db.QueryRow(`SELECT COUNT(*) FROM media_ingest_step WHERE media_id=?`, mediaID).Scan(&steps)
 	_ = db.QueryRow(`SELECT COUNT(*) FROM post_ingest_task WHERE media_id=?`, mediaID).Scan(&queued)
-	if state != string(StatePublished) || generation != 0 || runs+steps+queued != 0 {
+	if state != string(StateProcessing) || generation != 1 || runs == 0 || steps == 0 || queued == 0 {
 		t.Fatalf("state=%s gen=%d counts=%d/%d/%d", state, generation, runs, steps, queued)
 	}
 }
@@ -256,7 +252,7 @@ func TestPlannerRequiresPrepareWhenEnterpriseCapabilityAndLibraryFlagEnabled(t *
 		t.Fatalf("prepare callback=%+v run=%+v", capability, run)
 	}
 	var stepType, status string
-	if err := db.QueryRow(`SELECT step_type,status FROM media_ingest_step WHERE id=? AND run_id=? AND media_id=? AND generation=? AND required=1`, capability.stepID, run.ID, mediaID, run.Generation).Scan(&stepType, &status); err != nil {
+	if err := db.QueryRow(`SELECT step_type,status FROM media_ingest_step WHERE id=? AND run_id=? AND media_id=? AND generation=? AND required=0`, capability.stepID, run.ID, mediaID, run.Generation).Scan(&stepType, &status); err != nil {
 		t.Fatal(err)
 	}
 	if stepType != string(StepPrepare) || status != "waiting" {
@@ -297,5 +293,97 @@ func TestPlannerLibraryFlagWithoutCapabilityOmitsPrepare(t *testing.T) {
 		if step == StepPrepare {
 			t.Fatal("bool without capability planned prepare")
 		}
+	}
+}
+
+func TestPlannerV2VideoMatrix(t *testing.T) {
+	db := openPlannerTestDB(t)
+	_, mediaID, scanID := seedPlannerMedia(t, db, "video", 1, 1, 1)
+	p := NewPlanner(PlanOptions{SubtitleAuto: true, EncryptGlobal: true, PreparePlanner: &recordingPreparePlanner{}, Capabilities: NewCapabilityMatrix([]string{"prepare"})})
+	run := planAndCommit(t, db, p, NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
+	wantRequired := []StepType{StepPoster, StepEncrypt}
+	wantOptional := []StepType{StepScrape, StepPreview, StepSubtitle, StepPrepare}
+	var raw string
+	if err := db.QueryRow(`SELECT config_snapshot_json FROM media_ingest_run WHERE id=?`, run.ID).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	var snapshot ConfigSnapshot
+	if err := json.Unmarshal([]byte(raw), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.PolicyVersion != PolicyV2 || !reflect.DeepEqual(snapshot.RequiredSteps, wantRequired) || !reflect.DeepEqual(snapshot.OptionalSteps, wantOptional) {
+		t.Fatalf("snapshot=%+v", snapshot)
+	}
+	if !reflect.DeepEqual(run.Steps, []StepType{StepPoster, StepEncrypt, StepScrape, StepPreview, StepSubtitle, StepPrepare}) {
+		t.Fatalf("steps=%v", run.Steps)
+	}
+}
+
+func TestPlannerV2PhotoMatrix(t *testing.T) {
+	db := openPlannerTestDB(t)
+	_, mediaID, scanID := seedPlannerMedia(t, db, "image", 0, 1, 0)
+	run := planAndCommit(t, db, NewPlanner(PlanOptions{EncryptGlobal: true}), NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "image"})
+	if !reflect.DeepEqual(run.Steps, []StepType{StepThumbnail, StepEncrypt, StepScrape}) {
+		t.Fatalf("steps=%v", run.Steps)
+	}
+	var raw string
+	if err := db.QueryRow(`SELECT config_snapshot_json FROM media_ingest_run WHERE id=?`, run.ID).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	var snapshot ConfigSnapshot
+	if err := json.Unmarshal([]byte(raw), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.PolicyVersion != PolicyV2 || !reflect.DeepEqual(snapshot.RequiredSteps, []StepType{StepThumbnail, StepEncrypt}) || !reflect.DeepEqual(snapshot.OptionalSteps, []StepType{StepScrape}) {
+		t.Fatalf("snapshot=%+v", snapshot)
+	}
+}
+
+func TestPlannerV2PersistsDependenciesBeforeCommit(t *testing.T) {
+	db := openPlannerTestDB(t)
+	_, mediaID, scanID := seedPlannerMedia(t, db, "video", 0, 1, 0)
+	run := planAndCommit(t, db, NewPlanner(PlanOptions{EncryptGlobal: true}), NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
+	var kind string
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM media_ingest_step_dependency d JOIN media_ingest_step s ON s.id=d.step_id WHERE s.run_id=? AND d.dependency_kind='step_done'`, run.ID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("step dependencies=%d", count)
+	}
+	if err := db.QueryRow(`SELECT d.dependency_kind FROM media_ingest_step_dependency d JOIN media_ingest_step s ON s.id=d.step_id WHERE s.run_id=? AND s.step_type='encrypt'`, run.ID).Scan(&kind); err != nil {
+		t.Fatal(err)
+	}
+	if kind != "step_done" {
+		t.Fatalf("kind=%s", kind)
+	}
+}
+
+func TestPlannerV2OmitsScanKeyframeAndAtrack(t *testing.T) {
+	db := openPlannerTestDB(t)
+	_, mediaID, scanID := seedPlannerMedia(t, db, "video", 0, 0, 0)
+	run := planAndCommit(t, db, NewPlanner(PlanOptions{ATrackAuto: true}), NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
+	for _, step := range run.Steps {
+		if step == StepKeyframe || step == StepAtrack {
+			t.Fatalf("scan step=%s", step)
+		}
+	}
+}
+
+func TestPlannerV2CarriesMetadataPartialDiagnostics(t *testing.T) {
+	db := openPlannerTestDB(t)
+	_, mediaID, scanID := seedPlannerMedia(t, db, "video", 0, 0, 0)
+	attempt := MetadataAttempt{Attempted: true, Fields: []string{"title"}, Errors: []MetadataDiagnostic{{Source: "probe", Message: "duration unavailable"}}}
+	run := planAndCommit(t, db, NewPlanner(PlanOptions{}), NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video", MetadataAttempt: attempt})
+	var raw string
+	if err := db.QueryRow(`SELECT config_snapshot_json FROM media_ingest_run WHERE id=?`, run.ID).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	var snapshot ConfigSnapshot
+	if err := json.Unmarshal([]byte(raw), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(snapshot.Metadata, attempt) {
+		t.Fatalf("metadata=%+v", snapshot.Metadata)
 	}
 }

@@ -2,7 +2,6 @@ package publication
 
 import "knox-media/internal/coreiface"
 
-// State is the externally visible publication state of media and ingest runs.
 type State string
 
 const (
@@ -13,42 +12,56 @@ const (
 	StateCancelled  State = "cancelled"
 )
 
-// StepType identifies one immutable operation in an ingest plan.
 type StepType string
 
 const (
-	StepPoster   StepType = "poster"
-	StepScrape   StepType = "scrape"
-	StepPreview  StepType = "preview"
-	StepKeyframe StepType = "keyframe"
-	StepSubtitle StepType = "subtitle"
-	StepAtrack   StepType = "atrack"
-	StepEncrypt  StepType = "encrypt"
-	StepPrepare  StepType = "prepare"
+	StepPoster    StepType = "poster"
+	StepThumbnail StepType = "thumbnail"
+	StepScrape    StepType = "scrape"
+	StepPreview   StepType = "preview"
+	StepKeyframe  StepType = "keyframe"
+	StepSubtitle  StepType = "subtitle"
+	StepAtrack    StepType = "atrack"
+	StepEncrypt   StepType = "encrypt"
+	StepPrepare   StepType = "prepare"
+)
+const PolicyV2 = 2
+
+type DependencyKind string
+
+const (
+	DependencyStepDone     DependencyKind = "step_done"
+	DependencyMediaVisible DependencyKind = "media_visible"
 )
 
-// PlanOptions are DB-independent capabilities captured by a Planner at construction.
+type Dependency struct {
+	Step      StepType       `json:"step"`
+	Kind      DependencyKind `json:"kind"`
+	DependsOn *StepType      `json:"depends_on,omitempty"`
+}
+type MetadataDiagnostic struct {
+	Source  string `json:"source"`
+	Message string `json:"message"`
+}
+type MetadataAttempt struct {
+	Attempted bool                 `json:"attempted"`
+	Fields    []string             `json:"fields"`
+	Errors    []MetadataDiagnostic `json:"errors"`
+}
 type PlanOptions struct {
-	SubtitleAuto  bool
-	ATrackAuto    bool
-	EncryptGlobal bool
-	// PreparePlanner is the actual enterprise capability. Production planning
-	// derives availability exclusively from this handle.
-	PreparePlanner coreiface.IngestPreparePlanner
-	// Capabilities gates planning of enterprise-backed publication steps.
-	Capabilities coreiface.CapabilityRegistry
-	// PrepareAvailable is retained only for legacy tests; without a planner it
+	SubtitleAuto     bool
+	ATrackAuto       bool
+	EncryptGlobal    bool
+	PreparePlanner   coreiface.IngestPreparePlanner
+	Capabilities     coreiface.CapabilityRegistry
 	PrepareAvailable bool
 }
-
-// NewMedia identifies media discovered by a scan transaction.
 type NewMedia struct {
-	MediaID    int64
-	ScanTaskID int64
-	FileType   string
+	MediaID         int64
+	ScanTaskID      int64
+	FileType        string
+	MetadataAttempt MetadataAttempt
 }
-
-// Run is the immutable plan persisted for one media generation.
 type Run struct {
 	ID         int64
 	MediaID    int64
@@ -58,15 +71,18 @@ type Run struct {
 	State      State
 	Steps      []StepType
 }
-
-// ConfigSnapshot is the stable JSON payload persisted with an ingest run.
 type ConfigSnapshot struct {
-	LibraryID      int64      `json:"library_id"`
-	FileType       string     `json:"file_type"`
-	PreviewExtract bool       `json:"preview"`
-	SubtitleAuto   bool       `json:"subtitle"`
-	ATrackAuto     bool       `json:"atrack"`
-	Encrypt        bool       `json:"encrypt"`
-	Prepare        bool       `json:"prepare"`
-	Steps          []StepType `json:"steps"`
+	PolicyVersion  int             `json:"policy_version"`
+	LibraryID      int64           `json:"library_id"`
+	FileType       string          `json:"file_type"`
+	PreviewExtract bool            `json:"preview"`
+	SubtitleAuto   bool            `json:"subtitle"`
+	ATrackAuto     bool            `json:"atrack"`
+	Encrypt        bool            `json:"encrypt"`
+	Prepare        bool            `json:"prepare"`
+	Steps          []StepType      `json:"steps"`
+	Metadata       MetadataAttempt `json:"metadata"`
+	RequiredSteps  []StepType      `json:"required_steps"`
+	OptionalSteps  []StepType      `json:"optional_steps"`
+	Dependencies   []Dependency    `json:"dependencies"`
 }

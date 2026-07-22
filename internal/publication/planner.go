@@ -84,31 +84,41 @@ WHERE m.id=?`, media.MediaID).Scan(&libraryID, &fileType, &previewExtract, &libr
 		}
 	}
 
-	if fileType != "video" {
+	if fileType != "video" && fileType != "image" {
 		return Run{}, nil
 	}
 
-	steps := []StepType{StepPoster, StepScrape}
-	if previewExtract == 1 {
-		steps = append(steps, StepPreview)
+	required := []StepType{StepPoster}
+	if fileType == "image" {
+		required = []StepType{StepThumbnail}
 	}
-	steps = append(steps, StepKeyframe)
-	if p.options.SubtitleAuto {
-		steps = append(steps, StepSubtitle)
+	optional := []StepType{StepScrape}
+	if fileType == "video" && previewExtract == 1 {
+		optional = append(optional, StepPreview)
 	}
-	if p.options.ATrackAuto {
-		steps = append(steps, StepAtrack)
+	if fileType == "video" && p.options.SubtitleAuto {
+		optional = append(optional, StepSubtitle)
 	}
 	encrypt := p.options.EncryptGlobal && libraryEncrypt == 1
 	if encrypt {
-		steps = append(steps, StepEncrypt)
+		required = append(required, StepEncrypt)
 	}
 	prepare := p.options.PreparePlanner != nil && p.options.Capabilities != nil && p.options.Capabilities.Available(string(StepPrepare)) && jitPrepare == 1
-	if prepare {
-		steps = append(steps, StepPrepare)
+	if prepare && fileType == "video" {
+		optional = append(optional, StepPrepare)
+	}
+	steps := append(append([]StepType(nil), required...), optional...)
+	dependencies := make([]Dependency, 0, len(steps))
+	for _, step := range optional {
+		dependencies = append(dependencies, Dependency{Step: step, Kind: DependencyMediaVisible})
+	}
+	if encrypt {
+		dep := required[0]
+		dependencies = append(dependencies, Dependency{Step: StepEncrypt, Kind: DependencyStepDone, DependsOn: &dep})
 	}
 
 	snapshot := ConfigSnapshot{
+		PolicyVersion:  PolicyV2,
 		LibraryID:      libraryID,
 		FileType:       fileType,
 		PreviewExtract: previewExtract == 1,
@@ -117,6 +127,10 @@ WHERE m.id=?`, media.MediaID).Scan(&libraryID, &fileType, &previewExtract, &libr
 		Encrypt:        encrypt,
 		Prepare:        prepare,
 		Steps:          append([]StepType(nil), steps...),
+		Metadata:       media.MetadataAttempt,
+		RequiredSteps:  append([]StepType(nil), required...),
+		OptionalSteps:  append([]StepType(nil), optional...),
+		Dependencies:   dependencies,
 	}
 	snapshotJSON, err := json.Marshal(snapshot)
 	if err != nil {
@@ -139,8 +153,8 @@ RETURNING ingest_generation`, boolDB(preserve), boolDB(preserve), media.MediaID,
 	}
 
 	result, err := tx.ExecContext(ctx, `
-INSERT INTO media_ingest_run(media_id,generation,scan_task_id,reason,status,preserve_visibility,config_snapshot_json)
-VALUES(?,?,?,?, 'processing',?,?)`, media.MediaID, generation, nullScanTask(media.ScanTaskID), reason, boolDB(preserve), string(snapshotJSON))
+INSERT INTO media_ingest_run(media_id,generation,scan_task_id,reason,status,preserve_visibility,config_snapshot_json,policy_version)
+VALUES(?,?,?,?, 'processing',?,?,?)`, media.MediaID, generation, nullScanTask(media.ScanTaskID), reason, boolDB(preserve), string(snapshotJSON), PolicyV2)
 	if err != nil {
 		return Run{}, fmt.Errorf("publication planner: insert run: %w", err)
 	}
@@ -149,10 +163,17 @@ VALUES(?,?,?,?, 'processing',?,?)`, media.MediaID, generation, nullScanTask(medi
 		return Run{}, fmt.Errorf("publication planner: read run id: %w", err)
 	}
 
+	stepIDs := make(map[StepType]int64, len(steps))
 	for _, step := range steps {
+		requiredFlag := 0
+		for _, r := range required {
+			if r == step {
+				requiredFlag = 1
+			}
+		}
 		result, err = tx.ExecContext(ctx, `
 INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status)
-VALUES(?,?,?,?,1,'waiting')`, runID, media.MediaID, generation, step)
+VALUES(?,?,?,?,?,'waiting')`, runID, media.MediaID, generation, step, requiredFlag)
 		if err != nil {
 			return Run{}, fmt.Errorf("publication planner: insert %s step: %w", step, err)
 		}
@@ -160,6 +181,7 @@ VALUES(?,?,?,?,1,'waiting')`, runID, media.MediaID, generation, step)
 		if err != nil {
 			return Run{}, fmt.Errorf("publication planner: read %s step id: %w", step, err)
 		}
+		stepIDs[step] = stepID
 		if step == StepPrepare {
 			if err = p.options.PreparePlanner.PlanIngestPrepareTx(ctx, tx, media.MediaID, runID, stepID, generation); err != nil {
 				return Run{}, fmt.Errorf("publication planner: enqueue prepare: %w", err)
@@ -186,6 +208,15 @@ VALUES(?,?,?,?,?,?,'waiting')`, media.MediaID, nullScanTask(media.ScanTaskID), r
 			return Run{}, fmt.Errorf("publication planner: enqueue %s step: %w", step, err)
 		}
 	}
+	for _, dep := range dependencies {
+		var depID any
+		if dep.DependsOn != nil {
+			depID = stepIDs[*dep.DependsOn]
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(?,?,?)`, stepIDs[dep.Step], depID, dep.Kind); err != nil {
+			return Run{}, fmt.Errorf("publication planner: insert dependency: %w", err)
+		}
+	}
 
 	return Run{
 		ID: runID, MediaID: media.MediaID, ScanTaskID: media.ScanTaskID,
@@ -209,7 +240,7 @@ func nullScanTask(id int64) any {
 
 func queueBacked(step StepType) bool {
 	switch step {
-	case StepPoster, StepPreview, StepKeyframe, StepSubtitle, StepAtrack, StepEncrypt:
+	case StepPoster, StepThumbnail, StepPreview, StepKeyframe, StepSubtitle, StepAtrack, StepEncrypt:
 		return true
 	default:
 		return false
