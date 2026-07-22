@@ -362,8 +362,8 @@ func (s *Scanner) ScanLibraryFoldersWithContextAndCallbacks(ctx context.Context,
 				if documentLibrary && ft == "document" && s.OnDocumentScanned != nil {
 					s.OnDocumentScanned(mediaID)
 				}
-				if existingMediaID == 0 && s.OnMediaAdded != nil {
-					s.OnMediaAdded(mediaID, title, ft)
+				if existingMediaID == 0 && callbacks.OnMediaAdded != nil {
+					_ = callbacks.OnMediaAdded(ctx, mediaID, title, ft)
 				}
 			}
 			if s.OnFile != nil {
