@@ -208,14 +208,8 @@ VALUES(?,?,?,?,?,?,'waiting')`, media.MediaID, nullScanTask(media.ScanTaskID), r
 			return Run{}, fmt.Errorf("publication planner: enqueue %s step: %w", step, err)
 		}
 	}
-	for _, dep := range dependencies {
-		var depID any
-		if dep.DependsOn != nil {
-			depID = stepIDs[*dep.DependsOn]
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(?,?,?)`, stepIDs[dep.Step], depID, dep.Kind); err != nil {
-			return Run{}, fmt.Errorf("publication planner: insert dependency: %w", err)
-		}
+	if err := insertDependenciesTx(ctx, tx, dependencies, stepIDs, media.MediaID, generation, runID); err != nil {
+		return Run{}, fmt.Errorf("publication planner: %w", err)
 	}
 
 	return Run{
@@ -225,6 +219,29 @@ VALUES(?,?,?,?,?,?,'waiting')`, media.MediaID, nullScanTask(media.ScanTaskID), r
 	}, nil
 }
 
+func insertDependenciesTx(ctx context.Context, tx *sql.Tx, dependencies []Dependency, stepIDs map[StepType]int64, mediaID, generation, runID int64) error {
+	for _, dep := range dependencies {
+		stepID, ok := stepIDs[dep.Step]
+		if !ok || stepID <= 0 {
+			return fmt.Errorf("insert dependency: step %q has no mapped step id", dep.Step)
+		}
+		var depID any
+		if dep.DependsOn != nil {
+			mapped, exists := stepIDs[*dep.DependsOn]
+			if !exists || mapped <= 0 {
+				return fmt.Errorf("insert dependency: target %q has no mapped step id", *dep.DependsOn)
+			}
+			depID = mapped
+		}
+		if err := validateDependencyTx(ctx, tx, stepID, depID, mediaID, generation, runID); err != nil {
+			return fmt.Errorf("validate dependency %q: %w", dep.Step, err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(?,?,?)`, stepID, depID, dep.Kind); err != nil {
+			return fmt.Errorf("insert dependency %q: %w", dep.Step, err)
+		}
+	}
+	return nil
+}
 func validateDependencyTx(ctx context.Context, tx *sql.Tx, stepID int64, dependsOn any, mediaID, generation, runID int64) error {
 	if stepID <= 0 {
 		return errors.New("dependency step does not exist")
@@ -258,7 +275,6 @@ func validateDependencyTx(ctx context.Context, tx *sql.Tx, stepID int64, depends
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 	for rows.Next() {
 		var from, to int64
 		if err := rows.Scan(&from, &to); err != nil {
@@ -290,6 +306,9 @@ func validateDependencyTx(ctx context.Context, tx *sql.Tx, stepID int64, depends
 		if visit(node) {
 			return errors.New("dependency cycle")
 		}
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close dependency rows: %w", err)
 	}
 	return rows.Err()
 }
