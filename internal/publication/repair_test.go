@@ -168,7 +168,7 @@ func allRepairPlanner(t *testing.T) *Planner {
 	t.Cleanup(restore)
 	return NewPlanner(PlanOptions{
 		SubtitleAuto: true, ATrackAuto: true, EncryptGlobal: true,
-		PreparePlanner: coreiface.IngestPreparePlannerHandle(),
+		PreparePlanner: coreiface.IngestPreparePlannerHandle(), Capabilities: NewCapabilityMatrix([]string{"prepare"}),
 	})
 }
 

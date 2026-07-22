@@ -63,7 +63,7 @@ func planAndCommit(t *testing.T, db *sql.DB, p *Planner, media NewMedia) Run {
 func TestPlannerVideoSnapshotsRequiredSteps(t *testing.T) {
 	db := openPlannerTestDB(t)
 	libraryID, mediaID, scanID := seedPlannerMedia(t, db, "video", 1, 1, 1)
-	run := planAndCommit(t, db, NewPlanner(PlanOptions{SubtitleAuto: true, ATrackAuto: true, EncryptGlobal: true, PreparePlanner: &recordingPreparePlanner{}}), NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
+	run := planAndCommit(t, db, NewPlanner(PlanOptions{SubtitleAuto: true, ATrackAuto: true, EncryptGlobal: true, PreparePlanner: &recordingPreparePlanner{}, Capabilities: NewCapabilityMatrix([]string{"prepare"})}), NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
 	wantSteps := []StepType{StepPoster, StepScrape, StepPreview, StepKeyframe, StepSubtitle, StepAtrack, StepEncrypt, StepPrepare}
 	if run.ID == 0 || run.MediaID != mediaID || run.Generation != 1 || !reflect.DeepEqual(run.Steps, wantSteps) {
 		t.Fatalf("run=%+v want steps=%v", run, wantSteps)
@@ -117,7 +117,7 @@ func TestPlannerCommunityBuildOmitsPrepare(t *testing.T) {
 func TestPlannerQueueRowsLinkExactStepsAndGeneration(t *testing.T) {
 	db := openPlannerTestDB(t)
 	_, mediaID, scanID := seedPlannerMedia(t, db, "video", 1, 1, 1)
-	run := planAndCommit(t, db, NewPlanner(PlanOptions{SubtitleAuto: true, ATrackAuto: true, EncryptGlobal: true, PreparePlanner: &recordingPreparePlanner{}}), NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
+	run := planAndCommit(t, db, NewPlanner(PlanOptions{SubtitleAuto: true, ATrackAuto: true, EncryptGlobal: true, PreparePlanner: &recordingPreparePlanner{}, Capabilities: NewCapabilityMatrix([]string{"prepare"})}), NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
 	rows, err := db.Query(`SELECT q.task_type,s.step_type,q.ingest_run_id,q.ingest_step_id,s.id,q.generation FROM post_ingest_task q JOIN media_ingest_step s ON s.id=q.ingest_step_id WHERE q.media_id=? ORDER BY q.id`, mediaID)
 	if err != nil {
 		t.Fatal(err)
@@ -144,7 +144,7 @@ func TestPlannerQueueRowsLinkExactStepsAndGeneration(t *testing.T) {
 func TestPlannerNonVideoLeavesPublishedWithoutPlan(t *testing.T) {
 	db := openPlannerTestDB(t)
 	_, mediaID, scanID := seedPlannerMedia(t, db, "image", 1, 1, 1)
-	run := planAndCommit(t, db, NewPlanner(PlanOptions{SubtitleAuto: true, ATrackAuto: true, EncryptGlobal: true, PreparePlanner: &recordingPreparePlanner{}}), NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "image"})
+	run := planAndCommit(t, db, NewPlanner(PlanOptions{SubtitleAuto: true, ATrackAuto: true, EncryptGlobal: true, PreparePlanner: &recordingPreparePlanner{}, Capabilities: NewCapabilityMatrix([]string{"prepare"})}), NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "image"})
 	if run.ID != 0 {
 		t.Fatalf("non-video run=%+v", run)
 	}
@@ -211,7 +211,7 @@ func TestPlannerCallerRollbackRemovesEntirePlan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewPlanner(PlanOptions{SubtitleAuto: true, ATrackAuto: true, EncryptGlobal: true, PreparePlanner: &recordingPreparePlanner{}}).PlanNewMediaTx(context.Background(), tx, NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"}); err != nil {
+	if _, err := NewPlanner(PlanOptions{SubtitleAuto: true, ATrackAuto: true, EncryptGlobal: true, PreparePlanner: &recordingPreparePlanner{}, Capabilities: NewCapabilityMatrix([]string{"prepare"})}).PlanNewMediaTx(context.Background(), tx, NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"}); err != nil {
 		t.Fatalf("plan: %v", err)
 	}
 	if err := tx.Rollback(); err != nil {
@@ -248,7 +248,7 @@ func TestPlannerRequiresPrepareWhenEnterpriseCapabilityAndLibraryFlagEnabled(t *
 	db := openPlannerTestDB(t)
 	_, mediaID, scanID := seedPlannerMedia(t, db, "video", 0, 0, 1)
 	capability := &recordingPreparePlanner{}
-	run := planAndCommit(t, db, NewPlanner(PlanOptions{PreparePlanner: capability}), NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
+	run := planAndCommit(t, db, NewPlanner(PlanOptions{PreparePlanner: capability, Capabilities: NewCapabilityMatrix([]string{"prepare"})}), NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
 	if len(run.Steps) == 0 || run.Steps[len(run.Steps)-1] != StepPrepare {
 		t.Fatalf("steps=%v, want final required prepare", run.Steps)
 	}
@@ -272,7 +272,7 @@ func TestPlannerPrepareCallbackFailureRollsBackEntirePlan(t *testing.T) {
 		t.Fatal(err)
 	}
 	capability := &recordingPreparePlanner{err: errors.New("preset unavailable")}
-	if _, err = NewPlanner(PlanOptions{PreparePlanner: capability}).PlanNewMediaTx(context.Background(), tx, NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"}); err == nil {
+	if _, err = NewPlanner(PlanOptions{PreparePlanner: capability, Capabilities: NewCapabilityMatrix([]string{"prepare"})}).PlanNewMediaTx(context.Background(), tx, NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"}); err == nil {
 		t.Fatal("expected callback failure")
 	}
 	if err = tx.Rollback(); err != nil {

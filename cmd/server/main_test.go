@@ -239,7 +239,7 @@ func TestMainInjectsRegisteredIngestPrepareCapability(t *testing.T) {
 		t.Fatal(err)
 	}
 	src := string(data)
-	if !strings.Contains(src, "PreparePlanner: coreiface.IngestPreparePlannerHandle()") {
+	if !strings.Contains(src, "PreparePlanner: preparePlanner, Capabilities: prepareCapabilities") {
 		t.Fatal("publication planner does not receive registered prepare capability")
 	}
 	if strings.Contains(src, "PrepareAvailable: false") {

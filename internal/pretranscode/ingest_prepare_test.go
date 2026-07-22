@@ -29,7 +29,7 @@ func TestIngestPreparePlannerCreatesExecutableExactlyLinkedTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	run, err := publication.NewPlanner(publication.PlanOptions{PreparePlanner: ingestPreparePlanner{}}).PlanNewMediaTx(context.Background(), tx, publication.NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
+	run, err := publication.NewPlanner(publication.PlanOptions{PreparePlanner: ingestPreparePlanner{}, Capabilities: publication.NewCapabilityMatrix([]string{"prepare"})}).PlanNewMediaTx(context.Background(), tx, publication.NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
 	if err != nil {
 		tx.Rollback()
 		t.Fatal(err)

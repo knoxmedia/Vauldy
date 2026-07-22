@@ -35,8 +35,9 @@ type PlanOptions struct {
 	// PreparePlanner is the actual enterprise capability. Production planning
 	// derives availability exclusively from this handle.
 	PreparePlanner coreiface.IngestPreparePlanner
+	// Capabilities gates planning of enterprise-backed publication steps.
+	Capabilities coreiface.CapabilityRegistry
 	// PrepareAvailable is retained only for legacy tests; without a planner it
-	// cannot create a prepare step.
 	PrepareAvailable bool
 }
 

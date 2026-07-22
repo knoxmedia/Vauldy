@@ -103,7 +103,7 @@ WHERE m.id=?`, media.MediaID).Scan(&libraryID, &fileType, &previewExtract, &libr
 	if encrypt {
 		steps = append(steps, StepEncrypt)
 	}
-	prepare := p.options.PreparePlanner != nil && jitPrepare == 1
+	prepare := p.options.PreparePlanner != nil && p.options.Capabilities != nil && p.options.Capabilities.Available(string(StepPrepare)) && jitPrepare == 1
 	if prepare {
 		steps = append(steps, StepPrepare)
 	}

@@ -218,7 +218,7 @@ func (p *Planner) requiredStepsTx(ctx context.Context, tx *sql.Tx, mediaID int64
 	if p.options.EncryptGlobal && encrypted == 1 {
 		steps = append(steps, StepEncrypt)
 	}
-	if p.options.PreparePlanner != nil && prepare == 1 {
+	if p.options.PreparePlanner != nil && p.options.Capabilities != nil && p.options.Capabilities.Available(string(StepPrepare)) && prepare == 1 {
 		steps = append(steps, StepPrepare)
 	}
 	return steps, nil
