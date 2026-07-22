@@ -322,7 +322,7 @@ func validateDependencyTx(ctx context.Context, tx *sql.Tx, stepID int64, depends
 	}
 	rowsErr := rows.Err()
 	if err := closeRows(); err != nil {
-		return fmt.Errorf("close dependency rows: %w", err)
+		return errors.Join(rowsErr, fmt.Errorf("close dependency rows: %w", err))
 	}
 	return rowsErr
 }
