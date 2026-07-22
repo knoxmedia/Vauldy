@@ -14,9 +14,14 @@ func AggregateTx(ctx context.Context, tx *sql.Tx, runID int64) error {
 	}
 	var mediaID, generation int64
 	var preserve int
-	var runState string
-	if err := tx.QueryRowContext(ctx, `SELECT media_id,generation,status,preserve_visibility FROM media_ingest_run WHERE id=?`, runID).Scan(&mediaID, &generation, &runState, &preserve); err != nil {
+	var runState, terminalReason, runError string
+	var supersededBy sql.NullInt64
+	var supersededAt sql.NullTime
+	if err := tx.QueryRowContext(ctx, `SELECT media_id,generation,status,preserve_visibility,terminal_reason,error_message,superseded_by_generation,superseded_at FROM media_ingest_run WHERE id=?`, runID).Scan(&mediaID, &generation, &runState, &preserve, &terminalReason, &runError, &supersededBy, &supersededAt); err != nil {
 		return err
+	}
+	if supersededBy.Valid || supersededAt.Valid {
+		return nil
 	}
 	var pending, failed, cancelled int
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(status IN ('waiting','running')),0),COALESCE(SUM(status='failed'),0),COALESCE(SUM(status='cancelled'),0) FROM media_ingest_step WHERE run_id=? AND required=1`, runID).Scan(&pending, &failed, &cancelled); err != nil {

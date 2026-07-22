@@ -142,3 +142,63 @@ func TestAggregateSupersededRunRemainsCancelled(t *testing.T) {
 		t.Fatalf("run=%s media=%s", run, media)
 	}
 }
+
+func TestPlanReplacementSupportsCommunityWithoutEnterpriseTables(t *testing.T) {
+	db := openPlannerTestDB(t)
+	_, mediaID, scanID := seedPlannerMedia(t, db, "video", 0, 0, 0)
+	old := planAndCommit(t, db, NewPlanner(PlanOptions{}), NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
+	if _, err := db.Exec(`DROP TABLE pretranscode_rendition_job; DROP TABLE pretranscode_task_meta`); err != nil {
+		t.Fatal(err)
+	}
+	result := planReplacementAndCommit(t, db, NewPlanner(PlanOptions{}), mediaID, ReplacementOptions{Reason: PlanReasonRepair, ExpectedGeneration: old.Generation})
+	if result.NewGeneration != old.Generation+1 {
+		t.Fatalf("generation=%d", result.NewGeneration)
+	}
+}
+
+func TestPlanReplacementRejectsPartialEnterpriseSchema(t *testing.T) {
+	db := openPlannerTestDB(t)
+	_, mediaID, scanID := seedPlannerMedia(t, db, "video", 0, 0, 0)
+	old := planAndCommit(t, db, NewPlanner(PlanOptions{}), NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
+	if _, err := db.Exec(`DROP TABLE pretranscode_rendition_job`); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = NewPlanner(PlanOptions{}).PlanReplacementTx(context.Background(), tx, mediaID, ReplacementOptions{Reason: PlanReasonRepair, ExpectedGeneration: old.Generation})
+	if err == nil {
+		t.Fatal("partial enterprise schema accepted")
+	}
+	_ = tx.Rollback()
+}
+
+func TestAggregateSupersededRunPreservesAllTerminalFields(t *testing.T) {
+	for _, state := range []string{"cancelled", "failed"} {
+		t.Run(state, func(t *testing.T) {
+			db, runID, mediaID := aggregateFixture(t, state, 1, map[string]string{"poster": "waiting"})
+			if _, err := db.Exec(`UPDATE media SET ingest_generation=2,publication_state='degraded',publication_error='media immutable' WHERE id=?`, mediaID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`UPDATE media_ingest_run SET terminal_reason='original reason',error_message='original error',finished_at='2020-01-01',superseded_by_generation=2,superseded_at='2020-01-02' WHERE id=?`, runID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`UPDATE media_ingest_step SET status='done',last_error='mutated' WHERE run_id=?`, runID); err != nil {
+				t.Fatal(err)
+			}
+			aggregateCall(t, db, runID)
+			var gotStatus, reason, runError, finished, supersededAt, mediaState, mediaError string
+			var superseded int64
+			if err := db.QueryRow(`SELECT status,terminal_reason,error_message,finished_at,superseded_by_generation,superseded_at FROM media_ingest_run WHERE id=?`, runID).Scan(&gotStatus, &reason, &runError, &finished, &superseded, &supersededAt); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.QueryRow(`SELECT publication_state,publication_error FROM media WHERE id=?`, mediaID).Scan(&mediaState, &mediaError); err != nil {
+				t.Fatal(err)
+			}
+			if gotStatus != state || reason != "original reason" || runError != "original error" || finished != "2020-01-01T00:00:00Z" || superseded != 2 || supersededAt != "2020-01-02T00:00:00Z" || mediaState != "degraded" || mediaError != "media immutable" {
+				t.Fatalf("run=%q/%q/%q/%q/%d/%q media=%q/%q", gotStatus, reason, runError, finished, superseded, supersededAt, mediaState, mediaError)
+			}
+		})
+	}
+}
