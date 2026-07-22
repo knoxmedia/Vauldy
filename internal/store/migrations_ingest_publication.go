@@ -1106,6 +1106,102 @@ func createPublicationParents(ctx context.Context, q SQLExecutor, g []publicatio
 	}
 	return nil
 }
+
+func findCreateTableBody(sqlText string) (openAt, closeAt int, err error) {
+	const (
+		plain = iota
+		singleQuoted
+		doubleQuoted
+		backtickQuoted
+		bracketQuoted
+		lineComment
+		blockComment
+	)
+	state, depth := plain, 0
+	openAt = -1
+	for i := 0; i < len(sqlText); i++ {
+		c := sqlText[i]
+		switch state {
+		case singleQuoted, doubleQuoted, backtickQuoted:
+			close := byte('\'')
+			if state == doubleQuoted {
+				close = '"'
+			} else if state == backtickQuoted {
+				close = '`'
+			}
+			if c == close {
+				if i+1 < len(sqlText) && sqlText[i+1] == close {
+					i++
+					continue
+				}
+				state = plain
+			}
+			continue
+		case bracketQuoted:
+			if c == ']' {
+				state = plain
+			}
+			continue
+		case lineComment:
+			if c == '\n' || c == '\r' {
+				state = plain
+			}
+			continue
+		case blockComment:
+			if c == '*' && i+1 < len(sqlText) && sqlText[i+1] == '/' {
+				i++
+				state = plain
+			}
+			continue
+		}
+		if c == '-' && i+1 < len(sqlText) && sqlText[i+1] == '-' {
+			i++
+			state = lineComment
+			continue
+		}
+		if c == '/' && i+1 < len(sqlText) && sqlText[i+1] == '*' {
+			i++
+			state = blockComment
+			continue
+		}
+		switch c {
+		case '\'':
+			state = singleQuoted
+		case '"':
+			state = doubleQuoted
+		case '`':
+			state = backtickQuoted
+		case '[':
+			state = bracketQuoted
+		case '(':
+			if openAt < 0 {
+				openAt = i
+				depth = 1
+			} else {
+				depth++
+			}
+		case ')':
+			if openAt < 0 {
+				return -1, -1, fmt.Errorf("transcode SQL closing parenthesis before body")
+			}
+			depth--
+			if depth == 0 {
+				return openAt, i, nil
+			}
+			if depth < 0 {
+				return -1, -1, fmt.Errorf("unbalanced transcode SQL")
+			}
+		}
+	}
+	if state != plain && state != lineComment {
+		return -1, -1, fmt.Errorf("unterminated transcode SQL lexical form")
+	}
+	if openAt < 0 {
+		return -1, -1, fmt.Errorf("transcode SQL body missing")
+	}
+	return -1, -1, fmt.Errorf("unbalanced transcode SQL body")
+}
+
 func splitPublicationSQLClauses(body string) ([]string, error) {
 	var out []string
 	start, depth := 0, 0
@@ -1297,10 +1393,9 @@ var publicationTranscodeManagedClauses = map[string]bool{
 const publicationTranscodeStrictCheck = `CHECK((ingest_run_id IS NULL AND ingest_step_id IS NULL AND generation IS NULL AND media_id IS NULL) OR (ingest_run_id IS NOT NULL AND ingest_step_id IS NOT NULL AND generation IS NOT NULL AND media_id IS NOT NULL))`
 
 func canonicalTranscodeSQL(original string) (string, error) {
-	openAt := strings.Index(original, "(")
-	closeAt := strings.LastIndex(original, ")")
-	if openAt < 0 || closeAt <= openAt {
-		return "", fmt.Errorf("transcode SQL malformed")
+	openAt, closeAt, err := findCreateTableBody(original)
+	if err != nil {
+		return "", err
 	}
 	clauses, err := splitPublicationSQLClauses(original[openAt+1 : closeAt])
 	if err != nil {

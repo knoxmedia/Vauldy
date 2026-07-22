@@ -1348,3 +1348,70 @@ func TestCanonicalTranscodeSQLRecognizesQuotedManagedColumnsOnce(t *testing.T) {
 		})
 	}
 }
+
+func TestCanonicalTranscodeSQLLocatesTableBodyLexically(t *testing.T) {
+	cases := []struct{ name, ddl, table string }{
+		{"double quoted table", `CREATE TABLE "transcode(task)" /* header ( comment */ (id INTEGER PRIMARY KEY, custom TEXT CHECK(custom <> ')'))`, `transcode(task)`},
+		{"backtick table", "CREATE TABLE `transcode(task)` -- header ( comment\n (id INTEGER PRIMARY KEY, custom TEXT)", `transcode(task)`},
+		{"bracket table", `CREATE TABLE [transcode(task)] /* ) , ( */ (id INTEGER PRIMARY KEY, custom TEXT)`, `transcode(task)`},
+		{"header block comment", `CREATE /* misleading ( ) */ TABLE transcode_task /* actual header ( ) */ (id INTEGER PRIMARY KEY, custom TEXT)`, `transcode_task`},
+		{"header line comment", "CREATE TABLE transcode_task -- misleading ( )\n (id INTEGER PRIMARY KEY, custom TEXT)", `transcode_task`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openIngestPublicationMigrationTestDB(t)
+			if _, err := db.Exec(tc.ddl); err != nil {
+				t.Fatalf("SQLite rejected source: %v\n%s", err, tc.ddl)
+			}
+			var stored string
+			if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name=?`, tc.table).Scan(&stored); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(stored, "custom") {
+				t.Fatalf("sqlite_master lost custom clause: %s", stored)
+			}
+			if _, err := db.Exec(`DROP TABLE ` + quoteIdent(tc.table)); err != nil {
+				t.Fatal(err)
+			}
+			got, err := canonicalTranscodeSQL(stored)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(got, "custom") {
+				t.Fatalf("canonical lost custom clause/comment: %s", got)
+			}
+			if _, err = db.Exec(got); err != nil {
+				t.Fatalf("SQLite rejected canonical: %v\n%s", err, got)
+			}
+			if _, err = db.Exec(`DROP TABLE ` + quoteIdent(tc.table)); err != nil {
+				t.Fatal(err)
+			}
+			two, err := canonicalTranscodeSQL(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if two != got {
+				t.Fatalf("not idempotent\none=%s\ntwo=%s", got, two)
+			}
+			if _, err = db.Exec(two); err != nil {
+				t.Fatalf("SQLite rejected second canonical: %v", err)
+			}
+		})
+	}
+}
+
+func TestFindCreateTableBodyRejectsMalformedLexicalHeader(t *testing.T) {
+	for _, ddl := range []string{
+		`CREATE TABLE "unterminated (id INTEGER)`,
+		"CREATE TABLE `unterminated (id INTEGER)",
+		`CREATE TABLE [unterminated (id INTEGER)`,
+		`CREATE TABLE transcode_task /* unterminated (id INTEGER)`,
+		"CREATE TABLE transcode_task -- no body",
+		`CREATE TABLE transcode_task`,
+		`CREATE TABLE transcode_task (id INTEGER /* unterminated )`,
+	} {
+		if _, _, err := findCreateTableBody(ddl); err == nil {
+			t.Fatalf("accepted malformed DDL %q", ddl)
+		}
+	}
+}
