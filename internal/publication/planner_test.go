@@ -450,3 +450,80 @@ func TestPlannerRejectsInvalidDependencyGraphAtomically(t *testing.T) {
 }
 
 func stepPtr(step StepType) *StepType { return &step }
+
+func TestInsertDependenciesRejectsCrossIdentityAndCycle(t *testing.T) {
+	db := openPlannerTestDB(t)
+	_, mediaA, scanA := seedPlannerMedia(t, db, "video", 0, 0, 0)
+	_, mediaB, _ := seedPlannerMedia(t, db, "video", 0, 0, 0)
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := NewPlanner(PlanOptions{}).PlanNewMediaTx(context.Background(), tx, NewMedia{MediaID: mediaA, ScanTaskID: scanA, FileType: "video"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var poster, scrape int64
+	if err := tx.QueryRow(`SELECT id FROM media_ingest_step WHERE run_id=? AND step_type='poster'`, run.ID).Scan(&poster); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.QueryRow(`SELECT id FROM media_ingest_step WHERE run_id=? AND step_type='scrape'`, run.ID).Scan(&scrape); err != nil {
+		t.Fatal(err)
+	}
+	insertForeign := func(runID, mediaID, generation int64, typ string) int64 {
+		res, err := tx.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status) VALUES(?,?,?,?,0,'waiting')`, runID, mediaID, generation, typ)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, _ := res.LastInsertId()
+		return id
+	}
+	res, err := tx.Exec(`INSERT INTO media_ingest_run(media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(?,99,'repair','processing','{}',2)`, mediaB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignRun, _ := res.LastInsertId()
+	crossRun := insertForeign(foreignRun, mediaB, 99, "poster")
+	for _, tc := range []struct {
+		name                     string
+		target                   int64
+		media, generation, runID int64
+	}{
+		{"cross-run", crossRun, mediaA, run.Generation, run.ID},
+		{"cross-media", crossRun, mediaA, 99, foreignRun},
+		{"cross-generation", crossRun, mediaB, run.Generation, foreignRun},
+	} {
+		deps := []Dependency{{Step: StepPoster, Kind: DependencyStepDone, DependsOn: stepPtr(StepScrape)}}
+		if err := insertDependenciesTx(context.Background(), tx, deps, map[StepType]int64{StepPoster: poster, StepScrape: tc.target}, tc.media, tc.generation, tc.runID); err == nil {
+			t.Fatalf("%s: expected error", tc.name)
+		}
+	}
+	if _, err := tx.Exec(`INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(?,?,'step_done')`, poster, scrape); err != nil {
+		t.Fatal(err)
+	}
+	cycle := []Dependency{{Step: StepScrape, Kind: DependencyStepDone, DependsOn: stepPtr(StepPoster)}}
+	if err := insertDependenciesTx(context.Background(), tx, cycle, map[StepType]int64{StepPoster: poster, StepScrape: scrape}, mediaA, run.Generation, run.ID); err == nil {
+		t.Fatal("expected cycle error")
+	}
+	batch := []Dependency{{Step: StepScrape, Kind: DependencyMediaVisible}, {Step: StepPoster, Kind: DependencyStepDone, DependsOn: stepPtr(StepPoster)}}
+	if err := insertDependenciesTx(context.Background(), tx, batch, map[StepType]int64{StepPoster: poster, StepScrape: scrape}, mediaA, run.Generation, run.ID); err == nil {
+		t.Fatal("expected second batch edge failure")
+	}
+	_ = tx.Rollback()
+	for _, q := range []string{`SELECT COUNT(*) FROM media_ingest_run`, `SELECT COUNT(*) FROM media_ingest_step`, `SELECT COUNT(*) FROM media_ingest_step_dependency`, `SELECT COUNT(*) FROM post_ingest_task`} {
+		var n int
+		if err := db.QueryRow(q).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 0 {
+			t.Fatalf("after rollback %s=%d", q, n)
+		}
+	}
+	var generation int
+	if err := db.QueryRow(`SELECT ingest_generation FROM media WHERE id=?`, mediaA).Scan(&generation); err != nil {
+		t.Fatal(err)
+	}
+	if generation != 0 {
+		t.Fatalf("generation=%d", generation)
+	}
+}
