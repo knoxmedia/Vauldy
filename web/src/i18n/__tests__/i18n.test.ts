@@ -109,3 +109,26 @@ describe("document batch tag translations", () => {
     expect(ko.pages.document_browse.batch_tags_add).toBe("\ucd94\uac00");
   });
 });
+
+
+describe("media manager pagination translations", () => {
+  it("uses exact UTF-8 loading labels", () => {
+    expect([
+      zhCN.pages.media_manager.ingest_load_more,
+      zhCN.pages.media_manager.ingest_load_more_loading,
+      zhCN.pages.media_manager.ingest_load_more_retry,
+      zhTW.pages.media_manager.ingest_load_more,
+      zhTW.pages.media_manager.ingest_load_more_loading,
+      zhTW.pages.media_manager.ingest_load_more_retry,
+      en.pages.media_manager.ingest_load_more_loading,
+    ]).toEqual([
+      "\u52a0\u8f7d\u66f4\u591a",
+      "\u6b63\u5728\u52a0\u8f7d\u66f4\u591a\u2026",
+      "\u91cd\u8bd5\u52a0\u8f7d\u66f4\u591a",
+      "\u8f09\u5165\u66f4\u591a",
+      "\u6b63\u5728\u8f09\u5165\u66f4\u591a\u2026",
+      "\u91cd\u8a66\u8f09\u5165\u66f4\u591a",
+      "Loading more\u2026",
+    ]);
+  });
+});

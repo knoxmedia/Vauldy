@@ -17,6 +17,7 @@ import {
   Space,
   Tree,
   Typography,
+  Tag,
   message,
 } from "antd";
 import type { DataNode } from "antd/es/tree";
@@ -27,12 +28,12 @@ import {
   addMediaPerson,
   deleteMediaPersonLink,
   fetchLibraries,
-  fetchMedia,
+  fetchAdminMedia,
   fetchMediaDetail,
   fetchMediaPersons,
+  type AdminMediaItem,
   type Library,
   type MediaDetail,
-  type MediaItem,
   type MediaPersonLink,
   updateMediaAdmin,
 } from "../api/client";
@@ -321,6 +322,14 @@ function nodeTitle(name: string, kind: "dir" | "file") {
   return <span>{kind === "dir" ? `📁 ${name}` : `🎬 ${name}`}</span>;
 }
 
+function isRequestCancellation(error: unknown, signal: AbortSignal) {
+  if (signal.aborted) return true;
+  if (error instanceof DOMException && error.name === "AbortError") return true;
+  if (!error || typeof error !== "object") return false;
+  const candidate = error as { name?: string; code?: string };
+  return candidate.name === "CanceledError" || candidate.code === "ERR_CANCELED";
+}
+
 export default function MediaManagerPage() {
   const t = useT();
   const [searchParams] = useSearchParams();
@@ -337,7 +346,16 @@ export default function MediaManagerPage() {
   const pendingTargetIdRef = useRef<number | null>(initialTargetId);
   const [libs, setLibs] = useState<Library[]>([]);
   const [libraryId, setLibraryId] = useState<number | undefined>(undefined);
-  const [rows, setRows] = useState<MediaItem[]>([]);
+  const [rows, setRows] = useState<AdminMediaItem[]>([]);
+  const [mediaLoading, setMediaLoading] = useState(false);
+  const [mediaLoadMoreLoading, setMediaLoadMoreLoading] = useState(false);
+  const [mediaLoadMoreError, setMediaLoadMoreError] = useState(false);
+  const [mediaNextCursor, setMediaNextCursor] = useState<string | undefined>();
+  const [mediaHasMore, setMediaHasMore] = useState(false);
+  const mediaRequestSequenceRef = useRef(0);
+  const mediaControllerRef = useRef<AbortController | null>(null);
+  const detailRequestSequenceRef = useRef(0);
+  const detailControllerRef = useRef<AbortController | null>(null);
   const [selectedNode, setSelectedNode] = useState<TreeNodeInfo | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -384,15 +402,7 @@ export default function MediaManagerPage() {
     setLibraryId((current) => (current !== undefined ? current : items[0].id));
   }
 
-  async function loadMedia(libId?: number) {
-    const items = await fetchMedia(libId, { sort: "created_desc", limit: 500 });
-    setRows(items);
-    if (items.length === 0) {
-      setSelectedNode(null);
-      setDetail(null);
-      form.resetFields();
-      return;
-    }
+  function applyLoadedMedia(items: AdminMediaItem[]) {
     const target = pendingTargetIdRef.current;
     if (target != null) {
       const hit = items.find((x) => x.id === target);
@@ -407,27 +417,84 @@ export default function MediaManagerPage() {
         });
         return;
       }
-      // Target not within the first 500 items of its library; fall through to default.
     }
-    if (!selectedId || !items.some((x) => x.id === selectedId)) {
+    setSelectedNode((current) => {
+      if (current?.type === "file" && items.some((x) => x.id === current.mediaId)) return current;
       const first = items[0];
-      setSelectedNode({
+      return first ? {
         type: "file",
         key: `file:${first.id}`,
         name: first.title || first.file_id,
         path: toLibraryDisplayRelativePath(first.file_path || "", selectedLibraryRoots),
         mediaId: first.id,
+      } : null;
+    });
+  }
+
+  async function loadMediaPage(libId: number, cursor: string | undefined, append: boolean) {
+    const sequence = append ? mediaRequestSequenceRef.current : ++mediaRequestSequenceRef.current;
+    mediaControllerRef.current?.abort();
+    const controller = new AbortController();
+    mediaControllerRef.current = controller;
+    if (append) {
+      setMediaLoadMoreLoading(true);
+      setMediaLoadMoreError(false);
+    } else {
+      detailControllerRef.current?.abort();
+      detailRequestSequenceRef.current++;
+      setRows([]);
+      setSelectedNode(null);
+      setDetail(null);
+      setGenreOptions([]);
+      form.resetFields();
+      setMediaNextCursor(undefined);
+      setMediaHasMore(false);
+      setMediaLoadMoreError(false);
+      setMediaLoading(true);
+    }
+    try {
+      const page = await fetchAdminMedia(
+        { library_id: libId, sort: "id_desc", limit: 500, ...(cursor ? { cursor } : {}) },
+        controller.signal,
+      );
+      if (controller.signal.aborted || sequence !== mediaRequestSequenceRef.current || libId !== libraryId) return;
+      let merged: AdminMediaItem[] = [];
+      setRows((previous) => {
+        const base = append ? previous : [];
+        const seen = new Set(base.map((item) => item.id));
+        merged = [...base];
+        for (const item of page.items) if (!seen.has(item.id)) { seen.add(item.id); merged.push(item); }
+        return merged;
       });
+      const nextCursor = page.next_cursor?.trim();
+      const canContinue = page.has_more && Boolean(nextCursor) && nextCursor !== cursor;
+      setMediaNextCursor(canContinue ? nextCursor : undefined);
+      setMediaHasMore(canContinue);
+      applyLoadedMedia(merged);
+    } catch (e) {
+      if (controller.signal.aborted || sequence !== mediaRequestSequenceRef.current) return;
+      if (append) setMediaLoadMoreError(true);
+      else message.error((e as Error).message || t("pages.media_manager.load_media_failed"));
+    } finally {
+      if (sequence === mediaRequestSequenceRef.current && mediaControllerRef.current === controller) {
+        if (append) setMediaLoadMoreLoading(false);
+        else setMediaLoading(false);
+      }
     }
   }
 
   async function loadDetail(id: number) {
+    const sequence = ++detailRequestSequenceRef.current;
+    detailControllerRef.current?.abort();
+    const controller = new AbortController();
+    detailControllerRef.current = controller;
     setLoadingDetail(true);
     try {
       const [d, personLinks] = await Promise.all([
-        fetchMediaDetail(id),
-        fetchMediaPersons(id).catch(() => ({ items: [] as MediaPersonLink[], resolved: [] })),
+        fetchMediaDetail(id, controller.signal),
+        fetchMediaPersons(id, controller.signal).catch(() => ({ items: [] as MediaPersonLink[], resolved: [] })),
       ]);
+      if (controller.signal.aborted || sequence !== detailRequestSequenceRef.current) return;
       setDetail(d);
       form.setFieldsValue({
         title: d.title || "",
@@ -459,8 +526,15 @@ export default function MediaManagerPage() {
         backdrop: typeof extra.backdrop === "string" ? extra.backdrop : "",
         logo: typeof extra.logo === "string" ? extra.logo : "",
       });
+    } catch (e) {
+      if (
+        isRequestCancellation(e, controller.signal) ||
+        sequence !== detailRequestSequenceRef.current ||
+        detailControllerRef.current !== controller
+      ) return;
+      throw e;
     } finally {
-      setLoadingDetail(false);
+      if (sequence === detailRequestSequenceRef.current && detailControllerRef.current === controller) setLoadingDetail(false);
     }
   }
 
@@ -471,14 +545,24 @@ export default function MediaManagerPage() {
 
   useEffect(() => {
     if (libraryId === undefined) return;
-    void loadMedia(libraryId).catch((e: unknown) => message.error((e as Error).message || t("pages.media_manager.load_media_failed")));
-     
+    void loadMediaPage(libraryId, undefined, false);
+    return () => {
+      mediaControllerRef.current?.abort();
+      detailControllerRef.current?.abort();
+      mediaRequestSequenceRef.current++;
+      detailRequestSequenceRef.current++;
+    };
   }, [libraryId]);
 
   useEffect(() => {
     if (!selectedId) return;
-    void loadDetail(selectedId).catch((e: unknown) => message.error((e as Error).message || t("pages.media_manager.load_detail_failed")));
-     
+    const sequence = detailRequestSequenceRef.current + 1;
+    void loadDetail(selectedId).catch((e: unknown) => {
+      if (sequence === detailRequestSequenceRef.current && !detailControllerRef.current?.signal.aborted) {
+        message.error((e as Error).message || t("pages.media_manager.load_detail_failed"));
+      }
+    });
+    return () => detailControllerRef.current?.abort();
   }, [selectedId]);
 
   const { treeData, treeMap } = useMemo(() => {
@@ -663,7 +747,7 @@ export default function MediaManagerPage() {
       });
       await syncMediaPersonCrew(selectedId, crewPayload);
       message.success(t("pages.media_manager.saved"));
-      await loadMedia(libraryId);
+      if (libraryId !== undefined) await loadMediaPage(libraryId, undefined, false);
       await loadDetail(selectedId);
     } catch (e: unknown) {
       message.error((e as Error).message || t("pages.media_manager.save_failed"));
@@ -677,6 +761,40 @@ export default function MediaManagerPage() {
       <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
         {t("pages.media_manager.intro")}
       </Typography.Paragraph>
+
+      <Card title={t("pages.media_manager.ingest_status_title")} loading={mediaLoading}>
+        <List
+          size="small"
+          dataSource={rows.filter((item) => item.publication_state !== "published")}
+          locale={{ emptyText: t("pages.media_manager.ingest_status_empty") }}
+          renderItem={(item) => (
+            <List.Item>
+              <List.Item.Meta title={item.title || item.file_id} description={item.file_path} />
+              <Tag
+                color={item.publication_state === "processing" ? "processing" : item.publication_state === "degraded" ? "warning" : "error"}
+                role="status"
+                aria-label={t(`pages.media_manager.publication_${item.publication_state}`)}
+              >
+                {t(`pages.media_manager.publication_${item.publication_state}`)}
+              </Tag>
+            </List.Item>
+          )}
+        />
+        {mediaHasMore || mediaLoadMoreError ? (
+          <Button
+            block
+            loading={mediaLoadMoreLoading}
+            aria-label={mediaLoadMoreLoading
+              ? t("pages.media_manager.ingest_load_more_loading")
+              : mediaLoadMoreError
+                ? t("pages.media_manager.ingest_load_more_retry")
+                : t("pages.media_manager.ingest_load_more")}
+            onClick={() => libraryId !== undefined && void loadMediaPage(libraryId, mediaNextCursor, true)}
+          >
+            {mediaLoadMoreError ? t("pages.media_manager.ingest_load_more_retry") : t("pages.media_manager.ingest_load_more")}
+          </Button>
+        ) : null}
+      </Card>
 
       <Row gutter={16}>
         <Col xs={24} lg={11}>

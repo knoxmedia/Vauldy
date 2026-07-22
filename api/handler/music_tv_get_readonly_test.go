@@ -142,3 +142,56 @@ func TestMusicGETAndTVPlayTargetHonorCancelledRequestContext(t *testing.T) {
 		})
 	}
 }
+
+func TestAlbumPlayTargetHidesUnpublishedMedia(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, _ := openPhotoGETWriteCountingDB(t)
+	if _, err := db.Exec(`INSERT INTO library(id,name,type,path,enabled) VALUES(2,'music','music','E:/music',1);
+		INSERT INTO user(id,username,password,role,can_play,library_scope) VALUES(1,'viewer','x','user',1,'all');
+		INSERT INTO music_artist(id,library_id,name,name_norm) VALUES(30,2,'Artist','artist');
+		INSERT INTO music_album(id,library_id,title,title_norm,album_artist_id) VALUES(40,2,'Album','album',30);
+		INSERT INTO media(id,library_id,file_id,title,file_path,file_type,publication_state) VALUES
+		(50,2,'audio-processing','Hidden','E:/music/hidden.mp3','audio','processing'),
+		(51,2,'audio-degraded','Visible','E:/music/visible.mp3','audio','degraded');
+		INSERT INTO music_track(id,album_id,media_id,track_number,title,sort_order) VALUES
+		(60,40,50,1,'Hidden',1),(61,40,51,2,'Visible',2)`); err != nil {
+		t.Fatal(err)
+	}
+	h := &Handler{App: &app.App{DB: db}}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/album/40/play-target", nil)
+	c.Params = gin.Params{{Key: "id", Value: "40"}}
+	setUserCtx(c, 1, "user", "viewer")
+	h.GetAlbumPlayTarget(c)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"media_id":51`) {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestSeriesPlayTargetHidesUnpublishedResumeAndFallbackMedia(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, _ := openPhotoGETWriteCountingDB(t)
+	if _, err := db.Exec(`INSERT INTO library(id,name,type,path,enabled) VALUES(3,'tv','tv','E:/tv',1);
+		INSERT INTO user(id,username,password,role,can_play,library_scope) VALUES(1,'viewer','x','user',1,'all');
+		INSERT INTO series(id,library_id,title,title_norm) VALUES(70,3,'Show','show');
+		INSERT INTO season(id,tv_id,season_num,name) VALUES(71,70,1,'Season 1');
+		INSERT INTO episode(id,season_id,episode_num,title) VALUES(72,71,1,'Hidden'),(73,71,2,'Visible');
+		INSERT INTO media(id,library_id,file_id,title,file_path,file_type,publication_state) VALUES
+		(80,3,'video-processing','Hidden','E:/tv/hidden.mkv','video','processing'),
+		(81,3,'video-degraded','Visible','E:/tv/visible.mkv','video','degraded');
+		INSERT INTO episode_media(id,episode_id,media_id,sort_order) VALUES(90,72,80,0),(91,73,81,0);
+		INSERT INTO play_progress(user_id,file_id,position,play_count,update_at) VALUES(1,'video-processing',120,1,'2026-07-21 12:00:00')`); err != nil {
+		t.Fatal(err)
+	}
+	h := &Handler{App: &app.App{DB: db}}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/series/70/play-target", nil)
+	c.Params = gin.Params{{Key: "id", Value: "70"}}
+	setUserCtx(c, 1, "user", "viewer")
+	h.GetSeriesPlayTarget(c)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"media_id":81`) {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+}

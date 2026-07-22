@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"log"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -57,7 +58,7 @@ func (s *Service) Start(ctx context.Context) {
 }
 
 func (s *Service) tick(ctx context.Context) {
-	rows, err := s.DB.Query(`
+	rows, err := s.DB.QueryContext(ctx, `
 		SELECT id, path, COALESCE(realtime_monitor, 0), COALESCE(auto_scan, 0)
 		FROM library
 		WHERE enabled = 1 AND (realtime_monitor = 1 OR auto_scan = 1)
@@ -74,24 +75,23 @@ func (s *Service) tick(ctx context.Context) {
 		if rows.Scan(&id, &path, &realtime, &autoScan) != nil || id <= 0 {
 			continue
 		}
-		var sources []scancoord.Source
+		var source scancoord.Source
 		if realtime == 1 {
-			sources = append(sources, scancoord.SourceMonitor)
+			source = scancoord.SourceMonitor
+		} else if autoScan == 1 && s.autoScanDue(id, now) {
+			source = scancoord.SourceScheduled
 		}
-		if autoScan == 1 && s.autoScanDue(id, now) {
-			sources = append(sources, scancoord.SourceScheduled)
-		}
-		if len(sources) == 0 || s.Submitter == nil {
+		if source == "" || s.Submitter == nil {
 			continue
 		}
-		folders := listFolders(s.DB, id, path.String)
+		folders := listFoldersContext(ctx, s.DB, id, path.String)
 		if len(folders) == 0 {
 			continue
 		}
-		for _, source := range sources {
-			if _, err := s.Submitter.Submit(ctx, scancoord.ScanRequest{LibraryID: id, Source: source, Roots: folders}); err != nil {
-				log.Printf("library scan submit failed library=%d source=%s err=%v", id, source, err)
-			}
+		if _, err := s.Submitter.Submit(ctx, scancoord.ScanRequest{LibraryID: id, Source: source, Roots: folders}); err != nil {
+			log.Printf("library scan submit failed library=%d source=%s err=%v", id, source, err)
+		} else if source == scancoord.SourceScheduled {
+			s.markAutoScan(id, now)
 		}
 	}
 }
@@ -107,8 +107,13 @@ func (s *Service) autoScanDue(libraryID int64, now time.Time) bool {
 	if ok && now.Sub(last) < interval {
 		return false
 	}
-	s.lastAutoScan[libraryID] = now
 	return true
+}
+
+func (s *Service) markAutoScan(libraryID int64, now time.Time) {
+	s.mu.Lock()
+	s.lastAutoScan[libraryID] = now
+	s.mu.Unlock()
 }
 
 func (s *Service) tryLock(libraryID int64) bool {
@@ -128,7 +133,11 @@ func (s *Service) unlock(libraryID int64) {
 }
 
 func listFolders(db *sql.DB, libraryID int64, fallback string) []string {
-	rows, err := db.Query(`SELECT path FROM library_folder WHERE library_id = ? ORDER BY sort_order, id`, libraryID)
+	return listFoldersContext(context.Background(), db, libraryID, fallback)
+}
+
+func listFoldersContext(ctx context.Context, db *sql.DB, libraryID int64, fallback string) []string {
+	rows, err := db.QueryContext(ctx, `SELECT path FROM library_folder WHERE library_id = ? ORDER BY sort_order, id`, libraryID)
 	if err != nil {
 		if strings.TrimSpace(fallback) == "" {
 			return nil
@@ -137,14 +146,21 @@ func listFolders(db *sql.DB, libraryID int64, fallback string) []string {
 	}
 	defer rows.Close()
 	var out []string
+	seen := make(map[string]struct{})
 	for rows.Next() {
 		var p sql.NullString
-		if rows.Scan(&p) == nil && p.Valid && strings.TrimSpace(p.String) != "" {
-			out = append(out, strings.TrimSpace(p.String))
+		if rows.Scan(&p) != nil || !p.Valid || strings.TrimSpace(p.String) == "" {
+			continue
 		}
+		clean := filepath.Clean(strings.TrimSpace(p.String))
+		if _, ok := seen[clean]; ok {
+			continue
+		}
+		seen[clean] = struct{}{}
+		out = append(out, clean)
 	}
 	if len(out) == 0 && strings.TrimSpace(fallback) != "" {
-		return []string{strings.TrimSpace(fallback)}
+		return []string{filepath.Clean(strings.TrimSpace(fallback))}
 	}
 	return out
 }

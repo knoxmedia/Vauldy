@@ -609,3 +609,49 @@ func TestEnsureColumnContextPropagatesAlterError(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 }
+
+func TestOpenSQLiteContextUpgradesLegacyPostIngestSchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy-post-ingest.sqlite")
+	db, err := OpenSQLite(path)
+	if err != nil {
+		t.Fatalf("create current fixture: %v", err)
+	}
+	if _, err := db.Exec(`
+DROP INDEX idx_post_ingest_run;
+DROP INDEX idx_post_ingest_step;
+ALTER TABLE post_ingest_task RENAME TO post_ingest_task_current;
+CREATE TABLE post_ingest_task (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, media_id INTEGER NOT NULL, scan_task_id INTEGER,
+ task_type TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'waiting', attempts INTEGER NOT NULL DEFAULT 0,
+ max_attempts INTEGER NOT NULL DEFAULT 3, available_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ lease_owner TEXT, lease_until TIMESTAMP, last_error TEXT NOT NULL DEFAULT '',
+ created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ started_at TIMESTAMP, finished_at TIMESTAMP,
+ FOREIGN KEY(media_id) REFERENCES media(id) ON DELETE CASCADE,
+ FOREIGN KEY(scan_task_id) REFERENCES scan_task(id) ON DELETE SET NULL,
+ UNIQUE(media_id,task_type),
+ CHECK(task_type IN ('poster','preview','keyframe','subtitle','atrack','encrypt')),
+ CHECK(status IN ('waiting','running','done','failed','cancelled'))
+);
+DROP TABLE post_ingest_task_current;
+CREATE INDEX idx_post_ingest_claim ON post_ingest_task(status,available_at,lease_until,created_at);
+CREATE INDEX idx_post_ingest_scan ON post_ingest_task(scan_task_id,status);`); err != nil {
+		_ = db.Close()
+		t.Fatalf("install legacy post_ingest_task: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = OpenSQLiteContext(context.Background(), path)
+	if err != nil {
+		t.Fatalf("upgrade legacy database: %v", err)
+	}
+	defer db.Close()
+	for _, column := range []string{"ingest_run_id", "ingest_step_id", "generation"} {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('post_ingest_task') WHERE name=?`, column).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("column %s count=%d err=%v", column, count, err)
+		}
+	}
+}

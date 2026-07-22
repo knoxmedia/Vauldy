@@ -1,16 +1,21 @@
 package pretranscode
 
 import (
+	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"knox-media/internal/publication"
+	"knox-media/internal/storage"
 	"log"
 	"os"
 	"sort"
-	"knox-media/internal/storage"
 	"strings"
 	"time"
 )
+
+var ErrLinkedIngestTaskOperation = errors.New("operation is not allowed for linked ingest prepare task")
 
 // TaskService manages pretranscode task lifecycle. It writes to the shared
 // transcode_task table (community, task_type='pretranscode') plus the
@@ -22,24 +27,24 @@ type TaskService struct {
 
 // UnifiedTask is the joined row for the unified task list (SRS 3.2.1).
 type UnifiedTask struct {
-	ID            int64          `json:"id"`
-	TaskType      string         `json:"task_type"`
-	FileID        string         `json:"file_id"`
-	MediaID       int64          `json:"media_id"`
-	Title         string         `json:"title"`
-	Quality       string         `json:"quality"`
-	Status        string         `json:"status"`
-	Progress      int            `json:"progress"`
-	ErrorMessage  string         `json:"error_message"`
-	OutputPath    string         `json:"output_path"`
-	PresetID      int64          `json:"preset_id,omitempty"`
-	PresetName    string         `json:"preset_name,omitempty"`
-	Priority      string         `json:"priority,omitempty"`
-	EncryptionMode string        `json:"encryption_mode,omitempty"`
-	OutputFormat  string         `json:"output_format,omitempty"`
-	CreatedAt     string         `json:"created_at"`
-	StartedAt     string         `json:"started_at,omitempty"`
-	CompletedAt   string         `json:"completed_at,omitempty"`
+	ID             int64  `json:"id"`
+	TaskType       string `json:"task_type"`
+	FileID         string `json:"file_id"`
+	MediaID        int64  `json:"media_id"`
+	Title          string `json:"title"`
+	Quality        string `json:"quality"`
+	Status         string `json:"status"`
+	Progress       int    `json:"progress"`
+	ErrorMessage   string `json:"error_message"`
+	OutputPath     string `json:"output_path"`
+	PresetID       int64  `json:"preset_id,omitempty"`
+	PresetName     string `json:"preset_name,omitempty"`
+	Priority       string `json:"priority,omitempty"`
+	EncryptionMode string `json:"encryption_mode,omitempty"`
+	OutputFormat   string `json:"output_format,omitempty"`
+	CreatedAt      string `json:"created_at"`
+	StartedAt      string `json:"started_at,omitempty"`
+	CompletedAt    string `json:"completed_at,omitempty"`
 }
 
 // CreateTask inserts a pretranscode task for each media id (SRS TASK-01).
@@ -192,67 +197,128 @@ func (s *TaskService) GetTask(id int64) (*UnifiedTask, []RenditionJob, error) {
 	return nil, nil, ErrTaskNotFound
 }
 
-// CancelTask stops running jobs and marks the task cancelled (SRS ACT-01).
+// CancelTask atomically cancels a linked prepare task and its publication step.
 func (s *TaskService) CancelTask(id int64) error {
-	if _, err := s.markTask(id, "cancelled"); err != nil {
+	tx, err := s.DB.BeginTx(context.Background(), nil)
+	if err != nil {
 		return err
 	}
-	_, err := s.DB.Exec(`UPDATE pretranscode_rendition_job
-		SET status = 'cancelled', completed_at = CURRENT_TIMESTAMP
-		WHERE task_id = ? AND status IN ('waiting','running')`, id)
-	return err
+	defer tx.Rollback()
+	linked, runID, stepID, generation, err := taskIngestLinkTx(tx, id)
+	if err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`UPDATE pretranscode_rendition_job SET status='cancelled',completed_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL WHERE task_id=? AND status IN ('waiting','running')`, id); err != nil {
+		return err
+	}
+	res, err := tx.Exec(`UPDATE transcode_task SET status='cancelled',completed_at=COALESCE(completed_at,CURRENT_TIMESTAMP) WHERE id=? AND status IN ('waiting','running','paused')`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("task %d is not cancellable", id)
+	}
+	if linked {
+		res, err = tx.Exec(`UPDATE media_ingest_step SET status='cancelled',last_error='cancelled',finished_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND run_id=? AND generation=? AND step_type='prepare' AND status IN ('waiting','running')`, stepID, runID, generation)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			return fmt.Errorf("task %d linked prepare step is not cancellable", id)
+		}
+		if err = publication.AggregateTx(context.Background(), tx, runID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
-// PauseTask parks a waiting task; running jobs finish naturally (SRS ACT-04).
 func (s *TaskService) PauseTask(id int64) error {
-	_, err := s.DB.Exec(`UPDATE transcode_task SET status = 'paused' WHERE id = ? AND status IN ('waiting','running')`, id)
+	linked, err := s.isLinkedIngestTask(id)
+	if err != nil {
+		return err
+	}
+	if linked {
+		return ErrLinkedIngestTaskOperation
+	}
+	_, err = s.DB.Exec(`UPDATE transcode_task SET status='paused' WHERE id=? AND status IN ('waiting','running')`, id)
 	return err
 }
-
-// ResumeTask re-queues a paused task.
 func (s *TaskService) ResumeTask(id int64) error {
-	_, err := s.DB.Exec(`UPDATE transcode_task SET status = 'waiting' WHERE id = ? AND status = 'paused'`, id)
+	linked, err := s.isLinkedIngestTask(id)
+	if err != nil {
+		return err
+	}
+	if linked {
+		return ErrLinkedIngestTaskOperation
+	}
+	_, err = s.DB.Exec(`UPDATE transcode_task SET status='waiting' WHERE id=? AND status='paused'`, id)
 	return err
 }
 
-// RetryTask re-queues failed rendition jobs (SRS ACT-02).
+// RetryTask opens a fresh attempt round atomically for linked prepare work.
 func (s *TaskService) RetryTask(id int64) error {
-	jobRes, err := s.DB.Exec(`UPDATE pretranscode_rendition_job
-		SET status = 'waiting', progress = 0, error_message = NULL, started_at = NULL, completed_at = NULL
-		WHERE task_id = ? AND status IN ('failed','cancelled')`, id)
+	tx, err := s.DB.BeginTx(context.Background(), nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	linked, runID, stepID, generation, err := taskIngestLinkTx(tx, id)
+	if err != nil {
+		return err
+	}
+	jobRes, err := tx.Exec(`UPDATE pretranscode_rendition_job SET status='waiting',progress=0,error_message=NULL,output_path=NULL,encoder_used=NULL,started_at=NULL,completed_at=NULL,available_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL WHERE task_id=? AND status IN ('failed','cancelled')`, id)
 	if err != nil {
 		return err
 	}
 	jobsReset, _ := jobRes.RowsAffected()
-
-	taskRes, err := s.DB.Exec(`UPDATE transcode_task
-		SET status = 'waiting', progress = 0, error_message = NULL, started_at = NULL, completed_at = NULL
-		WHERE id = ? AND status IN ('failed','paused','cancelled')`, id)
+	taskRes, err := tx.Exec(`UPDATE transcode_task SET status='waiting',progress=0,error_message=NULL,started_at=NULL,completed_at=NULL WHERE id=? AND status IN ('failed','paused','cancelled','waiting')`, id)
 	if err != nil {
 		return err
 	}
 	taskReset, _ := taskRes.RowsAffected()
-
-	if jobsReset > 0 || taskReset > 0 {
-		return nil
+	if jobsReset == 0 && taskReset == 0 {
+		return fmt.Errorf("task %d is not retryable", id)
 	}
-
-	// Heal orphaned state: generic retry set transcode_task=waiting but left rendition jobs failed.
-	var status string
-	if err := s.DB.QueryRow(`SELECT status FROM transcode_task WHERE id = ?`, id).Scan(&status); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("task %d is not retryable", id)
+	if linked {
+		res, err := tx.Exec(`UPDATE media_ingest_step SET status='waiting',attempts=0,last_error='',available_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL,started_at=NULL,finished_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND run_id=? AND generation=? AND step_type='prepare' AND status IN ('failed','cancelled')`, stepID, runID, generation)
+		if err != nil {
+			return err
 		}
-		return err
-	}
-	if status == "waiting" || status == "running" {
-		var waitingJobs int
-		_ = s.DB.QueryRow(`SELECT COUNT(1) FROM pretranscode_rendition_job WHERE task_id = ? AND status = 'waiting'`, id).Scan(&waitingJobs)
-		if waitingJobs > 0 {
-			return nil
+		if n, _ := res.RowsAffected(); n != 1 {
+			return fmt.Errorf("task %d linked prepare step is not retryable", id)
+		}
+		if _, err = tx.Exec(`UPDATE media_ingest_run SET status='processing',preserve_visibility=1,error_message='',finished_at=NULL WHERE id=?`, runID); err != nil {
+			return err
+		}
+		if err = publication.AggregateTx(context.Background(), tx, runID); err != nil {
+			return err
 		}
 	}
-	return fmt.Errorf("task %d is not retryable", id)
+	return tx.Commit()
+}
+
+func taskIngestLinkTx(tx *sql.Tx, id int64) (bool, int64, int64, int64, error) {
+	var runID, stepID, generation sql.NullInt64
+	if err := tx.QueryRow(`SELECT ingest_run_id,ingest_step_id,generation FROM transcode_task WHERE id=?`, id).Scan(&runID, &stepID, &generation); err != nil {
+		return false, 0, 0, 0, err
+	}
+	if !runID.Valid && !stepID.Valid && !generation.Valid {
+		return false, 0, 0, 0, nil
+	}
+	if !runID.Valid || !stepID.Valid || !generation.Valid {
+		return false, 0, 0, 0, fmt.Errorf("task %d has partial ingest linkage", id)
+	}
+	return true, runID.Int64, stepID.Int64, generation.Int64, nil
+}
+func (s *TaskService) isLinkedIngestTask(id int64) (bool, error) {
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	linked, _, _, _, err := taskIngestLinkTx(tx, id)
+	return linked, err
 }
 
 // RetryLatestFailedTaskForMedia re-queues the most recent failed pretranscode task for a media row.
@@ -321,17 +387,17 @@ func (s *TaskService) CleanupFailedTasks(days int) (int, error) {
 
 // RenditionJob mirrors pretranscode_rendition_job.
 type RenditionJob struct {
-	ID           int64  `json:"id"`
-	TaskID       int64  `json:"task_id"`
-	RenditionID  int64  `json:"rendition_id"`
+	ID            int64  `json:"id"`
+	TaskID        int64  `json:"task_id"`
+	RenditionID   int64  `json:"rendition_id"`
 	RenditionName string `json:"rendition_name"`
-	Status       string `json:"status"`
-	Progress     int    `json:"progress"`
-	OutputPath   string `json:"output_path"`
-	ErrorMessage string `json:"error_message"`
-	EncoderUsed  string `json:"encoder_used"`
-	StartedAt    string `json:"started_at"`
-	CompletedAt  string `json:"completed_at"`
+	Status        string `json:"status"`
+	Progress      int    `json:"progress"`
+	OutputPath    string `json:"output_path"`
+	ErrorMessage  string `json:"error_message"`
+	EncoderUsed   string `json:"encoder_used"`
+	StartedAt     string `json:"started_at"`
+	CompletedAt   string `json:"completed_at"`
 }
 
 // ListRenditionJobs returns the rendition jobs for a task.
@@ -358,14 +424,33 @@ func (s *TaskService) ListRenditionJobs(taskID int64) ([]RenditionJob, error) {
 
 // CancelRenditionJob cancels a single rendition job.
 func (s *TaskService) CancelRenditionJob(id int64) error {
-	_, err := s.DB.Exec(`UPDATE pretranscode_rendition_job SET status='cancelled', completed_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('waiting','running')`, id)
+	linked, err := s.renditionBelongsToLinkedTask(id)
+	if err != nil {
+		return err
+	}
+	if linked {
+		return ErrLinkedIngestTaskOperation
+	}
+	_, err = s.DB.Exec(`UPDATE pretranscode_rendition_job SET status='cancelled',completed_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('waiting','running')`, id)
 	return err
 }
 
 // RetryRenditionJob re-queues a single failed/cancelled rendition job.
 func (s *TaskService) RetryRenditionJob(id int64) error {
-	_, err := s.DB.Exec(`UPDATE pretranscode_rendition_job SET status='waiting', progress=0, error_message=NULL, started_at=NULL, completed_at=NULL WHERE id=? AND status IN ('failed','cancelled')`, id)
+	linked, err := s.renditionBelongsToLinkedTask(id)
+	if err != nil {
+		return err
+	}
+	if linked {
+		return ErrLinkedIngestTaskOperation
+	}
+	_, err = s.DB.Exec(`UPDATE pretranscode_rendition_job SET status='waiting',progress=0,error_message=NULL,started_at=NULL,completed_at=NULL,available_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('failed','cancelled')`, id)
 	return err
+}
+func (s *TaskService) renditionBelongsToLinkedTask(id int64) (bool, error) {
+	var linked int
+	err := s.DB.QueryRow(`SELECT COUNT(1) FROM pretranscode_rendition_job j JOIN transcode_task t ON t.id=j.task_id WHERE j.id=? AND t.ingest_step_id IS NOT NULL`, id).Scan(&linked)
+	return linked > 0, err
 }
 
 // AggregateProgress computes the weighted average of rendition progress
@@ -510,14 +595,14 @@ type RunningTask struct {
 
 // MediaOptimizationStatus is the response for GET /api/v1/media/:id/optimization.
 type MediaOptimizationStatus struct {
-	MediaID              int64               `json:"media_id"`
-	Filename             string              `json:"filename"`
-	Duration             int                 `json:"duration"`
-	Resolution           string              `json:"resolution"`
-	FileSize             int64               `json:"file_size"`
-	OptimizationAvailable bool               `json:"optimization_available"`
-	OptimizedRenditions  []OptimizedRendition `json:"optimized_renditions"`
-	RunningTasks         []RunningTask        `json:"running_tasks"`
+	MediaID               int64                `json:"media_id"`
+	Filename              string               `json:"filename"`
+	Duration              int                  `json:"duration"`
+	Resolution            string               `json:"resolution"`
+	FileSize              int64                `json:"file_size"`
+	OptimizationAvailable bool                 `json:"optimization_available"`
+	OptimizedRenditions   []OptimizedRendition `json:"optimized_renditions"`
+	RunningTasks          []RunningTask        `json:"running_tasks"`
 }
 
 // GetMediaOptimizationStatus returns the optimization status for a media item.
@@ -550,14 +635,14 @@ func (s *TaskService) GetMediaOptimizationStatus(mediaID int64) (*MediaOptimizat
 	}
 
 	status := &MediaOptimizationStatus{
-		MediaID:              mediaID,
-		Filename:             filename,
-		Duration:             duration,
-		Resolution:           resolution,
-		FileSize:             fileSize,
+		MediaID:               mediaID,
+		Filename:              filename,
+		Duration:              duration,
+		Resolution:            resolution,
+		FileSize:              fileSize,
 		OptimizationAvailable: storage.PlaintextSourceAvailable(s.DB, mediaID, libraryID, filePath),
-		OptimizedRenditions:  []OptimizedRendition{},
-		RunningTasks:         []RunningTask{},
+		OptimizedRenditions:   []OptimizedRendition{},
+		RunningTasks:          []RunningTask{},
 	}
 
 	// Get completed rendition jobs
@@ -645,45 +730,95 @@ func (s *TaskService) BatchRemoveRenditionJobs(jobIDs []int64) error {
 // waiting pretranscode tasks that have no rendition jobs. This fixes tasks
 // created by a buggy build where the INSERT errors were silently swallowed.
 func (s *TaskService) RecoverOrphanedTasks() int {
-	rows, err := s.DB.Query(`
-		SELECT t.id, COALESCE(t.preset_id,0)
-		FROM transcode_task t
-		WHERE t.task_type = 'pretranscode' AND t.status = 'waiting'
-		  AND NOT EXISTS (SELECT 1 FROM pretranscode_rendition_job j WHERE j.task_id = t.id)
-	`)
+	rows, err := s.DB.Query(`SELECT t.id,COALESCE(t.preset_id,0),COALESCE(t.ingest_run_id,0),COALESCE(t.ingest_step_id,0),COALESCE(t.generation,0),COALESCE(m.ingest_jobs_snapshot_json,'') FROM transcode_task t LEFT JOIN pretranscode_task_meta m ON m.task_id=t.id WHERE t.task_type='pretranscode' AND t.status='waiting' AND NOT EXISTS(SELECT 1 FROM pretranscode_rendition_job j WHERE j.task_id=t.id)`)
 	if err != nil {
 		log.Printf("pretranscode recovery query failed: %v", err)
 		return 0
 	}
 	defer rows.Close()
-	var orphans []struct{ taskID, presetID int64 }
-	for rows.Next() {
-		var tID, pID int64
-		if err := rows.Scan(&tID, &pID); err != nil {
-			continue
-		}
-		orphans = append(orphans, struct{ taskID, presetID int64 }{tID, pID})
+	type orphan struct {
+		taskID, presetID, runID, stepID, generation int64
+		snapshot                                    string
 	}
-	if len(orphans) == 0 {
-		return 0
+	var orphans []orphan
+	for rows.Next() {
+		var o orphan
+		if err := rows.Scan(&o.taskID, &o.presetID, &o.runID, &o.stepID, &o.generation, &o.snapshot); err == nil {
+			orphans = append(orphans, o)
+		}
 	}
 	fixed := 0
 	for _, o := range orphans {
-		preset, err := s.loadPreset(o.presetID)
-		if err != nil {
-			log.Printf("pretranscode recovery: load preset %d for task %d failed: %v", o.presetID, o.taskID, err)
+		if o.runID > 0 || o.stepID > 0 || o.generation > 0 {
+			var jobs []ingestPrepareTaskJob
+			if json.Unmarshal([]byte(o.snapshot), &jobs) != nil || len(jobs) == 0 {
+				if err := s.failLinkedOrphan(o.taskID, o.runID, o.stepID, "invalid immutable prepare jobs snapshot"); err != nil {
+					log.Printf("pretranscode recovery fail linked task %d: %v", o.taskID, err)
+				}
+				continue
+			}
+			tx, err := s.DB.Begin()
+			if err != nil {
+				continue
+			}
+			ok := true
+			for _, j := range jobs {
+				if len(j.Config) == 0 || !json.Valid(j.Config) {
+					ok = false
+					break
+				}
+				if _, err = tx.Exec(`INSERT INTO pretranscode_rendition_job(task_id,rendition_id,rendition_name,status,config_snapshot_json) VALUES(?,?,?,'waiting',?)`, o.taskID, nullRenditionID(j.RenditionID), j.RenditionName, string(j.Config)); err != nil {
+					ok = false
+					break
+				}
+			}
+			if ok && tx.Commit() == nil {
+				fixed++
+			} else {
+				_ = tx.Rollback()
+				_ = s.failLinkedOrphan(o.taskID, o.runID, o.stepID, "invalid immutable prepare job snapshot")
+			}
 			continue
 		}
+		preset, err := s.loadPreset(o.presetID)
+		if err != nil {
+			continue
+		}
+		inserted := true
 		for _, r := range preset.Renditions {
-			if _, err := s.DB.Exec(`INSERT INTO pretranscode_rendition_job (task_id, rendition_id, rendition_name, status)
-				VALUES (?, ?, ?, 'waiting')`, o.taskID, r.ID, r.Name); err != nil {
-				log.Printf("pretranscode recovery: insert job task=%d rendition=%s failed: %v", o.taskID, r.Name, err)
+			if _, err := s.DB.Exec(`INSERT INTO pretranscode_rendition_job(task_id,rendition_id,rendition_name,status) VALUES(?,?,?,'waiting')`, o.taskID, r.ID, r.Name); err != nil {
+				inserted = false
+				break
 			}
 		}
-		fixed++
-		log.Printf("pretranscode recovery: recreated rendition jobs for task %d (preset %d, %d renditions)", o.taskID, o.presetID, len(preset.Renditions))
+		if inserted {
+			fixed++
+		}
 	}
 	return fixed
+}
+func nullRenditionID(id int64) any {
+	if id > 0 {
+		return id
+	}
+	return nil
+}
+func (s *TaskService) failLinkedOrphan(taskID, runID, stepID int64, message string) error {
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`UPDATE transcode_task SET status='failed',error_message=? WHERE id=? AND status='waiting'`, message, taskID); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`UPDATE media_ingest_step SET status='failed',last_error=?,finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND run_id=? AND status='waiting'`, message, stepID, runID); err != nil {
+		return err
+	}
+	if err = publication.AggregateTx(context.Background(), tx, runID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // RepairStuckWaitingTasks resets failed rendition jobs for pretranscode tasks
@@ -782,8 +917,8 @@ func bitrateFromName(name string) string {
 
 // Standard errors.
 var (
-	ErrTaskNotFound                = errors.New("task not found")
-	ErrMediaNotFound               = errors.New("media not found")
-	ErrPresetDisabled              = errors.New("preset is disabled")
-	ErrPlaintextSourceUnavailable  = errors.New("plaintext source unavailable")
+	ErrTaskNotFound               = errors.New("task not found")
+	ErrMediaNotFound              = errors.New("media not found")
+	ErrPresetDisabled             = errors.New("preset is disabled")
+	ErrPlaintextSourceUnavailable = errors.New("plaintext source unavailable")
 )

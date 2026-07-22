@@ -1132,6 +1132,13 @@
       "section_related_movie": "相關電影"
     },
     "media_manager": {
+      "ingest_status_title": "入庫狀態",
+      "ingest_status_empty": "暫無入庫診斷項",
+      "publication_processing": "處理中",
+      "publication_degraded": "降級可用",
+      "publication_failed": "失敗",
+      "publication_cancelled": "已取消",
+      "publication_published": "已發佈",
       "load_libraries_failed": "載入媒體庫失敗",
       "load_media_failed": "載入媒體失敗",
       "load_detail_failed": "載入媒體詳情失敗",
@@ -1203,7 +1210,10 @@
       "poster_picker_scrape_failed": "刮削圖片候選取得失敗，請檢查媒體庫的圖片刮削源設定",
       "poster_picker_none_selected": "請先選擇一張圖片",
       "poster_picker_confirm": "確定",
-      "poster_picker_cancel": "取消"
+      "poster_picker_cancel": "取消",
+      "ingest_load_more": "載入更多",
+      "ingest_load_more_loading": "正在載入更多…",
+      "ingest_load_more_retry": "重試載入更多"
     },
     "playlists": {
       "category_audio": "音樂",
@@ -1270,6 +1280,7 @@
       "all_folders": "全部收藏夾"
     },
     "home": {
+      "degraded_badge": "降級可用",
       "aria_deselect": "取消選取",
       "aria_select": "選取",
       "aria_play_video": "播放 {title}",

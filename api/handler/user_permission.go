@@ -16,6 +16,23 @@ import (
 	"knox-media/api/middleware"
 )
 
+const mediaPublicationVisibleStatesSQL = "('published','degraded')"
+
+func mediaPublicationVisiblePredicate(alias string) string {
+	alias = strings.TrimSpace(alias)
+	if alias != "" {
+		alias += "."
+	}
+	return alias + "publication_state IN " + mediaPublicationVisibleStatesSQL
+}
+
+func mediaPublicationVisibilityPredicate(alias string, includeUnpublished bool) string {
+	if includeUnpublished {
+		return "1=1"
+	}
+	return mediaPublicationVisiblePredicate(alias)
+}
+
 type userPermissionProfile struct {
 	UserID                int64
 	Role                  string
@@ -173,27 +190,28 @@ func (h *Handler) requirePhotoAggregateAccess(c *gin.Context, libraryID int64) b
 }
 
 func (h *Handler) requireMediaAccess(c *gin.Context, mediaID int64, needPlay bool) (int64, bool) {
-	if middleware.IsAPIClient(c) {
-		return 0, true
-	}
 	uid := middleware.UserID(c)
-	if uid <= 0 && strings.TrimSpace(middleware.Role(c)) == "" {
-		// Allow direct handler tests / internal calls without auth middleware context.
-		return 0, true
-	}
-	if uid <= 0 {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
-		return 0, false
-	}
 	var libraryID int64
 	var filePath string
 	var metaRaw string
-	if err := h.App.DB.QueryRow(`SELECT library_id, COALESCE(file_path,''), COALESCE(meta_json,'') FROM media WHERE id = ?`, mediaID).Scan(&libraryID, &filePath, &metaRaw); err != nil {
+	query := `SELECT library_id, COALESCE(file_path,''), COALESCE(meta_json,'') FROM media WHERE id = ? AND ` + mediaPublicationVisibilityPredicate("media", middleware.IsAdmin(c))
+	if err := h.App.DB.QueryRow(query, mediaID).Scan(&libraryID, &filePath, &metaRaw); err != nil {
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 		} else {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		}
+		return 0, false
+	}
+	if middleware.IsAPIClient(c) {
+		return libraryID, true
+	}
+	if uid <= 0 && strings.TrimSpace(middleware.Role(c)) == "" {
+		// Allow direct handler tests / internal calls without auth middleware context.
+		return libraryID, true
+	}
+	if uid <= 0 {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return 0, false
 	}
 	profile, err := h.loadUserPermissionProfile(uid)

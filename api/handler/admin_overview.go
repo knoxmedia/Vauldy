@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"path/filepath"
 	"runtime"
-	"runtime/debug"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -17,6 +16,7 @@ import (
 	"github.com/shirou/gopsutil/v3/disk"
 	"github.com/shirou/gopsutil/v3/mem"
 
+	"knox-media/internal/buildinfo"
 	"knox-media/internal/postingest"
 	"knox-media/internal/store"
 )
@@ -173,13 +173,10 @@ func (b *AdminOverviewBuilder) Build(ctx context.Context) (AdminOverviewData, er
 	if err != nil {
 		return nil, err
 	}
-	softwareVersion := "dev"
-	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
-		softwareVersion = bi.Main.Version
-	}
+	softwareBuild := buildinfo.Current()
 	return AdminOverviewData{
 		"monitor":    map[string]any{"cpu_percent": sample.CPUPercent, "memory_percent": sample.MemoryPercent, "disk_percent": sample.DiskPercent, "transcode_task_count": transcodeTasks, "media_total": mediaTotal},
-		"system":     map[string]any{"cpu_count": runtime.NumCPU(), "memory_total": sample.MemoryTotal, "os": runtime.GOOS + "/" + runtime.GOARCH, "database": "sqlite " + dbVersion.String, "software_version": softwareVersion},
+		"system":     map[string]any{"cpu_count": runtime.NumCPU(), "memory_total": sample.MemoryTotal, "os": runtime.GOOS + "/" + runtime.GOARCH, "database": "sqlite " + dbVersion.String, "software_version": softwareBuild.Version, "software_commit": softwareBuild.Commit, "software_build_time": softwareBuild.BuildTime, "software_dirty": softwareBuild.Dirty, "software_dirty_known": softwareBuild.DirtyKnown, "software_vcs_revision": softwareBuild.VCS.Revision, "software_vcs_time": softwareBuild.VCS.Time, "software_vcs_modified": softwareBuild.VCS.Modified, "software_vcs_modified_known": softwareBuild.VCS.ModifiedKnown},
 		"activities": activities, "post_ingest_queue": queue, "running_post_ingest_tasks": running, "scan_leases": leases, "resource_budget": b.budget(), "sqlite_metrics": b.sqliteMetrics(),
 	}, nil
 }

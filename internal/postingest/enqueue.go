@@ -104,7 +104,7 @@ WHERE s.id=?`, mediaID, *scanTaskID).Scan(&exists)
 			if _, err := tx.ExecContext(ctx, `
 INSERT INTO post_ingest_task (media_id,scan_task_id,task_type)
 VALUES (?,?,?)
-ON CONFLICT(media_id,task_type) DO NOTHING`, mediaID, scanTaskID, typ); err != nil {
+ON CONFLICT(media_id,generation,task_type) DO NOTHING`, mediaID, scanTaskID, typ); err != nil {
 				return err
 			}
 		}

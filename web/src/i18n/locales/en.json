@@ -1135,6 +1135,13 @@
       "section_related_movie": "Related movies"
     },
     "media_manager": {
+      "ingest_status_title": "Ingest status",
+      "ingest_status_empty": "No active ingest diagnostics",
+      "publication_processing": "Processing",
+      "publication_degraded": "Degraded",
+      "publication_failed": "Failed",
+      "publication_cancelled": "Cancelled",
+      "publication_published": "Published",
       "load_libraries_failed": "Failed to load libraries",
       "load_media_failed": "Failed to load media",
       "load_detail_failed": "Failed to load media details",
@@ -1218,7 +1225,10 @@
       "poster_picker_scrape_failed": "Failed to fetch scraped candidates — check the library's image scrape sources",
       "poster_picker_none_selected": "Please select an image first",
       "poster_picker_confirm": "OK",
-      "poster_picker_cancel": "Cancel"
+      "poster_picker_cancel": "Cancel",
+      "ingest_load_more": "Load more",
+      "ingest_load_more_loading": "Loading more…",
+      "ingest_load_more_retry": "Retry loading more"
     },
     "playlists": {
       "category_audio": "Music",
@@ -1301,6 +1311,7 @@
       "folder_delete_cancel": "Cancel"
     },
     "home": {
+      "degraded_badge": "Degraded",
       "aria_deselect": "Deselect",
       "aria_select": "Select",
       "aria_play_video": "Play {title}",

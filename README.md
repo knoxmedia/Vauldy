@@ -324,7 +324,9 @@ go build -o knox-media ./cmd/server
 
 ```bash
 # 构建
-docker build -t knox-media .
+docker build --build-arg ALLOW_DIRTY=true --build-arg VERSION=development --build-arg COMMIT=<full-commit> --build-arg BUILD_TIME=<UTC-RFC3339> --build-arg DIRTY=true -t knox-media .
+# Release builds omit ALLOW_DIRTY and pass VERSION, COMMIT, BUILD_TIME, and DIRTY=false.
+# Trusted Docker source validation requires building from a full clone whose .git is a directory; linked Git worktrees are not supported for release Docker builds.
 
 # 运行
 docker run -d \
@@ -903,7 +905,9 @@ go build -o knox-media ./cmd/server
 
 ```bash
 # Build
-docker build -t knox-media .
+docker build --build-arg ALLOW_DIRTY=true --build-arg VERSION=development --build-arg COMMIT=<full-commit> --build-arg BUILD_TIME=<UTC-RFC3339> --build-arg DIRTY=true -t knox-media .
+# Release builds omit ALLOW_DIRTY and pass VERSION, COMMIT, BUILD_TIME, and DIRTY=false.
+# Trusted Docker source validation requires building from a full clone whose .git is a directory; linked Git worktrees are not supported for release Docker builds.
 
 # Run
 docker run -d \

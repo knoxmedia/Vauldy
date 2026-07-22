@@ -3,6 +3,7 @@ package pretranscode
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -283,4 +284,102 @@ func itoa(n int64) string {
 		n /= 10
 	}
 	return string(buf[i:])
+}
+
+func seedManagedLinkedTask(t *testing.T, db *sql.DB, status string) (svc *TaskService, taskID, jobID, runID, stepID, mediaID int64) {
+	t.Helper()
+	taskID, runID, stepID, mediaID = seedLinkedPrepareTerminal(t, db, 1)
+	res, err := db.Exec(`INSERT INTO pretranscode_rendition_job(task_id,rendition_id,rendition_name,status,progress,lease_owner,lease_until) VALUES(?,1,'360p',?,50,'old-owner',datetime(CURRENT_TIMESTAMP,'+1 hour'))`, taskID, status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobID, _ = res.LastInsertId()
+	if _, err = db.Exec(`UPDATE transcode_task SET status=? WHERE id=?`, status, taskID); err != nil {
+		t.Fatal(err)
+	}
+	if status == "failed" {
+		if _, err = db.Exec(`UPDATE media_ingest_step SET status='failed',attempts=max_attempts,last_error='boom',lease_owner='old',lease_until='2040-01-01',finished_at=CURRENT_TIMESTAMP WHERE id=?`, stepID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = db.Exec(`UPDATE media_ingest_run SET status='degraded',preserve_visibility=1,error_message='boom' WHERE id=?`, runID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = db.Exec(`UPDATE media SET publication_state='degraded',publication_error='boom' WHERE id=?`, mediaID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return &TaskService{DB: db, TranscodeDir: t.TempDir()}, taskID, jobID, runID, stepID, mediaID
+}
+
+func TestLinkedPrepareCancelTaskTransitionsFourLayersAtomically(t *testing.T) {
+	db := newTestDB(t)
+	svc, taskID, jobID, runID, stepID, mediaID := seedManagedLinkedTask(t, db, "running")
+	if err := svc.CancelTask(taskID); err != nil {
+		t.Fatal(err)
+	}
+	assertPrepareTerminalState(t, db, jobID, taskID, stepID, runID, mediaID, "cancelled", "cancelled", "cancelled", "cancelled", "cancelled")
+}
+
+func TestLinkedPrepareRetryTaskStartsNewRoundThenWorkerCanPublish(t *testing.T) {
+	db := newTestDB(t)
+	svc, taskID, jobID, runID, stepID, mediaID := seedManagedLinkedTask(t, db, "failed")
+	if err := svc.RetryTask(taskID); err != nil {
+		t.Fatal(err)
+	}
+	assertPrepareTerminalState(t, db, jobID, taskID, stepID, runID, mediaID, "waiting", "waiting", "waiting", "processing", "degraded")
+	var attempts int
+	var lastError string
+	var owner, lease, finished sql.NullString
+	if err := db.QueryRow(`SELECT attempts,last_error,lease_owner,lease_until,finished_at FROM media_ingest_step WHERE id=?`, stepID).Scan(&attempts, &lastError, &owner, &lease, &finished); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 0 || lastError != "" || owner.Valid || lease.Valid || finished.Valid {
+		t.Fatalf("retry step=%d/%q owner=%v lease=%v finished=%v", attempts, lastError, owner, lease, finished)
+	}
+	if _, err := db.Exec(`UPDATE pretranscode_rendition_job SET status='running',lease_owner='retry-owner',lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds') WHERE id=?`, jobID); err != nil {
+		t.Fatal(err)
+	}
+	w := NewWorker(db, nil, "ffmpeg", t.TempDir(), 1, 1)
+	if _, err := w.finalizeJobAndTaskTx(context.Background(), claimedJob{ID: jobID, TaskID: taskID, Owner: "retry-owner"}, renditionJobTerminal{Status: "done", Progress: 100, OutputPath: "/retry", Encoder: "libx264"}); err != nil {
+		t.Fatal(err)
+	}
+	assertPrepareTerminalState(t, db, jobID, taskID, stepID, runID, mediaID, "done", "done", "done", "published", "published")
+}
+
+func TestLinkedPrepareRejectsPartialRenditionAndPauseOperations(t *testing.T) {
+	db := newTestDB(t)
+	svc, taskID, jobID, _, _, _ := seedManagedLinkedTask(t, db, "running")
+	for name, call := range map[string]func() error{"cancel rendition": func() error { return svc.CancelRenditionJob(jobID) }, "retry rendition": func() error { return svc.RetryRenditionJob(jobID) }, "pause": func() error { return svc.PauseTask(taskID) }, "resume": func() error { return svc.ResumeTask(taskID) }} {
+		t.Run(name, func(t *testing.T) {
+			if err := call(); !errors.Is(err, ErrLinkedIngestTaskOperation) {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+}
+
+func TestLegacyTaskManagementBehaviorRemainsAvailable(t *testing.T) {
+	db := newTestDB(t)
+	presetSvc := &PresetService{DB: db}
+	preset, _ := presetSvc.CreatePreset(CreatePresetInput{Name: "legacy-management", OutputFormat: "hls", VideoCodec: "libx264", AudioCodec: "aac", AudioBitrate: "128k", Renditions: []Rendition{{Name: "720p", Height: 720, VideoBitrate: "2800k"}}})
+	mid := seedVideo(t, db, t.TempDir(), "fid-legacy-management", "legacy")
+	svc := &TaskService{DB: db, TranscodeDir: t.TempDir()}
+	ids, err := svc.CreateTask([]int64{mid}, preset.ID, "normal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs, _ := svc.ListRenditionJobs(ids[0])
+	jobID := jobs[0].ID
+	if err = svc.CancelRenditionJob(jobID); err != nil {
+		t.Fatal(err)
+	}
+	if err = svc.RetryRenditionJob(jobID); err != nil {
+		t.Fatal(err)
+	}
+	if err = svc.PauseTask(ids[0]); err != nil {
+		t.Fatal(err)
+	}
+	if err = svc.ResumeTask(ids[0]); err != nil {
+		t.Fatal(err)
+	}
 }

@@ -1134,6 +1134,13 @@
       "section_related_movie": "相关电影"
     },
     "media_manager": {
+      "ingest_status_title": "入库状态",
+      "ingest_status_empty": "暂无入库诊断项",
+      "publication_processing": "处理中",
+      "publication_degraded": "降级可用",
+      "publication_failed": "失败",
+      "publication_cancelled": "已取消",
+      "publication_published": "已发布",
       "load_libraries_failed": "加载媒体库失败",
       "load_media_failed": "加载媒体失败",
       "load_detail_failed": "加载媒体详情失败",
@@ -1217,7 +1224,10 @@
       "poster_picker_scrape_failed": "刮削图片候选获取失败，请检查媒体库的图片刮削源设置",
       "poster_picker_none_selected": "请先选择一张图片",
       "poster_picker_confirm": "确定",
-      "poster_picker_cancel": "取消"
+      "poster_picker_cancel": "取消",
+      "ingest_load_more": "加载更多",
+      "ingest_load_more_loading": "正在加载更多…",
+      "ingest_load_more_retry": "重试加载更多"
     },
     "playlists": {
       "category_audio": "音乐",
@@ -1300,6 +1310,7 @@
       "folder_delete_cancel": "取消"
     },
     "home": {
+      "degraded_badge": "降级可用",
       "aria_deselect": "取消选中",
       "aria_select": "选中",
       "aria_play_video": "播放 {title}",

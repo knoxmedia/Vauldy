@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"log"
 )
@@ -23,10 +24,9 @@ func ResetInterruptedTasks(db *sql.DB) {
 		}
 	}
 
-	reset("scrape_task", `
-		UPDATE scrape_task
-		SET status = 'waiting', progress = 0, message = ?
-		WHERE status = 'running'`, restartResetMessage)
+	if err := resetInterruptedScrapeTasks(context.Background(), db); err != nil {
+		log.Printf("reset interrupted scrape_task: %v", err)
+	}
 
 	reset("transcode_task", `
 		UPDATE transcode_task
@@ -35,8 +35,17 @@ func ResetInterruptedTasks(db *sql.DB) {
 
 	reset("pretranscode_rendition_job", `
 		UPDATE pretranscode_rendition_job
-		SET status = 'waiting', progress = 0, error_message = ?
+		SET status = 'waiting', progress = 0, error_message = ?, available_at=CURRENT_TIMESTAMP, lease_owner=NULL, lease_until=NULL
 		WHERE status = 'running'`, restartResetMessage)
+
+	reset("linked prepare step", `
+		UPDATE media_ingest_step
+		SET status='waiting', lease_owner=NULL, lease_until=NULL, finished_at=NULL,
+			last_error='', updated_at=CURRENT_TIMESTAMP
+		WHERE step_type='prepare' AND status='running'
+		  AND id IN (SELECT ingest_step_id FROM transcode_task
+		             WHERE task_type='pretranscode' AND status='waiting'
+		               AND ingest_step_id IS NOT NULL)`)
 
 	reset("package_task", `
 		UPDATE package_task
@@ -67,4 +76,19 @@ func ResetInterruptedTasks(db *sql.DB) {
 		UPDATE keyframe_task
 		SET status = 'waiting', error_message = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE status = 'running'`, restartResetMessage)
+}
+
+func resetInterruptedScrapeTasks(ctx context.Context, db *sql.DB) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `UPDATE scrape_task SET status='waiting', progress=0, message=?, lease_owner=NULL, lease_until=NULL, available_at=COALESCE(available_at,CURRENT_TIMESTAMP) WHERE status='running'`, restartResetMessage); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE media_ingest_step SET status='waiting', lease_owner=NULL, lease_until=NULL, available_at=(SELECT t.available_at FROM scrape_task t WHERE t.ingest_step_id=media_ingest_step.id AND t.status='waiting'), attempts=(SELECT COALESCE(t.fail_count,0) FROM scrape_task t WHERE t.ingest_step_id=media_ingest_step.id AND t.status='waiting'), last_error='', finished_at=NULL, updated_at=CURRENT_TIMESTAMP WHERE id IN (SELECT ingest_step_id FROM scrape_task WHERE status='waiting' AND ingest_step_id IS NOT NULL) AND status='running'`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }

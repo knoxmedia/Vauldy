@@ -15,6 +15,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"knox-media/internal/publication"
 	"knox-media/internal/store"
 	"knox-media/pkg/ffprobe"
 	"knox-media/pkg/hashutil"
@@ -137,6 +138,124 @@ func TestScanLibraryFoldersAddsMediaAndNodes(t *testing.T) {
 	}
 	if nodeCount < 2 {
 		t.Fatalf("node count=%d want >= 2", nodeCount)
+	}
+}
+
+func TestScanNewVideoRollsBackMediaWhenPlanFails(t *testing.T) {
+	db, err := store.OpenSQLite(filepath.Join(t.TempDir(), "scan-plan-rollback.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "movie.mp4"), []byte("video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := db.Exec(`INSERT INTO library(name,type,path) VALUES('videos','video',?)`, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	libraryID, _ := res.LastInsertId()
+	res, err = db.Exec(`INSERT INTO scan_task(library_id,status,source) VALUES(?,'running','manual')`, libraryID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, _ := res.LastInsertId()
+	planRejected := errors.New("plan rejected")
+	s := &Scanner{DB: db, SkipHash: true, ProbePath: func(context.Context, int64, string) (*ffprobe.Summary, error) {
+		return &ffprobe.Summary{}, nil
+	}}
+	_, err = s.ScanLibraryFoldersWithContextAndCallbacks(context.Background(), libraryID, []string{root}, ScanCallbacks{
+		OnMediaDiscoveredTx: func(ctx context.Context, tx *sql.Tx, mediaID int64, _, fileType string) error {
+			_, planErr := publication.NewPlanner(publication.PlanOptions{}).PlanNewMediaTx(ctx, tx, publication.NewMedia{MediaID: mediaID, ScanTaskID: taskID, FileType: fileType})
+			if planErr != nil {
+				return planErr
+			}
+			return planRejected
+		},
+	})
+	if !errors.Is(err, planRejected) {
+		t.Fatalf("scan error=%v want %v", err, planRejected)
+	}
+	for _, table := range []string{"media", "media_ingest_run", "media_ingest_step", "post_ingest_task"} {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("%s rows=%d want 0", table, count)
+		}
+	}
+}
+
+func TestScanNewVideoCommitsMediaAndPlanTogether(t *testing.T) {
+	db, err := store.OpenSQLite(filepath.Join(t.TempDir(), "scan-plan-commit.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "movie.mp4"), []byte("video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := db.Exec(`INSERT INTO library(name,type,path,preview_extract) VALUES('videos','video',?,1)`, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	libraryID, _ := res.LastInsertId()
+	res, err = db.Exec(`INSERT INTO scan_task(library_id,status,source) VALUES(?,'running','manual')`, libraryID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, _ := res.LastInsertId()
+	planner := publication.NewPlanner(publication.PlanOptions{})
+	s := &Scanner{DB: db, SkipHash: true, ProbePath: func(context.Context, int64, string) (*ffprobe.Summary, error) {
+		return &ffprobe.Summary{}, nil
+	}}
+	added, err := s.ScanLibraryFoldersWithContextAndCallbacks(context.Background(), libraryID, []string{root}, ScanCallbacks{
+		OnMediaDiscoveredTx: func(ctx context.Context, tx *sql.Tx, mediaID int64, _, fileType string) error {
+			_, err := planner.PlanNewMediaTx(ctx, tx, publication.NewMedia{MediaID: mediaID, ScanTaskID: taskID, FileType: fileType})
+			return err
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if added != 1 {
+		t.Fatalf("added=%d want 1", added)
+	}
+	for table, want := range map[string]int{"media": 1, "media_ingest_run": 1, "media_ingest_step": 4, "post_ingest_task": 3} {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != want {
+			t.Fatalf("%s rows=%d want %d", table, count, want)
+		}
+	}
+}
+
+func TestScannerCallbackRegressionUsesCallbacksField(t *testing.T) {
+	db := newScannerTestDB(t)
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "movie.mp4"), []byte("video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	s := &Scanner{DB: db, SkipHash: true, OnMediaAdded: func(int64, string, string) {
+		panic("scanner field callback must not run")
+	}}
+	_, err := s.ScanLibraryFoldersWithContextAndCallbacks(context.Background(), 1, []string{root}, ScanCallbacks{
+		OnMediaAdded: func(context.Context, int64, string, string) error {
+			calls++
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("argument callback calls=%d want 1", calls)
 	}
 }
 

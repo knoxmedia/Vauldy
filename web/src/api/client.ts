@@ -101,6 +101,10 @@ export type MediaItem = {
   bitrate?: number;
   format: string;
   status: string;
+  publication_state?: "processing" | "published" | "degraded" | "failed" | "cancelled";
+  published_at?: string;
+  publication_error?: string;
+  ingest_generation?: number;
   created_at?: string;
   last_play_at?: string;
   /** 1 when the current user has marked or finished watching this item. */
@@ -1063,11 +1067,11 @@ export async function fetchPersonCollaborators(personId: number, limit = 20) {
   return data?.items ?? [];
 }
 
-export async function fetchMediaPersons(mediaId: number) {
+export async function fetchMediaPersons(mediaId: number, signal?: AbortSignal) {
   const { data } = await api.get<{
     items?: MediaPersonLink[];
     resolved?: Array<{ person_id: number; person_name: string; avatar_url?: string }>;
-  }>(`/api/v1/media/${mediaId}/persons`);
+  }>(`/api/v1/media/${mediaId}/persons`, { signal });
   return {
     items: data?.items ?? [],
     resolved: data?.resolved ?? [],
@@ -1299,8 +1303,8 @@ export type MediaDetail = MediaItem & {
   meta_json?: string;
 };
 
-export async function fetchMediaDetail(mediaId: number) {
-  const { data } = await api.get<MediaDetail>(`/api/v1/media/${mediaId}`);
+export async function fetchMediaDetail(mediaId: number, signal?: AbortSignal) {
+  const { data } = await api.get<MediaDetail>(`/api/v1/media/${mediaId}`, { signal });
   return data;
 }
 
@@ -2046,6 +2050,14 @@ export type AdminOverview = {
     os: string;
     database: string;
     software_version: string;
+    software_commit?: string;
+    software_build_time?: string;
+    software_dirty?: boolean;
+    software_dirty_known?: boolean;
+    software_vcs_revision?: string;
+    software_vcs_time?: string;
+    software_vcs_modified?: boolean;
+    software_vcs_modified_known?: boolean;
   };
   activities: Array<{
     id: number;
@@ -2867,5 +2879,65 @@ export async function installLibreOfficeDocTrans() {
     {},
     { timeout: 30 * 60 * 1000 },
   );
+  return data;
+}
+
+export type PublicationState = "processing" | "published" | "degraded" | "failed" | "cancelled";
+
+export type AdminMediaItem = MediaItem & {
+  publication_state: PublicationState;
+  ingest_generation: number;
+};
+
+export type MediaIngestStep = {
+  id: number;
+  type: "poster" | "scrape" | "preview" | "keyframe" | "subtitle" | "atrack" | "encrypt" | "prepare";
+  required: boolean;
+  status: "waiting" | "running" | "done" | "skipped" | "failed" | "cancelled";
+  attempts: number;
+  max_attempts: number;
+  available_at: string;
+  lease_owner: string;
+  lease_until: string;
+  error: string;
+  created_at: string;
+  updated_at: string;
+  started_at: string;
+  finished_at: string;
+};
+
+export type MediaIngestResponse = {
+  media: { id: number; publication_state: PublicationState; publication_error: string; published_at: string; ingest_generation: number };
+  run: { id: number; generation: number; status: PublicationState; reason: "scan" | "repair" | "manual_retry"; preserve_visibility: boolean; error: string; created_at: string; updated_at: string; finished_at: string };
+  steps: MediaIngestStep[];
+};
+
+export type AdminMediaPage = {
+  items: AdminMediaItem[];
+  next_cursor?: string;
+  has_more: boolean;
+};
+
+export type AdminMediaSort = "id_desc";
+
+export async function fetchAdminMedia(
+  params?: { publication_state?: PublicationState; limit?: number; library_id?: number; file_type?: string; q?: string; sort?: AdminMediaSort; cursor?: string },
+  signal?: AbortSignal,
+): Promise<AdminMediaPage> {
+  const { data } = await api.get<{ items?: AdminMediaItem[]; next_cursor?: string; has_more?: boolean }>("/api/v1/admin/media", { params, signal });
+  return {
+    items: data?.items ?? [],
+    next_cursor: data?.next_cursor,
+    has_more: data?.has_more === true,
+  };
+}
+
+export async function fetchAdminMediaIngest(mediaId: number) {
+  const { data } = await api.get<MediaIngestResponse>(`/api/v1/admin/media/${mediaId}/ingest`);
+  return data;
+}
+
+export async function retryAdminMediaIngest(mediaId: number) {
+  const { data } = await api.post<MediaIngestResponse>(`/api/v1/admin/media/${mediaId}/ingest/retry`);
   return data;
 }

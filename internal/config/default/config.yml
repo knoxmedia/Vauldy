@@ -1,4 +1,4 @@
-﻿server:
+server:
   host: "0.0.0.0"
   port: 8200
   mode: "release"
@@ -109,6 +109,3 @@ jit:
 cors:
   allow_origins:
     - "*"
-
-
-\n

@@ -100,6 +100,7 @@ function HistoryContinueCard({
   h,
   nav,
   thumbSrc,
+  posterGeneration,
   pct,
   selected,
   onToggleSelect,
@@ -110,6 +111,7 @@ function HistoryContinueCard({
   h: HistoryItem;
   nav: ReturnType<typeof useNavigate>;
   thumbSrc: string;
+  posterGeneration?: number;
   pct: number;
   selected: boolean;
   onToggleSelect: () => void;
@@ -118,6 +120,11 @@ function HistoryContinueCard({
   t: TranslateFn;
 }) {
   const [posterFailed, setPosterFailed] = useState(false);
+
+  useEffect(() => {
+    setPosterFailed(false);
+  }, [thumbSrc, posterGeneration]);
+
   const homeMediaMenu = useMemo(
     () =>
       buildHomeMediaMenu(h.media_id, {
@@ -282,12 +289,21 @@ function RecentShelfCard({
   const year = variant === "movie" ? mediaReleaseYear(m) : "";
   const landscapePrimary = mediaLandscapeThumbSrc(m);
   const landscapeFallback = mediaPosterSrc(m);
-  const posterSrc =
+  const resolvedPosterSource =
     variant === "music"
       ? musicMediaPosterSrc(m)
       : isLandscape
-        ? (useLandscapePosterFallback ? landscapeFallback : landscapePrimary) || landscapeFallback
+        ? landscapePrimary || landscapeFallback
         : mediaPosterSrc(m);
+  const sourceKey = `${resolvedPosterSource ?? ""}|${m.ingest_generation ?? "stable"}`;
+
+  useEffect(() => {
+    setPosterFailed(false);
+    setUseLandscapePosterFallback(false);
+  }, [sourceKey]);
+
+  const posterSrc =
+    isLandscape && useLandscapePosterFallback ? landscapeFallback : resolvedPosterSource;
   const showPosterImg = Boolean(posterSrc) && !posterFailed;
   const homeMediaMenu = useMemo(
     () => buildHomeMediaMenu(m.id),
@@ -434,6 +450,16 @@ function RecentShelfCard({
           </div>
         </>
       </div>
+      {m.publication_state === "degraded" ? (
+        <Tag
+          color="warning"
+          role="status"
+          aria-label={t("pages.home.degraded_badge")}
+          className={styles.publicationBadge}
+        >
+          {t("pages.home.degraded_badge")}
+        </Tag>
+      ) : null}
       <div
         className={styles.posterCapMovie}
         role="presentation"
@@ -563,7 +589,7 @@ function RecentAddedRow({
         {items.map((m, index) =>
           useShelfCard ? (
             <RecentShelfCard
-              key={m.id}
+              key={`${m.id}:${mediaPosterSrc(m)}:${m.ingest_generation ?? "stable"}`}
               m={m}
               nav={nav}
               selected={sectionKey === "movie" && movieSelectedIds.has(m.id)}
@@ -578,7 +604,7 @@ function RecentAddedRow({
             />
           ) : (
             <div
-              key={m.id}
+              key={`${m.id}:${landscape ? mediaLandscapeThumbSrc(m) : mediaPosterSrc(m)}:${m.ingest_generation ?? "stable"}`}
               className={landscape ? `${styles.thumbPoster} ${styles.thumbPosterLandscape}` : styles.thumbPoster}
               role="button"
               tabIndex={0}
@@ -731,10 +757,16 @@ export function HomePageSession() {
 
   /** Prefer poster_url from recent list when the same media appears in閵嗗瞼鎴风紒顓☆潎閻鈧? */
   const recentPosterById = useMemo(() => {
-    const m = new Map<number, string>();
+    const m = new Map<number, Pick<MediaItem, "poster_url" | "ingest_generation" | "publication_state">>();
     for (const r of allRecent) {
       const u = (r.poster_url || "").trim();
-      if (u) m.set(r.id, u);
+      if (u || r.ingest_generation !== undefined || r.publication_state !== undefined) {
+        m.set(r.id, {
+          poster_url: u,
+          ingest_generation: r.ingest_generation,
+          publication_state: r.publication_state,
+        });
+      }
     }
     return m;
   }, [allRecent]);
@@ -1456,9 +1488,10 @@ export function HomePageSession() {
               {history.map((h) => {
                 const dur = h.duration > 0 ? h.duration : 1;
                 const pct = Math.min(100, Math.round((h.position / dur) * 100));
+                const recentPoster = recentPosterById.get(h.media_id);
                 const thumbSrc = mediaPosterSrc({
                   id: h.media_id,
-                  poster_url: recentPosterById.get(h.media_id) || "",
+                  poster_url: recentPoster?.poster_url || "",
                 });
                 const rowKey = historyRowKey(h);
                 return (
@@ -1467,6 +1500,7 @@ export function HomePageSession() {
                     h={h}
                     nav={nav}
                     thumbSrc={thumbSrc}
+                    posterGeneration={recentPoster?.ingest_generation}
                     pct={pct}
                     selected={historySelectedKeys.has(rowKey)}
                     onToggleSelect={() => toggleHistoryRow(rowKey)}

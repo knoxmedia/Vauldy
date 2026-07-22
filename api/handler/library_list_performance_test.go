@@ -278,3 +278,44 @@ func TestListLibrariesMissingPreviewFailureUsesCooldown(t *testing.T) {
 		t.Fatalf("runs=%d want 1 during cooldown", got)
 	}
 }
+
+func TestListLibrariesCountsOnlyPublishedAndDegraded(t *testing.T) {
+	h := setupAccessTestDB(t)
+	if _, err := h.App.DB.Exec(`UPDATE media SET publication_state='processing' WHERE id=10;
+		INSERT INTO media(id,library_id,file_id,file_path,publication_state) VALUES
+		(41,1,'published-count','E:/lib1/published.mp4','published'),
+		(42,1,'degraded-count','E:/lib1/degraded.mp4','degraded'),
+		(43,1,'failed-count','E:/lib1/failed.mp4','failed'),
+		(44,1,'cancelled-count','E:/lib1/cancelled.mp4','cancelled')`); err != nil {
+		t.Fatal(err)
+	}
+	w, body := callListLibraries(t, h, context.Background(), 2, "admin", "admin")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	for _, item := range body.Items {
+		if item.ID == 1 && item.MediaCount != 2 {
+			t.Fatalf("library 1 media_count=%d want 2 body=%s", item.MediaCount, w.Body.String())
+		}
+	}
+}
+
+func TestFolderScopedCountFiltersPublicationState(t *testing.T) {
+	h := setupAccessTestDB(t)
+	if _, err := h.App.DB.Exec(`INSERT INTO user_library_folder_permission(user_id,library_id,folder_path) VALUES(1,1,'E:/lib1/allowed');
+		UPDATE media SET file_path='E:/lib1/allowed/legacy.mp4',publication_state='processing' WHERE id=10;
+		INSERT INTO media(id,library_id,file_id,file_path,publication_state) VALUES
+		(51,1,'folder-published','E:/lib1/allowed/published.mp4','published'),
+		(52,1,'folder-degraded','E:/lib1/allowed/degraded.mp4','degraded'),
+		(53,1,'folder-failed','E:/lib1/allowed/failed.mp4','failed'),
+		(54,1,'folder-hidden','E:/lib1/other/published.mp4','published')`); err != nil {
+		t.Fatal(err)
+	}
+	w, body := callListLibraries(t, h, context.Background(), 1, "user", "normal")
+	if w.Code != http.StatusOK || len(body.Items) != 1 {
+		t.Fatalf("status=%d items=%d body=%s", w.Code, len(body.Items), w.Body.String())
+	}
+	if body.Items[0].MediaCount != 2 {
+		t.Fatalf("folder media_count=%d want 2 body=%s", body.Items[0].MediaCount, w.Body.String())
+	}
+}

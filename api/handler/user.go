@@ -200,7 +200,7 @@ func (h *Handler) UserHistory(c *gin.Context) {
 			ORDER BY unixepoch(freshest.update_at) DESC, freshest.update_at DESC, freshest.id DESC
 			LIMIT 1
 		)
-		LEFT JOIN media m ON m.file_id = p.file_id
+		INNER JOIN media m ON m.file_id = p.file_id AND m.publication_state IN ('published','degraded')
 		LEFT JOIN library l ON l.id = m.library_id
 		WHERE uc.completed = 0
 		ORDER BY unixepoch(p.update_at) DESC, p.update_at DESC, p.id DESC

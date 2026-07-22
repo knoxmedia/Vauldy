@@ -16,8 +16,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/google/uuid"
 	"knox-media/api/middleware"
 	"knox-media/internal/metadatalib"
+	"knox-media/internal/publication"
 	"knox-media/internal/scraper"
 	"knox-media/internal/store"
 	"knox-media/internal/tvparse"
@@ -32,6 +34,8 @@ type scrapeRunBody struct {
 	IDs   []int64 `json:"ids"`
 	Limit int     `json:"limit"`
 }
+
+var scrapeBeforeFailUpdate func() error
 
 const (
 	maxScrapeTaskFailures = 3
@@ -332,13 +336,38 @@ func (h *Handler) ListScrapeTasks(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"items": items})
 }
 
-func claimScrapeTask(ctx context.Context, db *sql.DB, taskID int64) (bool, error) {
-	result, err := db.ExecContext(ctx, `UPDATE scrape_task SET status='running', progress=15, started_at=CURRENT_TIMESTAMP, message='scraping...' WHERE id=? AND (status='waiting' OR (status='failed' AND COALESCE(fail_count,0) < ?))`, taskID, maxScrapeTaskFailures)
+type scrapeClaim struct {
+	ID    int64
+	Owner string
+}
+
+func claimScrapeTaskWithOwner(ctx context.Context, db *sql.DB, taskID int64) (*scrapeClaim, error) {
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	n, err := result.RowsAffected()
-	return n == 1, err
+	defer tx.Rollback()
+	token := "scrape/" + uuid.NewString()
+	q := `UPDATE scrape_task SET status='running',progress=15,started_at=COALESCE(started_at,CURRENT_TIMESTAMP),message='scraping...',lease_owner=?,lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds'),fail_count=COALESCE(fail_count,0)+1 WHERE id=? AND (status='waiting' OR (status='failed' AND COALESCE(fail_count,0) < ?)) AND (available_at IS NULL OR available_at<=CURRENT_TIMESTAMP) AND (lease_until IS NULL OR lease_until<CURRENT_TIMESTAMP) AND (ingest_run_id IS NULL OR (generation=(SELECT r.generation FROM media_ingest_run r WHERE r.id=ingest_run_id AND r.media_id=scrape_task.media_id AND r.generation=(SELECT ingest_generation FROM media WHERE id=scrape_task.media_id))) AND ingest_step_id=(SELECT s.id FROM media_ingest_step s WHERE s.id=scrape_task.ingest_step_id AND s.run_id=scrape_task.ingest_run_id AND s.media_id=scrape_task.media_id AND s.generation=scrape_task.generation AND s.status='waiting'))`
+	r, err := tx.ExecContext(ctx, q, token, taskID, maxScrapeTaskFailures)
+	if err != nil {
+		return nil, err
+	}
+	n, _ := r.RowsAffected()
+	if n != 1 {
+		return nil, tx.Commit()
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE media_ingest_step SET status='running',attempts=(SELECT fail_count FROM scrape_task WHERE id=?),lease_owner=(SELECT lease_owner FROM scrape_task WHERE id=?),lease_until=(SELECT lease_until FROM scrape_task WHERE id=?),started_at=COALESCE(started_at,CURRENT_TIMESTAMP),updated_at=CURRENT_TIMESTAMP WHERE id=(SELECT ingest_step_id FROM scrape_task WHERE id=?) AND run_id=(SELECT ingest_run_id FROM scrape_task WHERE id=?) AND media_id=(SELECT media_id FROM scrape_task WHERE id=?) AND generation=(SELECT generation FROM scrape_task WHERE id=?)`, taskID, taskID, taskID, taskID, taskID, taskID, taskID); err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	return &scrapeClaim{ID: taskID, Owner: token}, nil
+}
+func claimScrapeTask(ctx context.Context, db *sql.DB, taskID int64) (bool, error) {
+	c, e := claimScrapeTaskWithOwner(ctx, db, taskID)
+	return c != nil, e
 }
 
 func (h *Handler) RunScrapeTasks(c *gin.Context) {
@@ -365,7 +394,8 @@ func (h *Handler) runScrapeTasksWithLimit(ctx context.Context, ids []int64, limi
 	} else {
 		rows, err := h.App.DB.QueryContext(ctx, `
 			SELECT id FROM scrape_task
-			WHERE status = 'waiting'
+			WHERE (available_at IS NULL OR available_at<=CURRENT_TIMESTAMP)
+			  AND (status = 'waiting'
 			   OR (status = 'failed' AND COALESCE(fail_count, 0) < ?)
 			ORDER BY id LIMIT ?`, maxScrapeTaskFailures, limit)
 		if err == nil {
@@ -390,7 +420,8 @@ func (h *Handler) runScrapeTasksWithLimit(ctx context.Context, ids []int64, limi
 		var taskStatus string
 		var source, query, title, existingMeta, filePath, fileType, libraryType string
 		var year sql.NullInt64
-		claimed, claimErr := claimScrapeTask(ctx, h.App.DB, taskID)
+		claim, claimErr := claimScrapeTaskWithOwner(ctx, h.App.DB, taskID)
+		claimed := claim != nil
 		if claimErr != nil || !claimed {
 			continue
 		}
@@ -425,7 +456,11 @@ func (h *Handler) runScrapeTasksWithLimit(ctx context.Context, ids []int64, limi
 		if tvparse.IsTVLibraryType(libraryType) && tvCtx.ValidEpisode() {
 			res, sErr = scraper.ScrapeTVEpisode(cfg, tvCtx, libraryType)
 		} else {
-			res, sErr = scraper.ScrapeWithConfig(query, source, cfg)
+			if h.scrapeWithConfig != nil {
+				res, sErr = h.scrapeWithConfig(query, source, cfg)
+			} else {
+				res, sErr = scraper.ScrapeWithConfig(query, source, cfg)
+			}
 		}
 		if res == nil {
 			res = &scraper.ScrapeResult{Title: query, Genres: []string{}, Extra: map[string]any{}}
@@ -434,7 +469,7 @@ func (h *Handler) runScrapeTasksWithLimit(ctx context.Context, ids []int64, limi
 			if ctx.Err() != nil {
 				break
 			}
-			if failErr := failScrapeTaskDB(ctx, h.App.DB, taskID, mediaID, source, query, err.Error()); failErr != nil {
+			if failErr := failScrapeTaskDB(ctx, h.App.DB, taskID, mediaID, source, query, err.Error(), claim.Owner); failErr != nil {
 				log.Printf("fail scrape task %d: %v", taskID, errors.Join(err, failErr))
 			}
 			failed++
@@ -445,7 +480,7 @@ func (h *Handler) runScrapeTasksWithLimit(ctx context.Context, ids []int64, limi
 			if sErr != nil {
 				fmsg = scraper.FormatScrapeErrorMessage(sErr)
 			}
-			if err := failScrapeTaskDB(ctx, h.App.DB, taskID, mediaID, source, query, fmsg); err != nil {
+			if err := failScrapeTaskDB(ctx, h.App.DB, taskID, mediaID, source, query, fmsg, claim.Owner); err != nil {
 				log.Printf("fail scrape task %d: %v", taskID, err)
 			}
 			failed++
@@ -460,7 +495,7 @@ func (h *Handler) runScrapeTasksWithLimit(ctx context.Context, ids []int64, limi
 				break
 			}
 			fmsg := "??????????????" + mErr.Error() + "?"
-			if err := failScrapeTaskDB(ctx, h.App.DB, taskID, mediaID, source, query, fmsg); err != nil {
+			if err := failScrapeTaskDB(ctx, h.App.DB, taskID, mediaID, source, query, fmsg, claim.Owner); err != nil {
 				log.Printf("fail scrape task %d: %v", taskID, err)
 			}
 			failed++
@@ -478,8 +513,8 @@ func (h *Handler) runScrapeTasksWithLimit(ctx context.Context, ids []int64, limi
 				okMsg += "; metadata_partial"
 			}
 		}
-		if err := completeScrapeTaskTx(ctx, h.App.DB, taskID, mediaID, source, query, okMsg, string(js)); err != nil {
-			if failErr := failScrapeTaskDB(ctx, h.App.DB, taskID, mediaID, source, query, "complete scrape task: "+err.Error()); failErr != nil {
+		if err := completeScrapeTaskTx(ctx, h.App.DB, taskID, mediaID, source, query, okMsg, string(js), claim.Owner); err != nil {
+			if failErr := failScrapeTaskDB(ctx, h.App.DB, taskID, mediaID, source, query, "complete scrape task: "+err.Error(), claim.Owner); failErr != nil {
 				log.Printf("complete/fail scrape task %d: %v", taskID, errors.Join(err, failErr))
 			}
 			failed++
@@ -1244,44 +1279,85 @@ func (h *Handler) BackfillScrapeArtwork(c *gin.Context) {
 	})
 }
 
-func completeScrapeTaskTx(ctx context.Context, db *sql.DB, taskID, mediaID int64, source, query, message, resultJSON string) error {
-	return store.WithBusyRetry(ctx, nil, func() error {
-		tx, err := db.BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		defer tx.Rollback()
-		res, err := tx.ExecContext(ctx, `UPDATE scrape_task SET status='done',progress=100,fail_count=0,finished_at=CURRENT_TIMESTAMP,message=? WHERE id=?`, message, taskID)
-		if err != nil {
-			return err
-		}
-		if n, err := res.RowsAffected(); err != nil {
-			return err
-		} else if n != 1 {
-			return sql.ErrNoRows
-		}
-		if _, err = tx.ExecContext(ctx, `INSERT INTO scrape_history(task_id,media_id,source,query,status,message,result_json) VALUES(?,?,?,?, 'done',?,?)`, taskID, mediaID, source, query, message, resultJSON); err != nil {
-			return err
-		}
-		return tx.Commit()
-	})
-}
-
-func failScrapeTaskDB(ctx context.Context, db *sql.DB, taskID, mediaID int64, source, query, message string) error {
-	var failCount int
-	if err := db.QueryRowContext(ctx, `SELECT COALESCE(fail_count,0) FROM scrape_task WHERE id=?`, taskID).Scan(&failCount); err != nil {
+func completeScrapeTaskTx(ctx context.Context, db *sql.DB, taskID, mediaID int64, source, query, message, resultJSON, owner string) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
 		return err
 	}
-	failCount++
-	status := "failed"
-	finalMsg := message
-	if failCount >= maxScrapeTaskFailures {
-		status = "abandoned"
-		finalMsg = message + fmt.Sprintf("???? %d ?????????", maxScrapeTaskFailures)
+	defer tx.Rollback()
+	var run, step sql.NullInt64
+	if err = tx.QueryRowContext(ctx, `SELECT ingest_run_id,ingest_step_id FROM scrape_task WHERE id=? AND media_id=? AND status='running' AND ((lease_owner IS NULL AND ?='') OR lease_owner=?)`, taskID, mediaID, owner, owner).Scan(&run, &step); err != nil {
+		return err
 	}
-	_, updateErr := db.ExecContext(ctx, `UPDATE scrape_task SET status=?,fail_count=?,progress=100,finished_at=CURRENT_TIMESTAMP,message=? WHERE id=?`, status, failCount, finalMsg, taskID)
-	_, historyErr := db.ExecContext(ctx, `INSERT INTO scrape_history(task_id,media_id,source,query,status,message) VALUES(?,?,?,?, 'failed',?)`, taskID, mediaID, source, query, finalMsg)
-	return errors.Join(updateErr, historyErr)
+	r, err := tx.ExecContext(ctx, `UPDATE scrape_task SET status='done',progress=100,finished_at=CURRENT_TIMESTAMP,message=?,lease_owner=NULL,lease_until=NULL WHERE id=? AND media_id=? AND status='running' AND ((lease_owner IS NULL AND ?='') OR lease_owner=?)`, message, taskID, mediaID, owner, owner)
+	if err != nil {
+		return err
+	}
+	n, _ := r.RowsAffected()
+	if n != 1 {
+		return sql.ErrNoRows
+	}
+	if step.Valid {
+		if _, err = tx.ExecContext(ctx, `UPDATE media_ingest_step SET status='done',finished_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND ((lease_owner IS NULL AND ?='') OR lease_owner=?)`, step.Int64, owner, owner); err != nil {
+			return err
+		}
+		if run.Valid {
+			if err = publication.AggregateTx(ctx, tx, run.Int64); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO scrape_history(task_id,media_id,source,query,status,message,result_json) VALUES(?,?,?,?, 'done',?,?)`, taskID, mediaID, source, query, message, resultJSON); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+func failScrapeTaskDB(ctx context.Context, db *sql.DB, taskID, mediaID int64, source, query, message, owner string) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var fails int
+	var run, step sql.NullInt64
+	if err = tx.QueryRowContext(ctx, `SELECT COALESCE(fail_count,0),ingest_run_id,ingest_step_id FROM scrape_task WHERE id=? AND media_id=? AND status='running' AND ((lease_owner IS NULL AND ?='') OR lease_owner=?)`, taskID, mediaID, owner, owner).Scan(&fails, &run, &step); err != nil {
+		return err
+	}
+	if scrapeBeforeFailUpdate != nil {
+		if err := scrapeBeforeFailUpdate(); err != nil {
+			return err
+		}
+	}
+	final := fails >= maxScrapeTaskFailures
+	status := "failed"
+	if !final {
+		status = "waiting"
+	}
+	stepStatus := status
+	if final {
+		stepStatus = "failed"
+	}
+	r, err := tx.ExecContext(ctx, `UPDATE scrape_task SET status=?,fail_count=?,progress=CASE WHEN ? THEN 100 ELSE progress END,finished_at=CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END,message=?,lease_owner=NULL,lease_until=NULL,available_at=CASE WHEN ? THEN available_at ELSE datetime(CURRENT_TIMESTAMP, CASE ? WHEN 1 THEN '+5 seconds' ELSE '+30 seconds' END) END WHERE id=? AND status='running' AND ((lease_owner IS NULL AND ?='') OR lease_owner=?)`, status, fails, final, final, message, final, fails, taskID, owner, owner)
+	if err != nil {
+		return err
+	}
+	if n, _ := r.RowsAffected(); n != 1 {
+		return fmt.Errorf("scrape task ownership lost")
+	}
+	if step.Valid {
+		if _, err = tx.ExecContext(ctx, `UPDATE media_ingest_step SET status=?,attempts=?,last_error=?,finished_at=CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END,lease_owner=NULL,lease_until=NULL,available_at=(SELECT available_at FROM scrape_task WHERE id=?),updated_at=CURRENT_TIMESTAMP WHERE id=?`, stepStatus, fails, message, final, taskID, step.Int64); err != nil {
+			return err
+		}
+		if run.Valid {
+			if err = publication.AggregateTx(ctx, tx, run.Int64); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO scrape_history(task_id,media_id,source,query,status,message) VALUES(?,?,?,?, 'failed',?)`, taskID, mediaID, source, query, message); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func summarizeProviderWarnings(res *scraper.ScrapeResult) string {

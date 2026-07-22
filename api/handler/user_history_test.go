@@ -191,3 +191,32 @@ func TestUserHistoryDuplicateIncompleteRowsUseFreshestDisplayRow(t *testing.T) {
 		t.Fatalf("freshest row must be deterministic by update_at then id: status=%d body=%s", w.Code, w.Body.String())
 	}
 }
+
+func TestUserHistoryHidesUnpublishedMediaFromHomeLookup(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := setupUserHistoryTestDB(t)
+	if _, err := h.App.DB.Exec(`UPDATE media SET publication_state='processing' WHERE id=10;
+		INSERT INTO play_progress(user_id,file_id,position,play_count,update_at) VALUES(1,'orphan-file',30,1,datetime('now','+1 minute'))`); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/user/history?limit=10", nil)
+	setUserCtx(c, 1, "user", "viewer")
+	h.UserHistory(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var payload struct {
+		Items []struct {
+			MediaID int64  `json:"media_id"`
+			FileID  string `json:"file_id"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Items) != 1 || payload.Items[0].MediaID != 20 || payload.Items[0].FileID != "f-music" {
+		t.Fatalf("Home history retained unpublished or orphan ghost rows: %+v body=%s", payload.Items, w.Body.String())
+	}
+}

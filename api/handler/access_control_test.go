@@ -476,3 +476,51 @@ func TestPathMatchesAnyFolderHonorsPathStyleCaseRules(t *testing.T) {
 		})
 	}
 }
+
+func TestRequireMediaAccessHidesEveryUnpublishedStateFromOrdinaryCallers(t *testing.T) {
+	for _, state := range []string{"processing", "failed", "cancelled"} {
+		t.Run(state, func(t *testing.T) {
+			h := setupAccessTestDB(t)
+			if _, err := h.App.DB.Exec(`UPDATE media SET publication_state=? WHERE id=10`, state); err != nil {
+				t.Fatal(err)
+			}
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/media/10/meta", nil)
+			setUserCtx(c, 1, "user", "normal")
+			if _, ok := h.requireMediaAccess(c, 10, false); ok || w.Code != http.StatusNotFound {
+				t.Fatalf("state=%s ok=%v status=%d body=%s", state, ok, w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestPlayMediaDirectLookupHidesProcessing(t *testing.T) {
+	h := setupAccessTestDB(t)
+	if _, err := h.App.DB.Exec(`UPDATE media SET publication_state='processing' WHERE id=10`); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/media/10/play", nil)
+	c.Params = gin.Params{{Key: "id", Value: "10"}}
+	setUserCtx(c, 1, "user", "normal")
+	h.PlayMedia(c)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestAPIClientCannotBypassPublicationVisibility(t *testing.T) {
+	h := setupAccessTestDB(t)
+	if _, err := h.App.DB.Exec(`UPDATE media SET publication_state='processing' WHERE id=10`); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/media/10", nil)
+	setUserCtx(c, 0, "api_client", "machine")
+	if _, ok := h.requireMediaAccess(c, 10, false); ok || w.Code != http.StatusNotFound {
+		t.Fatalf("ok=%v status=%d body=%s", ok, w.Code, w.Body.String())
+	}
+}

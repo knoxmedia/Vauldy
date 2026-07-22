@@ -22,6 +22,9 @@ func init() {
 			addColumnIfMissing(db, "transcode_task", "started_at TIMESTAMP")
 			addColumnIfMissing(db, "transcode_task", "completed_at TIMESTAMP")
 			addColumnIfMissing(db, "transcode_task", "preset_id INTEGER")
+			addColumnIfMissing(db, "transcode_task", "ingest_run_id INTEGER")
+			addColumnIfMissing(db, "transcode_task", "ingest_step_id INTEGER")
+			addColumnIfMissing(db, "transcode_task", "generation INTEGER")
 
 			stmts := []string{
 				`CREATE TABLE IF NOT EXISTS transcode_preset (
@@ -71,13 +74,14 @@ func init() {
 					encryption_mode TEXT DEFAULT 'none',
 					priority TEXT DEFAULT 'normal',
 					output_path TEXT,
+					ingest_jobs_snapshot_json TEXT,
 					FOREIGN KEY (task_id) REFERENCES transcode_task(id) ON DELETE CASCADE,
 					FOREIGN KEY (preset_id) REFERENCES transcode_preset(id)
 				)`,
 				`CREATE TABLE IF NOT EXISTS pretranscode_rendition_job (
 					id INTEGER PRIMARY KEY AUTOINCREMENT,
 					task_id INTEGER NOT NULL,
-					rendition_id INTEGER NOT NULL,
+					rendition_id INTEGER,
 					rendition_name TEXT NOT NULL,
 					status TEXT DEFAULT 'waiting',
 					progress INTEGER DEFAULT 0,
@@ -87,8 +91,9 @@ func init() {
 					started_at TIMESTAMP,
 					completed_at TIMESTAMP,
 					created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+					available_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 					FOREIGN KEY (task_id) REFERENCES transcode_task(id) ON DELETE CASCADE,
-					FOREIGN KEY (rendition_id) REFERENCES preset_rendition(id) ON DELETE CASCADE
+					FOREIGN KEY (rendition_id) REFERENCES preset_rendition(id) ON DELETE SET NULL
 				)`,
 				`CREATE INDEX IF NOT EXISTS idx_pretranscode_job_status ON pretranscode_rendition_job(status, created_at)`,
 				`CREATE INDEX IF NOT EXISTS idx_pretranscode_job_task ON pretranscode_rendition_job(task_id)`,
@@ -135,11 +140,18 @@ func init() {
 			addColumnIfMissing(db, "pretranscode_rendition_job", "started_at TIMESTAMP")
 			addColumnIfMissing(db, "pretranscode_rendition_job", "completed_at TIMESTAMP")
 			addColumnIfMissing(db, "pretranscode_rendition_job", "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+			if err := ensurePretranscodeRenditionAvailability(db); err != nil {
+				return err
+			}
+			addColumnIfMissing(db, "pretranscode_rendition_job", "lease_owner TEXT")
+			addColumnIfMissing(db, "pretranscode_rendition_job", "lease_until TIMESTAMP")
+			addColumnIfMissing(db, "pretranscode_rendition_job", "config_snapshot_json TEXT")
 			// Ensure pretranscode_task_meta columns exist
 			addColumnIfMissing(db, "pretranscode_task_meta", "output_format TEXT NOT NULL DEFAULT 'hls'")
 			addColumnIfMissing(db, "pretranscode_task_meta", "encryption_mode TEXT DEFAULT 'none'")
 			addColumnIfMissing(db, "pretranscode_task_meta", "priority TEXT DEFAULT 'normal'")
 			addColumnIfMissing(db, "pretranscode_task_meta", "output_path TEXT")
+			addColumnIfMissing(db, "pretranscode_task_meta", "ingest_jobs_snapshot_json TEXT")
 			return seedBuiltinPresets(db)
 		},
 	})
@@ -190,13 +202,13 @@ func migratePresetRenditionBitrateColumns(db *sql.DB) error {
 	var hasVideoRate int
 	_ = db.QueryRow(`SELECT COUNT(1) FROM pragma_table_info('preset_rendition') WHERE name='video_rate'`).Scan(&hasVideoRate)
 	if hasVideoRate > 0 {
-		// Copy old → new (legacy tables that had video_rate but not video_bitrate).
+		// Copy old 鈫?new (legacy tables that had video_rate but not video_bitrate).
 		if _, err := db.Exec(`UPDATE preset_rendition
 			SET video_bitrate = video_rate
 			WHERE COALESCE(video_bitrate,'') = '' AND COALESCE(video_rate,'') != ''`); err != nil {
 			return fmt.Errorf("copy video_rate -> video_bitrate: %w", err)
 		}
-		// Copy new → old (tables created by migration 0001 that have video_bitrate but empty video_rate).
+		// Copy new 鈫?old (tables created by migration 0001 that have video_bitrate but empty video_rate).
 		if _, err := db.Exec(`UPDATE preset_rendition
 			SET video_rate = video_bitrate
 			WHERE COALESCE(video_rate,'') = '' AND COALESCE(video_bitrate,'') != ''`); err != nil {
@@ -206,13 +218,13 @@ func migratePresetRenditionBitrateColumns(db *sql.DB) error {
 	var hasAudioRate int
 	_ = db.QueryRow(`SELECT COUNT(1) FROM pragma_table_info('preset_rendition') WHERE name='audio_rate'`).Scan(&hasAudioRate)
 	if hasAudioRate > 0 {
-		// Copy old → new.
+		// Copy old 鈫?new.
 		if _, err := db.Exec(`UPDATE preset_rendition
 			SET audio_bitrate = audio_rate
 			WHERE COALESCE(audio_bitrate,'') = '' AND COALESCE(audio_rate,'') != ''`); err != nil {
 			return fmt.Errorf("copy audio_rate -> audio_bitrate: %w", err)
 		}
-		// Copy new → old.
+		// Copy new 鈫?old.
 		if _, err := db.Exec(`UPDATE preset_rendition
 			SET audio_rate = COALESCE(audio_bitrate, '')
 			WHERE COALESCE(audio_rate,'') = '' AND COALESCE(audio_bitrate,'') != ''`); err != nil {
@@ -232,17 +244,25 @@ func migratePretranscodeRenditionJobFK(db *sql.DB) error {
 	if err == sql.ErrNoRows || !createSQL.Valid {
 		return nil
 	}
-	if !strings.Contains(strings.ToLower(createSQL.String), "pretranscode_task") {
+	normalized := strings.ToLower(strings.Join(strings.Fields(createSQL.String), ""))
+	if strings.Contains(normalized, "foreignkey(task_id)referencestranscode_task(id)ondeletecascade") && strings.Contains(normalized, "foreignkey(rendition_id)referencespreset_rendition(id)ondeletesetnull") && strings.Contains(normalized, "config_snapshot_json") {
 		return nil
 	}
 
-	log.Printf("pretranscode migration: rebuilding pretranscode_rendition_job FK (pretranscode_task -> transcode_task)")
+	log.Printf("pretranscode migration: rebuilding pretranscode_rendition_job constraints")
+	// Standalone callers may invoke this migration against a pre-0001 fixture.
+	if err := ensurePretranscodeRenditionAvailability(db); err != nil {
+		return err
+	}
+	addColumnIfMissing(db, "pretranscode_rendition_job", "lease_owner TEXT")
+	addColumnIfMissing(db, "pretranscode_rendition_job", "lease_until TIMESTAMP")
+	addColumnIfMissing(db, "pretranscode_rendition_job", "config_snapshot_json TEXT")
 
 	stmts := []string{
 		`CREATE TABLE pretranscode_rendition_job_new (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			task_id INTEGER NOT NULL,
-			rendition_id INTEGER NOT NULL,
+			rendition_id INTEGER,
 			rendition_name TEXT NOT NULL DEFAULT '',
 			status TEXT DEFAULT 'waiting',
 			progress INTEGER DEFAULT 0,
@@ -252,13 +272,17 @@ func migratePretranscodeRenditionJobFK(db *sql.DB) error {
 			started_at TIMESTAMP,
 			completed_at TIMESTAMP,
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			available_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			lease_owner TEXT,
+			lease_until TIMESTAMP,
+			config_snapshot_json TEXT,
 			FOREIGN KEY (task_id) REFERENCES transcode_task(id) ON DELETE CASCADE,
-			FOREIGN KEY (rendition_id) REFERENCES preset_rendition(id) ON DELETE CASCADE
+			FOREIGN KEY (rendition_id) REFERENCES preset_rendition(id) ON DELETE SET NULL
 		)`,
 		`INSERT INTO pretranscode_rendition_job_new
-			(id, task_id, rendition_id, rendition_name, status, progress, output_path, error_message, encoder_used, started_at, completed_at, created_at)
+			(id, task_id, rendition_id, rendition_name, status, progress, output_path, error_message, encoder_used, started_at, completed_at, created_at, available_at, lease_owner, lease_until, config_snapshot_json)
 		 SELECT old.id, old.task_id, old.rendition_id, COALESCE(old.rendition_name,''), old.status, old.progress,
-		        old.output_path, old.error_message, old.encoder_used, old.started_at, old.completed_at, old.created_at
+		        old.output_path, old.error_message, old.encoder_used, old.started_at, old.completed_at, old.created_at, COALESCE(old.available_at,CURRENT_TIMESTAMP), old.lease_owner, old.lease_until, old.config_snapshot_json
 		   FROM pretranscode_rendition_job old
 		  WHERE EXISTS (SELECT 1 FROM transcode_task t WHERE t.id = old.task_id)`,
 		`DROP TABLE pretranscode_rendition_job`,
@@ -295,6 +319,24 @@ func addColumnIfMissing(db *sql.DB, table, def string) {
 	_, _ = db.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s`, table, def))
 }
 
+func ensurePretranscodeRenditionAvailability(db *sql.DB) error {
+	var exists int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('pretranscode_rendition_job') WHERE name='available_at'`).Scan(&exists); err != nil {
+		return fmt.Errorf("inspect pretranscode_rendition_job.available_at: %w", err)
+	}
+	if exists == 0 {
+		// SQLite rejects ALTER TABLE with non-constant CURRENT_TIMESTAMP defaults
+		// when the table already contains rows. New tables retain the schema default.
+		if _, err := db.Exec(`ALTER TABLE pretranscode_rendition_job ADD COLUMN available_at TIMESTAMP`); err != nil {
+			return fmt.Errorf("add pretranscode_rendition_job.available_at: %w", err)
+		}
+	}
+	if _, err := db.Exec(`UPDATE pretranscode_rendition_job SET available_at=CURRENT_TIMESTAMP WHERE available_at IS NULL`); err != nil {
+		return fmt.Errorf("backfill pretranscode_rendition_job.available_at: %w", err)
+	}
+	return nil
+}
+
 // seedBuiltinPresets inserts the seven SRS 3.1.7 builtin templates marked
 // is_builtin=1 (not deletable). Idempotent: skips when rows already exist.
 func seedBuiltinPresets(db *sql.DB) error {
@@ -321,16 +363,11 @@ func seedBuiltinPresets(db *sql.DB) error {
 			[]rendition{{"360p", "850k", 360, 640, 1000000}, {"480p", "1400k", 480, 854, 1700000}, {"720p", "2800k", 720, 1280, 3300000}, {"1080p", "5000k", 1080, 1920, 5800000}}},
 		{"HLS-高质量", "高码率 HLS 适配大屏", "hls", "none", "libx264", "medium", 20, "192k",
 			[]rendition{{"720p", "2800k", 720, 1280, 3300000}, {"1080p", "5000k", 1080, 1920, 5800000}, {"1440p", "9000k", 1440, 2560, 12000000}, {"2160p", "18000k", 2160, 3840, 24000000}}},
-		{"HLS-AES128", "HLS AES-128 基本加密", "hls", "aes128", "libx264", "veryfast", 23, "128k",
-			[]rendition{{"360p", "850k", 360, 640, 1000000}, {"480p", "1400k", 480, 854, 1700000}, {"720p", "2800k", 720, 1280, 3300000}, {"1080p", "5000k", 1080, 1920, 5800000}}},
-		{"HLS-PowerDRM", "HLS PowerDRM 私有加密", "hls", "powerdrm", "libx264", "veryfast", 23, "128k",
-			[]rendition{{"720p", "2800k", 720, 1280, 3300000}, {"1080p", "5000k", 1080, 1920, 5800000}}},
-		{"DASH-自适应", "DASH 自适应码率", "dash", "none", "libx264", "veryfast", 23, "128k",
-			[]rendition{{"360p", "850k", 360, 640, 1000000}, {"480p", "1400k", 480, 854, 1700000}, {"720p", "2800k", 720, 1280, 3300000}, {"1080p", "5000k", 1080, 1920, 5800000}}},
-		{"DASH-DRM", "DASH CENC DRM 加密", "dash", "drm", "libx264", "veryfast", 23, "128k",
-			[]rendition{{"720p", "2800k", 720, 1280, 3300000}, {"1080p", "5000k", 1080, 1920, 5800000}}},
-		{"MP4-兼容", "MP4 兼容输出", "mp4", "none", "libx264", "veryfast", 23, "128k",
-			[]rendition{{"720p", "2800k", 720, 1280, 3300000}, {"1080p", "5000k", 1080, 1920, 5800000}}},
+		{"HLS-AES128", "HLS AES-128 基本加密", "hls", "aes128", "libx264", "veryfast", 23, "128k", []rendition{{"360p", "850k", 360, 640, 1000000}, {"480p", "1400k", 480, 854, 1700000}, {"720p", "2800k", 720, 1280, 3300000}, {"1080p", "5000k", 1080, 1920, 5800000}}},
+		{"HLS-PowerDRM", "HLS PowerDRM 私有加密", "hls", "powerdrm", "libx264", "veryfast", 23, "128k", []rendition{{"720p", "2800k", 720, 1280, 3300000}, {"1080p", "5000k", 1080, 1920, 5800000}}},
+		{"DASH-自适应", "DASH 自适应码率", "dash", "none", "libx264", "veryfast", 23, "128k", []rendition{{"360p", "850k", 360, 640, 1000000}, {"480p", "1400k", 480, 854, 1700000}, {"720p", "2800k", 720, 1280, 3300000}, {"1080p", "5000k", 1080, 1920, 5800000}}},
+		{"DASH-DRM", "DASH CENC DRM 加密", "dash", "drm", "libx264", "veryfast", 23, "128k", []rendition{{"720p", "2800k", 720, 1280, 3300000}, {"1080p", "5000k", 1080, 1920, 5800000}}},
+		{"MP4-兼容", "MP4 兼容输出", "mp4", "none", "libx264", "veryfast", 23, "128k", []rendition{{"720p", "2800k", 720, 1280, 3300000}, {"1080p", "5000k", 1080, 1920, 5800000}}},
 	}
 	for i, p := range presets {
 		res, err := db.Exec(`INSERT INTO transcode_preset

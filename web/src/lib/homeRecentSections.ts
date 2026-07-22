@@ -61,7 +61,7 @@ type HomeRecentComparableField = keyof MediaItem;
 
 const HOME_RECENT_PROJECTION_FIELDS: readonly HomeRecentComparableField[] = [
   "id", "library_id", "library_type", "file_id", "title", "original_title", "file_path", "file_type",
-  "duration", "width", "height", "bitrate", "format", "status", "created_at", "last_play_at", "completed",
+  "duration", "width", "height", "bitrate", "format", "status", "publication_state", "published_at", "publication_error", "ingest_generation", "created_at", "last_play_at", "completed",
   "release_date", "year", "poster_url", "backdrop_url", "photo_taken_at", "photo_tags", "photo_tag_ids", "scraped",
   "encrypted_asset", "optimization_asset_recorded", "optimization_available", "optimization_source_available",
   "music_album_id", "music_album_title", "music_artist",

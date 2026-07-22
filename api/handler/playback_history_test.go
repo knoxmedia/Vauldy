@@ -77,3 +77,52 @@ func TestParsePlaybackUserAgentEmpty(t *testing.T) {
 		t.Fatalf("got player=%q platform=%q", player, platform)
 	}
 }
+
+func TestListPlaybackHistoryFiltersPublicationStateInBothSources(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := setupPlaybackHistoryTestDB(t)
+	if _, err := h.App.DB.Exec(`DELETE FROM play_progress;
+		UPDATE media SET publication_state='processing' WHERE id=10;
+		INSERT INTO media(id,library_id,file_id,title,file_path,file_type,publication_state) VALUES
+		(11,1,'f-11','Activity Failed','E:/movies/11.mp4','video','failed'),
+		(12,1,'f-12','Activity Cancelled','E:/movies/12.mp4','video','cancelled'),
+		(13,1,'f-13','Activity Degraded','E:/movies/13.mp4','video','degraded'),
+		(14,1,'f-14','Progress Failed','E:/movies/14.mp4','video','failed'),
+		(15,1,'f-15','Progress Degraded','E:/movies/15.mp4','video','degraded');
+		INSERT INTO activity_log(user_id,username,action,media_id,message,created_at) VALUES
+		(1,'viewer','playback_start',10,'processing','2026-07-21 10:00:00'),
+		(1,'viewer','playback_start',11,'failed','2026-07-21 10:01:00'),
+		(1,'viewer','playback_start',12,'cancelled','2026-07-21 10:02:00'),
+		(1,'viewer','playback_start',13,'degraded','2026-07-21 10:03:00');
+		INSERT INTO play_progress(user_id,file_id,position,play_count,update_at) VALUES
+		(1,'f-14',14,1,'2026-07-21 10:04:00'),
+		(1,'f-15',15,1,'2026-07-21 10:05:00')`); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/playback-history?range=all", nil)
+	setUserCtx(c, 1, "user", "viewer")
+	h.ListPlaybackHistory(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var payload struct {
+		Items []struct {
+			MediaID int64 `json:"media_id"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Items) != 2 {
+		t.Fatalf("items=%+v want only two degraded records body=%s", payload.Items, w.Body.String())
+	}
+	seen := map[int64]int{}
+	for _, item := range payload.Items {
+		seen[item.MediaID]++
+	}
+	if seen[13] != 1 || seen[15] != 1 || len(seen) != 2 {
+		t.Fatalf("visible media=%v want degraded 13 and 15 body=%s", seen, w.Body.String())
+	}
+}

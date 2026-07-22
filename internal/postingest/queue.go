@@ -11,10 +11,14 @@ import (
 
 	"github.com/google/uuid"
 
+	"knox-media/internal/publication"
+
 	"knox-media/internal/store"
 )
 
 const leaseDuration = 90 * time.Second
+
+const recoverExpiredLimit = 100
 
 func leaseModifier() string {
 	return fmt.Sprintf("+%d seconds", int64(leaseDuration/time.Second))
@@ -66,6 +70,23 @@ func nullableInt64(id *int64) any {
 	return *id
 }
 
+func syncLinkedStepTx(ctx context.Context, tx *sql.Tx, taskID int64) error {
+	_, err := tx.ExecContext(ctx, `UPDATE media_ingest_step SET
+		status=(SELECT status FROM post_ingest_task WHERE id=?), attempts=(SELECT attempts FROM post_ingest_task WHERE id=?), max_attempts=(SELECT max_attempts FROM post_ingest_task WHERE id=?), last_error=(SELECT last_error FROM post_ingest_task WHERE id=?), available_at=(SELECT available_at FROM post_ingest_task WHERE id=?), lease_owner=(SELECT lease_owner FROM post_ingest_task WHERE id=?), lease_until=(SELECT lease_until FROM post_ingest_task WHERE id=?), started_at=(SELECT started_at FROM post_ingest_task WHERE id=?), finished_at=(SELECT finished_at FROM post_ingest_task WHERE id=?), updated_at=CURRENT_TIMESTAMP
+		WHERE id=(SELECT ingest_step_id FROM post_ingest_task WHERE id=?)`, taskID, taskID, taskID, taskID, taskID, taskID, taskID, taskID, taskID, taskID)
+	if err != nil {
+		return err
+	}
+	var runID sql.NullInt64
+	if err := tx.QueryRowContext(ctx, `SELECT ingest_run_id FROM post_ingest_task WHERE id=?`, taskID).Scan(&runID); err != nil {
+		return err
+	}
+	if runID.Valid {
+		return publication.AggregateTx(ctx, tx, runID.Int64)
+	}
+	return nil
+}
+
 func (q *Queue) Enqueue(ctx context.Context, mediaID int64, scanTaskID *int64, typ TaskType) (bool, error) {
 	if err := q.validate(false); err != nil {
 		return false, err
@@ -83,9 +104,9 @@ func (q *Queue) Enqueue(ctx context.Context, mediaID int64, scanTaskID *int64, t
 	var inserted bool
 	err := store.WithBusyRetry(ctx, q.metrics, func() error {
 		result, err := q.db.ExecContext(ctx, `
-			INSERT INTO post_ingest_task (media_id, scan_task_id, task_type)
-			VALUES (?, ?, ?)
-			ON CONFLICT(media_id, task_type) DO NOTHING`, mediaID, nullableInt64(scanTaskID), typ)
+			INSERT INTO post_ingest_task (media_id, scan_task_id, generation, task_type)
+			SELECT ?, ?, COALESCE(ingest_generation, 0), ? FROM media WHERE id=?
+			ON CONFLICT(media_id, generation, task_type) DO NOTHING`, mediaID, nullableInt64(scanTaskID), typ, mediaID)
 		if err != nil {
 			return err
 		}
@@ -99,7 +120,7 @@ func (q *Queue) Enqueue(ctx context.Context, mediaID int64, scanTaskID *int64, t
 	return inserted, err
 }
 
-func (q *Queue) Retry(ctx context.Context, id int64, scanTaskID *int64) error {
+func (q *Queue) retry(ctx context.Context, id int64, scanTaskID *int64, explicit bool) error {
 	if err := q.validate(false); err != nil {
 		return err
 	}
@@ -109,15 +130,23 @@ func (q *Queue) Retry(ctx context.Context, id int64, scanTaskID *int64) error {
 	if err := validateScanTaskID(scanTaskID); err != nil {
 		return err
 	}
-
 	var updated bool
 	err := store.WithBusyRetry(ctx, q.metrics, func() error {
-		result, err := q.db.ExecContext(ctx, `
-			UPDATE post_ingest_task
-			SET status='waiting', scan_task_id=?, last_error='', lease_owner=NULL,
-				lease_until=NULL, started_at=NULL, finished_at=NULL, attempts=0,
-				available_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
-			WHERE id=? AND status IN ('failed','cancelled')`, nullableInt64(scanTaskID), id)
+		tx, err := q.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				_ = tx.Rollback()
+			}
+		}()
+		statuses := "'failed','cancelled'"
+		if explicit {
+			statuses += ",'done'"
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE post_ingest_task SET status='waiting', scan_task_id=?, last_error='', lease_owner=NULL, lease_until=NULL, started_at=NULL, finished_at=NULL, attempts=0, available_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN (`+statuses+`)`, nullableInt64(scanTaskID), id)
 		if err != nil {
 			return err
 		}
@@ -126,12 +155,26 @@ func (q *Queue) Retry(ctx context.Context, id int64, scanTaskID *int64) error {
 			return err
 		}
 		updated = n == 1
+		if updated {
+			if err := syncLinkedStepTx(ctx, tx, id); err != nil {
+				return err
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		committed = true
 		return nil
 	})
-	if err != nil || updated {
+	if err != nil {
 		return err
 	}
-
+	if updated {
+		return nil
+	}
+	if explicit {
+		return fmt.Errorf("postingest queue: task %d cannot be explicitly retried", id)
+	}
 	var status Status
 	if err := q.db.QueryRowContext(ctx, `SELECT status FROM post_ingest_task WHERE id=?`, id).Scan(&status); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -142,38 +185,14 @@ func (q *Queue) Retry(ctx context.Context, id int64, scanTaskID *int64) error {
 	return fmt.Errorf("postingest queue: task %d in status %s cannot be retried", id, status)
 }
 
-func (q *Queue) RetryExplicit(ctx context.Context, id int64, scanTaskID *int64) error {
-	if err := q.validate(false); err != nil {
-		return err
-	}
-	if id <= 0 {
-		return fmt.Errorf("postingest queue: task id must be positive: %d", id)
-	}
-	if err := validateScanTaskID(scanTaskID); err != nil {
-		return err
-	}
-	var updated bool
-	err := store.WithBusyRetry(ctx, q.metrics, func() error {
-		updated = false
-		result, err := q.db.ExecContext(ctx, `UPDATE post_ingest_task SET status='waiting',scan_task_id=?,last_error='',lease_owner=NULL,lease_until=NULL,started_at=NULL,finished_at=NULL,attempts=0,available_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('failed','cancelled','done')`, nullableInt64(scanTaskID), id)
-		if err != nil {
-			return err
-		}
-		n, err := result.RowsAffected()
-		if err != nil {
-			return err
-		}
-		updated = n == 1
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-	if updated {
-		return nil
-	}
-	return fmt.Errorf("postingest queue: task %d cannot be explicitly retried", id)
+func (q *Queue) Retry(ctx context.Context, id int64, scanTaskID *int64) error {
+	return q.retry(ctx, id, scanTaskID, false)
 }
+
+func (q *Queue) RetryExplicit(ctx context.Context, id int64, scanTaskID *int64) error {
+	return q.retry(ctx, id, scanTaskID, true)
+}
+
 func (q *Queue) Claim(ctx context.Context, typ TaskType) (*Task, error) {
 	if err := q.validate(true); err != nil {
 		return nil, err
@@ -236,6 +255,9 @@ func (q *Queue) Claim(ctx context.Context, typ TaskType) (*Task, error) {
 		}
 		n, err := result.RowsAffected()
 		if err != nil {
+			return err
+		}
+		if err := syncLinkedStepTx(ctx, tx, id); err != nil {
 			return err
 		}
 		if n == 0 {
@@ -302,13 +324,35 @@ func (q *Queue) Renew(ctx context.Context, task Task) (bool, error) {
 	}
 	var renewed bool
 	err := store.WithBusyRetry(ctx, q.metrics, func() error {
-		result, err := q.db.ExecContext(ctx, `UPDATE post_ingest_task SET lease_until=datetime(CURRENT_TIMESTAMP, ?), updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='running' AND lease_owner=?`, leaseModifier(), task.ID, task.LeaseOwner)
+		tx, err := q.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				_ = tx.Rollback()
+			}
+		}()
+		result, err := tx.ExecContext(ctx, `UPDATE post_ingest_task SET lease_until=datetime(CURRENT_TIMESTAMP, ?), updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='running' AND lease_owner=?`, leaseModifier(), task.ID, task.LeaseOwner)
 		if err != nil {
 			return err
 		}
 		n, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
 		renewed = n == 1
-		return err
+		if renewed {
+			if err := syncLinkedStepTx(ctx, tx, task.ID); err != nil {
+				return err
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		committed = true
+		return nil
 	})
 	return renewed, err
 }
@@ -322,28 +366,41 @@ func (q *Queue) Complete(ctx context.Context, task Task) error {
 	}
 	var updated bool
 	err := store.WithBusyRetry(ctx, q.metrics, func() error {
-		result, err := q.db.ExecContext(ctx, `
-			UPDATE post_ingest_task SET
-				status=CASE WHEN scan_task_id IS NOT NULL AND EXISTS (
-					SELECT 1 FROM scan_task s WHERE s.id=post_ingest_task.scan_task_id
-					AND (s.cancelled=1 OR s.status='cancelled')
-				) THEN 'cancelled' ELSE 'done' END,
-				lease_owner=NULL, lease_until=NULL,
-				last_error=CASE WHEN scan_task_id IS NOT NULL AND EXISTS (
-					SELECT 1 FROM scan_task s WHERE s.id=post_ingest_task.scan_task_id
-					AND (s.cancelled=1 OR s.status='cancelled')
-				) THEN 'scan cancelled' ELSE '' END,
-				finished_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
-			WHERE id=? AND status='running' AND lease_owner=?`, task.ID, task.LeaseOwner)
+		tx, err := q.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				_ = tx.Rollback()
+			}
+		}()
+		result, err := tx.ExecContext(ctx, `UPDATE post_ingest_task SET status=CASE WHEN scan_task_id IS NOT NULL AND EXISTS (SELECT 1 FROM scan_task s WHERE s.id=post_ingest_task.scan_task_id AND (s.cancelled=1 OR s.status='cancelled')) THEN 'cancelled' ELSE 'done' END, lease_owner=NULL, lease_until=NULL, last_error=CASE WHEN scan_task_id IS NOT NULL AND EXISTS (SELECT 1 FROM scan_task s WHERE s.id=post_ingest_task.scan_task_id AND (s.cancelled=1 OR s.status='cancelled')) THEN 'scan cancelled' ELSE '' END, finished_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='running' AND lease_owner=?`, task.ID, task.LeaseOwner)
 		if err != nil {
 			return err
 		}
 		n, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
 		updated = n == 1
-		return err
+		if updated {
+			if err := syncLinkedStepTx(ctx, tx, task.ID); err != nil {
+				return err
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		committed = true
+		return nil
 	})
-	if err != nil || updated {
+	if err != nil {
 		return err
+	}
+	if updated {
+		return nil
 	}
 	return q.ownerWriteError(ctx, task.ID, task.LeaseOwner, "complete")
 }
@@ -439,6 +496,11 @@ func (q *Queue) Fail(ctx context.Context, task *Task, kind FailureKind, cause er
 			return err
 		}
 		updated = n == 1
+		if updated {
+			if err := syncLinkedStepTx(ctx, tx, task.ID); err != nil {
+				return err
+			}
+		}
 		if err := tx.Commit(); err != nil {
 			return err
 		}
@@ -470,40 +532,101 @@ func (q *Queue) RecoverExpired(ctx context.Context) (int64, error) {
 	if err := q.validate(false); err != nil {
 		return 0, err
 	}
-	var affected int64
+	var n int64
 	err := store.WithBusyRetry(ctx, q.metrics, func() error {
-		result, err := q.db.ExecContext(ctx, `UPDATE post_ingest_task SET
-			status=CASE WHEN scan_task_id IS NOT NULL AND EXISTS(SELECT 1 FROM scan_task s WHERE s.id=post_ingest_task.scan_task_id AND (s.cancelled=1 OR s.status='cancelled')) THEN 'cancelled' WHEN attempts>=max_attempts THEN 'failed' ELSE 'waiting' END,
-			last_error=CASE WHEN scan_task_id IS NOT NULL AND EXISTS(SELECT 1 FROM scan_task s WHERE s.id=post_ingest_task.scan_task_id AND (s.cancelled=1 OR s.status='cancelled')) THEN 'scan cancelled' WHEN attempts>=max_attempts THEN 'lease expired and attempts exhausted' ELSE last_error END,
-			available_at=CURRENT_TIMESTAMP, lease_owner=NULL, lease_until=NULL,
-			finished_at=CASE WHEN (scan_task_id IS NOT NULL AND EXISTS(SELECT 1 FROM scan_task s WHERE s.id=post_ingest_task.scan_task_id AND (s.cancelled=1 OR s.status='cancelled'))) OR attempts>=max_attempts THEN CURRENT_TIMESTAMP ELSE NULL END,
-			updated_at=CURRENT_TIMESTAMP WHERE status='running' AND lease_until<CURRENT_TIMESTAMP`)
+		tx, err := q.db.BeginTx(ctx, nil)
 		if err != nil {
 			return err
 		}
-		affected, err = result.RowsAffected()
-		return err
+		committed := false
+		defer func() {
+			if !committed {
+				_ = tx.Rollback()
+			}
+		}()
+		rows, err := tx.QueryContext(ctx, `SELECT id FROM post_ingest_task WHERE status='running' AND lease_until<CURRENT_TIMESTAMP ORDER BY id LIMIT ?`, recoverExpiredLimit)
+		if err != nil {
+			return err
+		}
+		var ids []int64
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			ids = append(ids, id)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		for _, id := range ids {
+			result, err := tx.ExecContext(ctx, `UPDATE post_ingest_task SET status=CASE WHEN scan_task_id IS NOT NULL AND EXISTS(SELECT 1 FROM scan_task s WHERE s.id=post_ingest_task.scan_task_id AND (s.cancelled=1 OR s.status='cancelled')) THEN 'cancelled' WHEN attempts>=max_attempts THEN 'failed' ELSE 'waiting' END,last_error=CASE WHEN attempts>=max_attempts THEN 'lease expired and attempts exhausted' ELSE last_error END,available_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL,finished_at=CASE WHEN attempts>=max_attempts OR (scan_task_id IS NOT NULL AND EXISTS(SELECT 1 FROM scan_task s WHERE s.id=post_ingest_task.scan_task_id AND (s.cancelled=1 OR s.status='cancelled'))) THEN CURRENT_TIMESTAMP ELSE NULL END,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='running' AND lease_until<CURRENT_TIMESTAMP`, id)
+			if err != nil {
+				return err
+			}
+			changed, err := result.RowsAffected()
+			if err != nil {
+				return err
+			}
+			n += changed
+			if changed == 1 {
+				if err := syncLinkedStepTx(ctx, tx, id); err != nil {
+					return err
+				}
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		committed = true
+		return nil
 	})
-	return affected, err
+	return n, err
 }
 
-func (q *Queue) CancelScan(ctx context.Context, scanTaskID int64) (int64, error) {
+func (q *Queue) CancelScan(ctx context.Context, id int64) (int64, error) {
 	if err := q.validate(false); err != nil {
 		return 0, err
 	}
-	if scanTaskID <= 0 {
-		return 0, fmt.Errorf("postingest queue: scan task id must be positive: %d", scanTaskID)
+	if id <= 0 {
+		return 0, fmt.Errorf("postingest queue: scan task id must be positive: %d", id)
 	}
-	var affected int64
+	var n int64
 	err := store.WithBusyRetry(ctx, q.metrics, func() error {
-		result, err := q.db.ExecContext(ctx, `UPDATE post_ingest_task SET status='cancelled',lease_owner=NULL,lease_until=NULL,last_error='scan cancelled',finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE scan_task_id=? AND status='waiting'`, scanTaskID)
+		tx, err := q.db.BeginTx(ctx, nil)
 		if err != nil {
 			return err
 		}
-		affected, err = result.RowsAffected()
-		return err
+		defer tx.Rollback()
+		rows, err := tx.QueryContext(ctx, `SELECT id FROM post_ingest_task WHERE scan_task_id=? AND status='waiting'`, id)
+		if err != nil {
+			return err
+		}
+		var ids []int64
+		for rows.Next() {
+			var x int64
+			rows.Scan(&x)
+			ids = append(ids, x)
+		}
+		rows.Close()
+		r, err := tx.ExecContext(ctx, `UPDATE post_ingest_task SET status='cancelled',lease_owner=NULL,lease_until=NULL,last_error='scan cancelled',finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE scan_task_id=? AND status='waiting'`, id)
+		if err != nil {
+			return err
+		}
+		n, _ = r.RowsAffected()
+		for _, x := range ids {
+			if err = syncLinkedStepTx(ctx, tx, x); err != nil {
+				return err
+			}
+		}
+		return tx.Commit()
 	})
-	return affected, err
+	return n, err
 }
 
 func (q *Queue) IsScanCancelled(ctx context.Context, scanTaskID int64) (bool, error) {

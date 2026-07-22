@@ -55,23 +55,29 @@ func (h *Handler) queryLibrarySeriesItemsContext(ctx context.Context, libID int6
 				 JOIN episode ep ON ep.id = em.episode_id
 				 JOIN season se2 ON se2.id = ep.season_id
 				 JOIN media m ON m.id = em.media_id
-				 WHERE se2.tv_id = s.id
+				 WHERE se2.tv_id = s.id AND m.publication_state IN ('published','degraded')
 				 ORDER BY em.sort_order ASC, m.id ASC LIMIT 1),
 				(SELECT NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.poster')), '')
 				 FROM episode_media em
 				 JOIN episode ep ON ep.id = em.episode_id
 				 JOIN season se2 ON se2.id = ep.season_id
 				 JOIN media m ON m.id = em.media_id
-				 WHERE se2.tv_id = s.id
+				 WHERE se2.tv_id = s.id AND m.publication_state IN ('published','degraded')
 				 ORDER BY em.sort_order ASC, m.id ASC LIMIT 1)
 			) AS poster_url,
 			COALESCE(s.folder_paths, '[]'), s.created_at, s.updated_at,
-			(SELECT COUNT(DISTINCT se.id) FROM season se WHERE se.tv_id = s.id) AS season_count,
-			(SELECT COUNT(DISTINCT em.media_id)
+			(SELECT COUNT(DISTINCT se.id)
 			 FROM season se
 			 JOIN episode ep ON ep.season_id = se.id
 			 JOIN episode_media em ON em.episode_id = ep.id
-			 WHERE se.tv_id = s.id) AS episode_count
+			 JOIN media m ON m.id=em.media_id
+			 WHERE se.tv_id = s.id AND m.publication_state IN ('published','degraded')) AS season_count,
+			(SELECT COUNT(DISTINCT ep.id)
+			 FROM season se
+			 JOIN episode ep ON ep.season_id = se.id
+			 JOIN episode_media em ON em.episode_id = ep.id
+			 JOIN media m ON m.id=em.media_id
+			 WHERE se.tv_id = s.id AND m.publication_state IN ('published','degraded')) AS episode_count
 		FROM series s
 		WHERE s.library_id = ?
 		ORDER BY s.title COLLATE NOCASE ASC
@@ -125,14 +131,14 @@ func (h *Handler) GetSeries(c *gin.Context) {
 				 JOIN episode ep ON ep.id = em.episode_id
 				 JOIN season se2 ON se2.id = ep.season_id
 				 JOIN media m ON m.id = em.media_id
-				 WHERE se2.tv_id = s.id
+				 WHERE se2.tv_id = s.id AND m.publication_state IN ('published','degraded')
 				 ORDER BY em.sort_order ASC, m.id ASC LIMIT 1),
 				(SELECT NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.poster')), '')
 				 FROM episode_media em
 				 JOIN episode ep ON ep.id = em.episode_id
 				 JOIN season se2 ON se2.id = ep.season_id
 				 JOIN media m ON m.id = em.media_id
-				 WHERE se2.tv_id = s.id
+				 WHERE se2.tv_id = s.id AND m.publication_state IN ('published','degraded')
 				 ORDER BY em.sort_order ASC, m.id ASC LIMIT 1)
 			) AS poster_url,
 			COALESCE(s.folder_paths, '[]'), COALESCE(s.meta_json, ''), s.created_at, s.updated_at
@@ -174,7 +180,7 @@ func (h *Handler) listSeasonSummaries(seriesID int64) ([]gin.H, error) {
 func (h *Handler) listSeasonSummariesContext(ctx context.Context, seriesID int64) ([]gin.H, error) {
 	rows, err := h.App.DB.QueryContext(ctx, `
 		SELECT se.id, se.season_num, COALESCE(se.name, ''), COALESCE(se.poster, ''),
-			(SELECT COUNT(DISTINCT ep.id) FROM episode ep WHERE ep.season_id = se.id) AS episode_count
+			(SELECT COUNT(DISTINCT ep.id) FROM episode ep JOIN episode_media em ON em.episode_id=ep.id JOIN media m ON m.id=em.media_id WHERE ep.season_id = se.id AND m.publication_state IN ('published','degraded')) AS episode_count
 		FROM season se
 		WHERE se.tv_id = ?
 		ORDER BY se.season_num ASC
@@ -228,7 +234,7 @@ func (h *Handler) ListSeasonEpisodes(c *gin.Context) {
 	rows, err := h.App.DB.QueryContext(ctx, `
 		SELECT ep.id, ep.episode_num, COALESCE(ep.title, ''), COALESCE(ep.duration, 0)
 		FROM episode ep
-		WHERE ep.season_id = ?
+		WHERE ep.season_id = ? AND EXISTS (SELECT 1 FROM episode_media em JOIN media m ON m.id=em.media_id WHERE em.episode_id=ep.id AND m.publication_state IN ('published','degraded'))
 		ORDER BY ep.episode_num ASC
 	`, seasonID)
 	if err != nil {
@@ -272,7 +278,7 @@ func (h *Handler) listEpisodeMediaVersionsContext(ctx context.Context, episodeID
 			COALESCE((SELECT pp.completed FROM play_progress pp WHERE pp.file_id = m.file_id AND pp.user_id = ?), 0) AS play_completed
 		FROM episode_media em
 		JOIN media m ON m.id = em.media_id
-		WHERE em.episode_id = ?
+		WHERE em.episode_id = ? AND m.publication_state IN ('published','degraded')
 		ORDER BY em.sort_order ASC, m.id ASC
 	`, userID, episodeID)
 	if err != nil {
@@ -336,7 +342,7 @@ func (h *Handler) GetSeriesPlayTarget(c *gin.Context) {
 		JOIN episode_media em ON em.media_id = m.id
 		JOIN episode ep ON ep.id = em.episode_id
 		JOIN season se ON se.id = ep.season_id
-		WHERE p.user_id = ? AND se.tv_id = ?
+		WHERE p.user_id = ? AND se.tv_id = ? AND m.publication_state IN ('published','degraded')
 		ORDER BY p.update_at DESC
 		LIMIT 1
 	`, uid, seriesID).Scan(&mediaID, &duration, &position, &completed)
@@ -354,7 +360,7 @@ func (h *Handler) GetSeriesPlayTarget(c *gin.Context) {
 		JOIN episode ep ON ep.id = em.episode_id
 		JOIN season se ON se.id = ep.season_id
 		JOIN media m ON m.id = em.media_id
-		WHERE se.tv_id = ?
+		WHERE se.tv_id = ? AND m.publication_state IN ('published','degraded')
 		ORDER BY se.season_num ASC, ep.episode_num ASC, em.sort_order ASC, m.id ASC
 		LIMIT 1
 	`, seriesID).Scan(&mediaID); err != nil || mediaID <= 0 {

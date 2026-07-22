@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"log"
+	"sync"
 
 	"knox-media/internal/coreiface"
 )
@@ -18,7 +19,8 @@ type Module struct {
 	Worker   *Worker
 	Playback *PlaybackService
 
-	cancel context.CancelFunc
+	cancel     context.CancelFunc
+	dispatcher WebhookDispatcher
 }
 
 // NewModule returns an unconfigured module. Init() wires the DB and starts
@@ -29,22 +31,33 @@ func (m *Module) Name() string { return "pretranscode" }
 
 // activeModule is the singleton set in Init(); handlers reach it via
 // ActiveModule().
+var moduleGlobalsMu sync.RWMutex
 var activeModule *Module
 
 // ActiveModule returns the initialized pretranscode module, or nil when the
 // commercial build has not yet initialized it (e.g. in unit tests that don't
 // run Init). Handler code must nil-check the result.
-func ActiveModule() *Module { return activeModule }
+func ActiveModule() *Module {
+	moduleGlobalsMu.RLock()
+	defer moduleGlobalsMu.RUnlock()
+	return activeModule
+}
 
 func (m *Module) Init(ctx context.Context, deps coreiface.ModuleDeps) error {
+	if m.cancel != nil {
+		m.cancel()
+	}
+	moduleGlobalsMu.Lock()
 	activeModule = m
 	m.Preset = &PresetService{DB: deps.DB}
 	m.Task = &TaskService{DB: deps.DB, TranscodeDir: deps.TranscodeDir}
 	m.Webhook = &WebhookService{DB: deps.DB}
 	m.Playback = &PlaybackService{DB: deps.DB, TranscodeDir: deps.TranscodeDir}
 	m.Worker = NewWorker(deps.DB, deps.Vault, deps.FFmpegPath, deps.TranscodeDir, 4, 2)
-	GlobalWebhookDispatcher = &WebhookDispatcherAdapter{Service: m.Webhook}
-	coreiface.PretranscodeMod = m.Playback
+	m.dispatcher = &WebhookDispatcherAdapter{Service: m.Webhook}
+	setWebhookDispatcher(m.dispatcher)
+	coreiface.SetPretranscodeModule(m.Playback)
+	moduleGlobalsMu.Unlock()
 
 	// Recover orphaned tasks (waiting tasks with no rendition jobs).
 	if n := m.Task.RecoverOrphanedTasks(); n > 0 {
@@ -75,6 +88,15 @@ func (m *Module) Shutdown(ctx context.Context) error {
 	if m.cancel != nil {
 		m.cancel()
 	}
+	moduleGlobalsMu.Lock()
+	if activeModule == m {
+		activeModule = nil
+		coreiface.ClearPretranscodeModuleIfOwned(m.Playback)
+		if CurrentWebhookDispatcher() == m.dispatcher {
+			setWebhookDispatcher(nil)
+		}
+	}
+	moduleGlobalsMu.Unlock()
 	return nil
 }
 

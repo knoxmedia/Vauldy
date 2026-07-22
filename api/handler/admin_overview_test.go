@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -184,5 +185,38 @@ func TestAdminOverview_WrappedDeadlineMapsToTimeout(t *testing.T) {
 	}))
 	if w.Code != http.StatusGatewayTimeout || !strings.Contains(w.Body.String(), `"code":"admin_overview_timeout"`) {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestAdminOverviewExposesBuildMetadata(t *testing.T) {
+	data, err := os.ReadFile("admin_overview.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(data)
+	for _, want := range []string{"buildinfo.Current()", "software_version", "software_commit", "software_build_time", "software_dirty"} {
+		if !strings.Contains(src, want) {
+			t.Errorf("admin overview missing build metadata wiring %q", want)
+		}
+	}
+}
+
+func TestAdminOverviewReturnsFullBuildMetadata(t *testing.T) {
+	db, err := store.OpenSQLite(filepath.Join(t.TempDir(), "build-overview.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	b := NewAdminOverviewBuilder(db, nil, nil)
+	b.SampleSystem = func(context.Context, string) (SystemSample, error) { return SystemSample{}, nil }
+	data, err := b.Build(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	system := data["system"].(map[string]any)
+	for _, key := range []string{"software_version", "software_commit", "software_build_time", "software_dirty", "software_dirty_known", "software_vcs_revision", "software_vcs_time", "software_vcs_modified", "software_vcs_modified_known"} {
+		if _, ok := system[key]; !ok {
+			t.Errorf("missing %s in %#v", key, system)
+		}
 	}
 }

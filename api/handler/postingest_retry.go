@@ -67,7 +67,7 @@ func enqueueExplicitPostIngest(ctx context.Context, db *sql.DB, mediaID int64, t
 				return "", err
 			}
 		}
-		res, e := tx.ExecContext(ctx, `INSERT INTO post_ingest_task(media_id,scan_task_id,task_type) VALUES(?,NULL,?) ON CONFLICT(media_id,task_type) DO NOTHING`, mediaID, typ)
+		res, e := tx.ExecContext(ctx, `INSERT INTO post_ingest_task(media_id,scan_task_id,task_type) VALUES(?,NULL,?) ON CONFLICT(media_id,generation,task_type) DO NOTHING`, mediaID, typ)
 		if e != nil {
 			return "", e
 		}

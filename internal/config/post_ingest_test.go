@@ -109,3 +109,11 @@ func TestShippedConfigsUseCPUPostIngestDefaults(t *testing.T) {
 		}
 	}
 }
+
+func TestShippedConfigsParseAsYAML(t *testing.T) {
+	for _, path := range []string{"default/config.yml", filepath.Join("..", "..", "config.yml")} {
+		if _, err := Load(path); err != nil {
+			t.Fatalf("Load(%s): %v", path, err)
+		}
+	}
+}

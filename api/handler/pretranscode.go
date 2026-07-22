@@ -17,7 +17,7 @@ import (
 // coreiface.PretranscodeMod. Returns nil in the community build (no routes
 // should be registered in that case).
 func pretranscodeModule() *pretranscode.Module {
-	if coreiface.PretranscodeMod == nil {
+	if coreiface.PretranscodeModuleHandle() == nil {
 		return nil
 	}
 	// The playback service is owned by the module; recover the module via the
@@ -509,11 +509,12 @@ func (h *Handler) GetPretranscodeHLSInfo(c *gin.Context) {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
-	if coreiface.PretranscodeMod == nil {
+	mod := coreiface.PretranscodeModuleHandle()
+	if mod == nil {
 		c.JSON(200, gin.H{"available": false})
 		return
 	}
-	status, err := coreiface.PretranscodeMod.GetPretranscodeStatus(c.Request.Context(), fileID)
+	status, err := mod.GetPretranscodeStatus(c.Request.Context(), fileID)
 	if err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return

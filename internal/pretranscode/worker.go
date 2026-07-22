@@ -4,14 +4,19 @@ import (
 	"bufio"
 	"context"
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"knox-media/internal/processmetrics"
+	"knox-media/internal/publication"
 	"log"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/google/uuid"
 	"time"
 
 	"knox-media/internal/jit/hwenc"
@@ -80,55 +85,102 @@ func (w *Worker) Start(ctx context.Context) {
 
 // runOnce picks the next eligible waiting rendition job and runs it.
 func (w *Worker) runOnce(ctx context.Context) {
+	if _, err := w.ProcessNext(ctx); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		log.Printf("pretranscode claimNextJob error: %v", err)
+	}
+}
+
+// ProcessNext claims and starts one eligible rendition. It returns false when
+// no work is available; Start uses the same operational path on every tick.
+func (w *Worker) ProcessNext(ctx context.Context) (bool, error) {
 	job, preset, rendition, mediaID, catalogPath, sourceWidth, sourceHeight, err := w.claimNextJob()
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
 	if err != nil {
-		if err != sql.ErrNoRows {
-			log.Printf("pretranscode claimNextJob error: %v", err)
-		}
-		return
+		return false, err
 	}
 	if job == nil {
-		return
+		return false, nil
 	}
 	if ShouldSkipRenditionAboveSource(*rendition, sourceWidth, sourceHeight) {
-		_, _ = w.DB.Exec(`UPDATE pretranscode_rendition_job SET status='done', progress=100, output_path='', completed_at=CURRENT_TIMESTAMP WHERE id=?`, job.ID)
-		w.refreshTaskProgress(job.TaskID)
-		w.maybeCompleteTask(job.TaskID)
-		return
+		if _, err := w.finalizeJobAndTaskTx(ctx, *job, renditionJobTerminal{Status: "done", Progress: 100, Encoder: "skip"}); err != nil {
+			log.Printf("pretranscode skipped job %d finalize failed: %v", job.ID, err)
+		}
+		return true, nil
 	}
 	adapted := AdaptRenditionForSource(*rendition, sourceWidth, sourceHeight)
 	rendition = &adapted
 	log.Printf("pretranscode job claimed: job_id=%d task_id=%d rendition=%s media_id=%d", job.ID, job.TaskID, rendition.Name, mediaID)
 	go w.runRenditionJob(ctx, job, preset, rendition, mediaID, catalogPath)
+	return true, nil
 }
+
+var ErrJobOwnershipLost = errors.New("pretranscode rendition job ownership lost")
 
 type claimedJob struct {
 	ID          int64
 	TaskID      int64
 	RenditionID int64
 	Name        string
+	Owner       string
 }
 
 func (w *Worker) claimNextJob() (*claimedJob, *Preset, *Rendition, int64, string, int, int, error) {
-	row := w.DB.QueryRow(`SELECT j.id, j.task_id, j.rendition_id, j.rendition_name
+	row := w.DB.QueryRow(`SELECT j.id, j.task_id, COALESCE(j.rendition_id,0), j.rendition_name, COALESCE(j.config_snapshot_json,'')
 		FROM pretranscode_rendition_job j
 		JOIN transcode_task t ON t.id = j.task_id
 		LEFT JOIN pretranscode_task_meta pt ON pt.task_id = t.id
-		WHERE j.status = 'waiting' AND t.status IN ('waiting','running')
+		WHERE j.status = 'waiting' AND COALESCE(j.available_at,CURRENT_TIMESTAMP)<=CURRENT_TIMESTAMP AND t.status IN ('waiting','running')
 		ORDER BY CASE COALESCE(pt.priority,'normal') WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, j.created_at
 		LIMIT 1`)
 	var c claimedJob
-	if err := row.Scan(&c.ID, &c.TaskID, &c.RenditionID, &c.Name); err != nil {
+	var snapshotJSON string
+	if err := row.Scan(&c.ID, &c.TaskID, &c.RenditionID, &c.Name, &snapshotJSON); err != nil {
 		return nil, nil, nil, 0, "", 0, 0, err
 	}
-	res, err := w.DB.Exec(`UPDATE pretranscode_rendition_job SET status='running', started_at=CURRENT_TIMESTAMP WHERE id=? AND status='waiting'`, c.ID)
+	c.Owner = "pretranscode/" + uuid.NewString()
+	res, err := w.DB.Exec(`UPDATE pretranscode_rendition_job SET status='running',started_at=COALESCE(started_at,CURRENT_TIMESTAMP),lease_owner=?,lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds') WHERE id=? AND status='waiting' AND COALESCE(available_at,CURRENT_TIMESTAMP)<=CURRENT_TIMESTAMP`, c.Owner, c.ID)
 	if err != nil {
 		return nil, nil, nil, 0, "", 0, 0, err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return nil, nil, nil, 0, "", 0, 0, fmt.Errorf("lost race")
 	}
-	// Load preset + rendition + media info.
+	hydrated := false
+	defer func() {
+		if !hydrated {
+			_, _ = w.DB.Exec(`UPDATE pretranscode_rendition_job SET status='waiting',lease_owner=NULL,lease_until=NULL,started_at=NULL WHERE id=? AND status='running' AND lease_owner=?`, c.ID, c.Owner)
+		}
+	}()
+	var linkedGeneration int64
+	if err = w.DB.QueryRow(`SELECT COALESCE(generation,0) FROM transcode_task WHERE id=?`, c.TaskID).Scan(&linkedGeneration); err != nil {
+		return nil, nil, nil, 0, "", 0, 0, err
+	}
+	if linkedGeneration > 0 && snapshotJSON == "" {
+		return nil, nil, nil, 0, "", 0, 0, fmt.Errorf("ingest prepare immutable snapshot missing for job %d", c.ID)
+	}
+	// Linked ingest jobs are hydrated only from their immutable execution snapshot.
+	if snapshotJSON != "" {
+		var snapshot ingestPrepareJobSnapshot
+		if err = json.Unmarshal([]byte(snapshotJSON), &snapshot); err != nil {
+			return nil, nil, nil, 0, "", 0, 0, fmt.Errorf("decode ingest prepare snapshot for job %d: %w", c.ID, err)
+		}
+		var mediaID, libraryID, sourceWidth, sourceHeight int64
+		var catalogPath string
+		_ = w.DB.QueryRow(`SELECT COALESCE(m.id,0),COALESCE(m.library_id,0),COALESCE(m.width,0),COALESCE(m.height,0),COALESCE(m.file_path,'') FROM transcode_task t LEFT JOIN media m ON m.file_id=t.file_id WHERE t.id=?`, c.TaskID).Scan(&mediaID, &libraryID, &sourceWidth, &sourceHeight, &catalogPath)
+		if catalogPath == "" {
+			return nil, nil, nil, 0, "", 0, 0, fmt.Errorf("input path missing for task %d", c.TaskID)
+		}
+		if libraryID > 0 {
+			if resolved := storage.ResolveMediaAbsolutePath(w.DB, libraryID, catalogPath); resolved != "" {
+				catalogPath = resolved
+			}
+		}
+		hydrated = true
+		return &c, &snapshot.Preset, &snapshot.Rendition, mediaID, catalogPath, int(sourceWidth), int(sourceHeight), nil
+	}
+	// Legacy manual jobs retain mutable preset hydration.
 	var p Preset
 	var presetID int64
 	var encMode, outFormat, videoCodec, videoPreset, videoMaxrate, videoBufsize, videoProfile, videoPixFmt, audioCodec, audioBitrate string
@@ -183,6 +235,7 @@ func (w *Worker) claimNextJob() (*claimedJob, *Preset, *Rendition, int64, string
 			catalogPath = resolved
 		}
 	}
+	hydrated = true
 	return &c, &p, &r, mediaID, catalogPath, sourceWidth, sourceHeight, nil
 }
 
@@ -198,6 +251,9 @@ func (w *Worker) runRenditionJob(parent context.Context, job *claimedJob, p *Pre
 		w.mu.Unlock()
 		cancel()
 	}()
+	leaseDone := make(chan struct{})
+	go w.renewJobLeaseLoop(ctx, *job, leaseDone)
+	defer close(leaseDone)
 
 	// Acquire concurrency slot based on encoder family.
 	availableEncoders := hwenc.ListAvailableEncoders(w.FFmpegPath)
@@ -294,7 +350,10 @@ func (w *Worker) runRenditionJob(parent context.Context, job *claimedJob, p *Pre
 					if pct > 99 {
 						pct = 99
 					}
-					_, _ = w.DB.Exec(`UPDATE pretranscode_rendition_job SET progress=? WHERE id=?`, pct, job.ID)
+					if err := w.updateJobProgress(ctx, *job, pct); err != nil {
+						cancel()
+						return
+					}
 					w.refreshTaskProgress(job.TaskID)
 				}
 			}
@@ -312,10 +371,9 @@ func (w *Worker) runRenditionJob(parent context.Context, job *claimedJob, p *Pre
 		w.failJob(job, "output file missing after ffmpeg success", encoder)
 		return
 	}
-	_, _ = w.DB.Exec(`UPDATE pretranscode_rendition_job SET status='done', progress=100, output_path=?, encoder_used=?, completed_at=CURRENT_TIMESTAMP WHERE id=?`,
-		built.OutFile, encoder, job.ID)
-	w.refreshTaskProgress(job.TaskID)
-	w.maybeCompleteTask(job.TaskID)
+	if _, err := w.finalizeJobAndTaskTx(ctx, *job, renditionJobTerminal{Status: "done", Progress: 100, OutputPath: built.OutFile, Encoder: encoder}); err != nil {
+		log.Printf("pretranscode job %d finalize failed: %v", job.ID, err)
+	}
 }
 
 // CancelRendition cancels a running job (SRS ACT-01).
@@ -330,9 +388,9 @@ func (w *Worker) CancelRendition(jobID int64) bool {
 }
 
 func (w *Worker) failJob(job *claimedJob, msg, encoder string) {
-	_, _ = w.DB.Exec(`UPDATE pretranscode_rendition_job SET status='failed', error_message=?, encoder_used=?, completed_at=CURRENT_TIMESTAMP WHERE id=?`, truncate(msg, 1600), encoder, job.ID)
-	w.refreshTaskProgress(job.TaskID)
-	w.maybeFailTask(job.TaskID)
+	if _, err := w.finalizeJobAndTaskTx(context.Background(), *job, renditionJobTerminal{Status: "failed", ErrorMessage: truncate(msg, 1600), Encoder: encoder}); err != nil {
+		log.Printf("pretranscode job %d failure finalize failed: %v", job.ID, err)
+	}
 	log.Printf("pretranscode job %d failed: %s", job.ID, msg)
 }
 
@@ -345,29 +403,200 @@ func (w *Worker) refreshTaskProgress(taskID int64) {
 	_, _ = w.DB.Exec(`UPDATE transcode_task SET progress=? WHERE id=?`, overall, taskID)
 }
 
-func (w *Worker) maybeCompleteTask(taskID int64) {
-	var total, done int
-	_ = w.DB.QueryRow(`SELECT COUNT(1), SUM(CASE WHEN status='done' THEN 1 ELSE 0 END) FROM pretranscode_rendition_job WHERE task_id=?`, taskID).Scan(&total, &done)
-	if total > 0 && total == done {
-		var outputPath string
-		_ = w.DB.QueryRow(`SELECT COALESCE(output_path,'') FROM pretranscode_task_meta WHERE task_id=?`, taskID).Scan(&outputPath)
-		_, _ = w.DB.Exec(`UPDATE transcode_task SET status='done', progress=100, completed_at=CURRENT_TIMESTAMP, output_path=? WHERE id=?`, outputPath, taskID)
-		// Fire webhook (best-effort).
-		if wh := GlobalWebhookDispatcher; wh != nil {
-			wh.SendTaskCompleted(taskID)
+func (w *Worker) maybeCompleteTask(taskID int64) { _ = w.finalizeTask(context.Background(), taskID) }
+
+func (w *Worker) maybeFailTask(taskID int64) { _ = w.finalizeTask(context.Background(), taskID) }
+
+func (w *Worker) renewJobLease(ctx context.Context, job claimedJob) error {
+	res, err := w.DB.ExecContext(ctx, `UPDATE pretranscode_rendition_job SET lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds') WHERE id=? AND task_id=? AND status='running' AND lease_owner=?`, job.ID, job.TaskID, job.Owner)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return ErrJobOwnershipLost
+	}
+	return nil
+}
+func (w *Worker) renewJobLeaseLoop(ctx context.Context, job claimedJob, done <-chan struct{}) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-done:
+			return
+		case <-ticker.C:
+			if err := w.renewJobLease(ctx, job); err != nil {
+				return
+			}
 		}
 	}
 }
 
-func (w *Worker) maybeFailTask(taskID int64) {
-	var total, failed int
-	_ = w.DB.QueryRow(`SELECT COUNT(1), SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) FROM pretranscode_rendition_job WHERE task_id=?`, taskID).Scan(&total, &failed)
-	if total > 0 && total == failed {
-		_, _ = w.DB.Exec(`UPDATE transcode_task SET status='failed', completed_at=CURRENT_TIMESTAMP WHERE id=?`, taskID)
-		if wh := GlobalWebhookDispatcher; wh != nil {
-			wh.SendTaskFailed(taskID)
+func (w *Worker) updateJobProgress(ctx context.Context, job claimedJob, progress int) error {
+	res, err := w.DB.ExecContext(ctx, `UPDATE pretranscode_rendition_job SET progress=?,lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds') WHERE id=? AND task_id=? AND status='running' AND lease_owner=?`, progress, job.ID, job.TaskID, job.Owner)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return ErrJobOwnershipLost
+	}
+	return nil
+}
+
+type renditionJobTerminal struct {
+	Status       string
+	Progress     int
+	OutputPath   string
+	ErrorMessage string
+	Encoder      string
+}
+
+// finalizeJobAndTaskTx persists one running rendition's terminal payload and,
+// when it is the final active rendition, synchronizes task and publication state
+// in the same transaction. A downstream failure rolls back the job transition.
+func (w *Worker) finalizeJobAndTaskTx(ctx context.Context, job claimedJob, terminal renditionJobTerminal) (bool, error) {
+	if terminal.Status != "done" && terminal.Status != "failed" {
+		return false, fmt.Errorf("pretranscode job %d invalid terminal status %q", job.ID, terminal.Status)
+	}
+	tx, err := w.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `UPDATE pretranscode_rendition_job SET status=?,progress=?,output_path=?,error_message=?,encoder_used=?,completed_at=CURRENT_TIMESTAMP WHERE id=? AND task_id=? AND status='running' AND lease_owner=?`, terminal.Status, terminal.Progress, terminal.OutputPath, terminal.ErrorMessage, terminal.Encoder, job.ID, job.TaskID, job.Owner)
+	if err != nil {
+		return false, err
+	}
+	changed, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if changed == 0 {
+		return false, ErrJobOwnershipLost
+	}
+	var total, done, failed, pending, progress int
+	if err = tx.QueryRowContext(ctx, `SELECT COUNT(1),COALESCE(SUM(status='done'),0),COALESCE(SUM(status='failed'),0),COALESCE(SUM(status IN ('waiting','running')),0),COALESCE(SUM(progress),0) FROM pretranscode_rendition_job WHERE task_id=?`, job.TaskID).Scan(&total, &done, &failed, &pending, &progress); err != nil {
+		return false, err
+	}
+	if total == 0 {
+		return false, fmt.Errorf("pretranscode task %d has no rendition jobs", job.TaskID)
+	}
+	if pending > 0 {
+		if _, err = tx.ExecContext(ctx, `UPDATE transcode_task SET progress=? WHERE id=? AND status IN ('waiting','running')`, progress/total, job.TaskID); err != nil {
+			return false, err
+		}
+		return false, tx.Commit()
+	}
+	status := "done"
+	if failed > 0 {
+		status = "failed"
+	}
+	var outputPath string
+	_ = tx.QueryRowContext(ctx, `SELECT COALESCE(output_path,'') FROM pretranscode_task_meta WHERE task_id=?`, job.TaskID).Scan(&outputPath)
+	res, err = tx.ExecContext(ctx, `UPDATE transcode_task SET status=?,progress=CASE WHEN ?='done' THEN 100 ELSE progress END,completed_at=COALESCE(completed_at,CURRENT_TIMESTAMP),output_path=CASE WHEN ?='done' THEN ? ELSE output_path END WHERE id=? AND status IN ('waiting','running')`, status, status, status, outputPath, job.TaskID)
+	if err != nil {
+		return false, err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return false, fmt.Errorf("pretranscode task %d not active", job.TaskID)
+	}
+	if err = completeLinkedPrepareTx(ctx, tx, job.TaskID, status); err != nil {
+		return false, err
+	}
+	if err = tx.Commit(); err != nil {
+		return false, err
+	}
+	_ = done
+	if wh := CurrentWebhookDispatcher(); wh != nil {
+		if status == "done" {
+			wh.SendTaskCompleted(job.TaskID)
+		} else {
+			wh.SendTaskFailed(job.TaskID)
 		}
 	}
+	return true, nil
+}
+
+func completeLinkedPrepareTx(ctx context.Context, tx *sql.Tx, taskID int64, status string) error {
+	var runID, stepID, generation sql.NullInt64
+	if err := tx.QueryRowContext(ctx, `SELECT ingest_run_id,ingest_step_id,generation FROM transcode_task WHERE id=?`, taskID).Scan(&runID, &stepID, &generation); err != nil {
+		return err
+	}
+	if !runID.Valid && !stepID.Valid && !generation.Valid {
+		return nil
+	}
+	if !runID.Valid || !stepID.Valid || !generation.Valid {
+		return fmt.Errorf("pretranscode task %d has partial ingest linkage", taskID)
+	}
+	lastError := ""
+	if status == "failed" {
+		lastError = "pretranscode rendition failed"
+	}
+	if err := publication.CompletePrepareTx(ctx, tx, runID.Int64, stepID.Int64, generation.Int64, status == "done", lastError); err != nil {
+		return fmt.Errorf("pretranscode task %d complete linked prepare: %w", taskID, err)
+	}
+	return nil
+}
+
+// finalizeTask atomically synchronizes a terminal pretranscode task with its
+// linked prepare step and publication aggregate. Unlinked legacy tasks retain
+// their existing lifecycle without touching publication state.
+func (w *Worker) finalizeTask(ctx context.Context, taskID int64) error {
+	tx, err := w.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var total, done, failed, pending int
+	if err = tx.QueryRowContext(ctx, `SELECT COUNT(1),COALESCE(SUM(status='done'),0),COALESCE(SUM(status='failed'),0),COALESCE(SUM(status IN ('waiting','running')),0) FROM pretranscode_rendition_job WHERE task_id=?`, taskID).Scan(&total, &done, &failed, &pending); err != nil {
+		return err
+	}
+	if total == 0 || pending > 0 {
+		return nil
+	}
+	status := "done"
+	if failed > 0 {
+		status = "failed"
+	}
+	var outputPath string
+	_ = tx.QueryRowContext(ctx, `SELECT COALESCE(output_path,'') FROM pretranscode_task_meta WHERE task_id=?`, taskID).Scan(&outputPath)
+	res, err := tx.ExecContext(ctx, `UPDATE transcode_task SET status=?,progress=CASE WHEN ?='done' THEN 100 ELSE progress END,completed_at=COALESCE(completed_at,CURRENT_TIMESTAMP),output_path=CASE WHEN ?='done' THEN ? ELSE output_path END WHERE id=? AND status NOT IN ('done','failed')`, status, status, status, outputPath, taskID)
+	if err != nil {
+		return err
+	}
+	changed, _ := res.RowsAffected()
+	var runID, stepID, generation sql.NullInt64
+	if err = tx.QueryRowContext(ctx, `SELECT ingest_run_id,ingest_step_id,generation FROM transcode_task WHERE id=?`, taskID).Scan(&runID, &stepID, &generation); err != nil {
+		return err
+	}
+	if runID.Valid || stepID.Valid || generation.Valid {
+		if !runID.Valid || !stepID.Valid || !generation.Valid {
+			return fmt.Errorf("pretranscode task %d has partial ingest linkage", taskID)
+		}
+		lastError := ""
+		if status == "failed" {
+			lastError = "pretranscode rendition failed"
+		}
+		if err = publication.CompletePrepareTx(ctx, tx, runID.Int64, stepID.Int64, generation.Int64, status == "done", lastError); err != nil {
+			return fmt.Errorf("pretranscode task %d complete linked prepare: %w", taskID, err)
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	if changed > 0 {
+		if wh := CurrentWebhookDispatcher(); wh != nil {
+			if status == "done" {
+				wh.SendTaskCompleted(taskID)
+			} else {
+				wh.SendTaskFailed(taskID)
+			}
+		}
+	}
+	_ = done
+	return nil
 }
 
 func (w *Worker) lookupDurationUS(taskID int64) int64 {
@@ -410,7 +639,19 @@ func trimErr(err error, stderr string) string {
 
 // GlobalWebhookDispatcher is set by the module to dispatch webhook events
 // from worker callbacks. Nil in tests that don't care about webhooks.
+var webhookDispatcherMu sync.RWMutex
 var GlobalWebhookDispatcher WebhookDispatcher
+
+func CurrentWebhookDispatcher() WebhookDispatcher {
+	webhookDispatcherMu.RLock()
+	defer webhookDispatcherMu.RUnlock()
+	return GlobalWebhookDispatcher
+}
+func setWebhookDispatcher(dispatcher WebhookDispatcher) {
+	webhookDispatcherMu.Lock()
+	GlobalWebhookDispatcher = dispatcher
+	webhookDispatcherMu.Unlock()
+}
 
 // WebhookDispatcher is the minimal interface the worker calls.
 type WebhookDispatcher interface {

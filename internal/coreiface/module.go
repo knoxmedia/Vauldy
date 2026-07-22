@@ -7,6 +7,7 @@ package coreiface
 import (
 	"context"
 	"database/sql"
+	"sync"
 
 	"github.com/gin-gonic/gin"
 
@@ -64,7 +65,53 @@ var EnterpriseModules []EnterpriseModule
 // PretranscodeMod is the nil-by-default pretranscode capability handle.
 // The commercial build assigns a real implementation in init(); the
 // community build leaves it nil so play/delete paths skip pretranscode.
+var pretranscodeModMu sync.RWMutex
 var PretranscodeMod PretranscodeModule
+
+func PretranscodeModuleHandle() PretranscodeModule {
+	pretranscodeModMu.RLock()
+	defer pretranscodeModMu.RUnlock()
+	return PretranscodeMod
+}
+func SetPretranscodeModule(mod PretranscodeModule) {
+	pretranscodeModMu.Lock()
+	PretranscodeMod = mod
+	pretranscodeModMu.Unlock()
+}
+func ClearPretranscodeModuleIfOwned(mod PretranscodeModule) {
+	pretranscodeModMu.Lock()
+	if PretranscodeMod == mod {
+		PretranscodeMod = nil
+	}
+	pretranscodeModMu.Unlock()
+}
+
+// IngestPreparePlan is registered by the commercial pretranscode package at
+// package initialization. It has no process or database dependency and remains
+// nil when that package is absent from a community build.
+var ingestPrepareMu sync.RWMutex
+var IngestPreparePlan IngestPreparePlanner
+
+func IngestPreparePlannerHandle() IngestPreparePlanner {
+	ingestPrepareMu.RLock()
+	defer ingestPrepareMu.RUnlock()
+	return IngestPreparePlan
+}
+
+// RegisterIngestPreparePlanner installs the startup capability and returns a test-friendly restore closure.
+func RegisterIngestPreparePlanner(planner IngestPreparePlanner) func() {
+	ingestPrepareMu.Lock()
+	previous := IngestPreparePlan
+	IngestPreparePlan = planner
+	ingestPrepareMu.Unlock()
+	return func() {
+		ingestPrepareMu.Lock()
+		if IngestPreparePlan == planner {
+			IngestPreparePlan = previous
+		}
+		ingestPrepareMu.Unlock()
+	}
+}
 
 // RegisterEnterpriseModule appends a module to the global registry. Called
 // from commercial init() functions; a no-op in the community build.

@@ -74,8 +74,9 @@ func (s *Scanner) ScanLibraryFoldersWithContext(ctx context.Context, libraryID i
 }
 
 type ScanCallbacks struct {
-	OnFile       func(string, error)
-	OnMediaAdded func(context.Context, int64, string, string) error
+	OnFile              func(string, error)
+	OnMediaAdded        func(context.Context, int64, string, string) error
+	OnMediaDiscoveredTx func(context.Context, *sql.Tx, int64, string, string) error
 }
 
 func (s *Scanner) ScanLibraryFoldersWithContextAndMediaAdded(ctx context.Context, libraryID int64, roots []string, onMediaAdded func(context.Context, int64, string, string) error) (added int, err error) {
@@ -389,6 +390,11 @@ func (s *Scanner) ScanLibraryFoldersWithContextAndCallbacks(ctx context.Context,
 			if mediaID > 0 {
 				if tvLibrary || musicLibrary {
 					if e = relationshipsync.SyncTx(ctx, tx, mediaID); e != nil {
+						return e
+					}
+				}
+				if existingMediaID == 0 && callbacks.OnMediaDiscoveredTx != nil {
+					if e = callbacks.OnMediaDiscoveredTx(ctx, tx, mediaID, title, ft); e != nil {
 						return e
 					}
 				}
@@ -734,8 +740,8 @@ func (s *Scanner) syncMissingMedia(ctx context.Context, libraryID int64, roots [
 	_ = rows.Close()
 
 	for _, item := range stale {
-		if coreiface.PretranscodeMod != nil && strings.TrimSpace(item.fileID) != "" {
-			_ = coreiface.PretranscodeMod.OnMediaDeleted(ctx, item.id, []string{item.fileID})
+		if mod := coreiface.PretranscodeModuleHandle(); mod != nil && strings.TrimSpace(item.fileID) != "" {
+			_ = mod.OnMediaDeleted(ctx, item.id, []string{item.fileID})
 		}
 		tvstore.CleanupMedia(s.DB, item.id)
 		musicstore.CleanupMedia(s.DB, item.id)

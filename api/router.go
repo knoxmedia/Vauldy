@@ -252,6 +252,10 @@ func NewEngine(cfg *config.Config, application *app.App, deps handler.Dependenci
 			adm.GET("/scan/task", h.ListScanTasks)
 			adm.POST("/scan/task/:id/cancel", h.CancelScanTask)
 
+			adm.GET("/admin/media", h.AdminListMedia)
+			adm.GET("/admin/media/:id/ingest", h.AdminGetMediaIngest)
+			adm.POST("/admin/media/:id/ingest/retry", h.AdminRetryMediaIngest)
+
 			adm.POST("/media/:id/scrape", h.ScrapeMedia)
 			adm.POST("/media/:id/subtitle/process", h.ProcessMediaSubtitles)
 			adm.POST("/media/:id/subtitle", h.EnqueueSubtitleProcessing)

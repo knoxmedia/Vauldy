@@ -232,12 +232,12 @@ func (h *Handler) executeScheduledTask(ctx context.Context, taskType string, pay
 		if libraryID <= 0 {
 			return "", fmt.Errorf("payload.library_id required")
 		}
-		taskID, runningTaskID, err := h.startLibraryScanTask(libraryID, string(scancoord.SourceScheduled))
+		taskID, runningTaskID, err := h.startLibraryScanTask(ctx, libraryID, string(scancoord.SourceScheduled))
 		if err != nil {
 			return "", err
 		}
 		if runningTaskID > 0 {
-			return "", fmt.Errorf("library scan already running (task #%d)", runningTaskID)
+			return fmt.Sprintf("扫描请求已合并到任务 #%d", runningTaskID), nil
 		}
 		return fmt.Sprintf("已启动扫描任务 #%d", taskID), nil
 	case "scrape_run":

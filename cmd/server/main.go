@@ -29,6 +29,7 @@ import (
 	"knox-media/cmd/transcodeworker"
 	"knox-media/internal/app"
 	"knox-media/internal/atrack"
+	"knox-media/internal/buildinfo"
 	"knox-media/internal/config"
 	"knox-media/internal/coreiface"
 	"knox-media/internal/doccover"
@@ -48,6 +49,7 @@ import (
 	"knox-media/internal/postingest"
 	_ "knox-media/internal/pretranscode"
 	"knox-media/internal/preview"
+	"knox-media/internal/publication"
 	"knox-media/internal/scancoord"
 	"knox-media/internal/scanner"
 	"knox-media/internal/storage"
@@ -59,6 +61,15 @@ import (
 	"knox-media/pkg/ffprobe"
 )
 
+type cancelScanPersistence func(context.Context, int64) (int64, error)
+
+func handleScanCancelled(ctx context.Context, taskID int64, persist cancelScanPersistence, cancelLocal func(int64)) error {
+	// Stop local execution first so a running worker cannot race a durable cancel.
+	// Persistence is still attempted and its error is returned to the coordinator.
+	cancelLocal(taskID)
+	_, err := persist(ctx, taskID)
+	return err
+}
 func main() {
 	zlog := zapglobal.MustReplaceGlobals()
 	defer func() { _ = zlog.Sync() }()
@@ -79,16 +90,23 @@ func main() {
 	if err := cfg.EnsureDirs(); err != nil {
 		log.Fatalf("dirs: %v", err)
 	}
-	log.Printf("build marker: no_audio_master_patch=v1")
-
 	// (1) Database, metrics, and validated configuration. Configuration is validated above; OpenSQLite lives here rather than app.New.
 	db, err := store.OpenSQLiteContext(serverCtx, cfg.Data.DB)
 	if err != nil {
 		log.Fatalf("db: %v", err)
 	}
 	defer db.Close()
+	info := buildinfo.Current()
+	identity, identityOK := store.SQLiteIdentity(db)
+	if !identityOK {
+		identity = store.SQLiteDBIdentity{Path: "unknown"}
+	}
+	log.Printf("%s", startupBuildLog(info, identity))
+	for _, warning := range buildinfo.ValidateDevelopment(info) {
+		log.Printf("build metadata warning: %s", warning)
+	}
+	log.Printf("build marker: no_audio_master_patch=v1")
 	sqliteMetrics := &store.SQLiteMetrics{}
-	store.ResetInterruptedTasks(db)
 
 	if err := seedUsers(db); err != nil {
 		log.Fatalf("seed: %v", err)
@@ -231,6 +249,9 @@ func main() {
 	processID := fmt.Sprintf("%s-%d-%s", hostname, os.Getpid(), uuid.NewString())
 	queueOwner := "postingest-" + processID
 	postIngestQueue := postingest.NewQueue(db, queueOwner, sqliteMetrics)
+	if err := recoverStartupTasks(serverCtx, db, postIngestQueue); err != nil {
+		log.Fatalf("startup task recovery: %v", err)
+	}
 	postIngestEnqueuer := postingest.NewEnqueuer(db, cfg, sqliteMetrics)
 	posterRunner := &postingest.LocalPosterRunner{DB: db, Vault: keyVault, Derived: derivedStore, FFmpegPath: cfg.FFmpeg.FFmpegPath, FFprobePath: cfg.FFmpeg.FFprobePath, UploadDir: cfg.Data.Upload}
 	adapters := postingest.AdapterSet{
@@ -247,6 +268,20 @@ func main() {
 		log.Fatalf("post-ingest dispatcher: %v", err)
 	}
 	dispatcherDone := make(chan error, 1)
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-serverCtx.Done():
+				return
+			case <-ticker.C:
+				if _, err := publication.RetryDegradedRuns(serverCtx, db, 8); err != nil && serverCtx.Err() == nil {
+					log.Printf("publication degraded retry: %v", err)
+				}
+			}
+		}
+	}()
 	go func() {
 		err := dispatcher.Start(serverCtx)
 		dispatcherDone <- err
@@ -281,14 +316,36 @@ func main() {
 		LeaseDuration: 60 * time.Second, HeartbeatInterval: 20 * time.Second,
 		OwnerInstanceID: "scancoord-" + processID, Scanner: sc, Metrics: sqliteMetrics,
 
-		OnMediaAdded:    scancoord.MediaAddedFunc(postingest.NewScanMediaAddedEnqueueCallback(postIngestEnqueuer)),
-		OnScanCancelled: func(_ context.Context, taskID int64) error { dispatcher.CancelScan(taskID); return nil },
+		OnMediaDiscoveredTx: scancoord.MediaDiscoveredTxFunc(postingest.NewScanMediaDiscoveredTxCallback(publication.NewPlanner(publication.PlanOptions{SubtitleAuto: cfg.SubtitleAutoOnScan(), ATrackAuto: cfg.ATrackAutoOnScan(), EncryptGlobal: cfg.EncryptedAssetsEnabled(), PreparePlanner: coreiface.IngestPreparePlannerHandle()}))),
+		OnScanCancelled: func(ctx context.Context, taskID int64) error {
+			return handleScanCancelled(ctx, taskID, postIngestQueue.CancelScan, dispatcher.CancelScan)
+		},
 
 		OnError: func(err error) { log.Printf("scan coordinator: %v", err) },
 	})
 	if err != nil {
 		log.Fatalf("scan coordinator: %v", err)
 	}
+	finalizeRecoveryDone := make(chan struct{})
+	go func() {
+		defer close(finalizeRecoveryDone)
+		recoverPending := func() {
+			if _, err := scancoord.RecoverPendingFinalizations(serverCtx, db, 16); err != nil && serverCtx.Err() == nil {
+				log.Printf("scan finalize recovery: %v", err)
+			}
+		}
+		recoverPending()
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-serverCtx.Done():
+				return
+			case <-ticker.C:
+				recoverPending()
+			}
+		}
+	}()
 
 	// (5) Admin overview uses the shared resource-control instances.
 	background := &handler.BackgroundGroup{}
@@ -298,22 +355,11 @@ func main() {
 		Worker: worker, PackageWorker: packageWorker, PreviewWorker: previewWorker, Subtitle: subSvc, Upload: up,
 		Instant: instantScheduler, SessionManager: sessionMgr, AtrackWorker: atrackWorker, KeyframeWorker: keyframeWorker,
 		LyricWorker: lyricWorker, PhotoClassifyWorker: photoClassifyWorker, DocCoverWorker: docCoverWorker,
-		KeyVault: keyVault, AssetEncryptor: assetEnc, DerivedStore: derivedStore,
+		KeyVault: keyVault, AssetEncryptor: assetEnc, DerivedStore: derivedStore, IngestPreparePlanner: coreiface.IngestPreparePlannerHandle(),
 	}
 
 	// (6) Handler dependencies are injected into the API router.
 	engine := api.NewEngine(cfg, application, deps)
-
-	// (7) Monitor submits through the same coordinator and starts last.
-	mon := monitor.NewService(db, coordinator, 15*time.Second)
-	monitorDone := make(chan struct{})
-	go func() {
-		defer close(monitorDone)
-		mon.Start(serverCtx)
-	}()
-
-	// (8) Root cancellation stops monitor, scans, and dispatcher. HTTP shutdown below stops new requests first;
-	// Dispatcher preserves running leases with FailureShutdown and Coordinator waits for scan finalization.
 
 	// Initialize commercial enterprise modules (license + pretranscode). The
 	// community build leaves EnterpriseModules empty, so this loop is a no-op.
@@ -334,6 +380,32 @@ func main() {
 		}
 	}
 
+	// Repair runs only after post-ingest, scrape/API, and enterprise prepare workers exist.
+	// ResetInterruptedTasks already ran, so a restarted current repair suppresses duplicates.
+	repairPlanner := publication.NewPlanner(publication.PlanOptions{
+		SubtitleAuto: cfg.SubtitleAutoOnScan(), ATrackAuto: cfg.ATrackAutoOnScan(),
+		EncryptGlobal: cfg.EncryptedAssetsEnabled(), PreparePlanner: coreiface.IngestPreparePlannerHandle(),
+	})
+	background.Go(serverCtx, func(repairCtx context.Context) {
+		repaired, repairErr := publication.RepairLegacyMedia(repairCtx, db, repairPlanner, 64)
+		if repairErr != nil && repairCtx.Err() == nil {
+			log.Printf("publication legacy repair: %v", repairErr)
+			return
+		}
+		if repaired > 0 {
+			log.Printf("publication legacy repair scheduled: %d media", repaired)
+		}
+	})
+
+	// (7) Monitor submits through the same coordinator and starts last.
+	mon := monitor.NewService(db, coordinator, 15*time.Second)
+	monitorDone := make(chan struct{})
+	go func() {
+		defer close(monitorDone)
+		mon.Start(serverCtx)
+	}()
+
+	// (8) Root cancellation stops monitor, scans, and dispatcher.
 	httpServer := &http.Server{Addr: cfg.Addr(), Handler: engine}
 	serverDone := make(chan error, 1)
 	go func() {
@@ -355,6 +427,11 @@ func main() {
 		log.Printf("http server shutdown: %v", err)
 	}
 	serverCancel()
+	select {
+	case <-finalizeRecoveryDone:
+	case <-shutdownCtx.Done():
+		log.Printf("scan finalize recovery shutdown: %v", shutdownCtx.Err())
+	}
 	// Wait for monitor submission to stop before waiting on the Coordinator WaitGroup.
 	select {
 	case <-monitorDone:
@@ -557,4 +634,8 @@ func loadSystemOptionsTranscodeSettings(db *sql.DB) transcode.Settings {
 		return transcode.DefaultSettings()
 	}
 	return transcode.SettingsFromOptionsJSON(raw.String)
+}
+
+func startupBuildLog(info buildinfo.Info, identity store.SQLiteDBIdentity) string {
+	return fmt.Sprintf("build_info %s db_path=%s schema_version=%d user_version=%d", info.String(), identity.Path, identity.SchemaRevision, identity.UserRevision)
 }

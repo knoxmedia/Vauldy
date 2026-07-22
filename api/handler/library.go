@@ -69,7 +69,7 @@ func (h *Handler) ListLibraries(c *gin.Context) {
 			}
 		}
 	}
-	query := `SELECT l.id,l.name,l.type,l.path,l.auto_scan,l.enabled,l.realtime_monitor,l.preview_extract,l.drm_enabled,COALESCE(l.encryption_mode,'drm'),l.cleanup_local_source_after_package,l.jit_prepare_on_ingest,COALESCE(l.encrypted_assets_enabled,0),COALESCE(l.encrypted_assets_cleanup_plaintext,0),COALESCE(l.encrypted_assets_dir_mode,'library'),COALESCE(l.encrypted_assets_custom_dir,''),l.metadata_providers,l.image_providers,l.metadata_refresh_policy,l.scraper,l.created_at,COALESCE(mc.media_count,0),COALESCE(latest_scan.id,0),COALESCE(latest_scan.status,''),COALESCE(latest_scan.processed_count,0),COALESCE(latest_scan.total_count,0),COALESCE(latest_scan.added_count,0),COALESCE(latest_scan.started_at,'') FROM library l LEFT JOIN (SELECT library_id,COUNT(*) AS media_count FROM media GROUP BY library_id) mc ON mc.library_id=l.id LEFT JOIN (SELECT st.* FROM scan_task st JOIN (SELECT library_id,MAX(id) AS max_id FROM scan_task GROUP BY library_id) latest ON latest.max_id=st.id) latest_scan ON latest_scan.library_id=l.id`
+	query := `SELECT l.id,l.name,l.type,l.path,l.auto_scan,l.enabled,l.realtime_monitor,l.preview_extract,l.drm_enabled,COALESCE(l.encryption_mode,'drm'),l.cleanup_local_source_after_package,l.jit_prepare_on_ingest,COALESCE(l.encrypted_assets_enabled,0),COALESCE(l.encrypted_assets_cleanup_plaintext,0),COALESCE(l.encrypted_assets_dir_mode,'library'),COALESCE(l.encrypted_assets_custom_dir,''),l.metadata_providers,l.image_providers,l.metadata_refresh_policy,l.scraper,l.created_at,COALESCE(mc.media_count,0),COALESCE(latest_scan.id,0),COALESCE(latest_scan.status,''),COALESCE(latest_scan.processed_count,0),COALESCE(latest_scan.total_count,0),COALESCE(latest_scan.added_count,0),COALESCE(latest_scan.started_at,'') FROM library l LEFT JOIN (SELECT library_id,COUNT(*) AS media_count FROM media WHERE publication_state IN ('published','degraded') GROUP BY library_id) mc ON mc.library_id=l.id LEFT JOIN (SELECT st.* FROM scan_task st JOIN (SELECT library_id,MAX(id) AS max_id FROM scan_task GROUP BY library_id) latest ON latest.max_id=st.id) latest_scan ON latest_scan.library_id=l.id`
 	args := []any{}
 	if strings.EqualFold(profile.LibraryScope, "selected") {
 		ids := make([]int64, 0, len(profile.AllowedLibraryIDs))
@@ -175,7 +175,7 @@ func applyFolderScopedLibraryCounts(ctx context.Context, q contextQueryer, visib
 	if len(ids) == 0 {
 		return nil
 	}
-	query := `SELECT library_id,file_path FROM media WHERE library_id IN (` + sqlPlaceholders(len(ids)) + `)`
+	query := `SELECT library_id,file_path FROM media WHERE publication_state IN ('published','degraded') AND library_id IN (` + sqlPlaceholders(len(ids)) + `)`
 	args := make([]any, len(ids))
 	for i, id := range ids {
 		args[i] = id
@@ -388,7 +388,7 @@ func (h *Handler) ScanLibrary(c *gin.Context) {
 		return
 	}
 	var root string
-	if err := h.App.DB.QueryRow(`SELECT path FROM library WHERE id = ?`, id).Scan(&root); err != nil {
+	if err := h.App.DB.QueryRowContext(c.Request.Context(), `SELECT path FROM library WHERE id = ?`, id).Scan(&root); err != nil {
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "library not found"})
 			return
@@ -396,7 +396,7 @@ func (h *Handler) ScanLibrary(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	taskID, runningTaskID, err := h.startLibraryScanTask(id, "manual")
+	taskID, runningTaskID, err := h.startLibraryScanTask(c.Request.Context(), id, "manual")
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -501,7 +501,11 @@ func foldersForLibrary(byID map[int64][]string, libraryID int64, fallbackPath st
 }
 
 func listLibraryFolders(db *sql.DB, libraryID int64, fallbackPath string) []string {
-	rows, err := db.Query(`SELECT path FROM library_folder WHERE library_id = ? ORDER BY sort_order, id`, libraryID)
+	return listLibraryFoldersContext(context.Background(), db, libraryID, fallbackPath)
+}
+
+func listLibraryFoldersContext(ctx context.Context, db *sql.DB, libraryID int64, fallbackPath string) []string {
+	rows, err := db.QueryContext(ctx, `SELECT path FROM library_folder WHERE library_id = ? ORDER BY sort_order, id`, libraryID)
 	if err != nil {
 		if strings.TrimSpace(fallbackPath) == "" {
 			return nil

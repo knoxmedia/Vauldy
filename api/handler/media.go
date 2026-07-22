@@ -33,10 +33,10 @@ type updateMediaAdminBody struct {
 }
 
 func (h *Handler) ListMedia(c *gin.Context) {
-	h.listMediaObserved(c, nil)
+	h.listMediaObserved(c, nil, "")
 }
 
-func (h *Handler) listMediaObserved(c *gin.Context, afterBatch func(mediaListStats)) {
+func (h *Handler) listMediaObserved(c *gin.Context, afterBatch func(mediaListStats), publicationState string) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
 	defer cancel()
 	var profile userPermissionProfile
@@ -53,6 +53,10 @@ func (h *Handler) listMediaObserved(c *gin.Context, afterBatch func(mediaListSta
 		}
 	}
 	spec, err := parseMediaListSpec(c, profile, listUID)
+	if middleware.IsAdmin(c) {
+		spec.IncludeUnpublished = true
+		spec.PublicationState = publicationState
+	}
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -63,15 +67,23 @@ func (h *Handler) listMediaObserved(c *gin.Context, afterBatch func(mediaListSta
 			return
 		}
 	}
+	requestedLimit := spec.Limit
+	if spec.IncludeUnpublished {
+		spec.Limit = requestedLimit + 1
+	}
 	rows, _, err := h.listMediaRowsObserved(ctx, spec, afterBatch)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	hasMore := spec.IncludeUnpublished && len(rows) > requestedLimit
+	if hasMore {
+		rows = rows[:requestedLimit]
+	}
 	items := make([]gin.H, 0, len(rows))
 	for _, row := range rows {
 		optimizationAssetRecorded := row.OptimizationAssetRecorded.Int64 == 1
-		items = append(items, gin.H{
+		item := gin.H{
 			"id": row.ID, "library_id": row.LibraryID.Int64, "file_id": row.FileID.String,
 			"title": row.Title.String, "original_title": row.OriginalTitle.String, "file_path": row.FilePath.String,
 			"file_type": row.FileType.String, "duration": row.Duration.Int64, "width": row.Width.Int64, "height": row.Height.Int64,
@@ -82,10 +94,24 @@ func (h *Handler) listMediaObserved(c *gin.Context, afterBatch func(mediaListSta
 			"optimization_available": optimizationAssetRecorded,
 			"photo_taken_at":         row.PhotoTakenAt.String, "photo_tags": row.PhotoTags, "photo_tag_ids": row.PhotoTagIDs,
 			"music_album_id": row.MusicAlbumID.Int64, "music_album_title": textencoding.FixMetadataString(row.MusicAlbumTitle.String),
-			"music_artist": textencoding.FixMetadataString(row.MusicArtist.String),
-		})
+			"music_artist":      textencoding.FixMetadataString(row.MusicArtist.String),
+			"publication_state": row.PublicationState.String,
+		}
+		if spec.IncludeUnpublished {
+			item["published_at"] = row.PublishedAt.String
+			item["publication_error"] = row.PublicationError.String
+			item["ingest_generation"] = row.IngestGeneration.Int64
+		}
+		items = append(items, item)
 	}
-	c.JSON(http.StatusOK, gin.H{"items": items})
+	response := gin.H{"items": items}
+	if spec.IncludeUnpublished {
+		response["has_more"] = hasMore
+		if hasMore && len(rows) > 0 {
+			response["next_cursor"] = strconv.FormatInt(rows[len(rows)-1].ID, 10)
+		}
+	}
+	c.JSON(http.StatusOK, response)
 }
 func photoTagIDMatches(filterID string, tags, tagIDs []string) bool {
 	if filterID == "" || filterID == "all" {
@@ -119,17 +145,19 @@ func (h *Handler) GetMedia(c *gin.Context) {
 	row := h.App.DB.QueryRow(`
 		SELECT m.id, m.library_id, m.file_id, m.title, m.original_title, m.file_path, m.file_type,
 		       m.duration, m.width, m.height, m.bitrate, m.md5, m.format, m.meta_json, m.status, m.created_at,
+		       m.publication_state, m.published_at, m.publication_error, m.ingest_generation,
 		       CASE WHEN mea.status='encrypted' OR lower(m.file_path) LIKE '%.enc' THEN 1 ELSE 0 END,
 		       `+optimizationAssetRecordedSQL+`
 		FROM media m
 		LEFT JOIN library l ON l.id=m.library_id
 		LEFT JOIN media_encrypted_assets mea ON mea.media_id=m.id
-		WHERE m.id = ?`, id)
+		WHERE m.id = ? AND `+mediaPublicationVisibilityPredicate("m", middleware.IsAdmin(c)), id)
 	var libID sql.NullInt64
 	var fileID, title, orig, path, ftype, md5, format, meta, status, created sql.NullString
+	var publicationState, publishedAt, publicationError sql.NullString
 	var dur, w, hei, br sql.NullInt64
-	var mid, encryptedAsset, optimizationRecorded int64
-	if err := row.Scan(&mid, &libID, &fileID, &title, &orig, &path, &ftype, &dur, &w, &hei, &br, &md5, &format, &meta, &status, &created, &encryptedAsset, &optimizationRecorded); err != nil {
+	var mid, encryptedAsset, optimizationRecorded, ingestGeneration int64
+	if err := row.Scan(&mid, &libID, &fileID, &title, &orig, &path, &ftype, &dur, &w, &hei, &br, &md5, &format, &meta, &status, &created, &publicationState, &publishedAt, &publicationError, &ingestGeneration, &encryptedAsset, &optimizationRecorded); err != nil {
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 			return
@@ -141,17 +169,23 @@ func (h *Handler) GetMedia(c *gin.Context) {
 	if strings.EqualFold(ftype.String, "video") {
 		optimizationSourceAvailable = storage.PlaintextSourceAvailable(h.App.DB, mid, libID.Int64, path.String)
 	}
-	c.JSON(http.StatusOK, gin.H{
+	item := gin.H{
 		"id": mid, "library_id": libID.Int64, "file_id": fileID.String,
 		"title": title.String, "original_title": orig.String, "file_path": path.String,
 		"file_type": ftype.String, "duration": dur.Int64, "width": w.Int64, "height": hei.Int64,
 		"bitrate": br.Int64, "md5": md5.String, "format": format.String, "meta_json": meta.String,
-		"status": status.String, "created_at": created.String,
+		"status": status.String, "created_at": created.String, "publication_state": publicationState.String,
 		"encrypted_asset":               encryptedAsset == 1,
 		"optimization_asset_recorded":   optimizationRecorded == 1,
 		"optimization_available":        optimizationRecorded == 1,
 		"optimization_source_available": optimizationSourceAvailable,
-	})
+	}
+	if middleware.IsAdmin(c) {
+		item["published_at"] = publishedAt.String
+		item["publication_error"] = publicationError.String
+		item["ingest_generation"] = ingestGeneration
+	}
+	c.JSON(http.StatusOK, item)
 }
 
 func (h *Handler) GetMediaMeta(c *gin.Context) {

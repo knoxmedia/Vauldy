@@ -45,7 +45,7 @@ func (h *Handler) queryLibraryAlbums(libID int64, artistFilter, genreFilter stri
 }
 func (h *Handler) queryLibraryAlbumsContext(ctx context.Context, libID int64, artistFilter, genreFilter string) ([]gin.H, error) {
 	args := []any{libID}
-	where := `WHERE a.library_id = ?`
+	where := `WHERE a.library_id = ? AND EXISTS (SELECT 1 FROM music_track visible_mt JOIN media visible_m ON visible_m.id=visible_mt.media_id WHERE visible_mt.album_id=a.id AND visible_m.publication_state IN ('published','degraded'))`
 	if strings.TrimSpace(artistFilter) != "" {
 		where += ` AND ar.name_norm = ?`
 		args = append(args, musicparse.NormKey(artistFilter))
@@ -62,8 +62,8 @@ func (h *Handler) queryLibraryAlbumsContext(ctx context.Context, libID int64, ar
 		SELECT a.id, a.title, a.title_norm, COALESCE(a.year, 0), COALESCE(a.genre, ''),
 			COALESCE(a.artwork_path, ''), COALESCE(a.is_unknown, 0), COALESCE(a.rating, 0),
 			COALESCE(ar.name, ''), COALESCE(ar.id, 0),
-			(SELECT COUNT(1) FROM music_track mt JOIN media m ON m.id = mt.media_id AND m.status = 'active' WHERE mt.album_id = a.id) AS track_count,
-			(SELECT COALESCE(SUM(m.duration), 0) FROM music_track mt JOIN media m ON m.id = mt.media_id AND m.status = 'active' WHERE mt.album_id = a.id) AS total_duration,
+			(SELECT COUNT(1) FROM music_track mt JOIN media m ON m.id = mt.media_id AND m.status = 'active' AND m.publication_state IN ('published','degraded') WHERE mt.album_id = a.id) AS track_count,
+			(SELECT COALESCE(SUM(m.duration), 0) FROM music_track mt JOIN media m ON m.id = mt.media_id AND m.status = 'active' AND m.publication_state IN ('published','degraded') WHERE mt.album_id = a.id) AS total_duration,
 			a.created_at, a.updated_at
 		FROM music_album a
 		LEFT JOIN music_artist ar ON ar.id = a.album_artist_id
@@ -110,10 +110,10 @@ func (h *Handler) ListLibraryArtists(c *gin.Context) {
 	}
 	rows, err := h.App.DB.QueryContext(ctx, `
 		SELECT ar.id, ar.name, ar.name_norm, COALESCE(ar.artwork_path, ''),
-			(SELECT COUNT(DISTINCT a.id) FROM music_album a WHERE a.album_artist_id = ar.id) AS album_count,
-			(SELECT COUNT(1) FROM music_track mt JOIN music_album a ON a.id = mt.album_id WHERE a.album_artist_id = ar.id) AS track_count
+			(SELECT COUNT(DISTINCT a.id) FROM music_album a WHERE a.album_artist_id = ar.id AND EXISTS (SELECT 1 FROM music_track mt JOIN media m ON m.id=mt.media_id WHERE mt.album_id=a.id AND m.publication_state IN ('published','degraded'))) AS album_count,
+			(SELECT COUNT(1) FROM music_track mt JOIN music_album a ON a.id = mt.album_id JOIN media m ON m.id=mt.media_id WHERE a.album_artist_id = ar.id AND m.publication_state IN ('published','degraded')) AS track_count
 		FROM music_artist ar
-		WHERE ar.library_id = ?
+		WHERE ar.library_id = ? AND EXISTS (SELECT 1 FROM music_album a JOIN music_track mt ON mt.album_id=a.id JOIN media m ON m.id=mt.media_id WHERE a.album_artist_id=ar.id AND m.publication_state IN ('published','degraded'))
 		ORDER BY ar.name COLLATE NOCASE ASC
 	`, libID)
 	if err != nil {
@@ -161,11 +161,11 @@ func (h *Handler) ListLibraryGenres(c *gin.Context) {
 	rows, err := h.App.DB.QueryContext(ctx, `
 		SELECT COALESCE(NULLIF(TRIM(genre), ''), '未知流派') AS genre,
 			COUNT(DISTINCT id) AS album_count,
-			(SELECT COUNT(1) FROM music_track mt WHERE mt.album_id IN (
+			(SELECT COUNT(1) FROM music_track mt JOIN media m ON m.id=mt.media_id WHERE m.publication_state IN ('published','degraded') AND mt.album_id IN (
 				SELECT id FROM music_album a2 WHERE a2.library_id = ? AND COALESCE(NULLIF(TRIM(a2.genre), ''), '未知流派') = COALESCE(NULLIF(TRIM(music_album.genre), ''), '未知流派')
 			)) AS track_count
 		FROM music_album
-		WHERE library_id = ?
+		WHERE library_id = ? AND EXISTS (SELECT 1 FROM music_track visible_mt JOIN media visible_m ON visible_m.id=visible_mt.media_id WHERE visible_mt.album_id=music_album.id AND visible_m.publication_state IN ('published','degraded'))
 		GROUP BY COALESCE(NULLIF(TRIM(genre), ''), '未知流派')
 		ORDER BY genre COLLATE NOCASE ASC
 	`, libID, libID)
@@ -228,7 +228,7 @@ func (h *Handler) queryLibraryTracks(libID, albumID, artistID int64, genre strin
 }
 func (h *Handler) queryLibraryTracksContext(ctx context.Context, libID, albumID, artistID int64, genre string) ([]gin.H, error) {
 	args := []any{libID}
-	where := `WHERE m.library_id = ? AND m.file_type = 'audio' AND m.status = 'active'`
+	where := `WHERE m.library_id = ? AND m.file_type = 'audio' AND m.status = 'active' AND m.publication_state IN ('published','degraded')`
 	if albumID > 0 {
 		where += ` AND mt.album_id = ?`
 		args = append(args, albumID)
@@ -347,7 +347,8 @@ func (h *Handler) GetAlbumPlayTarget(c *gin.Context) {
 		SELECT a.library_id, mt.media_id
 		FROM music_album a
 		JOIN music_track mt ON mt.album_id = a.id
-		WHERE a.id = ?
+		JOIN media m ON m.id = mt.media_id
+		WHERE a.id = ? AND m.publication_state IN ('published','degraded')
 		ORDER BY mt.sort_order ASC, mt.track_number ASC, mt.id ASC
 		LIMIT 1
 	`, albumID).Scan(&libID, &mediaID)
@@ -606,11 +607,12 @@ func (h *Handler) GetArtist(c *gin.Context) {
 		return
 	}
 	var albumCount, trackCount int64
-	_ = h.App.DB.QueryRowContext(ctx, `SELECT COUNT(DISTINCT a.id) FROM music_album a WHERE a.album_artist_id = ?`, artistID).Scan(&albumCount)
+	_ = h.App.DB.QueryRowContext(ctx, `SELECT COUNT(DISTINCT a.id) FROM music_album a WHERE a.album_artist_id = ? AND EXISTS (SELECT 1 FROM music_track mt JOIN media m ON m.id=mt.media_id WHERE mt.album_id=a.id AND m.publication_state IN ('published','degraded'))`, artistID).Scan(&albumCount)
 	_ = h.App.DB.QueryRowContext(ctx, `
 		SELECT COUNT(1) FROM music_track mt
 		JOIN music_album a ON a.id = mt.album_id
-		WHERE a.album_artist_id = ?
+		JOIN media m ON m.id = mt.media_id
+		WHERE a.album_artist_id = ? AND m.publication_state IN ('published','degraded')
 	`, artistID).Scan(&trackCount)
 	c.JSON(http.StatusOK, gin.H{
 		"id":           artistID,

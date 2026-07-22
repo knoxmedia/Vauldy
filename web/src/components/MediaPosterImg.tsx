@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   MediaItem,
   hasScrapedPosterUrl,
@@ -7,7 +7,7 @@ import {
 } from "../api/client";
 
 type Props = {
-  item: Pick<MediaItem, "id" | "poster_url" | "encrypted_asset">;
+  item: Pick<MediaItem, "id" | "poster_url" | "encrypted_asset" | "ingest_generation">;
   className?: string;
   onLoad?: (e: React.SyntheticEvent<HTMLImageElement>) => void;
   onLoadStart?: (e: React.SyntheticEvent<HTMLImageElement>) => void;
@@ -17,6 +17,14 @@ type Props = {
 /** Grid/list poster: prefer scraped image, fall back to local frame capture on load error. */
 export default function MediaPosterImg({ item, className, onLoad, onLoadStart, onFinalError }: Props) {
   const [scrapedFailed, setScrapedFailed] = useState(false);
+  const imgRef = useRef<HTMLImageElement>(null);
+  const resolvedPosterSource = mediaPosterSrc(item);
+  const sourceKey = `${resolvedPosterSource}|${item.ingest_generation ?? "stable"}`;
+
+  useEffect(() => {
+    setScrapedFailed(false);
+    if (imgRef.current) imgRef.current.style.display = "";
+  }, [sourceKey]);
   const src = useMemo(() => {
     if (scrapedFailed && hasScrapedPosterUrl(item)) return localPosterSrc(item.id, item.encrypted_asset);
     return mediaPosterSrc(item);
@@ -24,6 +32,7 @@ export default function MediaPosterImg({ item, className, onLoad, onLoadStart, o
 
   return (
     <img
+      ref={imgRef}
       className={className}
       src={src}
       alt=""
