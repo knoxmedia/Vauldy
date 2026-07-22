@@ -45,7 +45,12 @@ func newPublicationE2E(t *testing.T, all bool) *publicationE2E {
 	opts := publication.PlanOptions{}
 	if all {
 		preview, encrypted, prepare = 1, 1, 1
-		opts = publication.PlanOptions{SubtitleAuto: true, ATrackAuto: true, EncryptGlobal: true, PreparePlanner: coreiface.IngestPreparePlannerHandle()}
+		preparePlanner := coreiface.IngestPreparePlannerHandle()
+		prepareCapabilities := publication.NewCapabilityMatrix(nil)
+		if preparePlanner != nil {
+			prepareCapabilities = publication.NewCapabilityMatrix([]string{"prepare"})
+		}
+		opts = publication.PlanOptions{SubtitleAuto: true, ATrackAuto: true, EncryptGlobal: true, PreparePlanner: preparePlanner, Capabilities: prepareCapabilities}
 	}
 	res, err := db.Exec(`INSERT INTO library(name,type,path,preview_extract,encrypted_assets_enabled,jit_prepare_on_ingest) VALUES('movies','video',?,?,?,?)`, root, preview, encrypted, prepare)
 	if err != nil {
