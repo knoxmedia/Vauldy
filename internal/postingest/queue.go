@@ -354,7 +354,17 @@ func (q *Queue) Renew(ctx context.Context, task Task) (bool, error) {
 		committed = true
 		return nil
 	})
-	return renewed, err
+	if err != nil || renewed {
+		return renewed, err
+	}
+	var status Status
+	if inspectErr := q.db.QueryRowContext(ctx, "SELECT status FROM post_ingest_task WHERE id=?", task.ID).Scan(&status); inspectErr != nil {
+		return false, inspectErr
+	}
+	if status == StatusRunning {
+		return false, nil
+	}
+	return false, q.ownerWriteError(ctx, task.ID, task.LeaseOwner, "renew")
 }
 
 func (q *Queue) Complete(ctx context.Context, task Task) error {

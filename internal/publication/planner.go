@@ -81,6 +81,9 @@ func (p *Planner) PlanReplacementTx(ctx context.Context, tx *sql.Tx, mediaID int
 	if err != nil {
 		return ReplacementResult{}, err
 	}
+	if err = SupersedeGenerationTx(ctx, tx, mediaID, opts.ExpectedGeneration, run.Generation); err != nil {
+		return ReplacementResult{}, err
+	}
 	return ReplacementResult{Run: run, OldGeneration: opts.ExpectedGeneration, NewGeneration: run.Generation}, nil
 }
 
