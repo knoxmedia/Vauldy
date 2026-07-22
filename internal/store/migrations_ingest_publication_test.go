@@ -916,3 +916,201 @@ func TestMigrateIngestPublicationV2RejectsExactBackupResidue(t *testing.T) {
 		t.Fatalf("error=%v", err)
 	}
 }
+
+func TestCanonicalTranscodeSQLPreservesCustomCheckAndDeduplicatesManagedClauses(t *testing.T) {
+	original := `CREATE TABLE transcode_task(id INTEGER PRIMARY KEY,file_id TEXT CHECK(length(file_id)>0),media_id INTEGER,ingest_run_id INTEGER,ingest_step_id INTEGER,generation INTEGER,lease_owner TEXT,lease_until TIMESTAMP,FOREIGN KEY(media_id) REFERENCES media(id) ON DELETE CASCADE,FOREIGN KEY(ingest_run_id,media_id,generation) REFERENCES media_ingest_run(id,media_id,generation) ON DELETE CASCADE,FOREIGN KEY(ingest_step_id,media_id,generation) REFERENCES media_ingest_step(id,media_id,generation) ON DELETE CASCADE,CHECK((ingest_run_id IS NULL AND ingest_step_id IS NULL AND generation IS NULL AND media_id IS NULL) OR (ingest_run_id IS NOT NULL AND ingest_step_id IS NOT NULL AND generation IS NOT NULL)))`
+	got, err := canonicalTranscodeSQL(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := normalizePublicationSQL(got)
+	if !strings.Contains(n, `check(length(file_id)>0)`) {
+		t.Fatal("custom CHECK lost")
+	}
+	for _, clause := range []string{`foreignkey(media_id)referencesmedia(id)ondeletecascade`, `foreignkey(ingest_run_id,media_id,generation)referencesmedia_ingest_run(id,media_id,generation)ondeletecascade`, `foreignkey(ingest_step_id,media_id,generation)referencesmedia_ingest_step(id,media_id,generation)ondeletecascade`} {
+		if strings.Count(n, clause) != 1 {
+			t.Fatalf("managed clause count %q=%d", clause, strings.Count(n, clause))
+		}
+	}
+	if strings.Count(n, `check((ingest_run_idisnullandingest_step_idisnullandgenerationisnullandmedia_idisnull)or(ingest_run_idisnotnullandingest_step_idisnotnullandgenerationisnotnullandmedia_idisnotnull))`) != 1 {
+		t.Fatalf("strict CHECK not exact once: %s", got)
+	}
+}
+
+func TestCanonicalTranscodeSQLIsByteIdempotent(t *testing.T) {
+	one, err := canonicalTranscodeSQL(`CREATE TABLE transcode_task(id INTEGER PRIMARY KEY,file_id TEXT CHECK(file_id <> 'x'))`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	two, err := canonicalTranscodeSQL(one)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if one != two {
+		t.Fatalf("canonical SQL changed on second pass\none=%s\ntwo=%s", one, two)
+	}
+}
+
+func TestPublicationTranscodeSchemaCurrentRejectsWeakCheck(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if err := migrateIngestPublicationV1(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	_, err := db.Exec(`CREATE TABLE transcode_task(id INTEGER PRIMARY KEY,file_id TEXT,media_id INTEGER,ingest_run_id INTEGER,ingest_step_id INTEGER,generation INTEGER,lease_owner TEXT,lease_until TIMESTAMP,FOREIGN KEY(media_id) REFERENCES media(id) ON DELETE CASCADE,FOREIGN KEY(ingest_run_id,media_id,generation) REFERENCES media_ingest_run(id,media_id,generation) ON DELETE CASCADE,FOREIGN KEY(ingest_step_id,media_id,generation) REFERENCES media_ingest_step(id,media_id,generation) ON DELETE CASCADE,CHECK((ingest_run_id IS NULL AND ingest_step_id IS NULL AND generation IS NULL AND media_id IS NULL) OR (ingest_run_id IS NOT NULL AND ingest_step_id IS NOT NULL AND generation IS NOT NULL)))`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, _ := db.Conn(context.Background())
+	defer conn.Close()
+	if publicationTranscodeSchemaCurrent(context.Background(), conn) {
+		t.Fatal("weak CHECK considered current")
+	}
+}
+
+func TestPublicationTranscodeSchemaCurrentRejectsMissingCheck(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if err := migrateIngestPublicationV1(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	_, err := db.Exec(`CREATE TABLE transcode_task(id INTEGER PRIMARY KEY,file_id TEXT,media_id INTEGER,ingest_run_id INTEGER,ingest_step_id INTEGER,generation INTEGER,lease_owner TEXT,lease_until TIMESTAMP,FOREIGN KEY(media_id) REFERENCES media(id) ON DELETE CASCADE,FOREIGN KEY(ingest_run_id,media_id,generation) REFERENCES media_ingest_run(id,media_id,generation) ON DELETE CASCADE,FOREIGN KEY(ingest_step_id,media_id,generation) REFERENCES media_ingest_step(id,media_id,generation) ON DELETE CASCADE)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, _ := db.Conn(context.Background())
+	defer conn.Close()
+	if publicationTranscodeSchemaCurrent(context.Background(), conn) {
+		t.Fatal("missing CHECK considered current")
+	}
+}
+
+func installD725TranscodeFixture(t *testing.T, db *sql.DB) (int64, int64) {
+	t.Helper()
+	// The transcode schema below is literal d725 DDL; it is never produced by the current migration.
+	if err := migrateIngestPublicationV1(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	res, err := db.Exec(`INSERT INTO media_ingest_run(media_id,generation,reason,status,config_snapshot_json) VALUES(20,1,'scan','processing','{}')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID, _ := res.LastInsertId()
+	res, err = db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status) VALUES(?,20,1,'prepare',1,'waiting')`, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stepID, _ := res.LastInsertId()
+	ddl := `CREATE TABLE transcode_task(id INTEGER PRIMARY KEY,file_id TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'waiting',media_id INTEGER,ingest_run_id INTEGER,ingest_step_id INTEGER,generation INTEGER,lease_owner TEXT,lease_until TIMESTAMP,FOREIGN KEY(media_id) REFERENCES media(id) ON DELETE CASCADE,FOREIGN KEY(ingest_run_id,media_id,generation) REFERENCES media_ingest_run(id,media_id,generation) ON DELETE CASCADE,FOREIGN KEY(ingest_step_id,media_id,generation) REFERENCES media_ingest_step(id,media_id,generation) ON DELETE CASCADE,CHECK((ingest_run_id IS NULL AND ingest_step_id IS NULL AND generation IS NULL AND media_id IS NULL) OR (ingest_run_id IS NOT NULL AND ingest_step_id IS NOT NULL AND generation IS NOT NULL)))`
+	if _, err = db.Exec(ddl); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO transcode_task(id,file_id,status,media_id,ingest_run_id,ingest_step_id,generation,lease_owner,lease_until) VALUES(7,'d725-file','waiting',NULL,?,?,1,'legacy-owner','2030-01-01')`, runID, stepID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(legacyPublicationFillMediaTriggerSQL); err != nil {
+		t.Fatal(err)
+	}
+	return runID, stepID
+}
+
+func TestMigrateIngestPublicationV2UpgradesRealD725TranscodeFixture(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	runID, stepID := installD725TranscodeFixture(t, db)
+	if err := migratePublicationV2(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	var fileID, status, owner, until string
+	var mediaID, gotRun, gotStep, generation int64
+	if err := db.QueryRow(`SELECT file_id,status,media_id,ingest_run_id,ingest_step_id,generation,lease_owner,lease_until FROM transcode_task WHERE id=7`).Scan(&fileID, &status, &mediaID, &gotRun, &gotStep, &generation, &owner, &until); err != nil {
+		t.Fatal(err)
+	}
+	if fileID != "d725-file" || status != "waiting" || mediaID != 20 || gotRun != runID || gotStep != stepID || generation != 1 || owner != "legacy-owner" || (until != "2030-01-01" && until != "2030-01-01T00:00:00Z") {
+		t.Fatalf("row changed: %q %q %d %d %d %d %q %q", fileID, status, mediaID, gotRun, gotStep, generation, owner, until)
+	}
+	var triggers int
+	_ = db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name='trg_transcode_task_fill_media'`).Scan(&triggers)
+	if triggers != 0 {
+		t.Fatal("known trigger remains")
+	}
+}
+
+func TestMigrateIngestPublicationV2RebuildsWeakTranscodeCheck(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	installD725TranscodeFixture(t, db)
+	if err := migratePublicationV2(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO transcode_task(id,file_id,status,ingest_run_id,ingest_step_id,generation) VALUES(8,'partial','waiting',1,1,1)`); err == nil {
+		t.Fatal("partial linked insert accepted")
+	}
+}
+
+func TestMigrateIngestPublicationV2DigestAcceptsOnlyMediaBackfill(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	installD725TranscodeFixture(t, db)
+	if err := migratePublicationV2(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMigrateIngestPublicationV2DigestRejectsNonMediaMutation(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	installD725TranscodeFixture(t, db)
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	graph, err := backupPublicationGraph(context.Background(), conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = dropPublicationGraph(context.Background(), conn, graph); err != nil {
+		t.Fatal(err)
+	}
+	if err = createPublicationParents(context.Background(), conn, graph); err != nil {
+		t.Fatal(err)
+	}
+	if err = createPublicationChildren(context.Background(), conn, graph); err != nil {
+		t.Fatal(err)
+	}
+	if err = restorePublicationIndexes(context.Background(), conn, graph); err != nil {
+		t.Fatal(err)
+	}
+	if err = copyPublicationGraph(context.Background(), conn, graph); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = conn.ExecContext(context.Background(), `UPDATE transcode_task SET file_id='corrupt' WHERE id=7`); err != nil {
+		t.Fatal(err)
+	}
+	if err = validatePublicationBackups(context.Background(), conn, graph); err == nil || !strings.Contains(err.Error(), "identity changed") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestMigrateIngestPublicationV2PreservesGraphCustomIndexes(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	installD725TranscodeFixture(t, db)
+	if _, err := db.Exec(`CREATE UNIQUE INDEX custom_step_unique ON media_ingest_step(id,step_type); CREATE INDEX custom_transcode_perf ON transcode_task(status,file_id); CREATE UNIQUE INDEX custom_post_unique ON post_ingest_task(id,task_type); CREATE INDEX custom_scrape_perf ON scrape_task(status,created_at)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migratePublicationV2(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"custom_step_unique", "custom_transcode_perf", "custom_post_unique", "custom_scrape_perf"} {
+		var sqlText string
+		if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='index' AND name=?`, name).Scan(&sqlText); err != nil || sqlText == "" {
+			t.Fatalf("index %s sql=%q err=%v", name, sqlText, err)
+		}
+	}
+	if _, err := db.Exec(`INSERT INTO post_ingest_task(id,media_id,generation,task_type) VALUES(30,20,1,'preview')`); err == nil {
+		t.Fatal("restored custom unique not enforced")
+	}
+	before := snapshotPublicationGraph(t, db)
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	after := snapshotPublicationGraph(t, db)
+	if before != after {
+		t.Fatal("second migration changed graph")
+	}
+}

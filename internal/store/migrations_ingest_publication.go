@@ -793,6 +793,9 @@ func migratePublicationV2(ctx context.Context, db *sql.DB) (err error) {
 	if err = createPublicationChildren(ctx, conn, graph); err != nil {
 		return err
 	}
+	if err = restorePublicationIndexes(ctx, conn, graph); err != nil {
+		return err
+	}
 	if err = publicationMigrationHook(publicationStageAfterChildCreate); err != nil {
 		return err
 	}
@@ -864,6 +867,8 @@ type publicationGraphTable struct {
 	columns           []string
 	count             int64
 	checksum          string
+	expectedCount     int64
+	expectedChecksum  string
 }
 
 var publicationGraphOrder = []string{"media_ingest_step", "post_ingest_task", "scrape_task", "transcode_task", "pretranscode_task_meta", "pretranscode_rendition_job", "media_ingest_step_dependency", "media_ingest_evidence", "media_asset_stage_journal"}
@@ -884,17 +889,19 @@ func backupPublicationGraph(ctx context.Context, q SQLExecutor) ([]publicationGr
 			return nil, err
 		}
 		m.columns = cols
-		rows, err := q.QueryContext(ctx, `SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name=? AND sql IS NOT NULL ORDER BY name`, name)
+		rows, err := q.QueryContext(ctx, `SELECT name,sql FROM sqlite_master WHERE type='index' AND tbl_name=? AND sql IS NOT NULL ORDER BY name`, name)
 		if err != nil {
 			return nil, err
 		}
 		for rows.Next() {
-			var x string
-			if err = rows.Scan(&x); err != nil {
+			var indexName, indexSQL string
+			if err = rows.Scan(&indexName, &indexSQL); err != nil {
 				rows.Close()
 				return nil, err
 			}
-			m.indexes = append(m.indexes, x)
+			if !publicationManagedIndex(name, indexName) {
+				m.indexes = append(m.indexes, indexSQL)
+			}
 		}
 		if err = rows.Close(); err != nil {
 			return nil, err
@@ -905,10 +912,55 @@ func backupPublicationGraph(ctx context.Context, q SQLExecutor) ([]publicationGr
 		if err = publicationIdentity(ctx, q, m.backup, &m.count, &m.checksum); err != nil {
 			return nil, err
 		}
+		m.expectedCount, m.expectedChecksum = m.count, m.checksum
+		if name == "transcode_task" {
+			if err = publicationTranscodeExpectedIdentity(ctx, q, &m); err != nil {
+				return nil, err
+			}
+		}
 		out = append(out, m)
 	}
 	return out, nil
 }
+
+func publicationManagedIndex(table, name string) bool {
+	managed := map[string]map[string]bool{
+		"post_ingest_task":             {"idx_post_ingest_claim": true, "idx_post_ingest_scan": true, "idx_post_ingest_run": true, "idx_post_ingest_step": true},
+		"scrape_task":                  {"idx_scrape_task_claim": true, "idx_scrape_task_ingest": true, "idx_scrape_task_media": true},
+		"media_ingest_step_dependency": {"idx_ingest_dependency_visible": true},
+		"media_asset_stage_journal":    {"idx_asset_stage_recovery": true},
+	}
+	return managed[table][name]
+}
+
+func publicationTranscodeExpectedIdentity(ctx context.Context, q SQLExecutor, m *publicationGraphTable) error {
+	cols := map[string]bool{}
+	for _, c := range m.columns {
+		cols[strings.ToLower(c)] = true
+	}
+	for _, c := range []string{"media_id", "ingest_run_id", "ingest_step_id", "generation"} {
+		if !cols[c] {
+			return nil
+		}
+	}
+	var bad int
+	if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+quoteIdent(m.backup)+` b WHERE b.ingest_step_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM media_ingest_step s WHERE s.id=b.ingest_step_id AND s.run_id=b.ingest_run_id AND s.generation=b.generation AND (b.media_id IS NULL OR b.media_id=s.media_id))`).Scan(&bad); err != nil {
+		return err
+	}
+	if bad != 0 {
+		return fmt.Errorf("transcode linkage invalid or ambiguous: rows=%d", bad)
+	}
+	expected := m.backup + "__expected"
+	if _, err := q.ExecContext(ctx, `CREATE TABLE `+quoteIdent(expected)+` AS SELECT * FROM `+quoteIdent(m.backup)); err != nil {
+		return err
+	}
+	defer q.ExecContext(context.WithoutCancel(ctx), `DROP TABLE IF EXISTS `+quoteIdent(expected))
+	if _, err := q.ExecContext(ctx, `UPDATE `+quoteIdent(expected)+` SET media_id=(SELECT s.media_id FROM media_ingest_step s WHERE s.id=`+quoteIdent(expected)+`.ingest_step_id AND s.run_id=`+quoteIdent(expected)+`.ingest_run_id AND s.generation=`+quoteIdent(expected)+`.generation) WHERE media_id IS NULL AND ingest_step_id IS NOT NULL`); err != nil {
+		return err
+	}
+	return publicationIdentity(ctx, q, expected, &m.expectedCount, &m.expectedChecksum)
+}
+
 func publicationColumnNames(ctx context.Context, q SQLExecutor, table string) ([]string, error) {
 	rows, e := q.QueryContext(ctx, fmt.Sprintf(`PRAGMA table_info(%q)`, table))
 	if e != nil {
@@ -1041,19 +1093,88 @@ func createPublicationParents(ctx context.Context, q SQLExecutor, g []publicatio
 	}
 	return nil
 }
+func splitPublicationSQLClauses(body string) ([]string, error) {
+	var out []string
+	start, depth := 0, 0
+	var quote byte
+	for i := 0; i < len(body); i++ {
+		c := body[i]
+		if quote != 0 {
+			if c == quote {
+				if i+1 < len(body) && body[i+1] == quote {
+					i++
+					continue
+				}
+				quote = 0
+			}
+			continue
+		}
+		if c == '\'' || c == '"' || c == '`' {
+			quote = c
+			continue
+		}
+		switch c {
+		case '(':
+			depth++
+		case ')':
+			if depth == 0 {
+				return nil, fmt.Errorf("unbalanced transcode SQL")
+			}
+			depth--
+		case ',':
+			if depth == 0 {
+				out = append(out, strings.TrimSpace(body[start:i]))
+				start = i + 1
+			}
+		}
+	}
+	if quote != 0 || depth != 0 {
+		return nil, fmt.Errorf("unbalanced transcode SQL")
+	}
+	out = append(out, strings.TrimSpace(body[start:]))
+	return out, nil
+}
+
+var publicationTranscodeManagedClauses = map[string]bool{
+	"foreignkey(media_id)referencesmedia(id)ondeletecascade":                                                                                                                                true,
+	"foreignkey(ingest_run_id,media_id,generation)referencesmedia_ingest_run(id,media_id,generation)ondeletecascade":                                                                        true,
+	"foreignkey(ingest_step_id,media_id,generation)referencesmedia_ingest_step(id,media_id,generation)ondeletecascade":                                                                      true,
+	"check((ingest_run_idisnullandingest_step_idisnullandgenerationisnullandmedia_idisnull)or(ingest_run_idisnotnullandingest_step_idisnotnullandgenerationisnotnull))":                     true,
+	"check((ingest_run_idisnullandingest_step_idisnullandgenerationisnullandmedia_idisnull)or(ingest_run_idisnotnullandingest_step_idisnotnullandgenerationisnotnullandmedia_idisnotnull))": true,
+}
+
+const publicationTranscodeStrictCheck = `CHECK((ingest_run_id IS NULL AND ingest_step_id IS NULL AND generation IS NULL AND media_id IS NULL) OR (ingest_run_id IS NOT NULL AND ingest_step_id IS NOT NULL AND generation IS NOT NULL AND media_id IS NOT NULL))`
+
 func canonicalTranscodeSQL(original string) (string, error) {
+	openAt := strings.Index(original, "(")
 	closeAt := strings.LastIndex(original, ")")
-	if closeAt < 0 {
+	if openAt < 0 || closeAt <= openAt {
 		return "", fmt.Errorf("transcode SQL malformed")
 	}
-	body := original[:closeAt]
+	clauses, err := splitPublicationSQLClauses(original[openAt+1 : closeAt])
+	if err != nil {
+		return "", err
+	}
+	kept := make([]string, 0, len(clauses)+4)
+	for _, clause := range clauses {
+		if clause != "" && !publicationTranscodeManagedClauses[normalizePublicationSQL(clause)] {
+			kept = append(kept, clause)
+		}
+	}
+	body := strings.Join(kept, ",")
 	for _, c := range []string{"media_id INTEGER", "ingest_run_id INTEGER", "ingest_step_id INTEGER", "generation INTEGER", "lease_owner TEXT", "lease_until TIMESTAMP"} {
 		name := strings.Fields(c)[0]
 		if !regexp.MustCompile(`(?i)\b` + name + `\b`).MatchString(body) {
-			body += "," + c
+			kept = append(kept, c)
+			body = strings.Join(kept, ",")
 		}
 	}
-	return body + `,FOREIGN KEY(media_id) REFERENCES media(id) ON DELETE CASCADE,FOREIGN KEY(ingest_run_id,media_id,generation) REFERENCES media_ingest_run(id,media_id,generation) ON DELETE CASCADE,FOREIGN KEY(ingest_step_id,media_id,generation) REFERENCES media_ingest_step(id,media_id,generation) ON DELETE CASCADE,CHECK((ingest_run_id IS NULL AND ingest_step_id IS NULL AND generation IS NULL AND media_id IS NULL) OR (ingest_run_id IS NOT NULL AND ingest_step_id IS NOT NULL AND generation IS NOT NULL AND media_id IS NOT NULL)))` + original[closeAt+1:], nil
+	kept = append(kept,
+		`FOREIGN KEY(media_id) REFERENCES media(id) ON DELETE CASCADE`,
+		`FOREIGN KEY(ingest_run_id,media_id,generation) REFERENCES media_ingest_run(id,media_id,generation) ON DELETE CASCADE`,
+		`FOREIGN KEY(ingest_step_id,media_id,generation) REFERENCES media_ingest_step(id,media_id,generation) ON DELETE CASCADE`,
+		publicationTranscodeStrictCheck)
+	return original[:openAt+1] + strings.Join(kept, ",") + original[closeAt:], nil
 }
 func createPublicationChildren(ctx context.Context, q SQLExecutor, g []publicationGraphTable) error {
 	if _, ok := graphMeta(g, "post_ingest_task"); ok {
@@ -1095,6 +1216,18 @@ func createPublicationChildren(ctx context.Context, q SQLExecutor, g []publicati
 	}
 	return nil
 }
+
+func restorePublicationIndexes(ctx context.Context, q SQLExecutor, g []publicationGraphTable) error {
+	for _, m := range g {
+		for _, indexSQL := range m.indexes {
+			if _, err := q.ExecContext(ctx, indexSQL); err != nil {
+				return fmt.Errorf("restore %s index: %w", m.name, err)
+			}
+		}
+	}
+	return nil
+}
+
 func ingestPublicationUniqueIndexSetsExecutor(ctx context.Context, q SQLExecutor, table string) (map[string]bool, error) {
 	rows, e := q.QueryContext(ctx, fmt.Sprintf(`PRAGMA index_list(%q)`, table))
 	if e != nil {
@@ -1235,8 +1368,8 @@ func validatePublicationBackups(ctx context.Context, q SQLExecutor, g []publicat
 		if e := publicationIdentity(ctx, q, m.name, &count, &sum); e != nil {
 			return e
 		}
-		if count != m.count || sum != m.checksum {
-			return fmt.Errorf("publication identity changed %s: %d/%s -> %d/%s", m.name, m.count, m.checksum, count, sum)
+		if count != m.expectedCount || sum != m.expectedChecksum {
+			return fmt.Errorf("publication identity changed %s: raw=%d/%s expected=%d/%s target=%d/%s", m.name, m.count, m.checksum, m.expectedCount, m.expectedChecksum, count, sum)
 		}
 	}
 	return nil
@@ -1565,6 +1698,28 @@ func publicationTranscodeSchemaCurrent(ctx context.Context, q SQLExecutor) bool 
 		if !cols[n] {
 			return false
 		}
+	}
+	raw, err := publicationRawTableSQL(ctx, q, "transcode_task")
+	if err != nil {
+		return false
+	}
+	openAt, closeAt := strings.Index(raw, "("), strings.LastIndex(raw, ")")
+	if openAt < 0 || closeAt <= openAt {
+		return false
+	}
+	clauses, err := splitPublicationSQLClauses(raw[openAt+1 : closeAt])
+	if err != nil {
+		return false
+	}
+	strict := normalizePublicationSQL(publicationTranscodeStrictCheck)
+	strictCount := 0
+	for _, clause := range clauses {
+		if normalizePublicationSQL(clause) == strict {
+			strictCount++
+		}
+	}
+	if strictCount != 1 {
+		return false
 	}
 	groups, err := publicationForeignKeys(ctx, q, "transcode_task")
 	if err != nil {
