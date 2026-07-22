@@ -3,6 +3,7 @@ package photoparse
 import (
 	"bytes"
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"image"
@@ -88,7 +89,7 @@ func ParseFromFileWithDiagnostics(filePath string) (PhotoMeta, []error) {
 		meta.Width, meta.Height = w, h
 	}
 	if values, err := readEXIF(data); err != nil {
-		if expectsEXIF(filePath) {
+		if hasEXIFPayload(data) {
 			diagnostics = append(diagnostics, fmt.Errorf("read EXIF: %w", err))
 		}
 	} else {
@@ -115,13 +116,111 @@ func ParseFromFileWithDiagnostics(filePath string) (PhotoMeta, []error) {
 	return meta, diagnostics
 }
 
-func expectsEXIF(filePath string) bool {
-	switch strings.ToLower(filepath.Ext(filePath)) {
-	case ".jpg", ".jpeg", ".tif", ".tiff", ".heic", ".heif":
-		return true
-	default:
+func hasEXIFPayload(data []byte) bool {
+	if len(data) >= 2 && data[0] == 0xff && data[1] == 0xd8 {
+		return jpegHasEXIF(data)
+	}
+	if len(data) >= 8 && (bytes.Equal(data[:4], []byte{'I', 'I', 42, 0}) || bytes.Equal(data[:4], []byte{'M', 'M', 0, 42})) {
+		return tiffHasMetadataIFD(data)
+	}
+	if len(data) >= 12 && bytes.Equal(data[:8], []byte("\x89PNG\r\n\x1a\n")) {
+		return pngHasEXIF(data)
+	}
+	if len(data) >= 12 && bytes.Equal(data[:4], []byte("RIFF")) && bytes.Equal(data[8:12], []byte("WEBP")) {
+		return webpHasEXIF(data)
+	}
+	return false
+}
+
+func jpegHasEXIF(data []byte) bool {
+	for offset := 2; offset+1 < len(data); {
+		if data[offset] != 0xff {
+			return false
+		}
+		for offset < len(data) && data[offset] == 0xff {
+			offset++
+		}
+		if offset >= len(data) {
+			return false
+		}
+		marker := data[offset]
+		offset++
+		if marker == 0xd9 || marker == 0xda {
+			return false
+		}
+		if marker == 0x01 || marker >= 0xd0 && marker <= 0xd7 {
+			continue
+		}
+		if offset+2 > len(data) {
+			return false
+		}
+		length := int(binary.BigEndian.Uint16(data[offset : offset+2]))
+		if length < 2 || offset+length > len(data) {
+			return false
+		}
+		payload := data[offset+2 : offset+length]
+		if marker == 0xe1 && len(payload) >= 6 && bytes.Equal(payload[:6], []byte("Exif\x00\x00")) {
+			return true
+		}
+		offset += length
+	}
+	return false
+}
+
+func tiffHasMetadataIFD(data []byte) bool {
+	var order binary.ByteOrder
+	if bytes.Equal(data[:4], []byte{'I', 'I', 42, 0}) {
+		order = binary.LittleEndian
+	} else {
+		order = binary.BigEndian
+	}
+	offset := uint64(order.Uint32(data[4:8]))
+	if offset+2 > uint64(len(data)) {
 		return false
 	}
+	count := uint64(order.Uint16(data[offset : offset+2]))
+	if count > (uint64(len(data))-offset-2)/12 {
+		return false
+	}
+	for i := uint64(0); i < count; i++ {
+		entry := offset + 2 + i*12
+		tag := order.Uint16(data[entry : entry+2])
+		switch tag {
+		case 0x0112, 0x010e, 0x010f, 0x0110, 0x0132, 0x8769, 0x8825:
+			return true
+		}
+	}
+	return false
+}
+
+func pngHasEXIF(data []byte) bool {
+	for offset := 8; offset+12 <= len(data); {
+		length := uint64(binary.BigEndian.Uint32(data[offset : offset+4]))
+		end := uint64(offset) + 12 + length
+		if end > uint64(len(data)) {
+			return false
+		}
+		if bytes.Equal(data[offset+4:offset+8], []byte("eXIf")) {
+			return true
+		}
+		offset = int(end)
+	}
+	return false
+}
+
+func webpHasEXIF(data []byte) bool {
+	for offset := 12; offset+8 <= len(data); {
+		length := uint64(binary.LittleEndian.Uint32(data[offset+4 : offset+8]))
+		end := uint64(offset) + 8 + length + length%2
+		if end > uint64(len(data)) {
+			return false
+		}
+		if bytes.Equal(data[offset:offset+4], []byte("EXIF")) {
+			return true
+		}
+		offset = int(end)
+	}
+	return false
 }
 
 // ParseForMedia extracts photo metadata, materializing Knox .enc to a temp file when needed.
