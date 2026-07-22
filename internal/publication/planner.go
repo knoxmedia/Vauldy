@@ -291,7 +291,6 @@ func validateDependencyTx(ctx context.Context, tx *sql.Tx, stepID int64, depends
 	for rows.Next() {
 		var from, to int64
 		if err := rows.Scan(&from, &to); err != nil {
-			_ = closeRows()
 			return err
 		}
 		graph[from] = append(graph[from], to)
@@ -318,7 +317,6 @@ func validateDependencyTx(ctx context.Context, tx *sql.Tx, stepID int64, depends
 	}
 	for node := range graph {
 		if visit(node) {
-			_ = closeRows()
 			return errors.New("dependency cycle")
 		}
 	}
