@@ -727,3 +727,19 @@ func TestPlanReplacementTxRequiresSQLTransaction(t *testing.T) {
 		t.Fatal("replacement planner method is nil")
 	}
 }
+
+func TestPlanReplacementRejectsNilTransaction(t *testing.T) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			t.Fatalf("PlanReplacementTx panicked: %v", recovered)
+		}
+	}()
+
+	_, err := NewPlanner(PlanOptions{}).PlanReplacementTx(context.Background(), nil, 1, ReplacementOptions{Reason: PlanReasonRepair})
+	if err == nil {
+		t.Fatal("expected nil transaction error")
+	}
+	if got, want := err.Error(), "publication planner: nil transaction"; got != want {
+		t.Fatalf("error=%q want %q", got, want)
+	}
+}

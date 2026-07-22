@@ -64,6 +64,9 @@ func (p *Planner) PlanNewMediaTx(ctx context.Context, tx *sql.Tx, media NewMedia
 // The caller owns tx and is responsible for committing or rolling it back. It
 // never copies rows or snapshots from an old run.
 func (p *Planner) PlanReplacementTx(ctx context.Context, tx *sql.Tx, mediaID int64, opts ReplacementOptions) (ReplacementResult, error) {
+	if tx == nil {
+		return ReplacementResult{}, errors.New("publication planner: nil transaction")
+	}
 	if opts.Reason != PlanReasonRepair && opts.Reason != PlanReasonManualRetry {
 		return ReplacementResult{}, fmt.Errorf("publication planner: invalid replacement reason %q", opts.Reason)
 	}
