@@ -239,13 +239,18 @@ func main() {
 		TimeoutSec: cfg.DocTransTimeoutSeconds,
 	})
 	// (3) Shared post-ingest queue, enqueuer, seven adapters, and dispatcher.
+	publicationSteps := []string{"poster", "thumbnail", "preview", "keyframe", "subtitle", "atrack", "encrypt", "scrape"}
+	if coreiface.IngestPreparePlannerHandle() != nil {
+		publicationSteps = append(publicationSteps, "prepare")
+	}
+	publicationCapabilities := publication.NewCapabilityMatrix(publicationSteps)
 	hostname, err := os.Hostname()
 	if err != nil || strings.TrimSpace(hostname) == "" {
 		hostname = "unknown-host"
 	}
 	processID := fmt.Sprintf("%s-%d-%s", hostname, os.Getpid(), uuid.NewString())
 	queueOwner := "postingest-" + processID
-	postIngestQueue := postingest.NewQueue(db, queueOwner, sqliteMetrics)
+	postIngestQueue := postingest.NewQueue(db, queueOwner, sqliteMetrics, publicationCapabilities)
 	if err := recoverStartupTasks(serverCtx, db, postIngestQueue, postingest.ThumbnailRecoveryRoots{Preview: filepath.Join(cfg.Data.Preview, "photos"), Derived: filepath.Join(cfg.Data.Dir, ".derived")}); err != nil {
 		log.Fatalf("startup task recovery: %v", err)
 	}
@@ -287,14 +292,10 @@ func main() {
 	}
 
 	preparePlanner := coreiface.IngestPreparePlannerHandle()
-	prepareCapabilities := publication.NewCapabilityMatrix(nil)
-	if preparePlanner != nil {
-		prepareCapabilities = publication.NewCapabilityMatrix([]string{"prepare"})
-	}
 
 	publicationPlanner := publication.NewPlanner(publication.PlanOptions{
 		SubtitleAuto: cfg.SubtitleAutoOnScan(), ATrackAuto: cfg.ATrackAutoOnScan(),
-		EncryptGlobal: cfg.EncryptedAssetsEnabled(), PreparePlanner: preparePlanner, Capabilities: prepareCapabilities,
+		EncryptGlobal: cfg.EncryptedAssetsEnabled(), PreparePlanner: preparePlanner, Capabilities: publicationCapabilities,
 	})
 
 	// (4) Scanner dependencies and the process-wide scan coordinator.
@@ -355,7 +356,7 @@ func main() {
 		Worker: worker, PackageWorker: packageWorker, PreviewWorker: previewWorker, Subtitle: subSvc, Upload: up,
 		Instant: instantScheduler, SessionManager: sessionMgr, AtrackWorker: atrackWorker, KeyframeWorker: keyframeWorker,
 		LyricWorker: lyricWorker, PhotoClassifyWorker: photoClassifyWorker, DocCoverWorker: docCoverWorker,
-		KeyVault: keyVault, AssetEncryptor: assetEnc, DerivedStore: derivedStore, PublicationPlanner: publicationPlanner,
+		KeyVault: keyVault, AssetEncryptor: assetEnc, DerivedStore: derivedStore, PublicationPlanner: publicationPlanner, PublicationCapabilities: publicationCapabilities,
 	}
 
 	// (6) Handler dependencies are injected into the API router.
@@ -373,6 +374,7 @@ func main() {
 			TranscodeDir: cfg.Data.Transcode,
 			FFmpegPath:   cfg.FFmpeg.FFmpegPath,
 			FFprobePath:  cfg.FFmpeg.FFprobePath,
+			Capabilities: publicationCapabilities,
 		}); err != nil {
 			log.Printf("enterprise module %s init failed: %v", mod.Name(), err)
 		} else {

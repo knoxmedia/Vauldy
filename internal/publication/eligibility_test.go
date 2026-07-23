@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"knox-media/internal/store"
+	"strings"
 	"testing"
 )
 
@@ -137,5 +138,64 @@ func TestPrepareClaimsParentOnceBeforeRenditions(t *testing.T) {
 	}
 	if status != "running" || owner != first.Owner {
 		t.Fatalf("status=%s owner=%s payload=%+v", status, owner, first)
+	}
+}
+
+func TestClaimEligibleCommunitySkipsAbsentUnavailablePrepareTable(t *testing.T) {
+	db := openEligibilityDB(t)
+	if _, err := db.Exec(`DROP TABLE pretranscode_rendition_job; DROP TABLE pretranscode_task_meta; DROP TABLE transcode_task`); err != nil {
+		t.Fatal(err)
+	}
+	registry := NewCapabilityMatrix([]string{"poster", "scrape"})
+	if got, err := ClaimEligible(context.Background(), db, ClaimRequest{Family: QueuePostIngest, TaskType: "poster", Owner: "community", Registry: registry}); err != nil || got != nil {
+		t.Fatalf("claim=%+v err=%v", got, err)
+	}
+}
+
+func TestClaimEligibleAdvertisedCapabilityMissingTableFailsClosed(t *testing.T) {
+	db := openEligibilityDB(t)
+	if _, err := db.Exec(`DROP TABLE pretranscode_rendition_job; DROP TABLE pretranscode_task_meta; DROP TABLE transcode_task`); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ClaimEligible(context.Background(), db, ClaimRequest{Family: QueuePrepare, TaskType: "prepare", Owner: "enterprise", Registry: NewCapabilityMatrix([]string{"prepare"})})
+	if err == nil || !strings.Contains(err.Error(), "advertised capability prepare") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestClaimByOwnerReturnsCompleteAuthoritativePayload(t *testing.T) {
+	db := openEligibilityDB(t)
+	_, err := db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l'); INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state) VALUES(10,1,'f','video',1,'processing'); INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(20,10,1,'scan','processing','{}',2); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status,lease_owner,lease_until) VALUES(30,20,10,1,'poster',1,'running','owner/token',datetime(CURRENT_TIMESTAMP,'+90 seconds')); INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status,attempts,max_attempts,lease_owner,lease_until) VALUES(40,10,20,30,1,'poster','running',2,3,'owner/token',datetime(CURRENT_TIMESTAMP,'+90 seconds'))`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := claimByOwner(context.Background(), db, QueuePostIngest, "owner/token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.QueueID != 40 || p.MediaID != 10 || p.RunID.Int64 != 20 || p.StepID.Int64 != 30 || p.Generation.Int64 != 1 || p.TaskType != "poster" || p.Attempts != 2 || p.MaxAttempts != 3 || p.LeaseUntil.IsZero() {
+		t.Fatalf("payload=%+v", p)
+	}
+	_, _ = db.Exec(`UPDATE media SET ingest_generation=2 WHERE id=10`)
+	if p, err = claimByOwner(context.Background(), db, QueuePostIngest, "owner/token"); err == nil || p != nil {
+		t.Fatalf("stale payload=%+v err=%v", p, err)
+	}
+}
+
+func TestClaimEligibleLinkedStepCASRequiresExactlyOneTransition(t *testing.T) {
+	db := openEligibilityDB(t)
+	_, err := db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l'); INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state) VALUES(10,1,'f','video',1,'processing'); INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(20,10,1,'scan','processing','{}',2); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(30,20,10,1,'poster',1,'waiting'); INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(40,10,20,30,1,'poster','waiting'); CREATE TRIGGER invalidate_step_before_queue_claim BEFORE UPDATE OF status ON post_ingest_task WHEN NEW.status='running' BEGIN UPDATE media_ingest_step SET status='cancelled' WHERE id=30; END`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := ClaimEligible(context.Background(), db, ClaimRequest{Family: QueuePostIngest, TaskType: "poster", Owner: "owner", Registry: NewCapabilityMatrix([]string{"poster"})})
+	if err == nil || p != nil {
+		t.Fatalf("payload=%+v err=%v", p, err)
+	}
+	var qs, ss string
+	_ = db.QueryRow(`SELECT status FROM post_ingest_task WHERE id=40`).Scan(&qs)
+	_ = db.QueryRow(`SELECT status FROM media_ingest_step WHERE id=30`).Scan(&ss)
+	if qs != "waiting" || ss != "waiting" {
+		t.Fatalf("states=%s/%s", qs, ss)
 	}
 }

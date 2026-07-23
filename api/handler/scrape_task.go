@@ -17,6 +17,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"knox-media/api/middleware"
+	"knox-media/internal/coreiface"
 	"knox-media/internal/metadatalib"
 	"knox-media/internal/publication"
 	"knox-media/internal/scraper"
@@ -341,16 +342,19 @@ type scrapeClaim struct {
 	Owner                     string
 }
 
-func claimScrapeTaskWithOwner(ctx context.Context, db *sql.DB, taskID int64) (*scrapeClaim, error) {
-	payload, err := publication.ClaimEligible(ctx, db, publication.ClaimRequest{Family: publication.QueueScrape, TaskType: "scrape", Owner: "scrape", QueueID: &taskID, Registry: publication.NewCapabilityMatrix([]string{"scrape"})})
+func claimScrapeTaskWithOwnerRegistry(ctx context.Context, db *sql.DB, taskID int64, registry coreiface.CapabilityRegistry) (*scrapeClaim, error) {
+	payload, err := publication.ClaimEligible(ctx, db, publication.ClaimRequest{Family: publication.QueueScrape, TaskType: "scrape", Owner: "scrape", QueueID: &taskID, Registry: registry})
 	if err != nil || payload == nil {
 		return nil, err
 	}
 	return &scrapeClaim{ID: payload.QueueID, MediaID: payload.MediaID, RunID: payload.RunID, StepID: payload.StepID, Generation: payload.Generation, Owner: payload.Owner}, nil
 }
 
+func claimScrapeTaskWithOwner(ctx context.Context, db *sql.DB, taskID int64) (*scrapeClaim, error) {
+	return claimScrapeTaskWithOwnerRegistry(ctx, db, taskID, publication.NewCapabilityMatrix([]string{"scrape"}))
+}
 func claimScrapeTask(ctx context.Context, db *sql.DB, taskID int64) (bool, error) {
-	c, e := claimScrapeTaskWithOwner(ctx, db, taskID)
+	c, e := claimScrapeTaskWithOwnerRegistry(ctx, db, taskID, publication.NewCapabilityMatrix([]string{"scrape"}))
 	return c != nil, e
 }
 
@@ -405,7 +409,7 @@ func (h *Handler) runScrapeTasksWithLimit(ctx context.Context, ids []int64, limi
 		var taskStatus string
 		var source, query, title, existingMeta, filePath, fileType, libraryType string
 		var year sql.NullInt64
-		claim, claimErr := claimScrapeTaskWithOwner(ctx, h.App.DB, taskID)
+		claim, claimErr := claimScrapeTaskWithOwnerRegistry(ctx, h.App.DB, taskID, h.PublicationCapabilities)
 		claimed := claim != nil
 		if claimErr != nil || !claimed {
 			continue

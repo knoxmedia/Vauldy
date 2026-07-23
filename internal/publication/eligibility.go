@@ -73,9 +73,26 @@ func ClaimEligible(ctx context.Context, db *sql.DB, req ClaimRequest) (*ClaimPay
 	return payload, err
 }
 
+func tableAvailable(ctx context.Context, tx store.SQLExecutor, table string) (bool, error) {
+	var n int
+	err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&n)
+	return n == 1, err
+}
+
 func claimEligibleTx(ctx context.Context, tx store.ImmediateConnTx, req ClaimRequest, owner string) (*ClaimPayload, error) {
 	if req.Family != QueuePostIngest && req.Family != QueueScrape && req.Family != QueuePrepare {
 		return nil, errors.New("publication claim: invalid family")
+	}
+	table, _ := familySource(req.Family)
+	present, err := tableAvailable(ctx, tx, table)
+	if err != nil {
+		return nil, err
+	}
+	if !present {
+		if req.Registry != nil && req.Registry.Available(req.TaskType) {
+			return nil, fmt.Errorf("publication claim: advertised capability %s missing table %s", req.TaskType, table)
+		}
+		return nil, nil
 	}
 	if strings.TrimSpace(req.TaskType) == "" || req.Registry == nil || !req.Registry.Available(req.TaskType) {
 		// Legacy rows are handled below without registry; linked work fails closed.
@@ -157,14 +174,28 @@ func selectFamilyCandidate(ctx context.Context, tx store.SQLExecutor, req ClaimR
 func eligibleRequiredExists(ctx context.Context, tx store.SQLExecutor, registry coreiface.CapabilityRegistry) (bool, error) {
 	for _, f := range []QueueFamily{QueuePostIngest, QueueScrape, QueuePrepare} {
 		table, a := familySource(f)
+		present, err := tableAvailable(ctx, tx, table)
+		if err != nil {
+			return false, err
+		}
+		typ := string(f)
+		if f == QueuePostIngest {
+			typ = "poster"
+		}
+		if !present {
+			if registry != nil && registry.Available(typ) {
+				return false, fmt.Errorf("publication claim: advertised capability %s missing table %s", typ, table)
+			}
+			continue
+		}
 		typeFilter := ""
 		if f == QueuePostIngest {
 			typeFilter = " AND st.step_type=q.task_type"
 		}
 		q := fmt.Sprintf(`SELECT st.step_type FROM %s q JOIN media_ingest_step st ON st.id=q.ingest_step_id WHERE st.required=1 AND %s AND %s%s ORDER BY q.created_at,q.id LIMIT 1`, table, familyDueSQL(f, a), linkedEligibilitySQL(a), typeFilter)
-		var typ string
-		err := tx.QueryRowContext(ctx, q).Scan(&typ)
-		if err == nil && registry != nil && registry.Available(typ) {
+		var stepType string
+		err = tx.QueryRowContext(ctx, q).Scan(&stepType)
+		if err == nil && registry != nil && registry.Available(stepType) {
 			return true, nil
 		}
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -218,22 +249,47 @@ func updateFamilyClaim(ctx context.Context, tx store.SQLExecutor, req ClaimReque
 		p.LeaseUntil = lease.Time
 	}
 	if p.StepID.Valid {
-		_, err = tx.ExecContext(ctx, fmt.Sprintf(`UPDATE media_ingest_step SET status='running',attempts=?,lease_owner=?,lease_until=(SELECT lease_until FROM %s WHERE id=?),started_at=COALESCE(started_at,CURRENT_TIMESTAMP),updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='waiting'`, table), p.Attempts, p.Owner, id, p.StepID.Int64)
+		stepResult, err := tx.ExecContext(ctx, fmt.Sprintf(`UPDATE media_ingest_step SET status='running',attempts=?,lease_owner=?,lease_until=(SELECT lease_until FROM %s WHERE id=?),started_at=COALESCE(started_at,CURRENT_TIMESTAMP),updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='waiting'`, table), p.Attempts, p.Owner, id, p.StepID.Int64)
 		if err != nil {
 			return nil, err
+		}
+		stepRows, err := stepResult.RowsAffected()
+		if err != nil {
+			return nil, err
+		}
+		if stepRows != 1 {
+			return nil, fmt.Errorf("publication claim: linked step transition affected %d rows", stepRows)
 		}
 	}
 	return p, nil
 }
 
 func claimByOwner(ctx context.Context, db *sql.DB, f QueueFamily, owner string) (*ClaimPayload, error) {
-	table, _ := familySource(f)
-	var id int64
-	err := db.QueryRowContext(ctx, `SELECT id FROM `+table+` WHERE lease_owner=? AND status='running'`, owner).Scan(&id)
+	p := &ClaimPayload{Family: f, Owner: owner}
+	var lease sql.NullTime
+	var err error
+	switch f {
+	case QueuePostIngest:
+		err = db.QueryRowContext(ctx, `SELECT q.id,q.media_id,q.ingest_run_id,q.ingest_step_id,q.scan_task_id,q.generation,q.task_type,q.attempts,q.max_attempts,q.lease_until FROM post_ingest_task q LEFT JOIN media_ingest_step st ON st.id=q.ingest_step_id LEFT JOIN media_ingest_run r ON r.id=q.ingest_run_id LEFT JOIN media m ON m.id=q.media_id WHERE q.lease_owner=? AND q.status='running' AND ((q.ingest_run_id IS NULL AND q.ingest_step_id IS NULL AND q.generation IS NULL) OR (st.status='running' AND st.lease_owner=q.lease_owner AND st.run_id=q.ingest_run_id AND st.media_id=q.media_id AND st.generation=q.generation AND r.id=st.run_id AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND m.ingest_generation=q.generation))`, owner).Scan(&p.QueueID, &p.MediaID, &p.RunID, &p.StepID, &p.ScanTaskID, &p.Generation, &p.TaskType, &p.Attempts, &p.MaxAttempts, &lease)
+	case QueueScrape:
+		err = db.QueryRowContext(ctx, `SELECT q.id,q.media_id,q.ingest_run_id,q.ingest_step_id,q.generation,COALESCE(q.fail_count,0),q.lease_until FROM scrape_task q LEFT JOIN media_ingest_step st ON st.id=q.ingest_step_id LEFT JOIN media_ingest_run r ON r.id=q.ingest_run_id LEFT JOIN media m ON m.id=q.media_id WHERE q.lease_owner=? AND q.status='running' AND ((q.ingest_run_id IS NULL AND q.ingest_step_id IS NULL AND q.generation IS NULL) OR (st.status='running' AND st.lease_owner=q.lease_owner AND st.run_id=q.ingest_run_id AND st.media_id=q.media_id AND st.generation=q.generation AND r.id=st.run_id AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND m.ingest_generation=q.generation))`, owner).Scan(&p.QueueID, &p.MediaID, &p.RunID, &p.StepID, &p.Generation, &p.Attempts, &lease)
+		p.TaskType = "scrape"
+		p.MaxAttempts = 3
+	case QueuePrepare:
+		err = db.QueryRowContext(ctx, `SELECT q.id,COALESCE(q.media_id,(SELECT m2.id FROM media m2 WHERE m2.file_id=q.file_id),0),q.ingest_run_id,q.ingest_step_id,q.generation,q.lease_until FROM transcode_task q LEFT JOIN media_ingest_step st ON st.id=q.ingest_step_id LEFT JOIN media_ingest_run r ON r.id=q.ingest_run_id LEFT JOIN media m ON m.id=q.media_id WHERE q.lease_owner=? AND q.status='running' AND ((q.ingest_run_id IS NULL AND q.ingest_step_id IS NULL AND q.generation IS NULL) OR (st.status='running' AND st.lease_owner=q.lease_owner AND st.run_id=q.ingest_run_id AND st.media_id=q.media_id AND st.generation=q.generation AND r.id=st.run_id AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND m.ingest_generation=q.generation))`, owner).Scan(&p.QueueID, &p.MediaID, &p.RunID, &p.StepID, &p.Generation, &lease)
+		p.TaskType = "prepare"
+		p.Attempts = 1
+		p.MaxAttempts = 1
+	default:
+		return nil, errors.New("publication claim reconciliation: invalid family")
+	}
 	if err != nil {
 		return nil, err
 	}
-	return &ClaimPayload{Family: f, QueueID: id, Owner: owner}, nil
+	if lease.Valid {
+		p.LeaseUntil = lease.Time
+	}
+	return p, nil
 }
 
 // LinkedClaimEligibilitySQL is the canonical linked-or-legacy dependency predicate.

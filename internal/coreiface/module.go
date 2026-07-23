@@ -44,7 +44,8 @@ type ModuleDeps struct {
 	// FFmpegPath is the resolved ffmpeg binary path.
 	FFmpegPath string
 	// FFprobePath is the resolved ffprobe binary path.
-	FFprobePath string
+	FFprobePath  string
+	Capabilities CapabilityRegistry
 }
 
 // EnterpriseModule is the contract every commercial-only module implements.

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"knox-media/internal/coreiface"
 	"knox-media/internal/processmetrics"
 	"knox-media/internal/publication"
 	"log"
@@ -41,13 +42,14 @@ type Worker struct {
 	beforeClaimUpdate func()
 	parentClaims      map[int64]publication.PrepareParentIdentity
 	claimOwner        string
+	registry          coreiface.CapabilityRegistry
 	semCPU            chan struct{}
 	semGPU            chan struct{}
 }
 
 // NewWorker constructs a standalone worker. MaxCPU/MaxGPU default to 4/2
 // when zero (SRS SCH-01).
-func NewWorker(db *sql.DB, vault *keystore.Vault, ffmpegPath, transcodeDir string, maxCPU, maxGPU int) *Worker {
+func NewWorker(db *sql.DB, vault *keystore.Vault, ffmpegPath, transcodeDir string, maxCPU, maxGPU int, registries ...coreiface.CapabilityRegistry) *Worker {
 	if maxCPU <= 0 {
 		maxCPU = 4
 	}
@@ -66,6 +68,12 @@ func NewWorker(db *sql.DB, vault *keystore.Vault, ffmpegPath, transcodeDir strin
 		semGPU:       make(chan struct{}, maxGPU),
 		parentClaims: make(map[int64]publication.PrepareParentIdentity),
 		claimOwner:   "pretranscode-" + uuid.NewString(),
+		registry: func() coreiface.CapabilityRegistry {
+			if len(registries) > 0 {
+				return registries[0]
+			}
+			return nil
+		}(),
 	}
 }
 
@@ -148,7 +156,7 @@ func (w *Worker) runBeforeClaimUpdate() {
 }
 
 func (w *Worker) claimNextJob() (*claimedJob, *Preset, *Rendition, int64, string, int, int, error) {
-	payload, err := publication.ClaimEligible(context.Background(), w.DB, publication.ClaimRequest{Family: publication.QueuePrepare, TaskType: "prepare", Owner: w.claimOwner, Registry: publication.NewCapabilityMatrix([]string{"prepare"})})
+	payload, err := publication.ClaimEligible(context.Background(), w.DB, publication.ClaimRequest{Family: publication.QueuePrepare, TaskType: "prepare", Owner: w.claimOwner, Registry: w.registry})
 	if err != nil {
 		return nil, nil, nil, 0, "", 0, 0, err
 	}

@@ -12,6 +12,7 @@ import (
 	"knox-media/internal/app"
 	"knox-media/internal/atrack"
 	"knox-media/internal/config"
+	"knox-media/internal/coreiface"
 	"knox-media/internal/doccover"
 	"knox-media/internal/jit/session"
 	"knox-media/internal/keyframe"
@@ -41,29 +42,30 @@ type PostIngestEnqueuer interface {
 }
 
 type Dependencies struct {
-	ServerContext        context.Context
-	Background           *BackgroundGroup
-	Coordinator          ScanCoordinator
-	Queue                *postingest.Queue
-	PostIngest           *postingest.Enqueuer
-	Dispatcher           *postingest.Dispatcher
-	AdminOverviewBuilder OverviewBuilder
-	Worker               *transcode.Worker
-	PackageWorker        *transcode.PackageWorker
-	PreviewWorker        *preview.Worker
-	Subtitle             *subtitle.Service
-	Upload               *upload.Service
-	Instant              *scheduler.Scheduler
-	SessionManager       *session.Manager
-	AtrackWorker         *atrack.Worker
-	KeyframeWorker       *keyframe.Worker
-	LyricWorker          *lyrictask.Worker
-	PhotoClassifyWorker  *photoclass.Worker
-	DocCoverWorker       *doccover.Worker
-	KeyVault             *keystore.Vault
-	AssetEncryptor       *storage.AssetEncryptor
-	DerivedStore         *storage.DerivedAssetStore
-	PublicationPlanner   *publication.Planner
+	ServerContext           context.Context
+	Background              *BackgroundGroup
+	Coordinator             ScanCoordinator
+	Queue                   *postingest.Queue
+	PostIngest              *postingest.Enqueuer
+	Dispatcher              *postingest.Dispatcher
+	AdminOverviewBuilder    OverviewBuilder
+	Worker                  *transcode.Worker
+	PackageWorker           *transcode.PackageWorker
+	PreviewWorker           *preview.Worker
+	Subtitle                *subtitle.Service
+	Upload                  *upload.Service
+	Instant                 *scheduler.Scheduler
+	SessionManager          *session.Manager
+	AtrackWorker            *atrack.Worker
+	KeyframeWorker          *keyframe.Worker
+	LyricWorker             *lyrictask.Worker
+	PhotoClassifyWorker     *photoclass.Worker
+	DocCoverWorker          *doccover.Worker
+	KeyVault                *keystore.Vault
+	AssetEncryptor          *storage.AssetEncryptor
+	DerivedStore            *storage.DerivedAssetStore
+	PublicationPlanner      *publication.Planner
+	PublicationCapabilities coreiface.CapabilityRegistry
 }
 
 type Handler struct {
@@ -87,6 +89,7 @@ type Handler struct {
 	AssetEncryptor          *storage.AssetEncryptor
 	DerivedStore            *storage.DerivedAssetStore
 	PublicationPlanner      *publication.Planner
+	PublicationCapabilities coreiface.CapabilityRegistry
 	Queue                   *postingest.Queue
 	PostIngestEnqueuer      PostIngestEnqueuer
 	Dispatcher              *postingest.Dispatcher
@@ -112,7 +115,7 @@ func New(a *app.App, deps Dependencies) *Handler {
 		Subtitle: deps.Subtitle, Upload: deps.Upload, Instant: deps.Instant, SessionManager: deps.SessionManager,
 		AtrackWorker: deps.AtrackWorker, KeyframeWorker: deps.KeyframeWorker, LyricWorker: deps.LyricWorker,
 		PhotoClassifyWorker: deps.PhotoClassifyWorker, DocCoverWorker: deps.DocCoverWorker, KeyVault: deps.KeyVault,
-		AssetEncryptor: deps.AssetEncryptor, DerivedStore: deps.DerivedStore, PublicationPlanner: deps.PublicationPlanner, Queue: deps.Queue,
+		AssetEncryptor: deps.AssetEncryptor, DerivedStore: deps.DerivedStore, PublicationPlanner: deps.PublicationPlanner, PublicationCapabilities: deps.PublicationCapabilities, Queue: deps.Queue,
 		PostIngestEnqueuer: deps.PostIngest, Dispatcher: deps.Dispatcher, AdminOverviewBuilder: deps.AdminOverviewBuilder, ScanCoordinator: deps.Coordinator,
 		runningScans: map[int64]scanRuntime{}, Background: deps.Background, ServerContext: deps.ServerContext,
 	}

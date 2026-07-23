@@ -328,3 +328,19 @@ func TestStartupBuildLogUsesOpenedSQLiteIdentity(t *testing.T) {
 		t.Fatal("build/database identity log occurs before database open")
 	}
 }
+
+func TestMainWiresOneSharedPublicationCapabilityRegistry(t *testing.T) {
+	data, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(data)
+	if strings.Count(src, "publication.NewCapabilityMatrix(") != 1 {
+		t.Fatalf("registry constructors=%d", strings.Count(src, "publication.NewCapabilityMatrix("))
+	}
+	for _, required := range []string{"postingest.NewQueue(db, queueOwner, sqliteMetrics, publicationCapabilities)", "PublicationCapabilities: publicationCapabilities", "Capabilities: publicationCapabilities"} {
+		if !strings.Contains(src, required) {
+			t.Fatalf("missing shared registry wiring %q", required)
+		}
+	}
+}

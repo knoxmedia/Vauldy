@@ -65,12 +65,10 @@ type Queue struct {
 	registry             coreiface.CapabilityRegistry
 }
 
-func NewQueue(db *sql.DB, owner string, metrics *store.SQLiteMetrics) *Queue {
-	return &Queue{db: db, owner: owner, metrics: metrics, registry: allowAllCapabilities{}}
+func NewQueue(db *sql.DB, owner string, metrics *store.SQLiteMetrics, registries ...coreiface.CapabilityRegistry) *Queue {
+	var registry coreiface.CapabilityRegistry
+	if len(registries) > 0 {
+		registry = registries[0]
+	}
+	return &Queue{db: db, owner: owner, metrics: metrics, registry: registry}
 }
-
-type allowAllCapabilities struct{}
-
-func (allowAllCapabilities) Available(string) bool { return true }
-
-func (q *Queue) SetCapabilityRegistry(registry coreiface.CapabilityRegistry) { q.registry = registry }

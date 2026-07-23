@@ -53,7 +53,7 @@ func (m *Module) Init(ctx context.Context, deps coreiface.ModuleDeps) error {
 	m.Task = &TaskService{DB: deps.DB, TranscodeDir: deps.TranscodeDir}
 	m.Webhook = &WebhookService{DB: deps.DB}
 	m.Playback = &PlaybackService{DB: deps.DB, TranscodeDir: deps.TranscodeDir}
-	m.Worker = NewWorker(deps.DB, deps.Vault, deps.FFmpegPath, deps.TranscodeDir, 4, 2)
+	m.Worker = NewWorker(deps.DB, deps.Vault, deps.FFmpegPath, deps.TranscodeDir, 4, 2, deps.Capabilities)
 	m.dispatcher = &WebhookDispatcherAdapter{Service: m.Webhook}
 	setWebhookDispatcher(m.dispatcher)
 	coreiface.SetPretranscodeModule(m.Playback)
