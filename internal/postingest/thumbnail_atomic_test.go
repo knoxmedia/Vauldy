@@ -13,7 +13,68 @@ import (
 	"knox-media/internal/imagethumb"
 	"knox-media/internal/keystore"
 	"knox-media/internal/storage"
+	"knox-media/internal/store"
 )
+
+func TestLocalThumbnailWorkerJournalDefiniteFailureCleansDerivedCandidates(t *testing.T) {
+	db, _, _ := planThumbnailFixture(t, true)
+	q := NewQueue(db, "thumbnail-owner", nil)
+	task, _ := q.Claim(context.Background(), TaskThumbnail)
+	vault, _ := keystore.NewVault("journal-fail-key", "")
+	root := t.TempDir()
+	worker := realThumbnailStager(t, db)
+	worker.Vault = vault
+	worker.Derived = &storage.DerivedAssetStore{DB: db, Vault: vault, BaseDir: root}
+	original := withImmediateThumbnailJournalTx
+	withImmediateThumbnailJournalTx = func(context.Context, *sql.DB, func(store.ImmediateConnTx) error) (store.ImmediateOutcome, error) {
+		return store.ImmediateOutcome{}, errors.New("journal failed")
+	}
+	t.Cleanup(func() { withImmediateThumbnailJournalTx = original })
+	if _, err := worker.Stage(context.Background(), *task); err == nil {
+		t.Fatal("expected journal failure")
+	}
+	var files int
+	filepath.WalkDir(root, func(_ string, d os.DirEntry, e error) error {
+		if e == nil && !d.IsDir() {
+			files++
+		}
+		return nil
+	})
+	if files != 0 {
+		t.Fatalf("orphan derived files=%d", files)
+	}
+}
+
+func TestLocalThumbnailWorkerJournalUncertainAbsentCleansAfterFreshReconcile(t *testing.T) {
+	db, _, _ := planThumbnailFixture(t, true)
+	q := NewQueue(db, "thumbnail-owner", nil)
+	task, _ := q.Claim(context.Background(), TaskThumbnail)
+	vault, _ := keystore.NewVault("journal-uncertain-key", "")
+	root := t.TempDir()
+	worker := realThumbnailStager(t, db)
+	worker.Vault = vault
+	worker.Derived = &storage.DerivedAssetStore{DB: db, Vault: vault, BaseDir: root}
+	original := withImmediateThumbnailJournalTx
+	withImmediateThumbnailJournalTx = func(context.Context, *sql.DB, func(store.ImmediateConnTx) error) (store.ImmediateOutcome, error) {
+		return store.ImmediateOutcome{CommitAttempted: true}, &store.ImmediateCommitError{Cause: errors.New("unknown")}
+	}
+	t.Cleanup(func() { withImmediateThumbnailJournalTx = original })
+	_, err := worker.Stage(context.Background(), *task)
+	var uncertain *store.ImmediateCommitError
+	if !errors.As(err, &uncertain) {
+		t.Fatalf("err=%v", err)
+	}
+	var files int
+	filepath.WalkDir(root, func(_ string, d os.DirEntry, e error) error {
+		if e == nil && !d.IsDir() {
+			files++
+		}
+		return nil
+	})
+	if files != 0 {
+		t.Fatalf("proven absent candidates retained=%d", files)
+	}
+}
 
 func TestThumbnailAtomicCommitSelectsBothPointersEvidenceJournalAndCompletion(t *testing.T) {
 	db, mediaID, runID := planThumbnailFixture(t, false)

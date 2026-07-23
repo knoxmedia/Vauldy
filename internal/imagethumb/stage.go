@@ -52,9 +52,13 @@ func StageThumbnail(ctx context.Context, db *sql.DB, vault *keystore.Vault, deri
 		return StagedThumbnail{}, err
 	}
 	cleanup := true
+	var derivedCandidates []*storage.StagedDerivedAsset
 	defer func() {
 		if cleanup {
 			_ = os.RemoveAll(dir)
+			if derived != nil {
+				derived.AbortStaged(derivedCandidates...)
+			}
 		}
 	}()
 	renderVariant := func(name, kind string, edge int) (StagedVariant, error) {
@@ -77,6 +81,7 @@ func StageThumbnail(ctx context.Context, db *sql.DB, vault *keystore.Vault, deri
 				return StagedVariant{}, e
 			}
 			_ = os.Remove(path)
+			derivedCandidates = append(derivedCandidates, v.Derived)
 			v.Path = v.Derived.EncPath()
 			size, hash, e = hashFile(v.Path)
 			v.Size, v.Hash = size, hash

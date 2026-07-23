@@ -22,6 +22,7 @@ import (
 )
 
 var withImmediateThumbnailTx = store.WithImmediateConnTx
+var withImmediateThumbnailJournalTx = store.WithImmediateConnTx
 var reconcileThumbnailCommit = reconcileThumbnailCommitAuthoritative
 
 type thumbnailCommitState uint8
@@ -375,7 +376,7 @@ func (w *LocalThumbnailWorker) Stage(ctx context.Context, task Task) (imagethumb
 	}
 	hs, _ := json.Marshal(map[string]any{"thumb": variantRef(staged.Thumb), "medium": variantRef(staged.Medium)})
 	staged.Stage.HashesSizesJSON = string(hs)
-	_, err = store.WithImmediateConnTx(ctx, w.DB, func(tx store.ImmediateConnTx) error {
+	_, err = withImmediateThumbnailJournalTx(ctx, w.DB, func(tx store.ImmediateConnTx) error {
 		var one int
 		if guardErr := tx.QueryRowContext(ctx, `SELECT 1 FROM post_ingest_task p JOIN media_ingest_step s ON s.id=p.ingest_step_id JOIN media_ingest_run r ON r.id=p.ingest_run_id JOIN media m ON m.id=p.media_id WHERE p.id=? AND p.media_id=? AND p.task_type='thumbnail' AND p.ingest_run_id=? AND p.ingest_step_id=? AND p.generation=? AND p.status='running' AND p.lease_owner=? AND p.attempts=? AND s.status='running' AND s.lease_owner=p.lease_owner AND s.attempts=p.attempts AND r.status='processing' AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND m.ingest_generation=p.generation`, task.ID, task.MediaID, *task.RunID, *task.StepID, task.Generation, task.LeaseOwner, task.Attempts).Scan(&one); guardErr != nil {
 			return guardErr
@@ -384,8 +385,22 @@ func (w *LocalThumbnailWorker) Stage(ctx context.Context, task Task) (imagethumb
 		return insertErr
 	})
 	if err != nil {
-		_ = os.RemoveAll(staged.Stage.StagedPath)
-		return imagethumb.StagedThumbnail{}, err
+		var uncertain *store.ImmediateCommitError
+		if errors.As(err, &uncertain) {
+			reconcileCtx, cancel := context.WithTimeout(context.Background(), thumbnailReconcileTimeout)
+			defer cancel()
+			var n int
+			queryErr := w.DB.QueryRowContext(reconcileCtx, `SELECT COUNT(*) FROM media_asset_stage_journal WHERE stage_id=? AND media_id=? AND run_id=? AND step_id=? AND generation=?`, staged.Stage.StageID, task.MediaID, *task.RunID, *task.StepID, task.Generation).Scan(&n)
+			if queryErr != nil || n > 0 {
+				return staged, err
+			}
+			if cleanupErr := cleanupPreJournalThumbnail(staged, w.Derived); cleanupErr != nil {
+				return staged, errors.Join(err, cleanupErr)
+			}
+			return imagethumb.StagedThumbnail{}, err
+		}
+		cleanupErr := cleanupPreJournalThumbnail(staged, w.Derived)
+		return imagethumb.StagedThumbnail{}, errors.Join(err, cleanupErr)
 	}
 	return staged, nil
 }
@@ -436,4 +451,21 @@ func reconcileThumbnailCommitAuthoritative(ctx context.Context, db *sql.DB, task
 		return thumbnailCommitAbsent, nil
 	}
 	return thumbnailCommitUnknown, err
+}
+
+func cleanupPreJournalThumbnail(staged imagethumb.StagedThumbnail, derived *storage.DerivedAssetStore) error {
+	var err error
+	if e := os.RemoveAll(staged.Stage.StagedPath); e != nil {
+		err = errors.Join(err, e)
+	}
+	if derived != nil {
+		for _, v := range []imagethumb.StagedVariant{staged.Thumb, staged.Medium} {
+			if v.Derived != nil {
+				if e := os.Remove(v.Path); e != nil && !os.IsNotExist(e) {
+					err = errors.Join(err, e)
+				}
+			}
+		}
+	}
+	return err
 }

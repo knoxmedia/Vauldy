@@ -14,8 +14,47 @@ import (
 	"knox-media/internal/crypto"
 	"knox-media/internal/keystore"
 	"knox-media/internal/publication"
+	"knox-media/internal/storage"
 	_ "modernc.org/sqlite"
 )
+
+func TestStageThumbnailEncryptedMediumFailureRemovesThumbCandidate(t *testing.T) {
+	db, err := sql.Open("sqlite", "file:thumb-medium-fail?mode=memory&cache=shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.Exec(`CREATE TABLE library(id INTEGER PRIMARY KEY,encrypted_assets_enabled INTEGER);CREATE TABLE media(id INTEGER PRIMARY KEY,library_id INTEGER);INSERT INTO library VALUES(1,1);INSERT INTO media VALUES(7,1)`)
+	vault, _ := keystore.NewVault("medium-fail-key", "")
+	derivedRoot := t.TempDir()
+	derived := &storage.DerivedAssetStore{DB: db, Vault: vault, BaseDir: derivedRoot}
+	source := writeStageJPEG(t)
+	ffmpeg := writeFailSecondFFmpeg(t, source)
+	req := publication.StageRequest{MediaID: 7, RunID: 8, StepID: 9, Generation: 3, OwnerToken: "owner", SourcePath: source, SourceFingerprint: "fp"}
+	if _, err = StageThumbnail(context.Background(), db, vault, derived, ffmpeg, t.TempDir(), req); err == nil {
+		t.Fatal("expected medium failure")
+	}
+	var candidates []string
+	filepath.WalkDir(derivedRoot, func(path string, d os.DirEntry, e error) error {
+		if e == nil && !d.IsDir() {
+			candidates = append(candidates, path)
+		}
+		return nil
+	})
+	if len(candidates) != 0 {
+		t.Fatalf("orphan candidates=%v", candidates)
+	}
+}
+func writeFailSecondFFmpeg(t *testing.T, source string) string {
+	t.Helper()
+	counter := filepath.Join(t.TempDir(), "count")
+	path := filepath.Join(t.TempDir(), "ffmpeg.bat")
+	script := "@echo off\r\nif exist \"" + counter + "\" exit /b 1\r\necho x>\"" + counter + "\"\r\nset last=\r\n:loop\r\nif \"%~1\"==\"\" goto done\r\nset last=%~1\r\nshift\r\ngoto loop\r\n:done\r\ncopy /Y \"" + source + "\" \"%last%\" >nul\r\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
 
 func TestStageThumbnailValidatesEncryptedSourceThroughDecryption(t *testing.T) {
 	plain := writeStageJPEG(t)
