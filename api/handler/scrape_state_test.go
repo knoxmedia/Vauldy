@@ -802,3 +802,33 @@ func TestScrapeEffectManifestIsBoundedAndOmitsProviderText(t *testing.T) {
 		t.Fatalf("manifest bytes=%d leaked=%v", len(raw), strings.Contains(string(raw), "sensitive-provider-text"))
 	}
 }
+
+func TestPrepareSeriesEffectsEmptyScrapePreservesEstablishedFields(t *testing.T) {
+	db, mid := posterHandlerTestDB(t)
+	lid, _ := seedScrapeAcceptanceSeries(t, db, mid)
+	_, _ = db.Exec(`UPDATE series SET title='Keep Title',poster='keep.jpg',meta_json='{"scrape":{"overview":"Keep Overview","backdrop":"keep-bg.jpg"}}' WHERE library_id=?`, lid)
+	prepared, err := prepareSeriesEffects(context.Background(), db, lid, mid, &scraper.ScrapeResult{Extra: map[string]any{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.DesiredTitle != "Keep Title" || prepared.DesiredPoster != "keep.jpg" || !strings.Contains(prepared.DesiredMeta, "Keep Overview") || !strings.Contains(prepared.DesiredMeta, "keep-bg.jpg") {
+		t.Fatalf("prepared=%+v", prepared)
+	}
+}
+
+func TestCompleteScrapePreparationHonorsCallerDeadline(t *testing.T) {
+	db, mid := posterHandlerTestDB(t)
+	claim := seedAndClaimLinkedScrape(t, db, mid)
+	lid, _ := seedScrapeAcceptanceSeries(t, db, mid)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := completeScrapeClaimWithEffects(ctx, db, *claim, "auto", "q", "ok", &scraper.ScrapeResult{Title: "x", Extra: map[string]any{}}, scrapeCompletionEffects{LibraryID: lid})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err=%v", err)
+	}
+	var status string
+	_ = db.QueryRow(`SELECT status FROM scrape_task WHERE id=?`, claim.ID).Scan(&status)
+	if status != "running" {
+		t.Fatalf("status=%s", status)
+	}
+}

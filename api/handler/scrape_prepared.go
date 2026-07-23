@@ -7,6 +7,7 @@ import (
 	"errors"
 	"knox-media/internal/scraper"
 	"knox-media/internal/store"
+	"strings"
 )
 
 type PreparedSeriesSibling struct {
@@ -33,12 +34,31 @@ func prepareSeriesEffects(ctx context.Context, q store.SQLExecutor, libraryID, m
 	if err != nil {
 		return nil, err
 	}
-	x.DesiredTitle = res.Title
-	x.DesiredPoster = res.Poster
+	x.DesiredTitle = x.OriginalTitle
+	if strings.TrimSpace(res.Title) != "" {
+		x.DesiredTitle = res.Title
+	}
+	x.DesiredPoster = x.OriginalPoster
+	if strings.TrimSpace(res.Poster) != "" {
+		x.DesiredPoster = res.Poster
+	}
 	x.DesiredTMDB = x.OriginalTMDB
 	x.DesiredTVDB = x.OriginalTVDB
 	overview := res.Overview
 	backdrop := res.Backdrop
+	if strings.TrimSpace(overview) == "" || strings.TrimSpace(backdrop) == "" {
+		var old map[string]any
+		if json.Unmarshal([]byte(x.OriginalMeta), &old) == nil {
+			if sm, _ := old["scrape"].(map[string]any); sm != nil {
+				if strings.TrimSpace(overview) == "" {
+					overview = stringScrapeField(sm["overview"])
+				}
+				if strings.TrimSpace(backdrop) == "" {
+					backdrop = stringScrapeField(sm["backdrop"])
+				}
+			}
+		}
+	}
 	if res.Extra != nil {
 		if v := stringScrapeField(res.Extra["series_title"]); v != "" {
 			x.DesiredTitle = v

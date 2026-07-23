@@ -1296,6 +1296,11 @@ func completeScrapeClaim(ctx context.Context, db *sql.DB, c scrapeClaim, source,
 	return completeScrapeClaimWithEffects(ctx, db, c, source, query, message, result, scrapeCompletionEffects{})
 }
 func completeScrapeClaimWithEffects(ctx context.Context, db *sql.DB, c scrapeClaim, source, query, message string, result *scraper.ScrapeResult, effects scrapeCompletionEffects) error {
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+	}
 	effects.Credits = normalizeScrapeCredits(effects.Credits)
 	if len(effects.Artwork.Images) > 0 {
 		metadatalib.SelectStagedScrapeArtwork(result, effects.Artwork)
@@ -1306,17 +1311,6 @@ func completeScrapeClaimWithEffects(ctx context.Context, db *sql.DB, c scrapeCla
 			return e
 		}
 		effects.PreparedSeries = prepared
-	}
-	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
-		defer cancel()
-	}
-	effects.Credits = normalizeScrapeCredits(effects.Credits)
-	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
-		defer cancel()
 	}
 	var expectedManifest []byte
 	var expectedDigest string
