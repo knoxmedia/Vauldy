@@ -138,7 +138,7 @@ func TestMainInjectsAndWaitsBackgroundGroup(t *testing.T) {
 	}
 }
 
-func TestHandleScanCancelledPersistsPublicationStateBeforeLocalCancellation(t *testing.T) {
+func TestHandleScanCancelledFailsInitialPublicationBeforeLocalCancellation(t *testing.T) {
 	db, err := store.OpenSQLite(":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -191,7 +191,7 @@ func TestHandleScanCancelledPersistsPublicationStateBeforeLocalCancellation(t *t
 	if err := db.QueryRow(`SELECT q.status,s.status,r.status,m.publication_state FROM post_ingest_task q JOIN media_ingest_step s ON s.id=q.ingest_step_id JOIN media_ingest_run r ON r.id=q.ingest_run_id JOIN media m ON m.id=q.media_id WHERE q.scan_task_id=?`, scanID).Scan(&q, &s, &r, &m); err != nil {
 		t.Fatal(err)
 	}
-	if q != "cancelled" || s != "cancelled" || r != "cancelled" || m != "cancelled" {
+	if q != "cancelled" || s != "cancelled" || r != "failed" || m != "failed" {
 		t.Fatalf("states=%s/%s/%s/%s", q, s, r, m)
 	}
 }

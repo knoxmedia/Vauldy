@@ -311,13 +311,13 @@ func seedManagedLinkedTask(t *testing.T, db *sql.DB, status string) (svc *TaskSe
 	return &TaskService{DB: db, TranscodeDir: t.TempDir()}, taskID, jobID, runID, stepID, mediaID
 }
 
-func TestLinkedPrepareCancelTaskTransitionsFourLayersAtomically(t *testing.T) {
+func TestLinkedPrepareCancelTaskFailsInitialPublicationAtomically(t *testing.T) {
 	db := newTestDB(t)
 	svc, taskID, jobID, runID, stepID, mediaID := seedManagedLinkedTask(t, db, "running")
 	if err := svc.CancelTask(taskID); err != nil {
 		t.Fatal(err)
 	}
-	assertPrepareTerminalState(t, db, jobID, taskID, stepID, runID, mediaID, "cancelled", "cancelled", "cancelled", "cancelled", "cancelled")
+	assertPrepareTerminalState(t, db, jobID, taskID, stepID, runID, mediaID, "cancelled", "cancelled", "cancelled", "failed", "failed")
 }
 
 func TestLinkedPrepareRetryTaskStartsNewRoundThenWorkerCanPublish(t *testing.T) {

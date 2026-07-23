@@ -188,7 +188,7 @@ func seedLinkedPrepareTerminal(t *testing.T, db *sql.DB, generation int64) (task
 	return
 }
 
-func TestPrepareFailureDegradesLinkedRun(t *testing.T) {
+func TestPrepareFailureFailsInitialLinkedPublication(t *testing.T) {
 	db := newTestDB(t)
 	taskID, runID, stepID, mediaID := seedLinkedPrepareTerminal(t, db, 1)
 	if _, err := db.Exec(`INSERT INTO pretranscode_rendition_job(task_id,rendition_id,rendition_name,status,error_message) VALUES(?,1,'360p','failed','boom')`, taskID); err != nil {
@@ -204,7 +204,7 @@ func TestPrepareFailureDegradesLinkedRun(t *testing.T) {
 	_ = db.QueryRow(`SELECT status,attempts,max_attempts FROM media_ingest_step WHERE id=?`, stepID).Scan(&step, &attempts, &maxAttempts)
 	_ = db.QueryRow(`SELECT status FROM media_ingest_run WHERE id=?`, runID).Scan(&run)
 	_ = db.QueryRow(`SELECT publication_state FROM media WHERE id=?`, mediaID).Scan(&media)
-	if task != "failed" || step != "failed" || attempts != maxAttempts || run != "degraded" || media != "degraded" {
+	if task != "failed" || step != "failed" || attempts != maxAttempts || run != "failed" || media != "failed" {
 		t.Fatalf("states=%s/%s(%d/%d)/%s/%s", task, step, attempts, maxAttempts, run, media)
 	}
 }
@@ -271,8 +271,8 @@ func TestFinalizeJobAndTaskTxRollsBackEntireTerminalTransition(t *testing.T) {
 			wantMedia := "published"
 			if tc.terminal.Status == "failed" {
 				want = "failed"
-				wantRun = "degraded"
-				wantMedia = "degraded"
+				wantRun = "failed"
+				wantMedia = "failed"
 			}
 			assertPrepareTerminalState(t, db, jobID, taskID, stepID, runID, mediaID, want, want, want, wantRun, wantMedia)
 			var output, errorMessage, encoder string

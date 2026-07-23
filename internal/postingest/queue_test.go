@@ -1175,7 +1175,7 @@ func TestQueueLinkedFailAggregatesQueueStepRunAndMedia(t *testing.T) {
 	}
 }
 
-func TestQueueLinkedRecoverExpiredAggregatesExhaustion(t *testing.T) {
+func TestQueueLinkedRecoverExpiredFailsInitialPublicationAtomically(t *testing.T) {
 	db, _ := openQueueTestDB(t)
 	mediaID, runID, stepID, taskID := linkedQueueFixture(t, db, "processing", "running", 3, 3)
 	if _, err := db.Exec(`UPDATE post_ingest_task SET status='running',attempts=3,lease_owner='old',lease_until=datetime(CURRENT_TIMESTAMP,'-1 second') WHERE id=?`, taskID); err != nil {
@@ -1198,12 +1198,12 @@ func TestQueueLinkedRecoverExpiredAggregatesExhaustion(t *testing.T) {
 	if err := db.QueryRow(`SELECT publication_state FROM media WHERE id=?`, mediaID).Scan(&mediaState); err != nil {
 		t.Fatal(err)
 	}
-	if queueStatus != "failed" || stepState != "failed" || runState != "degraded" || mediaState != "degraded" {
+	if queueStatus != "failed" || stepState != "failed" || runState != "failed" || mediaState != "failed" {
 		t.Fatalf("states queue=%s step=%s run=%s media=%s", queueStatus, stepState, runState, mediaState)
 	}
 }
 
-func TestQueueLinkedCancelScanAggregatesAndLeavesOtherScan(t *testing.T) {
+func TestQueueLinkedCancelScanFailsInitialPublicationAndLeavesOtherScan(t *testing.T) {
 	db, _ := openQueueTestDB(t)
 	mediaID, scanID, otherScan := seedQueueTest(t, db)
 	libraryID := mediaLibraryID(t, db, mediaID)
@@ -1234,7 +1234,7 @@ func TestQueueLinkedCancelScanAggregatesAndLeavesOtherScan(t *testing.T) {
 	if err := db.QueryRow(`SELECT q.status,s.status,r.status,m.publication_state FROM post_ingest_task q JOIN media_ingest_step s ON s.id=q.ingest_step_id JOIN media_ingest_run r ON r.id=q.ingest_run_id JOIN media m ON m.id=q.media_id WHERE q.scan_task_id=?`, scanID).Scan(&queueStatus, &stepState, &runState, &mediaState); err != nil {
 		t.Fatal(err)
 	}
-	if queueStatus != "cancelled" || stepState != "cancelled" || runState != "cancelled" || mediaState != "cancelled" {
+	if queueStatus != "cancelled" || stepState != "cancelled" || runState != "failed" || mediaState != "failed" {
 		t.Fatalf("cancelled states queue=%s step=%s run=%s media=%s", queueStatus, stepState, runState, mediaState)
 	}
 	var otherStatus string
@@ -1263,7 +1263,7 @@ func assertLinkedExecutionStateEqual(t *testing.T, db *sql.DB, taskID int64) {
 
 func TestQueueLinkedTransitionsSynchronizeCompleteExecutionState(t *testing.T) {
 	ctx := context.Background()
-	t.Run("claim and permanent failure degrade on first attempt", func(t *testing.T) {
+	t.Run("claim and permanent failure fail initial publication", func(t *testing.T) {
 		db, _ := openQueueTestDB(t)
 		mediaID, runID, _, taskID := linkedQueueFixture(t, db, "processing", "waiting", 0, 3)
 		q := NewQueue(db, "sync-permanent", nil)
@@ -1283,13 +1283,19 @@ func TestQueueLinkedTransitionsSynchronizeCompleteExecutionState(t *testing.T) {
 		if err := db.QueryRow(`SELECT publication_state FROM media WHERE id=?`, mediaID).Scan(&ms); err != nil {
 			t.Fatal(err)
 		}
-		if rs != "degraded" || ms != "degraded" {
-			t.Fatalf("permanent failure published: run=%s media=%s", rs, ms)
+		if rs != "failed" || ms != "failed" {
+			t.Fatalf("permanent failure states: run=%s media=%s", rs, ms)
 		}
 	})
-	t.Run("retryable exhaustion then retry and exhaustion", func(t *testing.T) {
+	t.Run("repair exhaustion then retry and exhaustion stays visible", func(t *testing.T) {
 		db, _ := openQueueTestDB(t)
-		_, runID, _, taskID := linkedQueueFixture(t, db, "processing", "waiting", 2, 3)
+		mediaID, runID, _, taskID := linkedQueueFixture(t, db, "processing", "waiting", 2, 3)
+		if _, err := db.Exec(`UPDATE media_ingest_run SET preserve_visibility=1 WHERE id=?`, runID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`UPDATE media SET publication_state='published',published_at=CURRENT_TIMESTAMP WHERE id=?`, mediaID); err != nil {
+			t.Fatal(err)
+		}
 		if _, err := db.Exec(`UPDATE post_ingest_task SET attempts=2 WHERE id=?`, taskID); err != nil {
 			t.Fatal(err)
 		}
