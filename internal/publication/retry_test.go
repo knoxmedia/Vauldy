@@ -10,9 +10,13 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unsafe"
 
 	"knox-media/internal/coreiface"
 	"knox-media/internal/store"
+
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 func openRetryTestDB(t *testing.T) *sql.DB {
@@ -79,6 +83,52 @@ func seedTerminalRetry(t *testing.T, db *sql.DB, state string) (mediaID, runID i
 
 func currentRetryPlanner(prepare *retryPreparePlanner) *Planner {
 	return NewPlanner(PlanOptions{SubtitleAuto: true, EncryptGlobal: true, PreparePlanner: prepare, Capabilities: NewCapabilityMatrix([]string{"prepare"})})
+}
+
+func retrySQLiteError(t *testing.T, code int) error {
+	t.Helper()
+	err := &sqlite.Error{}
+	field := reflect.ValueOf(err).Elem().FieldByName("code")
+	reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().SetInt(int64(code))
+	return err
+}
+
+func TestRetryIngestDoesNotRetryUncertainBusyCommit(t *testing.T) {
+	original := retryIngestAttemptFn
+	t.Cleanup(func() { retryIngestAttemptFn = original })
+	busy := retrySQLiteError(t, sqlite3.SQLITE_BUSY)
+	uncertain := &store.ImmediateCommitError{Cause: busy}
+	attempts := 0
+	retryIngestAttemptFn = func(context.Context, *sql.DB, int64, *Planner) error {
+		attempts++
+		return uncertain
+	}
+
+	err := RetryIngest(context.Background(), openRetryTestDB(t), 1, NewPlanner(PlanOptions{}))
+	var got *store.ImmediateCommitError
+	if attempts != 1 || !errors.As(err, &got) || got != uncertain || errors.Is(err, ErrNoRetryableWork) {
+		t.Fatalf("attempts=%d err=%v typed=%v same=%v", attempts, err, got != nil, got == uncertain)
+	}
+}
+
+func TestRetryIngestRetriesPrecommitBusy(t *testing.T) {
+	original := retryIngestAttemptFn
+	t.Cleanup(func() { retryIngestAttemptFn = original })
+	busy := retrySQLiteError(t, sqlite3.SQLITE_BUSY)
+	attempts := 0
+	retryIngestAttemptFn = func(context.Context, *sql.DB, int64, *Planner) error {
+		attempts++
+		if attempts == 1 {
+			return busy
+		}
+		return nil
+	}
+	if err := RetryIngest(context.Background(), openRetryTestDB(t), 1, NewPlanner(PlanOptions{})); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts=%d", attempts)
+	}
 }
 
 func TestRetryIngestDegradedCreatesVisibilityPreservingReplacement(t *testing.T) {

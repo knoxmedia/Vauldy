@@ -20,11 +20,27 @@ var retryIngestPolicy = store.RetryPolicy{
 	BaseBackoff: 10 * time.Millisecond, MaxBackoff: 100 * time.Millisecond,
 }
 
+var retryIngestAttemptFn = retryIngestAttempt
+
 func RetryIngest(ctx context.Context, db *sql.DB, mediaID int64, planner *Planner) error {
-	return store.WithBusyRetryPolicyContext(ctx, nil, retryIngestPolicy, func(attemptCtx context.Context) error {
-		return retryIngestAttempt(attemptCtx, db, mediaID, planner)
+	var uncertain *store.ImmediateCommitError
+	err := store.WithBusyRetryPolicyContext(ctx, nil, retryIngestPolicy, func(attemptCtx context.Context) error {
+		attemptErr := retryIngestAttemptFn(attemptCtx, db, mediaID, planner)
+		if errors.As(attemptErr, &uncertain) {
+			return retryCommitOutcomeUncertain{err: attemptErr}
+		}
+		return attemptErr
 	})
+	var protected retryCommitOutcomeUncertain
+	if errors.As(err, &protected) {
+		return protected.err
+	}
+	return err
 }
+
+type retryCommitOutcomeUncertain struct{ err error }
+
+func (e retryCommitOutcomeUncertain) Error() string { return e.err.Error() }
 
 func retryIngestAttempt(ctx context.Context, db *sql.DB, mediaID int64, planner *Planner) error {
 	if db == nil || mediaID <= 0 {
