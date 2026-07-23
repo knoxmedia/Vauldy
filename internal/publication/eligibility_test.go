@@ -386,3 +386,34 @@ func TestSelectFamilyCandidateUsesNormalizedDueOrdering(t *testing.T) {
 		})
 	}
 }
+
+func TestLinkedClaimEligibilityRejectsPartialLegacyIdentityAllFamilies(t *testing.T) {
+	for _, family := range []QueueFamily{QueuePostIngest, QueueScrape, QueuePrepare} {
+		t.Run(string(family), func(t *testing.T) {
+			db := openEligibilityDB(t)
+			_, err := db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l'); INSERT INTO media(id,library_id,file_id,file_type) VALUES(10,1,'f','video')`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch family {
+			case QueuePostIngest:
+				_, err = db.Exec(`INSERT INTO post_ingest_task(id,media_id,generation,task_type,status) VALUES(40,10,1,'poster','waiting')`)
+			case QueueScrape:
+				_, err = db.Exec(`INSERT INTO scrape_task(id,media_id,status,generation) VALUES(40,10,'waiting',1)`)
+			case QueuePrepare:
+				_, err = db.Exec(`PRAGMA ignore_check_constraints=ON; INSERT INTO transcode_task(id,file_id,status,task_type,generation) VALUES(40,'f','waiting','pretranscode',1)`)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			typ := map[QueueFamily]string{QueuePostIngest: "poster", QueueScrape: "scrape", QueuePrepare: "prepare"}[family]
+			p, err := ClaimEligible(context.Background(), db, ClaimRequest{Family: family, TaskType: typ, Owner: "w", Registry: NewCapabilityMatrix([]string{typ})})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if p != nil {
+				t.Fatalf("partial claimed=%+v", p)
+			}
+		})
+	}
+}

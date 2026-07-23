@@ -401,7 +401,7 @@ func TestScrapeExactLifecycleRejectsRelinkSameOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := completeScrapeClaim(context.Background(), db, *claim, "auto", "q", "ok", "{}"); !errors.Is(err, ErrScrapeClaimLost) {
+	if err := completeScrapeClaim(context.Background(), db, *claim, "auto", "q", "ok", &scraper.ScrapeResult{Title: "x", Genres: []string{}, Extra: map[string]any{}}); !errors.Is(err, ErrScrapeClaimLost) {
 		t.Fatalf("complete err=%v", err)
 	}
 	var status string
@@ -474,7 +474,7 @@ func TestScrapeLeaseLossPreventsLateCommit(t *testing.T) {
 	id, _ := q.LastInsertId()
 	entered := make(chan struct{})
 	release := make(chan struct{})
-	h := &Handler{App: &app.App{DB: db, Config: &config.Config{}}, PublicationCapabilities: publication.NewCapabilityMatrix([]string{"scrape"}), scrapeWithConfig: func(string, string, scraper.Config) (*scraper.ScrapeResult, error) {
+	h := &Handler{App: &app.App{DB: db, Config: &config.Config{}}, Queue: postingest.NewQueue(db, "side-effect", nil), PublicationCapabilities: publication.NewCapabilityMatrix([]string{"scrape"}), scrapeWithConfig: func(string, string, scraper.Config) (*scraper.ScrapeResult, error) {
 		close(entered)
 		<-release
 		return &scraper.ScrapeResult{Title: "late", Genres: []string{}, Extra: map[string]any{}}, nil
@@ -511,5 +511,34 @@ func TestLegacyUnlinkedScrapeLifecycleExplicitPath(t *testing.T) {
 	_ = db.QueryRow(`SELECT status FROM scrape_task WHERE id=200`).Scan(&status)
 	if status != "done" {
 		t.Fatalf("status=%s", status)
+	}
+}
+
+func TestScrapeLeaseLossLeavesAllMetadataSideEffectsUnchanged(t *testing.T) {
+	db, mediaID := posterHandlerTestDB(t)
+	_, _ = db.Exec(`UPDATE media SET ingest_generation=1,title='before',meta_json='{"keep":true}' WHERE id=?`, mediaID)
+	r, _ := db.Exec(`INSERT INTO media_ingest_run(media_id,generation,reason,status,config_snapshot_json) VALUES(?,1,'scan','processing','{}')`, mediaID)
+	run, _ := r.LastInsertId()
+	s, _ := db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status) VALUES(?,?,1,'scrape',1,'waiting')`, run, mediaID)
+	step, _ := s.LastInsertId()
+	q, _ := db.Exec(`INSERT INTO scrape_task(media_id,status,source,ingest_run_id,ingest_step_id,generation) VALUES(?,'waiting','auto',?,?,1)`, mediaID, run, step)
+	id, _ := q.LastInsertId()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	h := &Handler{App: &app.App{DB: db, Config: &config.Config{}}, Queue: postingest.NewQueue(db, "metadata-fence", nil), PublicationCapabilities: publication.NewCapabilityMatrix([]string{"scrape"}), scrapeWithConfig: func(string, string, scraper.Config) (*scraper.ScrapeResult, error) {
+		close(entered)
+		<-release
+		return &scraper.ScrapeResult{Title: "after", Overview: "changed", Genres: []string{"x"}, Extra: map[string]any{}}, nil
+	}}
+	done := make(chan struct{})
+	go func() { h.runScrapeTasksWithLimit(context.Background(), []int64{id}, 1); close(done) }()
+	<-entered
+	_, _ = db.Exec(`UPDATE scrape_task SET lease_owner='lost' WHERE id=?; UPDATE media_ingest_step SET lease_owner='lost' WHERE id=?`, id, step)
+	close(release)
+	<-done
+	var title, meta string
+	_ = db.QueryRow(`SELECT title,meta_json FROM media WHERE id=?`, mediaID).Scan(&title, &meta)
+	if title != "before" || meta != `{"keep":true}` {
+		t.Fatalf("title=%q meta=%s", title, meta)
 	}
 }

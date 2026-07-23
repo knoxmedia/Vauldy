@@ -466,9 +466,6 @@ func (h *Handler) runScrapeTasksWithLimit(ctx context.Context, ids []int64, limi
 				return true
 			}
 		}
-		if merged, saved, _ := h.backfillScrapeArtworkFromMeta(mediaID, existingMeta); saved > 0 {
-			existingMeta = merged
-		}
 		if query == "" {
 			query = title
 		}
@@ -491,17 +488,6 @@ func (h *Handler) runScrapeTasksWithLimit(ctx context.Context, ids []int64, limi
 		if res == nil {
 			res = &scraper.ScrapeResult{Title: query, Genres: []string{}, Extra: map[string]any{}}
 		}
-		if err := h.applyScrapeLocalImages(workCtx, mediaID, libraryID, fileType, cfg, res, false); err != nil {
-			if ctx.Err() != nil {
-				break
-			}
-			if failErr := failScrapeClaim(ctx, h.App.DB, *claim, source, query, err.Error()); failErr != nil {
-				log.Printf("fail scrape task %d: %v", taskID, errors.Join(err, failErr))
-			}
-			failed++
-			finishWork()
-			continue
-		}
 		if !scraper.HasMeaningfulScrapeData(res) {
 			fmsg := scraper.NoDataFailureMessage(res)
 			if sErr != nil {
@@ -514,26 +500,6 @@ func (h *Handler) runScrapeTasksWithLimit(ctx context.Context, ids []int64, limi
 			finishWork()
 			continue
 		}
-		if saved, pErr := h.persistScrapeArtwork(mediaID, res); pErr != nil {
-			log.Printf("scrape artwork persist media=%d saved=%d: %v", mediaID, saved, pErr)
-		}
-		merged, committed, mErr := h.mergeScrapeResultTx(workCtx, mediaID, res, res.Title)
-		if mErr != nil {
-			if ctx.Err() != nil {
-				break
-			}
-			fmsg := "??????????????" + mErr.Error() + "?"
-			if err := failScrapeClaim(ctx, h.App.DB, *claim, source, query, fmsg); err != nil {
-				log.Printf("fail scrape task %d: %v", taskID, err)
-			}
-			failed++
-			finishWork()
-			continue
-		}
-		res = committed
-		h.syncSeriesCollectionMeta(libraryID, mediaID, res)
-		h.importMediaCreditsAfterScrape(libraryID, mediaID, merged, libraryType)
-		js, _ := json.Marshal(res)
 		okMsg := summarizeProviderWarnings(res)
 		if sErr != nil {
 			if okMsg == "ok" {
@@ -546,12 +512,16 @@ func (h *Handler) runScrapeTasksWithLimit(ctx context.Context, ids []int64, limi
 			failed++
 			continue
 		}
-		if err := completeScrapeClaim(ctx, h.App.DB, *claim, source, query, okMsg, string(js)); err != nil {
+		if err := completeScrapeClaim(ctx, h.App.DB, *claim, source, query, okMsg, res); err != nil {
 			if failErr := failScrapeClaim(ctx, h.App.DB, *claim, source, query, "complete scrape task: "+err.Error()); failErr != nil {
 				log.Printf("complete/fail scrape task %d: %v", taskID, errors.Join(err, failErr))
 			}
 			failed++
 			continue
+		}
+		// Poster fallback is idempotent queue work and runs only after the exact scrape commit succeeds.
+		if err := h.applyScrapeLocalImages(ctx, mediaID, libraryID, fileType, cfg, res, false); err != nil {
+			log.Printf("scrape post-commit poster media=%d: %v", mediaID, err)
 		}
 		h.scheduleLibraryPreviewRefresh(libraryID)
 		done++
@@ -1424,7 +1394,7 @@ func renewScrapeClaim(ctx context.Context, db *sql.DB, c scrapeClaim) error {
 		return nil
 	})
 }
-func completeScrapeClaim(ctx context.Context, db *sql.DB, c scrapeClaim, source, query, message, resultJSON string) error {
+func completeScrapeClaim(ctx context.Context, db *sql.DB, c scrapeClaim, source, query, message string, result *scraper.ScrapeResult) error {
 	return scrapeClaimImmediate(ctx, db, func(tx store.ImmediateConnTx) error {
 		args := append([]any{message}, scrapeClaimArgs(c)...)
 		res, err := tx.ExecContext(ctx, `UPDATE scrape_task AS q SET status='done',progress=100,finished_at=CURRENT_TIMESTAMP,message=?,lease_owner=NULL,lease_until=NULL WHERE `+scrapeClaimPredicate(), args...)
@@ -1434,6 +1404,12 @@ func completeScrapeClaim(ctx context.Context, db *sql.DB, c scrapeClaim, source,
 		if n, _ := res.RowsAffected(); n != 1 {
 			return ErrScrapeClaimLost
 		}
+		_, committed, err := commitScrapeMediaTx(ctx, tx, c.MediaID, result, result.Title)
+		if err != nil {
+			return err
+		}
+		result = committed
+		resultJSON, _ := json.Marshal(result)
 		if c.StepID.Valid {
 			res, err = tx.ExecContext(ctx, `UPDATE media_ingest_step SET status='done',finished_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND run_id=? AND media_id=? AND generation=? AND status='running' AND lease_owner=? AND attempts=?`, c.StepID.Int64, c.RunID.Int64, c.MediaID, c.Generation.Int64, c.Owner, c.Attempts)
 			if err != nil {

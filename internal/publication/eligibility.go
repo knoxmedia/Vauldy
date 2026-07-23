@@ -186,7 +186,7 @@ func selectFamilyCandidate(ctx context.Context, tx store.SQLExecutor, req ClaimR
 		typeFilter += " AND q.id=?"
 		args = append(args, *req.QueueID)
 	}
-	query := fmt.Sprintf(`SELECT q.id,COALESCE(st.required,0),q.ingest_run_id IS NOT NULL FROM %s q LEFT JOIN media_ingest_step st ON st.id=q.ingest_step_id WHERE %s%s AND ((q.ingest_run_id IS NULL AND q.ingest_step_id IS NULL) OR (%s)) ORDER BY %s LIMIT 1`, table, due, typeFilter, link, familyOrderSQL(req.Family, alias))
+	query := fmt.Sprintf(`SELECT q.id,COALESCE(st.required,0),q.ingest_run_id IS NOT NULL FROM %s q LEFT JOIN media_ingest_step st ON st.id=q.ingest_step_id WHERE %s%s AND ((q.ingest_run_id IS NULL AND q.ingest_step_id IS NULL AND q.generation IS NULL) OR (%s)) ORDER BY %s LIMIT 1`, table, due, typeFilter, link, familyOrderSQL(req.Family, alias))
 	err = tx.QueryRowContext(ctx, query, args...).Scan(&id, &required, &linked)
 	return
 }
@@ -290,7 +290,7 @@ func updateFamilyClaim(ctx context.Context, tx store.SQLExecutor, req ClaimReque
 	case QueuePrepare:
 		set = `status='running',lease_owner=?,lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds'),started_at=COALESCE(started_at,CURRENT_TIMESTAMP)`
 	}
-	q := fmt.Sprintf(`UPDATE %s AS q SET %s WHERE q.id=? AND %s AND ((q.ingest_run_id IS NULL AND q.ingest_step_id IS NULL) OR (%s))`, table, set, due, link)
+	q := fmt.Sprintf(`UPDATE %s AS q SET %s WHERE q.id=? AND %s AND ((q.ingest_run_id IS NULL AND q.ingest_step_id IS NULL AND q.generation IS NULL) OR (%s))`, table, set, due, link)
 	res, err := tx.ExecContext(ctx, q, owner, id)
 	if err != nil {
 		return nil, err
@@ -366,5 +366,5 @@ func claimByOwner(ctx context.Context, db *sql.DB, f QueueFamily, owner string) 
 
 // LinkedClaimEligibilitySQL is the canonical linked-or-legacy dependency predicate.
 func LinkedClaimEligibilitySQL(alias string) string {
-	return fmt.Sprintf(`((%[1]s.ingest_run_id IS NULL AND %[1]s.ingest_step_id IS NULL) OR (%s))`, alias, linkedEligibilitySQL(alias))
+	return fmt.Sprintf(`((%[1]s.ingest_run_id IS NULL AND %[1]s.ingest_step_id IS NULL AND %[1]s.generation IS NULL) OR (%s))`, alias, linkedEligibilitySQL(alias))
 }
