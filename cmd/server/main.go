@@ -269,20 +269,6 @@ func main() {
 	}
 	dispatcherDone := make(chan error, 1)
 	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-serverCtx.Done():
-				return
-			case <-ticker.C:
-				if _, err := publication.RetryDegradedRuns(serverCtx, db, 8); err != nil && serverCtx.Err() == nil {
-					log.Printf("publication degraded retry: %v", err)
-				}
-			}
-		}
-	}()
-	go func() {
 		err := dispatcher.Start(serverCtx)
 		dispatcherDone <- err
 		if err != nil && serverCtx.Err() == nil {
