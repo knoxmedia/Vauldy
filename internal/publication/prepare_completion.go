@@ -9,7 +9,7 @@ import (
 )
 
 func CompletePrepareTx(ctx context.Context, tx store.SQLExecutor, parent PrepareParentIdentity, success bool, lastError string) error {
-	if tx == nil || parent.TaskID <= 0 || parent.RunID <= 0 || parent.StepID <= 0 || parent.MediaID <= 0 || parent.Generation <= 0 {
+	if tx == nil || parent.TaskID <= 0 || parent.RunID <= 0 || parent.StepID <= 0 || parent.MediaID <= 0 || parent.Generation <= 0 || parent.Owner == "" {
 		return errors.New("publication prepare completion: invalid identity")
 	}
 	status := "done"
