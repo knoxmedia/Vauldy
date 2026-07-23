@@ -1574,3 +1574,48 @@ func TestQueue_ClaimCASRechecksDependency(t *testing.T) {
 		t.Fatalf("invalidated claim=%+v err=%v", got, err)
 	}
 }
+
+func TestQueue_LinkedLifecycleRejectsRelinkWithSameOwner(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	ctx := context.Background()
+	mediaID, runID, stepID, taskID := linkedQueueFixture(t, db, "processing", "waiting", 0, 3)
+	q := NewQueue(db, "relink-owner", nil, testCapabilities{})
+	task, err := q.Claim(ctx, TaskPoster)
+	if err != nil || task == nil {
+		t.Fatalf("claim=%+v err=%v", task, err)
+	}
+	_, err = db.Exec(`INSERT INTO media_ingest_run(media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(?,2,'repair','processing','{}',2)`, mediaID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var newRun int64
+	_ = db.QueryRow(`SELECT max(id) FROM media_ingest_run`).Scan(&newRun)
+	_, err = db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status,lease_owner) VALUES(?,?,2,'poster',1,'running',?)`, newRun, mediaID, task.LeaseOwner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var newStep int64
+	_ = db.QueryRow(`SELECT max(id) FROM media_ingest_step`).Scan(&newStep)
+	_, err = db.Exec(`UPDATE media SET ingest_generation=2 WHERE id=?; UPDATE post_ingest_task SET ingest_run_id=?,ingest_step_id=?,generation=2 WHERE id=?`, mediaID, newRun, newStep, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := q.Renew(ctx, *task); err != nil || ok {
+		t.Fatalf("stale renew=(%v,%v)", ok, err)
+	}
+	if err := q.Complete(ctx, *task); err == nil {
+		t.Fatal("stale complete accepted")
+	}
+	if err := q.Fail(ctx, task, FailurePermanent, errors.New("stale")); err == nil {
+		t.Fatal("stale fail accepted")
+	}
+	var status string
+	_ = db.QueryRow(`SELECT status FROM post_ingest_task WHERE id=?`, taskID).Scan(&status)
+	if status != "running" {
+		t.Fatalf("status=%s old=%d/%d", status, runID, stepID)
+	}
+}
+
+type testCapabilities struct{}
+
+func (testCapabilities) Available(string) bool { return true }

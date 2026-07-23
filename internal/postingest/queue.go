@@ -70,6 +70,20 @@ func nullableInt64(id *int64) any {
 	return *id
 }
 
+func nullableNullInt(id sql.NullInt64) any {
+	if !id.Valid {
+		return nil
+	}
+	return id.Int64
+}
+
+func nullableTaskID(id *int64) any {
+	if id == nil {
+		return nil
+	}
+	return *id
+}
+
 func syncLinkedStepTx(ctx context.Context, tx *sql.Tx, taskID int64) error {
 	_, err := tx.ExecContext(ctx, `UPDATE media_ingest_step SET
 		status=(SELECT status FROM post_ingest_task WHERE id=?), attempts=(SELECT attempts FROM post_ingest_task WHERE id=?), max_attempts=(SELECT max_attempts FROM post_ingest_task WHERE id=?), last_error=(SELECT last_error FROM post_ingest_task WHERE id=?), available_at=(SELECT available_at FROM post_ingest_task WHERE id=?), lease_owner=(SELECT lease_owner FROM post_ingest_task WHERE id=?), lease_until=(SELECT lease_until FROM post_ingest_task WHERE id=?), started_at=(SELECT started_at FROM post_ingest_task WHERE id=?), finished_at=(SELECT finished_at FROM post_ingest_task WHERE id=?), updated_at=CURRENT_TIMESTAMP
@@ -205,7 +219,7 @@ func (q *Queue) Claim(ctx context.Context, typ TaskType) (*Task, error) {
 		return nil, err
 	}
 	var stillOwned int
-	if err = q.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM post_ingest_task WHERE id=? AND status='running' AND lease_owner=?`, payload.QueueID, payload.Owner).Scan(&stillOwned); err != nil {
+	if err = q.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM post_ingest_task WHERE id=? AND status='running' AND lease_owner=? AND ((ingest_run_id IS NULL AND ingest_step_id IS NULL AND ? IS NULL AND ? IS NULL) OR (ingest_run_id=? AND ingest_step_id=? AND generation=? AND media_id=? AND EXISTS(SELECT 1 FROM media_ingest_step st JOIN media_ingest_run r ON r.id=st.run_id JOIN media m ON m.id=st.media_id WHERE st.id=post_ingest_task.ingest_step_id AND st.status='running' AND st.lease_owner=post_ingest_task.lease_owner AND st.run_id=post_ingest_task.ingest_run_id AND st.media_id=post_ingest_task.media_id AND st.generation=post_ingest_task.generation AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND m.ingest_generation=post_ingest_task.generation)))`, payload.QueueID, payload.Owner, nullableNullInt(payload.RunID), nullableNullInt(payload.StepID), nullableNullInt(payload.RunID), nullableNullInt(payload.StepID), payload.Generation.Int64, payload.MediaID).Scan(&stillOwned); err != nil {
 		return nil, err
 	}
 	if stillOwned != 1 {
@@ -268,7 +282,7 @@ func (q *Queue) Renew(ctx context.Context, task Task) (bool, error) {
 				_ = tx.Rollback()
 			}
 		}()
-		result, err := tx.ExecContext(ctx, `UPDATE post_ingest_task SET lease_until=datetime(CURRENT_TIMESTAMP, ?), updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='running' AND lease_owner=?`, leaseModifier(), task.ID, task.LeaseOwner)
+		result, err := tx.ExecContext(ctx, `UPDATE post_ingest_task SET lease_until=datetime(CURRENT_TIMESTAMP, ?), updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='running' AND lease_owner=? AND ((ingest_run_id IS NULL AND ingest_step_id IS NULL AND ? IS NULL AND ? IS NULL) OR (ingest_run_id=? AND ingest_step_id=? AND generation=? AND media_id=? AND EXISTS(SELECT 1 FROM media_ingest_step st JOIN media_ingest_run r ON r.id=st.run_id JOIN media m ON m.id=st.media_id WHERE st.id=post_ingest_task.ingest_step_id AND st.status='running' AND st.lease_owner=post_ingest_task.lease_owner AND st.run_id=post_ingest_task.ingest_run_id AND st.media_id=post_ingest_task.media_id AND st.generation=post_ingest_task.generation AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND m.ingest_generation=post_ingest_task.generation)))`, leaseModifier(), task.ID, task.LeaseOwner, nullableTaskID(task.RunID), nullableTaskID(task.StepID), nullableTaskID(task.RunID), nullableTaskID(task.StepID), task.Generation, task.MediaID)
 		if err != nil {
 			return err
 		}
@@ -320,7 +334,7 @@ func (q *Queue) Complete(ctx context.Context, task Task) error {
 				_ = tx.Rollback()
 			}
 		}()
-		result, err := tx.ExecContext(ctx, `UPDATE post_ingest_task SET status=CASE WHEN scan_task_id IS NOT NULL AND EXISTS (SELECT 1 FROM scan_task s WHERE s.id=post_ingest_task.scan_task_id AND (s.cancelled=1 OR s.status='cancelled')) THEN 'cancelled' ELSE 'done' END, lease_owner=NULL, lease_until=NULL, last_error=CASE WHEN scan_task_id IS NOT NULL AND EXISTS (SELECT 1 FROM scan_task s WHERE s.id=post_ingest_task.scan_task_id AND (s.cancelled=1 OR s.status='cancelled')) THEN 'scan cancelled' ELSE '' END, finished_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='running' AND lease_owner=?`, task.ID, task.LeaseOwner)
+		result, err := tx.ExecContext(ctx, `UPDATE post_ingest_task SET status=CASE WHEN scan_task_id IS NOT NULL AND EXISTS (SELECT 1 FROM scan_task s WHERE s.id=post_ingest_task.scan_task_id AND (s.cancelled=1 OR s.status='cancelled')) THEN 'cancelled' ELSE 'done' END, lease_owner=NULL, lease_until=NULL, last_error=CASE WHEN scan_task_id IS NOT NULL AND EXISTS (SELECT 1 FROM scan_task s WHERE s.id=post_ingest_task.scan_task_id AND (s.cancelled=1 OR s.status='cancelled')) THEN 'scan cancelled' ELSE '' END, finished_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='running' AND lease_owner=? AND ((ingest_run_id IS NULL AND ingest_step_id IS NULL AND ? IS NULL AND ? IS NULL) OR (ingest_run_id=? AND ingest_step_id=? AND generation=? AND media_id=? AND EXISTS(SELECT 1 FROM media_ingest_step st JOIN media_ingest_run r ON r.id=st.run_id JOIN media m ON m.id=st.media_id WHERE st.id=post_ingest_task.ingest_step_id AND st.status='running' AND st.lease_owner=post_ingest_task.lease_owner AND st.run_id=post_ingest_task.ingest_run_id AND st.media_id=post_ingest_task.media_id AND st.generation=post_ingest_task.generation AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND m.ingest_generation=post_ingest_task.generation)))`, task.ID, task.LeaseOwner, nullableTaskID(task.RunID), nullableTaskID(task.StepID), nullableTaskID(task.RunID), nullableTaskID(task.StepID), task.Generation, task.MediaID)
 		if err != nil {
 			return err
 		}
@@ -416,8 +430,8 @@ func (q *Queue) Fail(ctx context.Context, task *Task, kind FailureKind, cause er
 		var query string
 		var args []any
 		if kind == FailureShutdown {
-			query = `UPDATE post_ingest_task SET last_error=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='running' AND lease_owner=?`
-			args = []any{lastError, task.ID, task.LeaseOwner}
+			query = `UPDATE post_ingest_task SET last_error=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='running' AND lease_owner=? AND ((ingest_run_id IS NULL AND ingest_step_id IS NULL AND ? IS NULL AND ? IS NULL) OR (ingest_run_id=? AND ingest_step_id=? AND generation=? AND media_id=? AND EXISTS(SELECT 1 FROM media_ingest_step st JOIN media_ingest_run r ON r.id=st.run_id JOIN media m ON m.id=st.media_id WHERE st.id=post_ingest_task.ingest_step_id AND st.status='running' AND st.lease_owner=post_ingest_task.lease_owner AND st.run_id=post_ingest_task.ingest_run_id AND st.media_id=post_ingest_task.media_id AND st.generation=post_ingest_task.generation AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND m.ingest_generation=post_ingest_task.generation)))`
+			args = []any{lastError, task.ID, task.LeaseOwner, nullableTaskID(task.RunID), nullableTaskID(task.StepID), nullableTaskID(task.RunID), nullableTaskID(task.StepID), task.Generation, task.MediaID}
 		} else {
 			status := "'failed'"
 			available := "CURRENT_TIMESTAMP"
@@ -428,8 +442,8 @@ func (q *Queue) Fail(ctx context.Context, task *Task, kind FailureKind, cause er
 				status = `CASE WHEN attempts>=max_attempts THEN 'failed' ELSE 'waiting' END`
 				available = `CASE WHEN attempts>=max_attempts THEN CURRENT_TIMESTAMP WHEN attempts=1 THEN datetime(CURRENT_TIMESTAMP,'+5 seconds') WHEN attempts=2 THEN datetime(CURRENT_TIMESTAMP,'+30 seconds') ELSE datetime(CURRENT_TIMESTAMP,'+120 seconds') END`
 			}
-			query = fmt.Sprintf(`UPDATE post_ingest_task SET status=%s, available_at=%s, lease_owner=NULL, lease_until=NULL, last_error=?, finished_at=CASE WHEN %s='waiting' THEN NULL ELSE CURRENT_TIMESTAMP END, updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='running' AND lease_owner=?`, status, available, status)
-			args = []any{lastError, task.ID, task.LeaseOwner}
+			query = fmt.Sprintf(`UPDATE post_ingest_task SET status=%s, available_at=%s, lease_owner=NULL, lease_until=NULL, last_error=?, finished_at=CASE WHEN %s='waiting' THEN NULL ELSE CURRENT_TIMESTAMP END, updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='running' AND lease_owner=? AND ((ingest_run_id IS NULL AND ingest_step_id IS NULL AND ? IS NULL AND ? IS NULL) OR (ingest_run_id=? AND ingest_step_id=? AND generation=? AND media_id=? AND EXISTS(SELECT 1 FROM media_ingest_step st JOIN media_ingest_run r ON r.id=st.run_id JOIN media m ON m.id=st.media_id WHERE st.id=post_ingest_task.ingest_step_id AND st.status='running' AND st.lease_owner=post_ingest_task.lease_owner AND st.run_id=post_ingest_task.ingest_run_id AND st.media_id=post_ingest_task.media_id AND st.generation=post_ingest_task.generation AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND m.ingest_generation=post_ingest_task.generation)))`, status, available, status)
+			args = []any{lastError, task.ID, task.LeaseOwner, nullableTaskID(task.RunID), nullableTaskID(task.StepID), nullableTaskID(task.RunID), nullableTaskID(task.StepID), task.Generation, task.MediaID}
 		}
 		result, err := tx.ExecContext(ctx, query, args...)
 		if err != nil {

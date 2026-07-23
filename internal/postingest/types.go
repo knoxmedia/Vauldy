@@ -65,8 +65,12 @@ type Queue struct {
 	registry             coreiface.CapabilityRegistry
 }
 
+type compatibilityCapabilities struct{}
+
+func (compatibilityCapabilities) Available(string) bool { return true }
+
 func NewQueue(db *sql.DB, owner string, metrics *store.SQLiteMetrics, registries ...coreiface.CapabilityRegistry) *Queue {
-	var registry coreiface.CapabilityRegistry
+	var registry coreiface.CapabilityRegistry = compatibilityCapabilities{}
 	if len(registries) > 0 {
 		registry = registries[0]
 	}
