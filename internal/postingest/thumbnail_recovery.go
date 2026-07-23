@@ -10,9 +10,15 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"knox-media/internal/imagethumb"
+	"knox-media/internal/publication"
+	"knox-media/internal/store"
 )
 
 const thumbnailStageBatchMax = 100
+
+var afterThumbnailStageQuarantined = func() {}
 
 type thumbnailJournalRow struct {
 	stageID                                       string
@@ -28,7 +34,7 @@ func ReconcileThumbnailStages(ctx context.Context, db *sql.DB, limit int) (check
 	if limit <= 0 || limit > thumbnailStageBatchMax {
 		limit = thumbnailStageBatchMax
 	}
-	rows, err := db.QueryContext(ctx, `SELECT stage_id,media_id,run_id,step_id,generation,owner_token,source_fingerprint,state,staged_path,hashes_sizes_json FROM media_asset_stage_journal WHERE artifact_kind='thumbnail' AND recovery_error<>'cleaned_unreferenced' ORDER BY updated_at,stage_id LIMIT ?`, limit)
+	rows, err := db.QueryContext(ctx, `SELECT stage_id,media_id,run_id,step_id,generation,owner_token,source_fingerprint,state,staged_path,hashes_sizes_json FROM media_asset_stage_journal WHERE artifact_kind='thumbnail' AND recovery_error NOT IN ('cleaned_unreferenced','quarantined_unreferenced') ORDER BY updated_at,stage_id LIMIT ?`, limit)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -50,6 +56,13 @@ func ReconcileThumbnailStages(ctx context.Context, db *sql.DB, limit int) (check
 	}
 	for _, r := range batch {
 		checked++
+		if r.state == "committed" {
+			if err := verifyCommittedThumbnailJournal(ctx, db, r); err != nil {
+				_, _ = db.ExecContext(ctx, `UPDATE media_asset_stage_journal SET recovery_error=? WHERE stage_id=?`, "committed_corrupt: "+err.Error(), r.stageID)
+				return checked, cleaned, err
+			}
+			continue
+		}
 		committed, active, err := thumbnailStageAuthority(ctx, db, r)
 		if err != nil {
 			return checked, cleaned, err
@@ -57,23 +70,54 @@ func ReconcileThumbnailStages(ctx context.Context, db *sql.DB, limit int) (check
 		if committed || active {
 			continue
 		}
+		var claimed int64
+		_, err = store.WithImmediateConnTx(ctx, db, func(tx store.ImmediateConnTx) error {
+			result, err := tx.ExecContext(ctx, `UPDATE media_asset_stage_journal SET state='quarantined',quarantine_path=staged_path,recovery_error='quarantined_unreferenced',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND artifact_kind='thumbnail' AND state='staged' AND media_id=? AND run_id=? AND step_id=? AND generation=? AND owner_token=? AND source_fingerprint=? AND NOT EXISTS(SELECT 1 FROM media_ingest_evidence WHERE stage_id=?)`, r.stageID, r.mediaID, r.runID, r.stepID, r.generation, r.owner, r.fingerprint, r.stageID)
+			if err != nil {
+				return err
+			}
+			claimed, _ = result.RowsAffected()
+			return nil
+		})
+		if err != nil {
+			return checked, cleaned, err
+		}
+		if claimed != 1 {
+			continue
+		}
+		afterThumbnailStageQuarantined()
 		paths, err := thumbnailJournalPaths(r)
 		if err != nil {
 			return checked, cleaned, err
 		}
-		if err = cleanupUnreferencedThumbnailPaths(ctx, db, paths); err != nil {
-			return checked, cleaned, err
+		referenced := false
+		for _, path := range paths {
+			refs, refErr := thumbnailPathReferenceCount(ctx, db, path)
+			if refErr != nil {
+				return checked, cleaned, refErr
+			}
+			if refs > 0 {
+				referenced = true
+			}
 		}
-		res, err := db.ExecContext(ctx, `UPDATE media_asset_stage_journal SET recovery_error='cleaned_unreferenced',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='staged' AND NOT EXISTS(SELECT 1 FROM media_ingest_evidence WHERE stage_id=?)`, r.stageID, r.stageID)
+		if referenced {
+			_, _ = db.ExecContext(ctx, `UPDATE media_asset_stage_journal SET recovery_error='quarantined_referenced',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='quarantined'`, r.stageID)
+			continue
+		}
+		if err = cleanupUnreferencedThumbnailPaths(ctx, db, paths); err != nil {
+			retErr = err
+			continue
+		}
+		result, err := db.ExecContext(ctx, `UPDATE media_asset_stage_journal SET recovery_error='cleaned_unreferenced',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='quarantined' AND recovery_error='quarantined_unreferenced'`, r.stageID)
 		if err != nil {
 			return checked, cleaned, err
 		}
-		n, _ := res.RowsAffected()
+		n, _ := result.RowsAffected()
 		if n == 1 {
 			cleaned++
 		}
 	}
-	return checked, cleaned, nil
+	return checked, cleaned, retErr
 }
 func thumbnailStageAuthority(ctx context.Context, db *sql.DB, r thumbnailJournalRow) (committed, active bool, err error) {
 	var n int
@@ -135,4 +179,37 @@ func RunThumbnailStageReconciler(ctx context.Context, db *sql.DB, interval time.
 			run()
 		}
 	}
+}
+
+func verifyCommittedThumbnailJournal(ctx context.Context, db *sql.DB, r thumbnailJournalRow) error {
+	var task Task
+	task.MediaID = r.mediaID
+	task.Generation = r.generation
+	task.LeaseOwner = r.owner
+	task.RunID = &r.runID
+	task.StepID = &r.stepID
+	if err := db.QueryRowContext(ctx, `SELECT id,attempts,task_type FROM post_ingest_task WHERE media_id=? AND ingest_run_id=? AND ingest_step_id=? AND generation=?`, r.mediaID, r.runID, r.stepID, r.generation).Scan(&task.ID, &task.Attempts, &task.Type); err != nil {
+		return err
+	}
+	paths, err := thumbnailJournalPaths(r)
+	if err != nil {
+		return err
+	}
+	if len(paths) != 2 {
+		return fmt.Errorf("thumbnail committed journal variants invalid")
+	}
+	var payload map[string]struct {
+		Kind        string `json:"kind"`
+		LogicalName string `json:"logical_name"`
+		Path        string `json:"path"`
+		Size        int64  `json:"size"`
+		SHA256      string `json:"sha256"`
+	}
+	if err = json.Unmarshal([]byte(r.hashes), &payload); err != nil {
+		return err
+	}
+	staged := imagethumb.StagedThumbnail{Stage: publication.StageRecord{StageID: r.stageID, Request: publication.StageRequest{MediaID: r.mediaID, RunID: r.runID, StepID: r.stepID, Generation: r.generation, OwnerToken: r.owner, SourceFingerprint: r.fingerprint}}}
+	staged.Thumb = imagethumb.StagedVariant{Kind: payload["thumb"].Kind, LogicalName: payload["thumb"].LogicalName, Path: payload["thumb"].Path, Size: payload["thumb"].Size, Hash: payload["thumb"].SHA256}
+	staged.Medium = imagethumb.StagedVariant{Kind: payload["medium"].Kind, LogicalName: payload["medium"].LogicalName, Path: payload["medium"].Path, Size: payload["medium"].Size, Hash: payload["medium"].SHA256}
+	return verifyCommittedThumbnailTx(ctx, db, task, staged)
 }

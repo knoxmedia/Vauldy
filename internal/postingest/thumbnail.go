@@ -203,24 +203,31 @@ func commitStagedThumbnail(ctx context.Context, db *sql.DB, task Task, staged im
 	return nil
 }
 
+func thumbnailPathReferenceCount(ctx context.Context, db *sql.DB, path string) (int, error) {
+	var refs int
+	err := db.QueryRowContext(ctx, `SELECT
+ (SELECT COUNT(*) FROM media_derived_assets WHERE enc_path=?)+
+ (SELECT COUNT(*) FROM media_ingest_evidence e,json_each(e.artifact_refs_json,'$.variants') v WHERE json_extract(v.value,'$.path')=?)+
+ (SELECT COUNT(*) FROM media m WHERE json_valid(m.meta_json) AND (json_extract(m.meta_json,'$.photo.thumb_path')=? OR json_extract(m.meta_json,'$.photo.medium_path')=?))`, path, path, path, path).Scan(&refs)
+	return refs, err
+}
 func cleanupUnreferencedThumbnailPaths(ctx context.Context, db *sql.DB, paths []string) error {
 	for _, path := range paths {
 		if strings.TrimSpace(path) == "" {
 			continue
 		}
-		var refs int
-		if err := db.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM media_derived_assets WHERE enc_path=?)+(SELECT COUNT(*) FROM media_ingest_evidence e,json_each(e.artifact_refs_json,'$.variants') v WHERE json_extract(v.value,'$.path')=?)`, path, path).Scan(&refs); err != nil {
+		refs, err := thumbnailPathReferenceCount(ctx, db, path)
+		if err != nil {
 			return fmt.Errorf("thumbnail cleanup reference query: %w", err)
 		}
 		if refs == 0 {
-			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			if err = os.Remove(path); err != nil && !os.IsNotExist(err) {
 				return err
 			}
 		}
 	}
 	return nil
 }
-
 func verifyCommittedThumbnailTx(ctx context.Context, tx store.SQLExecutor, task Task, staged imagethumb.StagedThumbnail) error {
 	var sourceFingerprint, refs, journalOwner, journalFingerprint, journalKind, journalState, metaRaw string
 	var evidenceMedia, evidenceRun, evidenceStep, evidenceGeneration int64

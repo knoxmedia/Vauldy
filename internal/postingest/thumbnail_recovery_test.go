@@ -3,6 +3,7 @@ package postingest
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -44,6 +45,110 @@ func TestReconcileThumbnailStagesRetainsActiveAndCleansStaleUnreferenced(t *test
 	_ = db.QueryRow(`SELECT recovery_error FROM media_asset_stage_journal WHERE stage_id=?`, staleID).Scan(&recovery)
 	if recovery != "cleaned_unreferenced" {
 		t.Fatalf("recovery=%q", recovery)
+	}
+}
+
+func TestReconcileThumbnailStagesQuarantinesBeforeCleanupAndBlocksCommit(t *testing.T) {
+	db, _, _ := planThumbnailFixture(t, false)
+	q := NewQueue(db, "thumbnail-owner", nil)
+	task, _ := q.Claim(context.Background(), TaskThumbnail)
+	staged, err := realThumbnailStager(t, db).Stage(context.Background(), *task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`UPDATE media_asset_stage_journal SET owner_token='stale-owner' WHERE stage_id=?`, staged.Stage.StageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checked, cleaned, err := ReconcileThumbnailStages(context.Background(), db, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checked != 1 || cleaned != 1 {
+		t.Fatalf("checked=%d cleaned=%d", checked, cleaned)
+	}
+	var state string
+	_ = db.QueryRow(`SELECT state FROM media_asset_stage_journal WHERE stage_id=?`, staged.Stage.StageID).Scan(&state)
+	if state != "quarantined" {
+		t.Fatalf("state=%q", state)
+	}
+	if err = commitStagedThumbnail(context.Background(), db, *task, staged); err == nil {
+		t.Fatal("quarantined stage was adopted")
+	}
+}
+func TestReconcileThumbnailStagesRetainsPlainMetadataReferenceWithoutEvidence(t *testing.T) {
+	db, _, _ := planThumbnailFixture(t, false)
+	q := NewQueue(db, "thumbnail-owner", nil)
+	task, _ := q.Claim(context.Background(), TaskThumbnail)
+	staged, err := realThumbnailStager(t, db).Stage(context.Background(), *task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta, _ := json.Marshal(map[string]any{"photo": map[string]any{"thumb_path": staged.Thumb.Path, "medium_path": staged.Medium.Path}})
+	if _, err = db.Exec(`UPDATE media SET meta_json=? WHERE id=?`, string(meta), task.MediaID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`UPDATE media_asset_stage_journal SET owner_token='stale-owner' WHERE stage_id=?`, staged.Stage.StageID); err != nil {
+		t.Fatal(err)
+	}
+	_, cleaned, err := ReconcileThumbnailStages(context.Background(), db, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleaned != 0 {
+		t.Fatalf("cleaned=%d", cleaned)
+	}
+	if _, err = os.Stat(staged.Thumb.Path); err != nil {
+		t.Fatalf("metadata reference removed: %v", err)
+	}
+}
+
+func TestReconcileThumbnailStagesQuarantineInterleavingRejectsWorker(t *testing.T) {
+	db, _, _ := planThumbnailFixture(t, false)
+	q := NewQueue(db, "thumbnail-owner", nil)
+	task, _ := q.Claim(context.Background(), TaskThumbnail)
+	staged, err := realThumbnailStager(t, db).Stage(context.Background(), *task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`UPDATE media_asset_stage_journal SET owner_token='stale-owner' WHERE stage_id=?`, staged.Stage.StageID); err != nil {
+		t.Fatal(err)
+	}
+	original := afterThumbnailStageQuarantined
+	var commitErr error
+	afterThumbnailStageQuarantined = func() { commitErr = commitStagedThumbnail(context.Background(), db, *task, staged) }
+	t.Cleanup(func() { afterThumbnailStageQuarantined = original })
+	_, _, err = ReconcileThumbnailStages(context.Background(), db, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if commitErr == nil {
+		t.Fatal("worker committed after quarantine")
+	}
+}
+func TestReconcileThumbnailStagesCorruptCommittedReportsAndRetains(t *testing.T) {
+	db, _, _ := planThumbnailFixture(t, false)
+	q := NewQueue(db, "thumbnail-owner", nil)
+	task, _ := q.Claim(context.Background(), TaskThumbnail)
+	staged, err := realThumbnailStager(t, db).Stage(context.Background(), *task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = commitStagedThumbnail(context.Background(), db, *task, staged); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`UPDATE media SET meta_json='{}' WHERE id=?`, task.MediaID); err != nil {
+		t.Fatal(err)
+	}
+	_, cleaned, err := ReconcileThumbnailStages(context.Background(), db, 10)
+	if err == nil {
+		t.Fatal("corrupt committed accepted")
+	}
+	if cleaned != 0 {
+		t.Fatalf("cleaned=%d", cleaned)
+	}
+	if _, err = os.Stat(staged.Thumb.Path); err != nil {
+		t.Fatalf("corrupt committed path removed: %v", err)
 	}
 }
 
