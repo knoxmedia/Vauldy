@@ -162,6 +162,16 @@ func familyDueSQL(f QueueFamily, alias string) string {
 	return "0"
 }
 
+func familyAvailableSQL(f QueueFamily, alias string) string {
+	if f == QueuePrepare {
+		return alias + ".created_at"
+	}
+	return "COALESCE(" + alias + ".available_at," + alias + ".created_at)"
+}
+func familyOrderSQL(f QueueFamily, alias string) string {
+	return familyAvailableSQL(f, alias) + "," + alias + ".created_at," + alias + ".id"
+}
+
 func selectFamilyCandidate(ctx context.Context, tx store.SQLExecutor, req ClaimRequest) (id int64, required, linked bool, err error) {
 	table, alias := familySource(req.Family)
 	due := familyDueSQL(req.Family, alias)
@@ -176,7 +186,7 @@ func selectFamilyCandidate(ctx context.Context, tx store.SQLExecutor, req ClaimR
 		typeFilter += " AND q.id=?"
 		args = append(args, *req.QueueID)
 	}
-	query := fmt.Sprintf(`SELECT q.id,COALESCE(st.required,0),q.ingest_run_id IS NOT NULL FROM %s q LEFT JOIN media_ingest_step st ON st.id=q.ingest_step_id WHERE %s%s AND ((q.ingest_run_id IS NULL AND q.ingest_step_id IS NULL) OR (%s)) ORDER BY q.created_at,q.id LIMIT 1`, table, due, typeFilter, link)
+	query := fmt.Sprintf(`SELECT q.id,COALESCE(st.required,0),q.ingest_run_id IS NOT NULL FROM %s q LEFT JOIN media_ingest_step st ON st.id=q.ingest_step_id WHERE %s%s AND ((q.ingest_run_id IS NULL AND q.ingest_step_id IS NULL) OR (%s)) ORDER BY %s LIMIT 1`, table, due, typeFilter, link, familyOrderSQL(req.Family, alias))
 	err = tx.QueryRowContext(ctx, query, args...).Scan(&id, &required, &linked)
 	return
 }
@@ -227,11 +237,8 @@ func oldestEligibleRequired(ctx context.Context, tx store.SQLExecutor, registry 
 		if f == QueuePostIngest {
 			typeFilter = " AND st.step_type=q.task_type"
 		}
-		availableExpr := "q.created_at"
-		if f != QueuePrepare {
-			availableExpr = "COALESCE(q.available_at,q.created_at)"
-		}
-		query := fmt.Sprintf(`SELECT q.id,st.step_type,CAST(%s AS TEXT),CAST(q.created_at AS TEXT) FROM %s q JOIN media_ingest_step st ON st.id=q.ingest_step_id WHERE st.required=1 AND %s AND %s%s ORDER BY %s,q.created_at,q.id LIMIT 1`, availableExpr, table, familyDueSQL(f, a), linkedEligibilitySQL(a), typeFilter, availableExpr)
+		availableExpr := familyAvailableSQL(f, a)
+		query := fmt.Sprintf(`SELECT q.id,st.step_type,CAST(%s AS TEXT),CAST(q.created_at AS TEXT) FROM %s q JOIN media_ingest_step st ON st.id=q.ingest_step_id WHERE st.required=1 AND %s AND %s%s ORDER BY %s LIMIT 1`, availableExpr, table, familyDueSQL(f, a), linkedEligibilitySQL(a), typeFilter, familyOrderSQL(f, a))
 		var c requiredCandidate
 		var typ string
 		c.family = f

@@ -358,3 +358,31 @@ func TestCommunityAbsentPrepareTableRequiredAvailabilityMatrix(t *testing.T) {
 		})
 	}
 }
+
+func TestSelectFamilyCandidateUsesNormalizedDueOrdering(t *testing.T) {
+	for _, family := range []QueueFamily{QueuePostIngest, QueueScrape, QueuePrepare} {
+		t.Run(string(family), func(t *testing.T) {
+			db := openEligibilityDB(t)
+			typ := map[QueueFamily]string{QueuePostIngest: "poster", QueueScrape: "scrape", QueuePrepare: "prepare"}[family]
+			_, err := db.Exec(fmt.Sprintf(`INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l'); INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state) VALUES(10,1,'f','video',1,'processing'),(11,1,'g','video',1,'processing'); INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(20,10,1,'scan','processing','{}',2),(21,11,1,'scan','processing','{}',2); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(30,20,10,1,'%[1]s',1,'waiting'),(31,21,11,1,'%[1]s',1,'waiting');`, typ))
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch family {
+			case QueuePostIngest:
+				_, err = db.Exec(`INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status,available_at,created_at) VALUES(40,10,20,30,1,'poster','waiting','2020-01-02','2019-01-01'),(41,11,21,31,1,'poster','waiting','2020-01-01','2020-01-01')`)
+			case QueueScrape:
+				_, err = db.Exec(`INSERT INTO scrape_task(id,media_id,status,ingest_run_id,ingest_step_id,generation,available_at,created_at) VALUES(40,10,'waiting',20,30,1,'2020-01-02','2019-01-01'),(41,11,'waiting',21,31,1,'2020-01-01','2020-01-01')`)
+			case QueuePrepare:
+				_, err = db.Exec(`INSERT INTO transcode_task(id,file_id,media_id,status,task_type,ingest_run_id,ingest_step_id,generation,created_at) VALUES(40,'f',10,'waiting','pretranscode',20,30,1,'2020-01-02'),(41,'g',11,'waiting','pretranscode',21,31,1,'2020-01-01')`)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			p, err := ClaimEligible(context.Background(), db, ClaimRequest{Family: family, TaskType: typ, Owner: "worker", Registry: NewCapabilityMatrix([]string{typ})})
+			if err != nil || p == nil || p.QueueID != 41 {
+				t.Fatalf("winner=%+v err=%v", p, err)
+			}
+		})
+	}
+}
