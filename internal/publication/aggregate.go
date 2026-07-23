@@ -44,7 +44,7 @@ func AggregateTx(ctx context.Context, tx *sql.Tx, runID int64) error {
 	default:
 		next = "published"
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE media_ingest_run SET status=?,error_message=CASE WHEN ?='cancelled' THEN error_message WHEN ? IN ('degraded','failed') THEN COALESCE(NULLIF((SELECT last_error FROM media_ingest_step WHERE run_id=? AND required=1 AND status IN ('failed','cancelled') ORDER BY CASE status WHEN 'failed' THEN 0 ELSE 1 END,id LIMIT 1),''),'required step exhausted') ELSE '' END,finished_at=CASE WHEN ? IN ('published','degraded','failed','cancelled') THEN COALESCE(finished_at,CURRENT_TIMESTAMP) ELSE NULL END WHERE id=?`, next, next, next, runID, next, runID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE media_ingest_run SET status=?,error_message=CASE WHEN ?='cancelled' THEN error_message WHEN ? IN ('degraded','failed') THEN COALESCE(NULLIF((SELECT last_error FROM media_ingest_step WHERE run_id=? AND required=1 AND status IN ('failed','cancelled') AND NULLIF(last_error,'') IS NOT NULL ORDER BY CASE status WHEN 'failed' THEN 0 ELSE 1 END,id LIMIT 1),''),'required step exhausted') ELSE '' END,finished_at=CASE WHEN ? IN ('published','degraded','failed','cancelled') THEN COALESCE(finished_at,CURRENT_TIMESTAMP) ELSE NULL END WHERE id=?`, next, next, next, runID, next, runID); err != nil {
 		return err
 	}
 	var current int64
@@ -62,7 +62,7 @@ func AggregateTx(ctx context.Context, tx *sql.Tx, runID int64) error {
 		return err
 	}
 	if next == "degraded" {
-		_, err := tx.ExecContext(ctx, `UPDATE media SET publication_state='degraded',publication_error=COALESCE(NULLIF((SELECT last_error FROM media_ingest_step WHERE run_id=? AND required=1 AND status IN ('failed','cancelled') ORDER BY CASE status WHEN 'failed' THEN 0 ELSE 1 END,id LIMIT 1),''),'required step exhausted') WHERE id=?`, runID, mediaID)
+		_, err := tx.ExecContext(ctx, `UPDATE media SET publication_state='degraded',publication_error=COALESCE(NULLIF((SELECT last_error FROM media_ingest_step WHERE run_id=? AND required=1 AND status IN ('failed','cancelled') AND NULLIF(last_error,'') IS NOT NULL ORDER BY CASE status WHEN 'failed' THEN 0 ELSE 1 END,id LIMIT 1),''),'required step exhausted') WHERE id=?`, runID, mediaID)
 		return err
 	}
 	if next == "cancelled" {
@@ -74,7 +74,7 @@ func AggregateTx(ctx context.Context, tx *sql.Tx, runID int64) error {
 		return err
 	}
 	if next == "failed" {
-		_, err := tx.ExecContext(ctx, `UPDATE media SET publication_state='failed',published_at=NULL,publication_error=COALESCE(NULLIF((SELECT last_error FROM media_ingest_step WHERE run_id=? AND required=1 AND status IN ('failed','cancelled') ORDER BY CASE status WHEN 'failed' THEN 0 ELSE 1 END,id LIMIT 1),''),'required step exhausted') WHERE id=?`, runID, mediaID)
+		_, err := tx.ExecContext(ctx, `UPDATE media SET publication_state='failed',published_at=NULL,publication_error=COALESCE(NULLIF((SELECT last_error FROM media_ingest_step WHERE run_id=? AND required=1 AND status IN ('failed','cancelled') AND NULLIF(last_error,'') IS NOT NULL ORDER BY CASE status WHEN 'failed' THEN 0 ELSE 1 END,id LIMIT 1),''),'required step exhausted') WHERE id=?`, runID, mediaID)
 		return err
 	}
 	_, err := tx.ExecContext(ctx, `UPDATE media SET publication_state='processing',publication_error='' WHERE id=?`, mediaID)

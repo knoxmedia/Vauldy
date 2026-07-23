@@ -247,6 +247,37 @@ func TestAggregateRepairCancellationUsesSamePrioritizedErrorForRunAndMedia(t *te
 	}
 }
 
+func TestAggregateDiagnosticSelectionSkipsEmptyHigherPriorityErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name, failedError, cancelledError, want string
+	}{
+		{name: "cancelled detail after empty failed", failedError: "", cancelledError: "cancel detail", want: "cancel detail"},
+		{name: "fallback when all empty", failedError: "", cancelledError: "", want: "required step exhausted"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, runID, mediaID := aggregateFixture(t, "processing", 1, map[string]string{"encrypt": "failed", "poster": "cancelled"})
+			if _, err := db.Exec(`UPDATE media_ingest_run SET preserve_visibility=1 WHERE id=?`, runID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`UPDATE media SET publication_state='published',published_at=CURRENT_TIMESTAMP WHERE id=?`, mediaID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`UPDATE media_ingest_step SET last_error=CASE status WHEN 'failed' THEN ? ELSE ? END WHERE run_id=?`, tc.failedError, tc.cancelledError, runID); err != nil {
+				t.Fatal(err)
+			}
+			aggregateCall(t, db, runID)
+			var runError string
+			if err := db.QueryRow(`SELECT error_message FROM media_ingest_run WHERE id=?`, runID).Scan(&runError); err != nil {
+				t.Fatal(err)
+			}
+			_, _, mediaError := mediaState(t, db, mediaID)
+			if runError != tc.want || mediaError != tc.want {
+				t.Fatalf("run=%q media=%q", runError, mediaError)
+			}
+		})
+	}
+}
+
 func TestAggregateRequiredCancellationWithoutRunIntentIsFailure(t *testing.T) {
 	for _, tc := range []struct {
 		name, wantRun, wantMedia string

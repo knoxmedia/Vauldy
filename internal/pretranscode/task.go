@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"knox-media/internal/publication"
 	"knox-media/internal/storage"
+	"knox-media/internal/store"
 	"log"
 	"os"
 	"sort"
@@ -24,6 +25,8 @@ var ErrTaskNotCancellable = errors.New("task is not cancellable")
 type TaskService struct {
 	DB           *sql.DB
 	TranscodeDir string
+
+	cancelTaskAttempt func(context.Context, int64) error
 }
 
 // UnifiedTask is the joined row for the unified task list (SRS 3.2.1).
@@ -200,7 +203,19 @@ func (s *TaskService) GetTask(id int64) (*UnifiedTask, []RenditionJob, error) {
 
 // CancelTask atomically cancels a linked prepare task and its publication step.
 func (s *TaskService) CancelTask(id int64) error {
-	tx, err := s.DB.BeginTx(context.Background(), nil)
+	ctx := context.Background()
+	attempt := s.cancelTaskAttempt
+	if attempt == nil {
+		attempt = s.cancelTaskAttemptTx
+	}
+	policy := store.RetryPolicy{Operation: "pretranscode_cancel_task", MaxElapsed: 2 * time.Second, BaseBackoff: 10 * time.Millisecond, MaxBackoff: 100 * time.Millisecond}
+	return store.WithBusyRetryPolicyContext(ctx, nil, policy, func(attemptCtx context.Context) error {
+		return attempt(attemptCtx, id)
+	})
+}
+
+func (s *TaskService) cancelTaskAttemptTx(ctx context.Context, id int64) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -215,7 +230,7 @@ func (s *TaskService) CancelTask(id int64) error {
 			return err
 		}
 		if required {
-			cancelled, cancelErr := publication.CancelRunForRequiredStepTx(context.Background(), tx, runID, stepID, id, "admin_cancelled")
+			cancelled, cancelErr := publication.CancelRunForRequiredStepTx(ctx, tx, runID, stepID, id, "admin_cancelled")
 			if cancelErr != nil {
 				return cancelErr
 			}
@@ -243,7 +258,7 @@ func (s *TaskService) CancelTask(id int64) error {
 		if n, _ := res.RowsAffected(); n != 1 {
 			return fmt.Errorf("task %d linked prepare step is not cancellable", id)
 		}
-		if err = publication.AggregateTx(context.Background(), tx, runID); err != nil {
+		if err = publication.AggregateTx(ctx, tx, runID); err != nil {
 			return err
 		}
 	}

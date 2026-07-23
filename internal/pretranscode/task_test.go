@@ -6,7 +6,13 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
+	"unsafe"
+
+	"knox-media/internal/store"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // seedVideo inserts a library + media row with an on-disk source file and returns the media id.
@@ -309,6 +315,44 @@ func seedManagedLinkedTask(t *testing.T, db *sql.DB, status string) (svc *TaskSe
 		}
 	}
 	return &TaskService{DB: db, TranscodeDir: t.TempDir()}, taskID, jobID, runID, stepID, mediaID
+}
+
+func pretranscodeSQLiteError(t *testing.T, code int) error {
+	t.Helper()
+	err := &sqlite.Error{}
+	v := reflect.ValueOf(err).Elem().FieldByName("code")
+	reflect.NewAt(v.Type(), unsafe.Pointer(v.UnsafeAddr())).Elem().SetInt(int64(code))
+	return err
+}
+
+func TestCancelTaskRetriesWholeTransactionAfterBusySnapshot(t *testing.T) {
+	db := newTestDB(t)
+	svc, taskID, jobID, runID, stepID, mediaID := seedManagedLinkedTask(t, db, "running")
+	attempts := 0
+	svc.cancelTaskAttempt = func(ctx context.Context, id int64) error {
+		attempts++
+		if attempts == 1 {
+			return pretranscodeSQLiteError(t, sqlite3.SQLITE_BUSY_SNAPSHOT)
+		}
+		return svc.cancelTaskAttemptTx(ctx, id)
+	}
+	if err := svc.CancelTask(taskID); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts=%d", attempts)
+	}
+	assertPrepareTerminalState(t, db, jobID, taskID, stepID, runID, mediaID, "cancelled", "cancelled", "cancelled", "cancelled", "cancelled")
+}
+
+func TestCancelTaskBusyExhaustionLeavesAllLayersUnchanged(t *testing.T) {
+	db := newTestDB(t)
+	svc, taskID, jobID, runID, stepID, mediaID := seedManagedLinkedTask(t, db, "running")
+	svc.cancelTaskAttempt = func(context.Context, int64) error { return pretranscodeSQLiteError(t, sqlite3.SQLITE_BUSY) }
+	if err := svc.CancelTask(taskID); !store.IsSQLiteBusy(err) {
+		t.Fatalf("err=%v", err)
+	}
+	assertPrepareTerminalState(t, db, jobID, taskID, stepID, runID, mediaID, "running", "running", "running", "processing", "processing")
 }
 
 func TestLinkedRequiredPrepareCancelTaskPersistsAdminRunIntentAtomically(t *testing.T) {
