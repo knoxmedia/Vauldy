@@ -294,7 +294,11 @@ func verifyCommittedThumbnailTx(ctx context.Context, tx store.SQLExecutor, task 
 	return nil
 }
 func variantRef(v imagethumb.StagedVariant) map[string]any {
-	return map[string]any{"kind": v.Kind, "logical_name": v.LogicalName, "path": v.Path, "size": v.Size, "sha256": v.Hash}
+	ref := map[string]any{"kind": v.Kind, "logical_name": v.LogicalName, "path": v.Path, "size": v.Size, "sha256": v.Hash}
+	if v.Derived != nil {
+		ref["derived"] = v.Derived.RecoveryMetadata()
+	}
+	return ref
 }
 func verifyVariant(v imagethumb.StagedVariant) error {
 	size, hash, err := hashPath(v.Path)

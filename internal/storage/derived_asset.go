@@ -75,6 +75,15 @@ type StagedDerivedAsset struct {
 	kind, logicalName, encPath, wrappedDEK, iv string
 }
 
+func (a *StagedDerivedAsset) RecoveryMetadata() map[string]any {
+	if a == nil {
+		return nil
+	}
+	return map[string]any{"media_id": a.mediaID, "kind": a.kind, "logical_name": a.logicalName, "enc_path": a.encPath, "wrapped_dek": a.wrappedDEK, "iv": a.iv}
+}
+func RestoreStagedDerivedAsset(mediaID int64, kind, logicalName, encPath, wrappedDEK, iv string) *StagedDerivedAsset {
+	return &StagedDerivedAsset{mediaID: mediaID, kind: kind, logicalName: logicalName, encPath: encPath, wrappedDEK: wrappedDEK, iv: iv}
+}
 func (a *StagedDerivedAsset) EncPath() string {
 	if a == nil {
 		return ""

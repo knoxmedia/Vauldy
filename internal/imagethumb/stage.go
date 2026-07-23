@@ -37,7 +37,7 @@ func StageThumbnail(ctx context.Context, db *sql.DB, vault *keystore.Vault, deri
 	if req.MediaID <= 0 || req.RunID <= 0 || req.StepID <= 0 || req.Generation <= 0 || req.OwnerToken == "" || req.SourceFingerprint == "" {
 		return StagedThumbnail{}, fmt.Errorf("thumbnail stage: invalid publication identity")
 	}
-	f, err := os.Open(req.SourcePath)
+	f, err := storage.OpenPlaintext(db, vault, req.MediaID, req.SourcePath)
 	if err != nil {
 		return StagedThumbnail{}, err
 	}

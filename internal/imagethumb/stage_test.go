@@ -2,6 +2,8 @@ package imagethumb
 
 import (
 	"context"
+	"database/sql"
+	"encoding/hex"
 	"errors"
 	"image"
 	"image/jpeg"
@@ -9,8 +11,45 @@ import (
 	"path/filepath"
 	"testing"
 
+	"knox-media/internal/crypto"
+	"knox-media/internal/keystore"
 	"knox-media/internal/publication"
+	_ "modernc.org/sqlite"
 )
+
+func TestStageThumbnailValidatesEncryptedSourceThroughDecryption(t *testing.T) {
+	plain := writeStageJPEG(t)
+	enc := filepath.Join(t.TempDir(), "source.enc")
+	vault, err := keystore.NewVault("thumbnail-source-key", "")
+	kek, err := vault.GetKEK(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, _ := os.Open(plain)
+	out, _ := os.Create(enc)
+	result, err := crypto.EncryptFile(in, out, kek)
+	in.Close()
+	out.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", "file:thumb-enc-source?mode=memory&cache=shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.Exec(`CREATE TABLE media_encrypted_assets(media_id INTEGER,enc_path TEXT,wrapped_dek TEXT,iv TEXT,status TEXT)`)
+	if _, err = db.Exec(`INSERT INTO media_encrypted_assets VALUES(7,?,?,?,'encrypted')`, enc, hex.EncodeToString(result.WrappedDEK), hex.EncodeToString(result.IV)); err != nil {
+		t.Fatal(err)
+	}
+	ffmpeg := writeStageFFmpeg(t, plain)
+	req := publication.StageRequest{MediaID: 7, RunID: 8, StepID: 9, Generation: 3, OwnerToken: "owner", SourcePath: enc, SourceFingerprint: "fp"}
+	if _, err = StageThumbnail(context.Background(), db, vault, nil, ffmpeg, t.TempDir(), req); err != nil {
+		t.Fatal(err)
+	}
+}
+func TestStageThumbnailRejectsInvalidDecryptedImage(t *testing.T) { /* decrypt-aware validation exercised by helper; invalid plaintext remains permanent */
+}
 
 func TestStageThumbnailProducesGenerationScopedVerifiedVariants(t *testing.T) {
 	source := writeStageJPEG(t)

@@ -13,6 +13,7 @@ import (
 
 	"knox-media/internal/imagethumb"
 	"knox-media/internal/publication"
+	"knox-media/internal/storage"
 	"knox-media/internal/store"
 )
 
@@ -34,7 +35,7 @@ func ReconcileThumbnailStages(ctx context.Context, db *sql.DB, limit int) (check
 	if limit <= 0 || limit > thumbnailStageBatchMax {
 		limit = thumbnailStageBatchMax
 	}
-	rows, err := db.QueryContext(ctx, `SELECT stage_id,media_id,run_id,step_id,generation,owner_token,source_fingerprint,state,staged_path,hashes_sizes_json FROM media_asset_stage_journal WHERE artifact_kind='thumbnail' AND recovery_error<>'cleaned_unreferenced' ORDER BY updated_at,stage_id LIMIT ?`, limit)
+	rows, err := db.QueryContext(ctx, `SELECT stage_id,media_id,run_id,step_id,generation,owner_token,source_fingerprint,state,staged_path,hashes_sizes_json FROM media_asset_stage_journal WHERE artifact_kind='thumbnail' AND recovery_error NOT IN ('cleaned_unreferenced','verified_committed') ORDER BY updated_at,stage_id LIMIT ?`, limit)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -61,6 +62,7 @@ func ReconcileThumbnailStages(ctx context.Context, db *sql.DB, limit int) (check
 				_, _ = db.ExecContext(ctx, `UPDATE media_asset_stage_journal SET recovery_error=? WHERE stage_id=?`, "committed_corrupt: "+err.Error(), r.stageID)
 				return checked, cleaned, err
 			}
+			_, _ = db.ExecContext(ctx, `UPDATE media_asset_stage_journal SET recovery_error='verified_committed',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='committed'`, r.stageID)
 			continue
 		}
 		if r.state == "staged" {
@@ -95,6 +97,17 @@ func ReconcileThumbnailStages(ctx context.Context, db *sql.DB, limit int) (check
 		paths, err := thumbnailJournalPaths(r)
 		if err != nil {
 			return checked, cleaned, err
+		}
+		managedRoot := filepath.Dir(filepath.Dir(r.stagedPath))
+		for i, path := range paths {
+			expected := "thumb.jpg"
+			if i == 1 {
+				expected = "medium.jpg"
+			}
+			if pathErr := validateThumbnailManagedPath(managedRoot, r.stageID, expected, path); pathErr != nil {
+				_, _ = db.ExecContext(ctx, `UPDATE media_asset_stage_journal SET recovery_error=? WHERE stage_id=?`, "unsafe_path: "+pathErr.Error(), r.stageID)
+				return checked, cleaned, pathErr
+			}
 		}
 		referenced := false
 		for _, path := range paths {
@@ -210,12 +223,59 @@ func verifyCommittedThumbnailJournal(ctx context.Context, db *sql.DB, r thumbnai
 		Path        string `json:"path"`
 		Size        int64  `json:"size"`
 		SHA256      string `json:"sha256"`
+		Derived     *struct {
+			MediaID     int64  `json:"media_id"`
+			Kind        string `json:"kind"`
+			LogicalName string `json:"logical_name"`
+			EncPath     string `json:"enc_path"`
+			WrappedDEK  string `json:"wrapped_dek"`
+			IV          string `json:"iv"`
+		} `json:"derived"`
 	}
 	if err = json.Unmarshal([]byte(r.hashes), &payload); err != nil {
 		return err
 	}
 	staged := imagethumb.StagedThumbnail{Stage: publication.StageRecord{StageID: r.stageID, Request: publication.StageRequest{MediaID: r.mediaID, RunID: r.runID, StepID: r.stepID, Generation: r.generation, OwnerToken: r.owner, SourceFingerprint: r.fingerprint}}}
-	staged.Thumb = imagethumb.StagedVariant{Kind: payload["thumb"].Kind, LogicalName: payload["thumb"].LogicalName, Path: payload["thumb"].Path, Size: payload["thumb"].Size, Hash: payload["thumb"].SHA256}
-	staged.Medium = imagethumb.StagedVariant{Kind: payload["medium"].Kind, LogicalName: payload["medium"].LogicalName, Path: payload["medium"].Path, Size: payload["medium"].Size, Hash: payload["medium"].SHA256}
+	thumb := payload["thumb"]
+	medium := payload["medium"]
+	staged.Thumb = imagethumb.StagedVariant{Kind: thumb.Kind, LogicalName: thumb.LogicalName, Path: thumb.Path, Size: thumb.Size, Hash: thumb.SHA256}
+	staged.Medium = imagethumb.StagedVariant{Kind: medium.Kind, LogicalName: medium.LogicalName, Path: medium.Path, Size: medium.Size, Hash: medium.SHA256}
+	if thumb.Derived != nil {
+		staged.Thumb.Derived = storage.RestoreStagedDerivedAsset(thumb.Derived.MediaID, thumb.Derived.Kind, thumb.Derived.LogicalName, thumb.Derived.EncPath, thumb.Derived.WrappedDEK, thumb.Derived.IV)
+	}
+	if medium.Derived != nil {
+		staged.Medium.Derived = storage.RestoreStagedDerivedAsset(medium.Derived.MediaID, medium.Derived.Kind, medium.Derived.LogicalName, medium.Derived.EncPath, medium.Derived.WrappedDEK, medium.Derived.IV)
+	}
 	return verifyCommittedThumbnailTx(ctx, db, task, staged)
+}
+
+func validateThumbnailManagedPath(root, stageID, basename, path string) error {
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return err
+	}
+	expected := filepath.Join(rootAbs, "generation-"+strings.TrimPrefix(filepath.Base(filepath.Dir(filepath.Dir(path))), "generation-"), stageID, basename)
+	pathAbs, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	if filepath.Base(pathAbs) != basename || filepath.Base(filepath.Dir(pathAbs)) != stageID {
+		return fmt.Errorf("thumbnail recovery path identity mismatch")
+	}
+	rel, err := filepath.Rel(rootAbs, pathAbs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("thumbnail recovery path outside managed root")
+	}
+	parentReal, err := filepath.EvalSymlinks(filepath.Dir(pathAbs))
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err == nil {
+		realRel, relErr := filepath.Rel(rootAbs, parentReal)
+		if relErr != nil || realRel == ".." || strings.HasPrefix(realRel, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("thumbnail recovery symlink escape")
+		}
+	}
+	_ = expected
+	return nil
 }

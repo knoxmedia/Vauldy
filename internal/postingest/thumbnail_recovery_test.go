@@ -4,10 +4,63 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestThumbnailManagedPathsRejectExternalTraversalAndSymlink(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "sentinel")
+	if err := os.WriteFile(outside, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{outside, filepath.Join(root, "generation-1", "stage", "..", "..", "sentinel")} {
+		if err := validateThumbnailManagedPath(root, "stage", "thumb.jpg", path); err == nil {
+			t.Fatalf("accepted %s", path)
+		}
+	}
+	link := filepath.Join(root, "generation-1", "stage")
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Dir(outside), link); err == nil {
+		if err = validateThumbnailManagedPath(root, "stage", "thumb.jpg", filepath.Join(link, "thumb.jpg")); err == nil {
+			t.Fatal("accepted symlink escape")
+		}
+	}
+	data, _ := os.ReadFile(outside)
+	if string(data) != "keep" {
+		t.Fatal("external sentinel changed")
+	}
+}
+func TestReconcileThumbnailStagesMarksCommittedAndReachesStaleAfterHundred(t *testing.T) {
+	db, _, _ := planThumbnailFixture(t, false)
+	for i := 0; i < 150; i++ {
+		id := fmt.Sprintf("verified-%03d", i)
+		_, err := db.Exec(`INSERT INTO media_asset_stage_journal(stage_id,media_id,run_id,step_id,generation,owner_token,source_fingerprint,artifact_kind,state,original_path,staged_path,hashes_sizes_json,recovery_error) VALUES(?,1,1,1,1,'o','f','thumbnail','committed','','','{}','verified_committed')`, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	q := NewQueue(db, "thumbnail-owner", nil)
+	task, _ := q.Claim(context.Background(), TaskThumbnail)
+	staged, err := realThumbnailStager(t, db).Stage(context.Background(), *task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`UPDATE media_asset_stage_journal SET owner_token='stale' WHERE stage_id=?`, staged.Stage.StageID); err != nil {
+		t.Fatal(err)
+	}
+	_, cleaned, err := ReconcileThumbnailStages(context.Background(), db, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleaned != 1 {
+		t.Fatalf("cleaned=%d", cleaned)
+	}
+}
 
 func TestReconcileThumbnailStagesRetainsActiveAndCleansStaleUnreferenced(t *testing.T) {
 	db, _, _ := planThumbnailFixture(t, false)
@@ -18,12 +71,15 @@ func TestReconcileThumbnailStagesRetainsActiveAndCleansStaleUnreferenced(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	staleDir := filepath.Join(t.TempDir(), "stale")
+	staleRoot := t.TempDir()
+	staleID := "stale-thumbnail-stage"
+	staleDir := filepath.Join(staleRoot, "generation-1", staleID)
 	_ = os.MkdirAll(staleDir, 0o755)
 	stalePath := filepath.Join(staleDir, "thumb.jpg")
 	_ = os.WriteFile(stalePath, []byte("stale"), 0o644)
-	staleID := "stale-thumbnail-stage"
-	hashes := `{"thumb":{"path":"` + filepath.ToSlash(stalePath) + `"},"medium":{"path":"` + filepath.ToSlash(stalePath) + `"}}`
+	mediumPath := filepath.Join(staleDir, "medium.jpg")
+	_ = os.WriteFile(mediumPath, []byte("stale"), 0o644)
+	hashes := `{"thumb":{"path":"` + filepath.ToSlash(stalePath) + `"},"medium":{"path":"` + filepath.ToSlash(mediumPath) + `"}}`
 	_, err = db.Exec(`INSERT INTO media_asset_stage_journal(stage_id,media_id,run_id,step_id,generation,owner_token,source_fingerprint,artifact_kind,state,original_path,staged_path,hashes_sizes_json) VALUES(?,?,?,?,?,'old-owner','old-fp','thumbnail','staged','',?,?)`, staleID, task.MediaID, *task.RunID, *task.StepID, task.Generation, staleDir, hashes)
 	if err != nil {
 		t.Fatal(err)
