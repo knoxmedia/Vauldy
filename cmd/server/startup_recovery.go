@@ -10,14 +10,14 @@ import (
 )
 
 // recoverStartupTasks performs durable queue recovery before workers claim work.
-func recoverStartupTasks(ctx context.Context, db *sql.DB, postIngest *postingest.Queue) error {
+func recoverStartupTasks(ctx context.Context, db *sql.DB, postIngest *postingest.Queue, thumbnailRoot ...string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if db == nil || postIngest == nil {
 		return fmt.Errorf("startup recovery: database and post-ingest queue are required")
 	}
-	if _, _, err := postingest.ReconcileThumbnailStages(ctx, db, 100); err != nil {
+	if _, _, err := postingest.ReconcileThumbnailStages(ctx, db, firstString(thumbnailRoot), 100); err != nil {
 		return fmt.Errorf("startup recovery: thumbnail stages: %w", err)
 	}
 	store.ResetInterruptedTasks(db)
@@ -25,4 +25,11 @@ func recoverStartupTasks(ctx context.Context, db *sql.DB, postIngest *postingest
 		return fmt.Errorf("startup recovery: post-ingest: %w", err)
 	}
 	return nil
+}
+
+func firstString(v []string) string {
+	if len(v) > 0 {
+		return v[0]
+	}
+	return ""
 }

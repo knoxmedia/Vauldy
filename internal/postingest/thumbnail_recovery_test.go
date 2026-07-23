@@ -7,8 +7,52 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"knox-media/internal/keystore"
+	"knox-media/internal/storage"
 )
+
+func TestThumbnailManagedPathsRequireConfiguredRootAndGeneration(t *testing.T) {
+	trusted := t.TempDir()
+	outside := t.TempDir()
+	stage := "stage-id"
+	outsidePath := filepath.Join(outside, "generation-4", stage, "thumb.jpg")
+	if err := os.MkdirAll(filepath.Dir(outsidePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(outsidePath, []byte("sentinel"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateThumbnailManagedPath(trusted, 4, stage, "thumb.jpg", outsidePath); err == nil {
+		t.Fatal("accepted matching external layout")
+	}
+	wrong := filepath.Join(trusted, "generation-5", stage, "thumb.jpg")
+	if err := os.MkdirAll(filepath.Dir(wrong), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateThumbnailManagedPath(trusted, 4, stage, "thumb.jpg", wrong); err == nil {
+		t.Fatal("accepted wrong generation")
+	}
+}
+func TestEncryptedJournalMetadataOmitsSecrets(t *testing.T) {
+	db, _, _ := planThumbnailFixture(t, true)
+	q := NewQueue(db, "thumbnail-owner", nil)
+	task, _ := q.Claim(context.Background(), TaskThumbnail)
+	vault, _ := keystore.NewVault("journal-secret-test", "")
+	worker := realThumbnailStager(t, db)
+	worker.Vault = vault
+	worker.Derived = &storage.DerivedAssetStore{DB: db, Vault: vault, BaseDir: t.TempDir()}
+	staged, err := worker.Stage(context.Background(), *task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := staged.Stage.HashesSizesJSON
+	if strings.Contains(raw, "wrapped_dek") || strings.Contains(raw, `"iv"`) {
+		t.Fatalf("journal leaked encryption metadata: %s", raw)
+	}
+}
 
 func TestThumbnailManagedPathsRejectExternalTraversalAndSymlink(t *testing.T) {
 	root := t.TempDir()
@@ -17,7 +61,7 @@ func TestThumbnailManagedPathsRejectExternalTraversalAndSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, path := range []string{outside, filepath.Join(root, "generation-1", "stage", "..", "..", "sentinel")} {
-		if err := validateThumbnailManagedPath(root, "stage", "thumb.jpg", path); err == nil {
+		if err := validateThumbnailManagedPath(root, 1, "stage", "thumb.jpg", path); err == nil {
 			t.Fatalf("accepted %s", path)
 		}
 	}
@@ -26,7 +70,7 @@ func TestThumbnailManagedPathsRejectExternalTraversalAndSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(filepath.Dir(outside), link); err == nil {
-		if err = validateThumbnailManagedPath(root, "stage", "thumb.jpg", filepath.Join(link, "thumb.jpg")); err == nil {
+		if err = validateThumbnailManagedPath(root, 1, "stage", "thumb.jpg", filepath.Join(link, "thumb.jpg")); err == nil {
 			t.Fatal("accepted symlink escape")
 		}
 	}
@@ -53,7 +97,7 @@ func TestReconcileThumbnailStagesMarksCommittedAndReachesStaleAfterHundred(t *te
 	if _, err = db.Exec(`UPDATE media_asset_stage_journal SET owner_token='stale' WHERE stage_id=?`, staged.Stage.StageID); err != nil {
 		t.Fatal(err)
 	}
-	_, cleaned, err := ReconcileThumbnailStages(context.Background(), db, 10)
+	_, cleaned, err := ReconcileThumbnailStages(context.Background(), db, filepath.Dir(filepath.Dir(staged.Stage.StagedPath)), 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +128,7 @@ func TestReconcileThumbnailStagesRetainsActiveAndCleansStaleUnreferenced(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	checked, cleaned, err := ReconcileThumbnailStages(context.Background(), db, 10)
+	checked, cleaned, err := ReconcileThumbnailStages(context.Background(), db, staleRoot, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +160,7 @@ func TestReconcileThumbnailStagesQuarantinesBeforeCleanupAndBlocksCommit(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	checked, cleaned, err := ReconcileThumbnailStages(context.Background(), db, 10)
+	checked, cleaned, err := ReconcileThumbnailStages(context.Background(), db, thumbnailTestRoot(t, db), 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +191,7 @@ func TestReconcileThumbnailStagesRetainsPlainMetadataReferenceWithoutEvidence(t 
 	if _, err = db.Exec(`UPDATE media_asset_stage_journal SET owner_token='stale-owner' WHERE stage_id=?`, staged.Stage.StageID); err != nil {
 		t.Fatal(err)
 	}
-	_, cleaned, err := ReconcileThumbnailStages(context.Background(), db, 10)
+	_, cleaned, err := ReconcileThumbnailStages(context.Background(), db, thumbnailTestRoot(t, db), 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +218,7 @@ func TestReconcileThumbnailStagesQuarantineInterleavingRejectsWorker(t *testing.
 	var commitErr error
 	afterThumbnailStageQuarantined = func() { commitErr = commitStagedThumbnail(context.Background(), db, *task, staged) }
 	t.Cleanup(func() { afterThumbnailStageQuarantined = original })
-	_, _, err = ReconcileThumbnailStages(context.Background(), db, 10)
+	_, _, err = ReconcileThumbnailStages(context.Background(), db, thumbnailTestRoot(t, db), 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +238,7 @@ func TestReconcileThumbnailStagesRetriesQuarantinedCleanup(t *testing.T) {
 	if _, err = db.Exec(`UPDATE media_asset_stage_journal SET state='quarantined',recovery_error='cleanup_failed' WHERE stage_id=?`, staged.Stage.StageID); err != nil {
 		t.Fatal(err)
 	}
-	_, cleaned, err := ReconcileThumbnailStages(context.Background(), db, 10)
+	_, cleaned, err := ReconcileThumbnailStages(context.Background(), db, thumbnailTestRoot(t, db), 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +264,7 @@ func TestReconcileThumbnailStagesCorruptCommittedReportsAndRetains(t *testing.T)
 	if _, err = db.Exec(`UPDATE media SET meta_json='{}' WHERE id=?`, task.MediaID); err != nil {
 		t.Fatal(err)
 	}
-	_, cleaned, err := ReconcileThumbnailStages(context.Background(), db, 10)
+	_, cleaned, err := ReconcileThumbnailStages(context.Background(), db, thumbnailTestRoot(t, db), 10)
 	if err == nil {
 		t.Fatal("corrupt committed accepted")
 	}
@@ -244,7 +288,7 @@ func TestReconcileThumbnailStagesRetainsCommittedAndReferenced(t *testing.T) {
 	if err = commitStagedThumbnail(context.Background(), db, *task, staged); err != nil {
 		t.Fatal(err)
 	}
-	_, cleaned, err := ReconcileThumbnailStages(context.Background(), db, 10)
+	_, cleaned, err := ReconcileThumbnailStages(context.Background(), db, thumbnailTestRoot(t, db), 10)
 	if err != nil || cleaned != 0 {
 		t.Fatalf("cleaned=%d err=%v", cleaned, err)
 	}
@@ -263,10 +307,19 @@ func TestReconcileThumbnailStagesQueryFailurePreservesFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	if _, _, err = ReconcileThumbnailStages(context.Background(), db, 10); err == nil {
+	if _, _, err = ReconcileThumbnailStages(context.Background(), db, thumbnailTestRoot(t, db), 10); err == nil {
 		t.Fatal("expected query error")
 	}
 	if _, err = os.Stat(path); err != nil {
 		t.Fatalf("file removed on query failure: %v", err)
 	}
+}
+
+func thumbnailTestRoot(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	var p string
+	if err := db.QueryRow(`SELECT staged_path FROM media_asset_stage_journal WHERE artifact_kind='thumbnail' ORDER BY created_at DESC LIMIT 1`).Scan(&p); err != nil {
+		return t.TempDir()
+	}
+	return filepath.Dir(filepath.Dir(p))
 }

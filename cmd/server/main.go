@@ -246,7 +246,7 @@ func main() {
 	processID := fmt.Sprintf("%s-%d-%s", hostname, os.Getpid(), uuid.NewString())
 	queueOwner := "postingest-" + processID
 	postIngestQueue := postingest.NewQueue(db, queueOwner, sqliteMetrics)
-	if err := recoverStartupTasks(serverCtx, db, postIngestQueue); err != nil {
+	if err := recoverStartupTasks(serverCtx, db, postIngestQueue, filepath.Join(cfg.Data.Preview, "photos")); err != nil {
 		log.Fatalf("startup task recovery: %v", err)
 	}
 	postIngestEnqueuer := postingest.NewEnqueuer(db, cfg, sqliteMetrics)
@@ -347,7 +347,7 @@ func main() {
 	// (5) Admin overview uses the shared resource-control instances.
 	background := &handler.BackgroundGroup{}
 	background.Go(serverCtx, func(ctx context.Context) {
-		postingest.RunThumbnailStageReconciler(ctx, db, time.Minute, 100, func(err error) { log.Printf("thumbnail stage reconcile: %v", err) })
+		postingest.RunThumbnailStageReconciler(ctx, db, filepath.Join(cfg.Data.Preview, "photos"), time.Minute, 100, func(err error) { log.Printf("thumbnail stage reconcile: %v", err) })
 	})
 	deps := handler.Dependencies{
 		ServerContext: serverCtx, Background: background,

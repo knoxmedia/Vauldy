@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -28,7 +29,7 @@ type thumbnailJournalRow struct {
 }
 
 // ReconcileThumbnailStages safely reconciles a bounded batch of durable thumbnail stages.
-func ReconcileThumbnailStages(ctx context.Context, db *sql.DB, limit int) (checked, cleaned int, retErr error) {
+func ReconcileThumbnailStages(ctx context.Context, db *sql.DB, trustedRoot string, limit int) (checked, cleaned int, retErr error) {
 	if db == nil {
 		return 0, 0, errors.New("thumbnail stage reconcile: database is required")
 	}
@@ -98,13 +99,12 @@ func ReconcileThumbnailStages(ctx context.Context, db *sql.DB, limit int) (check
 		if err != nil {
 			return checked, cleaned, err
 		}
-		managedRoot := filepath.Dir(filepath.Dir(r.stagedPath))
 		for i, path := range paths {
 			expected := "thumb.jpg"
 			if i == 1 {
 				expected = "medium.jpg"
 			}
-			if pathErr := validateThumbnailManagedPath(managedRoot, r.stageID, expected, path); pathErr != nil {
+			if pathErr := validateThumbnailManagedPath(trustedRoot, r.generation, r.stageID, expected, path); pathErr != nil {
 				_, _ = db.ExecContext(ctx, `UPDATE media_asset_stage_journal SET recovery_error=? WHERE stage_id=?`, "unsafe_path: "+pathErr.Error(), r.stageID)
 				return checked, cleaned, pathErr
 			}
@@ -177,12 +177,12 @@ func thumbnailJournalPaths(r thumbnailJournalRow) ([]string, error) {
 	return paths, nil
 }
 
-func RunThumbnailStageReconciler(ctx context.Context, db *sql.DB, interval time.Duration, limit int, report func(error)) {
+func RunThumbnailStageReconciler(ctx context.Context, db *sql.DB, trustedRoot string, interval time.Duration, limit int, report func(error)) {
 	if interval <= 0 {
 		interval = time.Minute
 	}
 	run := func() {
-		_, _, err := ReconcileThumbnailStages(ctx, db, limit)
+		_, _, err := ReconcileThumbnailStages(ctx, db, trustedRoot, limit)
 		if err != nil && report != nil {
 			report(err)
 		}
@@ -240,26 +240,53 @@ func verifyCommittedThumbnailJournal(ctx context.Context, db *sql.DB, r thumbnai
 	medium := payload["medium"]
 	staged.Thumb = imagethumb.StagedVariant{Kind: thumb.Kind, LogicalName: thumb.LogicalName, Path: thumb.Path, Size: thumb.Size, Hash: thumb.SHA256}
 	staged.Medium = imagethumb.StagedVariant{Kind: medium.Kind, LogicalName: medium.LogicalName, Path: medium.Path, Size: medium.Size, Hash: medium.SHA256}
-	if thumb.Derived != nil {
-		staged.Thumb.Derived = storage.RestoreStagedDerivedAsset(thumb.Derived.MediaID, thumb.Derived.Kind, thumb.Derived.LogicalName, thumb.Derived.EncPath, thumb.Derived.WrappedDEK, thumb.Derived.IV)
+	restore := func(meta *struct {
+		MediaID     int64  `json:"media_id"`
+		Kind        string `json:"kind"`
+		LogicalName string `json:"logical_name"`
+		EncPath     string `json:"enc_path"`
+		WrappedDEK  string `json:"wrapped_dek"`
+		IV          string `json:"iv"`
+	}) (*storage.StagedDerivedAsset, error) {
+		if meta == nil {
+			return nil, nil
+		}
+		var path, wrapped, iv string
+		err := db.QueryRowContext(ctx, `SELECT enc_path,wrapped_dek,iv FROM media_derived_assets WHERE media_id=? AND artifact_kind=? AND logical_name=?`, meta.MediaID, meta.Kind, meta.LogicalName).Scan(&path, &wrapped, &iv)
+		if err != nil {
+			return nil, err
+		}
+		if !pathsEqual(path, meta.EncPath) || strings.TrimSpace(wrapped) == "" || strings.TrimSpace(iv) == "" {
+			return nil, fmt.Errorf("thumbnail committed derived identity invalid")
+		}
+		return storage.RestoreStagedDerivedAsset(meta.MediaID, meta.Kind, meta.LogicalName, path, wrapped, iv), nil
 	}
-	if medium.Derived != nil {
-		staged.Medium.Derived = storage.RestoreStagedDerivedAsset(medium.Derived.MediaID, medium.Derived.Kind, medium.Derived.LogicalName, medium.Derived.EncPath, medium.Derived.WrappedDEK, medium.Derived.IV)
+	staged.Thumb.Derived, err = restore(thumb.Derived)
+	if err != nil {
+		return err
+	}
+	staged.Medium.Derived, err = restore(medium.Derived)
+	if err != nil {
+		return err
 	}
 	return verifyCommittedThumbnailTx(ctx, db, task, staged)
 }
 
-func validateThumbnailManagedPath(root, stageID, basename, path string) error {
+func validateThumbnailManagedPath(root string, generation int64, stageID, basename, path string) error {
 	rootAbs, err := filepath.Abs(root)
 	if err != nil {
 		return err
 	}
-	expected := filepath.Join(rootAbs, "generation-"+strings.TrimPrefix(filepath.Base(filepath.Dir(filepath.Dir(path))), "generation-"), stageID, basename)
+	expected := filepath.Join(rootAbs, fmt.Sprintf("generation-%d", generation), stageID, basename)
 	pathAbs, err := filepath.Abs(path)
 	if err != nil {
 		return err
 	}
-	if filepath.Base(pathAbs) != basename || filepath.Base(filepath.Dir(pathAbs)) != stageID {
+	same := filepath.Clean(pathAbs) == filepath.Clean(expected)
+	if runtime.GOOS == "windows" {
+		same = strings.EqualFold(filepath.Clean(pathAbs), filepath.Clean(expected))
+	}
+	if !same {
 		return fmt.Errorf("thumbnail recovery path identity mismatch")
 	}
 	rel, err := filepath.Rel(rootAbs, pathAbs)
@@ -271,11 +298,21 @@ func validateThumbnailManagedPath(root, stageID, basename, path string) error {
 		return err
 	}
 	if err == nil {
-		realRel, relErr := filepath.Rel(rootAbs, parentReal)
+		rootReal, rootErr := filepath.EvalSymlinks(rootAbs)
+		if rootErr != nil {
+			return rootErr
+		}
+		realRel, relErr := filepath.Rel(rootReal, parentReal)
 		if relErr != nil || realRel == ".." || strings.HasPrefix(realRel, ".."+string(filepath.Separator)) {
 			return fmt.Errorf("thumbnail recovery symlink escape")
 		}
 	}
-	_ = expected
 	return nil
+}
+
+func pathsEqual(a, b string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(filepath.Clean(a), filepath.Clean(b))
+	}
+	return filepath.Clean(a) == filepath.Clean(b)
 }

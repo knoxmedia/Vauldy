@@ -79,7 +79,7 @@ func (a *StagedDerivedAsset) RecoveryMetadata() map[string]any {
 	if a == nil {
 		return nil
 	}
-	return map[string]any{"media_id": a.mediaID, "kind": a.kind, "logical_name": a.logicalName, "enc_path": a.encPath, "wrapped_dek": a.wrappedDEK, "iv": a.iv}
+	return map[string]any{"media_id": a.mediaID, "kind": a.kind, "logical_name": a.logicalName, "enc_path": a.encPath}
 }
 func RestoreStagedDerivedAsset(mediaID int64, kind, logicalName, encPath, wrappedDEK, iv string) *StagedDerivedAsset {
 	return &StagedDerivedAsset{mediaID: mediaID, kind: kind, logicalName: logicalName, encPath: encPath, wrappedDEK: wrappedDEK, iv: iv}
