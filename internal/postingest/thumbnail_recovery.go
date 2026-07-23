@@ -20,6 +20,8 @@ import (
 
 const thumbnailStageBatchMax = 100
 
+type ThumbnailRecoveryRoots struct{ Preview, Derived string }
+
 var afterThumbnailStageQuarantined = func() {}
 
 type thumbnailJournalRow struct {
@@ -29,7 +31,7 @@ type thumbnailJournalRow struct {
 }
 
 // ReconcileThumbnailStages safely reconciles a bounded batch of durable thumbnail stages.
-func ReconcileThumbnailStages(ctx context.Context, db *sql.DB, trustedRoot string, limit int) (checked, cleaned int, retErr error) {
+func ReconcileThumbnailStages(ctx context.Context, db *sql.DB, roots ThumbnailRecoveryRoots, limit int) (checked, cleaned int, retErr error) {
 	if db == nil {
 		return 0, 0, errors.New("thumbnail stage reconcile: database is required")
 	}
@@ -99,12 +101,24 @@ func ReconcileThumbnailStages(ctx context.Context, db *sql.DB, trustedRoot strin
 		if err != nil {
 			return checked, cleaned, err
 		}
+		meta, metaErr := thumbnailJournalVariantMetadata(r)
+		if metaErr != nil {
+			return checked, cleaned, metaErr
+		}
 		for i, path := range paths {
+			key := "thumb"
 			expected := "thumb.jpg"
 			if i == 1 {
+				key = "medium"
 				expected = "medium.jpg"
 			}
-			if pathErr := validateThumbnailManagedPath(trustedRoot, r.generation, r.stageID, expected, path); pathErr != nil {
+			var pathErr error
+			if meta[key].Derived != nil {
+				pathErr = validateDerivedThumbnailPath(roots.Derived, meta[key].Derived.MediaID, meta[key].Derived.Kind, meta[key].Derived.LogicalName, path)
+			} else {
+				pathErr = validateThumbnailManagedPath(roots.Preview, r.generation, r.stageID, expected, path)
+			}
+			if pathErr != nil {
 				_, _ = db.ExecContext(ctx, `UPDATE media_asset_stage_journal SET recovery_error=? WHERE stage_id=?`, "unsafe_path: "+pathErr.Error(), r.stageID)
 				return checked, cleaned, pathErr
 			}
@@ -177,12 +191,12 @@ func thumbnailJournalPaths(r thumbnailJournalRow) ([]string, error) {
 	return paths, nil
 }
 
-func RunThumbnailStageReconciler(ctx context.Context, db *sql.DB, trustedRoot string, interval time.Duration, limit int, report func(error)) {
+func RunThumbnailStageReconciler(ctx context.Context, db *sql.DB, roots ThumbnailRecoveryRoots, interval time.Duration, limit int, report func(error)) {
 	if interval <= 0 {
 		interval = time.Minute
 	}
 	run := func() {
-		_, _, err := ReconcileThumbnailStages(ctx, db, trustedRoot, limit)
+		_, _, err := ReconcileThumbnailStages(ctx, db, roots, limit)
 		if err != nil && report != nil {
 			report(err)
 		}
@@ -315,4 +329,61 @@ func pathsEqual(a, b string) bool {
 		return strings.EqualFold(filepath.Clean(a), filepath.Clean(b))
 	}
 	return filepath.Clean(a) == filepath.Clean(b)
+}
+
+type thumbnailRecoveryVariant struct {
+	Path    string `json:"path"`
+	Derived *struct {
+		MediaID     int64  `json:"media_id"`
+		Kind        string `json:"kind"`
+		LogicalName string `json:"logical_name"`
+		EncPath     string `json:"enc_path"`
+	} `json:"derived"`
+}
+
+func thumbnailJournalVariantMetadata(r thumbnailJournalRow) (map[string]thumbnailRecoveryVariant, error) {
+	var m map[string]thumbnailRecoveryVariant
+	err := json.Unmarshal([]byte(r.hashes), &m)
+	return m, err
+}
+func validateDerivedThumbnailPath(root string, mediaID int64, kind, logical, path string) error {
+	if root == "" || mediaID <= 0 || (kind != "photo_thumb" && kind != "photo_medium") || ((kind == "photo_thumb" && logical != "thumb.jpg") || (kind == "photo_medium" && logical != "medium.jpg")) {
+		return fmt.Errorf("thumbnail derived identity invalid")
+	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Join(rootAbs, fmt.Sprintf("%d", mediaID), kind)
+	pathAbs, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	rel, err := filepath.Rel(dir, pathAbs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.Dir(pathAbs) != dir {
+		return fmt.Errorf("thumbnail derived path outside managed root")
+	}
+	base := filepath.Base(pathAbs)
+	prefix := logical + "."
+	if !strings.HasPrefix(base, prefix) || !strings.HasSuffix(base, ".enc") || len(strings.TrimSuffix(strings.TrimPrefix(base, prefix), ".enc")) < 32 {
+		return fmt.Errorf("thumbnail derived filename invalid")
+	}
+	return validateContainedSymlinks(rootAbs, pathAbs)
+}
+func validateContainedSymlinks(root, path string) error {
+	rootReal, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return err
+	}
+	parentReal, err := filepath.EvalSymlinks(filepath.Dir(path))
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err == nil {
+		rel, e := filepath.Rel(rootReal, parentReal)
+		if e != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("thumbnail recovery symlink escape")
+		}
+	}
+	return nil
 }

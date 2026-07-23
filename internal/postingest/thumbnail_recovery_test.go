@@ -14,6 +14,43 @@ import (
 	"knox-media/internal/storage"
 )
 
+func TestEncryptedThumbnailRecoveryUsesDerivedRoot(t *testing.T) {
+	db, _, _ := planThumbnailFixture(t, true)
+	q := NewQueue(db, "thumbnail-owner", nil)
+	task, _ := q.Claim(context.Background(), TaskThumbnail)
+	vault, _ := keystore.NewVault("recovery-derived-key", "")
+	preview := t.TempDir()
+	derivedRoot := t.TempDir()
+	worker := realThumbnailStager(t, db)
+	worker.PreviewDir = preview
+	worker.Vault = vault
+	worker.Derived = &storage.DerivedAssetStore{DB: db, Vault: vault, BaseDir: derivedRoot}
+	staged, err := worker.Stage(context.Background(), *task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`UPDATE media_asset_stage_journal SET owner_token='stale' WHERE stage_id=?`, staged.Stage.StageID); err != nil {
+		t.Fatal(err)
+	}
+	_, cleaned, err := ReconcileThumbnailStages(context.Background(), db, ThumbnailRecoveryRoots{Preview: filepath.Join(preview, "photos"), Derived: derivedRoot}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleaned != 1 {
+		t.Fatalf("cleaned=%d", cleaned)
+	}
+	for _, p := range []string{staged.Thumb.Path, staged.Medium.Path} {
+		if _, err = os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("encrypted stale retained %s: %v", p, err)
+		}
+	}
+}
+func TestEncryptedThumbnailRecoveryRejectsExternalDerivedPath(t *testing.T) {
+	if err := validateDerivedThumbnailPath(t.TempDir(), 1, "photo_thumb", "thumb.jpg", filepath.Join(t.TempDir(), "1", "photo_thumb", "thumb.jpg.deadbeef.enc")); err == nil {
+		t.Fatal("accepted external derived path")
+	}
+}
+
 func TestThumbnailManagedPathsRequireConfiguredRootAndGeneration(t *testing.T) {
 	trusted := t.TempDir()
 	outside := t.TempDir()
@@ -97,7 +134,7 @@ func TestReconcileThumbnailStagesMarksCommittedAndReachesStaleAfterHundred(t *te
 	if _, err = db.Exec(`UPDATE media_asset_stage_journal SET owner_token='stale' WHERE stage_id=?`, staged.Stage.StageID); err != nil {
 		t.Fatal(err)
 	}
-	_, cleaned, err := ReconcileThumbnailStages(context.Background(), db, filepath.Dir(filepath.Dir(staged.Stage.StagedPath)), 10)
+	_, cleaned, err := ReconcileThumbnailStages(context.Background(), db, ThumbnailRecoveryRoots{Preview: filepath.Dir(filepath.Dir(staged.Stage.StagedPath))}, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +165,7 @@ func TestReconcileThumbnailStagesRetainsActiveAndCleansStaleUnreferenced(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	checked, cleaned, err := ReconcileThumbnailStages(context.Background(), db, staleRoot, 10)
+	checked, cleaned, err := ReconcileThumbnailStages(context.Background(), db, ThumbnailRecoveryRoots{Preview: staleRoot}, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +197,7 @@ func TestReconcileThumbnailStagesQuarantinesBeforeCleanupAndBlocksCommit(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	checked, cleaned, err := ReconcileThumbnailStages(context.Background(), db, thumbnailTestRoot(t, db), 10)
+	checked, cleaned, err := ReconcileThumbnailStages(context.Background(), db, ThumbnailRecoveryRoots{Preview: thumbnailTestRoot(t, db)}, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +228,7 @@ func TestReconcileThumbnailStagesRetainsPlainMetadataReferenceWithoutEvidence(t 
 	if _, err = db.Exec(`UPDATE media_asset_stage_journal SET owner_token='stale-owner' WHERE stage_id=?`, staged.Stage.StageID); err != nil {
 		t.Fatal(err)
 	}
-	_, cleaned, err := ReconcileThumbnailStages(context.Background(), db, thumbnailTestRoot(t, db), 10)
+	_, cleaned, err := ReconcileThumbnailStages(context.Background(), db, ThumbnailRecoveryRoots{Preview: thumbnailTestRoot(t, db)}, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +255,7 @@ func TestReconcileThumbnailStagesQuarantineInterleavingRejectsWorker(t *testing.
 	var commitErr error
 	afterThumbnailStageQuarantined = func() { commitErr = commitStagedThumbnail(context.Background(), db, *task, staged) }
 	t.Cleanup(func() { afterThumbnailStageQuarantined = original })
-	_, _, err = ReconcileThumbnailStages(context.Background(), db, thumbnailTestRoot(t, db), 10)
+	_, _, err = ReconcileThumbnailStages(context.Background(), db, ThumbnailRecoveryRoots{Preview: thumbnailTestRoot(t, db)}, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,7 +275,7 @@ func TestReconcileThumbnailStagesRetriesQuarantinedCleanup(t *testing.T) {
 	if _, err = db.Exec(`UPDATE media_asset_stage_journal SET state='quarantined',recovery_error='cleanup_failed' WHERE stage_id=?`, staged.Stage.StageID); err != nil {
 		t.Fatal(err)
 	}
-	_, cleaned, err := ReconcileThumbnailStages(context.Background(), db, thumbnailTestRoot(t, db), 10)
+	_, cleaned, err := ReconcileThumbnailStages(context.Background(), db, ThumbnailRecoveryRoots{Preview: thumbnailTestRoot(t, db)}, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,7 +301,7 @@ func TestReconcileThumbnailStagesCorruptCommittedReportsAndRetains(t *testing.T)
 	if _, err = db.Exec(`UPDATE media SET meta_json='{}' WHERE id=?`, task.MediaID); err != nil {
 		t.Fatal(err)
 	}
-	_, cleaned, err := ReconcileThumbnailStages(context.Background(), db, thumbnailTestRoot(t, db), 10)
+	_, cleaned, err := ReconcileThumbnailStages(context.Background(), db, ThumbnailRecoveryRoots{Preview: thumbnailTestRoot(t, db)}, 10)
 	if err == nil {
 		t.Fatal("corrupt committed accepted")
 	}
@@ -288,7 +325,7 @@ func TestReconcileThumbnailStagesRetainsCommittedAndReferenced(t *testing.T) {
 	if err = commitStagedThumbnail(context.Background(), db, *task, staged); err != nil {
 		t.Fatal(err)
 	}
-	_, cleaned, err := ReconcileThumbnailStages(context.Background(), db, thumbnailTestRoot(t, db), 10)
+	_, cleaned, err := ReconcileThumbnailStages(context.Background(), db, ThumbnailRecoveryRoots{Preview: thumbnailTestRoot(t, db)}, 10)
 	if err != nil || cleaned != 0 {
 		t.Fatalf("cleaned=%d err=%v", cleaned, err)
 	}
@@ -307,7 +344,7 @@ func TestReconcileThumbnailStagesQueryFailurePreservesFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	if _, _, err = ReconcileThumbnailStages(context.Background(), db, thumbnailTestRoot(t, db), 10); err == nil {
+	if _, _, err = ReconcileThumbnailStages(context.Background(), db, ThumbnailRecoveryRoots{Preview: thumbnailTestRoot(t, db)}, 10); err == nil {
 		t.Fatal("expected query error")
 	}
 	if _, err = os.Stat(path); err != nil {
