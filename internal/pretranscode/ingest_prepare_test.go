@@ -132,6 +132,7 @@ func TestIngestPrepareSnapshotSurvivesPresetUpdate(t *testing.T) {
 		t.Fatalf("snapshot jobs=%d err=%v", jobs, err)
 	}
 	w := NewWorker(db, nil, "ffmpeg", root, 1, 1)
+	_, _ = db.Exec(`UPDATE transcode_task SET status='running',lease_owner=?,lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds') WHERE ingest_run_id=?`, w.claimOwner, runID)
 	_, p, r, _, _, _, _, err := w.claimNextJob()
 	if err != nil {
 		t.Fatal(err)
@@ -161,6 +162,7 @@ func TestLinkedIngestPrepareNeverFallsBackWhenSnapshotMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 	w := NewWorker(db, nil, "ffmpeg", root, 1, 1)
+	_, _ = db.Exec(`UPDATE transcode_task SET status='running',lease_owner=?,lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds') WHERE ingest_run_id=?`, w.claimOwner, runID)
 	if _, _, _, _, _, _, _, err := w.claimNextJob(); err == nil || !strings.Contains(err.Error(), "immutable snapshot") {
 		t.Fatalf("err=%v want immutable snapshot error", err)
 	}

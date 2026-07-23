@@ -10,6 +10,7 @@ import (
 	"testing"
 	"unsafe"
 
+	"knox-media/internal/publication"
 	"knox-media/internal/store"
 	"modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
@@ -491,7 +492,8 @@ func TestLinkedPrepareRetryTaskStartsNewRoundThenWorkerCanPublish(t *testing.T) 
 		t.Fatal(err)
 	}
 	w := NewWorker(db, nil, "ffmpeg", t.TempDir(), 1, 1)
-	if _, err := w.finalizeJobAndTaskTx(context.Background(), claimedJob{ID: jobID, TaskID: taskID, Owner: "retry-owner"}, renditionJobTerminal{Status: "done", Progress: 100, OutputPath: "/retry", Encoder: "libx264"}); err != nil {
+	_, _ = db.Exec(`UPDATE transcode_task SET status='running',lease_owner=?,lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds') WHERE id=?;UPDATE media_ingest_step SET status='running',attempts=1,lease_owner=?,lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds') WHERE id=?`, w.claimOwner, taskID, w.claimOwner, stepID)
+	if _, err := w.finalizeJobAndTaskTx(context.Background(), claimedJob{ID: jobID, TaskID: taskID, Owner: "retry-owner", Parent: publication.PrepareParentIdentity{TaskID: taskID, RunID: runID, StepID: stepID, MediaID: mediaID, Generation: 1, Owner: w.claimOwner}}, renditionJobTerminal{Status: "done", Progress: 100, OutputPath: "/retry", Encoder: "libx264"}); err != nil {
 		t.Fatal(err)
 	}
 	assertPrepareTerminalState(t, db, jobID, taskID, stepID, runID, mediaID, "done", "done", "done", "published", "published")

@@ -127,12 +127,12 @@ func TestPrepareCompletionPublishesFinalRequiredStep(t *testing.T) {
 	if _, err = db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status) VALUES(?,?,1,'poster',1,'done')`, runID, mediaID); err != nil {
 		t.Fatal(err)
 	}
-	res, err = db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status) VALUES(?,?,1,'prepare',1,'running')`, runID, mediaID)
+	res, err = db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status,attempts,lease_owner,lease_until) VALUES(?,?,1,'prepare',1,'running',1,'test-parent',datetime(CURRENT_TIMESTAMP,'+90 seconds'))`, runID, mediaID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	stepID, _ := res.LastInsertId()
-	res, err = db.Exec(`INSERT INTO transcode_task(file_id,quality,status,progress,task_type,media_id,ingest_run_id,ingest_step_id,generation) VALUES('fid-prepare-publish','360p','running',99,'pretranscode',?,?,?,1)`, mediaID, runID, stepID)
+	res, err = db.Exec(`INSERT INTO transcode_task(file_id,quality,status,progress,task_type,media_id,ingest_run_id,ingest_step_id,generation,lease_owner,lease_until) VALUES('fid-prepare-publish','360p','running',99,'pretranscode',?,?,?,1,'test-parent',datetime(CURRENT_TIMESTAMP,'+90 seconds'))`, mediaID, runID, stepID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,12 +175,12 @@ func seedLinkedPrepareTerminal(t *testing.T, db *sql.DB, generation int64) (task
 		t.Fatal(err)
 	}
 	runID, _ = res.LastInsertId()
-	res, err = db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status) VALUES(?,?,?,'prepare',1,'running')`, runID, mediaID, generation)
+	res, err = db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status,attempts,lease_owner,lease_until) VALUES(?,?,?,'prepare',1,'running',1,'test-parent',datetime(CURRENT_TIMESTAMP,'+90 seconds'))`, runID, mediaID, generation)
 	if err != nil {
 		t.Fatal(err)
 	}
 	stepID, _ = res.LastInsertId()
-	res, err = db.Exec(`INSERT INTO transcode_task(file_id,quality,status,progress,task_type,media_id,ingest_run_id,ingest_step_id,generation) VALUES('fid-linked-terminal','360p','running',50,'pretranscode',?,?,?,?)`, mediaID, runID, stepID, generation)
+	res, err = db.Exec(`INSERT INTO transcode_task(file_id,quality,status,progress,task_type,media_id,ingest_run_id,ingest_step_id,generation,lease_owner,lease_until) VALUES('fid-linked-terminal','360p','running',50,'pretranscode',?,?,?,?,'test-parent',datetime(CURRENT_TIMESTAMP,'+90 seconds'))`, mediaID, runID, stepID, generation)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -543,6 +543,8 @@ func TestProcessNextCompletesSkippedRenditionThroughPublicationAggregate(t *test
 		t.Fatal(err)
 	}
 	worker := NewWorker(db, nil, "missing-ffmpeg", t.TempDir(), 1, 1)
+	_, _ = db.Exec(`UPDATE transcode_task SET status='running',lease_owner=?,lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds') WHERE ingest_run_id=?`, worker.claimOwner, run.ID)
+	_, _ = db.Exec(`UPDATE media_ingest_step SET status='running',attempts=1,lease_owner=?,lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds') WHERE run_id=? AND step_type='prepare'`, worker.claimOwner, run.ID)
 	processed := 0
 	for {
 		ok, processErr := worker.ProcessNext(context.Background())

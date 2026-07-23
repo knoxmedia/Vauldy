@@ -310,6 +310,7 @@ func updateFamilyClaim(ctx context.Context, tx store.SQLExecutor, req ClaimReque
 	if err != nil {
 		return nil, err
 	}
+
 	n, _ := res.RowsAffected()
 	if n != 1 {
 		return nil, nil
