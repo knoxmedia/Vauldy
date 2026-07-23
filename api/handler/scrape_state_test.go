@@ -10,6 +10,7 @@ import (
 	"knox-media/internal/publication"
 	"knox-media/internal/scraper"
 	"testing"
+	"time"
 
 	"knox-media/internal/app"
 )
@@ -379,5 +380,136 @@ func TestScrapeRetriesExactlyThreeClaims(t *testing.T) {
 	}
 	if status != "failed" || fails != 3 {
 		t.Fatalf("status=%q fails=%d", status, fails)
+	}
+}
+
+func TestScrapeExactLifecycleRejectsRelinkSameOwner(t *testing.T) {
+	db, mediaID := posterHandlerTestDB(t)
+	claim := seedAndClaimLinkedScrape(t, db, mediaID)
+	_, err := db.Exec(`INSERT INTO media_ingest_run(media_id,generation,reason,status,config_snapshot_json) VALUES(?,2,'repair','processing','{}')`, mediaID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var run int64
+	_ = db.QueryRow(`SELECT max(id) FROM media_ingest_run`).Scan(&run)
+	res, err := db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status,attempts,lease_owner) VALUES(?,?,2,'scrape',1,'running',?,?)`, run, mediaID, claim.Attempts, claim.Owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	step, _ := res.LastInsertId()
+	_, err = db.Exec(`UPDATE media SET ingest_generation=2 WHERE id=?; UPDATE scrape_task SET ingest_run_id=?,ingest_step_id=?,generation=2 WHERE id=?`, mediaID, run, step, claim.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := completeScrapeClaim(context.Background(), db, *claim, "auto", "q", "ok", "{}"); !errors.Is(err, ErrScrapeClaimLost) {
+		t.Fatalf("complete err=%v", err)
+	}
+	var status string
+	_ = db.QueryRow(`SELECT status FROM scrape_task WHERE id=?`, claim.ID).Scan(&status)
+	if status != "running" {
+		t.Fatalf("status=%s", status)
+	}
+}
+
+func TestRenewScrapeClaimFencesTaskAndStep(t *testing.T) {
+	db, mediaID := posterHandlerTestDB(t)
+	claim := seedAndClaimLinkedScrape(t, db, mediaID)
+	_, _ = db.Exec(`UPDATE scrape_task SET lease_until=datetime(CURRENT_TIMESTAMP,'-1 second') WHERE id=?; UPDATE media_ingest_step SET lease_until=datetime(CURRENT_TIMESTAMP,'-1 second') WHERE id=?`, claim.ID, claim.StepID.Int64)
+	before := time.Now()
+	if err := renewScrapeClaim(context.Background(), db, *claim); err != nil {
+		t.Fatal(err)
+	}
+	var taskLease, stepLease time.Time
+	_ = db.QueryRow(`SELECT lease_until FROM scrape_task WHERE id=?`, claim.ID).Scan(&taskLease)
+	_ = db.QueryRow(`SELECT lease_until FROM media_ingest_step WHERE id=?`, claim.StepID.Int64).Scan(&stepLease)
+	if !taskLease.After(before) || !taskLease.Equal(stepLease) {
+		t.Fatalf("leases=%v/%v before=%v", taskLease, stepLease, before)
+	}
+	stale := *claim
+	stale.Owner = "scrape/stale"
+	if err := renewScrapeClaim(context.Background(), db, stale); !errors.Is(err, ErrScrapeClaimLost) {
+		t.Fatalf("stale err=%v", err)
+	}
+}
+
+func seedAndClaimLinkedScrape(t *testing.T, db *sql.DB, mediaID int64) *scrapeClaim {
+	t.Helper()
+	_, err := db.Exec(`UPDATE media SET ingest_generation=1 WHERE id=?`, mediaID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := db.Exec(`INSERT INTO media_ingest_run(media_id,generation,reason,status,config_snapshot_json) VALUES(?,1,'scan','processing','{}')`, mediaID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, _ := r.LastInsertId()
+	s, err := db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status) VALUES(?,?,1,'scrape',1,'waiting')`, run, mediaID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	step, _ := s.LastInsertId()
+	q, err := db.Exec(`INSERT INTO scrape_task(media_id,status,fail_count,ingest_run_id,ingest_step_id,generation) VALUES(?,'waiting',0,?,?,1)`, mediaID, run, step)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := q.LastInsertId()
+	c, err := claimScrapeTaskWithOwner(context.Background(), db, id)
+	if err != nil || c == nil {
+		t.Fatalf("claim=%+v err=%v", c, err)
+	}
+	return c
+}
+
+func TestScrapeLeaseLossPreventsLateCommit(t *testing.T) {
+	db, mediaID := posterHandlerTestDB(t)
+	_, err := db.Exec(`UPDATE media SET ingest_generation=1 WHERE id=?`, mediaID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, _ := db.Exec(`INSERT INTO media_ingest_run(media_id,generation,reason,status,config_snapshot_json) VALUES(?,1,'scan','processing','{}')`, mediaID)
+	run, _ := r.LastInsertId()
+	s, _ := db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status) VALUES(?,?,1,'scrape',1,'waiting')`, run, mediaID)
+	step, _ := s.LastInsertId()
+	q, _ := db.Exec(`INSERT INTO scrape_task(media_id,status,fail_count,source,ingest_run_id,ingest_step_id,generation) VALUES(?,'waiting',0,'auto',?,?,1)`, mediaID, run, step)
+	id, _ := q.LastInsertId()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	h := &Handler{App: &app.App{DB: db, Config: &config.Config{}}, PublicationCapabilities: publication.NewCapabilityMatrix([]string{"scrape"}), scrapeWithConfig: func(string, string, scraper.Config) (*scraper.ScrapeResult, error) {
+		close(entered)
+		<-release
+		return &scraper.ScrapeResult{Title: "late", Genres: []string{}, Extra: map[string]any{}}, nil
+	}}
+	done := make(chan [2]int, 1)
+	go func() { a, b := h.runScrapeTasksWithLimit(context.Background(), []int64{id}, 1); done <- [2]int{a, b} }()
+	<-entered
+	_, err = db.Exec(`UPDATE scrape_task SET lease_owner='scrape/reused' WHERE id=?; UPDATE media_ingest_step SET lease_owner='scrape/reused' WHERE id=?`, id, step)
+	if err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	result := <-done
+	if result[0] != 0 {
+		t.Fatalf("result=%v", result)
+	}
+	var status string
+	_ = db.QueryRow(`SELECT status FROM scrape_task WHERE id=?`, id).Scan(&status)
+	if status != "running" {
+		t.Fatalf("status=%s", status)
+	}
+}
+
+func TestLegacyUnlinkedScrapeLifecycleExplicitPath(t *testing.T) {
+	db, mediaID := posterHandlerTestDB(t)
+	_, err := db.Exec(`INSERT INTO scrape_task(id,media_id,status,fail_count) VALUES(200,?,'running',1)`, mediaID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := completeScrapeTaskTx(context.Background(), db, 200, mediaID, "auto", "q", "ok", "{}", ""); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	_ = db.QueryRow(`SELECT status FROM scrape_task WHERE id=200`).Scan(&status)
+	if status != "done" {
+		t.Fatalf("status=%s", status)
 	}
 }
