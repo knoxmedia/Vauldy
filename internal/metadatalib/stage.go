@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 type StagedScrapeImage struct {
@@ -128,3 +129,26 @@ func ReconcileScrapeArtworkStages(ctx context.Context, db *sql.DB, root string, 
 }
 
 var _ store.SQLExecutor
+
+func RunScrapeArtworkStageReconciler(ctx context.Context, db *sql.DB, root string, interval time.Duration, limit int, report func(error)) {
+	if interval <= 0 {
+		interval = time.Minute
+	}
+	run := func() {
+		_, e := ReconcileScrapeArtworkStages(ctx, db, root, limit)
+		if e != nil && report != nil {
+			report(e)
+		}
+	}
+	run()
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			run()
+		}
+	}
+}

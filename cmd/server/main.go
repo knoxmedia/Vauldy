@@ -41,6 +41,7 @@ import (
 	// imports (and the packages themselves), leaving EnterpriseModules empty.
 	_ "knox-media/internal/license"
 	"knox-media/internal/lyrictask"
+	"knox-media/internal/metadatalib"
 	"knox-media/internal/monitor"
 	"knox-media/internal/photoclass"
 	"knox-media/internal/postingest"
@@ -347,6 +348,9 @@ func main() {
 
 	// (5) Admin overview uses the shared resource-control instances.
 	background := &handler.BackgroundGroup{}
+	background.Go(serverCtx, func(ctx context.Context) {
+		metadatalib.RunScrapeArtworkStageReconciler(ctx, db, cfg.Data.MetadataLibrary, time.Minute, 100, func(err error) { log.Printf("scrape artwork stage reconcile: %v", err) })
+	})
 	background.Go(serverCtx, func(ctx context.Context) {
 		postingest.RunThumbnailStageReconciler(ctx, db, postingest.ThumbnailRecoveryRoots{Preview: filepath.Join(cfg.Data.Preview, "photos"), Derived: filepath.Join(cfg.Data.Dir, ".derived")}, time.Minute, 100, func(err error) { log.Printf("thumbnail stage reconcile: %v", err) })
 	})

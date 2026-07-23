@@ -1619,3 +1619,55 @@ func TestQueue_LinkedLifecycleRejectsRelinkWithSameOwner(t *testing.T) {
 type testCapabilities struct{}
 
 func (testCapabilities) Available(string) bool { return true }
+
+func TestQueue_PosterRepairExactLifecycleDoesNotSyncPublication(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	mid, _, _ := seedQueueTest(t, db)
+	_, _ = db.Exec(`UPDATE media SET ingest_generation=1,publication_state='published',published_at=CURRENT_TIMESTAMP WHERE id=?; INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(900,?,1,'repair','published','{}',2); INSERT INTO post_ingest_task(media_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(?,900,NULL,1,'poster_repair','waiting')`, mid, mid)
+	q := NewQueue(db, "repair-owner", nil)
+	task, err := q.Claim(context.Background(), TaskPosterRepair)
+	if err != nil || task == nil {
+		t.Fatalf("claim=%+v err=%v", task, err)
+	}
+	if ok, err := q.Renew(context.Background(), *task); err != nil || !ok {
+		t.Fatalf("renew=%v,%v", ok, err)
+	}
+	if err = q.Complete(context.Background(), *task); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	_ = db.QueryRow(`SELECT status FROM post_ingest_task WHERE id=?`, task.ID).Scan(&status)
+	if status != "done" {
+		t.Fatalf("status=%s", status)
+	}
+	var steps int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM media_ingest_step WHERE run_id=900`).Scan(&steps)
+	if steps != 0 {
+		t.Fatalf("steps=%d", steps)
+	}
+}
+func TestQueue_PosterRepairFailAndStaleFence(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	mid, _, _ := seedQueueTest(t, db)
+	_, _ = db.Exec(`UPDATE media SET ingest_generation=1,publication_state='published',published_at=CURRENT_TIMESTAMP WHERE id=?;INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(901,?,1,'repair','published','{}',2);INSERT INTO post_ingest_task(media_id,ingest_run_id,generation,task_type,status,max_attempts) VALUES(?,901,1,'poster_repair','waiting',2)`, mid, mid)
+	q := NewQueue(db, "repair-owner", nil)
+	task, _ := q.Claim(context.Background(), TaskPosterRepair)
+	if err := q.Fail(context.Background(), task, FailureRetryable, errors.New("x")); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	_ = db.QueryRow(`SELECT status FROM post_ingest_task WHERE id=?`, task.ID).Scan(&status)
+	if status != "waiting" {
+		t.Fatalf("retry=%s", status)
+	}
+	_, _ = db.Exec(`UPDATE post_ingest_task SET available_at=CURRENT_TIMESTAMP WHERE id=?`, task.ID)
+	task, _ = q.Claim(context.Background(), TaskPosterRepair)
+	_, _ = db.Exec(`UPDATE media SET ingest_generation=2 WHERE id=?`, mid)
+	if err := q.Complete(context.Background(), *task); err == nil {
+		t.Fatal("stale completed")
+	}
+	_ = db.QueryRow(`SELECT status FROM media_ingest_run WHERE id=901`).Scan(&status)
+	if status != "published" {
+		t.Fatalf("run=%s", status)
+	}
+}

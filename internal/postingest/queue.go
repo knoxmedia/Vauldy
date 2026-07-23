@@ -269,12 +269,36 @@ func (q *Queue) validateClaimedTask(task Task) error {
 	return nil
 }
 
+func posterRepairTask(task Task) bool {
+	return task.Type == TaskPosterRepair && task.RunID != nil && task.StepID == nil && task.Generation > 0
+}
+
+const posterRepairLifecyclePredicate = `id=? AND media_id=? AND task_type='poster_repair' AND status='running' AND lease_owner=? AND attempts=? AND ingest_run_id=? AND ingest_step_id IS NULL AND generation=? AND EXISTS(SELECT 1 FROM media m JOIN media_ingest_run r ON r.id=post_ingest_task.ingest_run_id WHERE m.id=post_ingest_task.media_id AND m.ingest_generation=post_ingest_task.generation AND m.publication_state IN ('published','degraded') AND m.published_at IS NOT NULL AND r.media_id=post_ingest_task.media_id AND r.generation=post_ingest_task.generation AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL)`
+
+func posterRepairArgs(t Task) []any {
+	return []any{t.ID, t.MediaID, t.LeaseOwner, t.Attempts, *t.RunID, t.Generation}
+}
+
 func (q *Queue) Renew(ctx context.Context, task Task) (bool, error) {
 	if err := q.validate(true); err != nil {
 		return false, err
 	}
 	if err := q.validateClaimedTask(task); err != nil {
 		return false, err
+	}
+	if posterRepairTask(task) {
+		var renewed bool
+		err := store.WithBusyRetry(ctx, q.metrics, func() error {
+			args := append([]any{leaseModifier()}, posterRepairArgs(task)...)
+			r, e := q.db.ExecContext(ctx, `UPDATE post_ingest_task SET lease_until=datetime(CURRENT_TIMESTAMP,?),updated_at=CURRENT_TIMESTAMP WHERE `+posterRepairLifecyclePredicate, args...)
+			if e != nil {
+				return e
+			}
+			n, _ := r.RowsAffected()
+			renewed = n == 1
+			return nil
+		})
+		return renewed, err
 	}
 	var renewed bool
 	err := store.WithBusyRetry(ctx, q.metrics, func() error {
@@ -327,6 +351,17 @@ func (q *Queue) Complete(ctx context.Context, task Task) error {
 	}
 	if err := q.validateClaimedTask(task); err != nil {
 		return err
+	}
+	if posterRepairTask(task) {
+		r, e := q.db.ExecContext(ctx, `UPDATE post_ingest_task SET status='done',lease_owner=NULL,lease_until=NULL,last_error='',finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE `+posterRepairLifecyclePredicate, posterRepairArgs(task)...)
+		if e != nil {
+			return e
+		}
+		n, _ := r.RowsAffected()
+		if n != 1 {
+			return q.ownerWriteError(ctx, task.ID, task.LeaseOwner, "complete")
+		}
+		return nil
 	}
 	var updated bool
 	err := store.WithBusyRetry(ctx, q.metrics, func() error {
@@ -399,6 +434,25 @@ func (q *Queue) Fail(ctx context.Context, task *Task, kind FailureKind, cause er
 	}
 	if kind < FailureRetryable || kind > FailureShutdown {
 		return fmt.Errorf("postingest queue: invalid failure kind %d", kind)
+	}
+	if posterRepairTask(*task) {
+		status := "failed"
+		available := "CURRENT_TIMESTAMP"
+		if kind == FailureRetryable {
+			status = "CASE WHEN attempts>=max_attempts THEN 'failed' ELSE 'waiting' END"
+			available = "datetime(CURRENT_TIMESTAMP,'+5 seconds')"
+		}
+		qtext := fmt.Sprintf(`UPDATE post_ingest_task SET status=%s,available_at=%s,lease_owner=NULL,lease_until=NULL,last_error=?,finished_at=CASE WHEN %s='waiting' THEN NULL ELSE CURRENT_TIMESTAMP END,updated_at=CURRENT_TIMESTAMP WHERE `+posterRepairLifecyclePredicate, status, available, status)
+		args := append([]any{failureText(cause)}, posterRepairArgs(*task)...)
+		r, e := q.db.ExecContext(ctx, qtext, args...)
+		if e != nil {
+			return e
+		}
+		n, _ := r.RowsAffected()
+		if n != 1 {
+			return q.ownerWriteError(ctx, task.ID, task.LeaseOwner, "fail")
+		}
+		return nil
 	}
 	requestedKind := kind
 	requestedError := failureText(cause)

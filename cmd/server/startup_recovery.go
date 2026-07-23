@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 
+	"knox-media/internal/metadatalib"
 	"knox-media/internal/postingest"
 	"knox-media/internal/store"
 )
@@ -16,6 +17,13 @@ func recoverStartupTasks(ctx context.Context, db *sql.DB, postIngest *postingest
 	}
 	if db == nil || postIngest == nil {
 		return fmt.Errorf("startup recovery: database and post-ingest queue are required")
+	}
+	metadataRoot := ""
+	if len(roots) > 1 {
+		metadataRoot = roots[1].Preview
+	}
+	if _, err := metadatalib.ReconcileScrapeArtworkStages(ctx, db, metadataRoot, 100); err != nil {
+		return fmt.Errorf("startup recovery: scrape artwork stages: %w", err)
 	}
 	if _, _, err := postingest.ReconcileThumbnailStages(ctx, db, firstRoots(roots), 100); err != nil {
 		return fmt.Errorf("startup recovery: thumbnail stages: %w", err)
