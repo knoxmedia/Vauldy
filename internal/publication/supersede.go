@@ -18,7 +18,7 @@ func publicationTableExistsTx(ctx context.Context, q store.SQLExecutor, table st
 	return exists == 1, nil
 }
 
-func execSupersedeTx(ctx context.Context, tx *sql.Tx, label, query string, args ...any) error {
+func execSupersedeTx(ctx context.Context, tx store.SQLExecutor, label, query string, args ...any) error {
 	result, err := tx.ExecContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("publication supersede: %s: %w", label, err)
@@ -32,6 +32,13 @@ func execSupersedeTx(ctx context.Context, tx *sql.Tx, label, query string, args 
 // SupersedeGenerationTx fences every active worker linked to an ingest generation.
 // Terminal run and task outcomes remain immutable; only supersession metadata is added.
 func SupersedeGenerationTx(ctx context.Context, tx *sql.Tx, mediaID, oldGeneration, newGeneration int64) error {
+	if tx == nil {
+		return fmt.Errorf("publication supersede: invalid transaction or generation")
+	}
+	return supersedeGeneration(ctx, tx, mediaID, oldGeneration, newGeneration)
+}
+
+func supersedeGeneration(ctx context.Context, tx store.SQLExecutor, mediaID, oldGeneration, newGeneration int64) error {
 	if tx == nil || mediaID <= 0 || oldGeneration < 0 || newGeneration <= oldGeneration {
 		return fmt.Errorf("publication supersede: invalid transaction or generation")
 	}

@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"sync"
 	"testing"
+	"time"
 
 	"knox-media/internal/coreiface"
 	"knox-media/internal/store"
@@ -341,6 +342,64 @@ func TestRetryIngestDoesNotCopyOldSnapshotOrPrepareRows(t *testing.T) {
 	_ = db.QueryRow(`SELECT COUNT(*) FROM pretranscode_rendition_job j JOIN transcode_task t ON t.id=j.task_id WHERE t.media_id=? AND t.generation=2 AND j.config_snapshot_json='{"old":true}'`, mediaID).Scan(&copied)
 	if snapshot == oldSnapshot || copied != 0 {
 		t.Fatalf("snapshotEqual=%v copiedPrepare=%d", snapshot == oldSnapshot, copied)
+	}
+}
+
+func TestRetryIngestCommitContentionHonorsRetryBudgetWithoutPartialReplacement(t *testing.T) {
+	db := openRetryTestDB(t)
+	mediaID, _, _ := seedTerminalRetry(t, db, "degraded")
+	if _, err := db.Exec(`PRAGMA journal_mode=DELETE`); err != nil {
+		t.Fatal(err)
+	}
+
+	// In rollback-journal mode this reader permits BEGIN IMMEDIATE and all writes,
+	// but prevents the writer from upgrading to EXCLUSIVE only at COMMIT.
+	reader, err := db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state string
+	if err = reader.QueryRow(`SELECT publication_state FROM media WHERE id=?`, mediaID).Scan(&state); err != nil {
+		_ = reader.Rollback()
+		t.Fatal(err)
+	}
+	released := make(chan struct{})
+	go func() {
+		time.Sleep(3 * time.Second)
+		_ = reader.Rollback()
+		close(released)
+	}()
+
+	started := time.Now()
+	err = RetryIngest(context.Background(), db, mediaID, currentRetryPlanner(&retryPreparePlanner{}))
+	elapsed := time.Since(started)
+	<-released
+	if err == nil {
+		t.Fatalf("retry unexpectedly committed after blocked commit in %v", elapsed)
+	}
+	var commitErr *store.ImmediateCommitError
+	if !errors.As(err, &commitErr) {
+		t.Fatalf("contention did not reach commit: err=%v", err)
+	}
+	if elapsed > 2500*time.Millisecond {
+		t.Fatalf("retry exceeded 2s policy budget: %v err=%v", elapsed, err)
+	}
+	var generation, runs int
+	if err = db.QueryRow(`SELECT ingest_generation FROM media WHERE id=?`, mediaID).Scan(&generation); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.QueryRow(`SELECT COUNT(*) FROM media_ingest_run WHERE media_id=?`, mediaID).Scan(&runs); err != nil {
+		t.Fatal(err)
+	}
+	if generation != 1 || runs != 1 {
+		t.Fatalf("partial replacement generation=%d runs=%d", generation, runs)
+	}
+	var busyTimeout int
+	if err = db.QueryRow(`PRAGMA busy_timeout`).Scan(&busyTimeout); err != nil {
+		t.Fatal(err)
+	}
+	if busyTimeout != 30000 {
+		t.Fatalf("pooled busy_timeout=%d want restored 30000", busyTimeout)
 	}
 }
 

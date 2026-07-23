@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"time"
 )
 
 // SQLExecutor is the subset of database/sql execution methods available inside
@@ -47,6 +48,36 @@ func WithImmediateConnTx(ctx context.Context, db *sql.DB, fn func(ImmediateConnT
 		return outcome, err
 	}
 	defer conn.Close()
+
+	var restoreBusyTimeout func() error
+	if deadline, ok := ctx.Deadline(); ok {
+		var previous int64
+		if err := conn.QueryRowContext(ctx, `PRAGMA busy_timeout`).Scan(&previous); err != nil {
+			return outcome, err
+		}
+		remaining := time.Until(deadline)
+		bounded := remaining.Milliseconds()
+		if bounded < 1 {
+			bounded = 1
+		}
+		if previous <= 0 || bounded < previous {
+			if _, err := conn.ExecContext(ctx, fmt.Sprintf(`PRAGMA busy_timeout=%d`, bounded)); err != nil {
+				return outcome, err
+			}
+			restoreBusyTimeout = func() error {
+				_, restoreErr := conn.ExecContext(context.Background(), fmt.Sprintf(`PRAGMA busy_timeout=%d`, previous))
+				return restoreErr
+			}
+			defer func() {
+				if restoreErr := restoreBusyTimeout(); restoreErr != nil {
+					err = errors.Join(err, fmt.Errorf("store: restore immediate transaction busy timeout: %w", restoreErr))
+					if discardErr := conn.Raw(func(any) error { return driver.ErrBadConn }); discardErr != nil && !errors.Is(discardErr, driver.ErrBadConn) {
+						err = errors.Join(err, fmt.Errorf("store: discard connection after busy timeout restore failure: %w", discardErr))
+					}
+				}
+			}()
+		}
+	}
 
 	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
 		return outcome, err
