@@ -1297,6 +1297,22 @@ func completeScrapeClaim(ctx context.Context, db *sql.DB, c scrapeClaim, source,
 }
 func completeScrapeClaimWithEffects(ctx context.Context, db *sql.DB, c scrapeClaim, source, query, message string, result *scraper.ScrapeResult, effects scrapeCompletionEffects) error {
 	effects.Credits = normalizeScrapeCredits(effects.Credits)
+	if len(effects.Artwork.Images) > 0 {
+		metadatalib.SelectStagedScrapeArtwork(result, effects.Artwork)
+	}
+	if effects.LibraryID > 0 && effects.PreparedSeries == nil {
+		prepared, e := prepareSeriesEffects(ctx, db, effects.LibraryID, c.MediaID, result)
+		if e != nil {
+			return e
+		}
+		effects.PreparedSeries = prepared
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+	}
+	effects.Credits = normalizeScrapeCredits(effects.Credits)
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, 30*time.Second)

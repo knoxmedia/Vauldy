@@ -145,11 +145,20 @@ func ReconcileScrapeArtworkStages(ctx context.Context, db *sql.DB, root string, 
 			continue
 		}
 		if c.state == "staged" {
-			r, err := db.ExecContext(ctx, `UPDATE media_asset_stage_journal SET state='quarantined',quarantine_path=staged_path,updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='staged' AND updated_at < datetime(CURRENT_TIMESTAMP,'-10 minutes') AND NOT EXISTS(SELECT 1 FROM media_ingest_evidence WHERE stage_id=?)`, c.id, c.id)
+			var changed bool
+			_, err := store.WithImmediateConnTx(ctx, db, func(tx store.ImmediateConnTx) error {
+				r, e := tx.ExecContext(ctx, `UPDATE media_asset_stage_journal AS j SET state='quarantined',quarantine_path=staged_path,updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='staged' AND artifact_kind='scrape_artwork' AND updated_at < datetime(CURRENT_TIMESTAMP,'-10 minutes') AND NOT EXISTS(SELECT 1 FROM media_ingest_evidence WHERE stage_id=j.stage_id) AND NOT EXISTS(SELECT 1 FROM scrape_task q JOIN media m ON m.id=q.media_id JOIN media_ingest_step s ON s.id=q.ingest_step_id AND s.run_id=q.ingest_run_id AND s.media_id=q.media_id AND s.generation=q.generation WHERE q.media_id=j.media_id AND q.ingest_run_id=j.run_id AND q.ingest_step_id=j.step_id AND q.generation=j.generation AND q.lease_owner=j.owner_token AND q.status='running' AND q.lease_until>CURRENT_TIMESTAMP AND s.status='running' AND s.lease_owner=j.owner_token AND m.ingest_generation=j.generation)`, c.id)
+				if e != nil {
+					return e
+				}
+				n, e := r.RowsAffected()
+				changed = n == 1
+				return e
+			})
 			if err != nil {
 				return n, err
 			}
-			if x, _ := r.RowsAffected(); x != 1 {
+			if !changed {
 				continue
 			}
 		}

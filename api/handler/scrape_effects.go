@@ -23,6 +23,7 @@ type scrapeCompletionEffects struct {
 	LibraryID      int64
 	Artwork        metadatalib.StagedScrapeArtwork
 	BeforeTerminal func() error
+	PreparedSeries *PreparedSeriesEffects
 }
 
 func applyScrapeCompletionEffectsTx(ctx context.Context, tx store.SQLExecutor, c scrapeClaim, result *scraper.ScrapeResult, e scrapeCompletionEffects) (string, error) {
@@ -43,7 +44,11 @@ func applyScrapeCompletionEffectsTx(ctx context.Context, tx store.SQLExecutor, c
 			return "", err
 		}
 	}
-	if e.LibraryID > 0 {
+	if e.PreparedSeries != nil {
+		if err := applyPreparedSeriesEffectsTx(ctx, tx, *e.PreparedSeries); err != nil {
+			return "", err
+		}
+	} else if e.LibraryID > 0 {
 		if err := syncSeriesCollectionMetaExecutor(ctx, tx, e.LibraryID, c.MediaID, result); err != nil {
 			return "", err
 		}

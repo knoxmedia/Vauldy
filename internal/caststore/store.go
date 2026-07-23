@@ -807,8 +807,12 @@ func findOrCreateByNameExecutor(ctx context.Context, db store.SQLExecutor, name 
 		return 0, sql.ErrNoRows
 	}
 	var id int64
-	if db.QueryRowContext(ctx, `SELECT id FROM cast_person WHERE name_norm=? AND deleted_at IS NULL LIMIT 1`, normName(name)).Scan(&id) == nil && id > 0 {
+	err := db.QueryRowContext(ctx, `SELECT id FROM cast_person WHERE name_norm=? AND deleted_at IS NULL LIMIT 1`, normName(name)).Scan(&id)
+	if err == nil && id > 0 {
 		return id, nil
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, err
 	}
 	r, e := db.ExecContext(ctx, `INSERT INTO cast_person(name,name_norm,occupation_json) VALUES(?,?,'[]')`, name, normName(name))
 	if e != nil {
