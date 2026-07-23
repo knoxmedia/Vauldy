@@ -21,12 +21,13 @@ type Adapter interface {
 }
 
 type AdapterSet struct {
-	Poster   Adapter
-	Preview  Adapter
-	Keyframe Adapter
-	Subtitle Adapter
-	Atrack   Adapter
-	Encrypt  Adapter
+	Poster    Adapter
+	Thumbnail Adapter
+	Preview   Adapter
+	Keyframe  Adapter
+	Subtitle  Adapter
+	Atrack    Adapter
+	Encrypt   Adapter
 }
 
 func (s AdapterSet) Execute(ctx context.Context, task Task) error {
@@ -34,6 +35,8 @@ func (s AdapterSet) Execute(ctx context.Context, task Task) error {
 	switch task.Type {
 	case TaskPoster:
 		adapter = s.Poster
+	case TaskThumbnail:
+		adapter = s.Thumbnail
 	case TaskPreview:
 		adapter = s.Preview
 	case TaskKeyframe:
@@ -141,8 +144,8 @@ func validateAdapterLease(ctx context.Context, db *sql.DB, task Task) error {
 		return nil
 	}
 	var one int
-	query := `SELECT 1 FROM post_ingest_task WHERE id=? AND media_id=? AND task_type=? AND status='running' AND lease_owner=?`
-	args := []any{task.ID, task.MediaID, task.Type, task.LeaseOwner}
+	query := `SELECT 1 FROM post_ingest_task p JOIN media m ON m.id=p.media_id WHERE p.id=? AND p.media_id=? AND p.task_type=? AND p.status='running' AND p.lease_owner=? AND p.generation=m.ingest_generation AND (?<=0 OR p.generation=?) AND (p.ingest_run_id IS NULL OR EXISTS (SELECT 1 FROM media_ingest_run r WHERE r.id=p.ingest_run_id AND r.media_id=p.media_id AND r.generation=p.generation AND r.superseded_by_generation IS NULL AND r.superseded_at IS NULL))`
+	args := []any{task.ID, task.MediaID, task.Type, task.LeaseOwner, task.Generation, task.Generation}
 	if task.Attempts > 0 {
 		query += ` AND attempts=?`
 		args = append(args, task.Attempts)
@@ -158,8 +161,8 @@ func validateAdapterLeaseTx(ctx context.Context, tx *sql.Tx, task Task) error {
 	if strings.TrimSpace(task.LeaseOwner) == "" {
 		return nil
 	}
-	query := `SELECT 1 FROM post_ingest_task WHERE id=? AND media_id=? AND task_type=? AND status='running' AND lease_owner=?`
-	args := []any{task.ID, task.MediaID, task.Type, task.LeaseOwner}
+	query := `SELECT 1 FROM post_ingest_task p JOIN media m ON m.id=p.media_id WHERE p.id=? AND p.media_id=? AND p.task_type=? AND p.status='running' AND p.lease_owner=? AND p.generation=m.ingest_generation AND (?<=0 OR p.generation=?) AND (p.ingest_run_id IS NULL OR EXISTS (SELECT 1 FROM media_ingest_run r WHERE r.id=p.ingest_run_id AND r.media_id=p.media_id AND r.generation=p.generation AND r.superseded_by_generation IS NULL AND r.superseded_at IS NULL))`
+	args := []any{task.ID, task.MediaID, task.Type, task.LeaseOwner, task.Generation, task.Generation}
 	if task.Attempts > 0 {
 		query += ` AND attempts=?`
 		args = append(args, task.Attempts)

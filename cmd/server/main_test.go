@@ -73,7 +73,7 @@ func TestSharedResourceControlAssemblyMainOrder(t *testing.T) {
 	markers := []string{
 		"// (1) Database, metrics, and validated configuration.",
 		"// (2) Vault, derived storage, and domain workers.",
-		"// (3) Shared post-ingest queue, enqueuer, six adapters, and dispatcher.",
+		"// (3) Shared post-ingest queue, enqueuer, seven adapters, and dispatcher.",
 		"// (4) Scanner dependencies and the process-wide scan coordinator.",
 		"// (5) Admin overview uses the shared resource-control instances.",
 		"// (6) Handler dependencies are injected into the API router.",
@@ -91,7 +91,7 @@ func TestSharedResourceControlAssemblyMainOrder(t *testing.T) {
 		}
 		previous = at
 	}
-	for _, required := range []string{"postingest.AdapterSet{", "postingest.NewPosterAdapter(", "postingest.NewPreviewAdapter(", "postingest.NewKeyframeAdapter(", "postingest.NewSubtitleAdapter(", "postingest.NewAtrackAdapter(", "postingest.NewEncryptAdapter(", "scancoord.New(", "monitor.NewService(db, coordinator", "api.NewEngine(cfg, application, deps)"} {
+	for _, required := range []string{"postingest.AdapterSet{", "postingest.NewThumbnailAdapter(", "postingest.NewPosterAdapter(", "postingest.NewPreviewAdapter(", "postingest.NewKeyframeAdapter(", "postingest.NewSubtitleAdapter(", "postingest.NewAtrackAdapter(", "postingest.NewEncryptAdapter(", "scancoord.New(", "monitor.NewService(db, coordinator", "api.NewEngine(cfg, application, deps)"} {
 		if !strings.Contains(src, required) {
 			t.Fatalf("main missing shared assembly %q", required)
 		}

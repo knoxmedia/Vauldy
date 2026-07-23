@@ -46,7 +46,7 @@ func DefaultDispatcherOptions() DispatcherOptions {
 		global = 4
 	}
 	return DispatcherOptions{Global: global, Poster: min(2, global), Preview: 1, PollInterval: 250 * time.Millisecond, LeaseDuration: leaseDuration, HeartbeatInterval: 30 * time.Second, ExecutorStopGrace: 10 * time.Second, Timeouts: map[TaskType]time.Duration{
-		TaskPoster: 2 * time.Minute, TaskPreview: 30 * time.Minute, TaskKeyframe: 30 * time.Minute, TaskSubtitle: 60 * time.Minute, TaskAtrack: 30 * time.Minute, TaskEncrypt: 120 * time.Minute,
+		TaskPoster: 2 * time.Minute, TaskThumbnail: 2 * time.Minute, TaskPreview: 30 * time.Minute, TaskKeyframe: 30 * time.Minute, TaskSubtitle: 60 * time.Minute, TaskAtrack: 30 * time.Minute, TaskEncrypt: 120 * time.Minute,
 	}}
 }
 
@@ -129,7 +129,7 @@ func NewDispatcher(q *Queue, executor Executor, opts DispatcherOptions) (*Dispat
 	return &Dispatcher{q: q, executor: executor, opts: opts, global: make(chan struct{}, opts.Global), poster: make(chan struct{}, opts.Poster), preview: make(chan struct{}, opts.Preview), running: map[int64]*workerState{}, scans: map[int64]map[int64]*workerState{}}, nil
 }
 
-var taskTypes = []TaskType{TaskPoster, TaskPreview, TaskKeyframe, TaskSubtitle, TaskAtrack, TaskEncrypt}
+var taskTypes = []TaskType{TaskPoster, TaskThumbnail, TaskPreview, TaskKeyframe, TaskSubtitle, TaskAtrack, TaskEncrypt}
 
 func (d *Dispatcher) Start(ctx context.Context) error {
 	d.startMu.Lock()

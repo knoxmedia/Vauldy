@@ -42,7 +42,7 @@ func (q *Queue) validate(needOwner bool) error {
 
 func validTaskType(typ TaskType) bool {
 	switch typ {
-	case TaskPoster, TaskPreview, TaskKeyframe, TaskSubtitle, TaskAtrack, TaskEncrypt:
+	case TaskPoster, TaskThumbnail, TaskPreview, TaskKeyframe, TaskSubtitle, TaskAtrack, TaskEncrypt:
 		return true
 	default:
 		return false
@@ -274,10 +274,10 @@ func (q *Queue) Claim(ctx context.Context, typ TaskType) (*Task, error) {
 		var leaseUntil time.Time
 		err = tx.QueryRowContext(ctx, `
 			SELECT id, media_id, scan_task_id, task_type, status, attempts,
-				max_attempts, lease_owner, lease_until, last_error
+				max_attempts, generation, lease_owner, lease_until, last_error
 			FROM post_ingest_task WHERE id=?`, id).Scan(
 			&task.ID, &task.MediaID, &scanID, &task.Type, &task.Status,
-			&task.Attempts, &task.MaxAttempts, &leaseOwner, &leaseUntil, &lastError)
+			&task.Attempts, &task.MaxAttempts, &task.Generation, &leaseOwner, &leaseUntil, &lastError)
 		if err != nil {
 			return err
 		}

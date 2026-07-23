@@ -62,7 +62,7 @@ func TestDefaultDispatcherOptions(t *testing.T) {
 	if o.Global != wantGlobal || o.Poster != min(2, wantGlobal) || o.Preview != 1 {
 		t.Fatalf("budgets=%d/%d/%d", o.Global, o.Poster, o.Preview)
 	}
-	wants := map[TaskType]time.Duration{TaskPoster: 2 * time.Minute, TaskPreview: 30 * time.Minute, TaskKeyframe: 30 * time.Minute, TaskAtrack: 30 * time.Minute, TaskSubtitle: 60 * time.Minute, TaskEncrypt: 120 * time.Minute}
+	wants := map[TaskType]time.Duration{TaskPoster: 2 * time.Minute, TaskThumbnail: 2 * time.Minute, TaskPreview: 30 * time.Minute, TaskKeyframe: 30 * time.Minute, TaskAtrack: 30 * time.Minute, TaskSubtitle: 60 * time.Minute, TaskEncrypt: 120 * time.Minute}
 	for typ, want := range wants {
 		if o.Timeouts[typ] != want {
 			t.Fatalf("timeout %s=%v", typ, o.Timeouts[typ])
@@ -311,7 +311,7 @@ func TestDispatcher_RoundRobinPersistsAcrossSlots(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- d.Start(ctx) }()
 	seen := map[TaskType]bool{}
-	for i := 0; i < 6; i++ {
+	for i := 0; i < len(taskTypes); i++ {
 		select {
 		case typ := <-started:
 			seen[typ] = true
@@ -322,7 +322,7 @@ func TestDispatcher_RoundRobinPersistsAcrossSlots(t *testing.T) {
 	}
 	for _, typ := range taskTypes {
 		if !seen[typ] {
-			t.Fatalf("first six starts=%v missing %s", seen, typ)
+			t.Fatalf("first task cycle starts=%v missing %s", seen, typ)
 		}
 	}
 	cancel()

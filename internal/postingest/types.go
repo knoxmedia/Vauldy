@@ -11,12 +11,13 @@ import (
 type TaskType string
 
 const (
-	TaskPoster   TaskType = "poster"
-	TaskPreview  TaskType = "preview"
-	TaskKeyframe TaskType = "keyframe"
-	TaskSubtitle TaskType = "subtitle"
-	TaskAtrack   TaskType = "atrack"
-	TaskEncrypt  TaskType = "encrypt"
+	TaskPoster    TaskType = "poster"
+	TaskThumbnail TaskType = "thumbnail"
+	TaskPreview   TaskType = "preview"
+	TaskKeyframe  TaskType = "keyframe"
+	TaskSubtitle  TaskType = "subtitle"
+	TaskAtrack    TaskType = "atrack"
+	TaskEncrypt   TaskType = "encrypt"
 )
 
 type Status string
@@ -46,6 +47,7 @@ type Task struct {
 	Status      Status
 	Attempts    int
 	MaxAttempts int
+	Generation  int64
 	LeaseOwner  string
 	LeaseUntil  time.Time
 	LastError   string

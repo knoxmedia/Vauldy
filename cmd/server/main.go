@@ -241,7 +241,7 @@ func main() {
 		DocTrans:   cfg.DocTrans,
 		TimeoutSec: cfg.DocTransTimeoutSeconds,
 	})
-	// (3) Shared post-ingest queue, enqueuer, six adapters, and dispatcher.
+	// (3) Shared post-ingest queue, enqueuer, seven adapters, and dispatcher.
 	hostname, err := os.Hostname()
 	if err != nil || strings.TrimSpace(hostname) == "" {
 		hostname = "unknown-host"
@@ -253,14 +253,16 @@ func main() {
 		log.Fatalf("startup task recovery: %v", err)
 	}
 	postIngestEnqueuer := postingest.NewEnqueuer(db, cfg, sqliteMetrics)
+	thumbnailWorker := &postingest.LocalThumbnailWorker{DB: db, Vault: keyVault, Derived: derivedStore, FFmpegPath: cfg.FFmpeg.FFmpegPath, PreviewDir: cfg.Data.Preview}
 	posterRunner := &postingest.LocalPosterRunner{DB: db, Vault: keyVault, Derived: derivedStore, FFmpegPath: cfg.FFmpeg.FFmpegPath, FFprobePath: cfg.FFmpeg.FFprobePath, UploadDir: cfg.Data.Upload}
 	adapters := postingest.AdapterSet{
-		Poster:   postingest.NewPosterAdapter(db, cfg.Data.Upload, derivedStore, posterRunner),
-		Preview:  postingest.NewPreviewAdapter(db, previewWorker),
-		Keyframe: postingest.NewKeyframeAdapter(db, keyframeWorker),
-		Subtitle: postingest.NewSubtitleAdapter(db, subSvc),
-		Atrack:   postingest.NewAtrackAdapter(db, atrackWorker),
-		Encrypt:  postingest.NewEncryptAdapter(assetEnc),
+		Thumbnail: postingest.NewThumbnailAdapter(db, thumbnailWorker),
+		Poster:    postingest.NewPosterAdapter(db, cfg.Data.Upload, derivedStore, posterRunner),
+		Preview:   postingest.NewPreviewAdapter(db, previewWorker),
+		Keyframe:  postingest.NewKeyframeAdapter(db, keyframeWorker),
+		Subtitle:  postingest.NewSubtitleAdapter(db, subSvc),
+		Atrack:    postingest.NewAtrackAdapter(db, atrackWorker),
+		Encrypt:   postingest.NewEncryptAdapter(assetEnc),
 	}
 	dispatcherOptions := buildDispatcherOptions(cfg, queueOwner)
 	dispatcher, err := postingest.NewDispatcher(postIngestQueue, adapters, dispatcherOptions)

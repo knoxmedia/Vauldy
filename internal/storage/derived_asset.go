@@ -196,6 +196,9 @@ func (s *DerivedAssetStore) Write(ctx context.Context, mediaID int64, kind, logi
 			return e
 		}
 		defer tx.Rollback()
+		if e = runDerivedCommitGuardTx(ctx, tx); e != nil {
+			return e
+		}
 		old, e = s.CommitStagedTx(ctx, tx, a)
 		if e != nil {
 			return e
