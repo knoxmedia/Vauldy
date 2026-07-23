@@ -500,6 +500,25 @@ func (h *Handler) runScrapeTasksWithLimit(ctx context.Context, ids []int64, limi
 			finishWork()
 			continue
 		}
+
+		effects := scrapeCompletionEffects{LibraryID: libraryID}
+		if claim.Generation.Valid && h.App.Config != nil {
+			stageID := fmt.Sprintf("scrape:%d:%d:%d", claim.ID, claim.Attempts, claim.Generation.Int64)
+			if staged, e := metadatalib.StageScrapeImages(workCtx, h.App.Config.Data.MetadataLibrary, h.App.Config.Data.Upload, mediaID, claim.Generation.Int64, stageID, res); e == nil {
+				effects.Artwork = staged
+			}
+		}
+		if strings.EqualFold(fileType, "video") && !scraper.HasScrapePoster(res) && (imageSourceEnabled(cfg, "embedded") || imageSourceEnabled(cfg, "screen_grabber")) {
+			effects.PosterFallback = true
+		}
+		if tmdbID, mediaType := extractTMDBIDFromMeta(mustScrapeJSON(res), libraryType); tmdbID != "" {
+			if key := cfg.APIKeys["tmdb"]; key != "" {
+				if credits, e := scraper.FetchTMDBCredits(tmdbID, mediaType, "zh-CN", key); e == nil {
+					effects.Credits = credits
+					effects.AvatarBaseURL = scraper.GetTMDBImageBase() + "/t/p/w185"
+				}
+			}
+		}
 		okMsg := summarizeProviderWarnings(res)
 		if sErr != nil {
 			if okMsg == "ok" {
@@ -512,7 +531,7 @@ func (h *Handler) runScrapeTasksWithLimit(ctx context.Context, ids []int64, limi
 			failed++
 			continue
 		}
-		if err := completeScrapeClaim(ctx, h.App.DB, *claim, source, query, okMsg, res); err != nil {
+		if err := completeScrapeClaimWithEffects(ctx, h.App.DB, *claim, source, query, okMsg, res, effects); err != nil {
 			if failErr := failScrapeClaim(ctx, h.App.DB, *claim, source, query, "complete scrape task: "+err.Error()); failErr != nil {
 				log.Printf("complete/fail scrape task %d: %v", taskID, errors.Join(err, failErr))
 			}
@@ -1391,6 +1410,9 @@ func renewScrapeClaim(ctx context.Context, db *sql.DB, c scrapeClaim) error {
 	})
 }
 func completeScrapeClaim(ctx context.Context, db *sql.DB, c scrapeClaim, source, query, message string, result *scraper.ScrapeResult) error {
+	return completeScrapeClaimWithEffects(ctx, db, c, source, query, message, result, scrapeCompletionEffects{})
+}
+func completeScrapeClaimWithEffects(ctx context.Context, db *sql.DB, c scrapeClaim, source, query, message string, result *scraper.ScrapeResult, effects scrapeCompletionEffects) error {
 	return scrapeClaimImmediate(ctx, db, func(tx store.ImmediateConnTx) error {
 		args := append([]any{message}, scrapeClaimArgs(c)...)
 		res, err := tx.ExecContext(ctx, `UPDATE scrape_task AS q SET status='done',progress=100,finished_at=CURRENT_TIMESTAMP,message=?,lease_owner=NULL,lease_until=NULL WHERE `+scrapeClaimPredicate(), args...)
@@ -1405,6 +1427,9 @@ func completeScrapeClaim(ctx context.Context, db *sql.DB, c scrapeClaim, source,
 			return err
 		}
 		result = committed
+		if err = applyScrapeCompletionEffectsTx(ctx, tx, c, result, effects); err != nil {
+			return err
+		}
 		resultJSON, _ := json.Marshal(result)
 		if c.StepID.Valid {
 			res, err = tx.ExecContext(ctx, `UPDATE media_ingest_step SET status='done',finished_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND run_id=? AND media_id=? AND generation=? AND status='running' AND lease_owner=? AND attempts=?`, c.StepID.Int64, c.RunID.Int64, c.MediaID, c.Generation.Int64, c.Owner, c.Attempts)

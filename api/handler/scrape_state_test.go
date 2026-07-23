@@ -542,3 +542,43 @@ func TestScrapeLeaseLossLeavesAllMetadataSideEffectsUnchanged(t *testing.T) {
 		t.Fatalf("title=%q meta=%s", title, meta)
 	}
 }
+
+func TestAutomaticScrapeSuccessRestoresFencedEffects(t *testing.T) {
+	db, mediaID := posterHandlerTestDB(t)
+	claim := seedAndClaimLinkedScrape(t, db, mediaID)
+	_, _ = db.Exec(`UPDATE media SET publication_state='published',published_at=CURRENT_TIMESTAMP WHERE id=?`, mediaID)
+	res := &scraper.ScrapeResult{Title: "accepted", Overview: "overview", Genres: []string{"drama"}, Extra: map[string]any{"series_title": "Accepted Show"}}
+	effects := scrapeCompletionEffects{PosterFallback: true}
+	if err := completeScrapeClaimWithEffects(context.Background(), db, *claim, "auto", "q", "ok", res, effects); err != nil {
+		t.Fatal(err)
+	}
+	var fallback, history int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM post_ingest_task WHERE media_id=? AND generation=1 AND task_type='poster'`, mediaID).Scan(&fallback)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM scrape_history WHERE task_id=? AND status='done'`, claim.ID).Scan(&history)
+	if fallback != 1 || history != 1 {
+		t.Fatalf("fallback=%d history=%d", fallback, history)
+	}
+	if err := completeScrapeClaimWithEffects(context.Background(), db, *claim, "auto", "q", "ok", res, effects); !errors.Is(err, ErrScrapeClaimLost) {
+		t.Fatalf("second=%v", err)
+	}
+	_ = db.QueryRow(`SELECT COUNT(*) FROM post_ingest_task WHERE media_id=? AND generation=1 AND task_type='poster'`, mediaID).Scan(&fallback)
+	if fallback != 1 {
+		t.Fatalf("duplicate fallback=%d", fallback)
+	}
+}
+
+func TestAutomaticScrapeStaleAndRollbackSelectNoEffects(t *testing.T) {
+	db, mediaID := posterHandlerTestDB(t)
+	claim := seedAndClaimLinkedScrape(t, db, mediaID)
+	_, _ = db.Exec(`UPDATE media SET publication_state='published',published_at=CURRENT_TIMESTAMP WHERE id=?; UPDATE scrape_task SET lease_owner='lost' WHERE id=?`, mediaID, claim.ID)
+	effects := scrapeCompletionEffects{PosterFallback: true, BeforeTerminal: func() error { return errors.New("rollback") }}
+	err := completeScrapeClaimWithEffects(context.Background(), db, *claim, "auto", "q", "ok", &scraper.ScrapeResult{Title: "stale", Extra: map[string]any{}}, effects)
+	if !errors.Is(err, ErrScrapeClaimLost) {
+		t.Fatalf("err=%v", err)
+	}
+	var n int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM post_ingest_task WHERE media_id=? AND generation=1`, mediaID).Scan(&n)
+	if n != 0 {
+		t.Fatalf("stale effects=%d", n)
+	}
+}
