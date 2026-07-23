@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"time"
 
+	"knox-media/internal/coreiface"
 	"knox-media/internal/store"
 )
 
@@ -56,14 +57,20 @@ type Task struct {
 }
 
 type Queue struct {
-	db                    *sql.DB
-	owner                 string
-	metrics               *store.SQLiteMetrics
-	isScanCancelled       func(context.Context, int64) (bool, error)
-	beforeFailTransition  func()
-	beforeClaimTransition func(*sql.Tx)
+	db                   *sql.DB
+	owner                string
+	metrics              *store.SQLiteMetrics
+	isScanCancelled      func(context.Context, int64) (bool, error)
+	beforeFailTransition func()
+	registry             coreiface.CapabilityRegistry
 }
 
 func NewQueue(db *sql.DB, owner string, metrics *store.SQLiteMetrics) *Queue {
-	return &Queue{db: db, owner: owner, metrics: metrics}
+	return &Queue{db: db, owner: owner, metrics: metrics, registry: allowAllCapabilities{}}
 }
+
+type allowAllCapabilities struct{}
+
+func (allowAllCapabilities) Available(string) bool { return true }
+
+func (q *Queue) SetCapabilityRegistry(registry coreiface.CapabilityRegistry) { q.registry = registry }

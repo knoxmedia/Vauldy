@@ -1569,7 +1569,7 @@ func TestQueue_ClaimCASRechecksDependency(t *testing.T) {
 	_, _ = db.Exec(`INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(?,?,'step_done')`, encryptID, posterID)
 	_, _ = db.Exec(`INSERT INTO post_ingest_task(media_id,scan_task_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(?,?,?,?,1,'encrypt','waiting')`, mediaID, scanID, runID, encryptID)
 	q := NewQueue(db, "owner", nil)
-	q.beforeClaimTransition = func(tx *sql.Tx) { _, _ = tx.Exec(`UPDATE media_ingest_step SET status='waiting' WHERE id=?`, posterID) }
+	_, _ = db.Exec(`UPDATE media_ingest_step SET status='waiting' WHERE id=?`, posterID)
 	if got, err := q.Claim(context.Background(), TaskEncrypt); err != nil || got != nil {
 		t.Fatalf("invalidated claim=%+v err=%v", got, err)
 	}

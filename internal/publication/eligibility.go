@@ -1,38 +1,242 @@
 package publication
 
-import "fmt"
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
 
-// LinkedClaimEligibilitySQL returns the canonical predicate shared by linked
-// publication queue claims. Completely unlinked legacy rows remain eligible;
-// partial or drifted publication identity fails closed.
+	"github.com/google/uuid"
+	"knox-media/internal/coreiface"
+	"knox-media/internal/store"
+)
+
+type QueueFamily string
+
+const (
+	QueuePostIngest QueueFamily = "post_ingest"
+	QueueScrape     QueueFamily = "scrape"
+	QueuePrepare    QueueFamily = "prepare"
+)
+
+type ClaimPayload struct {
+	Family                                QueueFamily
+	QueueID, MediaID                      int64
+	RunID, StepID, ScanTaskID, Generation sql.NullInt64
+	TaskType, Owner                       string
+	Attempts, MaxAttempts                 int
+	LeaseUntil                            time.Time
+}
+
+type ClaimRequest struct {
+	Family          QueueFamily
+	TaskType, Owner string
+	QueueID         *int64
+	Registry        coreiface.CapabilityRegistry
+}
+
+type PrepareParentIdentity struct {
+	TaskID, RunID, StepID, MediaID, Generation int64
+	Owner                                      string
+}
+
+var ErrClaimCommitUncertain = errors.New("publication claim commit outcome uncertain")
+
+func ClaimEligible(ctx context.Context, db *sql.DB, req ClaimRequest) (*ClaimPayload, error) {
+	if db == nil || strings.TrimSpace(req.Owner) == "" {
+		return nil, errors.New("publication claim: invalid database or owner")
+	}
+	var payload *ClaimPayload
+	ownerToken := strings.TrimSpace(req.Owner) + "/" + uuid.NewString()
+	policy := store.RetryPolicy{Operation: "publication_claim", MaxElapsed: 2 * time.Second, BaseBackoff: 10 * time.Millisecond, MaxBackoff: 100 * time.Millisecond}
+	err := store.WithBusyRetryPolicyContext(ctx, nil, policy, func(attempt context.Context) error {
+		payload = nil
+		outcome, err := store.WithImmediateConnTx(attempt, db, func(tx store.ImmediateConnTx) error {
+			var inner error
+			payload, inner = claimEligibleTx(attempt, tx, req, ownerToken)
+			return inner
+		})
+		if err != nil && outcome.CommitAttempted {
+			return fmt.Errorf("%w: %v", ErrClaimCommitUncertain, err)
+		}
+		return err
+	})
+	if errors.Is(err, ErrClaimCommitUncertain) {
+		reconciled, reconcileErr := claimByOwner(ctx, db, req.Family, ownerToken)
+		if reconcileErr == nil && reconciled != nil {
+			return reconciled, nil
+		}
+		return nil, err
+	}
+	return payload, err
+}
+
+func claimEligibleTx(ctx context.Context, tx store.ImmediateConnTx, req ClaimRequest, owner string) (*ClaimPayload, error) {
+	if req.Family != QueuePostIngest && req.Family != QueueScrape && req.Family != QueuePrepare {
+		return nil, errors.New("publication claim: invalid family")
+	}
+	if strings.TrimSpace(req.TaskType) == "" || req.Registry == nil || !req.Registry.Available(req.TaskType) {
+		// Legacy rows are handled below without registry; linked work fails closed.
+	}
+	candidate, required, linked, err := selectFamilyCandidate(ctx, tx, req)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if linked && (req.Registry == nil || !req.Registry.Available(req.TaskType)) {
+		return nil, nil
+	}
+	if linked && !required {
+		exists, err := eligibleRequiredExists(ctx, tx, req.Registry)
+		if err != nil {
+			return nil, err
+		}
+		if exists {
+			return nil, nil
+		}
+	}
+	return updateFamilyClaim(ctx, tx, req, candidate, owner)
+}
+
+func familySource(f QueueFamily) (table, alias string) {
+	switch f {
+	case QueuePostIngest:
+		return "post_ingest_task", "q"
+	case QueueScrape:
+		return "scrape_task", "q"
+	case QueuePrepare:
+		return "transcode_task", "q"
+	}
+	return "", ""
+}
+
+func linkedEligibilitySQL(alias string) string {
+	return fmt.Sprintf(`%[1]s.ingest_run_id IS NOT NULL AND %[1]s.ingest_step_id IS NOT NULL AND %[1]s.generation IS NOT NULL AND EXISTS(
+SELECT 1 FROM media_ingest_step st JOIN media_ingest_run r ON r.id=st.run_id JOIN media m ON m.id=st.media_id
+WHERE st.id=%[1]s.ingest_step_id AND st.run_id=%[1]s.ingest_run_id AND st.media_id=%[1]s.media_id AND st.generation=%[1]s.generation
+AND r.media_id=st.media_id AND r.generation=st.generation AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND m.ingest_generation=st.generation
+AND st.status='waiting' AND ((st.required=1 AND r.status='processing') OR (st.required=0 AND m.published_at IS NOT NULL AND ((r.status='published' AND NOT EXISTS(SELECT 1 FROM media_ingest_step rr WHERE rr.run_id=r.id AND rr.required=1 AND rr.status NOT IN ('done','skipped'))) OR (r.status='degraded' AND NOT EXISTS(SELECT 1 FROM media_ingest_step rr WHERE rr.run_id=r.id AND rr.required=1 AND rr.status IN ('waiting','running'))))))
+AND NOT EXISTS(SELECT 1 FROM media_ingest_step_dependency d LEFT JOIN media_ingest_step dep ON dep.id=d.depends_on_step_id WHERE d.step_id=st.id AND NOT ((d.dependency_kind='step_done' AND dep.id IS NOT NULL AND dep.run_id=st.run_id AND dep.media_id=st.media_id AND dep.generation=st.generation AND dep.status IN ('done','skipped')) OR (d.dependency_kind='media_visible' AND d.depends_on_step_id IS NULL AND m.publication_state IN ('published','degraded') AND m.published_at IS NOT NULL))))`, alias)
+}
+
+func familyDueSQL(f QueueFamily, alias string) string {
+	switch f {
+	case QueuePostIngest:
+		return fmt.Sprintf(`%s.status='waiting' AND %s.available_at<=CURRENT_TIMESTAMP AND %s.attempts<%s.max_attempts AND (%s.scan_task_id IS NULL OR EXISTS(SELECT 1 FROM scan_task sc WHERE sc.id=%s.scan_task_id AND sc.cancelled=0 AND sc.status<>'cancelled'))`, alias, alias, alias, alias, alias, alias)
+	case QueueScrape:
+		return fmt.Sprintf(`%s.status IN ('waiting','failed') AND COALESCE(%s.fail_count,0)<3 AND COALESCE(%s.available_at,CURRENT_TIMESTAMP)<=CURRENT_TIMESTAMP AND (%s.lease_until IS NULL OR %s.lease_until<CURRENT_TIMESTAMP)`, alias, alias, alias, alias, alias)
+	case QueuePrepare:
+		return fmt.Sprintf(`%s.status='waiting' AND COALESCE(%s.task_type,'batch')='pretranscode' AND (%s.lease_until IS NULL OR %s.lease_until<CURRENT_TIMESTAMP)`, alias, alias, alias, alias)
+	}
+	return "0"
+}
+
+func selectFamilyCandidate(ctx context.Context, tx store.SQLExecutor, req ClaimRequest) (id int64, required, linked bool, err error) {
+	table, alias := familySource(req.Family)
+	due := familyDueSQL(req.Family, alias)
+	link := linkedEligibilitySQL(alias)
+	typeFilter := ""
+	args := []any{}
+	if req.Family == QueuePostIngest {
+		typeFilter = " AND q.task_type=?"
+		args = append(args, req.TaskType)
+	}
+	if req.QueueID != nil {
+		typeFilter += " AND q.id=?"
+		args = append(args, *req.QueueID)
+	}
+	query := fmt.Sprintf(`SELECT q.id,COALESCE(st.required,0),q.ingest_run_id IS NOT NULL FROM %s q LEFT JOIN media_ingest_step st ON st.id=q.ingest_step_id WHERE %s%s AND ((q.ingest_run_id IS NULL AND q.ingest_step_id IS NULL) OR (%s)) ORDER BY q.created_at,q.id LIMIT 1`, table, due, typeFilter, link)
+	err = tx.QueryRowContext(ctx, query, args...).Scan(&id, &required, &linked)
+	return
+}
+
+func eligibleRequiredExists(ctx context.Context, tx store.SQLExecutor, registry coreiface.CapabilityRegistry) (bool, error) {
+	for _, f := range []QueueFamily{QueuePostIngest, QueueScrape, QueuePrepare} {
+		table, a := familySource(f)
+		typeFilter := ""
+		if f == QueuePostIngest {
+			typeFilter = " AND st.step_type=q.task_type"
+		}
+		q := fmt.Sprintf(`SELECT st.step_type FROM %s q JOIN media_ingest_step st ON st.id=q.ingest_step_id WHERE st.required=1 AND %s AND %s%s ORDER BY q.created_at,q.id LIMIT 1`, table, familyDueSQL(f, a), linkedEligibilitySQL(a), typeFilter)
+		var typ string
+		err := tx.QueryRowContext(ctx, q).Scan(&typ)
+		if err == nil && registry != nil && registry.Available(typ) {
+			return true, nil
+		}
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return false, err
+		}
+	}
+	return false, nil
+}
+
+func updateFamilyClaim(ctx context.Context, tx store.SQLExecutor, req ClaimRequest, id int64, owner string) (*ClaimPayload, error) {
+	table, a := familySource(req.Family)
+	due := familyDueSQL(req.Family, a)
+	link := linkedEligibilitySQL(a)
+	set := ""
+	switch req.Family {
+	case QueuePostIngest:
+		set = `status='running',attempts=attempts+1,lease_owner=?,lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds'),started_at=COALESCE(started_at,CURRENT_TIMESTAMP),updated_at=CURRENT_TIMESTAMP`
+	case QueueScrape:
+		set = `status='running',fail_count=COALESCE(fail_count,0)+1,progress=15,message='scraping...',lease_owner=?,lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds'),started_at=COALESCE(started_at,CURRENT_TIMESTAMP)`
+	case QueuePrepare:
+		set = `status='running',lease_owner=?,lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds'),started_at=COALESCE(started_at,CURRENT_TIMESTAMP)`
+	}
+	q := fmt.Sprintf(`UPDATE %s AS q SET %s WHERE q.id=? AND %s AND ((q.ingest_run_id IS NULL AND q.ingest_step_id IS NULL) OR (%s))`, table, set, due, link)
+	res, err := tx.ExecContext(ctx, q, owner, id)
+	if err != nil {
+		return nil, err
+	}
+	n, _ := res.RowsAffected()
+	if n != 1 {
+		return nil, nil
+	}
+	p := &ClaimPayload{Family: req.Family, QueueID: id, Owner: owner, TaskType: req.TaskType}
+	var lease sql.NullTime
+	switch req.Family {
+	case QueuePostIngest:
+		err = tx.QueryRowContext(ctx, `SELECT media_id,ingest_run_id,ingest_step_id,scan_task_id,generation,task_type,attempts,max_attempts,lease_until FROM post_ingest_task WHERE id=?`, id).Scan(&p.MediaID, &p.RunID, &p.StepID, &p.ScanTaskID, &p.Generation, &p.TaskType, &p.Attempts, &p.MaxAttempts, &lease)
+	case QueueScrape:
+		err = tx.QueryRowContext(ctx, `SELECT media_id,ingest_run_id,ingest_step_id,generation,COALESCE(fail_count,0),lease_until FROM scrape_task WHERE id=?`, id).Scan(&p.MediaID, &p.RunID, &p.StepID, &p.Generation, &p.Attempts, &lease)
+		p.TaskType = "scrape"
+		p.MaxAttempts = 3
+	case QueuePrepare:
+		err = tx.QueryRowContext(ctx, `SELECT COALESCE(media_id,(SELECT m.id FROM media m WHERE m.file_id=transcode_task.file_id),0),ingest_run_id,ingest_step_id,generation,lease_until FROM transcode_task WHERE id=?`, id).Scan(&p.MediaID, &p.RunID, &p.StepID, &p.Generation, &lease)
+		p.TaskType = "prepare"
+		p.Attempts = 1
+		p.MaxAttempts = 1
+	}
+	if err != nil {
+		return nil, err
+	}
+	if lease.Valid {
+		p.LeaseUntil = lease.Time
+	}
+	if p.StepID.Valid {
+		_, err = tx.ExecContext(ctx, fmt.Sprintf(`UPDATE media_ingest_step SET status='running',attempts=?,lease_owner=?,lease_until=(SELECT lease_until FROM %s WHERE id=?),started_at=COALESCE(started_at,CURRENT_TIMESTAMP),updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='waiting'`, table), p.Attempts, p.Owner, id, p.StepID.Int64)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return p, nil
+}
+
+func claimByOwner(ctx context.Context, db *sql.DB, f QueueFamily, owner string) (*ClaimPayload, error) {
+	table, _ := familySource(f)
+	var id int64
+	err := db.QueryRowContext(ctx, `SELECT id FROM `+table+` WHERE lease_owner=? AND status='running'`, owner).Scan(&id)
+	if err != nil {
+		return nil, err
+	}
+	return &ClaimPayload{Family: f, QueueID: id, Owner: owner}, nil
+}
+
+// LinkedClaimEligibilitySQL is the canonical linked-or-legacy dependency predicate.
 func LinkedClaimEligibilitySQL(alias string) string {
-	return fmt.Sprintf(`(
-		(%[1]s.ingest_run_id IS NULL AND %[1]s.ingest_step_id IS NULL)
-		OR
-		(%[1]s.ingest_run_id IS NOT NULL AND %[1]s.ingest_step_id IS NOT NULL AND %[1]s.generation IS NOT NULL
-		 AND EXISTS (
-			SELECT 1 FROM media_ingest_run r
-			JOIN media m ON m.id=r.media_id
-			JOIN media_ingest_step st ON st.id=%[1]s.ingest_step_id
-			WHERE r.id=%[1]s.ingest_run_id AND r.media_id=%[1]s.media_id
-			  AND r.generation=%[1]s.generation AND m.id=%[1]s.media_id
-			  AND m.ingest_generation=%[1]s.generation
-			  AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL
-			  AND r.status IN ('processing','published','degraded')
-			  AND st.run_id=r.id AND st.media_id=r.media_id AND st.generation=r.generation
-			  AND st.status='waiting'
-			  AND NOT EXISTS (
-				SELECT 1 FROM media_ingest_step_dependency d
-				LEFT JOIN media_ingest_step dep ON dep.id=d.depends_on_step_id
-				WHERE d.step_id=st.id AND NOT (
-				  (d.dependency_kind='step_done' AND d.depends_on_step_id IS NOT NULL
-				   AND dep.id IS NOT NULL AND dep.run_id=st.run_id AND dep.media_id=st.media_id
-				   AND dep.generation=st.generation AND dep.status IN ('done','skipped'))
-				  OR
-				  (d.dependency_kind='media_visible' AND d.depends_on_step_id IS NULL
-				   AND m.publication_state IN ('published','degraded') AND m.published_at IS NOT NULL)
-				)
-			  )
-		 ))
-	)`, alias)
+	return fmt.Sprintf(`((%[1]s.ingest_run_id IS NULL AND %[1]s.ingest_step_id IS NULL) OR (%s))`, alias, linkedEligibilitySQL(alias))
 }

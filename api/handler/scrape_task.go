@@ -16,7 +16,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/google/uuid"
 	"knox-media/api/middleware"
 	"knox-media/internal/metadatalib"
 	"knox-media/internal/publication"
@@ -337,50 +336,19 @@ func (h *Handler) ListScrapeTasks(c *gin.Context) {
 }
 
 type scrapeClaim struct {
-	ID    int64
-	Owner string
+	ID, MediaID               int64
+	RunID, StepID, Generation sql.NullInt64
+	Owner                     string
 }
 
 func claimScrapeTaskWithOwner(ctx context.Context, db *sql.DB, taskID int64) (*scrapeClaim, error) {
-	return claimScrapeTaskWithOwnerHook(ctx, db, taskID, nil)
+	payload, err := publication.ClaimEligible(ctx, db, publication.ClaimRequest{Family: publication.QueueScrape, TaskType: "scrape", Owner: "scrape", QueueID: &taskID, Registry: publication.NewCapabilityMatrix([]string{"scrape"})})
+	if err != nil || payload == nil {
+		return nil, err
+	}
+	return &scrapeClaim{ID: payload.QueueID, MediaID: payload.MediaID, RunID: payload.RunID, StepID: payload.StepID, Generation: payload.Generation, Owner: payload.Owner}, nil
 }
 
-func claimScrapeTaskWithOwnerHook(ctx context.Context, db *sql.DB, taskID int64, beforeUpdate func()) (*scrapeClaim, error) {
-	eligibility := publication.LinkedClaimEligibilitySQL("q")
-	var candidateID int64
-	err := db.QueryRowContext(ctx, fmt.Sprintf(`SELECT q.id FROM scrape_task q WHERE q.id=? AND (q.status='waiting' OR (q.status='failed' AND COALESCE(q.fail_count,0) < ?)) AND (q.available_at IS NULL OR q.available_at<=CURRENT_TIMESTAMP) AND (q.lease_until IS NULL OR q.lease_until<CURRENT_TIMESTAMP) AND %s`, eligibility), taskID, maxScrapeTaskFailures).Scan(&candidateID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	if beforeUpdate != nil {
-		beforeUpdate()
-	}
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-	token := "scrape/" + uuid.NewString()
-	q := fmt.Sprintf(`UPDATE scrape_task AS q SET status='running',progress=15,started_at=COALESCE(started_at,CURRENT_TIMESTAMP),message='scraping...',lease_owner=?,lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds'),fail_count=COALESCE(fail_count,0)+1 WHERE id=? AND (status='waiting' OR (status='failed' AND COALESCE(fail_count,0) < ?)) AND (available_at IS NULL OR available_at<=CURRENT_TIMESTAMP) AND (lease_until IS NULL OR lease_until<CURRENT_TIMESTAMP) AND %s`, eligibility)
-	r, err := tx.ExecContext(ctx, q, token, taskID, maxScrapeTaskFailures)
-	if err != nil {
-		return nil, err
-	}
-	n, _ := r.RowsAffected()
-	if n != 1 {
-		return nil, tx.Commit()
-	}
-	if _, err = tx.ExecContext(ctx, `UPDATE media_ingest_step SET status='running',attempts=(SELECT fail_count FROM scrape_task WHERE id=?),lease_owner=(SELECT lease_owner FROM scrape_task WHERE id=?),lease_until=(SELECT lease_until FROM scrape_task WHERE id=?),started_at=COALESCE(started_at,CURRENT_TIMESTAMP),updated_at=CURRENT_TIMESTAMP WHERE id=(SELECT ingest_step_id FROM scrape_task WHERE id=?) AND run_id=(SELECT ingest_run_id FROM scrape_task WHERE id=?) AND media_id=(SELECT media_id FROM scrape_task WHERE id=?) AND generation=(SELECT generation FROM scrape_task WHERE id=?)`, taskID, taskID, taskID, taskID, taskID, taskID, taskID); err != nil {
-		return nil, err
-	}
-	if err = tx.Commit(); err != nil {
-		return nil, err
-	}
-	return &scrapeClaim{ID: taskID, Owner: token}, nil
-}
 func claimScrapeTask(ctx context.Context, db *sql.DB, taskID int64) (bool, error) {
 	c, e := claimScrapeTaskWithOwner(ctx, db, taskID)
 	return c != nil, e

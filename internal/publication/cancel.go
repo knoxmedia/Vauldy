@@ -4,12 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"knox-media/internal/store"
 )
 
 // CancelRunTx records an explicit whole-run cancellation before fencing all
 // outstanding work. The caller owns the transaction so intent and work
 // cancellation commit or roll back together.
-func CancelRunTx(ctx context.Context, tx *sql.Tx, runID int64, reason string) (bool, error) {
+func CancelRunTx(ctx context.Context, tx store.SQLExecutor, runID int64, reason string) (bool, error) {
 	if tx == nil || runID <= 0 || reason == "" {
 		return false, fmt.Errorf("publication cancel: invalid transaction, run, or reason")
 	}

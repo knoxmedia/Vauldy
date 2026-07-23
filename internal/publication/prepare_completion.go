@@ -2,17 +2,15 @@ package publication
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
+
+	"knox-media/internal/store"
 )
 
-// CompletePrepareTx is the completion contract for enterprise prepare
-// executors. It fences the exact immutable link, transitions the required step,
-// and aggregates the run in the caller transaction.
-func CompletePrepareTx(ctx context.Context, tx *sql.Tx, runID, stepID, generation int64, success bool, lastError string) error {
-	if tx == nil || runID <= 0 || stepID <= 0 || generation <= 0 {
-		return errors.New("publication prepare completion: invalid linkage")
+func CompletePrepareTx(ctx context.Context, tx store.SQLExecutor, parent PrepareParentIdentity, success bool, lastError string) error {
+	if tx == nil || parent.TaskID <= 0 || parent.RunID <= 0 || parent.StepID <= 0 || parent.MediaID <= 0 || parent.Generation <= 0 {
+		return errors.New("publication prepare completion: invalid identity")
 	}
 	status := "done"
 	if !success {
@@ -21,15 +19,19 @@ func CompletePrepareTx(ctx context.Context, tx *sql.Tx, runID, stepID, generatio
 			lastError = "prepare failed"
 		}
 	}
-	res, err := tx.ExecContext(ctx, `UPDATE media_ingest_step SET status=?,attempts=CASE WHEN ?='failed' THEN max_attempts ELSE attempts END,last_error=?,finished_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND run_id=? AND generation=? AND step_type='prepare' AND status IN ('waiting','running')`, status, status, lastError, stepID, runID, generation)
+	res, err := tx.ExecContext(ctx, `UPDATE transcode_task SET status=?,error_message=?,completed_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL WHERE id=? AND media_id=? AND ingest_run_id=? AND ingest_step_id=? AND generation=? AND ((status='running' AND lease_owner=?) OR EXISTS(SELECT 1 FROM media_ingest_run r WHERE r.id=? AND r.policy_version=1))`, status, lastError, parent.TaskID, parent.MediaID, parent.RunID, parent.StepID, parent.Generation, parent.Owner, parent.RunID)
+	if err != nil {
+		return fmt.Errorf("publication prepare completion: update parent: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return errors.New("publication prepare completion: parent ownership or identity mismatch")
+	}
+	res, err = tx.ExecContext(ctx, `UPDATE media_ingest_step SET status=?,attempts=CASE WHEN ?='failed' THEN max_attempts ELSE attempts END,last_error=?,finished_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND run_id=? AND media_id=? AND generation=? AND step_type='prepare' AND ((status='running' AND lease_owner=?) OR EXISTS(SELECT 1 FROM media_ingest_run r WHERE r.id=? AND r.policy_version=1))`, status, status, lastError, parent.StepID, parent.RunID, parent.MediaID, parent.Generation, parent.Owner, parent.RunID)
 	if err != nil {
 		return fmt.Errorf("publication prepare completion: update step: %w", err)
 	}
 	if n, _ := res.RowsAffected(); n != 1 {
-		return errors.New("publication prepare completion: linked step mismatch or already terminal")
+		return errors.New("publication prepare completion: step ownership or identity mismatch")
 	}
-	if err = AggregateTx(ctx, tx, runID); err != nil {
-		return fmt.Errorf("publication prepare completion: aggregate: %w", err)
-	}
-	return nil
+	return AggregateTx(ctx, tx, parent.RunID)
 }

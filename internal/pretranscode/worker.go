@@ -39,6 +39,8 @@ type Worker struct {
 	mu                sync.Mutex
 	running           map[int64]context.CancelFunc // jobID -> cancel
 	beforeClaimUpdate func()
+	parentClaims      map[int64]publication.PrepareParentIdentity
+	claimOwner        string
 	semCPU            chan struct{}
 	semGPU            chan struct{}
 }
@@ -62,6 +64,8 @@ func NewWorker(db *sql.DB, vault *keystore.Vault, ffmpegPath, transcodeDir strin
 		running:      make(map[int64]context.CancelFunc),
 		semCPU:       make(chan struct{}, maxCPU),
 		semGPU:       make(chan struct{}, maxGPU),
+		parentClaims: make(map[int64]publication.PrepareParentIdentity),
+		claimOwner:   "pretranscode-" + uuid.NewString(),
 	}
 }
 
@@ -125,6 +129,7 @@ type claimedJob struct {
 	RenditionID int64
 	Name        string
 	Owner       string
+	ParentOwner string
 }
 
 func (w *Worker) setBeforeClaimUpdate(hook func()) {
@@ -143,22 +148,31 @@ func (w *Worker) runBeforeClaimUpdate() {
 }
 
 func (w *Worker) claimNextJob() (*claimedJob, *Preset, *Rendition, int64, string, int, int, error) {
-	eligibility := publication.LinkedClaimEligibilitySQL("t")
-	row := w.DB.QueryRow(fmt.Sprintf(`SELECT j.id, j.task_id, COALESCE(j.rendition_id,0), j.rendition_name, COALESCE(j.config_snapshot_json,'')
+	payload, err := publication.ClaimEligible(context.Background(), w.DB, publication.ClaimRequest{Family: publication.QueuePrepare, TaskType: "prepare", Owner: w.claimOwner, Registry: publication.NewCapabilityMatrix([]string{"prepare"})})
+	if err != nil {
+		return nil, nil, nil, 0, "", 0, 0, err
+	}
+	if payload != nil {
+		w.mu.Lock()
+		w.parentClaims[payload.QueueID] = publication.PrepareParentIdentity{TaskID: payload.QueueID, RunID: payload.RunID.Int64, StepID: payload.StepID.Int64, MediaID: payload.MediaID, Generation: payload.Generation.Int64, Owner: payload.Owner}
+		w.mu.Unlock()
+	}
+	eligibility := fmt.Sprintf(`t.status='running' AND t.lease_owner LIKE '%s/%%'`, w.claimOwner)
+	row := w.DB.QueryRow(fmt.Sprintf(`SELECT j.id, j.task_id, COALESCE(j.rendition_id,0), j.rendition_name, COALESCE(j.config_snapshot_json,''),COALESCE(t.lease_owner,'')
 		FROM pretranscode_rendition_job j
 		JOIN transcode_task t ON t.id = j.task_id
 		LEFT JOIN pretranscode_task_meta pt ON pt.task_id = t.id
-		WHERE j.status = 'waiting' AND COALESCE(j.available_at,CURRENT_TIMESTAMP)<=CURRENT_TIMESTAMP AND t.status IN ('waiting','running') AND %s
+		WHERE j.status = 'waiting' AND COALESCE(j.available_at,CURRENT_TIMESTAMP)<=CURRENT_TIMESTAMP AND t.status='running' AND %s
 		ORDER BY CASE COALESCE(pt.priority,'normal') WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, j.created_at
 		LIMIT 1`, eligibility))
 	var c claimedJob
 	var snapshotJSON string
-	if err := row.Scan(&c.ID, &c.TaskID, &c.RenditionID, &c.Name, &snapshotJSON); err != nil {
+	if err := row.Scan(&c.ID, &c.TaskID, &c.RenditionID, &c.Name, &snapshotJSON, &c.ParentOwner); err != nil {
 		return nil, nil, nil, 0, "", 0, 0, err
 	}
 	c.Owner = "pretranscode/" + uuid.NewString()
 	w.runBeforeClaimUpdate()
-	res, err := w.DB.Exec(fmt.Sprintf(`UPDATE pretranscode_rendition_job AS j SET status='running',started_at=COALESCE(started_at,CURRENT_TIMESTAMP),lease_owner=?,lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds') WHERE id=? AND status='waiting' AND COALESCE(available_at,CURRENT_TIMESTAMP)<=CURRENT_TIMESTAMP AND EXISTS (SELECT 1 FROM transcode_task t WHERE t.id=j.task_id AND t.status IN ('waiting','running') AND %s)`, eligibility), c.Owner, c.ID)
+	res, err := w.DB.Exec(fmt.Sprintf(`UPDATE pretranscode_rendition_job AS j SET status='running',started_at=COALESCE(started_at,CURRENT_TIMESTAMP),lease_owner=?,lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds') WHERE id=? AND status='waiting' AND COALESCE(available_at,CURRENT_TIMESTAMP)<=CURRENT_TIMESTAMP AND EXISTS (SELECT 1 FROM transcode_task t WHERE t.id=j.task_id AND t.status='running' AND %s)`, eligibility), c.Owner, c.ID)
 	if err != nil {
 		return nil, nil, nil, 0, "", 0, 0, err
 	}
@@ -433,6 +447,15 @@ func (w *Worker) renewJobLease(ctx context.Context, job claimedJob) error {
 	if n, _ := res.RowsAffected(); n != 1 {
 		return ErrJobOwnershipLost
 	}
+	if job.ParentOwner != "" {
+		res, err = w.DB.ExecContext(ctx, `UPDATE transcode_task SET lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds') WHERE id=? AND status='running' AND lease_owner=?`, job.TaskID, job.ParentOwner)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			return ErrJobOwnershipLost
+		}
+	}
 	return nil
 }
 func (w *Worker) renewJobLeaseLoop(ctx context.Context, job claimedJob, done <-chan struct{}) {
@@ -513,14 +536,14 @@ func (w *Worker) finalizeJobAndTaskTx(ctx context.Context, job claimedJob, termi
 	}
 	var outputPath string
 	_ = tx.QueryRowContext(ctx, `SELECT COALESCE(output_path,'') FROM pretranscode_task_meta WHERE task_id=?`, job.TaskID).Scan(&outputPath)
-	res, err = tx.ExecContext(ctx, `UPDATE transcode_task SET status=?,progress=CASE WHEN ?='done' THEN 100 ELSE progress END,completed_at=COALESCE(completed_at,CURRENT_TIMESTAMP),output_path=CASE WHEN ?='done' THEN ? ELSE output_path END WHERE id=? AND status IN ('waiting','running')`, status, status, status, outputPath, job.TaskID)
+	res, err = tx.ExecContext(ctx, `UPDATE transcode_task SET progress=CASE WHEN ?='done' THEN 100 ELSE progress END,output_path=CASE WHEN ?='done' THEN ? ELSE output_path END WHERE id=? AND status IN ('waiting','running')`, status, status, outputPath, job.TaskID)
 	if err != nil {
 		return false, err
 	}
 	if n, _ := res.RowsAffected(); n != 1 {
 		return false, fmt.Errorf("pretranscode task %d not active", job.TaskID)
 	}
-	if err = completeLinkedPrepareTx(ctx, tx, job.TaskID, status); err != nil {
+	if err = completeLinkedPrepareTx(ctx, tx, job.TaskID, job.ParentOwner, status); err != nil {
 		return false, err
 	}
 	if err = tx.Commit(); err != nil {
@@ -537,9 +560,10 @@ func (w *Worker) finalizeJobAndTaskTx(ctx context.Context, job claimedJob, termi
 	return true, nil
 }
 
-func completeLinkedPrepareTx(ctx context.Context, tx *sql.Tx, taskID int64, status string) error {
-	var runID, stepID, generation sql.NullInt64
-	if err := tx.QueryRowContext(ctx, `SELECT ingest_run_id,ingest_step_id,generation FROM transcode_task WHERE id=?`, taskID).Scan(&runID, &stepID, &generation); err != nil {
+func completeLinkedPrepareTx(ctx context.Context, tx *sql.Tx, taskID int64, claimedParentOwner string, status string) error {
+	var runID, stepID, generation, mediaID sql.NullInt64
+	var owner string
+	if err := tx.QueryRowContext(ctx, `SELECT ingest_run_id,ingest_step_id,generation,media_id,COALESCE(lease_owner,'') FROM transcode_task WHERE id=?`, taskID).Scan(&runID, &stepID, &generation, &mediaID, &owner); err != nil {
 		return err
 	}
 	if !runID.Valid && !stepID.Valid && !generation.Valid {
@@ -552,7 +576,7 @@ func completeLinkedPrepareTx(ctx context.Context, tx *sql.Tx, taskID int64, stat
 	if status == "failed" {
 		lastError = "pretranscode rendition failed"
 	}
-	if err := publication.CompletePrepareTx(ctx, tx, runID.Int64, stepID.Int64, generation.Int64, status == "done", lastError); err != nil {
+	if err := publication.CompletePrepareTx(ctx, tx, publication.PrepareParentIdentity{TaskID: taskID, RunID: runID.Int64, StepID: stepID.Int64, MediaID: mediaID.Int64, Generation: generation.Int64, Owner: claimedParentOwner}, status == "done", lastError); err != nil {
 		return fmt.Errorf("pretranscode task %d complete linked prepare: %w", taskID, err)
 	}
 	return nil
@@ -580,13 +604,14 @@ func (w *Worker) finalizeTask(ctx context.Context, taskID int64) error {
 	}
 	var outputPath string
 	_ = tx.QueryRowContext(ctx, `SELECT COALESCE(output_path,'') FROM pretranscode_task_meta WHERE task_id=?`, taskID).Scan(&outputPath)
-	res, err := tx.ExecContext(ctx, `UPDATE transcode_task SET status=?,progress=CASE WHEN ?='done' THEN 100 ELSE progress END,completed_at=COALESCE(completed_at,CURRENT_TIMESTAMP),output_path=CASE WHEN ?='done' THEN ? ELSE output_path END WHERE id=? AND status NOT IN ('done','failed')`, status, status, status, outputPath, taskID)
+	res, err := tx.ExecContext(ctx, `UPDATE transcode_task SET progress=CASE WHEN ?='done' THEN 100 ELSE progress END,output_path=CASE WHEN ?='done' THEN ? ELSE output_path END WHERE id=? AND status NOT IN ('done','failed')`, status, status, outputPath, taskID)
 	if err != nil {
 		return err
 	}
 	changed, _ := res.RowsAffected()
-	var runID, stepID, generation sql.NullInt64
-	if err = tx.QueryRowContext(ctx, `SELECT ingest_run_id,ingest_step_id,generation FROM transcode_task WHERE id=?`, taskID).Scan(&runID, &stepID, &generation); err != nil {
+	var runID, stepID, generation, mediaID sql.NullInt64
+	var owner string
+	if err = tx.QueryRowContext(ctx, `SELECT ingest_run_id,ingest_step_id,generation,media_id,COALESCE(lease_owner,'') FROM transcode_task WHERE id=?`, taskID).Scan(&runID, &stepID, &generation, &mediaID, &owner); err != nil {
 		return err
 	}
 	if runID.Valid || stepID.Valid || generation.Valid {
@@ -597,7 +622,7 @@ func (w *Worker) finalizeTask(ctx context.Context, taskID int64) error {
 		if status == "failed" {
 			lastError = "pretranscode rendition failed"
 		}
-		if err = publication.CompletePrepareTx(ctx, tx, runID.Int64, stepID.Int64, generation.Int64, status == "done", lastError); err != nil {
+		if err = publication.CompletePrepareTx(ctx, tx, publication.PrepareParentIdentity{TaskID: taskID, RunID: runID.Int64, StepID: stepID.Int64, MediaID: mediaID.Int64, Generation: generation.Int64, Owner: owner}, status == "done", lastError); err != nil {
 			return fmt.Errorf("pretranscode task %d complete linked prepare: %w", taskID, err)
 		}
 	}
