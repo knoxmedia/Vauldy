@@ -17,6 +17,9 @@ func recoverStartupTasks(ctx context.Context, db *sql.DB, postIngest *postingest
 	if db == nil || postIngest == nil {
 		return fmt.Errorf("startup recovery: database and post-ingest queue are required")
 	}
+	if _, _, err := postingest.ReconcileThumbnailStages(ctx, db, 100); err != nil {
+		return fmt.Errorf("startup recovery: thumbnail stages: %w", err)
+	}
 	store.ResetInterruptedTasks(db)
 	if _, err := postIngest.RecoverExpired(ctx); err != nil {
 		return fmt.Errorf("startup recovery: post-ingest: %w", err)

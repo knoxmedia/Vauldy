@@ -112,6 +112,27 @@ func TestMainUsesThumbnailAdapterWithoutLegacyEnsure(t *testing.T) {
 	}
 }
 
+func TestMainWiresThumbnailStageStartupAndPeriodicReconciliation(t *testing.T) {
+	startup, err := os.ReadFile("startup_recovery.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	main, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(startup)
+	reconcileAt, resetAt := strings.Index(src, "postingest.ReconcileThumbnailStages("), strings.Index(src, "store.ResetInterruptedTasks(")
+	if reconcileAt < 0 || resetAt < 0 || reconcileAt > resetAt {
+		t.Fatal("thumbnail stages must reconcile before task recovery")
+	}
+	for _, want := range []string{"background.Go(serverCtx", "postingest.RunThumbnailStageReconciler("} {
+		if !strings.Contains(string(main), want) {
+			t.Fatalf("main missing %q", want)
+		}
+	}
+}
+
 func TestGracefulShutdownAssemblyUsesSignalsAndHTTPServer(t *testing.T) {
 	data, err := os.ReadFile("main.go")
 	if err != nil {

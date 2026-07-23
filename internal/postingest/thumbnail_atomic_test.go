@@ -107,6 +107,39 @@ func TestThumbnailAtomicCommitEncryptedSelectsBothDerivedPointersAndMetadata(t *
 	}
 }
 
+func TestVerifyCommittedThumbnailRejectsJournalMetadataAndPointerCorruption(t *testing.T) {
+	mutations := []struct{ name, sql string }{
+		{"journal owner", `UPDATE media_asset_stage_journal SET owner_token='wrong' WHERE stage_id=?`},
+		{"evidence linkage", `UPDATE media_ingest_evidence SET source_fingerprint='wrong' WHERE stage_id=?`},
+		{"plain metadata", `UPDATE media SET meta_json='{}' WHERE id=(SELECT media_id FROM media_ingest_evidence WHERE stage_id=?)`},
+	}
+	for _, tc := range mutations {
+		t.Run(tc.name, func(t *testing.T) {
+			db, _, _ := planThumbnailFixture(t, false)
+			q := NewQueue(db, "thumbnail-owner", nil)
+			task, _ := q.Claim(context.Background(), TaskThumbnail)
+			staged, err := realThumbnailStager(t, db).Stage(context.Background(), *task)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = commitStagedThumbnail(context.Background(), db, *task, staged); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = db.Exec(tc.sql, staged.Stage.StageID); err != nil {
+				t.Fatal(err)
+			}
+			conn, err := db.Conn(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			if err = verifyCommittedThumbnailTx(context.Background(), conn, *task, staged); err == nil {
+				t.Fatal("corruption accepted")
+			}
+		})
+	}
+}
+
 func TestThumbnailAtomicCommitRollbackSelectsNeitherVariant(t *testing.T) {
 	db, mediaID, _ := planThumbnailFixture(t, false)
 	q := NewQueue(db, "thumbnail-owner", nil)

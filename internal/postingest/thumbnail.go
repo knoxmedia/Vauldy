@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"knox-media/internal/imagethumb"
 	"knox-media/internal/keystore"
@@ -19,6 +20,19 @@ import (
 	"knox-media/internal/storage"
 	"knox-media/internal/store"
 )
+
+var withImmediateThumbnailTx = store.WithImmediateConnTx
+var reconcileThumbnailCommit = reconcileThumbnailCommitAuthoritative
+
+type thumbnailCommitState uint8
+
+const (
+	thumbnailCommitUnknown thumbnailCommitState = iota
+	thumbnailCommitAbsent
+	thumbnailCommitExact
+)
+
+const thumbnailReconcileTimeout = 5 * time.Second
 
 type thumbnailStageWorker interface {
 	Stage(context.Context, Task) (imagethumb.StagedThumbnail, error)
@@ -72,6 +86,10 @@ func (a *thumbnailAdapter) ExecuteWithResult(ctx context.Context, task Task) (Ex
 		return ordinary, ClassifiedError{Kind: FailureRetryable, Err: err}
 	}
 	if err = commitStagedThumbnail(ctx, a.db, task, staged); err != nil {
+		var uncertain *store.ImmediateCommitError
+		if errors.As(err, &uncertain) {
+			return ExecutionResult{Completion: FinalizationOutcomeUncertain}, err
+		}
 		return ordinary, err
 	}
 	return ExecutionResult{Completion: AlreadyCommittedAtomically}, nil
@@ -86,7 +104,7 @@ func commitStagedThumbnail(ctx context.Context, db *sql.DB, task Task, staged im
 		return fmt.Errorf("thumbnail commit: stage/task identity mismatch")
 	}
 	var replaced []string
-	_, err := store.WithImmediateConnTx(ctx, db, func(tx store.ImmediateConnTx) error {
+	_, err := withImmediateThumbnailTx(ctx, db, func(tx store.ImmediateConnTx) error {
 		var existingStage string
 		existingErr := tx.QueryRowContext(ctx, `SELECT stage_id FROM media_ingest_evidence WHERE step_id=? AND kind='thumbnail'`, *task.StepID).Scan(&existingStage)
 		if existingErr == nil {
@@ -154,34 +172,67 @@ func commitStagedThumbnail(ctx context.Context, db *sql.DB, task Task, staged im
 		return publication.AggregateTx(ctx, tx, *task.RunID)
 	})
 	if err != nil {
-		cleanupUnreferencedThumbnailPaths(ctx, db, []string{staged.Thumb.Path, staged.Medium.Path})
+		var uncertain *store.ImmediateCommitError
+		if errors.As(err, &uncertain) {
+			reconcileCtx, cancel := context.WithTimeout(context.Background(), thumbnailReconcileTimeout)
+			defer cancel()
+			state, reconcileErr := reconcileThumbnailCommit(reconcileCtx, db, task, staged)
+			if reconcileErr != nil {
+				return uncertain
+			}
+			if state == thumbnailCommitExact {
+				return nil
+			}
+			if state == thumbnailCommitAbsent {
+				if cleanupErr := cleanupUnreferencedThumbnailPaths(reconcileCtx, db, []string{staged.Thumb.Path, staged.Medium.Path}); cleanupErr != nil {
+					return uncertain
+				}
+			}
+			return uncertain
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), thumbnailReconcileTimeout)
+		defer cancel()
+		if cleanupErr := cleanupUnreferencedThumbnailPaths(cleanupCtx, db, []string{staged.Thumb.Path, staged.Medium.Path}); cleanupErr != nil {
+			return errors.Join(err, cleanupErr)
+		}
 		return err
 	}
-	cleanupUnreferencedThumbnailPaths(ctx, db, replaced)
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), thumbnailReconcileTimeout)
+	defer cancel()
+	_ = cleanupUnreferencedThumbnailPaths(cleanupCtx, db, replaced)
 	return nil
 }
 
-func cleanupUnreferencedThumbnailPaths(ctx context.Context, db *sql.DB, paths []string) {
+func cleanupUnreferencedThumbnailPaths(ctx context.Context, db *sql.DB, paths []string) error {
 	for _, path := range paths {
 		if strings.TrimSpace(path) == "" {
 			continue
 		}
 		var refs int
-		_ = db.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM media_derived_assets WHERE enc_path=?)+(SELECT COUNT(*) FROM media_ingest_evidence WHERE artifact_refs_json LIKE '%'||?||'%')`, path, path).Scan(&refs)
+		if err := db.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM media_derived_assets WHERE enc_path=?)+(SELECT COUNT(*) FROM media_ingest_evidence e,json_each(e.artifact_refs_json,'$.variants') v WHERE json_extract(v.value,'$.path')=?)`, path, path).Scan(&refs); err != nil {
+			return fmt.Errorf("thumbnail cleanup reference query: %w", err)
+		}
 		if refs == 0 {
-			_ = os.Remove(path)
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				return err
+			}
 		}
 	}
+	return nil
 }
 
 func verifyCommittedThumbnailTx(ctx context.Context, tx store.SQLExecutor, task Task, staged imagethumb.StagedThumbnail) error {
-	var sourceFingerprint, refs string
-	err := tx.QueryRowContext(ctx, `SELECT e.source_fingerprint,e.artifact_refs_json FROM post_ingest_task p JOIN media_ingest_step s ON s.id=p.ingest_step_id JOIN media_ingest_evidence e ON e.step_id=s.id AND e.kind='thumbnail' JOIN media_asset_stage_journal j ON j.stage_id=e.stage_id WHERE p.id=? AND p.status='done' AND p.ingest_run_id=? AND p.ingest_step_id=? AND p.generation=? AND s.status='done' AND e.stage_id=? AND j.state='committed'`, task.ID, *task.RunID, *task.StepID, task.Generation, staged.Stage.StageID).Scan(&sourceFingerprint, &refs)
+	var sourceFingerprint, refs, journalOwner, journalFingerprint, journalKind, journalState, metaRaw string
+	var evidenceMedia, evidenceRun, evidenceStep, evidenceGeneration int64
+	err := tx.QueryRowContext(ctx, `SELECT e.media_id,e.run_id,e.step_id,e.generation,e.source_fingerprint,e.artifact_refs_json,j.owner_token,j.source_fingerprint,j.artifact_kind,j.state,m.meta_json FROM post_ingest_task p JOIN media_ingest_step s ON s.id=p.ingest_step_id JOIN media_ingest_evidence e ON e.step_id=s.id AND e.kind='thumbnail' JOIN media_asset_stage_journal j ON j.stage_id=e.stage_id JOIN media m ON m.id=e.media_id WHERE p.id=? AND p.status='done' AND p.ingest_run_id=? AND p.ingest_step_id=? AND p.generation=? AND s.status='done' AND e.stage_id=?`, task.ID, *task.RunID, *task.StepID, task.Generation, staged.Stage.StageID).Scan(&evidenceMedia, &evidenceRun, &evidenceStep, &evidenceGeneration, &sourceFingerprint, &refs, &journalOwner, &journalFingerprint, &journalKind, &journalState, &metaRaw)
 	if err != nil {
 		return fmt.Errorf("thumbnail commit: partial same-stage completion: %w", err)
 	}
-	if sourceFingerprint != staged.Stage.Request.SourceFingerprint {
-		return fmt.Errorf("thumbnail commit conflict: source fingerprint differs")
+	if evidenceMedia != task.MediaID || evidenceRun != *task.RunID || evidenceStep != *task.StepID || evidenceGeneration != task.Generation || sourceFingerprint != staged.Stage.Request.SourceFingerprint {
+		return fmt.Errorf("thumbnail commit conflict: evidence identity differs")
+	}
+	if journalOwner != task.LeaseOwner || journalFingerprint != sourceFingerprint || journalKind != "thumbnail" || journalState != "committed" {
+		return fmt.Errorf("thumbnail commit conflict: journal identity differs")
 	}
 	if err = verifyVariant(staged.Thumb); err != nil {
 		return err
@@ -191,8 +242,11 @@ func verifyCommittedThumbnailTx(ctx context.Context, tx store.SQLExecutor, task 
 	}
 	var evidence struct {
 		Variants []struct {
-			Path   string `json:"path"`
-			SHA256 string `json:"sha256"`
+			Kind        string `json:"kind"`
+			LogicalName string `json:"logical_name"`
+			Path        string `json:"path"`
+			SHA256      string `json:"sha256"`
+			Size        int64  `json:"size"`
 		} `json:"variants"`
 	}
 	if err = json.Unmarshal([]byte(refs), &evidence); err != nil {
@@ -201,12 +255,33 @@ func verifyCommittedThumbnailTx(ctx context.Context, tx store.SQLExecutor, task 
 	for _, v := range []imagethumb.StagedVariant{staged.Thumb, staged.Medium} {
 		matched := false
 		for _, ref := range evidence.Variants {
-			if filepath.Clean(ref.Path) == filepath.Clean(v.Path) && ref.SHA256 == v.Hash {
+			if ref.Kind == v.Kind && ref.LogicalName == v.LogicalName && filepath.Clean(ref.Path) == filepath.Clean(v.Path) && ref.SHA256 == v.Hash && ref.Size == v.Size {
 				matched = true
 			}
 		}
 		if !matched {
 			return fmt.Errorf("thumbnail commit conflict: evidence does not match staged variants")
+		}
+	}
+	var root map[string]any
+	if err = json.Unmarshal([]byte(metaRaw), &root); err != nil {
+		return err
+	}
+	photo, _ := root["photo"].(map[string]any)
+	thumb, _ := photo["thumb_path"].(string)
+	medium, _ := photo["medium_path"].(string)
+	if filepath.Clean(thumb) != filepath.Clean(staged.Thumb.Path) || filepath.Clean(medium) != filepath.Clean(staged.Medium.Path) {
+		return fmt.Errorf("thumbnail commit conflict: metadata pointers differ")
+	}
+	for _, v := range []imagethumb.StagedVariant{staged.Thumb, staged.Medium} {
+		if v.Derived != nil {
+			var selected string
+			if err = tx.QueryRowContext(ctx, `SELECT enc_path FROM media_derived_assets WHERE media_id=? AND artifact_kind=? AND logical_name=?`, task.MediaID, v.Kind, v.LogicalName).Scan(&selected); err != nil {
+				return err
+			}
+			if filepath.Clean(selected) != filepath.Clean(v.Path) {
+				return fmt.Errorf("thumbnail commit conflict: derived pointer differs")
+			}
 		}
 	}
 	return nil
@@ -327,4 +402,27 @@ func hashPath(path string) (int64, string, error) {
 	h := sha256.New()
 	n, err := io.Copy(h, f)
 	return n, hex.EncodeToString(h.Sum(nil)), err
+}
+
+func reconcileThumbnailCommitAuthoritative(ctx context.Context, db *sql.DB, task Task, staged imagethumb.StagedThumbnail) (thumbnailCommitState, error) {
+	if err := ctx.Err(); err != nil {
+		return thumbnailCommitUnknown, err
+	}
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return thumbnailCommitUnknown, err
+	}
+	defer conn.Close()
+	err = verifyCommittedThumbnailTx(ctx, conn, task, staged)
+	if err == nil {
+		return thumbnailCommitExact, nil
+	}
+	var evidence, taskStatus, stepStatus int
+	if queryErr := conn.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM media_ingest_evidence WHERE stage_id=?),(SELECT COUNT(*) FROM post_ingest_task WHERE id=? AND status='done'),(SELECT COUNT(*) FROM media_ingest_step WHERE id=? AND status='done')`, staged.Stage.StageID, task.ID, *task.StepID).Scan(&evidence, &taskStatus, &stepStatus); queryErr != nil {
+		return thumbnailCommitUnknown, queryErr
+	}
+	if evidence == 0 && taskStatus == 0 && stepStatus == 0 {
+		return thumbnailCommitAbsent, nil
+	}
+	return thumbnailCommitUnknown, err
 }

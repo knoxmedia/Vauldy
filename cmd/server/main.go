@@ -346,6 +346,9 @@ func main() {
 
 	// (5) Admin overview uses the shared resource-control instances.
 	background := &handler.BackgroundGroup{}
+	background.Go(serverCtx, func(ctx context.Context) {
+		postingest.RunThumbnailStageReconciler(ctx, db, time.Minute, 100, func(err error) { log.Printf("thumbnail stage reconcile: %v", err) })
+	})
 	deps := handler.Dependencies{
 		ServerContext: serverCtx, Background: background,
 		Coordinator: coordinator, Queue: postIngestQueue, PostIngest: postIngestEnqueuer, Dispatcher: dispatcher, AdminOverviewBuilder: handler.NewAdminOverviewBuilder(db, dispatcher, sqliteMetrics),

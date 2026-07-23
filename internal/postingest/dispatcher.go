@@ -19,6 +19,7 @@ type CompletionDisposition uint8
 const (
 	CompleteThroughQueue CompletionDisposition = iota
 	AlreadyCommittedAtomically
+	FinalizationOutcomeUncertain
 )
 
 type ExecutionResult struct{ Completion CompletionDisposition }
@@ -413,6 +414,9 @@ finish:
 		if err := d.q.Complete(writeCtx, task); err != nil {
 			log.Printf("postingest dispatcher complete task %d: %v", task.ID, err)
 		}
+		return
+	}
+	if execResult.Completion == FinalizationOutcomeUncertain {
 		return
 	}
 	kind := failureKind(execErr)

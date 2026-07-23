@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"knox-media/internal/store"
 	"time"
 
 	"knox-media/internal/scancoord"
@@ -758,6 +760,46 @@ func TestDispatcher_CancelScanFencesSuccessfulExecutorBeforeComplete(t *testing.
 	}
 	cancel()
 	<-done
+}
+
+func TestDispatcherUncertainAtomicFinalizationDoesNotFailQueue(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	mediaID, _, _ := seedQueueTest(t, db)
+	q := NewQueue(db, "owner", nil)
+	if _, err := q.Enqueue(context.Background(), mediaID, nil, TaskThumbnail); err != nil {
+		t.Fatal(err)
+	}
+	exec := uncertainResultExecutor{}
+	o := dispatcherOptions("owner")
+	d, err := NewDispatcher(q, exec, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- d.Start(ctx) }()
+	waitUntil(t, time.Second, func() bool {
+		var status string
+		_ = db.QueryRow(`SELECT status FROM post_ingest_task WHERE media_id=?`, mediaID).Scan(&status)
+		return status == "running"
+	})
+	cancel()
+	if err = <-done; err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	var attempts int
+	_ = db.QueryRow(`SELECT status,attempts FROM post_ingest_task WHERE media_id=?`, mediaID).Scan(&status, &attempts)
+	if status != "running" || attempts != 1 {
+		t.Fatalf("task=%s/%d want preserved running", status, attempts)
+	}
+}
+
+type uncertainResultExecutor struct{}
+
+func (uncertainResultExecutor) Execute(context.Context, Task) error { return errors.New("unused") }
+func (uncertainResultExecutor) ExecuteWithResult(context.Context, Task) (ExecutionResult, error) {
+	return ExecutionResult{Completion: FinalizationOutcomeUncertain}, &store.ImmediateCommitError{Cause: errors.New("unknown")}
 }
 
 func TestDispatcher_UnregisterIsGenerationSafe(t *testing.T) {
