@@ -127,20 +127,21 @@ type claimedJob struct {
 }
 
 func (w *Worker) claimNextJob() (*claimedJob, *Preset, *Rendition, int64, string, int, int, error) {
-	row := w.DB.QueryRow(`SELECT j.id, j.task_id, COALESCE(j.rendition_id,0), j.rendition_name, COALESCE(j.config_snapshot_json,'')
+	eligibility := publication.LinkedClaimEligibilitySQL("t")
+	row := w.DB.QueryRow(fmt.Sprintf(`SELECT j.id, j.task_id, COALESCE(j.rendition_id,0), j.rendition_name, COALESCE(j.config_snapshot_json,'')
 		FROM pretranscode_rendition_job j
 		JOIN transcode_task t ON t.id = j.task_id
 		LEFT JOIN pretranscode_task_meta pt ON pt.task_id = t.id
-		WHERE j.status = 'waiting' AND COALESCE(j.available_at,CURRENT_TIMESTAMP)<=CURRENT_TIMESTAMP AND t.status IN ('waiting','running')
+		WHERE j.status = 'waiting' AND COALESCE(j.available_at,CURRENT_TIMESTAMP)<=CURRENT_TIMESTAMP AND t.status IN ('waiting','running') AND %s
 		ORDER BY CASE COALESCE(pt.priority,'normal') WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, j.created_at
-		LIMIT 1`)
+		LIMIT 1`, eligibility))
 	var c claimedJob
 	var snapshotJSON string
 	if err := row.Scan(&c.ID, &c.TaskID, &c.RenditionID, &c.Name, &snapshotJSON); err != nil {
 		return nil, nil, nil, 0, "", 0, 0, err
 	}
 	c.Owner = "pretranscode/" + uuid.NewString()
-	res, err := w.DB.Exec(`UPDATE pretranscode_rendition_job SET status='running',started_at=COALESCE(started_at,CURRENT_TIMESTAMP),lease_owner=?,lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds') WHERE id=? AND status='waiting' AND COALESCE(available_at,CURRENT_TIMESTAMP)<=CURRENT_TIMESTAMP`, c.Owner, c.ID)
+	res, err := w.DB.Exec(fmt.Sprintf(`UPDATE pretranscode_rendition_job AS j SET status='running',started_at=COALESCE(started_at,CURRENT_TIMESTAMP),lease_owner=?,lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds') WHERE id=? AND status='waiting' AND COALESCE(available_at,CURRENT_TIMESTAMP)<=CURRENT_TIMESTAMP AND EXISTS (SELECT 1 FROM transcode_task t WHERE t.id=j.task_id AND t.status IN ('waiting','running') AND %s)`, eligibility), c.Owner, c.ID)
 	if err != nil {
 		return nil, nil, nil, 0, "", 0, 0, err
 	}

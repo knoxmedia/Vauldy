@@ -217,15 +217,17 @@ func (q *Queue) Claim(ctx context.Context, typ TaskType) (*Task, error) {
 		}()
 
 		var id int64
-		err = tx.QueryRowContext(ctx, `
+		claimEligibility := publication.LinkedClaimEligibilitySQL("p")
+		err = tx.QueryRowContext(ctx, fmt.Sprintf(`
 			SELECT p.id
 			FROM post_ingest_task p
 			LEFT JOIN scan_task s ON s.id=p.scan_task_id
 			WHERE p.task_type=? AND p.status='waiting'
 			  AND p.available_at<=CURRENT_TIMESTAMP AND p.attempts<p.max_attempts
 			  AND (p.scan_task_id IS NULL OR (s.cancelled=0 AND s.status<>'cancelled'))
+			  AND %s
 			ORDER BY p.created_at, p.id
-			LIMIT 1`, typ).Scan(&id)
+			LIMIT 1`, claimEligibility), typ).Scan(&id)
 		if errors.Is(err, sql.ErrNoRows) {
 			if err = tx.Commit(); err != nil {
 				return err
@@ -237,8 +239,11 @@ func (q *Queue) Claim(ctx context.Context, typ TaskType) (*Task, error) {
 			return err
 		}
 
-		result, err := tx.ExecContext(ctx, `
-			UPDATE post_ingest_task
+		if q.beforeClaimTransition != nil {
+			q.beforeClaimTransition(tx)
+		}
+		result, err := tx.ExecContext(ctx, fmt.Sprintf(`
+			UPDATE post_ingest_task AS p
 			SET status='running', lease_owner=?,
 				lease_until=datetime(CURRENT_TIMESTAMP, ?),
 				started_at=COALESCE(started_at, CURRENT_TIMESTAMP),
@@ -247,17 +252,14 @@ func (q *Queue) Claim(ctx context.Context, typ TaskType) (*Task, error) {
 			  AND available_at<=CURRENT_TIMESTAMP AND attempts<max_attempts
 			  AND (scan_task_id IS NULL OR EXISTS (
 				SELECT 1 FROM scan_task s
-				WHERE s.id=post_ingest_task.scan_task_id
+				WHERE s.id=p.scan_task_id
 				  AND s.cancelled=0 AND s.status<>'cancelled'
-			  ))`, leaseToken, leaseModifier(), id, typ)
+			  )) AND %s`, claimEligibility), leaseToken, leaseModifier(), id, typ)
 		if err != nil {
 			return err
 		}
 		n, err := result.RowsAffected()
 		if err != nil {
-			return err
-		}
-		if err := syncLinkedStepTx(ctx, tx, id); err != nil {
 			return err
 		}
 		if n == 0 {
@@ -266,6 +268,9 @@ func (q *Queue) Claim(ctx context.Context, typ TaskType) (*Task, error) {
 			}
 			committed = true
 			return nil
+		}
+		if err := syncLinkedStepTx(ctx, tx, id); err != nil {
+			return err
 		}
 
 		task := &Task{}

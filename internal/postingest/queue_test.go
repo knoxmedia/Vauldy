@@ -1529,3 +1529,48 @@ func TestQueueRecoverExpiredIsBounded(t *testing.T) {
 		t.Fatalf("second recover=(%d,%v), want (1,nil)", n, err)
 	}
 }
+
+func TestQueue_ClaimEnforcesLinkedDependenciesAndKeepsLegacy(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	mediaID, scanID, _ := seedQueueTest(t, db)
+	_, _ = db.Exec(`UPDATE media SET ingest_generation=1,publication_state='processing' WHERE id=?`, mediaID)
+	r, _ := db.Exec(`INSERT INTO media_ingest_run(media_id,generation,scan_task_id,reason,status,config_snapshot_json,policy_version) VALUES(?,1,?,'scan','processing','{}',2)`, mediaID, scanID)
+	runID, _ := r.LastInsertId()
+	r, _ = db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status) VALUES(?,?,1,'poster',1,'waiting')`, runID, mediaID)
+	posterID, _ := r.LastInsertId()
+	r, _ = db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status) VALUES(?,?,1,'encrypt',1,'waiting')`, runID, mediaID)
+	encryptID, _ := r.LastInsertId()
+	_, _ = db.Exec(`INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(?,?,'step_done')`, encryptID, posterID)
+	_, _ = db.Exec(`INSERT INTO post_ingest_task(media_id,scan_task_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(?,?,?,?,1,'encrypt','waiting')`, mediaID, scanID, runID, encryptID)
+	q := NewQueue(db, "owner", nil)
+	if got, err := q.Claim(context.Background(), TaskEncrypt); err != nil || got != nil {
+		t.Fatalf("blocked claim=%+v err=%v", got, err)
+	}
+	_, _ = db.Exec(`UPDATE media_ingest_step SET status='done' WHERE id=?`, posterID)
+	if got, err := q.Claim(context.Background(), TaskEncrypt); err != nil || got == nil {
+		t.Fatalf("ready claim=%+v err=%v", got, err)
+	}
+	_, _ = db.Exec(`INSERT INTO post_ingest_task(media_id,task_type,status) VALUES(?,'subtitle','waiting')`, mediaID)
+	if got, err := q.Claim(context.Background(), TaskSubtitle); err != nil || got == nil {
+		t.Fatalf("legacy claim=%+v err=%v", got, err)
+	}
+}
+
+func TestQueue_ClaimCASRechecksDependency(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	mediaID, scanID, _ := seedQueueTest(t, db)
+	_, _ = db.Exec(`UPDATE media SET ingest_generation=1 WHERE id=?`, mediaID)
+	r, _ := db.Exec(`INSERT INTO media_ingest_run(media_id,generation,scan_task_id,reason,status,config_snapshot_json,policy_version) VALUES(?,1,?,'scan','processing','{}',2)`, mediaID, scanID)
+	runID, _ := r.LastInsertId()
+	r, _ = db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status) VALUES(?,?,1,'poster',1,'done')`, runID, mediaID)
+	posterID, _ := r.LastInsertId()
+	r, _ = db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status) VALUES(?,?,1,'encrypt',1,'waiting')`, runID, mediaID)
+	encryptID, _ := r.LastInsertId()
+	_, _ = db.Exec(`INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(?,?,'step_done')`, encryptID, posterID)
+	_, _ = db.Exec(`INSERT INTO post_ingest_task(media_id,scan_task_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(?,?,?,?,1,'encrypt','waiting')`, mediaID, scanID, runID, encryptID)
+	q := NewQueue(db, "owner", nil)
+	q.beforeClaimTransition = func(tx *sql.Tx) { _, _ = tx.Exec(`UPDATE media_ingest_step SET status='waiting' WHERE id=?`, posterID) }
+	if got, err := q.Claim(context.Background(), TaskEncrypt); err != nil || got != nil {
+		t.Fatalf("invalidated claim=%+v err=%v", got, err)
+	}
+}

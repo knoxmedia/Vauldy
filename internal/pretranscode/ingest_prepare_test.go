@@ -92,6 +92,7 @@ func TestIngestPrepareSnapshotSurvivesPresetUpdate(t *testing.T) {
 	if err := db.QueryRow(`SELECT id FROM transcode_preset WHERE is_builtin=1 ORDER BY sort_order,id LIMIT 1`).Scan(&presetID); err != nil {
 		t.Fatal(err)
 	}
+	_, _ = db.Exec(`UPDATE media SET ingest_generation=1 WHERE id=?`, mediaID)
 	res, err := db.Exec(`INSERT INTO media_ingest_run(media_id,generation,reason,status,preserve_visibility,config_snapshot_json) VALUES(?,1,'scan','processing',0,'{}')`, mediaID)
 	if err != nil {
 		t.Fatal(err)
@@ -144,6 +145,7 @@ func TestLinkedIngestPrepareNeverFallsBackWhenSnapshotMissing(t *testing.T) {
 	db := newTestDB(t)
 	root := t.TempDir()
 	mediaID := seedVideo(t, db, root, "missing-snapshot", "Missing Snapshot")
+	_, _ = db.Exec(`UPDATE media SET ingest_generation=1 WHERE id=?`, mediaID)
 	res, _ := db.Exec(`INSERT INTO media_ingest_run(media_id,generation,reason,status,preserve_visibility,config_snapshot_json) VALUES(?,1,'scan','processing',0,'{}')`, mediaID)
 	runID, _ := res.LastInsertId()
 	res, _ = db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status) VALUES(?,?,1,'prepare',1,'waiting')`, runID, mediaID)

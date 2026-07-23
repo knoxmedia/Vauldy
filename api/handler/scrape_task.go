@@ -348,7 +348,7 @@ func claimScrapeTaskWithOwner(ctx context.Context, db *sql.DB, taskID int64) (*s
 	}
 	defer tx.Rollback()
 	token := "scrape/" + uuid.NewString()
-	q := `UPDATE scrape_task SET status='running',progress=15,started_at=COALESCE(started_at,CURRENT_TIMESTAMP),message='scraping...',lease_owner=?,lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds'),fail_count=COALESCE(fail_count,0)+1 WHERE id=? AND (status='waiting' OR (status='failed' AND COALESCE(fail_count,0) < ?)) AND (available_at IS NULL OR available_at<=CURRENT_TIMESTAMP) AND (lease_until IS NULL OR lease_until<CURRENT_TIMESTAMP) AND (ingest_run_id IS NULL OR (generation=(SELECT r.generation FROM media_ingest_run r WHERE r.id=ingest_run_id AND r.media_id=scrape_task.media_id AND r.generation=(SELECT ingest_generation FROM media WHERE id=scrape_task.media_id))) AND ingest_step_id=(SELECT s.id FROM media_ingest_step s WHERE s.id=scrape_task.ingest_step_id AND s.run_id=scrape_task.ingest_run_id AND s.media_id=scrape_task.media_id AND s.generation=scrape_task.generation AND s.status='waiting'))`
+	q := fmt.Sprintf(`UPDATE scrape_task AS q SET status='running',progress=15,started_at=COALESCE(started_at,CURRENT_TIMESTAMP),message='scraping...',lease_owner=?,lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds'),fail_count=COALESCE(fail_count,0)+1 WHERE id=? AND (status='waiting' OR (status='failed' AND COALESCE(fail_count,0) < ?)) AND (available_at IS NULL OR available_at<=CURRENT_TIMESTAMP) AND (lease_until IS NULL OR lease_until<CURRENT_TIMESTAMP) AND %s`, publication.LinkedClaimEligibilitySQL("q"))
 	r, err := tx.ExecContext(ctx, q, token, taskID, maxScrapeTaskFailures)
 	if err != nil {
 		return nil, err
@@ -392,12 +392,13 @@ func (h *Handler) runScrapeTasksWithLimit(ctx context.Context, ids []int64, limi
 	if len(ids) > 0 {
 		taskIDs = ids
 	} else {
-		rows, err := h.App.DB.QueryContext(ctx, `
-			SELECT id FROM scrape_task
-			WHERE (available_at IS NULL OR available_at<=CURRENT_TIMESTAMP)
-			  AND (status = 'waiting'
-			   OR (status = 'failed' AND COALESCE(fail_count, 0) < ?)
-			ORDER BY id LIMIT ?`, maxScrapeTaskFailures, limit)
+		rows, err := h.App.DB.QueryContext(ctx, fmt.Sprintf(`
+			SELECT q.id FROM scrape_task q
+			WHERE (q.available_at IS NULL OR q.available_at<=CURRENT_TIMESTAMP)
+			  AND (q.status = 'waiting'
+			   OR (q.status = 'failed' AND COALESCE(q.fail_count, 0) < ?))
+			  AND %s
+			ORDER BY q.id LIMIT ?`, publication.LinkedClaimEligibilitySQL("q")), maxScrapeTaskFailures, limit)
 		if err == nil {
 			defer rows.Close()
 			for rows.Next() {

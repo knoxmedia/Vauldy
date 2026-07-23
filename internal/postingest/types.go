@@ -56,11 +56,12 @@ type Task struct {
 }
 
 type Queue struct {
-	db                   *sql.DB
-	owner                string
-	metrics              *store.SQLiteMetrics
-	isScanCancelled      func(context.Context, int64) (bool, error)
-	beforeFailTransition func()
+	db                    *sql.DB
+	owner                 string
+	metrics               *store.SQLiteMetrics
+	isScanCancelled       func(context.Context, int64) (bool, error)
+	beforeFailTransition  func()
+	beforeClaimTransition func(*sql.Tx)
 }
 
 func NewQueue(db *sql.DB, owner string, metrics *store.SQLiteMetrics) *Queue {
