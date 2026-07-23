@@ -21,6 +21,7 @@ func TestRecoverStartupTasksCleansScrapeStagesBeforeQueueReset(t *testing.T) {
 	_ = os.MkdirAll(stale, 0755)
 	_ = os.WriteFile(filepath.Join(stale, "poster.jpg"), []byte("x"), 0644)
 	_, _ = db.Exec(`INSERT INTO media_asset_stage_journal(stage_id,media_id,run_id,step_id,generation,owner_token,source_fingerprint,artifact_kind,state,staged_path,hashes_sizes_json) VALUES('stale',1,1,1,1,'dead','fp','scrape_artwork','staged',?,'{}')`, stale)
+	_, _ = db.Exec(`UPDATE media_asset_stage_journal SET updated_at=datetime(CURRENT_TIMESTAMP,'-11 minutes') WHERE stage_id='stale'`)
 	if e = recoverStartupTasks(context.Background(), db, postingest.NewQueue(db, "r", nil), StartupRecoveryRoots{ScrapeArtwork: root}); e != nil {
 		t.Fatal(e)
 	}

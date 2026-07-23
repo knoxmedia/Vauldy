@@ -7,10 +7,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"knox-media/internal/caststore"
 	"knox-media/internal/metadatalib"
 	"knox-media/internal/scraper"
 	"knox-media/internal/store"
+	"sort"
 	"strings"
 )
 
@@ -237,9 +239,21 @@ func mustScrapeJSON(res *scraper.ScrapeResult) string {
 }
 
 func canonicalScrapeEffectManifest(c scrapeClaim, result *scraper.ScrapeResult, e scrapeCompletionEffects) ([]byte, string, error) {
-	raw, err := json.Marshal(map[string]any{"task": c.ID, "attempt": c.Attempts, "generation": c.Generation.Int64, "stage": e.Artwork.StageID, "title": result.Title, "result": result, "credits": e.Credits, "repair": e.PosterFallback})
+	mediaRaw := mustScrapeJSON(result)
+	mediaSum := sha256.Sum256([]byte(mediaRaw))
+	creditKeys := make([]string, 0, len(e.Credits))
+	for _, v := range e.Credits {
+		creditKeys = append(creditKeys, strings.Join([]string{strings.TrimSpace(v.TMDBPersonID), strings.TrimSpace(v.Name), strings.TrimSpace(v.Occupation), strings.TrimSpace(v.CharacterName), strings.TrimSpace(v.RoleType), fmt.Sprint(v.SortOrder)}, "\x00"))
+	}
+	sort.Strings(creditKeys)
+	creditSum := sha256.Sum256([]byte(strings.Join(creditKeys, "\n")))
+	seriesSum := sha256.Sum256([]byte(fmt.Sprintf("%d:%d:%x", e.LibraryID, c.MediaID, mediaSum)))
+	raw, err := json.Marshal(map[string]any{"v": 2, "task": c.ID, "attempt": c.Attempts, "generation": c.Generation.Int64, "stage": e.Artwork.StageID, "media_sha256": hex.EncodeToString(mediaSum[:]), "series_sha256": hex.EncodeToString(seriesSum[:]), "credit_sha256": hex.EncodeToString(creditSum[:]), "credit_count": len(creditKeys), "repair": e.PosterFallback, "artwork_count": len(e.Artwork.Images)})
 	if err != nil {
 		return nil, "", err
+	}
+	if len(raw) > 64<<10 {
+		return nil, "", fmt.Errorf("scrape effect manifest exceeds 64KiB")
 	}
 	sum := sha256.Sum256(raw)
 	return raw, hex.EncodeToString(sum[:]), nil

@@ -1296,6 +1296,12 @@ func completeScrapeClaim(ctx context.Context, db *sql.DB, c scrapeClaim, source,
 	return completeScrapeClaimWithEffects(ctx, db, c, source, query, message, result, scrapeCompletionEffects{})
 }
 func completeScrapeClaimWithEffects(ctx context.Context, db *sql.DB, c scrapeClaim, source, query, message string, result *scraper.ScrapeResult, effects scrapeCompletionEffects) error {
+	effects.Credits = normalizeScrapeCredits(effects.Credits)
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+	}
 	var expectedManifest []byte
 	var expectedDigest string
 	err := scrapeClaimImmediate(ctx, db, func(tx store.ImmediateConnTx) error {
@@ -1435,4 +1441,24 @@ func summarizeProviderWarnings(res *scraper.ScrapeResult) string {
 	default:
 		return "ok"
 	}
+}
+
+func normalizeScrapeCredits(in []scraper.CreditMember) []scraper.CreditMember {
+	out := make([]scraper.CreditMember, 0, len(in))
+	seen := map[string]bool{}
+	for _, v := range in {
+		v.Name = strings.TrimSpace(v.Name)
+		v.TMDBPersonID = strings.TrimSpace(v.TMDBPersonID)
+		v.Occupation = strings.TrimSpace(v.Occupation)
+		if v.Name == "" {
+			continue
+		}
+		k := strings.Join([]string{v.TMDBPersonID, strings.ToLower(v.Name), v.Occupation, v.CharacterName, v.RoleType, fmt.Sprint(v.SortOrder)}, "\x00")
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, v)
+	}
+	return out
 }

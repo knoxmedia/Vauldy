@@ -25,9 +25,12 @@ func ImportCreditsExecutor(ctx context.Context, db store.SQLExecutor, mediaID in
 		if name == "" {
 			continue
 		}
-		personID, err := findOrCreateByTMDBExecutor(context.Background(), db, c.TMDBPersonID, name)
-		if err != nil || personID <= 0 {
-			continue
+		personID, err := findOrCreateByTMDBExecutor(ctx, db, c.TMDBPersonID, name)
+		if err != nil {
+			return imported, err
+		}
+		if personID <= 0 {
+			return imported, sql.ErrNoRows
 		}
 		avatar := strings.TrimSpace(c.ProfilePath)
 		if avatar != "" && !strings.HasPrefix(avatar, "http") {
@@ -47,10 +50,14 @@ func ImportCreditsExecutor(ctx context.Context, db store.SQLExecutor, mediaID in
 			TMDBID:      c.TMDBPersonID,
 			Occupations: []string{c.Occupation},
 		}
-		_ = applyScrapePatchExecutor(context.Background(), db, personID, patch)
-		mergePersonOccupationsExecutor(context.Background(), db, personID, c.Occupation)
-		if err := linkMediaPersonExecutor(context.Background(), db, mediaID, personID, c.Occupation, c.CharacterName, c.RoleType, c.SortOrder); err != nil {
-			continue
+		if err := applyScrapePatchExecutor(ctx, db, personID, patch); err != nil {
+			return imported, err
+		}
+		if err := mergePersonOccupationsExecutor(ctx, db, personID, c.Occupation); err != nil {
+			return imported, err
+		}
+		if err := linkMediaPersonExecutor(ctx, db, mediaID, personID, c.Occupation, c.CharacterName, c.RoleType, c.SortOrder); err != nil {
+			return imported, err
 		}
 		imported++
 	}

@@ -628,6 +628,7 @@ func TestScrapeEffectsValidClaimRollbackIsExhaustive(t *testing.T) {
 		}
 	}
 	_, _ = db.Exec(`UPDATE scrape_task SET lease_owner='stale' WHERE id=?`, claim.ID)
+	_, _ = db.Exec(`UPDATE media_asset_stage_journal SET updated_at=datetime(CURRENT_TIMESTAMP,'-11 minutes') WHERE stage_id=?`, stage.StageID)
 	cleaned, err := metadatalib.ReconcileScrapeArtworkStages(context.Background(), db, root, 10)
 	if err != nil || cleaned != 1 {
 		t.Fatalf("clean=%d err=%v", cleaned, err)
@@ -783,5 +784,21 @@ func TestScrapeSeriesEffectErrorsRollbackCompletion(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestScrapeEffectManifestIsBoundedAndOmitsProviderText(t *testing.T) {
+	huge := "sensitive-provider-text-" + strings.Repeat("x", 200000)
+	c := scrapeClaim{ID: 1, Attempts: 2, Generation: sql.NullInt64{Int64: 3, Valid: true}, MediaID: 4}
+	credits := make([]scraper.CreditMember, 1000)
+	for i := range credits {
+		credits[i] = scraper.CreditMember{TMDBPersonID: fmt.Sprint(i), Name: huge + fmt.Sprint(i), Occupation: "actor"}
+	}
+	raw, _, err := canonicalScrapeEffectManifest(c, &scraper.ScrapeResult{Title: huge, Overview: huge, Extra: map[string]any{"secret": huge}}, scrapeCompletionEffects{Credits: credits, PosterFallback: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) >= 64<<10 || strings.Contains(string(raw), "sensitive-provider-text") {
+		t.Fatalf("manifest bytes=%d leaked=%v", len(raw), strings.Contains(string(raw), "sensitive-provider-text"))
 	}
 }

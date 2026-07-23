@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"knox-media/internal/store"
 	"strings"
 	"time"
@@ -783,8 +784,12 @@ func findOrCreateByTMDBExecutor(ctx context.Context, db store.SQLExecutor, tmdbI
 		return findOrCreateByNameExecutor(ctx, db, name)
 	}
 	var id int64
-	if db.QueryRowContext(ctx, `SELECT id FROM cast_person WHERE tmdb_id=? AND deleted_at IS NULL LIMIT 1`, tmdbID).Scan(&id) == nil && id > 0 {
+	err := db.QueryRowContext(ctx, `SELECT id FROM cast_person WHERE tmdb_id=? AND deleted_at IS NULL LIMIT 1`, tmdbID).Scan(&id)
+	if err == nil && id > 0 {
 		return id, nil
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, err
 	}
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -825,10 +830,10 @@ func linkMediaPersonExecutor(ctx context.Context, db store.SQLExecutor, mediaID,
 	_, e := db.ExecContext(ctx, `INSERT INTO media_person(media_id,person_id,occupation,character_name,role_type,sort_order) VALUES(?,?,?,?,?,?) ON CONFLICT(media_id,person_id,occupation) DO UPDATE SET character_name=excluded.character_name,role_type=excluded.role_type,sort_order=excluded.sort_order,updated_at=CURRENT_TIMESTAMP`, mediaID, personID, occupation, strings.TrimSpace(character), strings.TrimSpace(role), sortOrder)
 	return e
 }
-func mergePersonOccupationsExecutor(ctx context.Context, db store.SQLExecutor, id int64, occupations ...string) {
+func mergePersonOccupationsExecutor(ctx context.Context, db store.SQLExecutor, id int64, occupations ...string) error {
 	var raw sql.NullString
-	if db.QueryRowContext(ctx, `SELECT occupation_json FROM cast_person WHERE id=?`, id).Scan(&raw) != nil {
-		return
+	if err := db.QueryRowContext(ctx, `SELECT occupation_json FROM cast_person WHERE id=?`, id).Scan(&raw); err != nil {
+		return err
 	}
 	existing := decodeOccupations(raw.String)
 	seen := map[string]bool{}
@@ -842,7 +847,18 @@ func mergePersonOccupationsExecutor(ctx context.Context, db store.SQLExecutor, i
 			existing = append(existing, o)
 		}
 	}
-	_, _ = db.ExecContext(ctx, `UPDATE cast_person SET occupation_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`, encodeOccupations(existing), id)
+	r, err := db.ExecContext(ctx, `UPDATE cast_person SET occupation_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`, encodeOccupations(existing), id)
+	if err != nil {
+		return err
+	}
+	n, err := r.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 func applyScrapePatchExecutor(ctx context.Context, db store.SQLExecutor, id int64, patch PersonPatch) error {
 	var locksRaw, name sql.NullString
