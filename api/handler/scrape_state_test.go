@@ -7,10 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"knox-media/internal/config"
+	"knox-media/internal/metadatalib"
 	"knox-media/internal/postingest"
 	"knox-media/internal/publication"
 	"knox-media/internal/scraper"
 	"knox-media/internal/store"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
@@ -588,10 +592,12 @@ func TestAutomaticScrapeStaleAndRollbackSelectNoEffects(t *testing.T) {
 func TestScrapeEffectsValidClaimRollbackIsExhaustive(t *testing.T) {
 	db, mid := posterHandlerTestDB(t)
 	claim := seedAndClaimLinkedScrape(t, db, mid)
+	LibraryID, _ := seedScrapeAcceptanceSeries(t, db, mid)
 	_, _ = db.Exec(`UPDATE media SET publication_state='published',published_at=CURRENT_TIMESTAMP,title='before',meta_json='{"keep":true}' WHERE id=?`, mid)
+	stage, scrapeResult, root := stageAcceptanceArtwork(t, db, claim, mid)
 	sentinel := errors.New("effect rollback")
-	effects := scrapeCompletionEffects{PosterFallback: true, Credits: []scraper.CreditMember{{TMDBPersonID: "777", Name: "Credit Person", Occupation: "actor"}}, BeforeTerminal: func() error { return sentinel }}
-	err := completeScrapeClaimWithEffects(context.Background(), db, *claim, "auto", "q", "ok", &scraper.ScrapeResult{Title: "after", Extra: map[string]any{}}, effects)
+	effects := scrapeCompletionEffects{PosterFallback: true, Artwork: stage, LibraryID: LibraryID, Credits: []scraper.CreditMember{{TMDBPersonID: "777", Name: "Credit Person", Occupation: "actor"}}, BeforeTerminal: func() error { return sentinel }}
+	err := completeScrapeClaimWithEffects(context.Background(), db, *claim, "auto", "q", "ok", scrapeResult, effects)
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("err=%v", err)
 	}
@@ -602,18 +608,40 @@ func TestScrapeEffectsValidClaimRollbackIsExhaustive(t *testing.T) {
 	if title != "before" || meta != "{\"keep\":true}" || task != "running" || step != "running" {
 		t.Fatalf("media=%s/%s states=%s/%s", title, meta, task, step)
 	}
-	for name, q := range map[string]string{"person": `SELECT COUNT(*) FROM cast_person WHERE tmdb_id='777'`, "link": `SELECT COUNT(*) FROM media_person WHERE media_id=` + fmt.Sprint(mid), "repair": `SELECT COUNT(*) FROM post_ingest_task WHERE task_type='poster_repair'`, "history": `SELECT COUNT(*) FROM scrape_history WHERE task_id=` + fmt.Sprint(claim.ID), "manifest": `SELECT COUNT(*) FROM scrape_effect_commit WHERE task_id=` + fmt.Sprint(claim.ID)} {
+	var journal string
+	_ = db.QueryRow(`SELECT state FROM media_asset_stage_journal WHERE stage_id=?`, stage.StageID).Scan(&journal)
+	if journal != "staged" {
+		t.Fatalf("journal=%s", journal)
+	}
+	for _, v := range stage.Images {
+		if _, e := os.Stat(v.Path); e != nil {
+			t.Fatal(e)
+		}
+	}
+	for name, q := range map[string]string{"evidence": `SELECT COUNT(*) FROM media_ingest_evidence WHERE stage_id='acceptance-stage'`, "person": `SELECT COUNT(*) FROM cast_person WHERE tmdb_id='777'`, "link": `SELECT COUNT(*) FROM media_person WHERE media_id=` + fmt.Sprint(mid), "repair": `SELECT COUNT(*) FROM post_ingest_task WHERE task_type='poster_repair'`, "history": `SELECT COUNT(*) FROM scrape_history WHERE task_id=` + fmt.Sprint(claim.ID), "manifest": `SELECT COUNT(*) FROM scrape_effect_commit WHERE task_id=` + fmt.Sprint(claim.ID)} {
 		var n int
 		_ = db.QueryRow(q).Scan(&n)
 		if n != 0 {
 			t.Fatalf("%s=%d", name, n)
 		}
 	}
+	_, _ = db.Exec(`UPDATE scrape_task SET lease_owner='stale' WHERE id=?`, claim.ID)
+	cleaned, err := metadatalib.ReconcileScrapeArtworkStages(context.Background(), db, root, 10)
+	if err != nil || cleaned != 1 {
+		t.Fatalf("clean=%d err=%v", cleaned, err)
+	}
+	for _, v := range stage.Images {
+		if _, e := os.Stat(v.Path); !os.IsNotExist(e) {
+			t.Fatalf("retained %s", v.Path)
+		}
+	}
+
 }
 
 func TestScrapeEffectsUncertainActualCommitReconcilesManifestExactlyOnce(t *testing.T) {
 	db, mid := posterHandlerTestDB(t)
 	claim := seedAndClaimLinkedScrape(t, db, mid)
+	LibraryID, _ := seedScrapeAcceptanceSeries(t, db, mid)
 	_, _ = db.Exec(`UPDATE media SET publication_state='published',published_at=CURRENT_TIMESTAMP WHERE id=?`, mid)
 	orig := withImmediateScrapeTx
 	t.Cleanup(func() { withImmediateScrapeTx = orig })
@@ -626,8 +654,8 @@ func TestScrapeEffectsUncertainActualCommitReconcilesManifestExactlyOnce(t *test
 		}
 		return out, err
 	}
-	effects := scrapeCompletionEffects{PosterFallback: true, Credits: []scraper.CreditMember{{TMDBPersonID: "778", Name: "Exact Person", Occupation: "actor"}}}
-	res := &scraper.ScrapeResult{Title: "exact", Extra: map[string]any{}}
+	stage, res, _ := stageAcceptanceArtwork(t, db, claim, mid)
+	effects := scrapeCompletionEffects{PosterFallback: true, Artwork: stage, LibraryID: LibraryID, Credits: []scraper.CreditMember{{TMDBPersonID: "778", Name: "Exact Person", Occupation: "actor"}}}
 	if err := completeScrapeClaimWithEffects(context.Background(), db, *claim, "auto", "q", "ok", res, effects); err != nil {
 		t.Fatal(err)
 	}
@@ -638,4 +666,68 @@ func TestScrapeEffectsUncertainActualCommitReconcilesManifestExactlyOnce(t *test
 			t.Fatalf("%s=%d", name, n)
 		}
 	}
+}
+
+func TestScrapeEffectsUncertainRejectsCorruptManifest(t *testing.T) {
+	db, mid := posterHandlerTestDB(t)
+	claim := seedAndClaimLinkedScrape(t, db, mid)
+	_, _ = db.Exec(`UPDATE media SET publication_state='published',published_at=CURRENT_TIMESTAMP WHERE id=?`, mid)
+	orig := withImmediateScrapeTx
+	t.Cleanup(func() { withImmediateScrapeTx = orig })
+	withImmediateScrapeTx = func(ctx context.Context, db *sql.DB, fn func(store.ImmediateConnTx) error) (store.ImmediateOutcome, error) {
+		out, err := orig(ctx, db, fn)
+		if err == nil {
+			_, _ = db.Exec(`UPDATE scrape_effect_commit SET manifest_json='{"corrupt":true}',manifest_digest='bad' WHERE task_id=?`, claim.ID)
+			return out, &store.ImmediateCommitError{Cause: errors.New("lost")}
+		}
+		return out, err
+	}
+	err := completeScrapeClaimWithEffects(context.Background(), db, *claim, "auto", "q", "ok", &scraper.ScrapeResult{Title: "exact", Extra: map[string]any{}}, scrapeCompletionEffects{PosterFallback: true})
+	var uncertain *store.ImmediateCommitError
+	if !errors.As(err, &uncertain) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func stageAcceptanceArtwork(t *testing.T, db *sql.DB, c *scrapeClaim, mid int64) (metadatalib.StagedScrapeArtwork, *scraper.ScrapeResult, string) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("image:" + r.URL.Path)) }))
+	t.Cleanup(srv.Close)
+	root := t.TempDir()
+	res := &scraper.ScrapeResult{Title: "accepted", Poster: srv.URL + "/poster.jpg", Backdrop: srv.URL + "/backdrop.jpg", Logo: srv.URL + "/logo.png", Extra: map[string]any{"series_title": "Accepted Show"}}
+	stage, err := metadatalib.StageScrapeImagesDurable(context.Background(), db, root, "", c.RunID.Int64, c.StepID.Int64, mid, c.Generation.Int64, c.Owner, "acceptance-stage", res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stage.Images) != 3 {
+		t.Fatalf("images=%d", len(stage.Images))
+	}
+	return stage, res, root
+}
+
+func seedScrapeAcceptanceSeries(t *testing.T, db *sql.DB, mid int64) (int64, int64) {
+	t.Helper()
+	var lid int64
+	if err := db.QueryRow(`SELECT library_id FROM media WHERE id=?`, mid).Scan(&lid); err != nil {
+		t.Fatal(err)
+	}
+	r, err := db.Exec(`INSERT INTO series(library_id,title,title_norm,meta_json) VALUES(?,'Before Show','before show','{"before":true}')`, lid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seriesID, _ := r.LastInsertId()
+	r, _ = db.Exec(`INSERT INTO season(tv_id,season_num) VALUES(?,1)`, seriesID)
+	seasonID, _ := r.LastInsertId()
+	r, _ = db.Exec(`INSERT INTO episode(season_id,episode_num) VALUES(?,1)`, seasonID)
+	episodeID, _ := r.LastInsertId()
+	_, _ = db.Exec(`INSERT INTO episode_media(episode_id,media_id) VALUES(?,?)`, episodeID, mid)
+	r, err = db.Exec(`INSERT INTO media(library_id,file_id,file_path,title,file_type,status,meta_json,publication_state,published_at) VALUES(?,'accept-sibling','sibling.mp4','Sibling','video','active','{"sibling":true}','published',CURRENT_TIMESTAMP)`, lid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	siblingID, _ := r.LastInsertId()
+	r, _ = db.Exec(`INSERT INTO episode(season_id,episode_num) VALUES(?,2)`, seasonID)
+	episodeID, _ = r.LastInsertId()
+	_, _ = db.Exec(`INSERT INTO episode_media(episode_id,media_id) VALUES(?,?)`, episodeID, siblingID)
+	return lid, siblingID
 }

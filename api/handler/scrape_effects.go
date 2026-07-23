@@ -60,10 +60,11 @@ func applyScrapeCompletionEffectsTx(ctx context.Context, tx store.SQLExecutor, c
 	if e.BeforeTerminal != nil {
 		return "", e.BeforeTerminal()
 	}
-	manifestRaw, _ := json.Marshal(map[string]any{"task": c.ID, "attempt": c.Attempts, "stage": e.Artwork.StageID, "title": result.Title, "result": result, "credits": e.Credits, "repair": e.PosterFallback})
-	sum := sha256.Sum256(manifestRaw)
-	digest := hex.EncodeToString(sum[:])
-	_, err := tx.ExecContext(ctx, `INSERT INTO scrape_effect_commit(task_id,attempt,generation,stage_id,manifest_json,manifest_digest) VALUES(?,?,?,?,?,?)`, c.ID, c.Attempts, c.Generation.Int64, e.Artwork.StageID, string(manifestRaw), digest)
+	manifestRaw, digest, err := canonicalScrapeEffectManifest(c, result, e)
+	if err != nil {
+		return "", err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO scrape_effect_commit(task_id,attempt,generation,stage_id,manifest_json,manifest_digest) VALUES(?,?,?,?,?,?)`, c.ID, c.Attempts, c.Generation.Int64, e.Artwork.StageID, string(manifestRaw), digest)
 	return digest, err
 }
 
@@ -197,4 +198,13 @@ func syncSeriesCollectionMetaExecutor(ctx context.Context, q store.SQLExecutor, 
 func mustScrapeJSON(res *scraper.ScrapeResult) string {
 	raw, _ := json.Marshal(map[string]any{"scrape": res})
 	return string(raw)
+}
+
+func canonicalScrapeEffectManifest(c scrapeClaim, result *scraper.ScrapeResult, e scrapeCompletionEffects) ([]byte, string, error) {
+	raw, err := json.Marshal(map[string]any{"task": c.ID, "attempt": c.Attempts, "generation": c.Generation.Int64, "stage": e.Artwork.StageID, "title": result.Title, "result": result, "credits": e.Credits, "repair": e.PosterFallback})
+	if err != nil {
+		return nil, "", err
+	}
+	sum := sha256.Sum256(raw)
+	return raw, hex.EncodeToString(sum[:]), nil
 }
