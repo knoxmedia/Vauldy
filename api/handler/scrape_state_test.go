@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -641,8 +643,8 @@ func TestScrapeEffectsValidClaimRollbackIsExhaustive(t *testing.T) {
 func TestScrapeEffectsUncertainActualCommitReconcilesManifestExactlyOnce(t *testing.T) {
 	db, mid := posterHandlerTestDB(t)
 	claim := seedAndClaimLinkedScrape(t, db, mid)
-	LibraryID, _ := seedScrapeAcceptanceSeries(t, db, mid)
-	_, _ = db.Exec(`UPDATE media SET publication_state='published',published_at=CURRENT_TIMESTAMP WHERE id=?`, mid)
+	LibraryID, siblingID := seedScrapeAcceptanceSeries(t, db, mid)
+	_, _ = db.Exec(`UPDATE library SET type='tv' WHERE id=?; UPDATE media SET file_path='Before Show S01E01.mkv',publication_state='published',published_at=CURRENT_TIMESTAMP WHERE id=?`, LibraryID, mid)
 	orig := withImmediateScrapeTx
 	t.Cleanup(func() { withImmediateScrapeTx = orig })
 	once := true
@@ -658,6 +660,20 @@ func TestScrapeEffectsUncertainActualCommitReconcilesManifestExactlyOnce(t *test
 	effects := scrapeCompletionEffects{PosterFallback: true, Artwork: stage, LibraryID: LibraryID, Credits: []scraper.CreditMember{{TMDBPersonID: "778", Name: "Exact Person", Occupation: "actor"}}}
 	if err := completeScrapeClaimWithEffects(context.Background(), db, *claim, "auto", "q", "ok", res, effects); err != nil {
 		t.Fatal(err)
+	}
+	var seriesTitle, siblingMeta string
+	_ = db.QueryRow(`SELECT title FROM series WHERE library_id=?`, LibraryID).Scan(&seriesTitle)
+	_ = db.QueryRow(`SELECT meta_json FROM media WHERE id=?`, siblingID).Scan(&siblingMeta)
+	if seriesTitle != "Before Show" {
+		t.Fatalf("series=%q", seriesTitle)
+	}
+	var sibling map[string]any
+	if err := json.Unmarshal([]byte(siblingMeta), &sibling); err != nil {
+		t.Fatal(err)
+	}
+	scrapeMeta, ok := sibling["scrape"].(map[string]any)
+	if !ok || scrapeMeta["series_title"] != "Before Show" || !strings.Contains(fmt.Sprint(scrapeMeta["series_poster"]), stage.StageID) || !strings.Contains(fmt.Sprint(scrapeMeta["series_backdrop"]), stage.StageID) {
+		t.Fatalf("sibling=%s", siblingMeta)
 	}
 	for name, q := range map[string]string{"person": `SELECT COUNT(*) FROM cast_person WHERE tmdb_id='778'`, "link": `SELECT COUNT(*) FROM media_person WHERE media_id=` + fmt.Sprint(mid), "repair": `SELECT COUNT(*) FROM post_ingest_task WHERE task_type='poster_repair'`, "history": `SELECT COUNT(*) FROM scrape_history WHERE task_id=` + fmt.Sprint(claim.ID), "manifest": `SELECT COUNT(*) FROM scrape_effect_commit WHERE task_id=` + fmt.Sprint(claim.ID)} {
 		var n int
@@ -730,4 +746,42 @@ func seedScrapeAcceptanceSeries(t *testing.T, db *sql.DB, mid int64) (int64, int
 	episodeID, _ = r.LastInsertId()
 	_, _ = db.Exec(`INSERT INTO episode_media(episode_id,media_id) VALUES(?,?)`, episodeID, siblingID)
 	return lid, siblingID
+}
+
+func TestScrapeSeriesEffectErrorsRollbackCompletion(t *testing.T) {
+	for _, tc := range []struct{ name, trigger string }{
+		{"series_update", `CREATE TRIGGER fail_series_effect BEFORE UPDATE ON series BEGIN SELECT RAISE(ABORT,'series update fault'); END`},
+		{"sibling_update", `CREATE TRIGGER fail_sibling_effect BEFORE UPDATE OF meta_json ON media WHEN NEW.file_id='accept-sibling' BEGIN SELECT RAISE(ABORT,'sibling update fault'); END`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mid := posterHandlerTestDB(t)
+			claim := seedAndClaimLinkedScrape(t, db, mid)
+			libraryID, siblingID := seedScrapeAcceptanceSeries(t, db, mid)
+			_, _ = db.Exec(`UPDATE library SET type='tv' WHERE id=?; UPDATE media SET file_path='Before Show S01E01.mkv' WHERE id=?`, libraryID, mid)
+			_, _ = db.Exec(`UPDATE media SET publication_state='published',published_at=CURRENT_TIMESTAMP,title='before',meta_json='{"keep":true}' WHERE id=?`, mid)
+			if _, err := db.Exec(tc.trigger); err != nil {
+				t.Fatal(err)
+			}
+			err := completeScrapeClaimWithEffects(context.Background(), db, *claim, "auto", "q", "ok", &scraper.ScrapeResult{Title: "After", Extra: map[string]any{"series_title": "After Show"}}, scrapeCompletionEffects{LibraryID: libraryID, PosterFallback: true})
+			if err == nil {
+				t.Fatal("expected injected series effect error")
+			}
+			var task, step, seriesTitle, siblingMeta, mediaTitle string
+			_ = db.QueryRow(`SELECT status FROM scrape_task WHERE id=?`, claim.ID).Scan(&task)
+			_ = db.QueryRow(`SELECT status FROM media_ingest_step WHERE id=?`, claim.StepID.Int64).Scan(&step)
+			_ = db.QueryRow(`SELECT title FROM series WHERE library_id=?`, libraryID).Scan(&seriesTitle)
+			_ = db.QueryRow(`SELECT meta_json FROM media WHERE id=?`, siblingID).Scan(&siblingMeta)
+			_ = db.QueryRow(`SELECT title FROM media WHERE id=?`, mid).Scan(&mediaTitle)
+			if task != "running" || step != "running" || seriesTitle != "Before Show" || siblingMeta != `{"sibling":true}` || mediaTitle != "before" {
+				t.Fatalf("task=%s step=%s series=%q sibling=%s media=%q", task, step, seriesTitle, siblingMeta, mediaTitle)
+			}
+			for name, q := range map[string]string{"manifest": `SELECT COUNT(*) FROM scrape_effect_commit WHERE task_id=?`, "history": `SELECT COUNT(*) FROM scrape_history WHERE task_id=?`, "repair": `SELECT COUNT(*) FROM post_ingest_task WHERE media_id=? AND task_type='poster_repair'`} {
+				var n int
+				_ = db.QueryRow(q, claim.ID).Scan(&n)
+				if n != 0 {
+					t.Fatalf("%s=%d", name, n)
+				}
+			}
+		})
+	}
 }

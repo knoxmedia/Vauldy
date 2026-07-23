@@ -6,11 +6,11 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"knox-media/internal/caststore"
 	"knox-media/internal/metadatalib"
 	"knox-media/internal/scraper"
 	"knox-media/internal/store"
-	"log"
 	"strings"
 )
 
@@ -73,25 +73,34 @@ func syncSeriesCollectionMetaExecutor(ctx context.Context, q store.SQLExecutor, 
 		return nil
 	}
 	var seriesID int64
-	if err := q.QueryRowContext(ctx, `
+	err := q.QueryRowContext(ctx, `
 		SELECT sr.id FROM episode_media em
 		JOIN episode ep ON ep.id = em.episode_id
 		JOIN season se ON se.id = ep.season_id
 		JOIN series sr ON sr.id = se.tv_id
 		WHERE em.media_id = ? AND sr.library_id = ?
-		LIMIT 1`, mediaID, libraryID).Scan(&seriesID); err != nil || seriesID <= 0 {
+		LIMIT 1`, mediaID, libraryID).Scan(&seriesID)
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if seriesID <= 0 {
+		return sql.ErrNoRows
 	}
 	var existingTitle sql.NullString
 	var linkedEpisodeCount int64
-	_ = q.QueryRowContext(ctx, `
+	if err := q.QueryRowContext(ctx, `
 		SELECT COALESCE(sr.title, ''),
 			(SELECT COUNT(DISTINCT em2.media_id)
 			 FROM season se2
 			 JOIN episode ep2 ON ep2.season_id = se2.id
 			 JOIN episode_media em2 ON em2.episode_id = ep2.id
 			 WHERE se2.tv_id = sr.id)
-		FROM series sr WHERE sr.id = ?`, seriesID).Scan(&existingTitle, &linkedEpisodeCount)
+		FROM series sr WHERE sr.id = ?`, seriesID).Scan(&existingTitle, &linkedEpisodeCount); err != nil {
+		return err
+	}
 
 	seriesTitle := res.Title
 	seriesOverview := res.Overview
@@ -136,7 +145,7 @@ func syncSeriesCollectionMetaExecutor(ctx context.Context, q store.SQLExecutor, 
 			},
 		},
 	})
-	_, _ = q.ExecContext(ctx, `
+	result, err := q.ExecContext(ctx, `
 		UPDATE series SET
 			title = CASE WHEN ? THEN title WHEN ? != '' THEN ? ELSE title END,
 			poster = COALESCE(NULLIF(?, ''), poster),
@@ -147,6 +156,16 @@ func syncSeriesCollectionMetaExecutor(ctx context.Context, q store.SQLExecutor, 
 		WHERE id = ?`,
 		preserveTitle, seriesTitle, seriesTitle, seriesPoster, tmdbID, tvdbID, string(seriesMeta), seriesID,
 	)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return sql.ErrNoRows
+	}
 	// Propagate shared show fields to sibling episodes without overwriting episode titles/posters.
 	rows, err := q.QueryContext(ctx, `
 		SELECT m.id, COALESCE(m.meta_json, '')
@@ -157,9 +176,8 @@ func syncSeriesCollectionMetaExecutor(ctx context.Context, q store.SQLExecutor, 
 		WHERE se.tv_id = ? AND m.id != ?
 	`, seriesID, mediaID)
 	if err != nil {
-		return nil
+		return err
 	}
-	defer rows.Close()
 	sharedPatch := map[string]any{
 		"scrape": map[string]any{
 			"series_title":    seriesTitle,
@@ -177,21 +195,39 @@ func syncSeriesCollectionMetaExecutor(ctx context.Context, q store.SQLExecutor, 
 			},
 		},
 	}
+	type sibling struct {
+		id   int64
+		meta string
+	}
+	var siblings []sibling
 	for rows.Next() {
-		var siblingID int64
-		var siblingMeta string
-		if rows.Scan(&siblingID, &siblingMeta) != nil || siblingID <= 0 {
-			continue
+		var v sibling
+		if err := rows.Scan(&v.id, &v.meta); err != nil {
+			_ = rows.Close()
+			return err
 		}
-		merged, mErr := scraper.MergeMetaJSON(siblingMeta, sharedPatch)
-		if mErr != nil {
-			continue
+		if v.id <= 0 {
+			_ = rows.Close()
+			return sql.ErrNoRows
 		}
-		if err := store.UpdateMediaMetaAndPhotoTime(ctx, q, siblingID, merged); err != nil {
-			log.Printf("series sibling metadata media=%d: %v", siblingID, err)
+		siblings = append(siblings, v)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, v := range siblings {
+		merged, err := scraper.MergeMetaJSON(v.meta, sharedPatch)
+		if err != nil {
+			return err
+		}
+		if err := store.UpdateMediaMetaAndPhotoTime(ctx, q, v.id, merged); err != nil {
+			return err
 		}
 	}
-
 	return nil
 }
 
