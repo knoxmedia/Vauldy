@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 
+	"knox-media/internal/coreiface"
 	"knox-media/internal/store"
 )
 
@@ -112,6 +113,63 @@ func TestRetryIngestDegradedCreatesVisibilityPreservingReplacement(t *testing.T)
 	_ = db.QueryRow(`SELECT COUNT(*) FROM pretranscode_rendition_job j JOIN transcode_task t ON t.id=j.task_id WHERE t.ingest_run_id=? AND j.status='failed' AND j.config_snapshot_json='{"old":true}'`, oldRun).Scan(&oldJobs)
 	if oldSteps != 4 || oldTasks != 1 || oldJobs != 1 {
 		t.Fatalf("old execution changed: steps=%d tasks=%d jobs=%d", oldSteps, oldTasks, oldJobs)
+	}
+}
+
+func TestRetryIngestDegradedUsesCurrentPrepareCapability(t *testing.T) {
+	db := openRetryTestDB(t)
+	mediaID, oldRun, _ := seedTerminalRetry(t, db, "degraded")
+	if _, err := db.Exec(`DELETE FROM pretranscode_rendition_job WHERE task_id IN (SELECT id FROM transcode_task WHERE ingest_run_id=?); DELETE FROM transcode_task WHERE ingest_run_id=?; DELETE FROM media_ingest_step WHERE run_id=? AND step_type='prepare'; UPDATE media_ingest_run SET config_snapshot_json='{"policy_version":2,"library_id":1,"file_type":"video","steps":["poster"]}' WHERE id=?`, oldRun, oldRun, oldRun, oldRun); err != nil {
+		t.Fatal(err)
+	}
+	prepare := &retryPreparePlanner{}
+	restore := coreiface.RegisterIngestPreparePlanner(prepare)
+	t.Cleanup(restore)
+	planner := NewPlanner(PlanOptions{PreparePlanner: coreiface.IngestPreparePlannerHandle(), Capabilities: NewCapabilityMatrix([]string{"prepare"})})
+	if err := RetryIngest(context.Background(), db, mediaID, planner); err != nil {
+		t.Fatal(err)
+	}
+	var steps, tasks int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM media_ingest_step WHERE media_id=? AND generation=2 AND step_type='prepare'`, mediaID).Scan(&steps)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM transcode_task WHERE media_id=? AND generation=2`, mediaID).Scan(&tasks)
+	if steps != 1 || tasks != 0 || prepare.calls != 1 {
+		t.Fatalf("prepare steps=%d tasks=%d planner calls=%d", steps, tasks, prepare.calls)
+	}
+}
+
+func TestRetryIngestDegradedOmitsPrepareWithoutBothCurrentConstraints(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		registered bool
+		capability bool
+	}{
+		{name: "planner_missing", capability: true},
+		{name: "capability_missing", registered: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openRetryTestDB(t)
+			mediaID, _, _ := seedTerminalRetry(t, db, "degraded")
+			var plannerHandle coreiface.IngestPreparePlanner
+			if tc.registered {
+				prepare := &retryPreparePlanner{}
+				restore := coreiface.RegisterIngestPreparePlanner(prepare)
+				defer restore()
+				plannerHandle = coreiface.IngestPreparePlannerHandle()
+			}
+			var caps []string
+			if tc.capability {
+				caps = []string{"prepare"}
+			}
+			planner := NewPlanner(PlanOptions{PreparePlanner: plannerHandle, Capabilities: NewCapabilityMatrix(caps)})
+			if err := RetryIngest(context.Background(), db, mediaID, planner); err != nil {
+				t.Fatal(err)
+			}
+			var count int
+			_ = db.QueryRow(`SELECT COUNT(*) FROM media_ingest_step WHERE media_id=? AND generation=2 AND step_type='prepare'`, mediaID).Scan(&count)
+			if count != 0 {
+				t.Fatalf("prepare steps=%d", count)
+			}
+		})
 	}
 }
 

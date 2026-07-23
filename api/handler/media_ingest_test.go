@@ -234,6 +234,27 @@ func TestAdminRetryDegradedIngestCreatesVisibilityPreservingGeneration(t *testin
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
+	var payload struct {
+		Media struct {
+			IngestGeneration int64  `json:"ingest_generation"`
+			PublicationState string `json:"publication_state"`
+			PublicationError string `json:"publication_error"`
+			PublishedAt      string `json:"published_at"`
+		} `json:"media"`
+		Run struct {
+			Generation         int64  `json:"generation"`
+			Status             string `json:"status"`
+			Reason             string `json:"reason"`
+			PreserveVisibility bool   `json:"preserve_visibility"`
+		} `json:"run"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Media.IngestGeneration != 2 || payload.Media.PublicationState != "degraded" || payload.Media.PublicationError != "poster failed" || payload.Media.PublishedAt != "2026-07-01 02:03:04" ||
+		payload.Run.Generation != 2 || payload.Run.Status != "processing" || payload.Run.Reason != "manual_retry" || !payload.Run.PreserveVisibility {
+		t.Fatalf("payload=%+v body=%s", payload, w.Body.String())
+	}
 	var generation, preserve, oldAttempts int
 	var mediaState, mediaErr, publishedAt, reason, runState, oldStep, oldTask string
 	if err := h.App.DB.QueryRow(`SELECT ingest_generation,publication_state,publication_error,published_at FROM media WHERE id=102`).Scan(&generation, &mediaState, &mediaErr, &publishedAt); err != nil {
