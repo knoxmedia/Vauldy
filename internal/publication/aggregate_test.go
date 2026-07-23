@@ -206,6 +206,47 @@ func TestAggregateExplicitCancellationIntentControlsVisibility(t *testing.T) {
 	}
 }
 
+func TestAggregateRepairCancellationUsesSamePrioritizedErrorForRunAndMedia(t *testing.T) {
+	for _, tc := range []struct {
+		name                     string
+		steps                    map[string]string
+		cancelError, failedError string
+		want                     string
+	}{
+		{name: "cancelled error", steps: map[string]string{"poster": "cancelled"}, cancelError: "poster cancelled", want: "poster cancelled"},
+		{name: "failed has priority", steps: map[string]string{"poster": "cancelled", "encrypt": "failed"}, cancelError: "poster cancelled", failedError: "encrypt failed", want: "encrypt failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, runID, mediaID := aggregateFixture(t, "processing", 1, tc.steps)
+			if _, err := db.Exec(`UPDATE media_ingest_run SET preserve_visibility=1 WHERE id=?`, runID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`UPDATE media SET publication_state='published',published_at=CURRENT_TIMESTAMP WHERE id=?`, mediaID); err != nil {
+				t.Fatal(err)
+			}
+			if tc.cancelError != "" {
+				if _, err := db.Exec(`UPDATE media_ingest_step SET last_error=? WHERE run_id=? AND status='cancelled'`, tc.cancelError, runID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.failedError != "" {
+				if _, err := db.Exec(`UPDATE media_ingest_step SET last_error=? WHERE run_id=? AND status='failed'`, tc.failedError, runID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			aggregateCall(t, db, runID)
+			var runStatus, runError string
+			if err := db.QueryRow(`SELECT status,error_message FROM media_ingest_run WHERE id=?`, runID).Scan(&runStatus, &runError); err != nil {
+				t.Fatal(err)
+			}
+			mediaStatus, _, mediaError := mediaState(t, db, mediaID)
+			if runStatus != "degraded" || mediaStatus != "degraded" || runError != tc.want || mediaError != tc.want {
+				t.Fatalf("run=%s/%q media=%s/%q", runStatus, runError, mediaStatus, mediaError)
+			}
+		})
+	}
+}
+
 func TestAggregateRequiredCancellationWithoutRunIntentIsFailure(t *testing.T) {
 	for _, tc := range []struct {
 		name, wantRun, wantMedia string

@@ -329,6 +329,85 @@ func TestLinkedRequiredPrepareCancelTaskPersistsAdminRunIntentAtomically(t *test
 	}
 }
 
+func TestLinkedRequiredPrepareCancelRejectsTerminalOrStaleTargets(t *testing.T) {
+	for _, tc := range []struct {
+		name, taskStatus, stepStatus string
+		stale                        bool
+	}{
+		{name: "done", taskStatus: "done", stepStatus: "done"},
+		{name: "failed", taskStatus: "failed", stepStatus: "failed"},
+		{name: "cancelled", taskStatus: "cancelled", stepStatus: "cancelled"},
+		{name: "stale generation", taskStatus: "running", stepStatus: "running", stale: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newTestDB(t)
+			svc, taskID, _, runID, stepID, mediaID := seedManagedLinkedTask(t, db, "running")
+			if _, err := db.Exec(`UPDATE transcode_task SET status=? WHERE id=?`, tc.taskStatus, taskID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`UPDATE media_ingest_step SET status=? WHERE id=?`, tc.stepStatus, stepID); err != nil {
+				t.Fatal(err)
+			}
+			if tc.stale {
+				if _, err := db.Exec(`UPDATE media SET ingest_generation=2 WHERE id=?`, mediaID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := svc.CancelTask(taskID); !errors.Is(err, ErrTaskNotCancellable) {
+				t.Fatalf("err=%v", err)
+			}
+			var runStatus, reason, taskStatus, stepStatus string
+			if err := db.QueryRow(`SELECT status,terminal_reason FROM media_ingest_run WHERE id=?`, runID).Scan(&runStatus, &reason); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.QueryRow(`SELECT status FROM transcode_task WHERE id=?`, taskID).Scan(&taskStatus); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.QueryRow(`SELECT status FROM media_ingest_step WHERE id=?`, stepID).Scan(&stepStatus); err != nil {
+				t.Fatal(err)
+			}
+			if runStatus != "processing" || reason != "" || taskStatus != tc.taskStatus || stepStatus != tc.stepStatus {
+				t.Fatalf("run=%s reason=%q task=%s step=%s", runStatus, reason, taskStatus, stepStatus)
+			}
+		})
+	}
+}
+
+func TestLinkedRequiredPrepareCancelRejectsDoneTargetWithoutCancellingOtherPendingWork(t *testing.T) {
+	db := newTestDB(t)
+	svc, taskID, _, runID, stepID, mediaID := seedManagedLinkedTask(t, db, "running")
+	if _, err := db.Exec(`UPDATE transcode_task SET status='done' WHERE id=?`, taskID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE media_ingest_step SET status='done' WHERE id=?`, stepID); err != nil {
+		t.Fatal(err)
+	}
+	res, err := db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status) VALUES(?,?,1,'poster',1,'waiting')`, runID, mediaID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherStep, _ := res.LastInsertId()
+	if _, err = db.Exec(`INSERT INTO post_ingest_task(media_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(?,?,?,1,'poster','waiting')`, mediaID, runID, otherStep); err != nil {
+		t.Fatal(err)
+	}
+	if err = svc.CancelTask(taskID); !errors.Is(err, ErrTaskNotCancellable) {
+		t.Fatalf("err=%v", err)
+	}
+	var runStatus, otherStepStatus, otherTaskStatus string
+	if err = db.QueryRow(`SELECT status FROM media_ingest_run WHERE id=?`, runID).Scan(&runStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.QueryRow(`SELECT status FROM media_ingest_step WHERE id=?`, otherStep).Scan(&otherStepStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.QueryRow(`SELECT status FROM post_ingest_task WHERE ingest_step_id=?`, otherStep).Scan(&otherTaskStatus); err != nil {
+		t.Fatal(err)
+	}
+	if runStatus != "processing" || otherStepStatus != "waiting" || otherTaskStatus != "waiting" {
+		t.Fatalf("run=%s step=%s task=%s", runStatus, otherStepStatus, otherTaskStatus)
+	}
+}
+
 func TestLinkedOptionalPrepareCancelDoesNotCancelRunOutcome(t *testing.T) {
 	db := newTestDB(t)
 	svc, taskID, jobID, runID, stepID, mediaID := seedManagedLinkedTask(t, db, "running")

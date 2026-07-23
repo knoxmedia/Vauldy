@@ -41,3 +41,27 @@ func CancelRunTx(ctx context.Context, tx *sql.Tx, runID int64, reason string) (b
 	}
 	return true, nil
 }
+
+// CancelRunForRequiredStepTx validates a specific required linked task and step
+// before recording whole-run cancellation intent. No run or sibling work is
+// changed when the linkage is stale or either target is already terminal.
+func CancelRunForRequiredStepTx(ctx context.Context, tx *sql.Tx, runID, stepID, taskID int64, reason string) (bool, error) {
+	if tx == nil || runID <= 0 || stepID <= 0 || taskID <= 0 || reason == "" {
+		return false, fmt.Errorf("publication cancel target: invalid transaction, run, step, task, or reason")
+	}
+	var valid int
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
+		SELECT 1 FROM media_ingest_run r
+		JOIN media m ON m.id=r.media_id AND m.ingest_generation=r.generation
+		JOIN media_ingest_step s ON s.id=? AND s.run_id=r.id AND s.media_id=r.media_id AND s.generation=r.generation
+		JOIN transcode_task t ON t.id=? AND t.ingest_run_id=r.id AND t.ingest_step_id=s.id AND t.media_id=r.media_id AND t.generation=r.generation
+		WHERE r.id=? AND r.status='processing' AND r.superseded_by_generation IS NULL AND r.superseded_at IS NULL
+		AND s.step_type='prepare' AND s.required=1 AND s.status IN ('waiting','running')
+		AND t.task_type='pretranscode' AND t.status IN ('waiting','running','paused'))`, stepID, taskID, runID).Scan(&valid); err != nil {
+		return false, err
+	}
+	if valid != 1 {
+		return false, nil
+	}
+	return CancelRunTx(ctx, tx, runID, reason)
+}

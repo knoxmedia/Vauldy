@@ -752,8 +752,8 @@ func (c *Coordinator) Cancel(ctx context.Context, taskID int64) (CancelResult, e
 	if c.onScanCancelled != nil {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cleanupCancel()
-		if err := c.onScanCancelled(cleanupCtx, taskID); err != nil {
-			return CancelResult{}, fmt.Errorf("scancoord: cancel post-ingest for task %d: %w", taskID, err)
+		if err := c.onScanCancelled(cleanupCtx, taskID); err != nil && c.onError != nil {
+			c.onError(fmt.Errorf("scancoord: cancel local scan task %d: %w", taskID, err))
 		}
 	}
 	return result, nil

@@ -328,8 +328,9 @@ func main() {
 		OwnerInstanceID: "scancoord-" + processID, Scanner: sc, Metrics: sqliteMetrics,
 
 		OnMediaDiscoveredTx: scancoord.MediaDiscoveredTxFunc(postingest.NewScanMediaDiscoveredTxCallback(publicationPlanner)),
-		OnScanCancelled: func(ctx context.Context, taskID int64) error {
-			return handleScanCancelled(ctx, taskID, postIngestQueue.CancelScan, dispatcher.CancelScan)
+		OnScanCancelled: func(_ context.Context, taskID int64) error {
+			dispatcher.CancelScan(taskID)
+			return nil
 		},
 
 		OnError: func(err error) { log.Printf("scan coordinator: %v", err) },

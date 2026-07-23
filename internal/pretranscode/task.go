@@ -16,6 +16,7 @@ import (
 )
 
 var ErrLinkedIngestTaskOperation = errors.New("operation is not allowed for linked ingest prepare task")
+var ErrTaskNotCancellable = errors.New("task is not cancellable")
 
 // TaskService manages pretranscode task lifecycle. It writes to the shared
 // transcode_task table (community, task_type='pretranscode') plus the
@@ -214,12 +215,12 @@ func (s *TaskService) CancelTask(id int64) error {
 			return err
 		}
 		if required {
-			cancelled, cancelErr := publication.CancelRunTx(context.Background(), tx, runID, "admin_cancelled")
+			cancelled, cancelErr := publication.CancelRunForRequiredStepTx(context.Background(), tx, runID, stepID, id, "admin_cancelled")
 			if cancelErr != nil {
 				return cancelErr
 			}
 			if !cancelled {
-				return fmt.Errorf("task %d linked ingest run is not cancellable", id)
+				return fmt.Errorf("%w: task %d linked ingest target", ErrTaskNotCancellable, id)
 			}
 			return tx.Commit()
 		}
@@ -232,7 +233,7 @@ func (s *TaskService) CancelTask(id int64) error {
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("task %d is not cancellable", id)
+		return fmt.Errorf("%w: task %d", ErrTaskNotCancellable, id)
 	}
 	if linked {
 		res, err = tx.Exec(`UPDATE media_ingest_step SET status='cancelled',last_error='cancelled',finished_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND run_id=? AND generation=? AND step_type='prepare' AND status IN ('waiting','running')`, stepID, runID, generation)

@@ -62,7 +62,7 @@ func AggregateTx(ctx context.Context, tx *sql.Tx, runID int64) error {
 		return err
 	}
 	if next == "degraded" {
-		_, err := tx.ExecContext(ctx, `UPDATE media SET publication_state='degraded',publication_error=COALESCE(NULLIF((SELECT last_error FROM media_ingest_step WHERE run_id=? AND required=1 AND status='failed' ORDER BY id LIMIT 1),''),'required step exhausted') WHERE id=?`, runID, mediaID)
+		_, err := tx.ExecContext(ctx, `UPDATE media SET publication_state='degraded',publication_error=COALESCE(NULLIF((SELECT last_error FROM media_ingest_step WHERE run_id=? AND required=1 AND status IN ('failed','cancelled') ORDER BY CASE status WHEN 'failed' THEN 0 ELSE 1 END,id LIMIT 1),''),'required step exhausted') WHERE id=?`, runID, mediaID)
 		return err
 	}
 	if next == "cancelled" {

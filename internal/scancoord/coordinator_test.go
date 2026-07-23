@@ -952,6 +952,7 @@ type cancelTargetSpy struct {
 	mu    sync.Mutex
 	calls []int64
 	ctxs  []error
+	err   error
 }
 
 func (s *cancelTargetSpy) cancel(ctx context.Context, taskID int64) error {
@@ -959,7 +960,7 @@ func (s *cancelTargetSpy) cancel(ctx context.Context, taskID int64) error {
 	defer s.mu.Unlock()
 	s.calls = append(s.calls, taskID)
 	s.ctxs = append(s.ctxs, ctx.Err())
-	return nil
+	return s.err
 }
 
 func insertScanPostTask(t *testing.T, db *sql.DB, libraryID, scanTaskID int64, status postingest.Status, suffix string) int64 {
@@ -1015,6 +1016,30 @@ func TestCoordinator_CancelScanAtomicallyCancelsWaitingPostTasksAfterCommit(t *t
 	defer target.mu.Unlock()
 	if len(target.calls) != 1 || target.calls[0] != result.TaskID {
 		t.Fatalf("cancel target calls=%v", target.calls)
+	}
+}
+
+func TestCoordinator_CancelIgnoresPostCommitLocalCallbackError(t *testing.T) {
+	db, libraries := openCoordinatorTestDB(t, 1)
+	target := &cancelTargetSpy{err: errors.New("local dispatcher unavailable")}
+	coordinator, err := New(db, Options{LeaseDuration: time.Minute, HeartbeatInterval: 20 * time.Second, OwnerInstanceID: "local-error-owner", Scanner: &countingScanner{}, OnScanCancelled: target.cancel})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := coordinator.Submit(context.Background(), ScanRequest{LibraryID: libraries[0], Source: SourceManual, Roots: []string{"/a"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForTaskStatus(t, db, result.TaskID, "done")
+	if _, err = db.Exec(`UPDATE scan_task SET status='waiting',cancelled=0,finished_at=NULL WHERE id=?`, result.TaskID); err != nil {
+		t.Fatal(err)
+	}
+	cancelResult, err := coordinator.Cancel(context.Background(), result.TaskID)
+	if err != nil || !cancelResult.Cancelled {
+		t.Fatalf("result=%+v err=%v", cancelResult, err)
+	}
+	if len(target.calls) != 1 || target.calls[0] != result.TaskID {
+		t.Fatalf("calls=%v", target.calls)
 	}
 }
 
