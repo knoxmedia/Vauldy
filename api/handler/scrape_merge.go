@@ -68,6 +68,9 @@ func commitScrapeMediaTx(ctx context.Context, tx store.SQLExecutor, mediaID int6
 	if err = store.UpdateMediaMetaAndPhotoTime(ctx, tx, mediaID, next); err != nil {
 		return "", nil, err
 	}
+	if err = relationshipsync.SyncExecutor(ctx, tx, mediaID); err != nil {
+		return "", nil, err
+	}
 	return next, candidate, nil
 }
 

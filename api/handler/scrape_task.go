@@ -519,10 +519,6 @@ func (h *Handler) runScrapeTasksWithLimit(ctx context.Context, ids []int64, limi
 			failed++
 			continue
 		}
-		// Poster fallback is idempotent queue work and runs only after the exact scrape commit succeeds.
-		if err := h.applyScrapeLocalImages(ctx, mediaID, libraryID, fileType, cfg, res, false); err != nil {
-			log.Printf("scrape post-commit poster media=%d: %v", mediaID, err)
-		}
 		h.scheduleLibraryPreviewRefresh(libraryID)
 		done++
 	}

@@ -14,6 +14,10 @@ import (
 func LinkTrack(db *sql.DB, libraryID, mediaID int64, meta musicparse.TrackMeta) error {
 	return linkTrackContext(context.Background(), db, libraryID, mediaID, meta)
 }
+func LinkTrackExecutor(ctx context.Context, db relationDB, libraryID, mediaID int64, meta musicparse.TrackMeta) error {
+	return linkTrackContext(ctx, db, libraryID, mediaID, meta)
+}
+
 func LinkTrackTx(ctx context.Context, tx *sql.Tx, libraryID, mediaID int64, meta musicparse.TrackMeta) error {
 	return linkTrackContext(ctx, tx, libraryID, mediaID, meta)
 }

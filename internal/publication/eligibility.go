@@ -172,6 +172,13 @@ func familyOrderSQL(f QueueFamily, alias string) string {
 	return familyAvailableSQL(f, alias) + "," + alias + ".created_at," + alias + ".id"
 }
 
+func familyLegacySQL(f QueueFamily, alias string) string {
+	if f == QueuePostIngest {
+		return fmt.Sprintf("(%s.ingest_run_id IS NULL AND %s.ingest_step_id IS NULL AND %s.generation=0)", alias, alias, alias)
+	}
+	return fmt.Sprintf("(%s.ingest_run_id IS NULL AND %s.ingest_step_id IS NULL AND %s.generation IS NULL)", alias, alias, alias)
+}
+
 func selectFamilyCandidate(ctx context.Context, tx store.SQLExecutor, req ClaimRequest) (id int64, required, linked bool, err error) {
 	table, alias := familySource(req.Family)
 	due := familyDueSQL(req.Family, alias)
@@ -186,7 +193,7 @@ func selectFamilyCandidate(ctx context.Context, tx store.SQLExecutor, req ClaimR
 		typeFilter += " AND q.id=?"
 		args = append(args, *req.QueueID)
 	}
-	query := fmt.Sprintf(`SELECT q.id,COALESCE(st.required,0),q.ingest_run_id IS NOT NULL FROM %s q LEFT JOIN media_ingest_step st ON st.id=q.ingest_step_id WHERE %s%s AND ((q.ingest_run_id IS NULL AND q.ingest_step_id IS NULL AND q.generation IS NULL) OR (%s)) ORDER BY %s LIMIT 1`, table, due, typeFilter, link, familyOrderSQL(req.Family, alias))
+	query := fmt.Sprintf(`SELECT q.id,COALESCE(st.required,0),q.ingest_run_id IS NOT NULL FROM %s q LEFT JOIN media_ingest_step st ON st.id=q.ingest_step_id WHERE %s%s AND (%s OR (%s)) ORDER BY %s LIMIT 1`, table, due, typeFilter, familyLegacySQL(req.Family, alias), link, familyOrderSQL(req.Family, alias))
 	err = tx.QueryRowContext(ctx, query, args...).Scan(&id, &required, &linked)
 	return
 }
@@ -290,7 +297,7 @@ func updateFamilyClaim(ctx context.Context, tx store.SQLExecutor, req ClaimReque
 	case QueuePrepare:
 		set = `status='running',lease_owner=?,lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds'),started_at=COALESCE(started_at,CURRENT_TIMESTAMP)`
 	}
-	q := fmt.Sprintf(`UPDATE %s AS q SET %s WHERE q.id=? AND %s AND ((q.ingest_run_id IS NULL AND q.ingest_step_id IS NULL AND q.generation IS NULL) OR (%s))`, table, set, due, link)
+	q := fmt.Sprintf(`UPDATE %s AS q SET %s WHERE q.id=? AND %s AND (%s OR (%s))`, table, set, due, familyLegacySQL(req.Family, a), link)
 	res, err := tx.ExecContext(ctx, q, owner, id)
 	if err != nil {
 		return nil, err

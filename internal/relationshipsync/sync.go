@@ -5,12 +5,16 @@ import (
 	"database/sql"
 	"knox-media/internal/musicparse"
 	"knox-media/internal/musicstore"
+	"knox-media/internal/store"
 	"knox-media/internal/tvparse"
 	"knox-media/internal/tvstore"
 	"strings"
 )
 
 func SyncTx(ctx context.Context, tx *sql.Tx, mediaID int64) error {
+	return SyncExecutor(ctx, tx, mediaID)
+}
+func SyncExecutor(ctx context.Context, tx store.SQLExecutor, mediaID int64) error {
 	var libraryID int64
 	var libraryType, fileType, path, meta string
 	if err := tx.QueryRowContext(ctx, `SELECT m.library_id,COALESCE(l.type,''),COALESCE(m.file_type,''),COALESCE(m.file_path,''),COALESCE(m.meta_json,'') FROM media m JOIN library l ON l.id=m.library_id WHERE m.id=?`, mediaID).Scan(&libraryID, &libraryType, &fileType, &path, &meta); err != nil {
@@ -25,7 +29,7 @@ func SyncTx(ctx context.Context, tx *sql.Tx, mediaID int64) error {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM episode_media WHERE media_id=?`, mediaID); err != nil {
 			return err
 		}
-		if err := musicstore.LinkTrackTx(ctx, tx, libraryID, mediaID, musicstore.DecodeMusicMeta(meta, path)); err != nil {
+		if err := musicstore.LinkTrackExecutor(ctx, tx, libraryID, mediaID, musicstore.DecodeMusicMeta(meta, path)); err != nil {
 			return err
 		}
 	case fileType == "video" && tvparse.IsTVLibraryType(libraryType):
@@ -34,7 +38,7 @@ func SyncTx(ctx context.Context, tx *sql.Tx, mediaID int64) error {
 		}
 		info, ok := tvparse.ParseEpisodeFromMedia(path, meta)
 		if ok && strings.TrimSpace(info.SeriesTitleNorm) != "" {
-			if err := tvstore.LinkEpisodeTx(ctx, tx, libraryID, mediaID, info); err != nil {
+			if err := tvstore.LinkEpisodeExecutor(ctx, tx, libraryID, mediaID, info); err != nil {
 				return err
 			}
 		} else if _, err := tx.ExecContext(ctx, `DELETE FROM episode_media WHERE media_id=?`, mediaID); err != nil {
@@ -50,7 +54,7 @@ func SyncTx(ctx context.Context, tx *sql.Tx, mediaID int64) error {
 	}
 	return prune(ctx, tx, oldEpisodeID, oldSeasonID, oldSeriesID, oldAlbumID, oldArtistID)
 }
-func prune(ctx context.Context, tx *sql.Tx, episodeID, seasonID, seriesID, albumID int64, artist sql.NullInt64) error {
+func prune(ctx context.Context, tx store.SQLExecutor, episodeID, seasonID, seriesID, albumID int64, artist sql.NullInt64) error {
 	if episodeID > 0 {
 		if _, e := tx.ExecContext(ctx, `DELETE FROM episode WHERE id=? AND NOT EXISTS(SELECT 1 FROM episode_media WHERE episode_id=?)`, episodeID, episodeID); e != nil {
 			return e
