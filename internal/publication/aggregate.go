@@ -4,10 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+
+	"knox-media/internal/store"
 )
 
 // AggregateTx reconciles a run and, when it is current, its media visibility.
-func AggregateTx(ctx context.Context, tx *sql.Tx, runID int64) error {
+func AggregateTx(ctx context.Context, tx store.SQLExecutor, runID int64) error {
 	if tx == nil || runID <= 0 {
 		return fmt.Errorf("publication aggregate: invalid transaction or run")
 	}

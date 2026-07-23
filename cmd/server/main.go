@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -33,12 +32,10 @@ import (
 	"knox-media/internal/config"
 	"knox-media/internal/coreiface"
 	"knox-media/internal/doccover"
-	"knox-media/internal/imagethumb"
 	"knox-media/internal/jit/hwenc"
 	jitmetrics "knox-media/internal/jit/metrics"
 	jitsession "knox-media/internal/jit/session"
 	"knox-media/internal/keyframe"
-	"knox-media/internal/keystore"
 	// Enterprise module imports 闂?their init() registers into
 	// coreiface.EnterpriseModules. The community build excludes these
 	// imports (and the packages themselves), leaving EnterpriseModules empty.
@@ -577,49 +574,6 @@ func ensureAutoPreviewGeneration(db *sql.DB, previewWorker *preview.Worker, medi
 		return
 	}
 	_, _ = previewWorker.Ensure(context.Background(), mediaID, inputPath, duration.Int64)
-}
-
-func generatePhotoVariantsOnScan(db *sql.DB, vault *keystore.Vault, cfg *config.Config, mediaID int64, fileType string) {
-	if fileType != "image" || db == nil || cfg == nil || mediaID <= 0 {
-		return
-	}
-	ffmpegPath := strings.TrimSpace(cfg.FFmpeg.FFmpegPath)
-	if ffmpegPath == "" {
-		return
-	}
-	derivedStore := storage.NewDerivedAssetStoreFromConfig(cfg, db, vault)
-	var filePath sql.NullString
-	var metaRaw sql.NullString
-	if err := db.QueryRow(`SELECT file_path, COALESCE(meta_json,'') FROM media WHERE id = ? LIMIT 1`, mediaID).
-		Scan(&filePath, &metaRaw); err != nil {
-		return
-	}
-	if strings.TrimSpace(filePath.String) == "" {
-		return
-	}
-	cacheDir := filepath.Join(cfg.Data.Preview, "photos")
-	paths, err := imagethumb.Ensure(context.Background(), db, vault, derivedStore, ffmpegPath, filePath.String, cacheDir, mediaID)
-	if err != nil {
-		return
-	}
-	var root map[string]any
-	if strings.TrimSpace(metaRaw.String) != "" {
-		_ = json.Unmarshal([]byte(metaRaw.String), &root)
-	}
-	if root == nil {
-		root = map[string]any{}
-	}
-	photo, _ := root["photo"].(map[string]any)
-	if photo == nil {
-		photo = map[string]any{}
-	}
-	photo["thumb_path"] = paths.Thumb
-	photo["medium_path"] = paths.Medium
-	root["photo"] = photo
-	merged, _ := json.Marshal(root)
-	if err := store.UpdateMediaMetaAndPhotoTime(context.Background(), db, mediaID, string(merged)); err != nil {
-		log.Printf("photo thumbnail metadata media=%d: %v", mediaID, err)
-	}
 }
 
 func loadSystemOptionsTranscodeSettings(db *sql.DB) transcode.Settings {

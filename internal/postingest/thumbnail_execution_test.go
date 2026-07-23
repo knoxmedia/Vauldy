@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -14,41 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"knox-media/internal/imagethumb"
 	"knox-media/internal/publication"
 )
-
-type testThumbnailWorker struct {
-	base  string
-	err   error
-	calls int
-}
-
-func (w *testThumbnailWorker) Ensure(ctx context.Context, mediaID int64) (imagethumb.Paths, error) {
-	w.calls++
-	paths := imagethumb.ExpectedPaths(w.base, mediaID)
-	if w.err != nil {
-		return paths, w.err
-	}
-	if err := os.MkdirAll(filepath.Dir(paths.Thumb), 0o755); err != nil {
-		return paths, err
-	}
-	for _, path := range []string{paths.Thumb, paths.Medium} {
-		f, err := os.Create(path)
-		if err != nil {
-			return paths, err
-		}
-		err = jpeg.Encode(f, image.NewRGBA(image.Rect(0, 0, 4, 3)), nil)
-		closeErr := f.Close()
-		if err != nil {
-			return paths, err
-		}
-		if closeErr != nil {
-			return paths, closeErr
-		}
-	}
-	return paths, nil
-}
 
 func planThumbnailFixture(t *testing.T, encrypted bool) (*sql.DB, int64, int64) {
 	t.Helper()
@@ -118,7 +84,7 @@ func waitPublicationState(t *testing.T, db *sql.DB, mediaID int64, want string) 
 
 func TestThumbnailDispatcherExecutesPlannedPhotoAndPublishes(t *testing.T) {
 	db, mediaID, _ := planThumbnailFixture(t, false)
-	worker := &testThumbnailWorker{base: t.TempDir()}
+	worker := realThumbnailStager(t, db)
 	q := NewQueue(db, "thumbnail-owner", nil)
 	opts := DefaultDispatcherOptions()
 	opts.OwnerID = "thumbnail-owner"
@@ -136,8 +102,9 @@ func TestThumbnailDispatcherExecutesPlannedPhotoAndPublishes(t *testing.T) {
 	if err = <-done; err != nil {
 		t.Fatal(err)
 	}
-	if worker.calls != 1 {
-		t.Fatalf("worker calls=%d", worker.calls)
+	var evidence int
+	if err = db.QueryRow(`SELECT COUNT(*) FROM media_ingest_evidence WHERE media_id=? AND kind='thumbnail'`, mediaID).Scan(&evidence); err != nil || evidence != 1 {
+		t.Fatalf("thumbnail evidence=%d err=%v", evidence, err)
 	}
 	var raw string
 	if err = db.QueryRow(`SELECT meta_json FROM media WHERE id=?`, mediaID).Scan(&raw); err != nil {
@@ -160,12 +127,12 @@ func TestThumbnailCompletionMakesEncryptDependencyReadyThenEncryptPublishes(t *t
 	if err != nil || task == nil {
 		t.Fatalf("claim=%+v err=%v", task, err)
 	}
-	worker := &testThumbnailWorker{base: t.TempDir()}
-	if err = NewThumbnailAdapter(db, worker).Execute(context.Background(), *task); err != nil {
-		t.Fatal(err)
-	}
-	if err = q.Complete(context.Background(), *task); err != nil {
-		t.Fatal(err)
+	worker := realThumbnailStager(t, db)
+	result, err := NewThumbnailAdapter(db, worker).(interface {
+		ExecuteWithResult(context.Context, Task) (ExecutionResult, error)
+	}).ExecuteWithResult(context.Background(), *task)
+	if err != nil || result.Completion != AlreadyCommittedAtomically {
+		t.Fatalf("thumbnail execute=%+v err=%v", result, err)
 	}
 	var state string
 	if err = db.QueryRow(`SELECT publication_state FROM media WHERE id=?`, mediaID).Scan(&state); err != nil || state != "processing" {
@@ -195,13 +162,15 @@ func TestThumbnailAdapterStaleGenerationCannotMutate(t *testing.T) {
 	if _, err = db.Exec(`UPDATE media SET ingest_generation=ingest_generation+1 WHERE id=?`, mediaID); err != nil {
 		t.Fatal(err)
 	}
-	worker := &testThumbnailWorker{base: t.TempDir()}
+	worker := realThumbnailStager(t, db)
 	err = NewThumbnailAdapter(db, worker).Execute(context.Background(), *task)
 	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "stale") {
 		t.Fatalf("err=%v", err)
 	}
-	if worker.calls != 0 {
-		t.Fatalf("stale worker calls=%d", worker.calls)
+	var journals int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM media_asset_stage_journal WHERE media_id=?`, mediaID).Scan(&journals)
+	if journals != 0 {
+		t.Fatalf("stale worker persisted journals=%d", journals)
 	}
 	var raw string
 	_ = db.QueryRow(`SELECT meta_json FROM media WHERE id=?`, mediaID).Scan(&raw)
@@ -210,30 +179,30 @@ func TestThumbnailAdapterStaleGenerationCannotMutate(t *testing.T) {
 	}
 }
 
-func TestThumbnailInvalidImageFailsWithBoundedQueueRetry(t *testing.T) {
-	db, _, _ := planThumbnailFixture(t, false)
+func TestThumbnailInvalidImageFailsPermanentlyWithoutRetry(t *testing.T) {
+	db, mediaID, _ := planThumbnailFixture(t, false)
+	source := taskSource(t, db, mediaID)
+	if err := os.WriteFile(source, []byte("not an image"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	q := NewQueue(db, "thumbnail-owner", nil)
-	worker := &testThumbnailWorker{base: t.TempDir(), err: errors.New("ffmpeg thumb: invalid image data")}
-	for attempt := 1; attempt <= 3; attempt++ {
-		task, err := q.Claim(context.Background(), TaskThumbnail)
-		if err != nil || task == nil {
-			t.Fatalf("claim %d=%+v err=%v", attempt, task, err)
-		}
-		err = NewThumbnailAdapter(db, worker).Execute(context.Background(), *task)
-		if err == nil {
-			t.Fatal("expected invalid image error")
-		}
-		if err = q.Fail(context.Background(), task, failureKind(err), err); err != nil {
-			t.Fatal(err)
-		}
-		_, _ = db.Exec(`UPDATE post_ingest_task SET available_at=CURRENT_TIMESTAMP WHERE id=?`, task.ID)
+	task, err := q.Claim(context.Background(), TaskThumbnail)
+	if err != nil || task == nil {
+		t.Fatalf("claim=%+v err=%v", task, err)
+	}
+	err = NewThumbnailAdapter(db, realThumbnailStager(t, db)).Execute(context.Background(), *task)
+	if err == nil || failureKind(err) != FailurePermanent {
+		t.Fatalf("err=%v kind=%v", err, failureKind(err))
+	}
+	if err = q.Fail(context.Background(), task, failureKind(err), err); err != nil {
+		t.Fatal(err)
 	}
 	var status string
 	var attempts int
-	if err := db.QueryRow(`SELECT status,attempts FROM post_ingest_task WHERE task_type='thumbnail'`).Scan(&status, &attempts); err != nil {
+	if err = db.QueryRow(`SELECT status,attempts FROM post_ingest_task WHERE id=?`, task.ID).Scan(&status, &attempts); err != nil {
 		t.Fatal(err)
 	}
-	if status != "failed" || attempts != 3 || worker.calls != 3 {
-		t.Fatalf("status=%s attempts=%d calls=%d", status, attempts, worker.calls)
+	if status != "failed" || attempts != 1 {
+		t.Fatalf("status=%s attempts=%d", status, attempts)
 	}
 }

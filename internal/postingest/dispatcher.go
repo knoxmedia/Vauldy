@@ -14,6 +14,24 @@ import (
 type Executor interface {
 	Execute(context.Context, Task) error
 }
+type CompletionDisposition uint8
+
+const (
+	CompleteThroughQueue CompletionDisposition = iota
+	AlreadyCommittedAtomically
+)
+
+type ExecutionResult struct{ Completion CompletionDisposition }
+type resultExecutor interface {
+	ExecuteWithResult(context.Context, Task) (ExecutionResult, error)
+}
+
+func executeTask(ctx context.Context, executor Executor, task Task) (ExecutionResult, error) {
+	if atomic, ok := executor.(resultExecutor); ok {
+		return atomic.ExecuteWithResult(ctx, task)
+	}
+	return ExecutionResult{Completion: CompleteThroughQueue}, executor.Execute(ctx, task)
+}
 
 type ClassifiedError struct {
 	Kind FailureKind
@@ -295,15 +313,21 @@ func (d *Dispatcher) runTask(parent, taskCtx context.Context, task Task, state *
 			return
 		}
 	}
-	result := make(chan error, 1)
-	go func() { result <- d.executor.Execute(taskCtx, task) }()
+	type executionOutcome struct {
+		result ExecutionResult
+		err    error
+	}
+	result := make(chan executionOutcome, 1)
+	go func() { r, e := executeTask(taskCtx, d.executor, task); result <- executionOutcome{r, e} }()
 	heartbeat := time.NewTicker(d.opts.HeartbeatInterval)
 	defer heartbeat.Stop()
 	var execErr error
+	var execResult ExecutionResult
 	executorUnresponsive := false
 	for {
 		select {
-		case execErr = <-result:
+		case outcome := <-result:
+			execResult, execErr = outcome.result, outcome.err
 			goto finish
 		case <-heartbeat.C:
 			if task.ScanTaskID != nil {
@@ -329,7 +353,8 @@ func (d *Dispatcher) runTask(parent, taskCtx context.Context, task Task, state *
 		case <-taskCtx.Done():
 			timer := time.NewTimer(d.opts.ExecutorStopGrace)
 			select {
-			case execErr = <-result:
+			case outcome := <-result:
+				execResult, execErr = outcome.result, outcome.err
 				if !timer.Stop() {
 					<-timer.C
 				}
@@ -382,6 +407,9 @@ finish:
 		execErr = context.DeadlineExceeded
 	}
 	if execErr == nil {
+		if execResult.Completion == AlreadyCommittedAtomically {
+			return
+		}
 		if err := d.q.Complete(writeCtx, task); err != nil {
 			log.Printf("postingest dispatcher complete task %d: %v", task.ID, err)
 		}

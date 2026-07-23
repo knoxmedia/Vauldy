@@ -269,20 +269,26 @@ func (q *Queue) Claim(ctx context.Context, typ TaskType) (*Task, error) {
 		}
 
 		task := &Task{}
-		var scanID sql.NullInt64
+		var scanID, runID, stepID sql.NullInt64
 		var leaseOwner, lastError sql.NullString
 		var leaseUntil time.Time
 		err = tx.QueryRowContext(ctx, `
-			SELECT id, media_id, scan_task_id, task_type, status, attempts,
+			SELECT id, media_id, scan_task_id, ingest_run_id, ingest_step_id, task_type, status, attempts,
 				max_attempts, generation, lease_owner, lease_until, last_error
 			FROM post_ingest_task WHERE id=?`, id).Scan(
-			&task.ID, &task.MediaID, &scanID, &task.Type, &task.Status,
+			&task.ID, &task.MediaID, &scanID, &runID, &stepID, &task.Type, &task.Status,
 			&task.Attempts, &task.MaxAttempts, &task.Generation, &leaseOwner, &leaseUntil, &lastError)
 		if err != nil {
 			return err
 		}
 		if scanID.Valid {
 			task.ScanTaskID = &scanID.Int64
+		}
+		if runID.Valid {
+			task.RunID = &runID.Int64
+		}
+		if stepID.Valid {
+			task.StepID = &stepID.Int64
 		}
 		task.LeaseOwner = leaseOwner.String
 		task.LeaseUntil = leaseUntil

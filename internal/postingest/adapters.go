@@ -56,6 +56,35 @@ func (s AdapterSet) Execute(ctx context.Context, task Task) error {
 	return adapter.Execute(ctx, task)
 }
 
+func (s AdapterSet) ExecuteWithResult(ctx context.Context, task Task) (ExecutionResult, error) {
+	var adapter Adapter
+	switch task.Type {
+	case TaskPoster:
+		adapter = s.Poster
+	case TaskThumbnail:
+		adapter = s.Thumbnail
+	case TaskPreview:
+		adapter = s.Preview
+	case TaskKeyframe:
+		adapter = s.Keyframe
+	case TaskSubtitle:
+		adapter = s.Subtitle
+	case TaskAtrack:
+		adapter = s.Atrack
+	case TaskEncrypt:
+		adapter = s.Encrypt
+	default:
+		return ExecutionResult{Completion: CompleteThroughQueue}, ClassifiedError{Kind: FailurePermanent, Err: fmt.Errorf("post-ingest adapter: unsupported task type %q", task.Type)}
+	}
+	if adapter == nil {
+		return ExecutionResult{Completion: CompleteThroughQueue}, ClassifiedError{Kind: FailurePermanent, Err: fmt.Errorf("post-ingest adapter: adapter for task type %q is not configured", task.Type)}
+	}
+	if atomic, ok := adapter.(resultExecutor); ok {
+		return atomic.ExecuteWithResult(ctx, task)
+	}
+	return ExecutionResult{Completion: CompleteThroughQueue}, adapter.Execute(ctx, task)
+}
+
 type runOneWorker interface {
 	RunOne(context.Context, int64) error
 }

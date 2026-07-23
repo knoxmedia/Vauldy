@@ -98,6 +98,20 @@ func TestSharedResourceControlAssemblyMainOrder(t *testing.T) {
 	}
 }
 
+func TestMainUsesThumbnailAdapterWithoutLegacyEnsure(t *testing.T) {
+	data, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(data)
+	if !strings.Contains(src, "postingest.NewThumbnailAdapter(") {
+		t.Fatal("missing thumbnail adapter")
+	}
+	if strings.Contains(src, "generatePhotoVariantsOnScan") || strings.Contains(src, "imagethumb.Ensure") {
+		t.Fatal("server retains legacy direct thumbnail publication")
+	}
+}
+
 func TestGracefulShutdownAssemblyUsesSignalsAndHTTPServer(t *testing.T) {
 	data, err := os.ReadFile("main.go")
 	if err != nil {

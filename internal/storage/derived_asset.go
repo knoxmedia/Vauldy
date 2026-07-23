@@ -139,7 +139,7 @@ func (s *DerivedAssetStore) StagePath(ctx context.Context, mediaID int64, kind, 
 	defer f.Close()
 	return s.stageReader(ctx, mediaID, kind, logicalName, f)
 }
-func (s *DerivedAssetStore) CommitStagedTx(ctx context.Context, tx *sql.Tx, assets ...*StagedDerivedAsset) ([]string, error) {
+func (s *DerivedAssetStore) CommitStagedTx(ctx context.Context, tx store.SQLExecutor, assets ...*StagedDerivedAsset) ([]string, error) {
 	if tx == nil {
 		return nil, fmt.Errorf("derived staged transaction is nil")
 	}

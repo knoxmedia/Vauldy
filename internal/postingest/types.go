@@ -43,6 +43,8 @@ type Task struct {
 	ID          int64
 	MediaID     int64
 	ScanTaskID  *int64
+	RunID       *int64
+	StepID      *int64
 	Type        TaskType
 	Status      Status
 	Attempts    int
