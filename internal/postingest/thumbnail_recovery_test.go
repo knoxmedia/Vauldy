@@ -126,6 +126,30 @@ func TestReconcileThumbnailStagesQuarantineInterleavingRejectsWorker(t *testing.
 		t.Fatal("worker committed after quarantine")
 	}
 }
+
+func TestReconcileThumbnailStagesRetriesQuarantinedCleanup(t *testing.T) {
+	db, _, _ := planThumbnailFixture(t, false)
+	q := NewQueue(db, "thumbnail-owner", nil)
+	task, _ := q.Claim(context.Background(), TaskThumbnail)
+	staged, err := realThumbnailStager(t, db).Stage(context.Background(), *task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`UPDATE media_asset_stage_journal SET state='quarantined',recovery_error='cleanup_failed' WHERE stage_id=?`, staged.Stage.StageID); err != nil {
+		t.Fatal(err)
+	}
+	_, cleaned, err := ReconcileThumbnailStages(context.Background(), db, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleaned != 1 {
+		t.Fatalf("cleaned=%d", cleaned)
+	}
+	if _, err = os.Stat(staged.Thumb.Path); !os.IsNotExist(err) {
+		t.Fatalf("quarantined cleanup not retried: %v", err)
+	}
+}
+
 func TestReconcileThumbnailStagesCorruptCommittedReportsAndRetains(t *testing.T) {
 	db, _, _ := planThumbnailFixture(t, false)
 	q := NewQueue(db, "thumbnail-owner", nil)

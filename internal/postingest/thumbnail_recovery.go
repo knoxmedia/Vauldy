@@ -34,7 +34,7 @@ func ReconcileThumbnailStages(ctx context.Context, db *sql.DB, limit int) (check
 	if limit <= 0 || limit > thumbnailStageBatchMax {
 		limit = thumbnailStageBatchMax
 	}
-	rows, err := db.QueryContext(ctx, `SELECT stage_id,media_id,run_id,step_id,generation,owner_token,source_fingerprint,state,staged_path,hashes_sizes_json FROM media_asset_stage_journal WHERE artifact_kind='thumbnail' AND recovery_error NOT IN ('cleaned_unreferenced','quarantined_unreferenced') ORDER BY updated_at,stage_id LIMIT ?`, limit)
+	rows, err := db.QueryContext(ctx, `SELECT stage_id,media_id,run_id,step_id,generation,owner_token,source_fingerprint,state,staged_path,hashes_sizes_json FROM media_asset_stage_journal WHERE artifact_kind='thumbnail' AND recovery_error<>'cleaned_unreferenced' ORDER BY updated_at,stage_id LIMIT ?`, limit)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -63,29 +63,35 @@ func ReconcileThumbnailStages(ctx context.Context, db *sql.DB, limit int) (check
 			}
 			continue
 		}
-		committed, active, err := thumbnailStageAuthority(ctx, db, r)
-		if err != nil {
-			return checked, cleaned, err
-		}
-		if committed || active {
-			continue
-		}
-		var claimed int64
-		_, err = store.WithImmediateConnTx(ctx, db, func(tx store.ImmediateConnTx) error {
-			result, err := tx.ExecContext(ctx, `UPDATE media_asset_stage_journal SET state='quarantined',quarantine_path=staged_path,recovery_error='quarantined_unreferenced',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND artifact_kind='thumbnail' AND state='staged' AND media_id=? AND run_id=? AND step_id=? AND generation=? AND owner_token=? AND source_fingerprint=? AND NOT EXISTS(SELECT 1 FROM media_ingest_evidence WHERE stage_id=?)`, r.stageID, r.mediaID, r.runID, r.stepID, r.generation, r.owner, r.fingerprint, r.stageID)
+		if r.state == "staged" {
+			committed, active, err := thumbnailStageAuthority(ctx, db, r)
 			if err != nil {
-				return err
+				return checked, cleaned, err
 			}
-			claimed, _ = result.RowsAffected()
-			return nil
-		})
-		if err != nil {
-			return checked, cleaned, err
+			if committed || active {
+				continue
+			}
 		}
-		if claimed != 1 {
+		claimed := int64(1)
+		if r.state == "staged" {
+			_, err = store.WithImmediateConnTx(ctx, db, func(tx store.ImmediateConnTx) error {
+				result, err := tx.ExecContext(ctx, `UPDATE media_asset_stage_journal SET state='quarantined',quarantine_path=staged_path,recovery_error='quarantined_unreferenced',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND artifact_kind='thumbnail' AND state='staged' AND media_id=? AND run_id=? AND step_id=? AND generation=? AND owner_token=? AND source_fingerprint=? AND NOT EXISTS(SELECT 1 FROM media_ingest_evidence WHERE stage_id=?) AND NOT EXISTS(SELECT 1 FROM post_ingest_task p JOIN media_ingest_step s ON s.id=p.ingest_step_id JOIN media_ingest_run run ON run.id=p.ingest_run_id JOIN media m ON m.id=p.media_id WHERE p.media_id=? AND p.ingest_run_id=? AND p.ingest_step_id=? AND p.generation=? AND p.task_type='thumbnail' AND p.status='running' AND p.lease_owner=? AND s.status='running' AND s.lease_owner=p.lease_owner AND run.status='processing' AND run.superseded_at IS NULL AND run.superseded_by_generation IS NULL AND m.ingest_generation=p.generation)`, r.stageID, r.mediaID, r.runID, r.stepID, r.generation, r.owner, r.fingerprint, r.stageID, r.mediaID, r.runID, r.stepID, r.generation, r.owner)
+				if err != nil {
+					return err
+				}
+				claimed, _ = result.RowsAffected()
+				return nil
+			})
+			if err != nil {
+				return checked, cleaned, err
+			}
+			if claimed != 1 {
+				continue
+			}
+			afterThumbnailStageQuarantined()
+		} else if r.state != "quarantined" {
 			continue
 		}
-		afterThumbnailStageQuarantined()
 		paths, err := thumbnailJournalPaths(r)
 		if err != nil {
 			return checked, cleaned, err
@@ -108,7 +114,7 @@ func ReconcileThumbnailStages(ctx context.Context, db *sql.DB, limit int) (check
 			retErr = err
 			continue
 		}
-		result, err := db.ExecContext(ctx, `UPDATE media_asset_stage_journal SET recovery_error='cleaned_unreferenced',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='quarantined' AND recovery_error='quarantined_unreferenced'`, r.stageID)
+		result, err := db.ExecContext(ctx, `UPDATE media_asset_stage_journal SET recovery_error='cleaned_unreferenced',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='quarantined' AND recovery_error<>'cleaned_unreferenced'`, r.stageID)
 		if err != nil {
 			return checked, cleaned, err
 		}
