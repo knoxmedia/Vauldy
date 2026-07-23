@@ -86,7 +86,7 @@ func (a *PosterAdapter) Execute(ctx context.Context, task Task) error {
 	if a == nil || a.DB == nil {
 		return permanentPosterError("database is not configured")
 	}
-	if task.Type != TaskPoster {
+	if task.Type != TaskPoster && task.Type != TaskPosterRepair {
 		return permanentPosterError(fmt.Sprintf("unsupported task type %q", task.Type))
 	}
 	if task.MediaID <= 0 {
@@ -156,7 +156,7 @@ func (a *PosterAdapter) validateLease(ctx context.Context, task Task) error {
 		return nil
 	}
 	var one int
-	err := a.DB.QueryRowContext(ctx, `SELECT 1 FROM post_ingest_task WHERE id=? AND media_id=? AND task_type='poster' AND status='running' AND lease_owner=?`, task.ID, task.MediaID, task.LeaseOwner).Scan(&one)
+	err := a.DB.QueryRowContext(ctx, `SELECT 1 FROM post_ingest_task WHERE id=? AND media_id=? AND task_type IN ('poster','poster_repair') AND status='running' AND lease_owner=?`, task.ID, task.MediaID, task.LeaseOwner).Scan(&one)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ClassifiedError{Kind: FailureShutdown, Err: fmt.Errorf("poster adapter: stale lease for task %d", task.ID)}
 	}

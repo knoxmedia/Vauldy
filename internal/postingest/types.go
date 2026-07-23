@@ -12,13 +12,14 @@ import (
 type TaskType string
 
 const (
-	TaskPoster    TaskType = "poster"
-	TaskThumbnail TaskType = "thumbnail"
-	TaskPreview   TaskType = "preview"
-	TaskKeyframe  TaskType = "keyframe"
-	TaskSubtitle  TaskType = "subtitle"
-	TaskAtrack    TaskType = "atrack"
-	TaskEncrypt   TaskType = "encrypt"
+	TaskPoster       TaskType = "poster"
+	TaskPosterRepair TaskType = "poster_repair"
+	TaskThumbnail    TaskType = "thumbnail"
+	TaskPreview      TaskType = "preview"
+	TaskKeyframe     TaskType = "keyframe"
+	TaskSubtitle     TaskType = "subtitle"
+	TaskAtrack       TaskType = "atrack"
+	TaskEncrypt      TaskType = "encrypt"
 )
 
 type Status string

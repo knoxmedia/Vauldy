@@ -116,7 +116,7 @@ const postIngestTaskPublicationSchema = `CREATE TABLE post_ingest_task_new (
     FOREIGN KEY (ingest_run_id,media_id,generation) REFERENCES media_ingest_run(id,media_id,generation),
     FOREIGN KEY (ingest_step_id,media_id,generation) REFERENCES media_ingest_step(id,media_id,generation),
     UNIQUE(media_id,generation,task_type),
-    CHECK (task_type IN ('poster','preview','keyframe','subtitle','atrack','encrypt','thumbnail')),
+    CHECK (task_type IN ('poster','poster_repair','preview','keyframe','subtitle','atrack','encrypt','thumbnail')),
     CHECK (status IN ('waiting','running','done','failed','cancelled'))
 )`
 
@@ -385,7 +385,7 @@ func postIngestPublicationSchemaCurrent(ctx context.Context, tx *sql.Tx, columns
 	for _, required := range []string{
 		"generationintegernotnulldefault0check(generation>=0)",
 		"unique(media_id,generation,task_type)",
-		"check(task_typein('poster','preview','keyframe','subtitle','atrack','encrypt','thumbnail'))",
+		"check(task_typein('poster','poster_repair','preview','keyframe','subtitle','atrack','encrypt','thumbnail'))",
 		"check(statusin('waiting','running','done','failed','cancelled'))",
 	} {
 		if !strings.Contains(normalized, required) {
@@ -1488,7 +1488,7 @@ const canonicalIngestDependencySchema = `CREATE TABLE media_ingest_step_dependen
  UNIQUE(step_id,dependency_kind,depends_on_step_id))`
 const canonicalIngestEvidenceSchema = `CREATE TABLE media_ingest_evidence(
  id INTEGER PRIMARY KEY AUTOINCREMENT,run_id INTEGER NOT NULL,step_id INTEGER NOT NULL,media_id INTEGER NOT NULL,generation INTEGER NOT NULL,
- kind TEXT NOT NULL CHECK(kind IN ('poster','thumbnail','encrypt')),source_fingerprint TEXT NOT NULL,artifact_refs_json TEXT NOT NULL CHECK(json_valid(artifact_refs_json)),
+ kind TEXT NOT NULL CHECK(kind IN ('poster','thumbnail','encrypt','scrape_artwork')),source_fingerprint TEXT NOT NULL,artifact_refs_json TEXT NOT NULL CHECK(json_valid(artifact_refs_json)),
  reused_from_evidence_id INTEGER REFERENCES media_ingest_evidence(id) ON DELETE SET NULL,reason TEXT NOT NULL DEFAULT '',created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
  verified_at TIMESTAMP NOT NULL,stage_id TEXT NOT NULL,
  FOREIGN KEY(run_id,media_id,generation) REFERENCES media_ingest_run(id,media_id,generation) ON DELETE CASCADE,
@@ -1496,7 +1496,7 @@ const canonicalIngestEvidenceSchema = `CREATE TABLE media_ingest_evidence(
  FOREIGN KEY(media_id) REFERENCES media(id) ON DELETE CASCADE,UNIQUE(step_id,kind),UNIQUE(stage_id))`
 const canonicalAssetStageJournalSchema = `CREATE TABLE media_asset_stage_journal(
  stage_id TEXT PRIMARY KEY,media_id INTEGER NOT NULL,run_id INTEGER NOT NULL,step_id INTEGER NOT NULL,generation INTEGER NOT NULL,owner_token TEXT NOT NULL,source_fingerprint TEXT NOT NULL,
- artifact_kind TEXT NOT NULL CHECK(artifact_kind IN ('poster','thumbnail','encrypt')),state TEXT NOT NULL CHECK(state IN ('staged','quarantined','committed')),
+ artifact_kind TEXT NOT NULL CHECK(artifact_kind IN ('poster','thumbnail','encrypt','scrape_artwork')),state TEXT NOT NULL CHECK(state IN ('staged','quarantined','committed')),
  original_path TEXT NOT NULL DEFAULT '',quarantine_path TEXT NOT NULL DEFAULT '',staged_path TEXT NOT NULL,hashes_sizes_json TEXT NOT NULL CHECK(json_valid(hashes_sizes_json)),
  recovery_error TEXT NOT NULL DEFAULT '',created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
  FOREIGN KEY(run_id,media_id,generation) REFERENCES media_ingest_run(id,media_id,generation) ON DELETE CASCADE,
@@ -2201,13 +2201,13 @@ func validatePublicationV2Schema(ctx context.Context, q SQLExecutor) error {
 	if err := requirePublicationIndex(ctx, q, "media_ingest_step_dependency", "idx_ingest_dependency_visible", publicationManagedIndexes["media_ingest_step_dependency"]["idx_ingest_dependency_visible"], 1, 1); err != nil {
 		return err
 	}
-	if err := requirePublicationClauses(ctx, q, "media_ingest_evidence", `CHECK(kind IN ('poster','thumbnail','encrypt'))`, `CHECK(json_valid(artifact_refs_json))`, `UNIQUE(step_id,kind)`, `UNIQUE(stage_id)`); err != nil {
+	if err := requirePublicationClauses(ctx, q, "media_ingest_evidence", `CHECK(kind IN ('poster','thumbnail','encrypt','scrape_artwork'))`, `CHECK(json_valid(artifact_refs_json))`, `UNIQUE(step_id,kind)`, `UNIQUE(stage_id)`); err != nil {
 		return err
 	}
 	if err := requirePublicationFKSet(ctx, q, "media_ingest_evidence", "media:media_id:id:cascade", "media_ingest_run:run_id,media_id,generation:id,media_id,generation:cascade", "media_ingest_step:step_id,media_id,generation:id,media_id,generation:cascade", "media_ingest_evidence:reused_from_evidence_id:id:set null"); err != nil {
 		return err
 	}
-	if err := requirePublicationClauses(ctx, q, "media_asset_stage_journal", `CHECK(artifact_kind IN ('poster','thumbnail','encrypt'))`, `CHECK(state IN ('staged','quarantined','committed'))`, `CHECK(json_valid(hashes_sizes_json))`); err != nil {
+	if err := requirePublicationClauses(ctx, q, "media_asset_stage_journal", `CHECK(artifact_kind IN ('poster','thumbnail','encrypt','scrape_artwork'))`, `CHECK(state IN ('staged','quarantined','committed'))`, `CHECK(json_valid(hashes_sizes_json))`); err != nil {
 		return err
 	}
 	if err := requirePublicationFKSet(ctx, q, "media_asset_stage_journal", "media_ingest_run:run_id,media_id,generation:id,media_id,generation:cascade", "media_ingest_step:step_id,media_id,generation:id,media_id,generation:cascade"); err != nil {

@@ -553,7 +553,7 @@ func TestAutomaticScrapeSuccessRestoresFencedEffects(t *testing.T) {
 		t.Fatal(err)
 	}
 	var fallback, history int
-	_ = db.QueryRow(`SELECT COUNT(*) FROM post_ingest_task WHERE media_id=? AND generation=1 AND task_type='poster'`, mediaID).Scan(&fallback)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM post_ingest_task WHERE media_id=? AND generation=1 AND task_type='poster_repair'`, mediaID).Scan(&fallback)
 	_ = db.QueryRow(`SELECT COUNT(*) FROM scrape_history WHERE task_id=? AND status='done'`, claim.ID).Scan(&history)
 	if fallback != 1 || history != 1 {
 		t.Fatalf("fallback=%d history=%d", fallback, history)
@@ -561,7 +561,7 @@ func TestAutomaticScrapeSuccessRestoresFencedEffects(t *testing.T) {
 	if err := completeScrapeClaimWithEffects(context.Background(), db, *claim, "auto", "q", "ok", res, effects); !errors.Is(err, ErrScrapeClaimLost) {
 		t.Fatalf("second=%v", err)
 	}
-	_ = db.QueryRow(`SELECT COUNT(*) FROM post_ingest_task WHERE media_id=? AND generation=1 AND task_type='poster'`, mediaID).Scan(&fallback)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM post_ingest_task WHERE media_id=? AND generation=1 AND task_type='poster_repair'`, mediaID).Scan(&fallback)
 	if fallback != 1 {
 		t.Fatalf("duplicate fallback=%d", fallback)
 	}

@@ -193,7 +193,11 @@ func selectFamilyCandidate(ctx context.Context, tx store.SQLExecutor, req ClaimR
 		typeFilter += " AND q.id=?"
 		args = append(args, *req.QueueID)
 	}
-	query := fmt.Sprintf(`SELECT q.id,COALESCE(st.required,0),q.ingest_run_id IS NOT NULL FROM %s q LEFT JOIN media_ingest_step st ON st.id=q.ingest_step_id WHERE %s%s AND (%s OR (%s)) ORDER BY %s LIMIT 1`, table, due, typeFilter, familyLegacySQL(req.Family, alias), link, familyOrderSQL(req.Family, alias))
+	repair := "0"
+	if req.Family == QueuePostIngest && req.TaskType == "poster_repair" {
+		repair = `q.task_type='poster_repair' AND q.ingest_run_id IS NOT NULL AND q.ingest_step_id IS NULL AND q.generation>0 AND EXISTS(SELECT 1 FROM media m JOIN media_ingest_run r ON r.id=q.ingest_run_id WHERE m.id=q.media_id AND m.ingest_generation=q.generation AND m.publication_state IN ('published','degraded') AND m.published_at IS NOT NULL AND r.media_id=q.media_id AND r.generation=q.generation AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL)`
+	}
+	query := fmt.Sprintf(`SELECT q.id,COALESCE(st.required,0),q.ingest_run_id IS NOT NULL FROM %s q LEFT JOIN media_ingest_step st ON st.id=q.ingest_step_id WHERE %s%s AND (%s OR (%s) OR (%s)) ORDER BY %s LIMIT 1`, table, due, typeFilter, familyLegacySQL(req.Family, alias), link, repair, familyOrderSQL(req.Family, alias))
 	err = tx.QueryRowContext(ctx, query, args...).Scan(&id, &required, &linked)
 	return
 }
@@ -207,7 +211,7 @@ type requiredCandidate struct {
 func familyCapabilities(f QueueFamily) []string {
 	switch f {
 	case QueuePostIngest:
-		return []string{"poster", "thumbnail", "encrypt", "preview", "keyframe", "subtitle", "atrack"}
+		return []string{"poster", "poster_repair", "thumbnail", "encrypt", "preview", "keyframe", "subtitle", "atrack"}
 	case QueueScrape:
 		return []string{"scrape"}
 	case QueuePrepare:
@@ -297,7 +301,11 @@ func updateFamilyClaim(ctx context.Context, tx store.SQLExecutor, req ClaimReque
 	case QueuePrepare:
 		set = `status='running',lease_owner=?,lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds'),started_at=COALESCE(started_at,CURRENT_TIMESTAMP)`
 	}
-	q := fmt.Sprintf(`UPDATE %s AS q SET %s WHERE q.id=? AND %s AND (%s OR (%s))`, table, set, due, familyLegacySQL(req.Family, a), link)
+	repair := "0"
+	if req.Family == QueuePostIngest && req.TaskType == "poster_repair" {
+		repair = `q.task_type='poster_repair' AND q.ingest_run_id IS NOT NULL AND q.ingest_step_id IS NULL AND q.generation>0 AND EXISTS(SELECT 1 FROM media m JOIN media_ingest_run r ON r.id=q.ingest_run_id WHERE m.id=q.media_id AND m.ingest_generation=q.generation AND m.publication_state IN ('published','degraded') AND m.published_at IS NOT NULL AND r.media_id=q.media_id AND r.generation=q.generation AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL)`
+	}
+	q := fmt.Sprintf(`UPDATE %s AS q SET %s WHERE q.id=? AND %s AND (%s OR (%s) OR (%s))`, table, set, due, familyLegacySQL(req.Family, a), link, repair)
 	res, err := tx.ExecContext(ctx, q, owner, id)
 	if err != nil {
 		return nil, err

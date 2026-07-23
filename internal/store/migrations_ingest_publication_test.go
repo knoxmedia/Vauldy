@@ -2052,3 +2052,14 @@ func TestExactPublicationTableRejectsLiteralConstraintDrift(t *testing.T) {
 		})
 	}
 }
+
+func TestPublicationV2SchemaAcceptsScrapeArtworkAndPosterRepair(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	_, err := db.Exec(`INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(100,20,1,'scan','processing','{}',2); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(101,100,20,1,'scrape',0,'running'); INSERT INTO media_ingest_evidence(run_id,step_id,media_id,generation,kind,source_fingerprint,artifact_refs_json,verified_at,stage_id) VALUES(100,101,20,1,'scrape_artwork','fp','{}',CURRENT_TIMESTAMP,'scrape:1'); INSERT INTO media_asset_stage_journal(stage_id,media_id,run_id,step_id,generation,owner_token,source_fingerprint,artifact_kind,state,staged_path,hashes_sizes_json) VALUES('scrape:1',20,100,101,1,'owner','fp','scrape_artwork','staged','x','{}'); INSERT INTO post_ingest_task(media_id,ingest_run_id,ingest_step_id,generation,task_type,status,last_error) VALUES(20,100,NULL,1,'poster_repair','waiting','scrape_poster_repair')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+}

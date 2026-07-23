@@ -36,6 +36,7 @@ type scrapeRunBody struct {
 }
 
 var scrapeBeforeFailUpdate func() error
+var withImmediateScrapeTx = store.WithImmediateConnTx
 
 const (
 	maxScrapeTaskFailures = 3
@@ -504,7 +505,7 @@ func (h *Handler) runScrapeTasksWithLimit(ctx context.Context, ids []int64, limi
 		effects := scrapeCompletionEffects{LibraryID: libraryID}
 		if claim.Generation.Valid && h.App.Config != nil {
 			stageID := fmt.Sprintf("scrape:%d:%d:%d", claim.ID, claim.Attempts, claim.Generation.Int64)
-			if staged, e := metadatalib.StageScrapeImages(workCtx, h.App.Config.Data.MetadataLibrary, h.App.Config.Data.Upload, mediaID, claim.Generation.Int64, stageID, res); e == nil {
+			if staged, e := metadatalib.StageScrapeImagesDurable(workCtx, h.App.DB, h.App.Config.Data.MetadataLibrary, h.App.Config.Data.Upload, claim.RunID.Int64, claim.StepID.Int64, mediaID, claim.Generation.Int64, claim.Owner, stageID, res); e == nil {
 				effects.Artwork = staged
 			}
 		}
@@ -797,128 +798,10 @@ func shouldPreserveSeriesTitle(existingTitle string, linkedEpisodeCount int64) b
 
 // syncSeriesCollectionMeta updates the series record and shares show-level scrape fields across episodes.
 func (h *Handler) syncSeriesCollectionMeta(libraryID int64, mediaID int64, res *scraper.ScrapeResult) {
-	if h == nil || h.App == nil || h.App.DB == nil || res == nil || libraryID <= 0 || mediaID <= 0 {
+	if h == nil || h.App == nil || h.App.DB == nil {
 		return
 	}
-	var seriesID int64
-	if err := h.App.DB.QueryRow(`
-		SELECT sr.id FROM episode_media em
-		JOIN episode ep ON ep.id = em.episode_id
-		JOIN season se ON se.id = ep.season_id
-		JOIN series sr ON sr.id = se.tv_id
-		WHERE em.media_id = ? AND sr.library_id = ?
-		LIMIT 1`, mediaID, libraryID).Scan(&seriesID); err != nil || seriesID <= 0 {
-		return
-	}
-	var existingTitle sql.NullString
-	var linkedEpisodeCount int64
-	_ = h.App.DB.QueryRow(`
-		SELECT COALESCE(sr.title, ''),
-			(SELECT COUNT(DISTINCT em2.media_id)
-			 FROM season se2
-			 JOIN episode ep2 ON ep2.season_id = se2.id
-			 JOIN episode_media em2 ON em2.episode_id = ep2.id
-			 WHERE se2.tv_id = sr.id)
-		FROM series sr WHERE sr.id = ?`, seriesID).Scan(&existingTitle, &linkedEpisodeCount)
-
-	seriesTitle := res.Title
-	seriesOverview := res.Overview
-	seriesPoster := res.Poster
-	seriesBackdrop := res.Backdrop
-	tmdbID := ""
-	tvdbID := ""
-	if res.Extra != nil {
-		if v := stringScrapeField(res.Extra["series_title"]); v != "" {
-			seriesTitle = v
-		}
-		if v := stringScrapeField(res.Extra["series_overview"]); v != "" {
-			seriesOverview = v
-		}
-		if v := stringScrapeField(res.Extra["series_poster"]); v != "" {
-			seriesPoster = v
-		}
-		if v := stringScrapeField(res.Extra["series_backdrop"]); v != "" {
-			seriesBackdrop = v
-		}
-		tmdbID = stringScrapeField(res.Extra["tmdb_id"])
-		tvdbID = stringScrapeField(res.Extra["tvdb_id"])
-	}
-	preserveTitle := shouldPreserveSeriesTitle(existingTitle.String, linkedEpisodeCount)
-	if preserveTitle {
-		seriesTitle = strings.TrimSpace(existingTitle.String)
-	}
-	seriesMeta, _ := json.Marshal(map[string]any{
-		"scrape": map[string]any{
-			"title":        seriesTitle,
-			"overview":     seriesOverview,
-			"poster":       seriesPoster,
-			"backdrop":     seriesBackdrop,
-			"source":       res.Source,
-			"release_date": res.ReleaseDate,
-			"rating":       res.Rating,
-			"genres":       res.Genres,
-			"extra": map[string]any{
-				"tmdb_id":   tmdbID,
-				"tmdb_type": "tv",
-				"tvdb_id":   tvdbID,
-			},
-		},
-	})
-	_, _ = h.App.DB.Exec(`
-		UPDATE series SET
-			title = CASE WHEN ? THEN title WHEN ? != '' THEN ? ELSE title END,
-			poster = COALESCE(NULLIF(?, ''), poster),
-			tmdb_id = COALESCE(NULLIF(tmdb_id, ''), NULLIF(?, '')),
-			tvdb_id = COALESCE(NULLIF(tvdb_id, ''), NULLIF(?, '')),
-			meta_json = ?,
-			updated_at = CURRENT_TIMESTAMP
-		WHERE id = ?`,
-		preserveTitle, seriesTitle, seriesTitle, seriesPoster, tmdbID, tvdbID, string(seriesMeta), seriesID,
-	)
-	// Propagate shared show fields to sibling episodes without overwriting episode titles/posters.
-	rows, err := h.App.DB.Query(`
-		SELECT m.id, COALESCE(m.meta_json, '')
-		FROM episode_media em
-		JOIN episode ep ON ep.id = em.episode_id
-		JOIN season se ON se.id = ep.season_id
-		JOIN media m ON m.id = em.media_id
-		WHERE se.tv_id = ? AND m.id != ?
-	`, seriesID, mediaID)
-	if err != nil {
-		return
-	}
-	defer rows.Close()
-	sharedPatch := map[string]any{
-		"scrape": map[string]any{
-			"series_title":    seriesTitle,
-			"series_overview": seriesOverview,
-			"series_poster":   seriesPoster,
-			"series_backdrop": seriesBackdrop,
-			"extra": map[string]any{
-				"series_title":    seriesTitle,
-				"series_overview": seriesOverview,
-				"series_poster":   seriesPoster,
-				"series_backdrop": seriesBackdrop,
-				"tmdb_id":         tmdbID,
-				"tmdb_type":       "tv",
-				"tvdb_id":         tvdbID,
-			},
-		},
-	}
-	for rows.Next() {
-		var siblingID int64
-		var siblingMeta string
-		if rows.Scan(&siblingID, &siblingMeta) != nil || siblingID <= 0 {
-			continue
-		}
-		merged, mErr := scraper.MergeMetaJSON(siblingMeta, sharedPatch)
-		if mErr != nil {
-			continue
-		}
-		if err := store.UpdateMediaMetaAndPhotoTime(context.Background(), h.App.DB, siblingID, merged); err != nil {
-			log.Printf("series sibling metadata media=%d: %v", siblingID, err)
-		}
-	}
+	_ = syncSeriesCollectionMetaExecutor(context.Background(), h.App.DB, libraryID, mediaID, res)
 }
 
 func stringScrapeField(v any) string {
@@ -1386,7 +1269,7 @@ func scrapeClaimArgs(c scrapeClaim) []any {
 }
 func scrapeClaimImmediate(ctx context.Context, db *sql.DB, fn func(store.ImmediateConnTx) error) error {
 	policy := store.RetryPolicy{Operation: "scrape_claim_lifecycle", MaxElapsed: 2 * time.Second, BaseBackoff: 10 * time.Millisecond, MaxBackoff: 100 * time.Millisecond}
-	return store.WithBusyRetryPolicyContext(ctx, nil, policy, func(attempt context.Context) error { _, err := store.WithImmediateConnTx(attempt, db, fn); return err })
+	return store.WithBusyRetryPolicyContext(ctx, nil, policy, func(attempt context.Context) error { _, err := withImmediateScrapeTx(attempt, db, fn); return err })
 }
 func renewScrapeClaim(ctx context.Context, db *sql.DB, c scrapeClaim) error {
 	return scrapeClaimImmediate(ctx, db, func(tx store.ImmediateConnTx) error {
@@ -1413,7 +1296,7 @@ func completeScrapeClaim(ctx context.Context, db *sql.DB, c scrapeClaim, source,
 	return completeScrapeClaimWithEffects(ctx, db, c, source, query, message, result, scrapeCompletionEffects{})
 }
 func completeScrapeClaimWithEffects(ctx context.Context, db *sql.DB, c scrapeClaim, source, query, message string, result *scraper.ScrapeResult, effects scrapeCompletionEffects) error {
-	return scrapeClaimImmediate(ctx, db, func(tx store.ImmediateConnTx) error {
+	err := scrapeClaimImmediate(ctx, db, func(tx store.ImmediateConnTx) error {
 		args := append([]any{message}, scrapeClaimArgs(c)...)
 		res, err := tx.ExecContext(ctx, `UPDATE scrape_task AS q SET status='done',progress=100,finished_at=CURRENT_TIMESTAMP,message=?,lease_owner=NULL,lease_until=NULL WHERE `+scrapeClaimPredicate(), args...)
 		if err != nil {
@@ -1446,6 +1329,24 @@ func completeScrapeClaimWithEffects(ctx context.Context, db *sql.DB, c scrapeCla
 		_, err = tx.ExecContext(ctx, `INSERT INTO scrape_history(task_id,media_id,source,query,status,message,result_json) VALUES(?,?,?,?, 'done',?,?)`, c.ID, c.MediaID, source, query, message, resultJSON)
 		return err
 	})
+	if err == nil {
+		return nil
+	}
+	var uncertain *store.ImmediateCommitError
+	if !errors.As(err, &uncertain) {
+		return err
+	}
+	var n int
+	q := `SELECT COUNT(*) FROM scrape_task q JOIN scrape_history h ON h.task_id=q.id WHERE q.id=? AND q.media_id=? AND q.status='done' AND h.status='done'`
+	args := []any{c.ID, c.MediaID}
+	if effects.Artwork.StageID != "" {
+		q += ` AND EXISTS(SELECT 1 FROM media_ingest_evidence e JOIN media_asset_stage_journal j ON j.stage_id=e.stage_id WHERE e.stage_id=? AND e.run_id=? AND e.step_id=? AND e.media_id=? AND e.generation=? AND e.kind='scrape_artwork' AND j.state='committed')`
+		args = append(args, effects.Artwork.StageID, c.RunID.Int64, c.StepID.Int64, c.MediaID, c.Generation.Int64)
+	}
+	if e := db.QueryRowContext(context.Background(), q, args...).Scan(&n); e == nil && n == 1 {
+		return nil
+	}
+	return uncertain
 }
 
 func failScrapeClaim(ctx context.Context, db *sql.DB, c scrapeClaim, source, query, message string) error {

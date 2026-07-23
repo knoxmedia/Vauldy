@@ -33,7 +33,7 @@ type AdapterSet struct {
 func (s AdapterSet) Execute(ctx context.Context, task Task) error {
 	var adapter Adapter
 	switch task.Type {
-	case TaskPoster:
+	case TaskPoster, TaskPosterRepair:
 		adapter = s.Poster
 	case TaskThumbnail:
 		adapter = s.Thumbnail
@@ -59,7 +59,7 @@ func (s AdapterSet) Execute(ctx context.Context, task Task) error {
 func (s AdapterSet) ExecuteWithResult(ctx context.Context, task Task) (ExecutionResult, error) {
 	var adapter Adapter
 	switch task.Type {
-	case TaskPoster:
+	case TaskPoster, TaskPosterRepair:
 		adapter = s.Poster
 	case TaskThumbnail:
 		adapter = s.Thumbnail

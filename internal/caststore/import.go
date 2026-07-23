@@ -1,9 +1,11 @@
 package caststore
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"knox-media/internal/store"
 	"strings"
 
 	"knox-media/internal/scraper"
@@ -11,6 +13,9 @@ import (
 
 // ImportCredits links TMDB credits to media and upserts person records.
 func ImportCredits(db *sql.DB, mediaID int64, credits []scraper.CreditMember, avatarBaseURL string) (int, error) {
+	return ImportCreditsExecutor(context.Background(), db, mediaID, credits, avatarBaseURL)
+}
+func ImportCreditsExecutor(ctx context.Context, db store.SQLExecutor, mediaID int64, credits []scraper.CreditMember, avatarBaseURL string) (int, error) {
 	if db == nil || mediaID <= 0 || len(credits) == 0 {
 		return 0, nil
 	}
@@ -20,7 +25,7 @@ func ImportCredits(db *sql.DB, mediaID int64, credits []scraper.CreditMember, av
 		if name == "" {
 			continue
 		}
-		personID, err := FindOrCreateByTMDB(db, c.TMDBPersonID, name)
+		personID, err := findOrCreateByTMDBExecutor(context.Background(), db, c.TMDBPersonID, name)
 		if err != nil || personID <= 0 {
 			continue
 		}
@@ -42,14 +47,15 @@ func ImportCredits(db *sql.DB, mediaID int64, credits []scraper.CreditMember, av
 			TMDBID:      c.TMDBPersonID,
 			Occupations: []string{c.Occupation},
 		}
-		_ = ApplyScrapePatch(db, personID, patch)
-		MergePersonOccupations(db, personID, c.Occupation)
-		if err := LinkMediaPerson(db, mediaID, personID, c.Occupation, c.CharacterName, c.RoleType, c.SortOrder); err != nil {
+		_ = applyScrapePatchExecutor(context.Background(), db, personID, patch)
+		mergePersonOccupationsExecutor(context.Background(), db, personID, c.Occupation)
+		if err := linkMediaPersonExecutor(context.Background(), db, mediaID, personID, c.Occupation, c.CharacterName, c.RoleType, c.SortOrder); err != nil {
 			continue
 		}
 		imported++
 	}
 	return imported, nil
+
 }
 
 // BackfillFromMetaJSON creates person links from legacy scrape.extra.cast JSON.
