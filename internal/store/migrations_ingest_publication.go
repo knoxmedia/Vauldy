@@ -1540,6 +1540,9 @@ func createPublicationChildren(ctx context.Context, q SQLExecutor, g []publicati
 			}
 		}
 	}
+	if _, e := q.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS scrape_effect_commit(task_id INTEGER NOT NULL,attempt INTEGER NOT NULL,generation INTEGER NOT NULL,stage_id TEXT NOT NULL DEFAULT '',manifest_json TEXT NOT NULL CHECK(json_valid(manifest_json)),manifest_digest TEXT NOT NULL,created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(task_id,attempt),FOREIGN KEY(task_id) REFERENCES scrape_task(id) ON DELETE CASCADE)`); e != nil {
+		return e
+	}
 	for _, stmt := range []string{canonicalIngestDependencySchema, publicationManagedIndexes["media_ingest_step_dependency"]["idx_ingest_dependency_visible"], canonicalIngestEvidenceSchema, canonicalAssetStageJournalSchema, publicationManagedIndexes["media_asset_stage_journal"]["idx_asset_stage_recovery"]} {
 		if _, e := q.ExecContext(ctx, stmt); e != nil {
 			return e

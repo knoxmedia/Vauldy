@@ -1310,10 +1310,12 @@ func completeScrapeClaimWithEffects(ctx context.Context, db *sql.DB, c scrapeCla
 			return err
 		}
 		result = committed
-		if err = applyScrapeCompletionEffectsTx(ctx, tx, c, result, effects); err != nil {
+		manifestDigest, effectErr := applyScrapeCompletionEffectsTx(ctx, tx, c, result, effects)
+		if effectErr != nil {
+			err = effectErr
 			return err
 		}
-		resultJSON, _ := json.Marshal(result)
+		resultJSON, _ := json.Marshal(map[string]any{"result": result, "effect_manifest_digest": manifestDigest})
 		if c.StepID.Valid {
 			res, err = tx.ExecContext(ctx, `UPDATE media_ingest_step SET status='done',finished_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND run_id=? AND media_id=? AND generation=? AND status='running' AND lease_owner=? AND attempts=?`, c.StepID.Int64, c.RunID.Int64, c.MediaID, c.Generation.Int64, c.Owner, c.Attempts)
 			if err != nil {
@@ -1337,8 +1339,8 @@ func completeScrapeClaimWithEffects(ctx context.Context, db *sql.DB, c scrapeCla
 		return err
 	}
 	var n int
-	q := `SELECT COUNT(*) FROM scrape_task q JOIN scrape_history h ON h.task_id=q.id WHERE q.id=? AND q.media_id=? AND q.status='done' AND h.status='done'`
-	args := []any{c.ID, c.MediaID}
+	q := `SELECT COUNT(*) FROM scrape_task q JOIN scrape_history h ON h.task_id=q.id JOIN scrape_effect_commit ec ON ec.task_id=q.id AND ec.attempt=? AND ec.generation=? WHERE q.id=? AND q.media_id=? AND q.status='done' AND h.status='done' AND json_extract(h.result_json,'$.effect_manifest_digest')=ec.manifest_digest`
+	args := []any{c.Attempts, c.Generation.Int64, c.ID, c.MediaID}
 	if effects.Artwork.StageID != "" {
 		q += ` AND EXISTS(SELECT 1 FROM media_ingest_evidence e JOIN media_asset_stage_journal j ON j.stage_id=e.stage_id WHERE e.stage_id=? AND e.run_id=? AND e.step_id=? AND e.media_id=? AND e.generation=? AND e.kind='scrape_artwork' AND j.state='committed')`
 		args = append(args, effects.Artwork.StageID, c.RunID.Int64, c.StepID.Int64, c.MediaID, c.Generation.Int64)

@@ -252,7 +252,7 @@ func main() {
 	processID := fmt.Sprintf("%s-%d-%s", hostname, os.Getpid(), uuid.NewString())
 	queueOwner := "postingest-" + processID
 	postIngestQueue := postingest.NewQueue(db, queueOwner, sqliteMetrics, publicationCapabilities)
-	if err := recoverStartupTasks(serverCtx, db, postIngestQueue, postingest.ThumbnailRecoveryRoots{Preview: filepath.Join(cfg.Data.Preview, "photos"), Derived: filepath.Join(cfg.Data.Dir, ".derived")}); err != nil {
+	if err := recoverStartupTasks(serverCtx, db, postIngestQueue, StartupRecoveryRoots{Thumbnail: postingest.ThumbnailRecoveryRoots{Preview: filepath.Join(cfg.Data.Preview, "photos"), Derived: filepath.Join(cfg.Data.Dir, ".derived")}, ScrapeArtwork: cfg.Data.MetadataLibrary}); err != nil {
 		log.Fatalf("startup task recovery: %v", err)
 	}
 	postIngestEnqueuer := postingest.NewEnqueuer(db, cfg, sqliteMetrics)

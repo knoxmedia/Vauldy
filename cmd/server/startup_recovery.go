@@ -11,21 +11,22 @@ import (
 )
 
 // recoverStartupTasks performs durable queue recovery before workers claim work.
-func recoverStartupTasks(ctx context.Context, db *sql.DB, postIngest *postingest.Queue, roots ...postingest.ThumbnailRecoveryRoots) error {
+type StartupRecoveryRoots struct {
+	Thumbnail     postingest.ThumbnailRecoveryRoots
+	ScrapeArtwork string
+}
+
+func recoverStartupTasks(ctx context.Context, db *sql.DB, postIngest *postingest.Queue, roots StartupRecoveryRoots) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if db == nil || postIngest == nil {
 		return fmt.Errorf("startup recovery: database and post-ingest queue are required")
 	}
-	metadataRoot := ""
-	if len(roots) > 1 {
-		metadataRoot = roots[1].Preview
-	}
-	if _, err := metadatalib.ReconcileScrapeArtworkStages(ctx, db, metadataRoot, 100); err != nil {
+	if _, err := metadatalib.ReconcileScrapeArtworkStages(ctx, db, roots.ScrapeArtwork, 100); err != nil {
 		return fmt.Errorf("startup recovery: scrape artwork stages: %w", err)
 	}
-	if _, _, err := postingest.ReconcileThumbnailStages(ctx, db, firstRoots(roots), 100); err != nil {
+	if _, _, err := postingest.ReconcileThumbnailStages(ctx, db, roots.Thumbnail, 100); err != nil {
 		return fmt.Errorf("startup recovery: thumbnail stages: %w", err)
 	}
 	store.ResetInterruptedTasks(db)
@@ -33,11 +34,4 @@ func recoverStartupTasks(ctx context.Context, db *sql.DB, postIngest *postingest
 		return fmt.Errorf("startup recovery: post-ingest: %w", err)
 	}
 	return nil
-}
-
-func firstRoots(v []postingest.ThumbnailRecoveryRoots) postingest.ThumbnailRecoveryRoots {
-	if len(v) > 0 {
-		return v[0]
-	}
-	return postingest.ThumbnailRecoveryRoots{}
 }

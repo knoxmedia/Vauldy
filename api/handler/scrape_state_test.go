@@ -5,10 +5,12 @@ import (
 	"database/sql"
 
 	"errors"
+	"fmt"
 	"knox-media/internal/config"
 	"knox-media/internal/postingest"
 	"knox-media/internal/publication"
 	"knox-media/internal/scraper"
+	"knox-media/internal/store"
 	"testing"
 	"time"
 
@@ -580,5 +582,60 @@ func TestAutomaticScrapeStaleAndRollbackSelectNoEffects(t *testing.T) {
 	_ = db.QueryRow(`SELECT COUNT(*) FROM post_ingest_task WHERE media_id=? AND generation=1`, mediaID).Scan(&n)
 	if n != 0 {
 		t.Fatalf("stale effects=%d", n)
+	}
+}
+
+func TestScrapeEffectsValidClaimRollbackIsExhaustive(t *testing.T) {
+	db, mid := posterHandlerTestDB(t)
+	claim := seedAndClaimLinkedScrape(t, db, mid)
+	_, _ = db.Exec(`UPDATE media SET publication_state='published',published_at=CURRENT_TIMESTAMP,title='before',meta_json='{"keep":true}' WHERE id=?`, mid)
+	sentinel := errors.New("effect rollback")
+	effects := scrapeCompletionEffects{PosterFallback: true, Credits: []scraper.CreditMember{{TMDBPersonID: "777", Name: "Credit Person", Occupation: "actor"}}, BeforeTerminal: func() error { return sentinel }}
+	err := completeScrapeClaimWithEffects(context.Background(), db, *claim, "auto", "q", "ok", &scraper.ScrapeResult{Title: "after", Extra: map[string]any{}}, effects)
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("err=%v", err)
+	}
+	var title, meta, task, step string
+	_ = db.QueryRow(`SELECT title,meta_json FROM media WHERE id=?`, mid).Scan(&title, &meta)
+	_ = db.QueryRow(`SELECT status FROM scrape_task WHERE id=?`, claim.ID).Scan(&task)
+	_ = db.QueryRow(`SELECT status FROM media_ingest_step WHERE id=?`, claim.StepID.Int64).Scan(&step)
+	if title != "before" || meta != "{\"keep\":true}" || task != "running" || step != "running" {
+		t.Fatalf("media=%s/%s states=%s/%s", title, meta, task, step)
+	}
+	for name, q := range map[string]string{"person": `SELECT COUNT(*) FROM cast_person WHERE tmdb_id='777'`, "link": `SELECT COUNT(*) FROM media_person WHERE media_id=` + fmt.Sprint(mid), "repair": `SELECT COUNT(*) FROM post_ingest_task WHERE task_type='poster_repair'`, "history": `SELECT COUNT(*) FROM scrape_history WHERE task_id=` + fmt.Sprint(claim.ID), "manifest": `SELECT COUNT(*) FROM scrape_effect_commit WHERE task_id=` + fmt.Sprint(claim.ID)} {
+		var n int
+		_ = db.QueryRow(q).Scan(&n)
+		if n != 0 {
+			t.Fatalf("%s=%d", name, n)
+		}
+	}
+}
+
+func TestScrapeEffectsUncertainActualCommitReconcilesManifestExactlyOnce(t *testing.T) {
+	db, mid := posterHandlerTestDB(t)
+	claim := seedAndClaimLinkedScrape(t, db, mid)
+	_, _ = db.Exec(`UPDATE media SET publication_state='published',published_at=CURRENT_TIMESTAMP WHERE id=?`, mid)
+	orig := withImmediateScrapeTx
+	t.Cleanup(func() { withImmediateScrapeTx = orig })
+	once := true
+	withImmediateScrapeTx = func(ctx context.Context, db *sql.DB, fn func(store.ImmediateConnTx) error) (store.ImmediateOutcome, error) {
+		out, err := orig(ctx, db, fn)
+		if err == nil && once {
+			once = false
+			return out, &store.ImmediateCommitError{Cause: errors.New("lost response")}
+		}
+		return out, err
+	}
+	effects := scrapeCompletionEffects{PosterFallback: true, Credits: []scraper.CreditMember{{TMDBPersonID: "778", Name: "Exact Person", Occupation: "actor"}}}
+	res := &scraper.ScrapeResult{Title: "exact", Extra: map[string]any{}}
+	if err := completeScrapeClaimWithEffects(context.Background(), db, *claim, "auto", "q", "ok", res, effects); err != nil {
+		t.Fatal(err)
+	}
+	for name, q := range map[string]string{"person": `SELECT COUNT(*) FROM cast_person WHERE tmdb_id='778'`, "link": `SELECT COUNT(*) FROM media_person WHERE media_id=` + fmt.Sprint(mid), "repair": `SELECT COUNT(*) FROM post_ingest_task WHERE task_type='poster_repair'`, "history": `SELECT COUNT(*) FROM scrape_history WHERE task_id=` + fmt.Sprint(claim.ID), "manifest": `SELECT COUNT(*) FROM scrape_effect_commit WHERE task_id=` + fmt.Sprint(claim.ID)} {
+		var n int
+		_ = db.QueryRow(q).Scan(&n)
+		if n != 1 {
+			t.Fatalf("%s=%d", name, n)
+		}
 	}
 }

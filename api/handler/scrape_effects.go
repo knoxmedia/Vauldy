@@ -2,7 +2,9 @@ package handler
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"knox-media/internal/caststore"
 	"knox-media/internal/metadatalib"
@@ -21,44 +23,48 @@ type scrapeCompletionEffects struct {
 	BeforeTerminal func() error
 }
 
-func applyScrapeCompletionEffectsTx(ctx context.Context, tx store.SQLExecutor, c scrapeClaim, result *scraper.ScrapeResult, e scrapeCompletionEffects) error {
+func applyScrapeCompletionEffectsTx(ctx context.Context, tx store.SQLExecutor, c scrapeClaim, result *scraper.ScrapeResult, e scrapeCompletionEffects) (string, error) {
 	if len(e.Artwork.Images) > 0 {
 		if err := metadatalib.VerifyStagedScrapeArtwork(e.Artwork); err != nil {
-			return err
+			return "", err
 		}
 		var one int
 		if err := tx.QueryRowContext(ctx, `SELECT 1 FROM media_asset_stage_journal WHERE stage_id=? AND media_id=? AND run_id=? AND step_id=? AND generation=? AND owner_token=? AND artifact_kind='scrape_artwork' AND state='staged'`, e.Artwork.StageID, c.MediaID, c.RunID.Int64, c.StepID.Int64, c.Generation.Int64, c.Owner).Scan(&one); err != nil {
-			return err
+			return "", err
 		}
 		metadatalib.SelectStagedScrapeArtwork(result, e.Artwork)
 		raw, _ := json.Marshal(map[string]any{"producer": "scrape/stage-v1", "variants": e.Artwork.Images})
 		if _, err := tx.ExecContext(ctx, `INSERT INTO media_ingest_evidence(run_id,step_id,media_id,generation,kind,source_fingerprint,artifact_refs_json,reason,verified_at,stage_id) VALUES(?,?,?,?,'scrape_artwork',?,?, 'scrape',CURRENT_TIMESTAMP,?)`, c.RunID.Int64, c.StepID.Int64, c.MediaID, c.Generation.Int64, "scrape_artwork:"+e.Artwork.StageID, string(raw), e.Artwork.StageID); err != nil {
-			return err
+			return "", err
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE media_asset_stage_journal SET state='committed',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='staged'`, e.Artwork.StageID); err != nil {
-			return err
+			return "", err
 		}
 	}
 	if e.LibraryID > 0 {
 		if err := syncSeriesCollectionMetaExecutor(ctx, tx, e.LibraryID, c.MediaID, result); err != nil {
-			return err
+			return "", err
 		}
 	}
 	if len(e.Credits) > 0 {
 		if _, err := caststore.ImportCreditsExecutor(ctx, tx, c.MediaID, e.Credits, e.AvatarBaseURL); err != nil {
-			return err
+			return "", err
 		}
 	}
 	if e.PosterFallback && c.Generation.Valid {
 		_, err := tx.ExecContext(ctx, `INSERT INTO post_ingest_task(media_id,ingest_run_id,ingest_step_id,generation,task_type,status,last_error) VALUES(?,?,NULL,?,'poster_repair','waiting','scrape_poster_repair') ON CONFLICT(media_id,generation,task_type) DO NOTHING`, c.MediaID, c.RunID.Int64, c.Generation.Int64)
 		if err != nil {
-			return err
+			return "", err
 		}
 	}
 	if e.BeforeTerminal != nil {
-		return e.BeforeTerminal()
+		return "", e.BeforeTerminal()
 	}
-	return nil
+	manifestRaw, _ := json.Marshal(map[string]any{"task": c.ID, "attempt": c.Attempts, "stage": e.Artwork.StageID, "title": result.Title, "result": result, "credits": e.Credits, "repair": e.PosterFallback})
+	sum := sha256.Sum256(manifestRaw)
+	digest := hex.EncodeToString(sum[:])
+	_, err := tx.ExecContext(ctx, `INSERT INTO scrape_effect_commit(task_id,attempt,generation,stage_id,manifest_json,manifest_digest) VALUES(?,?,?,?,?,?)`, c.ID, c.Attempts, c.Generation.Int64, e.Artwork.StageID, string(manifestRaw), digest)
+	return digest, err
 }
 
 func syncSeriesCollectionMetaExecutor(ctx context.Context, q store.SQLExecutor, libraryID, mediaID int64, res *scraper.ScrapeResult) error {
