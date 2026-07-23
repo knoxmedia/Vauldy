@@ -35,6 +35,7 @@ type ClaimRequest struct {
 	TaskType, Owner string
 	QueueID         *int64
 	Registry        coreiface.CapabilityRegistry
+	afterCommit     func() error
 }
 
 type PrepareParentIdentity struct {
@@ -60,6 +61,11 @@ func ClaimEligible(ctx context.Context, db *sql.DB, req ClaimRequest) (*ClaimPay
 		})
 		if err != nil && outcome.CommitAttempted {
 			return fmt.Errorf("%w: %v", ErrClaimCommitUncertain, err)
+		}
+		if err == nil && outcome.CommitConfirmed && payload != nil && req.afterCommit != nil {
+			if hookErr := req.afterCommit(); hookErr != nil {
+				return fmt.Errorf("%w: %v", ErrClaimCommitUncertain, hookErr)
+			}
 		}
 		return err
 	})
@@ -107,12 +113,16 @@ func claimEligibleTx(ctx context.Context, tx store.ImmediateConnTx, req ClaimReq
 	if linked && (req.Registry == nil || !req.Registry.Available(req.TaskType)) {
 		return nil, nil
 	}
-	if linked && !required {
-		exists, err := eligibleRequiredExists(ctx, tx, req.Registry)
+	if linked {
+		oldest, err := oldestEligibleRequired(ctx, tx, req.Registry)
 		if err != nil {
 			return nil, err
 		}
-		if exists {
+		if required {
+			if oldest == nil || oldest.family != req.Family || oldest.id != candidate {
+				return nil, nil
+			}
+		} else if oldest != nil {
 			return nil, nil
 		}
 	}
@@ -171,20 +181,45 @@ func selectFamilyCandidate(ctx context.Context, tx store.SQLExecutor, req ClaimR
 	return
 }
 
-func eligibleRequiredExists(ctx context.Context, tx store.SQLExecutor, registry coreiface.CapabilityRegistry) (bool, error) {
+type requiredCandidate struct {
+	family             QueueFamily
+	id                 int64
+	available, created string
+}
+
+func familyCapabilities(f QueueFamily) []string {
+	switch f {
+	case QueuePostIngest:
+		return []string{"poster", "thumbnail", "encrypt", "preview", "keyframe", "subtitle", "atrack"}
+	case QueueScrape:
+		return []string{"scrape"}
+	case QueuePrepare:
+		return []string{"prepare"}
+	}
+	return nil
+}
+func familyAdvertised(registry coreiface.CapabilityRegistry, f QueueFamily) bool {
+	if registry == nil {
+		return false
+	}
+	for _, typ := range familyCapabilities(f) {
+		if registry.Available(typ) {
+			return true
+		}
+	}
+	return false
+}
+func oldestEligibleRequired(ctx context.Context, tx store.SQLExecutor, registry coreiface.CapabilityRegistry) (*requiredCandidate, error) {
+	var best *requiredCandidate
 	for _, f := range []QueueFamily{QueuePostIngest, QueueScrape, QueuePrepare} {
 		table, a := familySource(f)
 		present, err := tableAvailable(ctx, tx, table)
 		if err != nil {
-			return false, err
-		}
-		typ := string(f)
-		if f == QueuePostIngest {
-			typ = "poster"
+			return nil, err
 		}
 		if !present {
-			if registry != nil && registry.Available(typ) {
-				return false, fmt.Errorf("publication claim: advertised capability %s missing table %s", typ, table)
+			if familyAdvertised(registry, f) {
+				return nil, fmt.Errorf("publication claim: advertised capability %s missing table %s", familyCapabilities(f)[0], table)
 			}
 			continue
 		}
@@ -192,17 +227,47 @@ func eligibleRequiredExists(ctx context.Context, tx store.SQLExecutor, registry 
 		if f == QueuePostIngest {
 			typeFilter = " AND st.step_type=q.task_type"
 		}
-		q := fmt.Sprintf(`SELECT st.step_type FROM %s q JOIN media_ingest_step st ON st.id=q.ingest_step_id WHERE st.required=1 AND %s AND %s%s ORDER BY q.created_at,q.id LIMIT 1`, table, familyDueSQL(f, a), linkedEligibilitySQL(a), typeFilter)
-		var stepType string
-		err = tx.QueryRowContext(ctx, q).Scan(&stepType)
-		if err == nil && registry != nil && registry.Available(stepType) {
-			return true, nil
+		availableExpr := "q.created_at"
+		if f != QueuePrepare {
+			availableExpr = "COALESCE(q.available_at,q.created_at)"
 		}
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return false, err
+		query := fmt.Sprintf(`SELECT q.id,st.step_type,CAST(%s AS TEXT),CAST(q.created_at AS TEXT) FROM %s q JOIN media_ingest_step st ON st.id=q.ingest_step_id WHERE st.required=1 AND %s AND %s%s ORDER BY %s,q.created_at,q.id LIMIT 1`, availableExpr, table, familyDueSQL(f, a), linkedEligibilitySQL(a), typeFilter, availableExpr)
+		var c requiredCandidate
+		var typ string
+		c.family = f
+		err = tx.QueryRowContext(ctx, query).Scan(&c.id, &typ, &c.available, &c.created)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if registry == nil || !registry.Available(typ) {
+			continue
+		}
+		if best == nil || requiredLess(c, *best) {
+			copy := c
+			best = &copy
 		}
 	}
-	return false, nil
+	return best, nil
+}
+func requiredLess(a, b requiredCandidate) bool {
+	if a.available != b.available {
+		return a.available < b.available
+	}
+	if a.created != b.created {
+		return a.created < b.created
+	}
+	if a.id != b.id {
+		return a.id < b.id
+	}
+	return a.family < b.family
+}
+
+func eligibleRequiredExists(ctx context.Context, tx store.SQLExecutor, registry coreiface.CapabilityRegistry) (bool, error) {
+	c, err := oldestEligibleRequired(ctx, tx, registry)
+	return c != nil, err
 }
 
 func updateFamilyClaim(ctx context.Context, tx store.SQLExecutor, req ClaimRequest, id int64, owner string) (*ClaimPayload, error) {

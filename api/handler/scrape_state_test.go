@@ -7,6 +7,7 @@ import (
 	"errors"
 	"knox-media/internal/config"
 	"knox-media/internal/postingest"
+	"knox-media/internal/publication"
 	"knox-media/internal/scraper"
 	"testing"
 
@@ -241,7 +242,7 @@ func TestStartupScrapeLoopProcessesScannerPlan(t *testing.T) {
 	}
 	taskID, _ := task.LastInsertId()
 	calls := 0
-	h := &Handler{App: &app.App{DB: db, Config: &config.Config{}}, Queue: postingest.NewQueue(db, "test", nil), scrapeWithConfig: func(string, string, scraper.Config) (*scraper.ScrapeResult, error) {
+	h := &Handler{App: &app.App{DB: db, Config: &config.Config{}}, PublicationCapabilities: publication.NewCapabilityMatrix([]string{"scrape"}), Queue: postingest.NewQueue(db, "test", nil), scrapeWithConfig: func(string, string, scraper.Config) (*scraper.ScrapeResult, error) {
 		calls++
 		return &scraper.ScrapeResult{Title: "deterministic", Overview: "local fake", Genres: []string{}, Extra: map[string]any{}}, nil
 	}}

@@ -274,7 +274,7 @@ func TestMainInjectsRegisteredIngestPrepareCapability(t *testing.T) {
 		t.Fatal(err)
 	}
 	src := string(data)
-	if !strings.Contains(src, "PreparePlanner: preparePlanner, Capabilities: prepareCapabilities") {
+	if !strings.Contains(src, "PreparePlanner: preparePlanner, Capabilities: publicationCapabilities") {
 		t.Fatal("publication planner does not receive registered prepare capability")
 	}
 	if strings.Contains(src, "PrepareAvailable: false") {
@@ -335,8 +335,9 @@ func TestMainWiresOneSharedPublicationCapabilityRegistry(t *testing.T) {
 		t.Fatal(err)
 	}
 	src := string(data)
-	if strings.Count(src, "publication.NewCapabilityMatrix(") != 1 {
-		t.Fatalf("registry constructors=%d", strings.Count(src, "publication.NewCapabilityMatrix("))
+	constructor := strings.Index(src, "publicationCapabilities := publication.NewCapabilityMatrix(publicationSteps)")
+	if constructor < 0 {
+		t.Fatal("missing process publication capability registry")
 	}
 	for _, required := range []string{"postingest.NewQueue(db, queueOwner, sqliteMetrics, publicationCapabilities)", "PublicationCapabilities: publicationCapabilities", "Capabilities: publicationCapabilities"} {
 		if !strings.Contains(src, required) {

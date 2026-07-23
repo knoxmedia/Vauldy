@@ -3,6 +3,8 @@ package publication
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"knox-media/internal/store"
 	"strings"
 	"testing"
@@ -197,5 +199,162 @@ func TestClaimEligibleLinkedStepCASRequiresExactlyOneTransition(t *testing.T) {
 	_ = db.QueryRow(`SELECT status FROM media_ingest_step WHERE id=30`).Scan(&ss)
 	if qs != "waiting" || ss != "waiting" {
 		t.Fatalf("states=%s/%s", qs, ss)
+	}
+}
+
+func TestGlobalRequiredOrderingBlocksYoungerFamily(t *testing.T) {
+	db := openEligibilityDB(t)
+	seedThreeRequiredClaims(t, db)
+	registry := NewCapabilityMatrix([]string{"poster", "scrape", "prepare"})
+	if got, err := ClaimEligible(context.Background(), db, ClaimRequest{Family: QueuePostIngest, TaskType: "poster", Owner: "post", Registry: registry}); err != nil || got != nil {
+		t.Fatalf("younger post claim=%+v err=%v", got, err)
+	}
+	got, err := ClaimEligible(context.Background(), db, ClaimRequest{Family: QueueScrape, TaskType: "scrape", Owner: "scrape", Registry: registry})
+	if err != nil || got == nil || got.Family != QueueScrape || got.QueueID != 41 {
+		t.Fatalf("oldest scrape=%+v err=%v", got, err)
+	}
+}
+
+func TestRequiredFirstAcrossPostIngestScrapePrepareSimultaneousBarrier(t *testing.T) {
+	for iteration := 0; iteration < 10; iteration++ {
+		db := openEligibilityDB(t)
+		seedThreeRequiredClaims(t, db)
+		if _, err := db.Exec(`UPDATE media_ingest_step SET required=0 WHERE id IN (30,32)`); err != nil {
+			t.Fatal(err)
+		}
+		registry := NewCapabilityMatrix([]string{"poster", "scrape", "prepare"})
+		start := make(chan struct{})
+		results := make(chan *ClaimPayload, 3)
+		errs := make(chan error, 3)
+		for _, req := range []ClaimRequest{{Family: QueuePostIngest, TaskType: "poster", Owner: "p", Registry: registry}, {Family: QueueScrape, TaskType: "scrape", Owner: "s", Registry: registry}, {Family: QueuePrepare, TaskType: "prepare", Owner: "t", Registry: registry}} {
+			req := req
+			go func() { <-start; p, e := ClaimEligible(context.Background(), db, req); results <- p; errs <- e }()
+		}
+		close(start)
+		var claims []*ClaimPayload
+		for i := 0; i < 3; i++ {
+			if e := <-errs; e != nil {
+				t.Fatal(e)
+			}
+			if p := <-results; p != nil {
+				claims = append(claims, p)
+			}
+		}
+		if len(claims) != 1 || claims[0].Family != QueueScrape || claims[0].QueueID != 41 {
+			t.Fatalf("iteration=%d claims=%+v", iteration, claims)
+		}
+	}
+}
+
+func seedThreeRequiredClaims(t *testing.T, db *sql.DB) {
+	t.Helper()
+	_, err := db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l'); INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state) VALUES(10,1,'f','video',1,'processing'); INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(20,10,1,'scan','processing','{}',2); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(30,20,10,1,'poster',1,'waiting'),(31,20,10,1,'scrape',1,'waiting'),(32,20,10,1,'prepare',1,'waiting'); INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status,available_at,created_at) VALUES(40,10,20,30,1,'poster','waiting','2020-01-02','2019-01-01'); INSERT INTO scrape_task(id,media_id,status,ingest_run_id,ingest_step_id,generation,available_at,created_at) VALUES(41,10,'waiting',20,31,1,'2020-01-01','2020-01-03'); INSERT INTO transcode_task(id,file_id,media_id,status,task_type,ingest_run_id,ingest_step_id,generation,created_at) VALUES(42,'f',10,'waiting','pretranscode',20,32,1,'2020-01-04')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestClaimEligibleUncertainCommitReconcilesFullPayloadOnce(t *testing.T) {
+	db := openEligibilityDB(t)
+	_, err := db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l'); INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state) VALUES(10,1,'f','video',1,'processing'); INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(20,10,1,'scan','processing','{}',2); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(30,20,10,1,'poster',1,'waiting'); INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status,max_attempts) VALUES(40,10,20,30,1,'poster','waiting',4)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lost := errors.New("response lost")
+	calls := 0
+	p, err := ClaimEligible(context.Background(), db, ClaimRequest{Family: QueuePostIngest, TaskType: "poster", Owner: "worker", Registry: NewCapabilityMatrix([]string{"poster"}), afterCommit: func() error { calls++; return lost }})
+	if err != nil || p == nil || p.QueueID != 40 || p.MediaID != 10 || p.RunID.Int64 != 20 || p.StepID.Int64 != 30 || p.Generation.Int64 != 1 || p.Attempts != 1 || p.MaxAttempts != 4 || p.LeaseUntil.IsZero() {
+		t.Fatalf("payload=%+v err=%v", p, err)
+	}
+	if calls != 1 {
+		t.Fatalf("afterCommit calls=%d", calls)
+	}
+	var running int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM post_ingest_task WHERE status='running'`).Scan(&running)
+	if running != 1 {
+		t.Fatalf("running=%d", running)
+	}
+}
+
+func TestClaimEligibilityStatusDependencyMatrixAllFamilies(t *testing.T) {
+	cases := []struct {
+		name, run, media   string
+		published          bool
+		required           bool
+		depKind, depStatus string
+		want               bool
+	}{
+		{"required processing", "processing", "processing", false, true, "", "", true}, {"required failed", "failed", "processing", false, true, "", "", false}, {"required cancelled", "cancelled", "processing", false, true, "", "", false},
+		{"optional published independent", "published", "published", true, false, "media_visible", "", true}, {"optional degraded independent", "degraded", "degraded", true, false, "media_visible", "", true}, {"optional failed", "failed", "published", true, false, "media_visible", "", false}, {"optional cancelled", "cancelled", "published", true, false, "media_visible", "", false},
+		{"optional degraded explicit failed dep", "degraded", "degraded", true, false, "step_done", "failed", false}, {"optional degraded explicit done dep", "degraded", "degraded", true, false, "step_done", "done", true},
+	}
+	for _, family := range []QueueFamily{QueuePostIngest, QueueScrape, QueuePrepare} {
+		for _, tc := range cases {
+			t.Run(string(family)+"/"+tc.name, func(t *testing.T) {
+				db := openEligibilityDB(t)
+				published := "NULL"
+				if tc.published {
+					published = "CURRENT_TIMESTAMP"
+				}
+				required := 0
+				if tc.required {
+					required = 1
+				}
+				typ := map[QueueFamily]string{QueuePostIngest: "thumbnail", QueueScrape: "scrape", QueuePrepare: "prepare"}[family]
+				q := fmt.Sprintf(`INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l'); INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state,published_at) VALUES(10,1,'f','video',1,'%s',%s); INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(20,10,1,'scan','%s','{}',2); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(29,20,10,1,'poster',1,'%s'),(30,20,10,1,'%s',%d,'waiting');`, tc.media, published, tc.run, func() string {
+					if tc.depStatus == "" {
+						return "done"
+					}
+					return tc.depStatus
+				}(), typ, required)
+				if tc.depKind == "media_visible" {
+					q += `INSERT INTO media_ingest_step_dependency(step_id,dependency_kind) VALUES(30,'media_visible');`
+				} else if tc.depKind == "step_done" {
+					q += `INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(30,29,'step_done');`
+				}
+				switch family {
+				case QueuePostIngest:
+					q += `INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(40,10,20,30,1,'thumbnail','waiting');`
+				case QueueScrape:
+					q += `INSERT INTO scrape_task(id,media_id,status,ingest_run_id,ingest_step_id,generation) VALUES(40,10,'waiting',20,30,1);`
+				case QueuePrepare:
+					q += `INSERT INTO transcode_task(id,file_id,media_id,status,task_type,ingest_run_id,ingest_step_id,generation) VALUES(40,'f',10,'waiting','pretranscode',20,30,1);`
+				}
+				if _, err := db.Exec(q); err != nil {
+					t.Fatal(err)
+				}
+				got, err := ClaimEligible(context.Background(), db, ClaimRequest{Family: family, TaskType: typ, Owner: "worker", Registry: NewCapabilityMatrix([]string{typ})})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if (got != nil) != tc.want {
+					t.Fatalf("claim=%+v want=%v", got, tc.want)
+				}
+			})
+		}
+	}
+}
+
+func TestCommunityAbsentPrepareTableRequiredAvailabilityMatrix(t *testing.T) {
+	for _, advertised := range []bool{false, true} {
+		t.Run(fmt.Sprintf("advertised=%v", advertised), func(t *testing.T) {
+			db := openEligibilityDB(t)
+			_, err := db.Exec(`DROP TABLE pretranscode_rendition_job; DROP TABLE pretranscode_task_meta; DROP TABLE transcode_task; INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l'); INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state) VALUES(10,1,'f','video',1,'processing'); INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(20,10,1,'scan','processing','{}',2); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(30,20,10,1,'poster',1,'waiting'); INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(40,10,20,30,1,'poster','waiting')`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			steps := []string{"poster"}
+			if advertised {
+				steps = append(steps, "prepare")
+			}
+			p, err := ClaimEligible(context.Background(), db, ClaimRequest{Family: QueuePostIngest, TaskType: "poster", Owner: "worker", Registry: NewCapabilityMatrix(steps)})
+			if advertised {
+				if err == nil || !strings.Contains(err.Error(), "missing table") {
+					t.Fatalf("payload=%+v err=%v", p, err)
+				}
+			} else if err != nil || p == nil {
+				t.Fatalf("payload=%+v err=%v", p, err)
+			}
+		})
 	}
 }
