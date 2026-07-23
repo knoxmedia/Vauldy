@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"database/sql"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -87,5 +88,37 @@ func TestClaimScrapeTaskEnforcesMediaVisibleDependency(t *testing.T) {
 	_, _ = db.Exec(`UPDATE media SET publication_state='published',published_at=CURRENT_TIMESTAMP WHERE id=10; UPDATE media_ingest_run SET status='published' WHERE id=20`)
 	if got, err := claimScrapeTaskWithOwner(context.Background(), db, 40); err != nil || got == nil {
 		t.Fatalf("visible claim=%+v err=%v", got, err)
+	}
+}
+
+func TestClaimScrapeTaskCASRejectsInvalidatedMediaVisibleDependency(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "scrape-race.sqlite")
+	db, err := store.OpenSQLite(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	_, _ = db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l'); INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state,published_at) VALUES(10,1,'f','video',1,'published',CURRENT_TIMESTAMP); INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(20,10,1,'repair','published','{}',2); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(30,20,10,1,'scrape',0,'waiting'); INSERT INTO media_ingest_step_dependency(step_id,dependency_kind) VALUES(30,'media_visible'); INSERT INTO scrape_task(id,media_id,status,ingest_run_id,ingest_step_id,generation) VALUES(40,10,'waiting',20,30,1)`)
+	other, err := store.OpenSQLite(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	claim, err := claimScrapeTaskWithOwnerHook(context.Background(), db, 40, func() {
+		if _, updateErr := other.Exec(`UPDATE media SET publication_state='processing',published_at=NULL WHERE id=10`); updateErr != nil {
+			t.Fatal(updateErr)
+		}
+	})
+	if err != nil || claim != nil {
+		t.Fatalf("invalidated claim=%+v err=%v", claim, err)
+	}
+	var status string
+	var owner, lease sql.NullString
+	var failures int
+	if err = db.QueryRow(`SELECT status,lease_owner,lease_until,fail_count FROM scrape_task WHERE id=40`).Scan(&status, &owner, &lease, &failures); err != nil {
+		t.Fatal(err)
+	}
+	if status != "waiting" || owner.Valid || lease.Valid || failures != 0 {
+		t.Fatalf("task mutated status=%s owner=%v lease=%v failures=%d", status, owner, lease, failures)
 	}
 }

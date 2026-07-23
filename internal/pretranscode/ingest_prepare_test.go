@@ -2,11 +2,14 @@ package pretranscode
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"knox-media/internal/publication"
+	"knox-media/internal/store"
 )
 
 func TestIngestPreparePlannerCreatesExecutableExactlyLinkedTask(t *testing.T) {
@@ -234,5 +237,69 @@ func TestRecoverLinkedMalformedSnapshotFailsStepAndDegrades(t *testing.T) {
 	}
 	if got := svc.RecoverOrphanedTasks(); got != 0 {
 		t.Fatalf("second fixed=%d", got)
+	}
+}
+
+func TestClaimNextJobCASRejectsInvalidatedMediaVisibleDependency(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "prepare-race.sqlite")
+	db, err := store.OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	root := t.TempDir()
+	mediaID := seedVideo(t, db, root, "prepare-race", "Prepare Race")
+	_, _ = db.Exec(`UPDATE media SET ingest_generation=1,publication_state='published',published_at=CURRENT_TIMESTAMP WHERE id=?`, mediaID)
+	r, _ := db.Exec(`INSERT INTO media_ingest_run(media_id,generation,reason,status,preserve_visibility,config_snapshot_json,policy_version) VALUES(?,1,'repair','published',1,'{}',2)`, mediaID)
+	runID, _ := r.LastInsertId()
+	r, _ = db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status) VALUES(?,?,1,'prepare',0,'waiting')`, runID, mediaID)
+	stepID, _ := r.LastInsertId()
+	_, _ = db.Exec(`INSERT INTO media_ingest_step_dependency(step_id,dependency_kind) VALUES(?,'media_visible')`, stepID)
+	tx, _ := db.Begin()
+	if err = (ingestPreparePlanner{}).PlanIngestPrepareTx(context.Background(), tx, mediaID, runID, stepID, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err = tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	var blockedJobID int64
+	if err = db.QueryRow(`SELECT id FROM pretranscode_rendition_job ORDER BY id LIMIT 1`).Scan(&blockedJobID); err != nil {
+		t.Fatal(err)
+	}
+
+	legacyMediaID := seedVideo(t, db, root, "prepare-next", "Prepare Next")
+	preset, err := (&PresetService{DB: db}).ListPresets()
+	if err != nil || len(preset) == 0 {
+		t.Fatalf("presets=%d err=%v", len(preset), err)
+	}
+	ids, err := (&TaskService{DB: db, TranscodeDir: root}).CreateTask([]int64{legacyMediaID}, preset[0].ID, "normal")
+	if err != nil || len(ids) != 1 {
+		t.Fatalf("legacy task ids=%v err=%v", ids, err)
+	}
+
+	other, err := store.OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	w := NewWorker(db, nil, "ffmpeg", root, 1, 1)
+	w.setBeforeClaimUpdate(func() {
+		_, err = other.Exec(`UPDATE media SET publication_state='processing',published_at=NULL WHERE id=?`, mediaID)
+	})
+	if job, _, _, _, _, _, _, claimErr := w.claimNextJob(); claimErr == nil || job != nil {
+		t.Fatalf("invalidated claim job=%+v err=%v", job, claimErr)
+	}
+	var status string
+	var owner, lease sql.NullString
+	if err = db.QueryRow(`SELECT status,lease_owner,lease_until FROM pretranscode_rendition_job WHERE id=?`, blockedJobID).Scan(&status, &owner, &lease); err != nil {
+		t.Fatal(err)
+	}
+	if status != "waiting" || owner.Valid || lease.Valid {
+		t.Fatalf("blocked job mutated status=%s owner=%v lease=%v", status, owner, lease)
+	}
+	w.setBeforeClaimUpdate(nil)
+	job, _, _, gotMediaID, _, _, _, err := w.claimNextJob()
+	if err != nil || job == nil || gotMediaID != legacyMediaID {
+		t.Fatalf("next job=%+v media=%d err=%v", job, gotMediaID, err)
 	}
 }

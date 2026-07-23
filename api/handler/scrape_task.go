@@ -342,13 +342,29 @@ type scrapeClaim struct {
 }
 
 func claimScrapeTaskWithOwner(ctx context.Context, db *sql.DB, taskID int64) (*scrapeClaim, error) {
+	return claimScrapeTaskWithOwnerHook(ctx, db, taskID, nil)
+}
+
+func claimScrapeTaskWithOwnerHook(ctx context.Context, db *sql.DB, taskID int64, beforeUpdate func()) (*scrapeClaim, error) {
+	eligibility := publication.LinkedClaimEligibilitySQL("q")
+	var candidateID int64
+	err := db.QueryRowContext(ctx, fmt.Sprintf(`SELECT q.id FROM scrape_task q WHERE q.id=? AND (q.status='waiting' OR (q.status='failed' AND COALESCE(q.fail_count,0) < ?)) AND (q.available_at IS NULL OR q.available_at<=CURRENT_TIMESTAMP) AND (q.lease_until IS NULL OR q.lease_until<CURRENT_TIMESTAMP) AND %s`, eligibility), taskID, maxScrapeTaskFailures).Scan(&candidateID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if beforeUpdate != nil {
+		beforeUpdate()
+	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
 	token := "scrape/" + uuid.NewString()
-	q := fmt.Sprintf(`UPDATE scrape_task AS q SET status='running',progress=15,started_at=COALESCE(started_at,CURRENT_TIMESTAMP),message='scraping...',lease_owner=?,lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds'),fail_count=COALESCE(fail_count,0)+1 WHERE id=? AND (status='waiting' OR (status='failed' AND COALESCE(fail_count,0) < ?)) AND (available_at IS NULL OR available_at<=CURRENT_TIMESTAMP) AND (lease_until IS NULL OR lease_until<CURRENT_TIMESTAMP) AND %s`, publication.LinkedClaimEligibilitySQL("q"))
+	q := fmt.Sprintf(`UPDATE scrape_task AS q SET status='running',progress=15,started_at=COALESCE(started_at,CURRENT_TIMESTAMP),message='scraping...',lease_owner=?,lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds'),fail_count=COALESCE(fail_count,0)+1 WHERE id=? AND (status='waiting' OR (status='failed' AND COALESCE(fail_count,0) < ?)) AND (available_at IS NULL OR available_at<=CURRENT_TIMESTAMP) AND (lease_until IS NULL OR lease_until<CURRENT_TIMESTAMP) AND %s`, eligibility)
 	r, err := tx.ExecContext(ctx, q, token, taskID, maxScrapeTaskFailures)
 	if err != nil {
 		return nil, err

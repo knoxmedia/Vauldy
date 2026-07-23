@@ -36,10 +36,11 @@ type Worker struct {
 	MaxCPU       int
 	MaxGPU       int
 
-	mu      sync.Mutex
-	running map[int64]context.CancelFunc // jobID -> cancel
-	semCPU  chan struct{}
-	semGPU  chan struct{}
+	mu                sync.Mutex
+	running           map[int64]context.CancelFunc // jobID -> cancel
+	beforeClaimUpdate func()
+	semCPU            chan struct{}
+	semGPU            chan struct{}
 }
 
 // NewWorker constructs a standalone worker. MaxCPU/MaxGPU default to 4/2
@@ -126,6 +127,21 @@ type claimedJob struct {
 	Owner       string
 }
 
+func (w *Worker) setBeforeClaimUpdate(hook func()) {
+	w.mu.Lock()
+	w.beforeClaimUpdate = hook
+	w.mu.Unlock()
+}
+
+func (w *Worker) runBeforeClaimUpdate() {
+	w.mu.Lock()
+	hook := w.beforeClaimUpdate
+	w.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+}
+
 func (w *Worker) claimNextJob() (*claimedJob, *Preset, *Rendition, int64, string, int, int, error) {
 	eligibility := publication.LinkedClaimEligibilitySQL("t")
 	row := w.DB.QueryRow(fmt.Sprintf(`SELECT j.id, j.task_id, COALESCE(j.rendition_id,0), j.rendition_name, COALESCE(j.config_snapshot_json,'')
@@ -141,6 +157,7 @@ func (w *Worker) claimNextJob() (*claimedJob, *Preset, *Rendition, int64, string
 		return nil, nil, nil, 0, "", 0, 0, err
 	}
 	c.Owner = "pretranscode/" + uuid.NewString()
+	w.runBeforeClaimUpdate()
 	res, err := w.DB.Exec(fmt.Sprintf(`UPDATE pretranscode_rendition_job AS j SET status='running',started_at=COALESCE(started_at,CURRENT_TIMESTAMP),lease_owner=?,lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds') WHERE id=? AND status='waiting' AND COALESCE(available_at,CURRENT_TIMESTAMP)<=CURRENT_TIMESTAMP AND EXISTS (SELECT 1 FROM transcode_task t WHERE t.id=j.task_id AND t.status IN ('waiting','running') AND %s)`, eligibility), c.Owner, c.ID)
 	if err != nil {
 		return nil, nil, nil, 0, "", 0, 0, err
