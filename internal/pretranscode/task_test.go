@@ -311,13 +311,41 @@ func seedManagedLinkedTask(t *testing.T, db *sql.DB, status string) (svc *TaskSe
 	return &TaskService{DB: db, TranscodeDir: t.TempDir()}, taskID, jobID, runID, stepID, mediaID
 }
 
-func TestLinkedPrepareCancelTaskFailsInitialPublicationAtomically(t *testing.T) {
+func TestLinkedRequiredPrepareCancelTaskPersistsAdminRunIntentAtomically(t *testing.T) {
 	db := newTestDB(t)
 	svc, taskID, jobID, runID, stepID, mediaID := seedManagedLinkedTask(t, db, "running")
 	if err := svc.CancelTask(taskID); err != nil {
 		t.Fatal(err)
 	}
-	assertPrepareTerminalState(t, db, jobID, taskID, stepID, runID, mediaID, "cancelled", "cancelled", "cancelled", "failed", "failed")
+	assertPrepareTerminalState(t, db, jobID, taskID, stepID, runID, mediaID, "cancelled", "cancelled", "cancelled", "cancelled", "cancelled")
+
+	var reason, runError string
+	var finished sql.NullTime
+	if err := db.QueryRow(`SELECT terminal_reason,error_message,finished_at FROM media_ingest_run WHERE id=?`, runID).Scan(&reason, &runError, &finished); err != nil {
+		t.Fatal(err)
+	}
+	if reason != "admin_cancelled" || !finished.Valid {
+		t.Fatalf("reason=%q error=%q finished=%v", reason, runError, finished)
+	}
+}
+
+func TestLinkedOptionalPrepareCancelDoesNotCancelRunOutcome(t *testing.T) {
+	db := newTestDB(t)
+	svc, taskID, jobID, runID, stepID, mediaID := seedManagedLinkedTask(t, db, "running")
+	if _, err := db.Exec(`UPDATE media_ingest_step SET required=0 WHERE id=?`, stepID); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.CancelTask(taskID); err != nil {
+		t.Fatal(err)
+	}
+	assertPrepareTerminalState(t, db, jobID, taskID, stepID, runID, mediaID, "cancelled", "cancelled", "cancelled", "published", "published")
+	var reason string
+	if err := db.QueryRow(`SELECT terminal_reason FROM media_ingest_run WHERE id=?`, runID).Scan(&reason); err != nil {
+		t.Fatal(err)
+	}
+	if reason != "" {
+		t.Fatalf("terminal reason=%q", reason)
+	}
 }
 
 func TestLinkedPrepareRetryTaskStartsNewRoundThenWorkerCanPublish(t *testing.T) {

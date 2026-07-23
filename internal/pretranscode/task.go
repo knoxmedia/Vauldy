@@ -208,6 +208,22 @@ func (s *TaskService) CancelTask(id int64) error {
 	if err != nil {
 		return err
 	}
+	var required bool
+	if linked {
+		if err = tx.QueryRow(`SELECT required=1 FROM media_ingest_step WHERE id=? AND run_id=? AND generation=? AND step_type='prepare'`, stepID, runID, generation).Scan(&required); err != nil {
+			return err
+		}
+		if required {
+			cancelled, cancelErr := publication.CancelRunTx(context.Background(), tx, runID, "admin_cancelled")
+			if cancelErr != nil {
+				return cancelErr
+			}
+			if !cancelled {
+				return fmt.Errorf("task %d linked ingest run is not cancellable", id)
+			}
+			return tx.Commit()
+		}
+	}
 	if _, err = tx.Exec(`UPDATE pretranscode_rendition_job SET status='cancelled',completed_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL WHERE task_id=? AND status IN ('waiting','running')`, id); err != nil {
 		return err
 	}

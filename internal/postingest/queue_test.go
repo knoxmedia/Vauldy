@@ -1203,7 +1203,7 @@ func TestQueueLinkedRecoverExpiredFailsInitialPublicationAtomically(t *testing.T
 	}
 }
 
-func TestQueueLinkedCancelScanFailsInitialPublicationAndLeavesOtherScan(t *testing.T) {
+func TestQueueLinkedCancelScanPersistsIntentAndLeavesOtherScan(t *testing.T) {
 	db, _ := openQueueTestDB(t)
 	mediaID, scanID, otherScan := seedQueueTest(t, db)
 	libraryID := mediaLibraryID(t, db, mediaID)
@@ -1212,7 +1212,7 @@ func TestQueueLinkedCancelScanFailsInitialPublicationAndLeavesOtherScan(t *testi
 		t.Fatal(err)
 	}
 	for _, item := range []struct{ media, scan int64 }{{mediaID, scanID}, {otherMedia, otherScan}} {
-		res, err := db.Exec(`INSERT INTO media_ingest_run(media_id,generation,reason,status,config_snapshot_json) VALUES(?,1,'scan','processing','{}')`, item.media)
+		res, err := db.Exec(`INSERT INTO media_ingest_run(media_id,generation,scan_task_id,reason,status,config_snapshot_json) VALUES(?,1,?,'scan','processing','{}')`, item.media, item.scan)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1230,12 +1230,13 @@ func TestQueueLinkedCancelScanFailsInitialPublicationAndLeavesOtherScan(t *testi
 	if n, err := q.CancelScan(context.Background(), scanID); err != nil || n != 1 {
 		t.Fatalf("cancel=(%d,%v)", n, err)
 	}
-	var queueStatus, stepState, runState, mediaState string
-	if err := db.QueryRow(`SELECT q.status,s.status,r.status,m.publication_state FROM post_ingest_task q JOIN media_ingest_step s ON s.id=q.ingest_step_id JOIN media_ingest_run r ON r.id=q.ingest_run_id JOIN media m ON m.id=q.media_id WHERE q.scan_task_id=?`, scanID).Scan(&queueStatus, &stepState, &runState, &mediaState); err != nil {
+	var queueStatus, stepState, runState, mediaState, reason string
+	var finished sql.NullTime
+	if err := db.QueryRow(`SELECT q.status,s.status,r.status,m.publication_state,r.terminal_reason,r.finished_at FROM post_ingest_task q JOIN media_ingest_step s ON s.id=q.ingest_step_id JOIN media_ingest_run r ON r.id=q.ingest_run_id JOIN media m ON m.id=q.media_id WHERE q.scan_task_id=?`, scanID).Scan(&queueStatus, &stepState, &runState, &mediaState, &reason, &finished); err != nil {
 		t.Fatal(err)
 	}
-	if queueStatus != "cancelled" || stepState != "cancelled" || runState != "failed" || mediaState != "failed" {
-		t.Fatalf("cancelled states queue=%s step=%s run=%s media=%s", queueStatus, stepState, runState, mediaState)
+	if queueStatus != "cancelled" || stepState != "cancelled" || runState != "cancelled" || mediaState != "cancelled" || reason != "scan_cancelled" || !finished.Valid {
+		t.Fatalf("cancelled states queue=%s step=%s run=%s media=%s reason=%q finished=%v", queueStatus, stepState, runState, mediaState, reason, finished)
 	}
 	var otherStatus string
 	if err := db.QueryRow(`SELECT status FROM post_ingest_task WHERE scan_task_id=?`, otherScan).Scan(&otherStatus); err != nil {
@@ -1243,6 +1244,48 @@ func TestQueueLinkedCancelScanFailsInitialPublicationAndLeavesOtherScan(t *testi
 	}
 	if otherStatus != "waiting" {
 		t.Fatalf("other scan status=%s", otherStatus)
+	}
+}
+
+func TestQueueCancelScanRollsBackIntentWithTaskCancellation(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	mediaID, scanID, _ := seedQueueTest(t, db)
+	if _, err := db.Exec(`UPDATE media SET ingest_generation=1 WHERE id=?`, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	res, err := db.Exec(`INSERT INTO media_ingest_run(media_id,generation,scan_task_id,reason,status,config_snapshot_json,error_message) VALUES(?,1,?,'scan','processing','{}','original')`, mediaID, scanID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID, _ := res.LastInsertId()
+	res, err = db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status) VALUES(?,?,1,'poster',1,'waiting')`, runID, mediaID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stepID, _ := res.LastInsertId()
+	if _, err = db.Exec(`INSERT INTO post_ingest_task(media_id,scan_task_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(?,?,?,?,1,'poster','waiting')`, mediaID, scanID, runID, stepID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`CREATE TRIGGER reject_scan_cancel BEFORE UPDATE ON post_ingest_task WHEN NEW.status='cancelled' BEGIN SELECT RAISE(ABORT,'injected cancel failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	q := NewQueue(db, "rollback", nil)
+	if _, err = q.CancelScan(context.Background(), scanID); err == nil {
+		t.Fatal("expected cancellation failure")
+	}
+	var runStatus, reason, runError, stepStatus, taskStatus string
+	var finished sql.NullTime
+	if err = db.QueryRow(`SELECT status,terminal_reason,error_message,finished_at FROM media_ingest_run WHERE id=?`, runID).Scan(&runStatus, &reason, &runError, &finished); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.QueryRow(`SELECT status FROM media_ingest_step WHERE id=?`, stepID).Scan(&stepStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.QueryRow(`SELECT status FROM post_ingest_task WHERE ingest_run_id=?`, runID).Scan(&taskStatus); err != nil {
+		t.Fatal(err)
+	}
+	if runStatus != "processing" || reason != "" || runError != "original" || finished.Valid || stepStatus != "waiting" || taskStatus != "waiting" {
+		t.Fatalf("rollback run=%s reason=%q error=%q finished=%v step=%s task=%s", runStatus, reason, runError, finished, stepStatus, taskStatus)
 	}
 }
 

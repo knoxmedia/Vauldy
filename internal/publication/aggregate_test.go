@@ -168,6 +168,72 @@ func TestAggregateRequiredPendingRespectsRepairVisibility(t *testing.T) {
 		})
 	}
 }
+func TestAggregateExplicitCancellationIntentControlsVisibility(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		preserve        int
+		wantMedia       string
+		wantPublishedAt bool
+		wantError       string
+	}{
+		{name: "initial cancellation hides media", wantMedia: "cancelled", wantError: "scan_cancelled"},
+		{name: "repair cancellation remains visible", preserve: 1, wantMedia: "degraded", wantPublishedAt: true, wantError: "admin_cancelled"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, runID, mediaID := aggregateFixture(t, "cancelled", 1, map[string]string{"poster": "cancelled"})
+			reason := tc.wantError
+			if _, err := db.Exec(`UPDATE media_ingest_run SET preserve_visibility=?,terminal_reason=?,error_message='original error',finished_at='2026-07-01 01:02:03' WHERE id=?`, tc.preserve, reason, runID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`UPDATE media SET publication_state='published',published_at=CASE WHEN ?=1 THEN '2026-06-01 01:02:03' ELSE '2026-06-01 01:02:03' END WHERE id=?`, tc.preserve, mediaID); err != nil {
+				t.Fatal(err)
+			}
+
+			aggregateCall(t, db, runID)
+
+			var runState, terminalReason, runError, finished string
+			if err := db.QueryRow(`SELECT status,terminal_reason,error_message,strftime('%Y-%m-%d %H:%M:%S',finished_at) FROM media_ingest_run WHERE id=?`, runID).Scan(&runState, &terminalReason, &runError, &finished); err != nil {
+				t.Fatal(err)
+			}
+			state, publishedAt, publicationError := mediaState(t, db, mediaID)
+			if runState != "cancelled" || terminalReason != reason || runError != "original error" || finished != "2026-07-01 01:02:03" {
+				t.Fatalf("run=%s reason=%q error=%q finished=%q", runState, terminalReason, runError, finished)
+			}
+			if state != tc.wantMedia || publishedAt.Valid != tc.wantPublishedAt || publicationError != tc.wantError {
+				t.Fatalf("media=%s published_at=%v error=%q", state, publishedAt, publicationError)
+			}
+		})
+	}
+}
+
+func TestAggregateRequiredCancellationWithoutRunIntentIsFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name, wantRun, wantMedia string
+		preserve                 int
+	}{{name: "initial", wantRun: "failed", wantMedia: "failed"}, {name: "repair", preserve: 1, wantRun: "degraded", wantMedia: "degraded"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, runID, mediaID := aggregateFixture(t, "processing", 1, map[string]string{"poster": "cancelled"})
+			if _, err := db.Exec(`UPDATE media_ingest_run SET preserve_visibility=? WHERE id=?`, tc.preserve, runID); err != nil {
+				t.Fatal(err)
+			}
+			if tc.preserve == 1 {
+				if _, err := db.Exec(`UPDATE media SET publication_state='published',published_at='2026-06-01 01:02:03' WHERE id=?`, mediaID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			aggregateCall(t, db, runID)
+			var runState string
+			if err := db.QueryRow(`SELECT status FROM media_ingest_run WHERE id=?`, runID).Scan(&runState); err != nil {
+				t.Fatal(err)
+			}
+			mediaState, _, _ := mediaState(t, db, mediaID)
+			if runState != tc.wantRun || mediaState != tc.wantMedia {
+				t.Fatalf("run=%s media=%s", runState, mediaState)
+			}
+		})
+	}
+}
+
 func TestAggregateOptionalFailureDoesNotBlock(t *testing.T) {
 	db, r, m := aggregateFixture(t, "processing", 1, map[string]string{"poster": "done", "preview": "failed"})
 	db.Exec("UPDATE media_ingest_step SET required=0 WHERE step_type='preview'")

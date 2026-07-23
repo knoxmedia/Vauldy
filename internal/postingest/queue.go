@@ -613,26 +613,33 @@ func (q *Queue) CancelScan(ctx context.Context, id int64) (int64, error) {
 			return err
 		}
 		defer tx.Rollback()
-		rows, err := tx.QueryContext(ctx, `SELECT id FROM post_ingest_task WHERE scan_task_id=? AND status='waiting'`, id)
+		if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM post_ingest_task WHERE scan_task_id=? AND status IN ('waiting','running')`, id).Scan(&n); err != nil {
+			return err
+		}
+		rows, err := tx.QueryContext(ctx, `SELECT DISTINCT r.id FROM media_ingest_run r JOIN media m ON m.id=r.media_id AND m.ingest_generation=r.generation WHERE r.scan_task_id=? AND r.status='processing' AND r.superseded_by_generation IS NULL AND r.superseded_at IS NULL`, id)
 		if err != nil {
 			return err
 		}
-		var ids []int64
+		var runIDs []int64
 		for rows.Next() {
-			var x int64
-			rows.Scan(&x)
-			ids = append(ids, x)
-		}
-		rows.Close()
-		r, err := tx.ExecContext(ctx, `UPDATE post_ingest_task SET status='cancelled',lease_owner=NULL,lease_until=NULL,last_error='scan cancelled',finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE scan_task_id=? AND status='waiting'`, id)
-		if err != nil {
-			return err
-		}
-		n, _ = r.RowsAffected()
-		for _, x := range ids {
-			if err = syncLinkedStepTx(ctx, tx, x); err != nil {
+			var runID int64
+			if err = rows.Scan(&runID); err != nil {
+				rows.Close()
 				return err
 			}
+			runIDs = append(runIDs, runID)
+		}
+		if err = rows.Close(); err != nil {
+			return err
+		}
+		for _, runID := range runIDs {
+			if _, err = publication.CancelRunTx(ctx, tx, runID, "scan_cancelled"); err != nil {
+				return err
+			}
+		}
+		// Legacy unlinked tasks still need durable cancellation.
+		if _, err = tx.ExecContext(ctx, `UPDATE post_ingest_task SET status='cancelled',lease_owner=NULL,lease_until=NULL,last_error='scan cancelled',finished_at=COALESCE(finished_at,CURRENT_TIMESTAMP),updated_at=CURRENT_TIMESTAMP WHERE scan_task_id=? AND ingest_run_id IS NULL AND status IN ('waiting','running')`, id); err != nil {
+			return err
 		}
 		return tx.Commit()
 	})

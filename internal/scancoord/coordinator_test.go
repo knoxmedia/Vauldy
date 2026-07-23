@@ -998,7 +998,7 @@ func TestCoordinator_CancelScanAtomicallyCancelsWaitingPostTasksAfterCommit(t *t
 		t.Fatal(err)
 	}
 	waitForTaskStatus(t, db, result.TaskID, "cancelled")
-	for id, want := range map[int64]postingest.Status{waitingID: postingest.StatusCancelled, runningID: postingest.StatusRunning, doneID: postingest.StatusDone} {
+	for id, want := range map[int64]postingest.Status{waitingID: postingest.StatusCancelled, runningID: postingest.StatusCancelled, doneID: postingest.StatusDone} {
 		var got postingest.Status
 		var finished sql.NullTime
 		if err := db.QueryRow(`SELECT status,finished_at FROM post_ingest_task WHERE id=?`, id).Scan(&got, &finished); err != nil {

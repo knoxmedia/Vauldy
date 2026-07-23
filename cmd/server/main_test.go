@@ -191,7 +191,7 @@ func TestHandleScanCancelledFailsInitialPublicationBeforeLocalCancellation(t *te
 	if err := db.QueryRow(`SELECT q.status,s.status,r.status,m.publication_state FROM post_ingest_task q JOIN media_ingest_step s ON s.id=q.ingest_step_id JOIN media_ingest_run r ON r.id=q.ingest_run_id JOIN media m ON m.id=q.media_id WHERE q.scan_task_id=?`, scanID).Scan(&q, &s, &r, &m); err != nil {
 		t.Fatal(err)
 	}
-	if q != "cancelled" || s != "cancelled" || r != "failed" || m != "failed" {
+	if q != "cancelled" || s != "cancelled" || r != "cancelled" || m != "cancelled" {
 		t.Fatalf("states=%s/%s/%s/%s", q, s, r, m)
 	}
 }

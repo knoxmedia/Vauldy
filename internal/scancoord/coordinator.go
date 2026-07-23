@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"knox-media/internal/publication"
 	"knox-media/internal/scanner"
 	"knox-media/internal/store"
 )
@@ -700,10 +701,31 @@ func (c *Coordinator) Cancel(ctx context.Context, taskID int64) (CancelResult, e
 		if result.Status == "running" {
 			result.Status = "cancelling"
 		}
+		runRows, err := tx.QueryContext(ctx, `SELECT r.id FROM media_ingest_run r JOIN media m ON m.id=r.media_id AND m.ingest_generation=r.generation WHERE r.scan_task_id=? AND r.status='processing' AND r.superseded_by_generation IS NULL AND r.superseded_at IS NULL`, taskID)
+		if err != nil {
+			return err
+		}
+		var runIDs []int64
+		for runRows.Next() {
+			var runID int64
+			if err = runRows.Scan(&runID); err != nil {
+				runRows.Close()
+				return err
+			}
+			runIDs = append(runIDs, runID)
+		}
+		if err = runRows.Close(); err != nil {
+			return err
+		}
+		for _, runID := range runIDs {
+			if _, err = publication.CancelRunTx(ctx, tx, runID, "scan_cancelled"); err != nil {
+				return err
+			}
+		}
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE post_ingest_task SET status='cancelled', lease_owner=NULL, lease_until=NULL,
-				last_error='scan cancelled', finished_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
-			WHERE scan_task_id=? AND status='waiting'`, taskID); err != nil {
+				last_error='scan cancelled', finished_at=COALESCE(finished_at,CURRENT_TIMESTAMP), updated_at=CURRENT_TIMESTAMP
+			WHERE scan_task_id=? AND ingest_run_id IS NULL AND status IN ('waiting','running')`, taskID); err != nil {
 			return err
 		}
 		if err := tx.Commit(); err != nil {
