@@ -7,7 +7,6 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -224,33 +223,36 @@ func TestAdminGetMediaIngestReturnsCurrentOrderedSteps(t *testing.T) {
 	}
 }
 
-func TestAdminRetryDegradedIngestRequeuesFailedRequiredSteps(t *testing.T) {
+func TestAdminRetryDegradedIngestCreatesVisibilityPreservingGeneration(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	h := setupMediaIngestTestHandler(t)
+	if _, err := h.App.DB.Exec(`UPDATE media SET published_at='2026-07-01 02:03:04' WHERE id=102`); err != nil {
+		t.Fatal(err)
+	}
 	c, w := adminIngestContext(http.MethodPost, "/api/v1/admin/media/102/ingest/retry", "102")
 	h.AdminRetryMediaIngest(c)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
-	var requiredStatus, optionalStatus, queueStatus, mediaState, reason string
-	var attempts int
-	if err := h.App.DB.QueryRow(`SELECT status,attempts FROM media_ingest_step WHERE id=303`).Scan(&requiredStatus, &attempts); err != nil {
+	var generation, preserve, oldAttempts int
+	var mediaState, mediaErr, publishedAt, reason, runState, oldStep, oldTask string
+	if err := h.App.DB.QueryRow(`SELECT ingest_generation,publication_state,publication_error,published_at FROM media WHERE id=102`).Scan(&generation, &mediaState, &mediaErr, &publishedAt); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.App.DB.QueryRow(`SELECT status FROM media_ingest_step WHERE id=305`).Scan(&optionalStatus); err != nil {
+	if err := h.App.DB.QueryRow(`SELECT reason,status,preserve_visibility FROM media_ingest_run WHERE media_id=102 AND generation=2`).Scan(&reason, &runState, &preserve); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.App.DB.QueryRow(`SELECT status FROM post_ingest_task WHERE ingest_step_id=303`).Scan(&queueStatus); err != nil {
+	if err := h.App.DB.QueryRow(`SELECT status,attempts FROM media_ingest_step WHERE id=303`).Scan(&oldStep, &oldAttempts); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.App.DB.QueryRow(`SELECT publication_state FROM media WHERE id=102`).Scan(&mediaState); err != nil {
+	if err := h.App.DB.QueryRow(`SELECT status FROM post_ingest_task WHERE ingest_step_id=303`).Scan(&oldTask); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.App.DB.QueryRow(`SELECT reason FROM media_ingest_run WHERE id=202`).Scan(&reason); err != nil {
-		t.Fatal(err)
+	if generation != 2 || mediaState != "degraded" || mediaErr != "poster failed" || publishedAt != "2026-07-01T02:03:04Z" {
+		t.Fatalf("media=%d/%s/%q/%s", generation, mediaState, mediaErr, publishedAt)
 	}
-	if requiredStatus != "waiting" || attempts != 0 || queueStatus != "waiting" || optionalStatus != "failed" || mediaState != "degraded" || reason != "manual_retry" {
-		t.Fatalf("required=%s/%d queue=%s optional=%s media=%s reason=%s", requiredStatus, attempts, queueStatus, optionalStatus, mediaState, reason)
+	if reason != "manual_retry" || runState != "processing" || preserve != 1 || oldStep != "failed" || oldAttempts != 3 || oldTask != "failed" {
+		t.Fatalf("new=%s/%s/%d old=%s/%d/%s", reason, runState, preserve, oldStep, oldAttempts, oldTask)
 	}
 }
 
@@ -363,51 +365,22 @@ func TestAdminRetryConcurrentTerminalIngestCreatesOneGeneration(t *testing.T) {
 	}
 }
 
-func TestAdminRetryPrepareDefersWorkerClaimUntilAvailable(t *testing.T) {
+func TestAdminRetryDegradedUsesFreshCurrentPolicyExecutions(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	h := setupMediaIngestTestHandler(t)
-	res, err := h.App.DB.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status,attempts,max_attempts,last_error) VALUES(202,102,1,'prepare',1,'failed',3,3,'prepare failed')`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	stepID, _ := res.LastInsertId()
-	res, err = h.App.DB.Exec(`INSERT INTO transcode_task(file_id,status,task_type,media_id,ingest_run_id,ingest_step_id,generation) VALUES('degraded','failed','pretranscode',102,202,?,1)`, stepID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	taskID, _ := res.LastInsertId()
-	if _, err = h.App.DB.Exec(`INSERT INTO pretranscode_rendition_job(task_id,rendition_id,rendition_name,status,error_message) VALUES(?,1,'720p','failed','prepare failed')`, taskID); err != nil {
+	if _, err := h.App.DB.Exec(`UPDATE library SET preview_extract=1 WHERE id=1`); err != nil {
 		t.Fatal(err)
 	}
 	c, w := adminIngestContext(http.MethodPost, "/api/v1/admin/media/102/ingest/retry", "102")
 	h.AdminRetryMediaIngest(c)
-	if w.Code != 200 {
+	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
-	var stepAt, jobAt int64
-	if err = h.App.DB.QueryRow(`SELECT unixepoch(available_at) FROM media_ingest_step WHERE id=?`, stepID).Scan(&stepAt); err != nil {
-		t.Fatal(err)
-	}
-	if err = h.App.DB.QueryRow(`SELECT unixepoch(available_at) FROM pretranscode_rendition_job WHERE task_id=?`, taskID).Scan(&jobAt); err != nil {
-		t.Fatal(err)
-	}
-	if stepAt != jobAt || jobAt <= time.Now().Unix() {
-		t.Fatalf("stepAt=%d jobAt=%d", stepAt, jobAt)
-	}
-	var due int
-	if err = h.App.DB.QueryRow(`SELECT COUNT(*) FROM pretranscode_rendition_job WHERE task_id=? AND status='waiting' AND COALESCE(available_at,CURRENT_TIMESTAMP)<=CURRENT_TIMESTAMP`, taskID).Scan(&due); err != nil {
-		t.Fatal(err)
-	}
-	if due != 0 {
-		t.Fatal("future prepare job immediately claimable")
-	}
-	if _, err = h.App.DB.Exec(`UPDATE pretranscode_rendition_job SET available_at=datetime(CURRENT_TIMESTAMP,'-1 second') WHERE task_id=?`, taskID); err != nil {
-		t.Fatal(err)
-	}
-	if err = h.App.DB.QueryRow(`SELECT COUNT(*) FROM pretranscode_rendition_job WHERE task_id=? AND status='waiting' AND COALESCE(available_at,CURRENT_TIMESTAMP)<=CURRENT_TIMESTAMP`, taskID).Scan(&due); err != nil {
-		t.Fatal(err)
-	}
-	if due != 1 {
-		t.Fatal("prepare job not claimable after time advance")
+	var steps, executions, legacy int
+	h.App.DB.QueryRow(`SELECT COUNT(*) FROM media_ingest_step WHERE media_id=102 AND generation=2`).Scan(&steps)
+	h.App.DB.QueryRow(`SELECT (SELECT COUNT(*) FROM post_ingest_task WHERE media_id=102 AND generation=2)+(SELECT COUNT(*) FROM scrape_task WHERE media_id=102 AND generation=2)`).Scan(&executions)
+	h.App.DB.QueryRow(`SELECT COUNT(*) FROM media_ingest_step WHERE media_id=102 AND generation=2 AND step_type IN ('keyframe','atrack')`).Scan(&legacy)
+	if steps != 3 || executions != 3 || legacy != 0 {
+		t.Fatalf("steps=%d executions=%d legacy=%d", steps, executions, legacy)
 	}
 }

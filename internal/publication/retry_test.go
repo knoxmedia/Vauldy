@@ -41,7 +41,7 @@ func seedTerminalRetry(t *testing.T, db *sql.DB, state string) (mediaID, runID i
 		t.Fatal(err)
 	}
 	libraryID, _ := res.LastInsertId()
-	res, err = db.Exec(`INSERT INTO media(library_id,file_id,file_type,publication_state,publication_error,ingest_generation) VALUES(?,'retry-v2','video',?,'old outcome',1)`, libraryID, state)
+	res, err = db.Exec(`INSERT INTO media(library_id,file_id,file_type,publication_state,publication_error,ingest_generation,published_at) VALUES(?,'retry-v2','video',?,'old outcome',1,'2026-07-01 02:03:04')`, libraryID, state)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,8 +51,12 @@ func seedTerminalRetry(t *testing.T, db *sql.DB, state string) (mediaID, runID i
 		t.Fatal(err)
 	}
 	runID, _ = res.LastInsertId()
+	stepState := state
+	if state == "degraded" {
+		stepState = "failed"
+	}
 	for _, step := range []string{"poster", "keyframe", "atrack", "prepare"} {
-		res, err = db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status,last_error) VALUES(?,?,1,?,1,?,'old step outcome')`, runID, mediaID, step, state)
+		res, err = db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status,last_error) VALUES(?,?,1,?,1,?,'old step outcome')`, runID, mediaID, step, stepState)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -73,6 +77,107 @@ func seedTerminalRetry(t *testing.T, db *sql.DB, state string) (mediaID, runID i
 
 func currentRetryPlanner(prepare *retryPreparePlanner) *Planner {
 	return NewPlanner(PlanOptions{SubtitleAuto: true, EncryptGlobal: true, PreparePlanner: prepare, Capabilities: NewCapabilityMatrix([]string{"prepare"})})
+}
+
+func TestRetryIngestDegradedCreatesVisibilityPreservingReplacement(t *testing.T) {
+	db := openRetryTestDB(t)
+	mediaID, oldRun, oldSnapshot := seedTerminalRetry(t, db, "degraded")
+	if err := RetryIngest(context.Background(), db, mediaID, currentRetryPlanner(&retryPreparePlanner{})); err != nil {
+		t.Fatal(err)
+	}
+	var generation, preserve int
+	var mediaState, mediaErr, publishedAt, reason, runState, snapshot string
+	if err := db.QueryRow(`SELECT ingest_generation,publication_state,publication_error,published_at FROM media WHERE id=?`, mediaID).Scan(&generation, &mediaState, &mediaErr, &publishedAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT reason,status,preserve_visibility,config_snapshot_json FROM media_ingest_run WHERE media_id=? AND generation=2`, mediaID).Scan(&reason, &runState, &preserve, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if generation != 2 || mediaState != "degraded" || mediaErr != "old outcome" || publishedAt != "2026-07-01T02:03:04Z" {
+		t.Fatalf("media=%d/%s/%q/%s", generation, mediaState, mediaErr, publishedAt)
+	}
+	if reason != "manual_retry" || runState != "processing" || preserve != 1 || snapshot == oldSnapshot {
+		t.Fatalf("new run=%s/%s/%d snapshotEqual=%v", reason, runState, preserve, snapshot == oldSnapshot)
+	}
+	var oldStatus, oldError, oldFinished string
+	if err := db.QueryRow(`SELECT status,error_message,finished_at FROM media_ingest_run WHERE id=?`, oldRun).Scan(&oldStatus, &oldError, &oldFinished); err != nil {
+		t.Fatal(err)
+	}
+	if oldStatus != "degraded" || oldError != "old run outcome" || oldFinished == "" {
+		t.Fatalf("old run changed=%s/%q/%q", oldStatus, oldError, oldFinished)
+	}
+	var oldSteps, oldTasks, oldJobs int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM media_ingest_step WHERE run_id=? AND status='failed' AND attempts=0 AND last_error='old step outcome'`, oldRun).Scan(&oldSteps)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM transcode_task WHERE ingest_run_id=? AND status='failed'`, oldRun).Scan(&oldTasks)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM pretranscode_rendition_job j JOIN transcode_task t ON t.id=j.task_id WHERE t.ingest_run_id=? AND j.status='failed' AND j.config_snapshot_json='{"old":true}'`, oldRun).Scan(&oldJobs)
+	if oldSteps != 4 || oldTasks != 1 || oldJobs != 1 {
+		t.Fatalf("old execution changed: steps=%d tasks=%d jobs=%d", oldSteps, oldTasks, oldJobs)
+	}
+}
+
+func TestRetryIngestDegradedReplacementTerminalOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		name, stepStatus, stepError, wantState, wantError string
+	}{
+		{name: "success", stepStatus: "done", wantState: "published"},
+		{name: "failure", stepStatus: "failed", stepError: "new poster failure", wantState: "degraded", wantError: "new poster failure"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openRetryTestDB(t)
+			mediaID, _, _ := seedTerminalRetry(t, db, "degraded")
+			if err := RetryIngest(context.Background(), db, mediaID, currentRetryPlanner(&retryPreparePlanner{})); err != nil {
+				t.Fatal(err)
+			}
+			var runID int64
+			if err := db.QueryRow(`SELECT id FROM media_ingest_run WHERE media_id=? AND generation=2`, mediaID).Scan(&runID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`UPDATE media_ingest_step SET status=?,last_error=? WHERE run_id=? AND required=1`, tc.stepStatus, tc.stepError, runID); err != nil {
+				t.Fatal(err)
+			}
+			tx, err := db.Begin()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = AggregateTx(context.Background(), tx, runID); err != nil {
+				_ = tx.Rollback()
+				t.Fatal(err)
+			}
+			if err = tx.Commit(); err != nil {
+				t.Fatal(err)
+			}
+			var state, publicationError, publishedAt string
+			if err = db.QueryRow(`SELECT publication_state,publication_error,published_at FROM media WHERE id=?`, mediaID).Scan(&state, &publicationError, &publishedAt); err != nil {
+				t.Fatal(err)
+			}
+			if state != tc.wantState || publicationError != tc.wantError || publishedAt != "2026-07-01T02:03:04Z" {
+				t.Fatalf("media=%s/%q/%s", state, publicationError, publishedAt)
+			}
+		})
+	}
+}
+
+func TestRetryIngestRequiresMatchingDegradedMediaAndRun(t *testing.T) {
+	for _, tc := range []struct{ media, run string }{{"degraded", "failed"}, {"failed", "degraded"}} {
+		t.Run(tc.media+"_"+tc.run, func(t *testing.T) {
+			db := openRetryTestDB(t)
+			mediaID, runID, _ := seedTerminalRetry(t, db, tc.media)
+			if _, err := db.Exec(`UPDATE media_ingest_run SET status=? WHERE id=?`, tc.run, runID); err != nil {
+				t.Fatal(err)
+			}
+			if err := RetryIngest(context.Background(), db, mediaID, currentRetryPlanner(&retryPreparePlanner{})); !errors.Is(err, ErrNoRetryableWork) {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+}
+
+func TestRetryIngestDegradedRequiresPlanner(t *testing.T) {
+	db := openRetryTestDB(t)
+	mediaID, _, _ := seedTerminalRetry(t, db, "degraded")
+	if err := RetryIngest(context.Background(), db, mediaID, nil); err == nil || errors.Is(err, ErrNoRetryableWork) {
+		t.Fatalf("err=%v", err)
+	}
 }
 
 func TestRetryIngestFailedCreatesCurrentPolicyManualRetryGeneration(t *testing.T) {
@@ -183,7 +288,7 @@ func TestRetryIngestDoesNotCopyOldSnapshotOrPrepareRows(t *testing.T) {
 
 func TestRetryIngestConcurrentOneGeneration(t *testing.T) {
 	db := openRetryTestDB(t)
-	mediaID, _, _ := seedTerminalRetry(t, db, "failed")
+	mediaID, _, _ := seedTerminalRetry(t, db, "degraded")
 	db.SetMaxOpenConns(2)
 	start := make(chan struct{})
 	errs := make(chan error, 2)
@@ -220,7 +325,7 @@ func TestRetryIngestConcurrentOneGeneration(t *testing.T) {
 
 func TestRetryIngestPlannerFailureRollback(t *testing.T) {
 	db := openRetryTestDB(t)
-	mediaID, _, _ := seedTerminalRetry(t, db, "failed")
+	mediaID, _, _ := seedTerminalRetry(t, db, "degraded")
 	prepare := &retryPreparePlanner{err: errors.New("prepare plan failed")}
 	if err := RetryIngest(context.Background(), db, mediaID, currentRetryPlanner(prepare)); err == nil || !errors.Is(err, prepare.err) {
 		t.Fatalf("err=%v", err)
@@ -229,14 +334,14 @@ func TestRetryIngestPlannerFailureRollback(t *testing.T) {
 	var state, mediaErr string
 	_ = db.QueryRow(`SELECT ingest_generation,publication_state,publication_error FROM media WHERE id=?`, mediaID).Scan(&generation, &state, &mediaErr)
 	_ = db.QueryRow(`SELECT COUNT(*) FROM media_ingest_run WHERE media_id=?`, mediaID).Scan(&runs)
-	if generation != 1 || runs != 1 || state != "failed" || mediaErr != "old outcome" {
+	if generation != 1 || runs != 1 || state != "degraded" || mediaErr != "old outcome" {
 		t.Fatalf("rollback=%d/%d/%s/%q", generation, runs, state, mediaErr)
 	}
 }
 
 func TestRetryIngestHistoricalEvidenceStagesImmutable(t *testing.T) {
 	db := openRetryTestDB(t)
-	mediaID, runID, _ := seedTerminalRetry(t, db, "failed")
+	mediaID, runID, _ := seedTerminalRetry(t, db, "degraded")
 	var stepID int64
 	_ = db.QueryRow(`SELECT id FROM media_ingest_step WHERE run_id=? ORDER BY id LIMIT 1`, runID).Scan(&stepID)
 	_, err := db.Exec(`INSERT INTO media_asset_stage_journal(stage_id,media_id,run_id,step_id,generation,owner_token,source_fingerprint,artifact_kind,state,staged_path,hashes_sizes_json) VALUES('old-stage',?,?,?,1,'owner','fp','poster','committed','/old','{}'); INSERT INTO media_ingest_evidence(run_id,step_id,media_id,generation,kind,source_fingerprint,artifact_refs_json,verified_at,stage_id) VALUES(?,?,?,1,'poster','fp','{}',CURRENT_TIMESTAMP,'old-stage')`, mediaID, runID, stepID, runID, stepID, mediaID)
