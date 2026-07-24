@@ -13,6 +13,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,6 +24,7 @@ import (
 	"knox-media/internal/jit/hwenc"
 	"knox-media/internal/keystore"
 	"knox-media/internal/storage"
+	"knox-media/internal/store"
 )
 
 // Worker runs pretranscode rendition jobs serially with a configurable
@@ -118,7 +120,7 @@ func (w *Worker) ProcessNext(ctx context.Context) (bool, error) {
 	}
 	if ShouldSkipRenditionAboveSource(*rendition, sourceWidth, sourceHeight) {
 		if _, err := w.finalizeJobAndTaskTx(ctx, *job, renditionJobTerminal{Status: "done", Progress: 100, Encoder: "skip"}); err != nil {
-			log.Printf("pretranscode skipped job %d finalize failed: %v", job.ID, err)
+			return false, err
 		}
 		return true, nil
 	}
@@ -157,36 +159,43 @@ func (w *Worker) runBeforeClaimUpdate() {
 }
 
 func (w *Worker) claimNextJob() (*claimedJob, *Preset, *Rendition, int64, string, int, int, error) {
-	w.mu.Lock()
 	var parent publication.PrepareParentIdentity
-	for _, v := range w.parentClaims {
-		parent = v
-		break
-	}
-	w.mu.Unlock()
-	if parent.TaskID == 0 {
-		payload, err := publication.ClaimEligible(context.Background(), w.DB, publication.ClaimRequest{Family: publication.QueuePrepare, TaskType: "prepare", Owner: w.claimOwner, Registry: w.registry})
-		if err != nil {
-			return nil, nil, nil, 0, "", 0, 0, err
+	for {
+		w.mu.Lock()
+		ids := make([]int64, 0, len(w.parentClaims))
+		for id := range w.parentClaims {
+			ids = append(ids, id)
 		}
-		if payload != nil {
+		sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+		if len(ids) > 0 {
+			parent = w.parentClaims[ids[0]]
+		}
+		w.mu.Unlock()
+		if parent.TaskID == 0 {
+			payload, err := publication.ClaimEligible(context.Background(), w.DB, publication.ClaimRequest{Family: publication.QueuePrepare, TaskType: "prepare", Owner: w.claimOwner, Registry: w.registry})
+			if err != nil {
+				return nil, nil, nil, 0, "", 0, 0, err
+			}
+			if payload == nil {
+				return nil, nil, nil, 0, "", 0, 0, sql.ErrNoRows
+			}
 			parent = publication.PrepareParentIdentity{TaskID: payload.QueueID, RunID: payload.RunID.Int64, StepID: payload.StepID.Int64, MediaID: payload.MediaID, Generation: payload.Generation.Int64, Owner: payload.Owner}
 			w.mu.Lock()
 			w.parentClaims[parent.TaskID] = parent
 			w.mu.Unlock()
 		}
-	}
-	if parent.TaskID == 0 {
-		var id, run, step, media, gen int64
-		var owner string
-		err := w.DB.QueryRow(`SELECT id,COALESCE(ingest_run_id,0),COALESCE(ingest_step_id,0),COALESCE(media_id,0),COALESCE(generation,0),COALESCE(lease_owner,'') FROM transcode_task WHERE status='running' AND lease_owner IS NOT NULL AND EXISTS(SELECT 1 FROM pretranscode_rendition_job j WHERE j.task_id=transcode_task.id AND j.status='waiting') ORDER BY id LIMIT 1`).Scan(&id, &run, &step, &media, &gen, &owner)
+		var waiting int
+		err := w.DB.QueryRow(`SELECT COUNT(*) FROM pretranscode_rendition_job j JOIN transcode_task t ON t.id=j.task_id WHERE j.task_id=? AND j.status='waiting' AND t.status='running' AND t.lease_owner=? AND ((?=0 AND t.ingest_run_id IS NULL AND t.ingest_step_id IS NULL AND t.generation IS NULL) OR (t.ingest_run_id=? AND t.ingest_step_id=? AND t.media_id=? AND t.generation=?))`, parent.TaskID, parent.Owner, parent.RunID, parent.RunID, parent.StepID, parent.MediaID, parent.Generation).Scan(&waiting)
 		if err != nil {
-			return nil, nil, nil, 0, "", 0, 0, sql.ErrNoRows
+			return nil, nil, nil, 0, "", 0, 0, err
 		}
-		parent = publication.PrepareParentIdentity{TaskID: id, RunID: run, StepID: step, MediaID: media, Generation: gen, Owner: owner}
+		if waiting > 0 {
+			break
+		}
 		w.mu.Lock()
-		w.parentClaims[id] = parent
+		delete(w.parentClaims, parent.TaskID)
 		w.mu.Unlock()
+		parent = publication.PrepareParentIdentity{}
 	}
 	row := w.DB.QueryRow(`SELECT j.id,j.task_id,COALESCE(j.rendition_id,0),j.rendition_name,COALESCE(j.config_snapshot_json,''),COALESCE(t.lease_owner,'') FROM pretranscode_rendition_job j JOIN transcode_task t ON t.id=j.task_id WHERE j.status='waiting' AND COALESCE(j.available_at,CURRENT_TIMESTAMP)<=CURRENT_TIMESTAMP AND t.id=? AND t.status='running' AND t.lease_owner=? AND ((t.ingest_run_id IS NULL AND t.ingest_step_id IS NULL AND t.generation IS NULL) OR (t.ingest_run_id=? AND t.ingest_step_id=? AND t.media_id=? AND t.generation=?)) LIMIT 1`, parent.TaskID, parent.Owner, parent.RunID, parent.StepID, parent.MediaID, parent.Generation)
 	var c claimedJob
@@ -465,24 +474,39 @@ func (w *Worker) maybeCompleteTask(taskID int64) { _ = w.finalizeTask(context.Ba
 func (w *Worker) maybeFailTask(taskID int64) { _ = w.finalizeTask(context.Background(), taskID) }
 
 func (w *Worker) renewJobLease(ctx context.Context, job claimedJob) error {
-	res, err := w.DB.ExecContext(ctx, `UPDATE pretranscode_rendition_job SET lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds') WHERE id=? AND task_id=? AND status='running' AND lease_owner=?`, job.ID, job.TaskID, job.Owner)
-	if err != nil {
-		return err
-	}
-	if n, _ := res.RowsAffected(); n != 1 {
+	p := job.Parent
+	if p.TaskID <= 0 || p.Owner == "" {
 		return ErrJobOwnershipLost
 	}
-	if job.ParentOwner != "" {
-		res, err = w.DB.ExecContext(ctx, `UPDATE transcode_task SET lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds') WHERE id=? AND status='running' AND lease_owner=?`, job.TaskID, job.ParentOwner)
-		if err != nil {
-			return err
+	_, err := store.WithImmediateConnTx(ctx, w.DB, func(tx store.ImmediateConnTx) error {
+		pred := `EXISTS(SELECT 1 FROM transcode_task t JOIN media_ingest_run r ON r.id=t.ingest_run_id JOIN media_ingest_step s ON s.id=t.ingest_step_id JOIN media m ON m.id=t.media_id WHERE t.id=? AND t.status='running' AND t.lease_owner=? AND t.ingest_run_id=? AND t.ingest_step_id=? AND t.media_id=? AND t.generation=? AND r.id=? AND r.media_id=? AND r.generation=? AND r.status='processing' AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND s.id=? AND s.run_id=? AND s.media_id=? AND s.generation=? AND s.status='running' AND s.lease_owner=? AND m.id=? AND m.ingest_generation=?)`
+		args := []any{p.TaskID, p.Owner, p.RunID, p.StepID, p.MediaID, p.Generation, p.RunID, p.MediaID, p.Generation, p.StepID, p.RunID, p.MediaID, p.Generation, p.Owner, p.MediaID, p.Generation}
+		r, e := tx.ExecContext(ctx, `UPDATE pretranscode_rendition_job SET lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds') WHERE id=? AND task_id=? AND status='running' AND lease_owner=? AND `+pred, append([]any{job.ID, job.TaskID, job.Owner}, args...)...)
+		if e != nil {
+			return e
 		}
-		if n, _ := res.RowsAffected(); n != 1 {
+		if n, _ := r.RowsAffected(); n != 1 {
 			return ErrJobOwnershipLost
 		}
-	}
-	return nil
+		r, e = tx.ExecContext(ctx, `UPDATE transcode_task SET lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds') WHERE id=? AND status='running' AND lease_owner=? AND ingest_run_id=? AND ingest_step_id=? AND media_id=? AND generation=?`, p.TaskID, p.Owner, p.RunID, p.StepID, p.MediaID, p.Generation)
+		if e != nil {
+			return e
+		}
+		if n, _ := r.RowsAffected(); n != 1 {
+			return ErrJobOwnershipLost
+		}
+		r, e = tx.ExecContext(ctx, `UPDATE media_ingest_step SET lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds') WHERE id=? AND run_id=? AND media_id=? AND generation=? AND status='running' AND lease_owner=?`, p.StepID, p.RunID, p.MediaID, p.Generation, p.Owner)
+		if e != nil {
+			return e
+		}
+		if n, _ := r.RowsAffected(); n != 1 {
+			return ErrJobOwnershipLost
+		}
+		return nil
+	})
+	return err
 }
+
 func (w *Worker) renewJobLeaseLoop(ctx context.Context, job claimedJob, done <-chan struct{}) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
@@ -501,11 +525,15 @@ func (w *Worker) renewJobLeaseLoop(ctx context.Context, job claimedJob, done <-c
 }
 
 func (w *Worker) updateJobProgress(ctx context.Context, job claimedJob, progress int) error {
-	res, err := w.DB.ExecContext(ctx, `UPDATE pretranscode_rendition_job SET progress=?,lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds') WHERE id=? AND task_id=? AND status='running' AND lease_owner=?`, progress, job.ID, job.TaskID, job.Owner)
+	p := job.Parent
+	if p.TaskID <= 0 || p.Owner == "" {
+		return ErrJobOwnershipLost
+	}
+	r, err := w.DB.ExecContext(ctx, `UPDATE pretranscode_rendition_job AS j SET progress=?,lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds') WHERE j.id=? AND j.task_id=? AND j.status='running' AND j.lease_owner=? AND EXISTS(SELECT 1 FROM transcode_task t JOIN media_ingest_run r ON r.id=t.ingest_run_id JOIN media_ingest_step s ON s.id=t.ingest_step_id JOIN media m ON m.id=t.media_id WHERE t.id=j.task_id AND t.status='running' AND t.lease_owner=? AND t.ingest_run_id=? AND t.ingest_step_id=? AND t.media_id=? AND t.generation=? AND r.status='processing' AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND s.status='running' AND s.lease_owner=? AND m.ingest_generation=?)`, progress, job.ID, job.TaskID, job.Owner, p.Owner, p.RunID, p.StepID, p.MediaID, p.Generation, p.Owner, p.Generation)
 	if err != nil {
 		return err
 	}
-	if n, _ := res.RowsAffected(); n != 1 {
+	if n, _ := r.RowsAffected(); n != 1 {
 		return ErrJobOwnershipLost
 	}
 	return nil
@@ -523,19 +551,8 @@ type renditionJobTerminal struct {
 // when it is the final active rendition, synchronizes task and publication state
 // in the same transaction. A downstream failure rolls back the job transition.
 func (w *Worker) finalizeJobAndTaskTx(ctx context.Context, job claimedJob, terminal renditionJobTerminal) (bool, error) {
-	if job.Parent.TaskID == 0 {
-		w.mu.Lock()
-		job.Parent = w.parentClaims[job.TaskID]
-		w.mu.Unlock()
-		if job.Parent.TaskID == 0 {
-			var p publication.PrepareParentIdentity
-			var owner string
-			if e := w.DB.QueryRowContext(ctx, `SELECT id,COALESCE(ingest_run_id,0),COALESCE(ingest_step_id,0),COALESCE(media_id,0),COALESCE(generation,0),COALESCE(lease_owner,'') FROM transcode_task WHERE id=?`, job.TaskID).Scan(&p.TaskID, &p.RunID, &p.StepID, &p.MediaID, &p.Generation, &owner); e != nil {
-				return false, e
-			}
-			p.Owner = owner
-			job.Parent = p
-		}
+	if job.Parent.TaskID <= 0 || job.Parent.Owner == "" {
+		return false, ErrJobOwnershipLost
 	}
 	if terminal.Status != "done" && terminal.Status != "failed" {
 		return false, fmt.Errorf("pretranscode job %d invalid terminal status %q", job.ID, terminal.Status)
@@ -588,6 +605,9 @@ func (w *Worker) finalizeJobAndTaskTx(ctx context.Context, job claimedJob, termi
 	if err = tx.Commit(); err != nil {
 		return false, err
 	}
+	w.mu.Lock()
+	delete(w.parentClaims, job.Parent.TaskID)
+	w.mu.Unlock()
 	_ = done
 	if wh := CurrentWebhookDispatcher(); wh != nil {
 		if status == "done" {

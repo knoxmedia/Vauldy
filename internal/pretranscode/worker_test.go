@@ -219,14 +219,14 @@ func TestPrepareStaleGenerationCompletesOwnRunOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	w := NewWorker(db, nil, "ffmpeg", t.TempDir(), 1, 1)
-	if err := w.finalizeTask(context.Background(), taskID); err != nil {
-		t.Fatal(err)
+	if err := w.finalizeTask(context.Background(), taskID); err == nil {
+		t.Fatal("stale generation accepted")
 	}
 	var step, run, media string
 	_ = db.QueryRow(`SELECT status FROM media_ingest_step WHERE id=?`, stepID).Scan(&step)
 	_ = db.QueryRow(`SELECT status FROM media_ingest_run WHERE id=?`, runID).Scan(&run)
 	_ = db.QueryRow(`SELECT publication_state FROM media WHERE id=?`, mediaID).Scan(&media)
-	if step != "done" || run != "published" || media != "processing" {
+	if step != "running" || run != "processing" || media != "processing" {
 		t.Fatalf("states=%s/%s/%s", step, run, media)
 	}
 }
@@ -256,14 +256,14 @@ func TestFinalizeJobAndTaskTxRollsBackEntireTerminalTransition(t *testing.T) {
 				t.Fatal(err)
 			}
 			w := NewWorker(db, nil, "ffmpeg", t.TempDir(), 1, 1)
-			if _, err = w.finalizeJobAndTaskTx(context.Background(), claimedJob{ID: jobID, TaskID: taskID, Owner: "test-owner"}, tc.terminal); err == nil {
+			if _, err = w.finalizeJobAndTaskTx(context.Background(), exactClaimedJob(t, db, jobID, taskID, "test-owner"), tc.terminal); err == nil {
 				t.Fatal("expected injected terminal transaction failure")
 			}
 			assertPrepareTerminalState(t, db, jobID, taskID, stepID, runID, mediaID, "running", "running", "running", "processing", "processing")
 			if _, err = db.Exec(`DROP TRIGGER ` + triggerName(tc.triggerSQL)); err != nil {
 				t.Fatal(err)
 			}
-			if _, err = w.finalizeJobAndTaskTx(context.Background(), claimedJob{ID: jobID, TaskID: taskID, Owner: "test-owner"}, tc.terminal); err != nil {
+			if _, err = w.finalizeJobAndTaskTx(context.Background(), exactClaimedJob(t, db, jobID, taskID, "test-owner"), tc.terminal); err != nil {
 				t.Fatalf("retry terminal transition: %v", err)
 			}
 			want := "done"
@@ -329,7 +329,7 @@ func TestFinalizeJobAndTaskTxCommitsOnlyJobWhileAnotherRenditionActive(t *testin
 		t.Fatal(err)
 	}
 	w := NewWorker(db, nil, "ffmpeg", t.TempDir(), 2, 1)
-	terminal, err := w.finalizeJobAndTaskTx(context.Background(), claimedJob{ID: firstID, TaskID: taskID, Owner: "test-owner"}, renditionJobTerminal{Status: "done", Progress: 100, OutputPath: "/360/master.m3u8", Encoder: "libx264"})
+	terminal, err := w.finalizeJobAndTaskTx(context.Background(), exactClaimedJob(t, db, firstID, taskID, "test-owner"), renditionJobTerminal{Status: "done", Progress: 100, OutputPath: "/360/master.m3u8", Encoder: "libx264"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -349,10 +349,10 @@ func TestFinalizeJobAndTaskTxStatusGuardIsIdempotent(t *testing.T) {
 	jobID, _ := res.LastInsertId()
 	w := NewWorker(db, nil, "ffmpeg", t.TempDir(), 2, 1)
 	payload := renditionJobTerminal{Status: "done", Progress: 100, OutputPath: "/first", Encoder: "libx264"}
-	if terminal, err := w.finalizeJobAndTaskTx(context.Background(), claimedJob{ID: jobID, TaskID: taskID, Owner: "test-owner"}, payload); err != nil || !terminal {
+	if terminal, err := w.finalizeJobAndTaskTx(context.Background(), exactClaimedJob(t, db, jobID, taskID, "test-owner"), payload); err != nil || !terminal {
 		t.Fatalf("first finalize=%v/%v", terminal, err)
 	}
-	if terminal, err := w.finalizeJobAndTaskTx(context.Background(), claimedJob{ID: jobID, TaskID: taskID, Owner: "test-owner"}, renditionJobTerminal{Status: "failed", ErrorMessage: "late"}); !errors.Is(err, ErrJobOwnershipLost) || terminal {
+	if terminal, err := w.finalizeJobAndTaskTx(context.Background(), exactClaimedJob(t, db, jobID, taskID, "test-owner"), renditionJobTerminal{Status: "failed", ErrorMessage: "late"}); !errors.Is(err, ErrJobOwnershipLost) || terminal {
 		t.Fatalf("duplicate finalize=%v/%v", terminal, err)
 	}
 	assertPrepareTerminalState(t, db, jobID, taskID, stepID, runID, mediaID, "done", "done", "done", "published", "published")
@@ -385,7 +385,7 @@ func TestFinalizeJobAndTaskTxConcurrentRenditionsConverge(t *testing.T) {
 		wg.Add(1)
 		go func(jobID int64, owner string) {
 			defer wg.Done()
-			_, err := w.finalizeJobAndTaskTx(context.Background(), claimedJob{ID: jobID, TaskID: taskID, Owner: owner}, renditionJobTerminal{Status: "done", Progress: 100, OutputPath: "/done", Encoder: "libx264"})
+			_, err := w.finalizeJobAndTaskTx(context.Background(), exactClaimedJob(t, db, jobID, taskID, owner), renditionJobTerminal{Status: "done", Progress: 100, OutputPath: "/done", Encoder: "libx264"})
 			errs <- err
 		}(id, owners[i])
 	}
@@ -415,7 +415,7 @@ func TestFinalizeJobAndTaskTxRejectsStaleOwnerAfterRecoveryReclaim(t *testing.T)
 	}
 	jobID, _ := res.LastInsertId()
 	w := NewWorker(db, nil, "ffmpeg", t.TempDir(), 1, 1)
-	if terminal, err := w.finalizeJobAndTaskTx(context.Background(), claimedJob{ID: jobID, TaskID: taskID, Owner: "old-owner"}, renditionJobTerminal{Status: "done", Progress: 100}); !errors.Is(err, ErrJobOwnershipLost) || terminal {
+	if terminal, err := w.finalizeJobAndTaskTx(context.Background(), exactClaimedJob(t, db, jobID, taskID, "old-owner"), renditionJobTerminal{Status: "done", Progress: 100}); !errors.Is(err, ErrJobOwnershipLost) || terminal {
 		t.Fatalf("stale finalize=%v/%v", terminal, err)
 	}
 	assertPrepareTerminalState(t, db, jobID, taskID, stepID, runID, mediaID, "running", "running", "running", "processing", "processing")
@@ -472,7 +472,7 @@ func TestProgressUpdateRequiresCurrentOwner(t *testing.T) {
 	if progress != 10 {
 		t.Fatalf("stale owner changed progress=%d", progress)
 	}
-	if err = w.updateJobProgress(context.Background(), claimedJob{ID: jobID, TaskID: taskID, Owner: "current"}, 55); err != nil {
+	if err = w.updateJobProgress(context.Background(), exactClaimedJob(t, db, jobID, taskID, "current"), 55); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -545,6 +545,7 @@ func TestProcessNextCompletesSkippedRenditionThroughPublicationAggregate(t *test
 	worker := NewWorker(db, nil, "missing-ffmpeg", t.TempDir(), 1, 1)
 	_, _ = db.Exec(`UPDATE transcode_task SET status='running',lease_owner=?,lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds') WHERE ingest_run_id=?`, worker.claimOwner, run.ID)
 	_, _ = db.Exec(`UPDATE media_ingest_step SET status='running',attempts=1,lease_owner=?,lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds') WHERE run_id=? AND step_type='prepare'`, worker.claimOwner, run.ID)
+	registerOwnedParent(t, db, worker, run.ID)
 	processed := 0
 	for {
 		ok, processErr := worker.ProcessNext(context.Background())
@@ -567,4 +568,13 @@ func TestProcessNextCompletesSkippedRenditionThroughPublicationAggregate(t *test
 	if processed == 0 || jobs != processed || state != "published" {
 		t.Fatalf("processed=%d jobs=%d state=%s", processed, jobs, state)
 	}
+}
+
+func exactClaimedJob(t *testing.T, db *sql.DB, jobID, taskID int64, jobOwner string) claimedJob {
+	t.Helper()
+	var p publication.PrepareParentIdentity
+	if err := db.QueryRow(`SELECT id,COALESCE(ingest_run_id,0),COALESCE(ingest_step_id,0),COALESCE(media_id,0),COALESCE(generation,0),COALESCE(lease_owner,'') FROM transcode_task WHERE id=?`, taskID).Scan(&p.TaskID, &p.RunID, &p.StepID, &p.MediaID, &p.Generation, &p.Owner); err != nil {
+		t.Fatal(err)
+	}
+	return claimedJob{ID: jobID, TaskID: taskID, Owner: jobOwner, Parent: p}
 }

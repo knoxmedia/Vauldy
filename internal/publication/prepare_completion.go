@@ -19,7 +19,7 @@ func CompletePrepareTx(ctx context.Context, tx store.SQLExecutor, parent Prepare
 			lastError = "prepare failed"
 		}
 	}
-	res, err := tx.ExecContext(ctx, `UPDATE transcode_task SET status=?,error_message=?,completed_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL WHERE id=? AND media_id=? AND ingest_run_id=? AND ingest_step_id=? AND generation=? AND status='running' AND lease_owner=?`, status, lastError, parent.TaskID, parent.MediaID, parent.RunID, parent.StepID, parent.Generation, parent.Owner)
+	res, err := tx.ExecContext(ctx, `UPDATE transcode_task SET status=?,error_message=?,completed_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL WHERE id=? AND media_id=? AND ingest_run_id=? AND ingest_step_id=? AND generation=? AND status='running' AND lease_owner=? AND EXISTS(SELECT 1 FROM media m JOIN media_ingest_run r ON r.id=? WHERE m.id=? AND m.ingest_generation=? AND r.media_id=? AND r.generation=? AND r.status IN ('processing','published','degraded') AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL)`, status, lastError, parent.TaskID, parent.MediaID, parent.RunID, parent.StepID, parent.Generation, parent.Owner, parent.RunID, parent.MediaID, parent.Generation, parent.MediaID, parent.Generation)
 	if err != nil {
 		return fmt.Errorf("publication prepare completion: update parent: %w", err)
 	}

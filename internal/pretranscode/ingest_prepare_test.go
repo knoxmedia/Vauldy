@@ -2,6 +2,7 @@ package pretranscode
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -133,6 +134,7 @@ func TestIngestPrepareSnapshotSurvivesPresetUpdate(t *testing.T) {
 	}
 	w := NewWorker(db, nil, "ffmpeg", root, 1, 1)
 	_, _ = db.Exec(`UPDATE transcode_task SET status='running',lease_owner=?,lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds') WHERE ingest_run_id=?`, w.claimOwner, runID)
+	registerOwnedParent(t, db, w, runID)
 	_, p, r, _, _, _, _, err := w.claimNextJob()
 	if err != nil {
 		t.Fatal(err)
@@ -163,6 +165,7 @@ func TestLinkedIngestPrepareNeverFallsBackWhenSnapshotMissing(t *testing.T) {
 	}
 	w := NewWorker(db, nil, "ffmpeg", root, 1, 1)
 	_, _ = db.Exec(`UPDATE transcode_task SET status='running',lease_owner=?,lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds') WHERE ingest_run_id=?`, w.claimOwner, runID)
+	registerOwnedParent(t, db, w, runID)
 	if _, _, _, _, _, _, _, err := w.claimNextJob(); err == nil || !strings.Contains(err.Error(), "immutable snapshot") {
 		t.Fatalf("err=%v want immutable snapshot error", err)
 	}
@@ -237,4 +240,13 @@ func TestRecoverLinkedMalformedSnapshotFailsStepAndDegrades(t *testing.T) {
 	if got := svc.RecoverOrphanedTasks(); got != 0 {
 		t.Fatalf("second fixed=%d", got)
 	}
+}
+
+func registerOwnedParent(t *testing.T, db *sql.DB, w *Worker, runID int64) {
+	t.Helper()
+	var p publication.PrepareParentIdentity
+	if err := db.QueryRow(`SELECT id,ingest_run_id,ingest_step_id,media_id,generation,lease_owner FROM transcode_task WHERE ingest_run_id=?`, runID).Scan(&p.TaskID, &p.RunID, &p.StepID, &p.MediaID, &p.Generation, &p.Owner); err != nil {
+		t.Fatal(err)
+	}
+	w.parentClaims[p.TaskID] = p
 }
