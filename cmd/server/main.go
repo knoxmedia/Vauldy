@@ -252,9 +252,6 @@ func main() {
 	processID := fmt.Sprintf("%s-%d-%s", hostname, os.Getpid(), uuid.NewString())
 	queueOwner := "postingest-" + processID
 	postIngestQueue := postingest.NewQueue(db, queueOwner, sqliteMetrics, publicationCapabilities)
-	if err := recoverStartupTasks(serverCtx, db, postIngestQueue, StartupRecoveryRoots{Encryption: postingest.EncryptionRecoveryRoots{Quarantine: assetEnc.EncryptionPrivateRoot(), Resolver: assetEnc}, Thumbnail: postingest.ThumbnailRecoveryRoots{Preview: filepath.Join(cfg.Data.Preview, "photos"), Derived: filepath.Join(cfg.Data.Dir, ".derived")}, Poster: postingest.PosterRecoveryRoots{Upload: cfg.Data.Upload, Derived: filepath.Join(cfg.Data.Dir, ".derived")}, ScrapeArtwork: cfg.Data.MetadataLibrary}); err != nil {
-		log.Fatalf("startup task recovery: %v", err)
-	}
 	postIngestEnqueuer := postingest.NewEnqueuer(db, cfg, sqliteMetrics)
 	thumbnailWorker := &postingest.LocalThumbnailWorker{DB: db, Vault: keyVault, Derived: derivedStore, FFmpegPath: cfg.FFmpeg.FFmpegPath, PreviewDir: cfg.Data.Preview}
 	posterRunner := &postingest.LocalPosterRunner{DB: db, Vault: keyVault, Derived: derivedStore, FFmpegPath: cfg.FFmpeg.FFmpegPath, FFprobePath: cfg.FFmpeg.FFprobePath, UploadDir: cfg.Data.Upload}
@@ -273,15 +270,60 @@ func main() {
 		log.Fatalf("post-ingest dispatcher: %v", err)
 	}
 	dispatcherDone := make(chan error, 1)
-	go func() {
-		err := dispatcher.Start(serverCtx)
-		dispatcherDone <- err
-		if err != nil && serverCtx.Err() == nil {
-			log.Printf("post-ingest dispatcher stopped: %v", err)
-			serverCancel()
+
+	preparePlanner := coreiface.IngestPreparePlannerHandle()
+
+	publicationPlanner := publication.NewPlanner(publication.PlanOptions{
+		SubtitleAuto: cfg.SubtitleAutoOnScan(), ATrackAuto: cfg.ATrackAutoOnScan(),
+		EncryptGlobal: cfg.EncryptedAssetsEnabled(), PreparePlanner: preparePlanner, Capabilities: publicationCapabilities,
+	})
+
+	startupRoots := StartupRecoveryRoots{Encryption: postingest.EncryptionRecoveryRoots{Quarantine: assetEnc.EncryptionPrivateRoot(), Resolver: assetEnc}, Thumbnail: postingest.ThumbnailRecoveryRoots{Preview: filepath.Join(cfg.Data.Preview, "photos"), Derived: filepath.Join(cfg.Data.Dir, ".derived")}, Poster: postingest.PosterRecoveryRoots{Upload: cfg.Data.Upload, Derived: filepath.Join(cfg.Data.Dir, ".derived")}, ScrapeArtwork: cfg.Data.MetadataLibrary}
+	enterpriseCtx, enterpriseCancel := context.WithCancel(serverCtx)
+	defer enterpriseCancel()
+	for _, mod := range coreiface.EnterpriseModules {
+		if err := mod.Init(enterpriseCtx, coreiface.ModuleDeps{DB: db, Config: cfg, Vault: keyVault, TranscodeDir: cfg.Data.Transcode, FFmpegPath: cfg.FFmpeg.FFmpegPath, FFprobePath: cfg.FFmpeg.FFprobePath, Capabilities: publicationCapabilities}); err != nil {
+			log.Fatalf("enterprise module %s init failed: %v", mod.Name(), err)
 		}
-	}()
-	// Pending encryption sweep starts only after the shared Queue and Enqueuer exist.
+	}
+	preparePlanner = coreiface.IngestPreparePlannerHandle()
+	publicationPlanner = publication.NewPlanner(publication.PlanOptions{SubtitleAuto: cfg.SubtitleAutoOnScan(), ATrackAuto: cfg.ATrackAutoOnScan(), EncryptGlobal: cfg.EncryptedAssetsEnabled(), PreparePlanner: preparePlanner, Capabilities: publicationCapabilities})
+	warnings, err := PreparePublicationV2Startup(serverCtx, publicationV2StartupHooks{
+		Preflight: func(ctx context.Context) ([]string, error) {
+			keyReady := false
+			if keyVault != nil {
+				_, keyErr := keyVault.GetKEK(ctx)
+				keyReady = keyErr == nil
+			}
+			return publication.PreflightPublicationV2(ctx, db, publicationPlanner, publicationCapabilities, publication.PreflightResources{StageRoot: cfg.EncryptedAssetsStoragePath(), QuarantineRoot: startupRoots.Encryption.Quarantine, DerivedRoot: filepath.Join(cfg.Data.Dir, ".derived"), VaultReady: keyVault != nil, KeyReady: keyReady, PosterResolver: true, ThumbnailResolver: true})
+		},
+		RecoverArtifacts: func(ctx context.Context) error { return recoverStartupTasks(ctx, db, postIngestQueue, startupRoots) },
+		ReplaceAndAggregate: func(ctx context.Context) error {
+			_, reconcileErr := publication.ReconcileStartupPublicationV2(ctx, db, publicationPlanner)
+			return reconcileErr
+		},
+		StartClaimers: func() {
+			go func() {
+				err := dispatcher.Start(serverCtx)
+				dispatcherDone <- err
+				if err != nil && serverCtx.Err() == nil {
+					log.Printf("post-ingest dispatcher stopped: %v", err)
+					serverCancel()
+				}
+			}()
+			for _, mod := range coreiface.EnterpriseModules {
+				if starter, ok := mod.(interface{ StartWorkers(context.Context) }); ok {
+					starter.StartWorkers(enterpriseCtx)
+				}
+			}
+		},
+	})
+	if err != nil {
+		log.Fatalf("publication v2 startup: %v", err)
+	}
+	for _, warning := range warnings {
+		log.Printf("publication v2 preflight warning: %.300s", warning)
+	}
 	if cfg.EncryptedAssetsEnabled() {
 		go func() {
 			if err := postingest.EnqueuePendingMediaEncryption(serverCtx, db, func(ctx context.Context, mediaID int64, scanTaskID *int64, _ postingest.TaskType) (bool, error) {
@@ -291,14 +333,6 @@ func main() {
 			}
 		}()
 	}
-
-	preparePlanner := coreiface.IngestPreparePlannerHandle()
-
-	publicationPlanner := publication.NewPlanner(publication.PlanOptions{
-		SubtitleAuto: cfg.SubtitleAutoOnScan(), ATrackAuto: cfg.ATrackAutoOnScan(),
-		EncryptGlobal: cfg.EncryptedAssetsEnabled(), PreparePlanner: preparePlanner, Capabilities: publicationCapabilities,
-	})
-
 	// (4) Scanner dependencies and the process-wide scan coordinator.
 	sc := &scanner.Scanner{
 		DB:            db,
@@ -371,26 +405,6 @@ func main() {
 
 	// (6) Handler dependencies are injected into the API router.
 	engine := api.NewEngine(cfg, application, deps)
-
-	// Initialize commercial enterprise modules (license + pretranscode). The
-	// community build leaves EnterpriseModules empty, so this loop is a no-op.
-	enterpriseCtx, enterpriseCancel := context.WithCancel(serverCtx)
-	defer enterpriseCancel()
-	for _, mod := range coreiface.EnterpriseModules {
-		if err := mod.Init(enterpriseCtx, coreiface.ModuleDeps{
-			DB:           db,
-			Config:       cfg,
-			Vault:        keyVault,
-			TranscodeDir: cfg.Data.Transcode,
-			FFmpegPath:   cfg.FFmpeg.FFmpegPath,
-			FFprobePath:  cfg.FFmpeg.FFprobePath,
-			Capabilities: publicationCapabilities,
-		}); err != nil {
-			log.Printf("enterprise module %s init failed: %v", mod.Name(), err)
-		} else {
-			log.Printf("enterprise module %s initialized", mod.Name())
-		}
-	}
 
 	// Repair runs only after post-ingest, scrape/API, and enterprise prepare workers exist.
 	// ResetInterruptedTasks already ran, so a restarted current repair suppresses duplicates.

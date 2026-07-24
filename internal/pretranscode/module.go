@@ -70,11 +70,18 @@ func (m *Module) Init(ctx context.Context, deps coreiface.ModuleDeps) error {
 		log.Printf("pretranscode repaired %d stuck waiting rendition job(s)", n)
 	}
 
+	log.Printf("pretranscode module initialized: transcode_dir=%s", deps.TranscodeDir)
+	return nil
+}
+
+// StartWorkers begins prepare claiming only after the server startup gate succeeds.
+func (m *Module) StartWorkers(ctx context.Context) {
+	if m == nil || m.Worker == nil || m.cancel != nil {
+		return
+	}
 	workerCtx, cancel := context.WithCancel(ctx)
 	m.cancel = cancel
 	go m.Worker.Start(workerCtx)
-	log.Printf("pretranscode module initialized: transcode_dir=%s", deps.TranscodeDir)
-	return nil
 }
 
 func (m *Module) RegisterRoutes(r coreiface.RouterGroup, deps coreiface.ModuleDeps) {
