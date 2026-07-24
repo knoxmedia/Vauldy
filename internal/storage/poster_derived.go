@@ -33,6 +33,29 @@ func ImmutablePlainPosterURL(generation int64, stageID string) string {
 	return fmt.Sprintf("/uploads/posters/generation-%d/%s/poster.jpg", generation, stageID)
 }
 
+func PosterObjectPath(uploadDir, hash, ext string) string {
+	hash = strings.ToLower(strings.TrimSpace(hash))
+	if len(hash) != 64 {
+		return ""
+	}
+	for _, c := range hash {
+		if !strings.ContainsRune("0123456789abcdef", c) {
+			return ""
+		}
+	}
+	if ext != ".jpg" && ext != ".enc" {
+		return ""
+	}
+	return filepath.Join(uploadDir, "posters", "objects", "sha256", hash[:2], hash+ext)
+}
+func PosterObjectURL(hash string) string {
+	p := PosterObjectPath("", hash, ".jpg")
+	if p == "" {
+		return ""
+	}
+	return "/uploads/" + filepath.ToSlash(strings.TrimPrefix(p, string(filepath.Separator)))
+}
+
 // FinalizeLocalPoster persists a captured JPEG poster, encrypting when the library requires it.
 func FinalizeLocalPoster(ctx context.Context, derived *DerivedAssetStore, db *sql.DB, mediaID int64, plainPosterFile string) (posterURL string, err error) {
 	if mediaID <= 0 {

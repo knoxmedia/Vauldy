@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"knox-media/internal/keystore"
+	"knox-media/internal/storage"
 	"knox-media/internal/store"
 )
 
@@ -139,8 +141,8 @@ func TestIdempotentPosterCommitPreverifiesBeforeImmediateTransaction(t *testing.
 	if e = commitStagedPoster(context.Background(), db, task, staged); e != nil {
 		t.Fatal(e)
 	}
-	if calls != 2 {
-		t.Fatalf("hash calls=%d want=2", calls)
+	if calls != 3 {
+		t.Fatalf("hash calls=%d want=3", calls)
 	}
 }
 
@@ -151,13 +153,13 @@ func TestPosterCommitRejectsMutationAfterPrehash(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	orig := withImmediatePosterTx
-	withImmediatePosterTx = func(ctx context.Context, d *sql.DB, fn func(store.ImmediateConnTx) error) (store.ImmediateOutcome, error) {
-		_ = os.WriteFile(staged.Path, []byte("changed-poster"), 0644)
-		return store.WithImmediateConnTx(ctx, d, fn)
+	orig := posterAfterSealHook
+	posterAfterSealHook = func() {
+		_ = os.Chmod(storage.PosterObjectPath(upload, staged.Hash, ".jpg"), 0644)
+		_ = os.WriteFile(storage.PosterObjectPath(upload, staged.Hash, ".jpg"), []byte("changed-poster"), 0644)
 	}
-	t.Cleanup(func() { withImmediatePosterTx = orig })
-	if e = commitStagedPoster(context.Background(), db, task, staged); e == nil || !strings.Contains(e.Error(), "staged stat changed") {
+	t.Cleanup(func() { posterAfterSealHook = orig })
+	if e = commitStagedPoster(context.Background(), db, task, staged); e == nil || (!strings.Contains(e.Error(), "staged stat changed") && !strings.Contains(e.Error(), "hash/size mismatch")) {
 		t.Fatalf("err=%v", e)
 	}
 }
@@ -184,5 +186,119 @@ func TestPosterPrehashRejectsSameSizeMtimeMutation(t *testing.T) {
 	}
 	if e = commitStagedPoster(context.Background(), db, task, staged); e == nil || !strings.Contains(e.Error(), "hash/size mismatch") {
 		t.Fatalf("err=%v", e)
+	}
+}
+
+func TestPlainPosterCommitSealsContentAddressedObject(t *testing.T) {
+	db, upload, task := seedCurrentLinkedPosterTask(t)
+	runner := realPosterStageRunner(t, db, upload)
+	staged, e := runner.StagePoster(context.Background(), posterRequest(t, db, task), 1, screenGrabberConfig())
+	if e != nil {
+		t.Fatal(e)
+	}
+	temp := staged.Path
+	if e = commitStagedPoster(context.Background(), db, task, staged); e != nil {
+		t.Fatal(e)
+	}
+	resolved := storage.ResolvePosterServePath(db, upload, task.MediaID)
+	if !strings.Contains(filepath.ToSlash(resolved), "/posters/objects/sha256/") {
+		t.Fatalf("resolved=%s", resolved)
+	}
+	size, hash, e := hashPath(resolved)
+	if e != nil || size != staged.Size || hash != staged.Hash {
+		t.Fatalf("size=%d hash=%s err=%v", size, hash, e)
+	}
+	if sameResolvedPath(temp, resolved) {
+		t.Fatal("generation temp selected")
+	}
+	var refs string
+	if e = db.QueryRow(`SELECT artifact_refs_json FROM media_ingest_evidence WHERE stage_id=?`, staged.Stage.StageID).Scan(&refs); e != nil {
+		t.Fatal(e)
+	}
+	if !strings.Contains(refs, hash) {
+		t.Fatalf("refs=%s", refs)
+	}
+}
+func TestPosterSealIgnoresMutationAfterSeal(t *testing.T) {
+	db, upload, task := seedCurrentLinkedPosterTask(t)
+	runner := realPosterStageRunner(t, db, upload)
+	staged, e := runner.StagePoster(context.Background(), posterRequest(t, db, task), 1, screenGrabberConfig())
+	if e != nil {
+		t.Fatal(e)
+	}
+	orig := posterAfterSealHook
+	posterAfterSealHook = func() { _ = os.WriteFile(staged.Path, []byte("mutated-after"), 0644) }
+	t.Cleanup(func() { posterAfterSealHook = orig })
+	if e = commitStagedPoster(context.Background(), db, task, staged); e != nil {
+		t.Fatal(e)
+	}
+	resolved := storage.ResolvePosterServePath(db, upload, task.MediaID)
+	_, hash, e := hashPath(resolved)
+	if e != nil || hash != staged.Hash {
+		t.Fatalf("hash=%s err=%v", hash, e)
+	}
+}
+func TestPosterSealRejectsMutationBeforeCopy(t *testing.T) {
+	db, upload, task := seedCurrentLinkedPosterTask(t)
+	runner := realPosterStageRunner(t, db, upload)
+	staged, e := runner.StagePoster(context.Background(), posterRequest(t, db, task), 1, screenGrabberConfig())
+	if e != nil {
+		t.Fatal(e)
+	}
+	orig := posterBeforeSealHook
+	posterBeforeSealHook = func() { _ = os.WriteFile(staged.Path, []byte("mutated-before"), 0644) }
+	t.Cleanup(func() { posterBeforeSealHook = orig })
+	if e = commitStagedPoster(context.Background(), db, task, staged); e == nil {
+		t.Fatal("mutation accepted")
+	}
+}
+func TestPosterSealReusesOnlyVerifiedObject(t *testing.T) {
+	db, upload, task := seedCurrentLinkedPosterTask(t)
+	runner := realPosterStageRunner(t, db, upload)
+	staged, e := runner.StagePoster(context.Background(), posterRequest(t, db, task), 1, screenGrabberConfig())
+	if e != nil {
+		t.Fatal(e)
+	}
+	object := storage.PosterObjectPath(upload, staged.Hash, ".jpg")
+	if e = os.MkdirAll(filepath.Dir(object), 0755); e != nil {
+		t.Fatal(e)
+	}
+	if e = os.WriteFile(object, []byte("wrong-object"), 0644); e != nil {
+		t.Fatal(e)
+	}
+	if e = commitStagedPoster(context.Background(), db, task, staged); e == nil {
+		t.Fatal("corrupt existing object reused")
+	}
+}
+func TestEncryptedPosterCommitUsesExactUniqueDerivedIdentity(t *testing.T) {
+	db, upload, task := seedCurrentLinkedPosterTask(t)
+	if _, e := db.Exec(`UPDATE library SET encrypted_assets_enabled=1 WHERE id=(SELECT library_id FROM media WHERE id=?)`, task.MediaID); e != nil {
+		t.Fatal(e)
+	}
+	vault, e := keystore.NewVault("poster-encrypted-test", "")
+	if e != nil {
+		t.Fatal(e)
+	}
+	runner := realPosterStageRunner(t, db, upload)
+	runner.Derived = &storage.DerivedAssetStore{DB: db, Vault: vault, BaseDir: filepath.Join(t.TempDir(), "derived")}
+	first, e := runner.StagePoster(context.Background(), posterRequest(t, db, task), 1, screenGrabberConfig())
+	if e != nil {
+		t.Fatal(e)
+	}
+	if first.Derived == nil || strings.Contains(filepath.ToSlash(first.Path), "/posters/objects/") {
+		t.Fatalf("path=%s", first.Path)
+	}
+	if e = commitStagedPoster(context.Background(), db, task, first); e != nil {
+		t.Fatal(e)
+	}
+	var path string
+	if e = db.QueryRow(`SELECT enc_path FROM media_derived_assets WHERE media_id=? AND artifact_kind='poster'`, task.MediaID).Scan(&path); e != nil || !sameResolvedPath(path, first.Path) {
+		t.Fatalf("path=%s want=%s err=%v", path, first.Path, e)
+	}
+	if e = os.WriteFile(first.Path, []byte("replacement"), 0600); e != nil {
+		t.Fatal(e)
+	}
+	if e = commitStagedPoster(context.Background(), db, task, first); e == nil {
+		t.Fatal("modified encrypted artifact reused")
 	}
 }

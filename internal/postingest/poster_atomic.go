@@ -2,10 +2,13 @@ package postingest
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,6 +26,8 @@ var withImmediatePosterJournalTx = store.WithImmediateConnTx
 var reconcilePosterJournal = reconcilePosterJournalAuthoritative
 var posterHashPath = hashPath
 var posterSourceFingerprint = sourceFingerprint
+var posterBeforeSealHook = func() {}
+var posterAfterSealHook = func() {}
 
 const posterReconcileTimeout = 5 * time.Second
 
@@ -186,8 +191,81 @@ func preverifyPosterArtifact(path string, expectedSize int64, expectedHash strin
 	}
 	return preverifiedPosterIdentity{artifactPath: path, artifactHash: hash, artifactSize: st.Size(), artifactModTime: st.ModTime()}, nil
 }
+func sealPlainPosterObject(ctx context.Context, uploadRoot string, staged StagedPoster) (StagedPoster, error) {
+	posterBeforeSealHook()
+	if err := ctx.Err(); err != nil {
+		return staged, err
+	}
+	final := storage.PosterObjectPath(uploadRoot, staged.Hash, ".jpg")
+	if final == "" {
+		return staged, fmt.Errorf("poster seal: invalid hash")
+	}
+	if st, err := os.Stat(final); err == nil {
+		size, hash, e := posterHashPath(final)
+		if e != nil || st.IsDir() || size != staged.Size || hash != staged.Hash {
+			return staged, fmt.Errorf("poster seal: existing object mismatch")
+		}
+		staged.Path, staged.URL = final, storage.PosterObjectURL(staged.Hash)
+		return staged, nil
+	} else if !os.IsNotExist(err) {
+		return staged, err
+	}
+	if err := os.MkdirAll(filepath.Dir(final), 0755); err != nil {
+		return staged, err
+	}
+	src, err := os.Open(staged.Path)
+	if err != nil {
+		return staged, err
+	}
+	defer src.Close()
+	tmp, err := os.CreateTemp(filepath.Dir(final), ".seal-*.tmp")
+	if err != nil {
+		return staged, err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	h := sha256.New()
+	n, copyErr := io.Copy(io.MultiWriter(tmp, h), src)
+	if copyErr == nil {
+		copyErr = tmp.Sync()
+	}
+	closeErr := tmp.Close()
+	if copyErr != nil {
+		return staged, copyErr
+	}
+	if closeErr != nil {
+		return staged, closeErr
+	}
+	hash := hex.EncodeToString(h.Sum(nil))
+	if n != staged.Size || hash != staged.Hash {
+		return staged, fmt.Errorf("poster seal: source hash/size mismatch")
+	}
+	if err = os.Link(tmpName, final); err != nil {
+		if st, e := os.Stat(final); e != nil || st.IsDir() {
+			return staged, err
+		}
+		size, existingHash, e := posterHashPath(final)
+		if e != nil || size != staged.Size || existingHash != staged.Hash {
+			return staged, fmt.Errorf("poster seal: existing object mismatch")
+		}
+	}
+	_ = os.Chmod(final, 0444)
+	staged.Path, staged.URL = final, storage.PosterObjectURL(staged.Hash)
+	posterAfterSealHook()
+	return staged, nil
+}
+
 func commitStagedPoster(ctx context.Context, db *sql.DB, task Task, staged StagedPoster) error {
 	req := staged.Stage.Request
+	if staged.Derived == nil && !strings.Contains(filepath.ToSlash(staged.Path), "/posters/objects/sha256/") {
+		uploadRoot := filepath.Dir(filepath.Dir(filepath.Dir(staged.Stage.StagedPath)))
+		var sealErr error
+		staged, sealErr = sealPlainPosterObject(ctx, uploadRoot, staged)
+		if sealErr != nil {
+			return sealErr
+		}
+	}
+
 	stepID := int64(0)
 	if task.StepID != nil {
 		stepID = *task.StepID
@@ -206,6 +284,8 @@ func commitStagedPoster(ctx context.Context, db *sql.DB, task Task, staged Stage
 	if sourceFP != req.SourceFingerprint {
 		return fmt.Errorf("poster commit: stale source fingerprint")
 	}
+	sealedRefs, _ := json.Marshal(map[string]any{"path": staged.Path, "url": staged.URL, "source": staged.Source, "size": staged.Size, "sha256": staged.Hash, "generation": task.Generation, "stage_id": staged.Stage.StageID})
+	staged.Stage.HashesSizesJSON = string(sealedRefs)
 	verified, err := preverifyPosterArtifact(staged.Path, staged.Size, staged.Hash)
 	if err != nil {
 		return err
@@ -272,9 +352,9 @@ func commitStagedPoster(ctx context.Context, db *sql.DB, task Task, staged Stage
 			}
 		}
 		if task.Type == TaskPoster {
-			_, e = tx.ExecContext(ctx, `UPDATE media_asset_stage_journal SET state='committed',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='staged'`, staged.Stage.StageID)
+			_, e = tx.ExecContext(ctx, `UPDATE media_asset_stage_journal SET state='committed',hashes_sizes_json=?,updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='staged'`, staged.Stage.HashesSizesJSON, staged.Stage.StageID)
 		} else {
-			_, e = tx.ExecContext(ctx, `UPDATE poster_repair_stage SET state='committed',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND queue_id=? AND attempt=? AND state='staged'`, staged.Stage.StageID, task.ID, task.Attempts)
+			_, e = tx.ExecContext(ctx, `UPDATE poster_repair_stage SET state='committed',hashes_sizes_json=?,updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND queue_id=? AND attempt=? AND state='staged'`, staged.Stage.HashesSizesJSON, staged.Stage.StageID, task.ID, task.Attempts)
 		}
 		if e != nil {
 			return e
@@ -531,9 +611,14 @@ func cleanupPosterPaths(ctx context.Context, db *sql.DB, refs []string, exemplar
 	return nil
 }
 func cleanupUnreferencedPoster(ctx context.Context, db *sql.DB, s StagedPoster) error {
+	generationPath := filepath.Join(s.Stage.StagedPath, posterLogicalName)
 	_, _ = db.ExecContext(ctx, `DELETE FROM media_asset_stage_journal WHERE stage_id=? AND state='staged' AND media_id=? AND run_id=? AND generation=? AND owner_token=? AND source_fingerprint=?`, s.Stage.StageID, s.Stage.Request.MediaID, s.Stage.Request.RunID, s.Stage.Request.Generation, s.Stage.Request.OwnerToken, s.Stage.Request.SourceFingerprint)
 	_, _ = db.ExecContext(ctx, `DELETE FROM poster_repair_stage WHERE stage_id=? AND state='staged' AND queue_id=? AND media_id=? AND run_id=? AND generation=? AND owner_token=? AND attempt=? AND source_fingerprint=?`, s.Stage.StageID, s.Stage.Request.QueueID, s.Stage.Request.MediaID, s.Stage.Request.RunID, s.Stage.Request.Generation, s.Stage.Request.OwnerToken, s.Stage.Request.Attempt, s.Stage.Request.SourceFingerprint)
-	return cleanupPosterPaths(ctx, db, []string{s.Path}, "")
+	if err := cleanupPosterPaths(ctx, db, []string{s.Path, generationPath}, ""); err != nil {
+		return err
+	}
+	_ = os.Remove(s.Stage.StagedPath)
+	return nil
 }
 
 func (r *LocalPosterRunner) StagePoster(ctx context.Context, req publication.StageRequest, libraryID int64, cfg scraper.Config) (StagedPoster, error) {

@@ -275,11 +275,15 @@ func TestRepairPosterCommitRetainsNewAndCleansOldImmutableStage(t *testing.T) {
 	if err = commitStagedPoster(context.Background(), db, task, newStage); err != nil {
 		t.Fatal(err)
 	}
-	if _, e := os.Stat(newStage.Path); e != nil {
-		t.Fatalf("new stage removed: %v", e)
+	newObject := storage.PosterObjectPath(upload, newStage.Hash, ".jpg")
+	if _, e := os.Stat(newObject); e != nil {
+		t.Fatalf("new object removed: %v", e)
 	}
-	if _, e := os.Stat(old.Path); !os.IsNotExist(e) {
-		t.Fatalf("old stage retained: %v", e)
+	if old.Hash != newStage.Hash {
+		oldObject := storage.PosterObjectPath(upload, old.Hash, ".jpg")
+		if _, e := os.Stat(oldObject); !os.IsNotExist(e) {
+			t.Fatalf("old object retained: %v", e)
+		}
 	}
 	if p := managedPosterPath("/uploads/posters/../../sentinel", newStage.Path); p != "" {
 		t.Fatalf("traversal resolved %q", p)

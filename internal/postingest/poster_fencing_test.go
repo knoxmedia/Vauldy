@@ -145,7 +145,10 @@ func (r *stagedPosterFake) StagePoster(_ context.Context, req publication.StageR
 
 func TestPosterCurrentGenerationCommitsAtomicallyAndIsIdempotent(t *testing.T) {
 	db, upload, task := seedCurrentLinkedPosterTask(t)
-	dir := t.TempDir()
+	dir := filepath.Join(upload, "posters", "generation-1", "poster-stage-current")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
 	path := filepath.Join(dir, "poster.jpg")
 	if err := os.WriteFile(path, []byte("new-poster"), 0644); err != nil {
 		t.Fatal(err)
@@ -156,7 +159,7 @@ func TestPosterCurrentGenerationCommitsAtomicallyAndIsIdempotent(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO media_asset_stage_journal(stage_id,media_id,run_id,step_id,generation,owner_token,source_fingerprint,artifact_kind,state,original_path,staged_path,hashes_sizes_json) VALUES(?,?,?,?,?,?,?,'poster','staged','',?,'{}')`, stageID, task.MediaID, *task.RunID, *task.StepID, task.Generation, task.LeaseOwner, fp, dir); err != nil {
 		t.Fatal(err)
 	}
-	runner := &stagedPosterFake{staged: StagedPoster{Stage: publication.StageRecord{StageID: stageID}, Path: path, URL: "/immutable/poster.jpg", Source: "screen_grabber", Size: size, Hash: hash}}
+	runner := &stagedPosterFake{staged: StagedPoster{Stage: publication.StageRecord{StageID: stageID, StagedPath: dir}, Path: path, URL: "/immutable/poster.jpg", Source: "screen_grabber", Size: size, Hash: hash}}
 	a := NewPosterAdapter(db, upload, nil, runner)
 	result, err := a.ExecuteWithResult(context.Background(), task)
 	if err != nil || result.Completion != AlreadyCommittedAtomically {
@@ -167,7 +170,7 @@ func TestPosterCurrentGenerationCommitsAtomicallyAndIsIdempotent(t *testing.T) {
 	if err = db.QueryRow(`SELECT p.status,s.status,j.state,m.meta_json,e.id FROM post_ingest_task p JOIN media_ingest_step s ON s.id=p.ingest_step_id JOIN media_ingest_evidence e ON e.step_id=s.id AND e.kind='poster' JOIN media_asset_stage_journal j ON j.stage_id=e.stage_id JOIN media m ON m.id=p.media_id WHERE p.id=?`, task.ID).Scan(&taskStatus, &stepStatus, &journalState, &meta, &evidence); err != nil {
 		t.Fatal(err)
 	}
-	if taskStatus != "done" || stepStatus != "done" || journalState != "committed" || evidence <= 0 || !strings.Contains(meta, "/immutable/poster.jpg") {
+	if taskStatus != "done" || stepStatus != "done" || journalState != "committed" || evidence <= 0 || !strings.Contains(meta, "/posters/objects/sha256/") {
 		t.Fatalf("rows=%s/%s/%s evidence=%d meta=%s", taskStatus, stepStatus, journalState, evidence, meta)
 	}
 	result, err = a.ExecuteWithResult(context.Background(), task)
