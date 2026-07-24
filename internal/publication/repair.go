@@ -3,8 +3,11 @@ package publication
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -13,7 +16,7 @@ import (
 )
 
 // RepairLegacyMedia creates bounded, visibility-preserving ingest generations
-// for active legacy videos that lack evidence required by the current plan.
+// for active legacy videos and images that lack evidence required by the current plan.
 func RepairLegacyMedia(ctx context.Context, db *sql.DB, planner *Planner, batchSize int) (int, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
@@ -30,7 +33,7 @@ func RepairLegacyMedia(ctx context.Context, db *sql.DB, planner *Planner, batchS
 
 	repaired, after := 0, int64(0)
 	for {
-		rows, err := db.QueryContext(ctx, `SELECT id FROM media WHERE id>? AND status='active' AND file_type='video' AND publication_state IN ('published','degraded') ORDER BY id LIMIT ?`, after, batchSize)
+		rows, err := db.QueryContext(ctx, `SELECT id FROM media WHERE id>? AND status='active' AND file_type IN ('video','image') AND publication_state IN ('published','degraded') ORDER BY id LIMIT ?`, after, batchSize)
 		if err != nil {
 			return repaired, fmt.Errorf("publication repair: list candidates: %w", err)
 		}
@@ -120,7 +123,7 @@ func repairLegacyMediaOneAttempt(ctx context.Context, db *sql.DB, planner *Plann
 	}
 	defer tx.Rollback()
 	var state string
-	if err = tx.QueryRowContext(ctx, `SELECT publication_state FROM media WHERE id=? AND status='active' AND file_type='video' AND publication_state IN ('published','degraded')`, mediaID).Scan(&state); errors.Is(err, sql.ErrNoRows) {
+	if err = tx.QueryRowContext(ctx, `SELECT publication_state FROM media WHERE id=? AND status='active' AND file_type IN ('video','image') AND publication_state IN ('published','degraded')`, mediaID).Scan(&state); errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
@@ -236,7 +239,7 @@ func stepEvidenceTx(ctx context.Context, tx *sql.Tx, mediaID int64, step StepTyp
 	case StepPoster:
 		query = `SELECT EXISTS(SELECT 1 FROM media_derived_assets WHERE media_id=? AND artifact_kind='poster' AND TRIM(COALESCE(enc_path,''))<>'') OR EXISTS(SELECT 1 FROM media WHERE id=? AND (json_valid(meta_json) AND (TRIM(COALESCE(json_extract(meta_json,'$.scrape.poster'),''))<>'' OR TRIM(COALESCE(json_extract(meta_json,'$.scrape.extra.poster'),''))<>''))) OR EXISTS(SELECT 1 FROM post_ingest_task WHERE media_id=? AND task_type='poster' AND status='done')`
 	case StepThumbnail:
-		query = `SELECT EXISTS(SELECT 1 FROM post_ingest_task WHERE media_id=? AND task_type='thumbnail' AND status='done')`
+		return thumbnailEvidenceTx(ctx, tx, mediaID)
 	case StepScrape:
 		var taskDone int
 		var metaJSON string
@@ -253,7 +256,7 @@ func stepEvidenceTx(ctx context.Context, tx *sql.Tx, mediaID int64, step StepTyp
 	case StepAtrack:
 		query = `SELECT EXISTS(SELECT 1 FROM atrack_task WHERE media_id=? AND status='done') OR EXISTS(SELECT 1 FROM media_derived_assets WHERE media_id=? AND artifact_kind IN ('atrack_playlist','atrack_segment')) OR EXISTS(SELECT 1 FROM post_ingest_task WHERE media_id=? AND task_type='atrack' AND status='done')`
 	case StepEncrypt:
-		query = `SELECT EXISTS(SELECT 1 FROM media_encrypted_assets WHERE media_id=? AND status='encrypted') OR EXISTS(SELECT 1 FROM post_ingest_task WHERE media_id=? AND task_type='encrypt' AND status='done')`
+		return encryptionEvidenceTx(ctx, tx, mediaID)
 	case StepPrepare:
 		query = `SELECT EXISTS(SELECT 1 FROM transcode_task WHERE file_id=(SELECT file_id FROM media WHERE id=?) AND task_type='pretranscode' AND status='done')`
 	default:
@@ -268,4 +271,83 @@ func stepEvidenceTx(ctx context.Context, tx *sql.Tx, mediaID int64, step StepTyp
 		return false, err
 	}
 	return done == 1, nil
+}
+
+func thumbnailEvidenceTx(ctx context.Context, tx *sql.Tx, mediaID int64) (bool, error) {
+	var metaRaw string
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(meta_json,'{}') FROM media WHERE id=?`, mediaID).Scan(&metaRaw); err != nil {
+		return false, err
+	}
+	var meta struct {
+		Photo struct {
+			ThumbPath  string `json:"thumb_path"`
+			MediumPath string `json:"medium_path"`
+		} `json:"photo"`
+	}
+	if json.Unmarshal([]byte(metaRaw), &meta) != nil || !regularFile(meta.Photo.ThumbPath) || !regularFile(meta.Photo.MediumPath) {
+		return false, nil
+	}
+	if strings.EqualFold(filepath.Ext(meta.Photo.ThumbPath), ".enc") || strings.EqualFold(filepath.Ext(meta.Photo.MediumPath), ".enc") {
+		return encryptedPhotoVariantsTx(ctx, tx, mediaID, meta.Photo.ThumbPath, meta.Photo.MediumPath)
+	}
+	return true, nil
+}
+
+func encryptionEvidenceTx(ctx context.Context, tx *sql.Tx, mediaID int64) (bool, error) {
+	var fileType, encPath, wrapped, iv string
+	err := tx.QueryRowContext(ctx, `SELECT COALESCE(m.file_type,''),COALESCE(e.enc_path,''),COALESCE(e.wrapped_dek,''),COALESCE(e.iv,'') FROM media m LEFT JOIN media_encrypted_assets e ON e.media_id=m.id AND e.status='encrypted' WHERE m.id=?`, mediaID).Scan(&fileType, &encPath, &wrapped, &iv)
+	if err != nil {
+		return false, err
+	}
+	if strings.TrimSpace(fileType) != "image" {
+		return strings.TrimSpace(encPath) != "", nil
+	}
+	if !regularFile(encPath) || strings.TrimSpace(wrapped) == "" || strings.TrimSpace(iv) == "" {
+		return false, nil
+	}
+	var metaRaw string
+	if err = tx.QueryRowContext(ctx, `SELECT COALESCE(meta_json,'{}') FROM media WHERE id=?`, mediaID).Scan(&metaRaw); err != nil {
+		return false, err
+	}
+	var meta struct {
+		Photo struct {
+			ThumbPath  string `json:"thumb_path"`
+			MediumPath string `json:"medium_path"`
+		} `json:"photo"`
+	}
+	if json.Unmarshal([]byte(metaRaw), &meta) != nil {
+		return false, nil
+	}
+	return encryptedPhotoVariantsTx(ctx, tx, mediaID, meta.Photo.ThumbPath, meta.Photo.MediumPath)
+}
+
+func encryptedPhotoVariantsTx(ctx context.Context, tx *sql.Tx, mediaID int64, thumb, medium string) (bool, error) {
+	if !regularFile(thumb) || !regularFile(medium) {
+		return false, nil
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT artifact_kind,COALESCE(enc_path,''),COALESCE(wrapped_dek,''),COALESCE(iv,'') FROM media_derived_assets WHERE media_id=? AND artifact_kind IN ('photo_thumb','photo_medium')`, mediaID)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	want := map[string]string{"photo_thumb": filepath.Clean(thumb), "photo_medium": filepath.Clean(medium)}
+	seen := map[string]bool{}
+	for rows.Next() {
+		var kind, path, wrapped, iv string
+		if err = rows.Scan(&kind, &path, &wrapped, &iv); err != nil {
+			return false, err
+		}
+		if filepath.Clean(path) == want[kind] && regularFile(path) && strings.TrimSpace(wrapped) != "" && strings.TrimSpace(iv) != "" {
+			seen[kind] = true
+		}
+	}
+	return seen["photo_thumb"] && seen["photo_medium"], rows.Err()
+}
+
+func regularFile(path string) bool {
+	if strings.TrimSpace(path) == "" {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
 }

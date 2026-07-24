@@ -206,3 +206,50 @@ func TestThumbnailInvalidImageFailsPermanentlyWithoutRetry(t *testing.T) {
 		t.Fatalf("status=%s attempts=%d", status, attempts)
 	}
 }
+
+func TestThumbnailDispatcherRepairsLegacyPhotoAndPublishes(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	dir := t.TempDir()
+	source := filepath.Join(dir, "legacy.jpg")
+	f, err := os.Create(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = jpeg.Encode(f, image.NewRGBA(image.Rect(0, 0, 8, 6)), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err = f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	res, err := db.Exec(`INSERT INTO library(name,type,path) VALUES('legacy photos','photo',?)`, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	libraryID, _ := res.LastInsertId()
+	res, err = db.Exec(`INSERT INTO media(library_id,file_id,file_path,file_type,meta_json,status,publication_state,published_at) VALUES(?,'legacy-photo',?,'image','{}','active','published',CURRENT_TIMESTAMP)`, libraryID, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mediaID, _ := res.LastInsertId()
+	if n, repairErr := publication.RepairLegacyMedia(context.Background(), db, publication.NewPlanner(publication.PlanOptions{}), 1); repairErr != nil || n != 1 {
+		t.Fatalf("repair=%d err=%v", n, repairErr)
+	}
+	worker := realThumbnailStager(t, db)
+	q := NewQueue(db, "legacy-thumbnail-owner", nil)
+	task, err := q.Claim(context.Background(), TaskThumbnail)
+	if err != nil || task == nil {
+		t.Fatalf("claim=%+v err=%v", task, err)
+	}
+	result, err := NewThumbnailAdapter(db, worker).(interface {
+		ExecuteWithResult(context.Context, Task) (ExecutionResult, error)
+	}).ExecuteWithResult(context.Background(), *task)
+	if err != nil || result.Completion != AlreadyCommittedAtomically {
+		t.Fatalf("execute=%+v err=%v", result, err)
+	}
+	waitPublicationState(t, db, mediaID, "published")
+	var reason string
+	var preserve int
+	if err = db.QueryRow(`SELECT reason,preserve_visibility FROM media_ingest_run WHERE media_id=?`, mediaID).Scan(&reason, &preserve); err != nil || reason != "repair" || preserve != 1 {
+		t.Fatalf("reason=%q preserve=%d err=%v", reason, preserve, err)
+	}
+}
