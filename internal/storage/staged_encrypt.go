@@ -83,14 +83,22 @@ func (s *AssetEncryptor) StageMediaEncryption(ctx context.Context, mediaID int64
 		return stage, err
 	}
 	result, cryptErr := kcrypto.EncryptFileContext(ctx, src, dst, kek)
+	var syncErr error
+	if cryptErr == nil {
+		if s.syncStagedFile != nil {
+			syncErr = s.syncStagedFile(dst)
+		} else {
+			syncErr = dst.Sync()
+		}
+	}
 	closeErr := dst.Close()
 	if cryptErr != nil {
 		_ = os.Remove(encPath)
 		return stage, cryptErr
 	}
-	if closeErr != nil {
+	if syncErr != nil || closeErr != nil {
 		_ = os.Remove(encPath)
-		return stage, closeErr
+		return stage, errors.Join(syncErr, closeErr)
 	}
 	size, hash, err := EncryptionPathHash(encPath)
 	if err != nil {

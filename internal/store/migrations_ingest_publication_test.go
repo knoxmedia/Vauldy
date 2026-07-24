@@ -1851,7 +1851,7 @@ func installFullD725EnterpriseGraph(t *testing.T, db *sql.DB) {
 		d725PretranscodeMetaDDL, `CREATE INDEX custom_fault_pretranscode_task_meta ON pretranscode_task_meta(task_id,priority)`,
 		d725PretranscodeJobDDL, `CREATE INDEX idx_pretranscode_job_status ON pretranscode_rendition_job(status,created_at)`, `CREATE INDEX idx_pretranscode_job_task ON pretranscode_rendition_job(task_id)`, `CREATE INDEX custom_fault_pretranscode_rendition_job ON pretranscode_rendition_job(id,status)`,
 		canonicalIngestDependencySchema, `CREATE UNIQUE INDEX idx_ingest_dependency_visible ON media_ingest_step_dependency(step_id) WHERE dependency_kind='media_visible'`, `CREATE INDEX custom_fault_media_ingest_step_dependency ON media_ingest_step_dependency(step_id,dependency_kind)`,
-		canonicalIngestEvidenceSchema, `CREATE INDEX custom_fault_media_ingest_evidence ON media_ingest_evidence(id,kind)`, canonicalAssetStageJournalSchema, `CREATE INDEX idx_asset_stage_recovery ON media_asset_stage_journal(state,updated_at)`, `CREATE INDEX custom_fault_media_asset_stage_journal ON media_asset_stage_journal(stage_id,state)`, canonicalPosterRepairStageSchema, publicationManagedIndexes["poster_repair_stage"]["idx_poster_repair_stage_recovery"], `CREATE INDEX custom_fault_poster_repair_stage ON poster_repair_stage(stage_id,state)`,
+		canonicalIngestEvidenceSchema, `CREATE INDEX custom_fault_media_ingest_evidence ON media_ingest_evidence(id,kind)`, canonicalAssetStageJournalSchema, `CREATE INDEX idx_asset_stage_recovery ON media_asset_stage_journal(state,updated_at)`, `CREATE INDEX custom_fault_media_asset_stage_journal ON media_asset_stage_journal(stage_id,state)`, canonicalPosterRepairStageSchema, publicationManagedIndexes["poster_repair_stage"]["idx_poster_repair_stage_recovery"], `CREATE INDEX custom_fault_poster_repair_stage ON poster_repair_stage(stage_id,state)`, canonicalEncryptionStageJournalSchema, publicationManagedIndexes["media_encryption_stage_journal"]["idx_encryption_stage_recovery"], `CREATE INDEX custom_fault_media_encryption_stage_journal ON media_encryption_stage_journal(stage_id,state)`,
 		`CREATE INDEX custom_fault_media_ingest_step ON media_ingest_step(id,status)`,
 		`INSERT INTO transcode_preset VALUES(1)`, `INSERT INTO preset_rendition VALUES(2)`, `INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json) VALUES(1,20,1,'repair','processing','{"d725":1}')`, `INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status,attempts,lease_owner,lease_until,last_error) VALUES(70,1,20,1,'prepare',1,'running',2,'step-owner','2030-01-02','step-error')`, `INSERT INTO post_ingest_task(id,media_id,scan_task_id,ingest_run_id,ingest_step_id,generation,task_type,status,attempts,lease_owner,lease_until,last_error) VALUES(71,20,10,1,70,1,'poster','running',2,'post-owner','2030-01-02','post-error')`, `INSERT INTO scrape_task(id,media_id,status,progress,fail_count,ingest_run_id,ingest_step_id,generation,lease_owner,lease_until,message,created_by,created_at,started_at) VALUES(72,20,'running',37,2,1,70,1,'scrape-owner','2030-01-02','scrape-error',9,'2029-01-01','2029-01-02')`, `INSERT INTO transcode_task(id,file_id,status,progress,error_message,output_path,task_type,ingest_run_id,ingest_step_id,generation,media_id,lease_owner,lease_until) VALUES(73,'d725-file','running',55,'transcode-error','output','pretranscode',1,70,1,NULL,'transcode-owner','2030-01-02')`, `INSERT INTO pretranscode_task_meta VALUES(73,1,'hls','aes128','high','meta-output','{"jobs":[1]}')`, `INSERT INTO pretranscode_rendition_job(id,task_id,rendition_id,rendition_name,status,progress,lease_owner,lease_until,config_snapshot_json) VALUES(74,73,2,'720p','running',66,'job-owner','2030-01-02','{"job":1}')`, `INSERT INTO media_ingest_step_dependency VALUES(70,70,'step_done')`, `INSERT INTO media_ingest_evidence(id,run_id,step_id,media_id,generation,kind,source_fingerprint,artifact_refs_json,verified_at,stage_id) VALUES(75,1,70,20,1,'poster','fp','{}','2029-01-01','stage-75')`, `INSERT INTO media_asset_stage_journal(stage_id,media_id,run_id,step_id,generation,owner_token,source_fingerprint,artifact_kind,state,staged_path,hashes_sizes_json) VALUES('stage-75',20,1,70,1,'owner','fp','poster','staged','path','{}')`, legacyPublicationFillMediaTriggerSQL,
 	} {
@@ -2081,5 +2081,37 @@ func TestMigrationCreatesDedicatedEncryptionStageJournal(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(sqlText), "plaintext_dek") {
 		t.Fatalf("journal must not store plaintext DEK: %s", sqlText)
+	}
+}
+
+func TestEncryptionJournalCreationRollsBackWithPublicationMigration(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	old := publicationMigrationTestHook
+	publicationMigrationTestHook = func(stage publicationMigrationStage) error {
+		if stage == publicationStageAfterChildCreate {
+			return errors.New("injected encryption journal rollback")
+		}
+		return nil
+	}
+	t.Cleanup(func() { publicationMigrationTestHook = old })
+	if err := migrateIngestPublication(context.Background(), db); err == nil {
+		t.Fatal("migration unexpectedly succeeded")
+	}
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='media_encryption_stage_journal'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatal("encryption journal escaped rolled-back migration")
+	}
+}
+
+func TestMigrationRejectsConflictingEncryptionJournalSchema(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if _, err := db.Exec(`CREATE TABLE media_encryption_stage_journal(stage_id TEXT PRIMARY KEY)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateIngestPublication(context.Background(), db); err == nil {
+		t.Fatal("conflicting encryption journal schema accepted")
 	}
 }

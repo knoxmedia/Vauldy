@@ -29,6 +29,7 @@ type AssetEncryptor struct {
 	FFmpegPath     string
 	FFprobePath    string
 	onFlightJoined func(mediaID int64)
+	syncStagedFile func(*os.File) error
 }
 
 // IsMediaEncrypted reports whether the media item is already stored as an encrypted asset.

@@ -2,9 +2,11 @@ package postingest
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -83,5 +85,39 @@ func TestReconcileEncryptionStagesTerminalRowsDoNotStarveActionable(t *testing.T
 	checked, cleaned, e = ReconcileEncryptionStages(context.Background(), db, roots, 100)
 	if e != nil || checked != 0 || cleaned != 0 {
 		t.Fatalf("repeat checked=%d cleaned=%d err=%v", checked, cleaned, e)
+	}
+}
+
+func TestCommittedPlaintextCleanupRetriesBeforeVerification(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	path := filepath.Join(t.TempDir(), "source.jpg")
+	if e := os.WriteFile(path, []byte("plain"), 0600); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := db.Exec(`PRAGMA foreign_keys=OFF; INSERT INTO media_encryption_stage_journal(stage_id,task_id,attempt,media_id,run_id,step_id,generation,owner_token,source_path,quarantine_path,source_fingerprint,enc_path,wrapped_dek,iv,enc_sha256,enc_size,state) VALUES('cleanup-stage',1,1,1,1,1,1,'owner','source',?,'fp','enc','wrapped','iv','hash',1,'committed')`, path); e != nil {
+		t.Fatal(e)
+	}
+	want := errors.New("transient remove")
+	ops := defaultEncryptionFileOps()
+	ops.remove = func(string) error { return want }
+	if e := cleanupCommittedEncryptionPlaintext(context.Background(), db, "cleanup-stage", path, ops); !errors.Is(e, want) {
+		t.Fatalf("err=%v", e)
+	}
+	var marker string
+	if e := db.QueryRow(`SELECT recovery_error FROM media_encryption_stage_journal WHERE stage_id='cleanup-stage'`).Scan(&marker); e != nil {
+		t.Fatal(e)
+	}
+	if !strings.HasPrefix(marker, "plaintext_cleanup_pending:") || len(marker) > 512 {
+		t.Fatalf("marker=%q", marker)
+	}
+	ops = defaultEncryptionFileOps()
+	if e := cleanupCommittedEncryptionPlaintext(context.Background(), db, "cleanup-stage", path, ops); e != nil {
+		t.Fatal(e)
+	}
+	if e := db.QueryRow(`SELECT recovery_error FROM media_encryption_stage_journal WHERE stage_id='cleanup-stage'`).Scan(&marker); e != nil {
+		t.Fatal(e)
+	}
+	if marker != "verified_committed" {
+		t.Fatalf("marker=%q", marker)
 	}
 }

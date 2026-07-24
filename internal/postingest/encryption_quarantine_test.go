@@ -2,6 +2,7 @@ package postingest
 
 import (
 	"context"
+	"errors"
 
 	"database/sql"
 
@@ -109,5 +110,42 @@ func TestEncryptionStateMachineHooksEachPhase(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestQuarantinePlaintextSyncsBeforeReturning(t *testing.T) {
+	root, source := t.TempDir(), filepath.Join(t.TempDir(), "photo.jpg")
+	if err := os.WriteFile(source, []byte("plain"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var events []string
+	ops := encryptionFileOps{
+		syncFile: func(*os.File) error { events = append(events, "file"); return nil },
+		syncDir:  func(string) error { events = append(events, "dir"); return nil },
+	}
+	if _, err := quarantinePlaintextWithOps(source, root, 1, 1, "00000000-0000-0000-0000-000000000001", ops); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) < 2 || events[len(events)-1] != "dir" {
+		t.Fatalf("durability order=%v", events)
+	}
+}
+
+func TestQuarantinePlaintextDirectorySyncFailureIsRecoverable(t *testing.T) {
+	root, source := t.TempDir(), filepath.Join(t.TempDir(), "photo.jpg")
+	if err := os.WriteFile(source, []byte("plain"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	want := errors.New("injected directory sync failure")
+	ops := defaultEncryptionFileOps()
+	ops.syncDir = func(string) error { return want }
+	q, err := quarantinePlaintextWithOps(source, root, 1, 1, "00000000-0000-0000-0000-000000000002", ops)
+	if !errors.Is(err, want) {
+		t.Fatalf("path=%q err=%v", q, err)
+	}
+	if _, sourceErr := os.Stat(source); sourceErr != nil {
+		if _, quarantineErr := os.Stat(filepath.Join(root, "1", "1", "00000000-0000-0000-0000-000000000002", "source")); quarantineErr != nil {
+			t.Fatalf("neither recoverable copy exists: source=%v quarantine=%v", sourceErr, quarantineErr)
+		}
 	}
 }

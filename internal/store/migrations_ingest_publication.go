@@ -648,10 +648,6 @@ func (e *PostCommitMigrationValidationError) Unwrap() error { return e.Cause }
 var publicationMigrationPostCommitValidation = validatePublicationForeignKeys
 
 func migrateIngestPublication(ctx context.Context, db *sql.DB) error {
-	defer func() {
-		_, _ = db.ExecContext(ctx, canonicalEncryptionStageJournalSchema)
-		_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_encryption_stage_recovery ON media_encryption_stage_journal(state,updated_at)`)
-	}()
 	publicationMigrationMu.Lock()
 	defer publicationMigrationMu.Unlock()
 	// The base schema still declares this legacy index on every open. Remove it
@@ -685,12 +681,15 @@ func publicationV2CurrentDB(ctx context.Context, db *sql.DB) (bool, error) {
 		return false, err
 	}
 	defer conn.Close()
-	if !tableExists(ctx, conn, "media_ingest_step_dependency") || !tableExists(ctx, conn, "media_ingest_evidence") || !tableExists(ctx, conn, "media_asset_stage_journal") || !tableExists(ctx, conn, "poster_repair_stage") {
+	if !tableExists(ctx, conn, "media_ingest_step_dependency") || !tableExists(ctx, conn, "media_ingest_evidence") || !tableExists(ctx, conn, "media_asset_stage_journal") || !tableExists(ctx, conn, "poster_repair_stage") || !tableExists(ctx, conn, "media_encryption_stage_journal") {
 		return false, nil
 	}
 	if ok, childErr := publicationManagedChildrenCurrent(ctx, conn); childErr != nil {
 		return false, childErr
 	} else if !ok {
+		return false, nil
+	}
+	if exactPublicationTable(ctx, conn, "media_encryption_stage_journal", canonicalEncryptionStageJournalSchema) != nil || requirePublicationFKSet(ctx, conn, "media_encryption_stage_journal", "post_ingest_task:task_id:id:cascade", "media_ingest_run:run_id,media_id,generation:id,media_id,generation:cascade", "media_ingest_step:step_id,media_id,generation:id,media_id,generation:cascade") != nil {
 		return false, nil
 	}
 	if err = validatePublicationV2Schema(ctx, conn); err != nil {
@@ -781,6 +780,17 @@ func migratePublicationV2(ctx context.Context, db *sql.DB) (err error) {
 	if err = publicationMigrationHook(publicationStagePreflight); err != nil {
 		return err
 	}
+	if tableExists(ctx, conn, "media_encryption_stage_journal") {
+		cols, inspectErr := publicationColumns(ctx, conn, "media_encryption_stage_journal")
+		if inspectErr != nil {
+			return inspectErr
+		}
+		for _, required := range []string{"stage_id", "task_id", "attempt", "media_id", "run_id", "step_id", "generation", "state"} {
+			if !cols[required] {
+				return fmt.Errorf("media_encryption_stage_journal schema conflict: missing %s", required)
+			}
+		}
+	}
 	if tableExists(ctx, conn, "media_ingest_step_dependency") {
 		cols, inspectErr := publicationColumns(ctx, conn, "media_ingest_run")
 		if inspectErr != nil {
@@ -791,8 +801,12 @@ func migratePublicationV2(ctx context.Context, db *sql.DB) (err error) {
 			complete = complete && cols[name]
 		}
 		if complete {
-			if err = validatePublicationV2Schema(ctx, conn); err != nil {
-				return fmt.Errorf("publication v2 precommit existing schema: %w", err)
+			journalCanonical := exactPublicationTable(ctx, conn, "media_encryption_stage_journal", canonicalEncryptionStageJournalSchema) == nil
+			journalFKCanonical := requirePublicationFKSet(ctx, conn, "media_encryption_stage_journal", "post_ingest_task:task_id:id:cascade", "media_ingest_run:run_id,media_id,generation:id,media_id,generation:cascade", "media_ingest_step:step_id,media_id,generation:id,media_id,generation:cascade") == nil
+			if journalCanonical && journalFKCanonical {
+				if err = validatePublicationV2Schema(ctx, conn); err != nil {
+					return fmt.Errorf("publication v2 precommit existing schema: %w", err)
+				}
 			}
 		}
 	}
@@ -904,7 +918,7 @@ type publicationGraphTable struct {
 	expectedChecksum  string
 }
 
-var publicationGraphOrder = []string{"media_ingest_step", "post_ingest_task", "scrape_task", "transcode_task", "pretranscode_task_meta", "pretranscode_rendition_job", "media_ingest_step_dependency", "media_ingest_evidence", "media_asset_stage_journal", "poster_repair_stage"}
+var publicationGraphOrder = []string{"media_ingest_step", "post_ingest_task", "scrape_task", "transcode_task", "pretranscode_task_meta", "pretranscode_rendition_job", "media_ingest_step_dependency", "media_ingest_evidence", "media_asset_stage_journal", "poster_repair_stage", "media_encryption_stage_journal"}
 
 func quoteIdent(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
 func backupPublicationGraph(ctx context.Context, q SQLExecutor) ([]publicationGraphTable, error) {
@@ -972,11 +986,16 @@ var publicationManagedIndexes = map[string]map[string]string{
 		"idx_pretranscode_job_status": `CREATE INDEX idx_pretranscode_job_status ON pretranscode_rendition_job(status,created_at)`,
 		"idx_pretranscode_job_task":   `CREATE INDEX idx_pretranscode_job_task ON pretranscode_rendition_job(task_id)`,
 	},
-	"media_ingest_step_dependency": {"idx_ingest_dependency_visible": `CREATE UNIQUE INDEX idx_ingest_dependency_visible ON media_ingest_step_dependency(step_id) WHERE dependency_kind='media_visible'`},
-	"media_asset_stage_journal":    {"idx_asset_stage_recovery": `CREATE INDEX idx_asset_stage_recovery ON media_asset_stage_journal(state,updated_at)`},
-	"poster_repair_stage":          {"idx_poster_repair_stage_recovery": `CREATE INDEX idx_poster_repair_stage_recovery ON poster_repair_stage(state,recovery_error,updated_at)`},
+	"media_ingest_step_dependency":   {"idx_ingest_dependency_visible": `CREATE UNIQUE INDEX idx_ingest_dependency_visible ON media_ingest_step_dependency(step_id) WHERE dependency_kind='media_visible'`},
+	"media_asset_stage_journal":      {"idx_asset_stage_recovery": `CREATE INDEX idx_asset_stage_recovery ON media_asset_stage_journal(state,updated_at)`},
+	"poster_repair_stage":            {"idx_poster_repair_stage_recovery": `CREATE INDEX idx_poster_repair_stage_recovery ON poster_repair_stage(state,recovery_error,updated_at)`},
+	"media_encryption_stage_journal": {"idx_encryption_stage_recovery": `CREATE INDEX idx_encryption_stage_recovery ON media_encryption_stage_journal(state,recovery_error,updated_at)`},
 }
 
+func publicationIndexExists(ctx context.Context, q SQLExecutor, name string) bool {
+	var n int
+	return q.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?`, name).Scan(&n) == nil && n == 1
+}
 func publicationManagedIndex(table, name, sqlText string) bool {
 	want, ok := publicationManagedIndexes[table][strings.ToLower(name)]
 	return ok && normalizePublicationSQL(want) == normalizePublicationSQL(sqlText)
@@ -1138,7 +1157,7 @@ func graphMeta(g []publicationGraphTable, n string) (publicationGraphTable, bool
 	return publicationGraphTable{}, false
 }
 func dropPublicationGraph(ctx context.Context, q SQLExecutor, g []publicationGraphTable) error {
-	order := []string{"pretranscode_rendition_job", "pretranscode_task_meta", "poster_repair_stage", "media_asset_stage_journal", "media_ingest_evidence", "media_ingest_step_dependency", "post_ingest_task", "scrape_task", "transcode_task", "media_ingest_step"}
+	order := []string{"media_encryption_stage_journal", "pretranscode_rendition_job", "pretranscode_task_meta", "poster_repair_stage", "media_asset_stage_journal", "media_ingest_evidence", "media_ingest_step_dependency", "post_ingest_task", "scrape_task", "transcode_task", "media_ingest_step"}
 	for _, n := range order {
 		if _, ok := graphMeta(g, n); ok {
 			if _, e := q.ExecContext(ctx, `DROP TABLE `+quoteIdent(n)); e != nil {
@@ -1560,7 +1579,14 @@ func createPublicationChildren(ctx context.Context, q SQLExecutor, g []publicati
 	if _, e := q.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS scrape_effect_commit(task_id INTEGER NOT NULL,attempt INTEGER NOT NULL,generation INTEGER NOT NULL,stage_id TEXT NOT NULL DEFAULT '',manifest_json TEXT NOT NULL CHECK(json_valid(manifest_json)),manifest_digest TEXT NOT NULL,created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(task_id,attempt),FOREIGN KEY(task_id) REFERENCES scrape_task(id) ON DELETE CASCADE)`); e != nil {
 		return e
 	}
-	for _, stmt := range []string{canonicalIngestDependencySchema, publicationManagedIndexes["media_ingest_step_dependency"]["idx_ingest_dependency_visible"], canonicalIngestEvidenceSchema, canonicalAssetStageJournalSchema, publicationManagedIndexes["media_asset_stage_journal"]["idx_asset_stage_recovery"], canonicalPosterRepairStageSchema, publicationManagedIndexes["poster_repair_stage"]["idx_poster_repair_stage_recovery"]} {
+	statements := []string{canonicalIngestDependencySchema, publicationManagedIndexes["media_ingest_step_dependency"]["idx_ingest_dependency_visible"], canonicalIngestEvidenceSchema, canonicalAssetStageJournalSchema, publicationManagedIndexes["media_asset_stage_journal"]["idx_asset_stage_recovery"], canonicalPosterRepairStageSchema, publicationManagedIndexes["poster_repair_stage"]["idx_poster_repair_stage_recovery"]}
+	if !tableExists(ctx, q, "media_encryption_stage_journal") {
+		statements = append(statements, canonicalEncryptionStageJournalSchema)
+	}
+	if !publicationIndexExists(ctx, q, "idx_encryption_stage_recovery") {
+		statements = append(statements, publicationManagedIndexes["media_encryption_stage_journal"]["idx_encryption_stage_recovery"])
+	}
+	for _, stmt := range statements {
 		if _, e := q.ExecContext(ctx, stmt); e != nil {
 			return e
 		}
@@ -2195,7 +2221,7 @@ func validatePublicationV2Schema(ctx context.Context, q SQLExecutor) error {
 			}
 		}
 	}
-	for _, table := range []string{"media_ingest_step_dependency", "media_ingest_evidence", "media_asset_stage_journal", "poster_repair_stage"} {
+	for _, table := range []string{"media_ingest_step_dependency", "media_ingest_evidence", "media_asset_stage_journal", "poster_repair_stage", "media_encryption_stage_journal"} {
 		if !tableExists(ctx, q, table) {
 			return fmt.Errorf("publication v2 missing table %s", table)
 		}
@@ -2210,6 +2236,15 @@ func validatePublicationV2Schema(ctx context.Context, q SQLExecutor) error {
 		return err
 	}
 	if err := exactPublicationTable(ctx, q, "poster_repair_stage", canonicalPosterRepairStageSchema); err != nil {
+		return err
+	}
+	if err := exactPublicationTable(ctx, q, "media_encryption_stage_journal", canonicalEncryptionStageJournalSchema); err != nil {
+		return err
+	}
+	if err := requirePublicationFKSet(ctx, q, "media_encryption_stage_journal", "post_ingest_task:task_id:id:cascade", "media_ingest_run:run_id,media_id,generation:id,media_id,generation:cascade", "media_ingest_step:step_id,media_id,generation:id,media_id,generation:cascade"); err != nil {
+		return err
+	}
+	if err := requirePublicationIndex(ctx, q, "media_encryption_stage_journal", "idx_encryption_stage_recovery", publicationManagedIndexes["media_encryption_stage_journal"]["idx_encryption_stage_recovery"], 0, 0); err != nil {
 		return err
 	}
 	if err := requirePublicationClauses(ctx, q, "poster_repair_stage", `CHECK(state IN ('staged','quarantining','quarantined','restored','committed','failed_closed'))`, `CHECK(json_valid(hashes_sizes_json))`, `UNIQUE(queue_id,attempt)`); err != nil {

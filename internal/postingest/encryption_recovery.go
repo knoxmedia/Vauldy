@@ -23,7 +23,7 @@ func ReconcileEncryptionStages(ctx context.Context, db *sql.DB, roots Encryption
 	if limit <= 0 || limit > encryptionStageBatchMax {
 		limit = encryptionStageBatchMax
 	}
-	rows, err := db.QueryContext(ctx, `SELECT stage_id,task_id,attempt,media_id,run_id,step_id,generation,owner_token,source_path,quarantine_path,source_fingerprint,enc_path,wrapped_dek,iv,enc_sha256,enc_size,state FROM media_encryption_stage_journal WHERE state IN ('staged','quarantining','quarantined') OR (state='committed' AND recovery_error='') ORDER BY updated_at,stage_id LIMIT ?`, limit)
+	rows, err := db.QueryContext(ctx, `SELECT stage_id,task_id,attempt,media_id,run_id,step_id,generation,owner_token,source_path,quarantine_path,source_fingerprint,enc_path,wrapped_dek,iv,enc_sha256,enc_size,state FROM media_encryption_stage_journal WHERE state IN ('staged','quarantining','quarantined') OR (state='committed' AND (recovery_error='' OR recovery_error LIKE 'plaintext_cleanup_pending:%')) ORDER BY updated_at,stage_id LIMIT ?`, limit)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -62,10 +62,9 @@ func ReconcileEncryptionStages(ctx context.Context, db *sql.DB, roots Encryption
 			if err != nil || n != 1 {
 				return checked, cleaned, errors.New("committed encryption recovery mismatch")
 			}
-			if r.quarantine != "" {
-				_ = os.Remove(r.quarantine)
+			if err = cleanupCommittedEncryptionPlaintext(ctx, db, r.stage, r.quarantine, defaultEncryptionFileOps()); err != nil {
+				retErr = errors.Join(retErr, err)
 			}
-			_, _ = db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='committed',recovery_error='verified_committed',updated_at=CURRENT_TIMESTAMP WHERE stage_id=?`, r.stage)
 			continue
 		}
 		var active int
@@ -127,6 +126,33 @@ func ReconcileEncryptionStages(ctx context.Context, db *sql.DB, roots Encryption
 	}
 	return checked, cleaned, retErr
 }
+func cleanupCommittedEncryptionPlaintext(ctx context.Context, db *sql.DB, stageID, quarantine string, ops encryptionFileOps) error {
+	if quarantine != "" {
+		if err := ops.remove(quarantine); err != nil && !os.IsNotExist(err) {
+			marker := "plaintext_cleanup_pending:" + err.Error()
+			if len(marker) > 512 {
+				marker = marker[:512]
+			}
+			if _, updateErr := db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET recovery_error=?,updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='committed'`, marker, stageID); updateErr != nil {
+				return errors.Join(err, updateErr)
+			}
+			return err
+		}
+		if err := ops.syncDir(filepath.Dir(quarantine)); err != nil {
+			marker := "plaintext_cleanup_pending:" + err.Error()
+			if len(marker) > 512 {
+				marker = marker[:512]
+			}
+			if _, updateErr := db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET recovery_error=?,updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='committed'`, marker, stageID); updateErr != nil {
+				return errors.Join(err, updateErr)
+			}
+			return err
+		}
+	}
+	_, err := db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET recovery_error='verified_committed',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='committed'`, stageID)
+	return err
+}
+
 func managedEncryptionPath(root, path string) bool {
 	if strings.TrimSpace(root) == "" || strings.TrimSpace(path) == "" {
 		return false
