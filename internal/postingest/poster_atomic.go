@@ -150,6 +150,42 @@ func currentPosterEvidence(ctx context.Context, db *sql.DB, task Task) (bool, er
 	return posterInMeta(decodePosterMeta(meta)) == v.URL, nil
 }
 
+type preverifiedPosterIdentity struct {
+	sourcePath, sourceFingerprint string
+	sourceSize                    int64
+	sourceModTime                 time.Time
+	artifactPath, artifactHash    string
+	artifactSize                  int64
+	artifactModTime               time.Time
+}
+
+func (v preverifiedPosterIdentity) verifyStats() error {
+	if v.sourcePath != "" {
+		s, err := os.Stat(v.sourcePath)
+		if err != nil || s.Size() != v.sourceSize || !s.ModTime().Equal(v.sourceModTime) {
+			return fmt.Errorf("poster commit: source stat changed")
+		}
+	}
+	a, err := os.Stat(v.artifactPath)
+	if err != nil || a.Size() != v.artifactSize || !a.ModTime().Equal(v.artifactModTime) {
+		return fmt.Errorf("poster commit: staged stat changed")
+	}
+	return nil
+}
+func preverifyPosterArtifact(path string, expectedSize int64, expectedHash string) (preverifiedPosterIdentity, error) {
+	size, hash, err := posterHashPath(path)
+	if err != nil {
+		return preverifiedPosterIdentity{}, err
+	}
+	if size != expectedSize || hash != expectedHash {
+		return preverifiedPosterIdentity{}, fmt.Errorf("poster commit: staged hash/size mismatch")
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		return preverifiedPosterIdentity{}, err
+	}
+	return preverifiedPosterIdentity{artifactPath: path, artifactHash: hash, artifactSize: st.Size(), artifactModTime: st.ModTime()}, nil
+}
 func commitStagedPoster(ctx context.Context, db *sql.DB, task Task, staged StagedPoster) error {
 	req := staged.Stage.Request
 	stepID := int64(0)
@@ -170,14 +206,7 @@ func commitStagedPoster(ctx context.Context, db *sql.DB, task Task, staged Stage
 	if sourceFP != req.SourceFingerprint {
 		return fmt.Errorf("poster commit: stale source fingerprint")
 	}
-	artifactSize, artifactHash, err := posterHashPath(staged.Path)
-	if err != nil {
-		return err
-	}
-	if artifactSize != staged.Size || artifactHash != staged.Hash {
-		return fmt.Errorf("poster commit: staged hash/size mismatch")
-	}
-	artifactStat, err := os.Stat(staged.Path)
+	verified, err := preverifyPosterArtifact(staged.Path, staged.Size, staged.Hash)
 	if err != nil {
 		return err
 	}
@@ -185,6 +214,7 @@ func commitStagedPoster(ctx context.Context, db *sql.DB, task Task, staged Stage
 	if err != nil {
 		return err
 	}
+	verified.sourcePath, verified.sourceFingerprint, verified.sourceSize, verified.sourceModTime = sourcePath, sourceFP, sourceStat.Size(), sourceStat.ModTime()
 	var replaced []string
 	_, err = withImmediatePosterTx(ctx, db, func(tx store.ImmediateConnTx) error {
 		if task.Type == TaskPoster {
@@ -192,7 +222,7 @@ func commitStagedPoster(ctx context.Context, db *sql.DB, task Task, staged Stage
 			e := tx.QueryRowContext(ctx, `SELECT stage_id FROM media_ingest_evidence WHERE step_id=? AND kind='poster'`, stepID).Scan(&existing)
 			if e == nil {
 				if existing == staged.Stage.StageID {
-					return verifyCommittedPosterTx(ctx, tx, task, staged)
+					return verifyCommittedPosterTx(ctx, tx, task, staged, verified)
 				}
 				return fmt.Errorf("poster commit conflict: step selects %s", existing)
 			}
@@ -210,13 +240,8 @@ func commitStagedPoster(ctx context.Context, db *sql.DB, task Task, staged Stage
 		if !sameResolvedPath(source, sourcePath) {
 			return fmt.Errorf("poster commit: source path changed")
 		}
-		currentSource, e := os.Stat(source)
-		if e != nil || currentSource.Size() != sourceStat.Size() || !currentSource.ModTime().Equal(sourceStat.ModTime()) {
-			return fmt.Errorf("poster commit: source stat changed")
-		}
-		currentArtifact, e := os.Stat(staged.Path)
-		if e != nil || currentArtifact.Size() != artifactStat.Size() || !currentArtifact.ModTime().Equal(artifactStat.ModTime()) {
-			return fmt.Errorf("poster commit: staged stat changed")
+		if e := verified.verifyStats(); e != nil {
+			return e
 		}
 		fp := sourceFP
 		var one int
@@ -344,7 +369,7 @@ func persistPosterMetaTx(ctx context.Context, tx store.SQLExecutor, mediaID int6
 	return old, store.UpdateMediaMetaAndPhotoTime(ctx, tx, mediaID, string(raw))
 }
 
-func verifyCommittedPosterTx(ctx context.Context, tx store.SQLExecutor, task Task, staged StagedPoster) error {
+func verifyCommittedPosterTx(ctx context.Context, tx store.SQLExecutor, task Task, staged StagedPoster, verified preverifiedPosterIdentity) error {
 	var n int
 	err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM media_ingest_evidence e JOIN post_ingest_task p ON p.ingest_step_id=e.step_id JOIN media_ingest_step s ON s.id=e.step_id JOIN media_asset_stage_journal j ON j.stage_id=e.stage_id WHERE e.stage_id=? AND e.run_id=? AND e.step_id=? AND e.media_id=? AND e.generation=? AND e.source_fingerprint=? AND p.id=? AND p.status='done' AND s.status='done' AND j.state='committed' AND j.owner_token=?`, staged.Stage.StageID, *task.RunID, *task.StepID, task.MediaID, task.Generation, staged.Stage.Request.SourceFingerprint, task.ID, task.LeaseOwner).Scan(&n)
 	if err != nil {
@@ -353,9 +378,11 @@ func verifyCommittedPosterTx(ctx context.Context, tx store.SQLExecutor, task Tas
 	if n != 1 {
 		return fmt.Errorf("poster commit: partial same-stage completion")
 	}
-	size, hash, err := hashPath(staged.Path)
-	if err != nil || size != staged.Size || hash != staged.Hash {
+	if verified.artifactPath != staged.Path || verified.artifactSize != staged.Size || verified.artifactHash != staged.Hash {
 		return fmt.Errorf("poster commit: committed artifact mismatch")
+	}
+	if err := verified.verifyStats(); err != nil {
+		return err
 	}
 	var meta string
 	if err = tx.QueryRowContext(ctx, `SELECT meta_json FROM media WHERE id=?`, task.MediaID).Scan(&meta); err != nil {
@@ -399,7 +426,11 @@ func reconcilePosterCommitState(ctx context.Context, db *sql.DB, task Task, stag
 		return posterCommitUnknown, err
 	}
 	defer conn.Close()
-	if err = verifyCommittedPosterTx(ctx, conn, task, staged); err == nil {
+	verified, preErr := preverifyPosterArtifact(staged.Path, staged.Size, staged.Hash)
+	if preErr != nil {
+		return posterCommitUnknown, preErr
+	}
+	if err = verifyCommittedPosterTx(ctx, conn, task, staged, verified); err == nil {
 		return posterCommitExact, nil
 	}
 	var evidence, queue, step int
@@ -421,7 +452,11 @@ func reconcilePosterCommit(ctx context.Context, db *sql.DB, task Task, staged St
 		return false, err
 	}
 	defer conn.Close()
-	err = verifyCommittedPosterTx(ctx, conn, task, staged)
+	verified, preErr := preverifyPosterArtifact(staged.Path, staged.Size, staged.Hash)
+	if preErr != nil {
+		return false, preErr
+	}
+	err = verifyCommittedPosterTx(ctx, conn, task, staged, verified)
 	return err == nil, err
 }
 

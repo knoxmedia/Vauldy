@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"knox-media/internal/store"
@@ -108,5 +109,80 @@ func TestCommitHashesBeforeImmediateTransaction(t *testing.T) {
 	}
 	if calls < 2 {
 		t.Fatalf("calls=%d", calls)
+	}
+}
+
+func TestIdempotentPosterCommitPreverifiesBeforeImmediateTransaction(t *testing.T) {
+	db, upload, task := seedCurrentLinkedPosterTask(t)
+	runner := realPosterStageRunner(t, db, upload)
+	staged, e := runner.StagePoster(context.Background(), posterRequest(t, db, task), 1, screenGrabberConfig())
+	if e != nil {
+		t.Fatal(e)
+	}
+	origTx, origHash := withImmediatePosterTx, posterHashPath
+	inside := false
+	calls := 0
+	posterHashPath = func(p string) (int64, string, error) {
+		if inside {
+			t.Fatal("idempotent hash in tx")
+		}
+		calls++
+		return hashPath(p)
+	}
+	withImmediatePosterTx = func(ctx context.Context, d *sql.DB, fn func(store.ImmediateConnTx) error) (store.ImmediateOutcome, error) {
+		return store.WithImmediateConnTx(ctx, d, func(tx store.ImmediateConnTx) error { inside = true; defer func() { inside = false }(); return fn(tx) })
+	}
+	t.Cleanup(func() { withImmediatePosterTx = origTx; posterHashPath = origHash })
+	if e = commitStagedPoster(context.Background(), db, task, staged); e != nil {
+		t.Fatal(e)
+	}
+	if e = commitStagedPoster(context.Background(), db, task, staged); e != nil {
+		t.Fatal(e)
+	}
+	if calls != 2 {
+		t.Fatalf("hash calls=%d want=2", calls)
+	}
+}
+
+func TestPosterCommitRejectsMutationAfterPrehash(t *testing.T) {
+	db, upload, task := seedCurrentLinkedPosterTask(t)
+	runner := realPosterStageRunner(t, db, upload)
+	staged, e := runner.StagePoster(context.Background(), posterRequest(t, db, task), 1, screenGrabberConfig())
+	if e != nil {
+		t.Fatal(e)
+	}
+	orig := withImmediatePosterTx
+	withImmediatePosterTx = func(ctx context.Context, d *sql.DB, fn func(store.ImmediateConnTx) error) (store.ImmediateOutcome, error) {
+		_ = os.WriteFile(staged.Path, []byte("changed-poster"), 0644)
+		return store.WithImmediateConnTx(ctx, d, fn)
+	}
+	t.Cleanup(func() { withImmediatePosterTx = orig })
+	if e = commitStagedPoster(context.Background(), db, task, staged); e == nil || !strings.Contains(e.Error(), "staged stat changed") {
+		t.Fatalf("err=%v", e)
+	}
+}
+
+func TestPosterPrehashRejectsSameSizeMtimeMutation(t *testing.T) {
+	db, upload, task := seedCurrentLinkedPosterTask(t)
+	runner := realPosterStageRunner(t, db, upload)
+	staged, e := runner.StagePoster(context.Background(), posterRequest(t, db, task), 1, screenGrabberConfig())
+	if e != nil {
+		t.Fatal(e)
+	}
+	st, e := os.Stat(staged.Path)
+	if e != nil {
+		t.Fatal(e)
+	}
+	original, _ := os.ReadFile(staged.Path)
+	changed := append([]byte(nil), original...)
+	changed[0] ^= 0x1
+	if e = os.WriteFile(staged.Path, changed, 0644); e != nil {
+		t.Fatal(e)
+	}
+	if e = os.Chtimes(staged.Path, st.ModTime(), st.ModTime()); e != nil {
+		t.Fatal(e)
+	}
+	if e = commitStagedPoster(context.Background(), db, task, staged); e == nil || !strings.Contains(e.Error(), "hash/size mismatch") {
+		t.Fatalf("err=%v", e)
 	}
 }
