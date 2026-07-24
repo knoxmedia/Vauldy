@@ -145,3 +145,61 @@ func TestPosterGCSweepsOldQuarantineOnly(t *testing.T) {
 		t.Fatalf("fresh quarantine removed: %v", e)
 	}
 }
+
+func TestPostCommitCleanupUsesImmediateQuarantineProtocol(t *testing.T) {
+	db, upload, _ := seedCurrentLinkedPosterTask(t)
+	p, url := writePosterObject(t, upload, "postcommit", 0)
+	orig := posterObjectRename
+	inside := false
+	origTx := withImmediatePosterObjectTx
+	withImmediatePosterObjectTx = func(ctx context.Context, d *sql.DB, fn func(store.ImmediateConnTx) error) (store.ImmediateOutcome, error) {
+		return store.WithImmediateConnTx(ctx, d, func(tx store.ImmediateConnTx) error { inside = true; defer func() { inside = false }(); return fn(tx) })
+	}
+	posterObjectRename = func(a, b string) error {
+		if !inside {
+			t.Fatal("postcommit rename outside writer lock")
+		}
+		return os.Rename(a, b)
+	}
+	t.Cleanup(func() { posterObjectRename = orig; withImmediatePosterObjectTx = origTx })
+	if e := cleanupPosterPaths(context.Background(), db, []string{url}, upload); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := os.Stat(p); !os.IsNotExist(e) {
+		t.Fatalf("CAS final retained: %v", e)
+	}
+}
+func TestPostCommitCleanupBarrierRetainsConcurrentReference(t *testing.T) {
+	db, upload, task := seedCurrentLinkedPosterTask(t)
+	p, url := writePosterObject(t, upload, "postcommit-race", 0)
+	orig := posterObjectBeforeImmediate
+	posterObjectBeforeImmediate = func() {
+		_, _ = db.Exec(`UPDATE media SET meta_json=json_object('scrape',json_object('poster',?)) WHERE id=?`, url, task.MediaID)
+	}
+	t.Cleanup(func() { posterObjectBeforeImmediate = orig })
+	if e := cleanupPosterPaths(context.Background(), db, []string{url}, upload); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := os.Stat(p); e != nil {
+		t.Fatalf("referenced CAS removed: %v", e)
+	}
+}
+func TestPostCommitCleanupQuarantineDoesNotDeleteReplacement(t *testing.T) {
+	db, upload, task := seedCurrentLinkedPosterTask(t)
+	p, url := writePosterObject(t, upload, "postcommit-replacement", 0)
+	orig := posterObjectDeleteQuarantine
+	posterObjectDeleteQuarantine = func(q string) error {
+		if e := os.WriteFile(p, []byte("postcommit-replacement"), 0444); e != nil {
+			t.Fatal(e)
+		}
+		_, _ = db.Exec(`UPDATE media SET meta_json=json_object('scrape',json_object('poster',?)) WHERE id=?`, url, task.MediaID)
+		return os.Remove(q)
+	}
+	t.Cleanup(func() { posterObjectDeleteQuarantine = orig })
+	if e := cleanupPosterPaths(context.Background(), db, []string{url}, upload); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := os.Stat(p); e != nil {
+		t.Fatalf("replacement removed: %v", e)
+	}
+}

@@ -598,29 +598,43 @@ func managedPosterPath(url, exemplar string) string {
 }
 func cleanupPosterPaths(ctx context.Context, db *sql.DB, refs []string, exemplar string) error {
 	for _, ref := range refs {
-		p, url := ref, ""
+		p := ref
 		if strings.HasPrefix(ref, "/uploads/") {
-			url, p = ref, managedPosterPath(ref, exemplar)
+			p = managedPosterPath(ref, exemplar)
 		}
 		if p == "" || !filepath.IsAbs(p) {
 			continue
 		}
-		if ref == exemplar && strings.HasPrefix(ref, "/uploads/") {
+		uploadRoot := ""
+		marker := string(filepath.Separator) + "posters" + string(filepath.Separator)
+		if abs, e := filepath.Abs(p); e == nil {
+			if i := strings.LastIndex(strings.ToLower(abs), strings.ToLower(marker)); i >= 0 {
+				uploadRoot = abs[:i]
+			}
+		}
+		if exactPosterObjectPath(uploadRoot, p) {
+			q, renamed, e := quarantinePosterObjectIfUnreferenced(ctx, db, p, uploadRoot, nil)
+			if e != nil {
+				return e
+			}
+			if renamed {
+				if e = deletePosterQuarantine(q); e != nil {
+					return e
+				}
+				prunePosterObjectPrefix(uploadRoot, p)
+			}
 			continue
 		}
-		n, err := posterPathReferenceCount(ctx, db, p, url, "", "")
-		if err != nil {
-			return err
+		n, e := posterPathReferenceCount(ctx, db, p, "", "", "")
+		if e != nil {
+			return e
 		}
 		if n == 0 {
-			if st, err := os.Lstat(p); err == nil && st.Mode()&os.ModeSymlink != 0 {
+			if st, e := os.Lstat(p); e == nil && st.Mode()&os.ModeSymlink != 0 {
 				continue
 			}
-			if err = os.Remove(p); err != nil && !os.IsNotExist(err) {
-				return err
-			}
-			if strings.Contains(filepath.ToSlash(p), "/posters/objects/sha256/") {
-				prunePosterObjectPrefix(filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(p))))), p)
+			if e = os.Remove(p); e != nil && !os.IsNotExist(e) {
+				return e
 			}
 		}
 	}
