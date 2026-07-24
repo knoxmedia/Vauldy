@@ -20,6 +20,7 @@ import (
 
 var withImmediatePosterTx = store.WithImmediateConnTx
 var withImmediatePosterJournalTx = store.WithImmediateConnTx
+var reconcilePosterJournal = reconcilePosterJournalAuthoritative
 
 const posterReconcileTimeout = 5 * time.Second
 
@@ -29,6 +30,14 @@ type StagedPoster struct {
 	Size                    int64
 	Derived                 *storage.StagedDerivedAsset
 }
+
+type posterCommitState uint8
+
+const (
+	posterCommitUnknown posterCommitState = iota
+	posterCommitAbsent
+	posterCommitExact
+)
 
 type stagedPosterRunner interface {
 	StagePoster(context.Context, publication.StageRequest, int64, scraper.Config) (StagedPoster, error)
@@ -239,8 +248,12 @@ func commitStagedPoster(ctx context.Context, db *sql.DB, task Task, staged Stage
 		defer cancel()
 		var uncertain *store.ImmediateCommitError
 		if errors.As(err, &uncertain) {
-			if ok, _ := reconcilePosterCommit(cleanupCtx, db, task, staged); ok {
+			state, reconcileErr := reconcilePosterCommitState(cleanupCtx, db, task, staged)
+			if reconcileErr == nil && state == posterCommitExact {
 				return nil
+			}
+			if reconcileErr == nil && state == posterCommitAbsent {
+				_ = cleanupUnreferencedPoster(cleanupCtx, db, staged)
 			}
 			return err
 		}
@@ -321,6 +334,28 @@ func verifyCommittedPosterTx(ctx context.Context, tx store.SQLExecutor, task Tas
 	}
 	return nil
 }
+func reconcilePosterCommitState(ctx context.Context, db *sql.DB, task Task, staged StagedPoster) (posterCommitState, error) {
+	if task.Type != TaskPoster {
+		return posterCommitUnknown, nil
+	}
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return posterCommitUnknown, err
+	}
+	defer conn.Close()
+	if err = verifyCommittedPosterTx(ctx, conn, task, staged); err == nil {
+		return posterCommitExact, nil
+	}
+	var evidence, queue, step int
+	if queryErr := conn.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM media_ingest_evidence WHERE stage_id=?),(SELECT COUNT(*) FROM post_ingest_task WHERE id=? AND status='done'),(SELECT COUNT(*) FROM media_ingest_step WHERE id=? AND status='done')`, staged.Stage.StageID, task.ID, *task.StepID).Scan(&evidence, &queue, &step); queryErr != nil {
+		return posterCommitUnknown, queryErr
+	}
+	if evidence == 0 && queue == 0 && step == 0 {
+		return posterCommitAbsent, nil
+	}
+	return posterCommitUnknown, err
+}
+
 func reconcilePosterCommit(ctx context.Context, db *sql.DB, task Task, staged StagedPoster) (bool, error) {
 	if task.Type != TaskPoster {
 		return false, nil
@@ -375,12 +410,14 @@ func (r *LocalPosterRunner) StagePoster(ctx context.Context, req publication.Sta
 	plain := filepath.Join(dir, posterLogicalName)
 	cleanup := true
 	var derived *storage.StagedDerivedAsset
+	preserve := false
 	defer func() {
-		if cleanup {
-			_ = os.RemoveAll(dir)
+		if cleanup && !preserve {
+			_ = os.Remove(plain)
 			if r.Derived != nil {
 				r.Derived.AbortStaged(derived)
 			}
+			_ = os.Remove(dir)
 		}
 	}()
 	enabled := func(name string) bool {
@@ -415,7 +452,7 @@ func (r *LocalPosterRunner) StagePoster(ctx context.Context, req publication.Sta
 	if err := r.validateStageGuard(ctx, req); err != nil {
 		return StagedPoster{}, err
 	}
-	path, url := plain, storage.PlainPosterURL(req.MediaID)
+	path, url := plain, storage.ImmutablePlainPosterURL(req.Generation, stageID)
 	if r.Derived != nil && storage.NeedsDerivedEncryption(r.DB, req.MediaID) {
 		var err error
 		derived, err = r.Derived.StagePath(ctx, req.MediaID, posterKind, posterLogicalName, plain)
@@ -456,6 +493,19 @@ func (r *LocalPosterRunner) StagePoster(ctx context.Context, req publication.Sta
 		return e
 	})
 	if err != nil {
+		var uncertain *store.ImmediateCommitError
+		if errors.As(err, &uncertain) {
+			reconcileCtx, cancel := context.WithTimeout(context.Background(), posterReconcileTimeout)
+			defer cancel()
+			state, reconcileErr := reconcilePosterJournal(reconcileCtx, r.DB, staged)
+			if reconcileErr != nil {
+				preserve = true
+			}
+			if reconcileErr == nil && state == posterCommitExact {
+				cleanup = false
+				return staged, nil
+			}
+		}
 		return StagedPoster{}, err
 	}
 	cleanup = false

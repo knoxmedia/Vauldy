@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -22,6 +23,14 @@ func DerivedPosterAPIPath(mediaID int64) string {
 // PlainPosterURL is the legacy static URL for non-encrypted libraries.
 func PlainPosterURL(mediaID int64) string {
 	return fmt.Sprintf("/uploads/posters/%d.jpg", mediaID)
+}
+
+// ImmutablePlainPosterURL identifies one generation-scoped staged poster.
+func ImmutablePlainPosterURL(generation int64, stageID string) string {
+	if generation <= 0 || strings.TrimSpace(stageID) == "" {
+		return ""
+	}
+	return fmt.Sprintf("/uploads/posters/generation-%d/%s/poster.jpg", generation, stageID)
 }
 
 // FinalizeLocalPoster persists a captured JPEG poster, encrypting when the library requires it.
@@ -50,10 +59,43 @@ func ResolvePosterServePath(db *sql.DB, uploadDir string, mediaID int64) string 
 		return enc
 	}
 	if uploadDir != "" {
+		var raw string
+		if db != nil && db.QueryRow(`SELECT COALESCE(meta_json,'') FROM media WHERE id=?`, mediaID).Scan(&raw) == nil {
+			var meta struct {
+				Scrape struct {
+					Poster string `json:"poster"`
+					Extra  struct {
+						Poster string `json:"poster"`
+					} `json:"extra"`
+				} `json:"scrape"`
+			}
+			if json.Unmarshal([]byte(raw), &meta) == nil {
+				url := strings.TrimSpace(meta.Scrape.Poster)
+				if url == "" {
+					url = strings.TrimSpace(meta.Scrape.Extra.Poster)
+				}
+				const prefix = "/uploads/"
+				if strings.HasPrefix(url, prefix) {
+					rel := filepath.FromSlash(strings.TrimPrefix(url, prefix))
+					root, _ := filepath.Abs(uploadDir)
+					candidate, _ := filepath.Abs(filepath.Join(root, rel))
+					if withinRoot(root, candidate) {
+						if st, err := os.Stat(candidate); err == nil && !st.IsDir() && st.Size() > 0 {
+							return candidate
+						}
+					}
+				}
+			}
+		}
 		plain := filepath.Join(uploadDir, "posters", fmt.Sprintf("%d.jpg", mediaID))
 		if st, err := os.Stat(plain); err == nil && !st.IsDir() && st.Size() > 0 {
 			return plain
 		}
 	}
 	return ""
+}
+
+func withinRoot(root, path string) bool {
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
 }

@@ -79,7 +79,7 @@ func ReconcilePosterStages(ctx context.Context, db *sql.DB, roots PosterRecovery
 		if err != nil {
 			return checked, cleaned, err
 		}
-		if err = validatePosterRecoveryPath(roots, r, path); err != nil {
+		if err = validateExactPosterStagePaths(roots, r, path); err != nil {
 			_, _ = db.ExecContext(ctx, `UPDATE media_asset_stage_journal SET recovery_error=? WHERE stage_id=?`, `unsafe_path: `+err.Error(), r.stageID)
 			return checked, cleaned, err
 		}
@@ -94,7 +94,6 @@ func ReconcilePosterStages(ctx context.Context, db *sql.DB, roots PosterRecovery
 			retErr = err
 			continue
 		}
-		_ = os.RemoveAll(r.stagedPath)
 		res, err := db.ExecContext(ctx, `UPDATE media_asset_stage_journal SET recovery_error='cleaned_unreferenced',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='quarantined'`, r.stageID)
 		if err != nil {
 			return checked, cleaned, err
