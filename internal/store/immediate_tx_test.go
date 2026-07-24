@@ -145,6 +145,7 @@ type immediateRollbackTestDriver struct {
 	closes      atomic.Int32
 	beginErr    error
 	rollbackErr error
+	rollbacks   atomic.Int32
 }
 
 func (d *immediateRollbackTestDriver) Open(string) (driver.Conn, error) {
@@ -171,6 +172,7 @@ func (c *immediateRollbackTestConn) ExecContext(_ context.Context, query string,
 	case "BEGIN IMMEDIATE":
 		return driver.RowsAffected(0), c.driver.beginErr
 	case "ROLLBACK":
+		c.driver.rollbacks.Add(1)
 		return driver.RowsAffected(0), c.driver.rollbackErr
 	default:
 		return driver.RowsAffected(0), nil
@@ -223,7 +225,7 @@ func TestWithImmediateConnTxRollbackFailurePreservesErrorsAndDiscardsConnection(
 	}
 }
 
-func TestWithImmediateConnTxBeginContextCancellationDoesNotDiscardConnection(t *testing.T) {
+func TestWithImmediateConnTxBeginContextCancellationDiscardsConnection(t *testing.T) {
 	testDriver := &immediateRollbackTestDriver{beginErr: context.Canceled}
 	db := openImmediateRollbackTestDB(t, testDriver)
 
@@ -234,15 +236,15 @@ func TestWithImmediateConnTxBeginContextCancellationDoesNotDiscardConnection(t *
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error=%v want context cancellation", err)
 	}
-	if got := testDriver.closes.Load(); got != 0 {
-		t.Fatalf("closed connections=%d want begin cancellation connection retained", got)
+	if got := testDriver.closes.Load(); got != 1 {
+		t.Fatalf("closed connections=%d want ambiguous begin connection discarded", got)
 	}
 	testDriver.beginErr = nil
 	if _, err := db.ExecContext(context.Background(), "probe"); err != nil {
 		t.Fatal(err)
 	}
-	if got := testDriver.opens.Load(); got != 1 {
-		t.Fatalf("opened connections=%d want original connection reused", got)
+	if got := testDriver.opens.Load(); got != 2 {
+		t.Fatalf("opened connections=%d want replacement after ambiguous begin", got)
 	}
 }
 
@@ -286,5 +288,110 @@ func TestWithImmediateConnTxCommitAndRollbackFailurePreservesBothAndDiscardsConn
 	}
 	if got := testDriver.closes.Load(); got != 1 {
 		t.Fatalf("closed connections=%d want failed transaction connection discarded", got)
+	}
+}
+
+func TestWithImmediateConnTxAmbiguousBeginCancellationDoesNotContaminatePool(t *testing.T) {
+	db := openImmediateTxTestDB(t)
+	db.SetMaxOpenConns(1)
+	original := immediateBegin
+	ambiguousBegin := func(ctx context.Context, conn *sql.Conn) error {
+		if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+			return err
+		}
+		return context.Canceled
+	}
+	immediateBegin = ambiguousBegin
+	t.Cleanup(func() { immediateBegin = original })
+
+	for i := 0; i < 100; i++ {
+		_, err := WithImmediateConnTx(context.Background(), db, func(ImmediateConnTx) error {
+			t.Fatal("callback called after ambiguous begin")
+			return nil
+		})
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("iteration %d: error=%v want context cancellation", i, err)
+		}
+		immediateBegin = original
+		if _, err := WithImmediateConnTx(context.Background(), db, func(ImmediateConnTx) error { return nil }); err != nil {
+			t.Fatalf("iteration %d: replacement transaction: %v", i, err)
+		}
+		immediateBegin = ambiguousBegin
+	}
+}
+
+func TestWithImmediateConnTxBeginCancellationRollbackFailureDiscardsConnection(t *testing.T) {
+	rollbackErr := errors.New("rollback failed")
+	testDriver := &immediateRollbackTestDriver{beginErr: context.Canceled, rollbackErr: rollbackErr}
+	db := openImmediateRollbackTestDB(t, testDriver)
+
+	_, err := WithImmediateConnTx(context.Background(), db, func(ImmediateConnTx) error { return nil })
+	if !errors.Is(err, context.Canceled) || !errors.Is(err, rollbackErr) {
+		t.Fatalf("error=%v want cancellation and rollback failure", err)
+	}
+	if got := testDriver.rollbacks.Load(); got != 1 {
+		t.Fatalf("rollbacks=%d want cleanup attempted", got)
+	}
+	if got := testDriver.closes.Load(); got != 1 {
+		t.Fatalf("closed connections=%d want ambiguous connection discarded", got)
+	}
+}
+
+func TestWithImmediateConnTxCommitErrorAlwaysDiscardsConnection(t *testing.T) {
+	testDriver := &immediateRollbackTestDriver{}
+	db := openImmediateRollbackTestDB(t, testDriver)
+	original := immediateCommit
+	commitErr := errors.New("commit response lost")
+	immediateCommit = func(context.Context, *sql.Conn) error { return commitErr }
+	t.Cleanup(func() { immediateCommit = original })
+
+	_, err := WithImmediateConnTx(context.Background(), db, func(ImmediateConnTx) error { return nil })
+	var uncertain *ImmediateCommitError
+	if !errors.As(err, &uncertain) || !errors.Is(err, commitErr) {
+		t.Fatalf("error=%v want uncertain commit", err)
+	}
+	if got := testDriver.rollbacks.Load(); got != 1 {
+		t.Fatalf("rollbacks=%d want cleanup attempted", got)
+	}
+	if got := testDriver.closes.Load(); got != 1 {
+		t.Fatalf("closed connections=%d want uncertain connection discarded", got)
+	}
+}
+
+func TestWithImmediateConnTxRealBeginCancellationDoesNotRetainWriterLock(t *testing.T) {
+	db := openImmediateTxTestDB(t)
+	db.SetMaxOpenConns(2)
+
+	for i := 0; i < 25; i++ {
+		locker, err := db.Conn(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = locker.ExecContext(context.Background(), `BEGIN IMMEDIATE`); err != nil {
+			_ = locker.Close()
+			t.Fatalf("iteration %d: lock writer: %v", i, err)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+		_, beginErr := WithImmediateConnTx(ctx, db, func(ImmediateConnTx) error {
+			t.Fatal("callback entered while writer lock held")
+			return nil
+		})
+		ctxErr := ctx.Err()
+		cancel()
+		if ctxErr != context.DeadlineExceeded && !IsSQLiteBusy(beginErr) {
+			_ = locker.Close()
+			t.Fatalf("iteration %d: begin error=%v context error=%v want deadline or busy", i, beginErr, ctxErr)
+		}
+		if _, err = locker.ExecContext(context.Background(), `ROLLBACK`); err != nil {
+			_ = locker.Close()
+			t.Fatalf("iteration %d: release writer: %v", i, err)
+		}
+		if err = locker.Close(); err != nil {
+			t.Fatalf("iteration %d: close writer: %v", i, err)
+		}
+		if _, err = WithImmediateConnTx(context.Background(), db, func(ImmediateConnTx) error { return nil }); err != nil {
+			t.Fatalf("iteration %d: transaction after cancellation: %v", i, err)
+		}
 	}
 }

@@ -37,6 +37,13 @@ func (e *ImmediateCommitError) Error() string {
 
 func (e *ImmediateCommitError) Unwrap() error { return e.Cause }
 
+var immediateBegin = func(ctx context.Context, conn *sql.Conn) error {
+	_, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`)
+	return err
+}
+
+const immediateCleanupTimeout = time.Second
+
 var immediateCommit = func(ctx context.Context, conn *sql.Conn) error {
 	_, err := conn.ExecContext(ctx, `COMMIT`)
 	return err
@@ -47,6 +54,7 @@ func WithImmediateConnTx(ctx context.Context, db *sql.DB, fn func(ImmediateConnT
 	if err != nil {
 		return outcome, err
 	}
+	discarded := false
 	defer conn.Close()
 
 	var restoreBusyTimeout func() error
@@ -69,9 +77,13 @@ func WithImmediateConnTx(ctx context.Context, db *sql.DB, fn func(ImmediateConnT
 				return restoreErr
 			}
 			defer func() {
+				if discarded {
+					return
+				}
 				if restoreErr := restoreBusyTimeout(); restoreErr != nil {
 					err = errors.Join(err, fmt.Errorf("store: restore immediate transaction busy timeout: %w", restoreErr))
-					if discardErr := conn.Raw(func(any) error { return driver.ErrBadConn }); discardErr != nil && !errors.Is(discardErr, driver.ErrBadConn) {
+					discarded = true
+					if discardErr := discardSQLConn(conn); discardErr != nil {
 						err = errors.Join(err, fmt.Errorf("store: discard connection after busy timeout restore failure: %w", discardErr))
 					}
 				}
@@ -79,7 +91,20 @@ func WithImmediateConnTx(ctx context.Context, db *sql.DB, fn func(ImmediateConnT
 		}
 	}
 
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+	if beginErr := immediateBegin(ctx, conn); beginErr != nil {
+		err = beginErr
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), immediateCleanupTimeout)
+		_, rollbackErr := conn.ExecContext(cleanupCtx, `ROLLBACK`)
+		cancel()
+		if rollbackErr != nil {
+			err = errors.Join(err, fmt.Errorf("store: rollback after failed immediate transaction begin: %w", rollbackErr))
+		}
+		if errors.Is(beginErr, context.Canceled) || errors.Is(beginErr, context.DeadlineExceeded) || rollbackErr != nil {
+			discarded = true
+			if discardErr := discardSQLConn(conn); discardErr != nil {
+				err = errors.Join(err, fmt.Errorf("store: discard connection after ambiguous immediate transaction begin: %w", discardErr))
+			}
+		}
 		return outcome, err
 	}
 	finished := false
@@ -87,10 +112,16 @@ func WithImmediateConnTx(ctx context.Context, db *sql.DB, fn func(ImmediateConnT
 		if finished {
 			return
 		}
-		if _, rollbackErr := conn.ExecContext(context.Background(), `ROLLBACK`); rollbackErr != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), immediateCleanupTimeout)
+		_, rollbackErr := conn.ExecContext(cleanupCtx, `ROLLBACK`)
+		cancel()
+		if rollbackErr != nil {
 			err = errors.Join(err, fmt.Errorf("store: rollback immediate transaction: %w", rollbackErr))
-			if discardErr := conn.Raw(func(any) error { return driver.ErrBadConn }); discardErr != nil && !errors.Is(discardErr, driver.ErrBadConn) {
-				err = errors.Join(err, fmt.Errorf("store: discard connection after rollback failure: %w", discardErr))
+		}
+		if outcome.CommitAttempted || rollbackErr != nil {
+			discarded = true
+			if discardErr := discardSQLConn(conn); discardErr != nil {
+				err = errors.Join(err, fmt.Errorf("store: discard uncertain immediate transaction connection: %w", discardErr))
 			}
 		}
 	}()
@@ -105,4 +136,12 @@ func WithImmediateConnTx(ctx context.Context, db *sql.DB, fn func(ImmediateConnT
 	outcome.CommitConfirmed = true
 	finished = true
 	return outcome, nil
+}
+
+func discardSQLConn(conn *sql.Conn) error {
+	err := conn.Raw(func(any) error { return driver.ErrBadConn })
+	if errors.Is(err, driver.ErrBadConn) {
+		return nil
+	}
+	return err
 }
