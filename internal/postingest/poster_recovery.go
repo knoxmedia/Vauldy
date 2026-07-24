@@ -15,6 +15,12 @@ import (
 )
 
 type PosterRecoveryRoots struct{ Upload, Derived string }
+type repairPosterJournalRow struct {
+	posterJournalRow
+	queueID int64
+	attempt int
+}
+
 type posterJournalRow struct {
 	stageID                                       string
 	mediaID, runID, stepID, generation            int64
@@ -101,6 +107,82 @@ func ReconcilePosterStages(ctx context.Context, db *sql.DB, roots PosterRecovery
 		n, _ := res.RowsAffected()
 		if n == 1 {
 			cleaned++
+		}
+	}
+	remaining := limit - checked
+	if remaining > 0 {
+		rows, e := db.QueryContext(ctx, `SELECT stage_id,queue_id,media_id,run_id,generation,owner_token,attempt,source_fingerprint,state,staged_path,hashes_sizes_json FROM poster_repair_stage WHERE recovery_error NOT IN ('cleaned_unreferenced','verified_committed') ORDER BY updated_at,stage_id LIMIT ?`, remaining)
+		if e != nil {
+			return checked, cleaned, e
+		}
+		var repairs []repairPosterJournalRow
+		for rows.Next() {
+			var r repairPosterJournalRow
+			if e = rows.Scan(&r.stageID, &r.queueID, &r.mediaID, &r.runID, &r.generation, &r.owner, &r.attempt, &r.fingerprint, &r.state, &r.stagedPath, &r.hashes); e != nil {
+				rows.Close()
+				return checked, cleaned, e
+			}
+			repairs = append(repairs, r)
+		}
+		if e = rows.Close(); e != nil {
+			return checked, cleaned, e
+		}
+		for _, rr := range repairs {
+			r, queueID, attempt := rr.posterJournalRow, rr.queueID, rr.attempt
+			checked++
+			var committed, active int
+			e = db.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM poster_repair_stage s JOIN post_ingest_task p ON p.id=s.queue_id JOIN media m ON m.id=s.media_id WHERE s.stage_id=? AND s.queue_id=? AND s.attempt=? AND s.state='committed' AND p.status='done' AND (json_extract(m.meta_json,'$.scrape.poster')=json_extract(s.hashes_sizes_json,'$.url') OR json_extract(m.meta_json,'$.scrape.extra.poster')=json_extract(s.hashes_sizes_json,'$.url'))),(SELECT COUNT(*) FROM poster_repair_stage s JOIN post_ingest_task p ON p.id=s.queue_id JOIN media_ingest_run run ON run.id=s.run_id JOIN media m ON m.id=s.media_id WHERE s.stage_id=? AND s.queue_id=? AND s.attempt=? AND p.task_type='poster_repair' AND p.status='running' AND p.lease_owner=s.owner_token AND p.attempts=s.attempt AND p.ingest_run_id=s.run_id AND p.generation=s.generation AND p.ingest_step_id IS NULL AND run.superseded_at IS NULL AND run.superseded_by_generation IS NULL AND m.ingest_generation=s.generation AND m.publication_state IN ('published','degraded') AND m.published_at IS NOT NULL)`, r.stageID, queueID, attempt, r.stageID, queueID, attempt).Scan(&committed, &active)
+			if e != nil {
+				return checked, cleaned, e
+			}
+			if committed == 1 {
+				_, _ = db.ExecContext(ctx, `UPDATE poster_repair_stage SET recovery_error='verified_committed',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='committed'`, r.stageID)
+				continue
+			}
+			if active == 1 {
+				continue
+			}
+			if r.state == "staged" {
+				var claimed int64
+				_, e = store.WithImmediateConnTx(ctx, db, func(tx store.ImmediateConnTx) error {
+					res, x := tx.ExecContext(ctx, `UPDATE poster_repair_stage SET state='quarantined',recovery_error='quarantined_unreferenced',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND queue_id=? AND attempt=? AND state='staged' AND NOT EXISTS(SELECT 1 FROM post_ingest_task p JOIN media_ingest_run run ON run.id=p.ingest_run_id JOIN media m ON m.id=p.media_id WHERE p.id=? AND p.task_type='poster_repair' AND p.status='running' AND p.lease_owner=? AND p.attempts=? AND run.superseded_at IS NULL AND run.superseded_by_generation IS NULL AND m.ingest_generation=p.generation AND m.publication_state IN ('published','degraded') AND m.published_at IS NOT NULL)`, r.stageID, queueID, attempt, queueID, r.owner, attempt)
+					if x == nil {
+						claimed, _ = res.RowsAffected()
+					}
+					return x
+				})
+				if e != nil {
+					return checked, cleaned, e
+				}
+				if claimed != 1 {
+					continue
+				}
+			}
+			path, x := posterJournalPath(r)
+			if x != nil {
+				return checked, cleaned, x
+			}
+			if x = validateExactPosterStagePaths(roots, r, path); x != nil {
+				return checked, cleaned, x
+			}
+			refs, x := posterPathReferenceCount(ctx, db, path, "")
+			if x != nil {
+				return checked, cleaned, x
+			}
+			if refs > 0 {
+				continue
+			}
+			if x = os.Remove(path); x != nil && !os.IsNotExist(x) {
+				return checked, cleaned, x
+			}
+			res, x := db.ExecContext(ctx, `UPDATE poster_repair_stage SET recovery_error='cleaned_unreferenced',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND queue_id=? AND attempt=? AND state='quarantined'`, r.stageID, queueID, attempt)
+			if x != nil {
+				return checked, cleaned, x
+			}
+			n, _ := res.RowsAffected()
+			if n == 1 {
+				cleaned++
+			}
 		}
 	}
 	return checked, cleaned, retErr

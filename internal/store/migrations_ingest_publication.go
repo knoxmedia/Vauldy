@@ -900,7 +900,7 @@ type publicationGraphTable struct {
 	expectedChecksum  string
 }
 
-var publicationGraphOrder = []string{"media_ingest_step", "post_ingest_task", "scrape_task", "transcode_task", "pretranscode_task_meta", "pretranscode_rendition_job", "media_ingest_step_dependency", "media_ingest_evidence", "media_asset_stage_journal"}
+var publicationGraphOrder = []string{"media_ingest_step", "post_ingest_task", "scrape_task", "transcode_task", "pretranscode_task_meta", "pretranscode_rendition_job", "media_ingest_step_dependency", "media_ingest_evidence", "media_asset_stage_journal", "poster_repair_stage"}
 
 func quoteIdent(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
 func backupPublicationGraph(ctx context.Context, q SQLExecutor) ([]publicationGraphTable, error) {
@@ -970,6 +970,7 @@ var publicationManagedIndexes = map[string]map[string]string{
 	},
 	"media_ingest_step_dependency": {"idx_ingest_dependency_visible": `CREATE UNIQUE INDEX idx_ingest_dependency_visible ON media_ingest_step_dependency(step_id) WHERE dependency_kind='media_visible'`},
 	"media_asset_stage_journal":    {"idx_asset_stage_recovery": `CREATE INDEX idx_asset_stage_recovery ON media_asset_stage_journal(state,updated_at)`},
+	"poster_repair_stage":          {"idx_poster_repair_stage_recovery": `CREATE INDEX idx_poster_repair_stage_recovery ON poster_repair_stage(state,recovery_error,updated_at)`},
 }
 
 func publicationManagedIndex(table, name, sqlText string) bool {
@@ -1133,7 +1134,7 @@ func graphMeta(g []publicationGraphTable, n string) (publicationGraphTable, bool
 	return publicationGraphTable{}, false
 }
 func dropPublicationGraph(ctx context.Context, q SQLExecutor, g []publicationGraphTable) error {
-	order := []string{"pretranscode_rendition_job", "pretranscode_task_meta", "media_asset_stage_journal", "media_ingest_evidence", "media_ingest_step_dependency", "post_ingest_task", "scrape_task", "transcode_task", "media_ingest_step"}
+	order := []string{"pretranscode_rendition_job", "pretranscode_task_meta", "poster_repair_stage", "media_asset_stage_journal", "media_ingest_evidence", "media_ingest_step_dependency", "post_ingest_task", "scrape_task", "transcode_task", "media_ingest_step"}
 	for _, n := range order {
 		if _, ok := graphMeta(g, n); ok {
 			if _, e := q.ExecContext(ctx, `DROP TABLE `+quoteIdent(n)); e != nil {
@@ -1503,7 +1504,7 @@ const canonicalAssetStageJournalSchema = `CREATE TABLE media_asset_stage_journal
  FOREIGN KEY(step_id,media_id,generation) REFERENCES media_ingest_step(id,media_id,generation) ON DELETE CASCADE)`
 
 const canonicalPosterRepairStageSchema = `CREATE TABLE poster_repair_stage(
- stage_id TEXT PRIMARY KEY,queue_id INTEGER NOT NULL REFERENCES post_ingest_task(id) ON DELETE CASCADE,media_id INTEGER NOT NULL,run_id INTEGER NOT NULL,generation INTEGER NOT NULL,
+ stage_id TEXT PRIMARY KEY,queue_id INTEGER NOT NULL,media_id INTEGER NOT NULL,run_id INTEGER NOT NULL,generation INTEGER NOT NULL,
  owner_token TEXT NOT NULL,attempt INTEGER NOT NULL,source_fingerprint TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('staged','quarantined','committed')),
  staged_path TEXT NOT NULL,hashes_sizes_json TEXT NOT NULL CHECK(json_valid(hashes_sizes_json)),recovery_error TEXT NOT NULL DEFAULT '',created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
  UNIQUE(queue_id,attempt),
@@ -1547,13 +1548,10 @@ func createPublicationChildren(ctx context.Context, q SQLExecutor, g []publicati
 			}
 		}
 	}
-	if _, e := q.ExecContext(ctx, strings.Replace(canonicalPosterRepairStageSchema, "CREATE TABLE poster_repair_stage", "CREATE TABLE IF NOT EXISTS poster_repair_stage", 1)); e != nil {
-		return e
-	}
 	if _, e := q.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS scrape_effect_commit(task_id INTEGER NOT NULL,attempt INTEGER NOT NULL,generation INTEGER NOT NULL,stage_id TEXT NOT NULL DEFAULT '',manifest_json TEXT NOT NULL CHECK(json_valid(manifest_json)),manifest_digest TEXT NOT NULL,created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(task_id,attempt),FOREIGN KEY(task_id) REFERENCES scrape_task(id) ON DELETE CASCADE)`); e != nil {
 		return e
 	}
-	for _, stmt := range []string{canonicalIngestDependencySchema, publicationManagedIndexes["media_ingest_step_dependency"]["idx_ingest_dependency_visible"], canonicalIngestEvidenceSchema, canonicalAssetStageJournalSchema, publicationManagedIndexes["media_asset_stage_journal"]["idx_asset_stage_recovery"]} {
+	for _, stmt := range []string{canonicalIngestDependencySchema, publicationManagedIndexes["media_ingest_step_dependency"]["idx_ingest_dependency_visible"], canonicalIngestEvidenceSchema, canonicalAssetStageJournalSchema, publicationManagedIndexes["media_asset_stage_journal"]["idx_asset_stage_recovery"], canonicalPosterRepairStageSchema, publicationManagedIndexes["poster_repair_stage"]["idx_poster_repair_stage_recovery"]} {
 		if _, e := q.ExecContext(ctx, stmt); e != nil {
 			return e
 		}
@@ -2200,6 +2198,18 @@ func validatePublicationV2Schema(ctx context.Context, q SQLExecutor) error {
 		return err
 	}
 	if err := exactPublicationTable(ctx, q, "media_asset_stage_journal", canonicalAssetStageJournalSchema); err != nil {
+		return err
+	}
+	if err := exactPublicationTable(ctx, q, "poster_repair_stage", canonicalPosterRepairStageSchema); err != nil {
+		return err
+	}
+	if err := requirePublicationClauses(ctx, q, "poster_repair_stage", `CHECK(state IN ('staged','quarantined','committed'))`, `CHECK(json_valid(hashes_sizes_json))`, `UNIQUE(queue_id,attempt)`); err != nil {
+		return err
+	}
+	if err := requirePublicationFKSet(ctx, q, "poster_repair_stage", "media_ingest_run:run_id,media_id,generation:id,media_id,generation:cascade"); err != nil {
+		return err
+	}
+	if err := requirePublicationIndex(ctx, q, "poster_repair_stage", "idx_poster_repair_stage_recovery", publicationManagedIndexes["poster_repair_stage"]["idx_poster_repair_stage_recovery"], 0, 0); err != nil {
 		return err
 	}
 	if err := requirePublicationClauses(ctx, q, "media_ingest_step_dependency",

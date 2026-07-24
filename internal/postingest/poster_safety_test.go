@@ -286,3 +286,137 @@ func TestRepairPosterCommitRetainsNewAndCleansOldImmutableStage(t *testing.T) {
 	}
 	_ = oldURL
 }
+
+func seedRepairPosterStage(t *testing.T) (*sql.DB, string, Task, *LocalPosterRunner, publication.StageRequest) {
+	db, upload, task := seedCurrentLinkedPosterTask(t)
+	_, err := db.Exec(`UPDATE media SET publication_state='published',published_at=CURRENT_TIMESTAMP WHERE id=?; UPDATE media_ingest_run SET status='published' WHERE id=?; UPDATE post_ingest_task SET task_type='poster_repair',ingest_step_id=NULL WHERE id=?`, task.MediaID, *task.RunID, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task.Type, task.StepID = TaskPosterRepair, nil
+	fp, _ := sourceFingerprint(taskSource(t, db, task.MediaID))
+	req := publication.StageRequest{MediaID: task.MediaID, RunID: *task.RunID, Generation: task.Generation, QueueID: task.ID, Attempt: task.Attempts, OwnerToken: task.LeaseOwner, SourcePath: taskSource(t, db, task.MediaID), SourceFingerprint: fp}
+	return db, upload, task, realPosterStageRunner(t, db, upload), req
+}
+
+func TestRepairPosterJournalUncertainByTaskClass(t *testing.T) {
+	t.Run("committed", func(t *testing.T) {
+		db, _, _, runner, req := seedRepairPosterStage(t)
+		orig := withImmediatePosterJournalTx
+		withImmediatePosterJournalTx = func(ctx context.Context, d *sql.DB, fn func(store.ImmediateConnTx) error) (store.ImmediateOutcome, error) {
+			out, e := store.WithImmediateConnTx(ctx, d, fn)
+			if e != nil {
+				return out, e
+			}
+			return store.ImmediateOutcome{CommitAttempted: true}, &store.ImmediateCommitError{Cause: errors.New("lost")}
+		}
+		t.Cleanup(func() { withImmediatePosterJournalTx = orig })
+		staged, e := runner.StagePoster(context.Background(), req, 1, screenGrabberConfig())
+		if e != nil {
+			t.Fatal(e)
+		}
+		if _, e = os.Stat(staged.Path); e != nil {
+			t.Fatal(e)
+		}
+		var n int
+		if e = db.QueryRow(`SELECT COUNT(*) FROM poster_repair_stage WHERE stage_id=? AND queue_id=? AND attempt=?`, staged.Stage.StageID, req.QueueID, req.Attempt).Scan(&n); e != nil || n != 1 {
+			t.Fatalf("journal=%d err=%v", n, e)
+		}
+	})
+	t.Run("absent", func(t *testing.T) {
+		_, upload, _, runner, req := seedRepairPosterStage(t)
+		orig := withImmediatePosterJournalTx
+		withImmediatePosterJournalTx = func(context.Context, *sql.DB, func(store.ImmediateConnTx) error) (store.ImmediateOutcome, error) {
+			return store.ImmediateOutcome{CommitAttempted: true}, &store.ImmediateCommitError{Cause: errors.New("lost")}
+		}
+		t.Cleanup(func() { withImmediatePosterJournalTx = orig })
+		_, e := runner.StagePoster(context.Background(), req, 1, screenGrabberConfig())
+		var u *store.ImmediateCommitError
+		if !errors.As(e, &u) {
+			t.Fatalf("err=%v", e)
+		}
+		files, _ := filepath.Glob(filepath.Join(upload, "posters", "generation-1", "*", "poster.jpg"))
+		if len(files) != 0 {
+			t.Fatalf("retained=%v", files)
+		}
+	})
+	t.Run("query failure", func(t *testing.T) {
+		_, upload, _, runner, req := seedRepairPosterStage(t)
+		orig, ro := withImmediatePosterJournalTx, reconcilePosterJournal
+		withImmediatePosterJournalTx = func(context.Context, *sql.DB, func(store.ImmediateConnTx) error) (store.ImmediateOutcome, error) {
+			return store.ImmediateOutcome{CommitAttempted: true}, &store.ImmediateCommitError{Cause: errors.New("lost")}
+		}
+		reconcilePosterJournal = func(context.Context, *sql.DB, StagedPoster) (posterCommitState, error) {
+			return posterCommitUnknown, errors.New("query")
+		}
+		t.Cleanup(func() { withImmediatePosterJournalTx = orig; reconcilePosterJournal = ro })
+		_, e := runner.StagePoster(context.Background(), req, 1, screenGrabberConfig())
+		var u *store.ImmediateCommitError
+		if !errors.As(e, &u) {
+			t.Fatalf("err=%v", e)
+		}
+		files, _ := filepath.Glob(filepath.Join(upload, "posters", "generation-1", "*", "poster.jpg"))
+		if len(files) != 1 {
+			t.Fatalf("files=%v", files)
+		}
+	})
+}
+
+func TestRepairPosterRecoveryStates(t *testing.T) {
+	makeStage := func(t *testing.T) (*sql.DB, string, Task, StagedPoster) {
+		db, upload, task, runner, req := seedRepairPosterStage(t)
+		staged, e := runner.StagePoster(context.Background(), req, 1, screenGrabberConfig())
+		if e != nil {
+			t.Fatal(e)
+		}
+		return db, upload, task, staged
+	}
+	t.Run("stale cleanup", func(t *testing.T) {
+		db, upload, task, staged := makeStage(t)
+		_, _ = db.Exec(`UPDATE post_ingest_task SET status='cancelled',lease_owner=NULL WHERE id=?`, task.ID)
+		checked, cleaned, e := ReconcilePosterStages(context.Background(), db, PosterRecoveryRoots{Upload: upload}, 100)
+		if e != nil || checked < 1 || cleaned != 1 {
+			t.Fatalf("checked=%d cleaned=%d err=%v", checked, cleaned, e)
+		}
+		if _, e = os.Stat(staged.Path); !os.IsNotExist(e) {
+			t.Fatalf("retained=%v", e)
+		}
+	})
+	t.Run("active retained", func(t *testing.T) {
+		db, upload, _, staged := makeStage(t)
+		_, cleaned, e := ReconcilePosterStages(context.Background(), db, PosterRecoveryRoots{Upload: upload}, 100)
+		if e != nil || cleaned != 0 {
+			t.Fatalf("cleaned=%d err=%v", cleaned, e)
+		}
+		if _, e = os.Stat(staged.Path); e != nil {
+			t.Fatal(e)
+		}
+	})
+	t.Run("committed retained", func(t *testing.T) {
+		db, upload, task, staged := makeStage(t)
+		if e := commitStagedPoster(context.Background(), db, task, staged); e != nil {
+			t.Fatal(e)
+		}
+		_, cleaned, e := ReconcilePosterStages(context.Background(), db, PosterRecoveryRoots{Upload: upload}, 100)
+		if e != nil || cleaned != 0 {
+			t.Fatalf("cleaned=%d err=%v", cleaned, e)
+		}
+		if _, e = os.Stat(staged.Path); e != nil {
+			t.Fatal(e)
+		}
+	})
+	t.Run("no starvation", func(t *testing.T) {
+		db, upload, task, _ := makeStage(t)
+		_, _ = db.Exec(`UPDATE post_ingest_task SET status='cancelled',lease_owner=NULL WHERE id=?`, task.ID)
+		for i := 0; i < 3; i++ {
+			_, _, e := ReconcilePosterStages(context.Background(), db, PosterRecoveryRoots{Upload: upload}, 1)
+			if e != nil {
+				t.Fatal(e)
+			}
+		}
+		var got string
+		if e := db.QueryRow(`SELECT recovery_error FROM poster_repair_stage LIMIT 1`).Scan(&got); e != nil || got != "cleaned_unreferenced" {
+			t.Fatalf("got=%q err=%v", got, e)
+		}
+	})
+}
