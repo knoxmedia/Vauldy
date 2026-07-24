@@ -81,6 +81,9 @@ func NewWorker(db *sql.DB, vault *keystore.Vault, ffmpegPath, transcodeDir strin
 
 // Start launches the polling loop until ctx is cancelled.
 func (w *Worker) Start(ctx context.Context) {
+	if _, err := RecoverExpiredPrepareParents(ctx, w.DB, 100); err != nil {
+		log.Printf("pretranscode recover expired: %v", err)
+	}
 	var waitingTasks, waitingJobs int
 	_ = w.DB.QueryRow(`SELECT COUNT(1) FROM transcode_task WHERE status='waiting' AND COALESCE(task_type,'batch')='pretranscode'`).Scan(&waitingTasks)
 	_ = w.DB.QueryRow(`SELECT COUNT(1) FROM pretranscode_rendition_job WHERE status='waiting'`).Scan(&waitingJobs)
@@ -93,6 +96,9 @@ func (w *Worker) Start(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if _, err := RecoverExpiredPrepareParents(ctx, w.DB, 100); err != nil {
+				log.Printf("pretranscode recover expired: %v", err)
+			}
 			w.runOnce(ctx)
 		}
 	}
@@ -318,7 +324,8 @@ func (w *Worker) runRenditionJob(parent context.Context, job *claimedJob, p *Pre
 		cancel()
 	}()
 	leaseDone := make(chan struct{})
-	go w.renewJobLeaseLoop(ctx, *job, leaseDone)
+	leaseLost := make(chan error, 1)
+	go w.renewJobLeaseLoop(ctx, *job, leaseDone, cancel, leaseLost)
 	defer close(leaseDone)
 
 	// Acquire concurrency slot based on encoder family.
@@ -428,7 +435,15 @@ func (w *Worker) runRenditionJob(parent context.Context, job *claimedJob, p *Pre
 	}()
 	err = cmd.Wait()
 	<-done
+	select {
+	case <-leaseLost:
+		return
+	default:
+	}
 	if err != nil {
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return
+		}
 		w.failJob(job, trimErr(err, stderr.String()), encoder)
 		return
 	}
@@ -507,7 +522,7 @@ func (w *Worker) renewJobLease(ctx context.Context, job claimedJob) error {
 	return err
 }
 
-func (w *Worker) renewJobLeaseLoop(ctx context.Context, job claimedJob, done <-chan struct{}) {
+func (w *Worker) renewJobLeaseLoop(ctx context.Context, job claimedJob, done <-chan struct{}, cancel context.CancelFunc, lost chan<- error) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -518,6 +533,11 @@ func (w *Worker) renewJobLeaseLoop(ctx context.Context, job claimedJob, done <-c
 			return
 		case <-ticker.C:
 			if err := w.renewJobLease(ctx, job); err != nil {
+				select {
+				case lost <- err:
+				default:
+				}
+				cancel()
 				return
 			}
 		}
@@ -562,7 +582,7 @@ func (w *Worker) finalizeJobAndTaskTx(ctx context.Context, job claimedJob, termi
 		return false, err
 	}
 	defer tx.Rollback()
-	res, err := tx.ExecContext(ctx, `UPDATE pretranscode_rendition_job SET status=?,progress=?,output_path=?,error_message=?,encoder_used=?,completed_at=CURRENT_TIMESTAMP WHERE id=? AND task_id=? AND status='running' AND lease_owner=?`, terminal.Status, terminal.Progress, terminal.OutputPath, terminal.ErrorMessage, terminal.Encoder, job.ID, job.TaskID, job.Owner)
+	res, err := tx.ExecContext(ctx, `UPDATE pretranscode_rendition_job SET status=?,progress=?,output_path=?,error_message=?,encoder_used=?,completed_at=CURRENT_TIMESTAMP WHERE id=? AND task_id=? AND status='running' AND lease_owner=? AND EXISTS(SELECT 1 FROM transcode_task t JOIN media_ingest_run r ON r.id=t.ingest_run_id JOIN media_ingest_step s ON s.id=t.ingest_step_id JOIN media m ON m.id=t.media_id WHERE t.id=pretranscode_rendition_job.task_id AND t.status='running' AND t.lease_owner=? AND t.ingest_run_id=? AND t.ingest_step_id=? AND t.media_id=? AND t.generation=? AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND s.status='running' AND s.lease_owner=? AND m.ingest_generation=?)`, terminal.Status, terminal.Progress, terminal.OutputPath, terminal.ErrorMessage, terminal.Encoder, job.ID, job.TaskID, job.Owner, job.Parent.Owner, job.Parent.RunID, job.Parent.StepID, job.Parent.MediaID, job.Parent.Generation, job.Parent.Owner, job.Parent.Generation)
 	if err != nil {
 		return false, err
 	}
