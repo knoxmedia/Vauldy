@@ -23,7 +23,7 @@ func ReconcileEncryptionStages(ctx context.Context, db *sql.DB, roots Encryption
 	if limit <= 0 || limit > encryptionStageBatchMax {
 		limit = encryptionStageBatchMax
 	}
-	rows, err := db.QueryContext(ctx, `SELECT stage_id,task_id,attempt,media_id,run_id,step_id,generation,owner_token,source_path,quarantine_path,source_fingerprint,enc_path,wrapped_dek,iv,enc_sha256,enc_size,state FROM media_encryption_stage_journal WHERE recovery_error NOT IN ('cleaned_unreferenced','verified_committed') ORDER BY updated_at,stage_id LIMIT ?`, limit)
+	rows, err := db.QueryContext(ctx, `SELECT stage_id,task_id,attempt,media_id,run_id,step_id,generation,owner_token,source_path,quarantine_path,source_fingerprint,enc_path,wrapped_dek,iv,enc_sha256,enc_size,state FROM media_encryption_stage_journal WHERE state IN ('staged','quarantining','quarantined') OR (state='committed' AND recovery_error='') ORDER BY updated_at,stage_id LIMIT ?`, limit)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -51,7 +51,7 @@ func ReconcileEncryptionStages(ctx context.Context, db *sql.DB, roots Encryption
 		}
 		if !managedEncryptionPath(stageRoot, r.enc) || r.quarantine != "" && !managedEncryptionPath(roots.Quarantine, r.quarantine) {
 			_, _ = db.ExecContext(ctx, `UPDATE media SET publication_state='failed',last_error='unsafe encryption recovery path' WHERE id=?`, r.media)
-			_, _ = db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='failed_closed',recovery_error='unsafe_path' WHERE stage_id=?`, r.stage)
+			_, _ = db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='failed_closed',recovery_error='unsafe_path',updated_at=CURRENT_TIMESTAMP WHERE stage_id=?`, r.stage)
 			return checked, cleaned, errors.New("unsafe encryption recovery path")
 		}
 		var selected string
@@ -65,7 +65,7 @@ func ReconcileEncryptionStages(ctx context.Context, db *sql.DB, roots Encryption
 			if r.quarantine != "" {
 				_ = os.Remove(r.quarantine)
 			}
-			_, _ = db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='committed',recovery_error='verified_committed' WHERE stage_id=?`, r.stage)
+			_, _ = db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='committed',recovery_error='verified_committed',updated_at=CURRENT_TIMESTAMP WHERE stage_id=?`, r.stage)
 			continue
 		}
 		var active int
@@ -85,13 +85,13 @@ func ReconcileEncryptionStages(ctx context.Context, db *sql.DB, roots Encryption
 				if !samePathForEvidence(actual, r.quarantine) {
 					return checked, cleaned, errors.New("recovery quarantine reservation mismatch")
 				}
-				_, err = db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='quarantined' WHERE stage_id=? AND state='quarantining'`, r.stage)
+				_, err = db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='quarantined',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='quarantining'`, r.stage)
 				if err != nil {
 					return checked, cleaned, err
 				}
 				continue
 			case os.IsNotExist(sourceErr) && quarantineErr == nil:
-				_, err = db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='quarantined' WHERE stage_id=? AND state='quarantining'`, r.stage)
+				_, err = db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='quarantined',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='quarantining'`, r.stage)
 				if err != nil {
 					return checked, cleaned, err
 				}
@@ -105,7 +105,7 @@ func ReconcileEncryptionStages(ctx context.Context, db *sql.DB, roots Encryption
 				_ = sourceInfo
 				_ = quarantineInfo
 				_ = os.Remove(r.source)
-				_, err = db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='quarantined' WHERE stage_id=? AND state='quarantining'`, r.stage)
+				_, err = db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='quarantined',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='quarantining'`, r.stage)
 				if err != nil {
 					return checked, cleaned, err
 				}
@@ -117,12 +117,12 @@ func ReconcileEncryptionStages(ctx context.Context, db *sql.DB, roots Encryption
 		if r.quarantine != "" {
 			if err = restoreQuarantinedPlaintext(r.quarantine, r.source, roots.Quarantine); err != nil {
 				_, _ = db.ExecContext(ctx, `UPDATE media SET publication_state='failed',last_error=? WHERE id=?`, "encryption recovery restore failed: "+err.Error(), r.media)
-				_, _ = db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='failed_closed',recovery_error=? WHERE stage_id=?`, err.Error(), r.stage)
+				_, _ = db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='failed_closed',recovery_error=?,updated_at=CURRENT_TIMESTAMP WHERE stage_id=?`, err.Error(), r.stage)
 				return checked, cleaned, err
 			}
 		}
 		_ = os.Remove(r.enc)
-		_, _ = db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='restored',quarantine_path='',recovery_error='stale_restored' WHERE stage_id=?`, r.stage)
+		_, _ = db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='restored',quarantine_path='',recovery_error='stale_restored',updated_at=CURRENT_TIMESTAMP WHERE stage_id=?`, r.stage)
 		cleaned++
 	}
 	return checked, cleaned, retErr

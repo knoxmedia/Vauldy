@@ -144,68 +144,11 @@ func (s *AssetEncryptor) EncryptionPrivateRoot() string {
 	return ""
 }
 
-func (s *AssetEncryptor) EncryptMedia(ctx context.Context, mediaID int64) (err error) {
-	leader, flight := acquireEncryptFlight(mediaID)
-	if !leader {
-		return waitEncryptFlight(ctx, flight)
-	}
-	defer func() { finishEncryptFlight(mediaID, flight, err) }()
-	return s.commitStagedCompatibility(ctx, mediaID, false)
+func (s *AssetEncryptor) EncryptMedia(ctx context.Context, mediaID int64) error {
+	return s.encryptMediaLegacyPublic(ctx, mediaID)
 }
 func (s *AssetEncryptor) EncryptMediaManual(ctx context.Context, mediaID int64) error {
-	return s.commitStagedCompatibility(ctx, mediaID, true)
-}
-func (s *AssetEncryptor) commitStagedCompatibility(ctx context.Context, mediaID int64, manual bool) error {
-	if s == nil || s.DB == nil || s.Vault == nil {
-		if manual {
-			return errors.New("encrypted assets not configured")
-		}
-		return nil
-	}
-	if !manual {
-		var enabled int
-		if err := s.DB.QueryRowContext(ctx, `SELECT COALESCE(l.encrypted_assets_enabled,0) FROM media m JOIN library l ON l.id=m.library_id WHERE m.id=?`, mediaID).Scan(&enabled); err != nil {
-			return err
-		}
-		if enabled != 1 {
-			return nil
-		}
-	}
-	var selected, existing string
-	err := s.DB.QueryRowContext(ctx, `SELECT m.file_path,COALESCE(a.enc_path,'') FROM media m LEFT JOIN media_encrypted_assets a ON a.media_id=m.id AND a.status='encrypted' WHERE m.id=?`, mediaID).Scan(&selected, &existing)
-	if err != nil {
-		return err
-	}
-	if existing != "" && sameEncryptedPath(selected, existing) {
-		ok, _ := ValidEncryptedFile(existing)
-		if ok {
-			return ErrAlreadyEncrypted
-		}
-	}
-	stage, err := s.StageMediaEncryption(ctx, mediaID)
-	if err != nil {
-		return err
-	}
-	tx, err := s.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if err = runEncryptCommitGuard(ctx, tx); err != nil {
-		_ = os.Remove(stage.EncPath)
-		return err
-	}
-	if err = CommitStagedMediaEncryptionTx(ctx, tx, stage); err != nil {
-		return err
-	}
-	if err = tx.Commit(); err != nil {
-		return err
-	}
-	persistPlainMD5AfterEncrypt(s.DB, mediaID, stage.OriginalPath)
-	if stage.CleanupPlaintext {
-		cleanupPlaintextAfterEncrypt(s.DB, mediaID, stage.OriginalPath)
-	}
-	return nil
+	return s.encryptMediaManualLegacy(ctx, mediaID)
 }
 func CommitStagedMediaEncryptionTx(ctx context.Context, tx *sql.Tx, stage StagedMediaEncryption) error {
 	return commitStagedEncryptionSQL(ctx, tx, stage)

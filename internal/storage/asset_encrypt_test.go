@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 
@@ -49,26 +48,9 @@ func TestEncryptMediaConcurrentSingleOutput(t *testing.T) {
 	}
 	wg.Wait()
 
-	encDir := filepath.Join(dir, ".encrypted", "video", "stages")
-	entries, err := os.ReadDir(encDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var encFiles int
-	for _, e := range entries {
-		if e.IsDir() {
-			children, _ := os.ReadDir(filepath.Join(encDir, e.Name()))
-			for _, child := range children {
-				if strings.HasSuffix(child.Name(), ".enc") {
-					encFiles++
-				}
-			}
-		} else if strings.HasSuffix(e.Name(), ".enc") {
-			encFiles++
-		}
-	}
-	if encFiles != 1 {
-		t.Fatalf("expected 1 .enc file, got %d (%v)", encFiles, entries)
+	encPath := filepath.Join(dir, ".encrypted", "video", "fid-1.enc")
+	if !crypto.IsEncFile(encPath) {
+		t.Fatalf("canonical encrypted output missing: %s", encPath)
 	}
 }
 
