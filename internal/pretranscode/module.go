@@ -55,6 +55,8 @@ func (m *Module) Init(ctx context.Context, deps coreiface.ModuleDeps) error {
 	m.Playback = &PlaybackService{DB: deps.DB, TranscodeDir: deps.TranscodeDir}
 	m.Worker = NewWorker(deps.DB, deps.Vault, deps.FFmpegPath, deps.TranscodeDir, 4, 2, deps.Capabilities)
 	m.Task.CancelActive = m.Worker.CancelParent
+	m.Task.CaptureParentCancellation = m.Worker.CaptureParentCancellation
+	m.Task.CaptureRenditionCancellation = m.Worker.CaptureRenditionCancellation
 	m.dispatcher = &WebhookDispatcherAdapter{Service: m.Webhook}
 	setWebhookDispatcher(m.dispatcher)
 	coreiface.SetPretranscodeModule(m.Playback)

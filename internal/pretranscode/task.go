@@ -26,9 +26,11 @@ type TaskService struct {
 	DB           *sql.DB
 	TranscodeDir string
 
-	cancelTaskAttempt func(context.Context, int64) error
-	CancelActive      func(int64)
-	beforeCancelCAS   func(store.ImmediateConnTx) error
+	cancelTaskAttempt            func(context.Context, int64) error
+	CancelActive                 func(int64)
+	CaptureParentCancellation    func(int64) CancellationCapture
+	CaptureRenditionCancellation func(int64) CancellationCapture
+	beforeCancelCAS              func(store.ImmediateConnTx) error
 }
 
 // UnifiedTask is the joined row for the unified task list (SRS 3.2.1).
@@ -444,6 +446,10 @@ func (s *TaskService) RetryLatestFailedTaskForMedia(mediaID int64) (int64, error
 // foreign keys on pretranscode_task_meta / pretranscode_rendition_job clean
 // up the metadata rows.
 func (s *TaskService) DeleteTask(id int64) error {
+	capture := CancellationCapture(func() {})
+	if s.CaptureParentCancellation != nil {
+		capture = s.CaptureParentCancellation(id)
+	}
 	var linked int
 	var outputPath string
 	if err := s.DB.QueryRow(`SELECT CASE WHEN ingest_run_id IS NOT NULL OR ingest_step_id IS NOT NULL OR generation IS NOT NULL THEN 1 ELSE 0 END,COALESCE((SELECT output_path FROM pretranscode_task_meta WHERE task_id=transcode_task.id),'') FROM transcode_task WHERE id=?`, id).Scan(&linked, &outputPath); err != nil {
@@ -459,9 +465,7 @@ func (s *TaskService) DeleteTask(id int64) error {
 	if n, _ := res.RowsAffected(); n != 1 {
 		return ErrTaskNotFound
 	}
-	if s.CancelActive != nil {
-		s.CancelActive(id)
-	}
+	capture()
 	if outputPath != "" {
 		if err = osRemoveAll(outputPath); err != nil {
 			return err
@@ -816,6 +820,10 @@ func (s *TaskService) GetMediaOptimizationStatus(mediaID int64) (*MediaOptimizat
 
 // RemoveRenditionJob deletes a rendition job and its output file.
 func (s *TaskService) RemoveRenditionJob(jobID int64) error {
+	capture := CancellationCapture(func() {})
+	if s.CaptureRenditionCancellation != nil {
+		capture = s.CaptureRenditionCancellation(jobID)
+	}
 	var taskID int64
 	var outputPath, outputFormat string
 	var linked int
@@ -833,9 +841,7 @@ func (s *TaskService) RemoveRenditionJob(jobID int64) error {
 	if n, _ := res.RowsAffected(); n != 1 {
 		return ErrTaskNotFound
 	}
-	if s.CancelActive != nil {
-		s.CancelActive(taskID)
-	}
+	capture()
 	if path := RenditionDeletePath(outputPath, outputFormat); path != "" {
 		return osRemoveAll(path)
 	}

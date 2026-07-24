@@ -30,6 +30,13 @@ import (
 // Worker runs pretranscode rendition jobs serially with a configurable
 // concurrency cap (SRS SCH-01). It is the standalone-mode executor; the
 // cluster-mode dispatcher (SRS 3.2.6) is out of scope for this build.
+type activeRendition struct {
+	taskID int64
+	cancel context.CancelFunc
+	token  *struct{}
+}
+type CancellationCapture func()
+
 type Worker struct {
 	DB           *sql.DB
 	Vault        *keystore.Vault
@@ -40,7 +47,7 @@ type Worker struct {
 	MaxGPU       int
 
 	mu                 sync.Mutex
-	running            map[int64]context.CancelFunc // jobID -> cancel
+	running            map[int64]*activeRendition
 	beforeClaimUpdate  func()
 	parentClaims       map[int64]publication.PrepareParentIdentity
 	claimOwner         string
@@ -66,7 +73,7 @@ func NewWorker(db *sql.DB, vault *keystore.Vault, ffmpegPath, transcodeDir strin
 		TranscodeDir: transcodeDir,
 		MaxCPU:       maxCPU,
 		MaxGPU:       maxGPU,
-		running:      make(map[int64]context.CancelFunc),
+		running:      make(map[int64]*activeRendition),
 		semCPU:       make(chan struct{}, maxCPU),
 		semGPU:       make(chan struct{}, maxGPU),
 		parentClaims: make(map[int64]publication.PrepareParentIdentity),
@@ -376,7 +383,7 @@ func (w *Worker) failPoisonedParent(ctx context.Context, job claimedJob, reason 
 func (w *Worker) runRenditionJob(parent context.Context, job *claimedJob, p *Preset, r *Rendition, mediaID int64, catalogPath string) {
 	ctx, cancel := context.WithCancel(parent)
 	w.mu.Lock()
-	w.running[job.ID] = cancel
+	w.running[job.ID] = &activeRendition{taskID: job.TaskID, cancel: cancel, token: &struct{}{}}
 	w.mu.Unlock()
 	defer func() {
 		w.mu.Lock()
@@ -539,30 +546,58 @@ func (w *Worker) runRenditionJob(parent context.Context, job *claimedJob, p *Pre
 }
 
 // CancelRendition cancels a running job (SRS ACT-01).
-func (w *Worker) CancelRendition(jobID int64) bool {
+func (w *Worker) CaptureRenditionCancellation(jobID int64) CancellationCapture {
 	w.mu.Lock()
-	defer w.mu.Unlock()
-	if c, ok := w.running[jobID]; ok {
-		c()
-		return true
+	entry := w.running[jobID]
+	w.mu.Unlock()
+	if entry == nil {
+		return func() {}
 	}
-	return false
+	return func() {
+		w.mu.Lock()
+		if w.running[jobID] != entry {
+			w.mu.Unlock()
+			return
+		}
+		delete(w.running, jobID)
+		w.mu.Unlock()
+		entry.cancel()
+	}
 }
-
-func (w *Worker) CancelParent(taskID int64) {
+func (w *Worker) CaptureParentCancellation(taskID int64) CancellationCapture {
 	w.mu.Lock()
-	var cancels []context.CancelFunc
-	for jobID, c := range w.running {
-		var parent int64
-		if w.DB.QueryRow(`SELECT task_id FROM pretranscode_rendition_job WHERE id=?`, jobID).Scan(&parent) == nil && parent == taskID {
-			cancels = append(cancels, c)
+	entries := map[int64]*activeRendition{}
+	for id, e := range w.running {
+		if e.taskID == taskID {
+			entries[id] = e
 		}
 	}
 	w.mu.Unlock()
-	for _, c := range cancels {
-		c()
+	return func() {
+		var cancels []context.CancelFunc
+		w.mu.Lock()
+		for id, e := range entries {
+			if w.running[id] == e {
+				delete(w.running, id)
+				cancels = append(cancels, e.cancel)
+			}
+		}
+		w.mu.Unlock()
+		for _, c := range cancels {
+			c()
+		}
 	}
 }
+func (w *Worker) CancelRendition(jobID int64) bool {
+	w.mu.Lock()
+	_, ok := w.running[jobID]
+	w.mu.Unlock()
+	if ok {
+		w.CaptureRenditionCancellation(jobID)()
+	}
+	return ok
+}
+func (w *Worker) CancelParent(taskID int64) { w.CaptureParentCancellation(taskID)() }
 
 func (w *Worker) failJob(job *claimedJob, msg, encoder string) {
 	if _, err := w.finalizeJobAndTaskTx(context.Background(), *job, renditionJobTerminal{Status: "failed", ErrorMessage: truncate(msg, 1600), Encoder: encoder}); err != nil {

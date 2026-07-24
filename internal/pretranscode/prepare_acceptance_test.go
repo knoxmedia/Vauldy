@@ -126,7 +126,7 @@ func TestPrepareCancelCommitCancelsAllActiveRenditions(t *testing.T) {
 	for _, id := range ids {
 		id := id
 		ctx, c := context.WithCancel(context.Background())
-		w.running[id] = c
+		w.running[id] = &activeRendition{taskID: task, cancel: c, token: &struct{}{}}
 		go func() { <-ctx.Done(); cancelled <- int(id) }()
 	}
 	w.mu.Unlock()
@@ -149,7 +149,7 @@ func TestPrepareCancelRollbackDoesNotCancelProcesses(t *testing.T) {
 	ctx, c := context.WithCancel(context.Background())
 	defer c()
 	w.mu.Lock()
-	w.running[job] = c
+	w.running[job] = &activeRendition{taskID: task, cancel: c, token: &struct{}{}}
 	w.mu.Unlock()
 	called := 0
 	svc.CancelActive = func(id int64) { called++; w.CancelParent(id) }
