@@ -271,3 +271,102 @@ func TestEncryptedLegacyPhotoRepairHidesThenPublishesEncryptedSelection(t *testi
 		t.Fatalf("state=%s published=%v", state, published)
 	}
 }
+
+func TestEncryptAdapterFastPathAtomicallyCommitsEvidenceAndPublication(t *testing.T) {
+	db, mediaID, runID := planThumbnailFixture(t, true)
+	q := NewQueue(db, "encrypt-atomic-owner", nil)
+	thumb, err := q.Claim(context.Background(), TaskThumbnail)
+	if err != nil || thumb == nil {
+		t.Fatalf("thumbnail claim=%+v err=%v", thumb, err)
+	}
+	if _, err = db.Exec(`UPDATE post_ingest_task SET status='done',lease_owner=NULL,lease_until=NULL WHERE id=?; UPDATE media_ingest_step SET status='done',lease_owner=NULL,lease_until=NULL WHERE id=?; UPDATE media_ingest_run SET status='processing' WHERE id=?`, thumb.ID, *thumb.StepID, runID); err != nil {
+		t.Fatal(err)
+	}
+	var source string
+	if err = db.QueryRow(`SELECT file_path FROM media WHERE id=?`, mediaID).Scan(&source); err != nil {
+		t.Fatal(err)
+	}
+	encPath := filepath.Join(filepath.Dir(source), "photo.enc")
+	data := append([]byte(storageMagic9527ForTest), make([]byte, 32)...)
+	data[4], data[5] = 1, 1
+	if err = os.WriteFile(encPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO media_encrypted_assets(media_id,enc_path,wrapped_dek,iv,plain_path,status) VALUES(?,?,'wrapped','iv',?,'encrypted')`, mediaID, encPath, source); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`UPDATE media SET file_path=? WHERE id=?`, encPath, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	thumbPath, mediumPath := filepath.Join(filepath.Dir(source), "thumb.enc"), filepath.Join(filepath.Dir(source), "medium.enc")
+	for _, p := range []string{thumbPath, mediumPath} {
+		if err = os.WriteFile(p, []byte("encrypted derivative"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	meta, _ := json.Marshal(map[string]any{"photo": map[string]any{"thumb_path": thumbPath, "medium_path": mediumPath}})
+	if _, err = db.Exec(`UPDATE media SET meta_json=? WHERE id=?`, string(meta), mediaID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO media_derived_assets(media_id,artifact_kind,logical_name,enc_path,wrapped_dek,iv) VALUES(?,'photo_thumb','thumb.jpg',?,'tw','ti'),(?,'photo_medium','medium.jpg',?,'mw','mi')`, mediaID, thumbPath, mediaID, mediumPath); err != nil {
+		t.Fatal(err)
+	}
+	task, err := q.Claim(context.Background(), TaskEncrypt)
+	if err != nil || task == nil {
+		t.Fatalf("encrypt claim=%+v err=%v", task, err)
+	}
+	var qs, ss, rs, owner string
+	var attempts int
+	if err = db.QueryRow(`SELECT p.status,s.status,r.status,p.lease_owner,p.attempts FROM post_ingest_task p JOIN media_ingest_step s ON s.id=p.ingest_step_id JOIN media_ingest_run r ON r.id=p.ingest_run_id WHERE p.id=?`, task.ID).Scan(&qs, &ss, &rs, &owner, &attempts); err != nil {
+		t.Fatal(err)
+	}
+	if qs != "running" || ss != "running" || rs != "processing" || owner != task.LeaseOwner || attempts != task.Attempts {
+		t.Fatalf("fixture q=%s s=%s r=%s owner=%s/%s attempts=%d/%d", qs, ss, rs, owner, task.LeaseOwner, attempts, task.Attempts)
+	}
+	var selected, recorded, assetStatus string
+	if err = db.QueryRow(`SELECT m.file_path,a.enc_path,a.status FROM media m JOIN media_encrypted_assets a ON a.media_id=m.id WHERE m.id=?`, mediaID).Scan(&selected, &recorded, &assetStatus); err != nil {
+		t.Fatal(err)
+	}
+	if selected != recorded || assetStatus != "encrypted" {
+		t.Fatalf("selected=%q recorded=%q status=%q", selected, recorded, assetStatus)
+	}
+	var stepOwner string
+	var stepAttempts int
+	var superseded sql.NullInt64
+	var supersededAt sql.NullString
+	if err = db.QueryRow(`SELECT s.lease_owner,s.attempts,r.superseded_by_generation,r.superseded_at FROM media_ingest_step s JOIN media_ingest_run r ON r.id=s.run_id WHERE s.id=?`, *task.StepID).Scan(&stepOwner, &stepAttempts, &superseded, &supersededAt); err != nil {
+		t.Fatal(err)
+	}
+	if stepOwner != task.LeaseOwner || stepAttempts != task.Attempts || superseded.Valid || supersededAt.Valid {
+		t.Fatalf("step owner=%s/%s attempts=%d/%d superseded=%v at=%v", stepOwner, task.LeaseOwner, stepAttempts, task.Attempts, superseded, supersededAt)
+	}
+	var gen, mgen int64
+	if err = db.QueryRow(`SELECT p.generation,m.ingest_generation FROM post_ingest_task p JOIN media m ON m.id=p.media_id WHERE p.id=?`, task.ID).Scan(&gen, &mgen); err != nil {
+		t.Fatal(err)
+	}
+	if gen != mgen {
+		t.Fatalf("generation=%d media=%d", gen, mgen)
+	}
+	adapter := NewEncryptAdapter(&encryptorWithDB{recordingEncryptor: &recordingEncryptor{}, db: db})
+	atomic, ok := adapter.(interface {
+		ExecuteWithResult(context.Context, Task) (ExecutionResult, error)
+	})
+	if !ok {
+		t.Fatal("encrypt adapter is not atomic result executor")
+	}
+	result, err := atomic.ExecuteWithResult(context.Background(), *task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Completion != AlreadyCommittedAtomically {
+		t.Fatalf("completion=%v", result.Completion)
+	}
+	var queueStatus, stepStatus, runStatus, mediaState string
+	var evidence int
+	if err = db.QueryRow(`SELECT p.status,s.status,r.status,m.publication_state,(SELECT COUNT(*) FROM media_ingest_evidence e WHERE e.run_id=? AND e.step_id=s.id AND e.kind='encrypt') FROM post_ingest_task p JOIN media_ingest_step s ON s.id=p.ingest_step_id JOIN media_ingest_run r ON r.id=p.ingest_run_id JOIN media m ON m.id=p.media_id WHERE p.id=?`, runID, task.ID).Scan(&queueStatus, &stepStatus, &runStatus, &mediaState, &evidence); err != nil {
+		t.Fatal(err)
+	}
+	if queueStatus != "done" || stepStatus != "done" || runStatus != "published" || mediaState != "published" || evidence != 1 {
+		t.Fatalf("queue=%s step=%s run=%s media=%s evidence=%d", queueStatus, stepStatus, runStatus, mediaState, evidence)
+	}
+}
