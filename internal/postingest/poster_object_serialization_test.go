@@ -68,7 +68,7 @@ func TestPosterCommitRejectsCASQuarantinedAfterSeal(t *testing.T) {
 		_ = os.Rename(final, q)
 	}
 	t.Cleanup(func() { posterAfterSealHook = orig })
-	e = commitStagedPoster(context.Background(), db, task, s)
+	e = commitStagedPoster(context.Background(), db, task, s, PosterRecoveryRoots{Upload: upload})
 	if e == nil || (!strings.Contains(e.Error(), "staged stat changed") && !strings.Contains(strings.ToLower(e.Error()), "cannot find")) {
 		t.Fatalf("err=%v", e)
 	}

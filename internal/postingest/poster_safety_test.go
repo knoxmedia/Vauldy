@@ -25,7 +25,7 @@ func TestPlainStagedPosterURLResolvesImmutableBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = commitStagedPoster(context.Background(), db, task, staged); err != nil {
+	if err = commitStagedPoster(context.Background(), db, task, staged, PosterRecoveryRoots{Upload: upload}); err != nil {
 		t.Fatal(err)
 	}
 	if staged.URL == storage.PlainPosterURL(task.MediaID) || !strings.Contains(staged.URL, "generation-1/") {
@@ -100,7 +100,7 @@ func TestPosterFinalCommitUncertainActualCommitReconciles(t *testing.T) {
 		return store.ImmediateOutcome{CommitAttempted: true}, &store.ImmediateCommitError{Cause: errors.New("lost")}
 	}
 	t.Cleanup(func() { withImmediatePosterTx = original })
-	if err = commitStagedPoster(context.Background(), db, task, staged); err != nil {
+	if err = commitStagedPoster(context.Background(), db, task, staged, PosterRecoveryRoots{Upload: upload}); err != nil {
 		t.Fatalf("reconcile=%v", err)
 	}
 	if !strings.Contains(staged.URL, "generation-1/") {
@@ -117,7 +117,7 @@ func realPosterStageRunner(t *testing.T, db *sql.DB, upload string) *LocalPoster
 func posterRequest(t *testing.T, db *sql.DB, task Task) publication.StageRequest {
 	t.Helper()
 	fp, _ := sourceFingerprint(taskSource(t, db, task.MediaID))
-	return publication.StageRequest{MediaID: task.MediaID, RunID: *task.RunID, StepID: *task.StepID, Generation: task.Generation, OwnerToken: task.LeaseOwner, SourcePath: taskSource(t, db, task.MediaID), SourceFingerprint: fp}
+	return publication.StageRequest{QueueID: task.ID, MediaID: task.MediaID, RunID: *task.RunID, StepID: *task.StepID, Generation: task.Generation, OwnerToken: task.LeaseOwner, Attempt: task.Attempts, SourcePath: taskSource(t, db, task.MediaID), SourceFingerprint: fp}
 }
 func screenGrabberConfig() scraper.Config {
 	return scraper.Config{ImageSources: []string{"screen_grabber"}}
@@ -177,7 +177,7 @@ func TestPosterFinalCommitUncertainAbsentCleansCandidate(t *testing.T) {
 		return store.ImmediateOutcome{CommitAttempted: true}, &store.ImmediateCommitError{Cause: errors.New("unknown")}
 	}
 	t.Cleanup(func() { withImmediatePosterTx = original })
-	err = commitStagedPoster(context.Background(), db, task, staged)
+	err = commitStagedPoster(context.Background(), db, task, staged, PosterRecoveryRoots{Upload: upload})
 	var uncertain *store.ImmediateCommitError
 	if !errors.As(err, &uncertain) {
 		t.Fatalf("err=%v", err)
@@ -251,7 +251,7 @@ func TestRepairPosterCommitRetainsNewAndCleansOldImmutableStage(t *testing.T) {
 	runner := realPosterStageRunner(t, db, upload)
 	stage := func() StagedPoster {
 		fp, _ := sourceFingerprint(taskSource(t, db, task.MediaID))
-		req := publication.StageRequest{MediaID: task.MediaID, RunID: *task.RunID, Generation: task.Generation, OwnerToken: task.LeaseOwner, SourcePath: taskSource(t, db, task.MediaID), SourceFingerprint: fp}
+		req := publication.StageRequest{MediaID: task.MediaID, RunID: *task.RunID, Generation: task.Generation, OwnerToken: task.LeaseOwner, Attempt: task.Attempts, SourcePath: taskSource(t, db, task.MediaID), SourceFingerprint: fp}
 		req.StepID = 0
 		req.QueueID = task.ID
 		req.Attempt = task.Attempts
@@ -263,7 +263,7 @@ func TestRepairPosterCommitRetainsNewAndCleansOldImmutableStage(t *testing.T) {
 	}
 	old := stage()
 	oldURL := old.URL
-	if err = commitStagedPoster(context.Background(), db, task, old); err != nil {
+	if err = commitStagedPoster(context.Background(), db, task, old, PosterRecoveryRoots{Upload: upload}); err != nil {
 		t.Fatal(err)
 	}
 	_, err = db.Exec(`UPDATE post_ingest_task SET status='running',attempts=attempts+1,lease_owner=? WHERE id=?`, task.LeaseOwner, task.ID)
@@ -272,7 +272,7 @@ func TestRepairPosterCommitRetainsNewAndCleansOldImmutableStage(t *testing.T) {
 	}
 	task.Attempts++
 	newStage := stage()
-	if err = commitStagedPoster(context.Background(), db, task, newStage); err != nil {
+	if err = commitStagedPoster(context.Background(), db, task, newStage, PosterRecoveryRoots{Upload: upload}); err != nil {
 		t.Fatal(err)
 	}
 	newObject := storage.PosterObjectPath(upload, newStage.Hash, ".jpg")
@@ -398,7 +398,7 @@ func TestRepairPosterRecoveryStates(t *testing.T) {
 	})
 	t.Run("committed retained", func(t *testing.T) {
 		db, upload, task, staged := makeStage(t)
-		if e := commitStagedPoster(context.Background(), db, task, staged); e != nil {
+		if e := commitStagedPoster(context.Background(), db, task, staged, PosterRecoveryRoots{Upload: upload}); e != nil {
 			t.Fatal(e)
 		}
 		_, cleaned, e := ReconcilePosterStages(context.Background(), db, PosterRecoveryRoots{Upload: upload}, 100)

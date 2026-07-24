@@ -140,6 +140,8 @@ func (r *stagedPosterFake) Capture(context.Context, int64, int64, scraper.Config
 func (r *stagedPosterFake) StagePoster(_ context.Context, req publication.StageRequest, _ int64, _ scraper.Config) (StagedPoster, error) {
 	r.calls++
 	r.staged.Stage.Request = req
+	r.staged.Stage.Kind = publication.ArtifactPoster
+	r.staged.Stage.State = "staged"
 	return r.staged, nil
 }
 
@@ -180,19 +182,23 @@ func TestPosterCurrentGenerationCommitsAtomicallyAndIsIdempotent(t *testing.T) {
 }
 
 func TestPosterCommitRejectsLeaseLossWithoutMutation(t *testing.T) {
-	db, _, task := seedCurrentLinkedPosterTask(t)
-	path := filepath.Join(t.TempDir(), "poster.jpg")
+	db, upload, task := seedCurrentLinkedPosterTask(t)
+	dir := filepath.Join(upload, "posters", "generation-1", "lease-lost")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "poster.jpg")
 	_ = os.WriteFile(path, []byte("candidate"), 0644)
 	size, hash, _ := hashPath(path)
 	fp, _ := sourceFingerprint(taskSource(t, db, task.MediaID))
-	stage := StagedPoster{Stage: publication.StageRecord{StageID: "lease-lost", Request: publication.StageRequest{MediaID: task.MediaID, RunID: *task.RunID, StepID: *task.StepID, Generation: task.Generation, OwnerToken: task.LeaseOwner, SourceFingerprint: fp}}, Path: path, URL: "/stale.jpg", Size: size, Hash: hash}
+	stage := StagedPoster{Stage: publication.StageRecord{StageID: "lease-lost", Request: publication.StageRequest{QueueID: task.ID, MediaID: task.MediaID, RunID: *task.RunID, StepID: *task.StepID, Generation: task.Generation, OwnerToken: task.LeaseOwner, Attempt: task.Attempts, SourceFingerprint: fp}, Kind: publication.ArtifactPoster, State: "staged", StagedPath: filepath.Dir(path)}, Path: path, URL: "/stale.jpg", Size: size, Hash: hash}
 	if _, err := db.Exec(`INSERT INTO media_asset_stage_journal(stage_id,media_id,run_id,step_id,generation,owner_token,source_fingerprint,artifact_kind,state,staged_path,hashes_sizes_json) VALUES(?,?,?,?,?,?,?,'poster','staged',?,'{}')`, stage.Stage.StageID, task.MediaID, *task.RunID, *task.StepID, task.Generation, task.LeaseOwner, fp, filepath.Dir(path)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`UPDATE post_ingest_task SET lease_owner='new-owner' WHERE id=?`, task.ID); err != nil {
 		t.Fatal(err)
 	}
-	requirePosterShutdown(t, commitStagedPoster(context.Background(), db, task, stage))
+	requirePosterShutdown(t, commitStagedPoster(context.Background(), db, task, stage, PosterRecoveryRoots{Upload: upload}))
 	var meta, taskStatus, stepStatus string
 	var generation int64
 	_ = db.QueryRow(`SELECT meta_json,ingest_generation FROM media WHERE id=?`, task.MediaID).Scan(&meta, &generation)

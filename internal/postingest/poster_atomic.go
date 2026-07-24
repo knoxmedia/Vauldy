@@ -22,6 +22,7 @@ import (
 )
 
 var withImmediatePosterTx = store.WithImmediateConnTx
+var withImmediatePosterPreflightTx = store.WithImmediateConnTx
 var withImmediatePosterJournalTx = store.WithImmediateConnTx
 var reconcilePosterJournal = reconcilePosterJournalAuthoritative
 var posterHashPath = hashPath
@@ -111,7 +112,11 @@ func (a *PosterAdapter) ExecuteWithResult(ctx context.Context, task Task) (Execu
 	if err != nil {
 		return ordinary, err
 	}
-	if err = commitStagedPoster(ctx, a.DB, task, staged); err != nil {
+	roots := PosterRecoveryRoots{Upload: a.UploadDir}
+	if a.Derived != nil {
+		roots.Derived = a.Derived.BaseDir
+	}
+	if err = commitStagedPoster(ctx, a.DB, task, staged, roots); err != nil {
 		var uncertain *store.ImmediateCommitError
 		if errors.As(err, &uncertain) {
 			return ExecutionResult{Completion: FinalizationOutcomeUncertain}, err
@@ -191,36 +196,36 @@ func preverifyPosterArtifact(path string, expectedSize int64, expectedHash strin
 	}
 	return preverifiedPosterIdentity{artifactPath: path, artifactHash: hash, artifactSize: st.Size(), artifactModTime: st.ModTime()}, nil
 }
-func sealPlainPosterObject(ctx context.Context, uploadRoot string, staged StagedPoster) (StagedPoster, error) {
+func sealPlainPosterObject(ctx context.Context, uploadRoot string, staged StagedPoster) (StagedPoster, bool, error) {
 	posterBeforeSealHook()
 	if err := ctx.Err(); err != nil {
-		return staged, err
+		return staged, false, err
 	}
 	final := storage.PosterObjectPath(uploadRoot, staged.Hash, ".jpg")
 	if final == "" {
-		return staged, fmt.Errorf("poster seal: invalid hash")
+		return staged, false, fmt.Errorf("poster seal: invalid hash")
 	}
 	if st, err := os.Stat(final); err == nil {
 		size, hash, e := posterHashPath(final)
 		if e != nil || st.IsDir() || size != staged.Size || hash != staged.Hash {
-			return staged, fmt.Errorf("poster seal: existing object mismatch")
+			return staged, false, fmt.Errorf("poster seal: existing object mismatch")
 		}
 		staged.Path, staged.URL = final, storage.PosterObjectURL(staged.Hash)
-		return staged, nil
+		return staged, false, nil
 	} else if !os.IsNotExist(err) {
-		return staged, err
+		return staged, false, err
 	}
 	if err := os.MkdirAll(filepath.Dir(final), 0755); err != nil {
-		return staged, err
+		return staged, false, err
 	}
 	src, err := os.Open(staged.Path)
 	if err != nil {
-		return staged, err
+		return staged, false, err
 	}
 	defer src.Close()
 	tmp, err := os.CreateTemp(filepath.Dir(final), ".seal-*.tmp")
 	if err != nil {
-		return staged, err
+		return staged, false, err
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
@@ -231,47 +236,56 @@ func sealPlainPosterObject(ctx context.Context, uploadRoot string, staged Staged
 	}
 	closeErr := tmp.Close()
 	if copyErr != nil {
-		return staged, copyErr
+		return staged, false, copyErr
 	}
 	if closeErr != nil {
-		return staged, closeErr
+		return staged, false, closeErr
 	}
 	hash := hex.EncodeToString(h.Sum(nil))
 	if n != staged.Size || hash != staged.Hash {
-		return staged, fmt.Errorf("poster seal: source hash/size mismatch")
+		return staged, false, fmt.Errorf("poster seal: source hash/size mismatch")
 	}
+	created := false
 	if err = os.Link(tmpName, final); err != nil {
 		if st, e := os.Stat(final); e != nil || st.IsDir() {
-			return staged, err
+			return staged, false, err
 		}
 		size, existingHash, e := posterHashPath(final)
 		if e != nil || size != staged.Size || existingHash != staged.Hash {
-			return staged, fmt.Errorf("poster seal: existing object mismatch")
+			return staged, false, fmt.Errorf("poster seal: existing object mismatch")
 		}
+	} else {
+		created = true
 	}
 	_ = os.Chmod(final, 0444)
 	staged.Path, staged.URL = final, storage.PosterObjectURL(staged.Hash)
 	posterAfterSealHook()
-	return staged, nil
+	return staged, created, nil
 }
 
-func commitStagedPoster(ctx context.Context, db *sql.DB, task Task, staged StagedPoster) error {
+func commitStagedPoster(ctx context.Context, db *sql.DB, task Task, staged StagedPoster, roots PosterRecoveryRoots) error {
 	req := staged.Stage.Request
-	if staged.Derived == nil && !strings.Contains(filepath.ToSlash(staged.Path), "/posters/objects/sha256/") {
-		uploadRoot := filepath.Dir(filepath.Dir(filepath.Dir(staged.Stage.StagedPath)))
-		var sealErr error
-		staged, sealErr = sealPlainPosterObject(ctx, uploadRoot, staged)
-		if sealErr != nil {
-			return sealErr
-		}
-	}
-
 	stepID := int64(0)
 	if task.StepID != nil {
 		stepID = *task.StepID
 	}
-	if task.RunID == nil || req.MediaID != task.MediaID || req.RunID != *task.RunID || req.StepID != stepID || req.Generation != task.Generation || req.OwnerToken != task.LeaseOwner || (task.Type == TaskPosterRepair && (req.QueueID != task.ID || req.Attempt != task.Attempts)) {
-		return fmt.Errorf("poster commit: stage/task identity mismatch")
+	if err := validateStagedPosterIdentity(task, staged, roots); err != nil {
+		return err
+	}
+	if _, err := withImmediatePosterPreflightTx(ctx, db, func(tx store.ImmediateConnTx) error { return validatePosterTaskTx(ctx, tx, task) }); err != nil {
+		state, reconcileErr := reconcilePosterCommitState(ctx, db, task, staged)
+		if reconcileErr == nil && state == posterCommitExact {
+			return nil
+		}
+		return err
+	}
+	sealedNew := false
+	if staged.Derived == nil && !exactPosterObjectPath(roots.Upload, staged.Path) {
+		var sealErr error
+		staged, sealedNew, sealErr = sealPlainPosterObject(ctx, roots.Upload, staged)
+		if sealErr != nil {
+			return sealErr
+		}
 	}
 	var sourcePath string
 	if err := db.QueryRowContext(ctx, `SELECT file_path FROM media WHERE id=?`, task.MediaID).Scan(&sourcePath); err != nil {
@@ -310,7 +324,7 @@ func commitStagedPoster(ctx context.Context, db *sql.DB, task Task, staged Stage
 				return e
 			}
 		}
-		if err := validatePosterIdentityTx(ctx, tx, task); err != nil {
+		if err := validatePosterTaskTx(ctx, tx, task); err != nil {
 			return err
 		}
 		var source string
@@ -381,6 +395,9 @@ func commitStagedPoster(ctx context.Context, db *sql.DB, task Task, staged Stage
 		return nil
 	})
 	if err != nil {
+		if !sealedNew {
+			staged.Path = ""
+		}
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), posterReconcileTimeout)
 		defer cancel()
 		var uncertain *store.ImmediateCommitError
@@ -403,7 +420,40 @@ func commitStagedPoster(ctx context.Context, db *sql.DB, task Task, staged Stage
 	return nil
 }
 
-func validatePosterIdentityTx(ctx context.Context, tx store.SQLExecutor, task Task) error {
+func validateStagedPosterIdentity(task Task, staged StagedPoster, roots PosterRecoveryRoots) error {
+	req := staged.Stage.Request
+	stepID := int64(0)
+	if task.StepID != nil {
+		stepID = *task.StepID
+	}
+	stageID := strings.TrimSpace(staged.Stage.StageID)
+	if invalidPosterStageID(stageID) || task.RunID == nil || task.ID <= 0 || task.MediaID <= 0 || task.Generation <= 0 || task.Attempts <= 0 || strings.TrimSpace(task.LeaseOwner) == "" || req.QueueID != task.ID || req.MediaID != task.MediaID || req.RunID != *task.RunID || req.StepID != stepID || req.Generation != task.Generation || req.OwnerToken != task.LeaseOwner || req.Attempt != task.Attempts || strings.TrimSpace(req.SourceFingerprint) == "" || staged.Stage.Kind != publication.ArtifactPoster || staged.Stage.State != "staged" {
+		return fmt.Errorf("poster commit: stage/task identity mismatch")
+	}
+	if (task.Type == TaskPoster && (task.StepID == nil || stepID <= 0)) || (task.Type == TaskPosterRepair && task.StepID != nil) || (task.Type != TaskPoster && task.Type != TaskPosterRepair) {
+		return fmt.Errorf("poster commit: invalid task class")
+	}
+	if strings.TrimSpace(staged.Stage.StagedPath) == "" || !filepath.IsAbs(staged.Stage.StagedPath) || strings.TrimSpace(roots.Upload) == "" || !filepath.IsAbs(roots.Upload) {
+		return fmt.Errorf("poster commit: unsafe staged path")
+	}
+	expectedDir := filepath.Join(roots.Upload, "posters", fmt.Sprintf("generation-%d", task.Generation), stageID)
+	if !sameResolvedPath(expectedDir, staged.Stage.StagedPath) {
+		return fmt.Errorf("poster commit: staged path is not exact trusted layout")
+	}
+	if staged.Derived == nil {
+		if !sameResolvedPath(filepath.Join(expectedDir, posterLogicalName), staged.Path) && !exactPosterObjectPath(roots.Upload, staged.Path) {
+			return fmt.Errorf("poster commit: artifact is outside trusted upload root")
+		}
+	} else if strings.TrimSpace(roots.Derived) == "" || !filepath.IsAbs(roots.Derived) || !pathInsideResolvedRoot(roots.Derived, staged.Path) || !sameResolvedPath(staged.Derived.EncPath(), staged.Path) {
+		return fmt.Errorf("poster commit: artifact is outside trusted derived root")
+	}
+	return nil
+}
+func invalidPosterStageID(id string) bool {
+	return id == "" || id == "." || id == ".." || filepath.Base(id) != id || strings.ContainsAny(id, `/\\`)
+}
+
+func validatePosterTaskTx(ctx context.Context, tx store.SQLExecutor, task Task) error {
 	var one int
 	var err error
 	if task.Type == TaskPoster && task.RunID != nil && task.StepID != nil {
@@ -739,7 +789,7 @@ func (r *LocalPosterRunner) StagePoster(ctx context.Context, req publication.Sta
 		if e := tx.QueryRowContext(ctx, `SELECT id,attempts,task_type FROM post_ingest_task WHERE media_id=? AND ingest_run_id=? AND ((?=0 AND ingest_step_id IS NULL) OR ingest_step_id=?) AND generation=? AND status='running' AND lease_owner=?`, req.MediaID, req.RunID, req.StepID, req.StepID, req.Generation, req.OwnerToken).Scan(&task.ID, &task.Attempts, &task.Type); e != nil {
 			return e
 		}
-		if e := validatePosterIdentityTx(ctx, tx, task); e != nil {
+		if e := validatePosterTaskTx(ctx, tx, task); e != nil {
 			return e
 		}
 		var e error

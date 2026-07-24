@@ -198,7 +198,7 @@ func TestCommittedPosterRecoveryCleansGenerationTempOnly(t *testing.T) {
 		t.Fatal(e)
 	}
 	generation := s.Path
-	if e = commitStagedPoster(context.Background(), db, task, s); e != nil {
+	if e = commitStagedPoster(context.Background(), db, task, s, PosterRecoveryRoots{Upload: upload}); e != nil {
 		t.Fatal(e)
 	}
 	object := storage.PosterObjectPath(upload, s.Hash, ".jpg")
