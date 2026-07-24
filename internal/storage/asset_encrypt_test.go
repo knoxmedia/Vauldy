@@ -49,14 +49,21 @@ func TestEncryptMediaConcurrentSingleOutput(t *testing.T) {
 	}
 	wg.Wait()
 
-	encDir := filepath.Join(dir, ".encrypted", "video")
+	encDir := filepath.Join(dir, ".encrypted", "video", "stages")
 	entries, err := os.ReadDir(encDir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var encFiles int
 	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), ".enc") {
+		if e.IsDir() {
+			children, _ := os.ReadDir(filepath.Join(encDir, e.Name()))
+			for _, child := range children {
+				if strings.HasSuffix(child.Name(), ".enc") {
+					encFiles++
+				}
+			}
+		} else if strings.HasSuffix(e.Name(), ".enc") {
 			encFiles++
 		}
 	}
@@ -480,5 +487,43 @@ func TestEncryptMedia_WaiterSuccessLeavesValidAsset(t *testing.T) {
 	valid, err := IsEncryptedAssetRecordValid(context.Background(), db, 509)
 	if err != nil || !valid || !crypto.IsEncFile(out) {
 		t.Fatalf("valid=%v err=%v", valid, err)
+	}
+}
+
+func TestStageMediaEncryptionLeavesCatalogAndSelectionUnchanged(t *testing.T) {
+	db, err := store.OpenSQLite(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	vault, err := keystore.NewVault(string(bytes.Repeat([]byte{0x42}, 32)), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	plain := filepath.Join(dir, "photo.jpg")
+	if err = os.WriteFile(plain, []byte("photo bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = db.Exec(`INSERT INTO library(id,name,type,path,encrypted_assets_enabled) VALUES(1,'photos','photo',?,1)`, dir)
+	_, _ = db.Exec(`INSERT INTO media(id,library_id,file_id,file_path,file_type,status) VALUES(10,1,'photo-1',?,'image','active')`, plain)
+	enc := &AssetEncryptor{DB: db, Vault: vault, BasePath: filepath.Join(dir, "encrypted")}
+	stage, err := enc.StageMediaEncryption(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stage.OriginalPath != plain || stage.EncPath == "" || stage.WrappedDEK == "" || stage.IV == "" || stage.SHA256 == "" || stage.Size <= 0 {
+		t.Fatalf("stage=%+v", stage)
+	}
+	var selected string
+	var records int
+	if err = db.QueryRow(`SELECT file_path,(SELECT COUNT(*) FROM media_encrypted_assets WHERE media_id=10) FROM media WHERE id=10`).Scan(&selected, &records); err != nil {
+		t.Fatal(err)
+	}
+	if selected != plain || records != 0 {
+		t.Fatalf("selected=%q records=%d", selected, records)
+	}
+	if ok, _ := ValidEncryptedFile(stage.EncPath); !ok {
+		t.Fatalf("invalid staged output %q", stage.EncPath)
 	}
 }

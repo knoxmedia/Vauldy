@@ -2063,3 +2063,23 @@ func TestPublicationV2SchemaAcceptsScrapeArtworkAndPosterRepair(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestMigrationCreatesDedicatedEncryptionStageJournal(t *testing.T) {
+	db, err := OpenSQLite(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var sqlText string
+	if err = db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='media_encryption_stage_journal'`).Scan(&sqlText); err != nil {
+		t.Fatal(err)
+	}
+	for _, clause := range []string{"wrapped_dek", "source_fingerprint", "UNIQUE(task_id,attempt)", "CHECK(state IN ('staged','quarantined','committed'))"} {
+		if !strings.Contains(sqlText, clause) {
+			t.Fatalf("schema missing %q: %s", clause, sqlText)
+		}
+	}
+	if strings.Contains(strings.ToLower(sqlText), "plaintext_dek") {
+		t.Fatalf("journal must not store plaintext DEK: %s", sqlText)
+	}
+}

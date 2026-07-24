@@ -648,6 +648,10 @@ func (e *PostCommitMigrationValidationError) Unwrap() error { return e.Cause }
 var publicationMigrationPostCommitValidation = validatePublicationForeignKeys
 
 func migrateIngestPublication(ctx context.Context, db *sql.DB) error {
+	defer func() {
+		_, _ = db.ExecContext(ctx, canonicalEncryptionStageJournalSchema)
+		_, _ = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_encryption_stage_recovery ON media_encryption_stage_journal(state,updated_at)`)
+	}()
 	publicationMigrationMu.Lock()
 	defer publicationMigrationMu.Unlock()
 	// The base schema still declares this legacy index on every open. Remove it
@@ -1503,6 +1507,11 @@ const canonicalAssetStageJournalSchema = `CREATE TABLE media_asset_stage_journal
  FOREIGN KEY(run_id,media_id,generation) REFERENCES media_ingest_run(id,media_id,generation) ON DELETE CASCADE,
  FOREIGN KEY(step_id,media_id,generation) REFERENCES media_ingest_step(id,media_id,generation) ON DELETE CASCADE)`
 
+const canonicalEncryptionStageJournalSchema = `CREATE TABLE media_encryption_stage_journal(
+ stage_id TEXT PRIMARY KEY,task_id INTEGER NOT NULL,attempt INTEGER NOT NULL,media_id INTEGER NOT NULL,run_id INTEGER NOT NULL,step_id INTEGER NOT NULL,generation INTEGER NOT NULL,owner_token TEXT NOT NULL,
+ source_path TEXT NOT NULL,source_fingerprint TEXT NOT NULL,enc_path TEXT NOT NULL,wrapped_dek TEXT NOT NULL,iv TEXT NOT NULL,enc_sha256 TEXT NOT NULL,enc_size INTEGER NOT NULL CHECK(enc_size>0),
+ cleanup_plaintext INTEGER NOT NULL DEFAULT 0 CHECK(cleanup_plaintext IN (0,1)),state TEXT NOT NULL CHECK(state IN ('staged','quarantined','committed')),recovery_error TEXT NOT NULL DEFAULT '',created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ UNIQUE(task_id,attempt),FOREIGN KEY(task_id) REFERENCES post_ingest_task(id) ON DELETE CASCADE,FOREIGN KEY(run_id,media_id,generation) REFERENCES media_ingest_run(id,media_id,generation) ON DELETE CASCADE,FOREIGN KEY(step_id,media_id,generation) REFERENCES media_ingest_step(id,media_id,generation) ON DELETE CASCADE)`
 const canonicalPosterRepairStageSchema = `CREATE TABLE poster_repair_stage(
  stage_id TEXT PRIMARY KEY,queue_id INTEGER NOT NULL,media_id INTEGER NOT NULL,run_id INTEGER NOT NULL,generation INTEGER NOT NULL,
  owner_token TEXT NOT NULL,attempt INTEGER NOT NULL,source_fingerprint TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('staged','quarantined','committed')),
@@ -1828,7 +1837,7 @@ func rebuildPublicationTranscodeTask(ctx context.Context, conn *sql.Conn) error 
 	if strings.Contains(normalized, "foreignkey(ingest_step_id,media_id,generation)referencesmedia_ingest_step(id,media_id,generation)ondeletecascade") && publicationTranscodeSchemaCurrent(ctx, conn) {
 		return nil
 	}
-	approved := map[string]bool{"pretranscode_task_meta": true, "pretranscode_rendition_job": true, "media_ingest_step_dependency": true, "media_ingest_evidence": true, "media_asset_stage_journal": true}
+	approved := map[string]bool{"pretranscode_task_meta": true, "pretranscode_rendition_job": true, "media_ingest_step_dependency": true, "media_ingest_evidence": true, "media_asset_stage_journal": true, "media_encryption_stage_journal": true}
 	refs, err := conn.QueryContext(ctx, `SELECT m.name FROM sqlite_master m,pragma_foreign_key_list(m.name) f WHERE m.type='table' AND f."table"='transcode_task'`)
 	if err != nil {
 		return err
@@ -1932,7 +1941,7 @@ func normalizePublicationSQL(s string) string {
 }
 
 var publicationRebuiltParents = map[string]bool{"media_ingest_step": true, "transcode_task": true}
-var publicationApprovedChildren = map[string]bool{"post_ingest_task": true, "scrape_task": true, "transcode_task": true, "pretranscode_task_meta": true, "pretranscode_rendition_job": true, "media_ingest_step_dependency": true, "media_ingest_evidence": true, "media_asset_stage_journal": true}
+var publicationApprovedChildren = map[string]bool{"post_ingest_task": true, "scrape_task": true, "transcode_task": true, "pretranscode_task_meta": true, "pretranscode_rendition_job": true, "media_ingest_step_dependency": true, "media_ingest_evidence": true, "media_asset_stage_journal": true, "media_encryption_stage_journal": true}
 
 func publicationMigrationPreflightDB(ctx context.Context, db *sql.DB) error {
 	conn, err := db.Conn(ctx)
@@ -2871,7 +2880,7 @@ func validatePublicationParentChildren(ctx context.Context, q SQLExecutor) error
 				want["transcode_task"] = true
 			}
 		}
-		for _, n := range []string{"media_ingest_step_dependency", "media_ingest_evidence", "media_asset_stage_journal"} {
+		for _, n := range []string{"media_ingest_step_dependency", "media_ingest_evidence", "media_asset_stage_journal", "media_encryption_stage_journal"} {
 			if tableExists(ctx, q, n) {
 				want[n] = true
 			}
@@ -2932,7 +2941,7 @@ func validatePublicationRunV2(ctx context.Context, q SQLExecutor) error {
 
 func validatePublicationKnownReferences(ctx context.Context, q SQLExecutor) error {
 	for parent, allowed := range map[string]map[string]bool{
-		"media_ingest_step": {"post_ingest_task": true, "scrape_task": true, "transcode_task": true, "media_ingest_step_dependency": true, "media_ingest_evidence": true, "media_asset_stage_journal": true},
+		"media_ingest_step": {"post_ingest_task": true, "scrape_task": true, "transcode_task": true, "media_ingest_step_dependency": true, "media_ingest_evidence": true, "media_asset_stage_journal": true, "media_encryption_stage_journal": true},
 		"transcode_task":    {"pretranscode_task_meta": true, "pretranscode_rendition_job": true},
 	} {
 		if !tableExists(ctx, q, parent) {

@@ -440,7 +440,11 @@ func validPlainAtrackOutput(root string) (bool, error) {
 	return false, nil
 }
 
-// NewEncryptAdapter runs media encryption synchronously under dispatcher ownership.
+// NewEncryptAdapter runs staged media encryption under dispatcher ownership.
+type mediaEncryptionStager interface {
+	StageMediaEncryption(context.Context, int64) (storage.StagedMediaEncryption, error)
+}
+
 func NewEncryptAdapter(enc interface {
 	EncryptMedia(context.Context, int64) error
 }) Adapter {
@@ -452,14 +456,12 @@ type encryptAdapter struct {
 		EncryptMedia(context.Context, int64) error
 	}
 }
-
 type encryptionDBProvider interface{ EncryptionDB() *sql.DB }
 
 func (a *encryptAdapter) Execute(ctx context.Context, task Task) error {
 	_, err := a.ExecuteWithResult(ctx, task)
 	return err
 }
-
 func (a *encryptAdapter) ExecuteWithResult(ctx context.Context, task Task) (ExecutionResult, error) {
 	ordinary := ExecutionResult{Completion: CompleteThroughQueue}
 	if err := validateBasicAdapterTask(task, TaskEncrypt); err != nil {
@@ -468,17 +470,16 @@ func (a *encryptAdapter) ExecuteWithResult(ctx context.Context, task Task) (Exec
 	if a == nil || a.enc == nil {
 		return ordinary, permanentAdapterError(TaskEncrypt, "encryptor is not configured")
 	}
-	var db *sql.DB
-	if provider, ok := a.enc.(encryptionDBProvider); ok {
-		db = provider.EncryptionDB()
-	}
-	if db == nil {
+	dbp, hasDB := a.enc.(encryptionDBProvider)
+	stager, canStage := a.enc.(mediaEncryptionStager)
+	if !hasDB || dbp.EncryptionDB() == nil {
 		err := a.enc.EncryptMedia(ctx, task.MediaID)
 		if errors.Is(err, storage.ErrAlreadyEncrypted) {
 			return ordinary, nil
 		}
 		return ordinary, classifyEncryptError(err)
 	}
+	db := dbp.EncryptionDB()
 	if task.RunID == nil || task.StepID == nil || task.Generation <= 0 {
 		var one int
 		if err := db.QueryRowContext(ctx, `SELECT 1 FROM media WHERE id=?`, task.MediaID).Scan(&one); err != nil {
@@ -506,27 +507,32 @@ func (a *encryptAdapter) ExecuteWithResult(ctx context.Context, task Task) (Exec
 	if err := validateAdapterLease(ctx, db, task); err != nil {
 		return ordinary, err
 	}
-	ready, err := usableEncryptedOutput(ctx, db, task.MediaID)
-	if err != nil {
-		return ordinary, err
-	}
-	if !ready {
-		ctx = storage.WithEncryptCommitGuardTx(ctx, func(c context.Context, tx *sql.Tx) error { return validateAdapterLeaseTx(c, tx, task) })
-		err = a.enc.EncryptMedia(ctx, task.MediaID)
-		if err != nil && !errors.Is(err, storage.ErrAlreadyEncrypted) {
-			return ordinary, classifyEncryptError(err)
+	staged, err := loadSelectedEncryptionStage(ctx, db, task)
+	if errors.Is(err, sql.ErrNoRows) {
+		if !canStage {
+			return ordinary, permanentAdapterError(TaskEncrypt, "staged encryption is not configured")
+		}
+		staged, err = stager.StageMediaEncryption(ctx, task.MediaID)
+		if err == nil {
+			err = insertEncryptionStageJournal(ctx, db, task, staged)
 		}
 	}
-	if err = finalizeEncryption(ctx, db, task); err != nil {
+	if err != nil {
+		return ordinary, classifyEncryptError(err)
+	}
+	if err = commitEncryptionStage(ctx, db, task, staged); err != nil {
 		var uncertain *store.ImmediateCommitError
 		if errors.As(err, &uncertain) {
 			return ExecutionResult{Completion: FinalizationOutcomeUncertain}, err
 		}
+		_ = cleanupUnreferencedEncryptionStage(context.Background(), db, staged)
 		return ordinary, err
+	}
+	if staged.CleanupPlaintext {
+		go cleanupPlaintextAfterCommittedEncryption(db, staged)
 	}
 	return ExecutionResult{Completion: AlreadyCommittedAtomically}, nil
 }
-
 func classifyEncryptError(err error) error {
 	if err == nil {
 		return nil
@@ -539,24 +545,82 @@ func classifyEncryptError(err error) error {
 	}
 	return ClassifiedError{Kind: FailureRetryable, Err: err}
 }
-
-func finalizeEncryption(ctx context.Context, db *sql.DB, task Task) error {
+func insertEncryptionStageJournal(ctx context.Context, db *sql.DB, task Task, s storage.StagedMediaEncryption) error {
+	_, err := db.ExecContext(ctx, `INSERT INTO media_encryption_stage_journal(stage_id,task_id,attempt,media_id,run_id,step_id,generation,owner_token,source_path,source_fingerprint,enc_path,wrapped_dek,iv,enc_sha256,enc_size,cleanup_plaintext,state) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'staged')`, s.StageID, task.ID, task.Attempts, task.MediaID, *task.RunID, *task.StepID, task.Generation, task.LeaseOwner, s.OriginalPath, s.SourceFingerprint, s.EncPath, s.WrappedDEK, s.IV, s.SHA256, s.Size, boolInt(s.CleanupPlaintext))
+	return err
+}
+func boolInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
+}
+func loadSelectedEncryptionStage(ctx context.Context, db *sql.DB, task Task) (storage.StagedMediaEncryption, error) {
+	var s storage.StagedMediaEncryption
+	var cleanup int
+	err := db.QueryRowContext(ctx, `SELECT 'selected-'||?||'-'||?,m.id,a.plain_path,'',a.enc_path,a.wrapped_dek,a.iv,COALESCE(l.encrypted_assets_cleanup_plaintext,0) FROM media m JOIN library l ON l.id=m.library_id JOIN media_encrypted_assets a ON a.media_id=m.id AND a.status='encrypted' AND a.enc_path=m.file_path WHERE m.id=?`, task.ID, task.Attempts, task.MediaID).Scan(&s.StageID, &s.MediaID, &s.OriginalPath, &s.SourceFingerprint, &s.EncPath, &s.WrappedDEK, &s.IV, &cleanup)
+	if err != nil {
+		return s, err
+	}
+	s.SourceFingerprint, err = storage.EncryptionSourceFingerprint(s.OriginalPath)
+	if err != nil {
+		return s, err
+	}
+	s.Size, s.SHA256, err = storage.EncryptionPathHash(s.EncPath)
+	s.CleanupPlaintext = cleanup == 1
+	return s, err
+}
+func commitEncryptionStage(ctx context.Context, db *sql.DB, task Task, s storage.StagedMediaEncryption) error {
 	_, err := store.WithImmediateConnTx(ctx, db, func(tx store.ImmediateConnTx) error {
-		var existing string
-		existingErr := tx.QueryRowContext(ctx, `SELECT stage_id FROM media_ingest_evidence WHERE step_id=? AND kind='encrypt'`, *task.StepID).Scan(&existing)
-		if existingErr == nil {
-			return verifyEncryptionFinalizedTx(ctx, tx, task, existing)
+		var selected string
+		guard := `SELECT m.file_path FROM post_ingest_task p JOIN media_ingest_step step ON step.id=p.ingest_step_id JOIN media_ingest_run r ON r.id=p.ingest_run_id JOIN media m ON m.id=p.media_id WHERE p.id=? AND p.task_type='encrypt' AND p.media_id=? AND p.generation=? AND p.ingest_run_id=? AND p.ingest_step_id=? AND p.status='running' AND p.lease_owner=? AND p.attempts=? AND step.status='running' AND step.lease_owner=p.lease_owner AND step.attempts=p.attempts AND r.status='processing' AND r.superseded_at IS NULL AND COALESCE(r.superseded_by_generation,0)=0 AND m.ingest_generation=p.generation AND NOT EXISTS(SELECT 1 FROM media_ingest_step_dependency d JOIN media_ingest_step dep ON dep.id=d.depends_on_step_id WHERE d.step_id=step.id AND d.dependency_kind='step_done' AND dep.status NOT IN ('done','skipped'))`
+		if err := tx.QueryRowContext(ctx, guard, task.ID, task.MediaID, task.Generation, *task.RunID, *task.StepID, task.LeaseOwner, task.Attempts).Scan(&selected); err != nil {
+			return ClassifiedError{Kind: FailureShutdown, Err: fmt.Errorf("encrypt commit stale fence: %w", err)}
 		}
-		if !errors.Is(existingErr, sql.ErrNoRows) {
-			return existingErr
+		alreadySelected := samePathForEvidence(selected, s.EncPath)
+		if !alreadySelected {
+			if !samePathForEvidence(selected, s.OriginalPath) {
+				return errors.New("encrypt commit source selection changed")
+			}
+			fp, err := publication.SourceFingerprint(selected)
+			if err != nil || fp != s.SourceFingerprint {
+				return errors.New("encrypt commit source fingerprint changed")
+			}
 		}
-		refs, fingerprint, stageID, err := validatedEncryptionEvidenceTx(ctx, tx, task)
-		if err != nil {
+		size, hash, err := hashPath(s.EncPath)
+		if err != nil || size != s.Size || !strings.EqualFold(hash, s.SHA256) || s.WrappedDEK == "" || s.IV == "" {
+			return errors.New("encrypt commit staged identity invalid")
+		}
+		if !alreadySelected {
+			if _, err = tx.ExecContext(ctx, `INSERT INTO media_encrypted_assets(media_id,enc_path,wrapped_dek,iv,plain_path,status,updated_at) VALUES(?,?,?,?,?,'encrypted',CURRENT_TIMESTAMP) ON CONFLICT(media_id) DO UPDATE SET enc_path=excluded.enc_path,wrapped_dek=excluded.wrapped_dek,iv=excluded.iv,plain_path=excluded.plain_path,status='encrypted',updated_at=CURRENT_TIMESTAMP`, task.MediaID, s.EncPath, s.WrappedDEK, s.IV, s.OriginalPath); err != nil {
+				return err
+			}
+			res, err := tx.ExecContext(ctx, `UPDATE media SET file_path=? WHERE id=? AND file_path=?`, s.EncPath, task.MediaID, s.OriginalPath)
+			if err != nil {
+				return err
+			}
+			n, _ := res.RowsAffected()
+			if n != 1 {
+				return errors.New("encrypt commit source fence lost")
+			}
+		}
+		var fileType string
+		if err = tx.QueryRowContext(ctx, `SELECT file_type FROM media WHERE id=?`, task.MediaID).Scan(&fileType); err != nil {
 			return err
 		}
-		if _, err = tx.ExecContext(ctx, `INSERT INTO media_ingest_evidence(run_id,step_id,media_id,generation,kind,source_fingerprint,artifact_refs_json,reason,verified_at,stage_id) VALUES(?,?,?,?,'encrypt',?,?,'generated',CURRENT_TIMESTAMP,?)`, *task.RunID, *task.StepID, task.MediaID, task.Generation, fingerprint, refs, stageID); err != nil {
+		refs := map[string]any{"path": s.EncPath, "size": s.Size, "sha256": s.SHA256, "wrapped_dek": s.WrappedDEK, "iv": s.IV}
+		if fileType == "image" {
+			variants, e := validatedEncryptedPhotoVariantsTx(ctx, tx, task.MediaID)
+			if e != nil {
+				return e
+			}
+			refs["variants"] = variants
+		}
+		raw, _ := json.Marshal(refs)
+		if _, err = tx.ExecContext(ctx, `INSERT INTO media_ingest_evidence(run_id,step_id,media_id,generation,kind,source_fingerprint,artifact_refs_json,reason,verified_at,stage_id) VALUES(?,?,?,?,'encrypt',?,?,'generated',CURRENT_TIMESTAMP,?)`, *task.RunID, *task.StepID, task.MediaID, task.Generation, s.SourceFingerprint, string(raw), s.StageID); err != nil {
 			return err
 		}
+		_, _ = tx.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='committed',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='staged'`, s.StageID)
 		if err = finishEncryptionLifecycleTx(ctx, tx, task); err != nil {
 			return err
 		}
@@ -569,84 +633,42 @@ func finalizeEncryption(ctx context.Context, db *sql.DB, task Task) error {
 	if !errors.As(err, &uncertain) {
 		return err
 	}
-	reconcileCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	rctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if reconcileErr := reconcileEncryptionFinalization(reconcileCtx, db, task); reconcileErr == nil {
+	if reconcileEncryptionFinalization(rctx, db, task, s.StageID) == nil {
 		return nil
 	}
 	return uncertain
 }
-
-func validatedEncryptionEvidenceTx(ctx context.Context, tx store.SQLExecutor, task Task) (string, string, string, error) {
-	guard := `SELECT COALESCE(a.plain_path,''),a.enc_path,a.wrapped_dek,a.iv,COALESCE(m.file_type,'') FROM post_ingest_task p JOIN media_ingest_step s ON s.id=p.ingest_step_id JOIN media_ingest_run r ON r.id=p.ingest_run_id JOIN media m ON m.id=p.media_id JOIN media_encrypted_assets a ON a.media_id=m.id AND a.status='encrypted' AND a.enc_path=m.file_path WHERE p.id=? AND p.task_type='encrypt' AND p.media_id=? AND p.generation=? AND p.ingest_run_id=? AND p.ingest_step_id=? AND p.status='running' AND p.lease_owner=? AND p.attempts=? AND s.status='running' AND s.run_id=p.ingest_run_id AND s.media_id=p.media_id AND s.generation=p.generation AND s.step_type='encrypt' AND s.attempts=p.attempts AND s.lease_owner=p.lease_owner AND r.status='processing' AND r.superseded_at IS NULL AND COALESCE(r.superseded_by_generation,0)=0 AND m.ingest_generation=p.generation`
-	var source, path, wrapped, iv, fileType string
-	if err := tx.QueryRowContext(ctx, guard, task.ID, task.MediaID, task.Generation, *task.RunID, *task.StepID, task.LeaseOwner, task.Attempts).Scan(&source, &path, &wrapped, &iv, &fileType); err != nil {
-		return "", "", "", ClassifiedError{Kind: FailureShutdown, Err: fmt.Errorf("encrypt finalization stale fence: %w", err)}
-	}
-	if wrapped == "" || iv == "" {
-		return "", "", "", errors.New("encrypt finalization missing key identity")
-	}
-	fingerprint, err := publication.SourceFingerprint(source)
+func reconcileEncryptionFinalization(ctx context.Context, db *sql.DB, task Task, stageID string) error {
+	var n int
+	err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM media_ingest_evidence e JOIN post_ingest_task p ON p.id=? JOIN media_ingest_step s ON s.id=? JOIN media_ingest_run r ON r.id=? JOIN media m ON m.id=? JOIN media_encrypted_assets a ON a.media_id=m.id AND a.enc_path=m.file_path WHERE e.step_id=s.id AND e.kind='encrypt' AND e.stage_id=? AND e.run_id=r.id AND e.media_id=m.id AND e.generation=? AND p.status='done' AND s.status='done' AND r.status IN ('published','degraded') AND m.ingest_generation=?`, task.ID, *task.StepID, *task.RunID, task.MediaID, stageID, task.Generation, task.Generation).Scan(&n)
 	if err != nil {
-		return "", "", "", err
+		return err
 	}
-	size, hash, err := hashPath(path)
-	if err != nil {
-		return "", "", "", err
+	if n != 1 {
+		return errors.New("encrypt reconciliation mismatch")
 	}
-	refs := map[string]any{"path": path, "size": size, "sha256": hash, "wrapped_dek": wrapped, "iv": iv}
-	if strings.EqualFold(strings.TrimSpace(fileType), "image") {
-		variants, err := validatedEncryptedPhotoVariantsTx(ctx, tx, task.MediaID)
-		if err != nil {
-			return "", "", "", err
-		}
-		refs["variants"] = variants
-	}
-	raw, _ := json.Marshal(refs)
-	return string(raw), fingerprint, fmt.Sprintf("encrypt-%d-%d", *task.StepID, task.Generation), nil
+	return nil
 }
-
-func validatedEncryptedPhotoVariantsTx(ctx context.Context, tx store.SQLExecutor, mediaID int64) ([]any, error) {
-	var metaRaw string
-	if err := tx.QueryRowContext(ctx, `SELECT meta_json FROM media WHERE id=?`, mediaID).Scan(&metaRaw); err != nil {
-		return nil, err
+func cleanupUnreferencedEncryptionStage(ctx context.Context, db *sql.DB, s storage.StagedMediaEncryption) error {
+	var refs int
+	_ = db.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM media m WHERE m.file_path=?)+(SELECT COUNT(*) FROM media_encrypted_assets a WHERE a.enc_path=? AND a.status='encrypted')+(SELECT COUNT(*) FROM media_ingest_evidence e WHERE e.stage_id=?)`, s.EncPath, s.EncPath, s.StageID).Scan(&refs)
+	if refs > 0 {
+		return nil
 	}
-	var meta struct {
-		Photo struct {
-			Thumb, Medium string `json:"-"`
-		} `json:"photo"`
+	if err := os.Remove(s.EncPath); err != nil && !os.IsNotExist(err) {
+		return err
 	}
-	var root map[string]any
-	if json.Unmarshal([]byte(metaRaw), &root) != nil {
-		return nil, errors.New("encrypt finalization invalid photo metadata")
-	}
-	photo, _ := root["photo"].(map[string]any)
-	meta.Photo.Thumb, _ = photo["thumb_path"].(string)
-	meta.Photo.Medium, _ = photo["medium_path"].(string)
-	var refs []any
-	for _, v := range []struct{ kind, logical, path string }{{"photo_thumb", "thumb.jpg", meta.Photo.Thumb}, {"photo_medium", "medium.jpg", meta.Photo.Medium}} {
-		var selected, wrapped, iv string
-		if err := tx.QueryRowContext(ctx, `SELECT enc_path,wrapped_dek,iv FROM media_derived_assets WHERE media_id=? AND artifact_kind=? AND logical_name=?`, mediaID, v.kind, v.logical).Scan(&selected, &wrapped, &iv); err != nil {
-			return nil, err
-		}
-		if !samePathForEvidence(selected, v.path) || wrapped == "" || iv == "" {
-			return nil, errors.New("encrypt finalization derivative selection mismatch")
-		}
-		size, hash, err := hashPath(selected)
-		if err != nil {
-			return nil, err
-		}
-		refs = append(refs, map[string]any{"kind": v.kind, "logical_name": v.logical, "path": selected, "size": size, "sha256": hash, "wrapped_dek": wrapped, "iv": iv})
-	}
-	return refs, nil
+	_, _ = db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='quarantined',recovery_error='cleaned_unreferenced',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='staged'`, s.StageID)
+	return nil
 }
-
-func samePathForEvidence(a, b string) bool {
-	aa, ea := filepath.Abs(a)
-	bb, eb := filepath.Abs(b)
-	return ea == nil && eb == nil && strings.EqualFold(filepath.Clean(aa), filepath.Clean(bb))
+func cleanupPlaintextAfterCommittedEncryption(db *sql.DB, s storage.StagedMediaEncryption) {
+	var n int
+	if db.QueryRow(`SELECT COUNT(*) FROM media m JOIN media_encrypted_assets a ON a.media_id=m.id AND a.enc_path=m.file_path AND a.enc_path=? WHERE m.id=?`, s.EncPath, s.MediaID).Scan(&n) == nil && n == 1 {
+		_ = os.Remove(s.OriginalPath)
+	}
 }
-
 func finishEncryptionLifecycleTx(ctx context.Context, tx store.SQLExecutor, task Task) error {
 	res, err := tx.ExecContext(ctx, `UPDATE post_ingest_task SET status='done',lease_owner=NULL,lease_until=NULL,last_error='',finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='running' AND lease_owner=? AND attempts=?`, task.ID, task.LeaseOwner, task.Attempts)
 	if err != nil {
@@ -654,7 +676,7 @@ func finishEncryptionLifecycleTx(ctx context.Context, tx store.SQLExecutor, task
 	}
 	n, _ := res.RowsAffected()
 	if n != 1 {
-		return errors.New("encrypt finalization queue fence lost")
+		return errors.New("encrypt queue fence lost")
 	}
 	res, err = tx.ExecContext(ctx, `UPDATE media_ingest_step SET status='done',lease_owner=NULL,lease_until=NULL,last_error='',finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='running' AND lease_owner=? AND attempts=?`, *task.StepID, task.LeaseOwner, task.Attempts)
 	if err != nil {
@@ -662,27 +684,9 @@ func finishEncryptionLifecycleTx(ctx context.Context, tx store.SQLExecutor, task
 	}
 	n, _ = res.RowsAffected()
 	if n != 1 {
-		return errors.New("encrypt finalization step fence lost")
+		return errors.New("encrypt step fence lost")
 	}
 	return nil
-}
-func verifyEncryptionFinalizedTx(ctx context.Context, tx store.SQLExecutor, task Task, stageID string) error {
-	var n int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM media_ingest_evidence e JOIN post_ingest_task p ON p.id=? JOIN media_ingest_step s ON s.id=? JOIN media_ingest_run r ON r.id=? JOIN media m ON m.id=? WHERE e.step_id=s.id AND e.kind='encrypt' AND e.stage_id=? AND e.run_id=r.id AND e.media_id=m.id AND e.generation=? AND p.status='done' AND s.status='done' AND r.status IN ('published','degraded') AND m.ingest_generation=?`, task.ID, *task.StepID, *task.RunID, task.MediaID, stageID, task.Generation, task.Generation).Scan(&n); err != nil {
-		return err
-	}
-	if n != 1 {
-		return errors.New("encrypt finalization reconciliation mismatch")
-	}
-	return nil
-}
-func reconcileEncryptionFinalization(ctx context.Context, db *sql.DB, task Task) error {
-	var stage string
-	err := db.QueryRowContext(ctx, `SELECT stage_id FROM media_ingest_evidence WHERE step_id=? AND kind='encrypt'`, *task.StepID).Scan(&stage)
-	if err != nil {
-		return err
-	}
-	return verifyEncryptionFinalizedTx(ctx, db, task, stage)
 }
 func usableEncryptedOutput(ctx context.Context, db *sql.DB, mediaID int64) (bool, error) {
 	return storage.IsEncryptedAssetRecordValid(ctx, db, mediaID)
@@ -755,4 +759,38 @@ LIMIT 100`, after)
 			return nil
 		}
 	}
+}
+
+func samePathForEvidence(a, b string) bool {
+	aa, ea := filepath.Abs(a)
+	bb, eb := filepath.Abs(b)
+	return ea == nil && eb == nil && strings.EqualFold(filepath.Clean(aa), filepath.Clean(bb))
+}
+func validatedEncryptedPhotoVariantsTx(ctx context.Context, tx store.SQLExecutor, mediaID int64) ([]any, error) {
+	var raw string
+	if err := tx.QueryRowContext(ctx, `SELECT meta_json FROM media WHERE id=?`, mediaID).Scan(&raw); err != nil {
+		return nil, err
+	}
+	var root map[string]any
+	if json.Unmarshal([]byte(raw), &root) != nil {
+		return nil, errors.New("invalid photo metadata")
+	}
+	photo, _ := root["photo"].(map[string]any)
+	var out []any
+	for _, v := range []struct{ kind, logical, key string }{{"photo_thumb", "thumb.jpg", "thumb_path"}, {"photo_medium", "medium.jpg", "medium_path"}} {
+		path, _ := photo[v.key].(string)
+		var selected, wrapped, iv string
+		if err := tx.QueryRowContext(ctx, `SELECT enc_path,wrapped_dek,iv FROM media_derived_assets WHERE media_id=? AND artifact_kind=? AND logical_name=?`, mediaID, v.kind, v.logical).Scan(&selected, &wrapped, &iv); err != nil {
+			return nil, err
+		}
+		if !samePathForEvidence(path, selected) || wrapped == "" || iv == "" {
+			return nil, errors.New("photo derivative selection mismatch")
+		}
+		size, hash, err := hashPath(path)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, map[string]any{"kind": v.kind, "logical_name": v.logical, "path": path, "size": size, "sha256": hash, "wrapped_dek": wrapped, "iv": iv})
+	}
+	return out, nil
 }
