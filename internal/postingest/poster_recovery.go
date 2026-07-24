@@ -83,7 +83,7 @@ func ReconcilePosterStages(ctx context.Context, db *sql.DB, roots PosterRecovery
 			_, _ = db.ExecContext(ctx, `UPDATE media_asset_stage_journal SET recovery_error=? WHERE stage_id=?`, `unsafe_path: `+err.Error(), r.stageID)
 			return checked, cleaned, err
 		}
-		refs, err := posterPathReferenceCount(ctx, db, path)
+		refs, err := posterPathReferenceCount(ctx, db, path, "")
 		if err != nil {
 			return checked, cleaned, err
 		}

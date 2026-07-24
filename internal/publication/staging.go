@@ -10,8 +10,9 @@ const (
 )
 
 type StageRequest struct {
-	MediaID, RunID, StepID, Generation        int64
-	OwnerToken, SourcePath, SourceFingerprint string
+	MediaID, RunID, StepID, Generation, QueueID int64
+	OwnerToken, SourcePath, SourceFingerprint   string
+	Attempt                                     int
 }
 type StageRecord struct {
 	StageID                                         string

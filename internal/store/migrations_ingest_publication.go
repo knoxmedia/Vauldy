@@ -681,7 +681,7 @@ func publicationV2CurrentDB(ctx context.Context, db *sql.DB) (bool, error) {
 		return false, err
 	}
 	defer conn.Close()
-	if !tableExists(ctx, conn, "media_ingest_step_dependency") || !tableExists(ctx, conn, "media_ingest_evidence") || !tableExists(ctx, conn, "media_asset_stage_journal") {
+	if !tableExists(ctx, conn, "media_ingest_step_dependency") || !tableExists(ctx, conn, "media_ingest_evidence") || !tableExists(ctx, conn, "media_asset_stage_journal") || !tableExists(ctx, conn, "poster_repair_stage") {
 		return false, nil
 	}
 	if ok, childErr := publicationManagedChildrenCurrent(ctx, conn); childErr != nil {
@@ -1502,6 +1502,13 @@ const canonicalAssetStageJournalSchema = `CREATE TABLE media_asset_stage_journal
  FOREIGN KEY(run_id,media_id,generation) REFERENCES media_ingest_run(id,media_id,generation) ON DELETE CASCADE,
  FOREIGN KEY(step_id,media_id,generation) REFERENCES media_ingest_step(id,media_id,generation) ON DELETE CASCADE)`
 
+const canonicalPosterRepairStageSchema = `CREATE TABLE poster_repair_stage(
+ stage_id TEXT PRIMARY KEY,queue_id INTEGER NOT NULL REFERENCES post_ingest_task(id) ON DELETE CASCADE,media_id INTEGER NOT NULL,run_id INTEGER NOT NULL,generation INTEGER NOT NULL,
+ owner_token TEXT NOT NULL,attempt INTEGER NOT NULL,source_fingerprint TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('staged','quarantined','committed')),
+ staged_path TEXT NOT NULL,hashes_sizes_json TEXT NOT NULL CHECK(json_valid(hashes_sizes_json)),recovery_error TEXT NOT NULL DEFAULT '',created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ UNIQUE(queue_id,attempt),
+ FOREIGN KEY(run_id,media_id,generation) REFERENCES media_ingest_run(id,media_id,generation) ON DELETE CASCADE)`
+
 func createPublicationChildren(ctx context.Context, q SQLExecutor, g []publicationGraphTable) error {
 	if _, ok := graphMeta(g, "post_ingest_task"); ok {
 		if _, e := q.ExecContext(ctx, strings.Replace(postIngestTaskPublicationSchema, "post_ingest_task_new", "post_ingest_task", 1)); e != nil {
@@ -1539,6 +1546,9 @@ func createPublicationChildren(ctx context.Context, q SQLExecutor, g []publicati
 				return e
 			}
 		}
+	}
+	if _, e := q.ExecContext(ctx, strings.Replace(canonicalPosterRepairStageSchema, "CREATE TABLE poster_repair_stage", "CREATE TABLE IF NOT EXISTS poster_repair_stage", 1)); e != nil {
+		return e
 	}
 	if _, e := q.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS scrape_effect_commit(task_id INTEGER NOT NULL,attempt INTEGER NOT NULL,generation INTEGER NOT NULL,stage_id TEXT NOT NULL DEFAULT '',manifest_json TEXT NOT NULL CHECK(json_valid(manifest_json)),manifest_digest TEXT NOT NULL,created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(task_id,attempt),FOREIGN KEY(task_id) REFERENCES scrape_task(id) ON DELETE CASCADE)`); e != nil {
 		return e
@@ -2178,7 +2188,7 @@ func validatePublicationV2Schema(ctx context.Context, q SQLExecutor) error {
 			}
 		}
 	}
-	for _, table := range []string{"media_ingest_step_dependency", "media_ingest_evidence", "media_asset_stage_journal"} {
+	for _, table := range []string{"media_ingest_step_dependency", "media_ingest_evidence", "media_asset_stage_journal", "poster_repair_stage"} {
 		if !tableExists(ctx, q, table) {
 			return fmt.Errorf("publication v2 missing table %s", table)
 		}

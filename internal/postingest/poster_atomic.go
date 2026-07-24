@@ -95,7 +95,7 @@ func (a *PosterAdapter) ExecuteWithResult(ctx context.Context, task Task) (Execu
 	if task.StepID != nil {
 		stepID = *task.StepID
 	}
-	req := publication.StageRequest{MediaID: task.MediaID, RunID: *task.RunID, StepID: stepID, Generation: task.Generation, OwnerToken: task.LeaseOwner, SourcePath: input, SourceFingerprint: fp}
+	req := publication.StageRequest{MediaID: task.MediaID, RunID: *task.RunID, StepID: stepID, Generation: task.Generation, OwnerToken: task.LeaseOwner, SourcePath: input, SourceFingerprint: fp, QueueID: task.ID, Attempt: task.Attempts}
 	cfg, err := a.configForLibrary(ctx, libraryID)
 	if err != nil {
 		return ordinary, err
@@ -154,7 +154,7 @@ func commitStagedPoster(ctx context.Context, db *sql.DB, task Task, staged Stage
 	if task.StepID != nil {
 		stepID = *task.StepID
 	}
-	if task.RunID == nil || req.MediaID != task.MediaID || req.RunID != *task.RunID || req.StepID != stepID || req.Generation != task.Generation || req.OwnerToken != task.LeaseOwner {
+	if task.RunID == nil || req.MediaID != task.MediaID || req.RunID != *task.RunID || req.StepID != stepID || req.Generation != task.Generation || req.OwnerToken != task.LeaseOwner || (task.Type == TaskPosterRepair && (req.QueueID != task.ID || req.Attempt != task.Attempts)) {
 		return fmt.Errorf("poster commit: stage/task identity mismatch")
 	}
 	var replaced []string
@@ -193,11 +193,14 @@ func commitStagedPoster(ctx context.Context, db *sql.DB, task Task, staged Stage
 		if size != staged.Size || hash != staged.Hash {
 			return fmt.Errorf("poster commit: staged hash/size mismatch")
 		}
+		var one int
 		if task.Type == TaskPoster {
-			var one int
-			if err = tx.QueryRowContext(ctx, `SELECT 1 FROM media_asset_stage_journal WHERE stage_id=? AND media_id=? AND run_id=? AND step_id=? AND generation=? AND owner_token=? AND source_fingerprint=? AND artifact_kind='poster' AND state='staged'`, staged.Stage.StageID, task.MediaID, *task.RunID, stepID, task.Generation, task.LeaseOwner, fp).Scan(&one); err != nil {
-				return fmt.Errorf("poster commit: journal mismatch: %w", err)
-			}
+			err = tx.QueryRowContext(ctx, `SELECT 1 FROM media_asset_stage_journal WHERE stage_id=? AND media_id=? AND run_id=? AND step_id=? AND generation=? AND owner_token=? AND source_fingerprint=? AND artifact_kind='poster' AND state='staged'`, staged.Stage.StageID, task.MediaID, *task.RunID, stepID, task.Generation, task.LeaseOwner, fp).Scan(&one)
+		} else {
+			err = tx.QueryRowContext(ctx, `SELECT 1 FROM poster_repair_stage WHERE stage_id=? AND queue_id=? AND media_id=? AND run_id=? AND generation=? AND owner_token=? AND attempt=? AND source_fingerprint=? AND state='staged'`, staged.Stage.StageID, task.ID, task.MediaID, *task.RunID, task.Generation, task.LeaseOwner, task.Attempts, fp).Scan(&one)
+		}
+		if err != nil {
+			return fmt.Errorf("poster commit: journal mismatch: %w", err)
 		}
 		if staged.Derived != nil {
 			old, e := (&storage.DerivedAssetStore{}).CommitStagedTx(ctx, tx, staged.Derived)
@@ -218,9 +221,12 @@ func commitStagedPoster(ctx context.Context, db *sql.DB, task Task, staged Stage
 			}
 		}
 		if task.Type == TaskPoster {
-			if _, e = tx.ExecContext(ctx, `UPDATE media_asset_stage_journal SET state='committed',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='staged'`, staged.Stage.StageID); e != nil {
-				return e
-			}
+			_, e = tx.ExecContext(ctx, `UPDATE media_asset_stage_journal SET state='committed',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='staged'`, staged.Stage.StageID)
+		} else {
+			_, e = tx.ExecContext(ctx, `UPDATE poster_repair_stage SET state='committed',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND queue_id=? AND attempt=? AND state='staged'`, staged.Stage.StageID, task.ID, task.Attempts)
+		}
+		if e != nil {
+			return e
 		}
 		result, e := tx.ExecContext(ctx, `UPDATE post_ingest_task SET status='done',lease_owner=NULL,lease_until=NULL,last_error='',finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='running' AND lease_owner=? AND attempts=?`, task.ID, task.LeaseOwner, task.Attempts)
 		if e != nil {
@@ -262,7 +268,7 @@ func commitStagedPoster(ctx context.Context, db *sql.DB, task Task, staged Stage
 	}
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), posterReconcileTimeout)
 	defer cancel()
-	_ = cleanupPosterPaths(cleanupCtx, db, replaced)
+	_ = cleanupPosterPaths(cleanupCtx, db, replaced, staged.Path)
 	return nil
 }
 
@@ -335,6 +341,30 @@ func verifyCommittedPosterTx(ctx context.Context, tx store.SQLExecutor, task Tas
 	return nil
 }
 func reconcilePosterCommitState(ctx context.Context, db *sql.DB, task Task, staged StagedPoster) (posterCommitState, error) {
+	if task.Type == TaskPosterRepair {
+		var state, meta string
+		err := db.QueryRowContext(ctx, `SELECT r.state,m.meta_json FROM poster_repair_stage r JOIN post_ingest_task p ON p.id=r.queue_id JOIN media m ON m.id=r.media_id JOIN media_ingest_run run ON run.id=r.run_id WHERE r.stage_id=? AND r.queue_id=? AND r.media_id=? AND r.run_id=? AND r.generation=? AND r.owner_token=? AND r.attempt=? AND r.source_fingerprint=? AND p.status='done' AND p.ingest_step_id IS NULL AND run.superseded_at IS NULL AND run.superseded_by_generation IS NULL AND m.ingest_generation=r.generation`, staged.Stage.StageID, task.ID, task.MediaID, *task.RunID, task.Generation, task.LeaseOwner, task.Attempts, staged.Stage.Request.SourceFingerprint).Scan(&state, &meta)
+		if errors.Is(err, sql.ErrNoRows) {
+			var n int
+			if e := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM poster_repair_stage WHERE stage_id=? OR (queue_id=? AND attempt=?)`, staged.Stage.StageID, task.ID, task.Attempts).Scan(&n); e != nil {
+				return posterCommitUnknown, e
+			}
+			if n == 0 {
+				return posterCommitAbsent, nil
+			}
+			return posterCommitUnknown, err
+		}
+		if err != nil {
+			return posterCommitUnknown, err
+		}
+		if state == "committed" && posterInMeta(decodePosterMeta(meta)) == staged.URL {
+			size, hash, e := hashPath(staged.Path)
+			if e == nil && size == staged.Size && hash == staged.Hash {
+				return posterCommitExact, nil
+			}
+		}
+		return posterCommitUnknown, fmt.Errorf("poster repair commit mismatch")
+	}
 	if task.Type != TaskPoster {
 		return posterCommitUnknown, nil
 	}
@@ -368,21 +398,62 @@ func reconcilePosterCommit(ctx context.Context, db *sql.DB, task Task, staged St
 	err = verifyCommittedPosterTx(ctx, conn, task, staged)
 	return err == nil, err
 }
-func posterPathReferenceCount(ctx context.Context, db *sql.DB, path string) (int, error) {
+func posterPathReferenceCount(ctx context.Context, db *sql.DB, path, url string) (int, error) {
 	var n int
-	err := db.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM media_derived_assets WHERE enc_path=?)+(SELECT COUNT(*) FROM media_ingest_evidence WHERE json_extract(artifact_refs_json,'$.path')=?)+(SELECT COUNT(*) FROM media WHERE json_extract(meta_json,'$.scrape.poster')=? OR json_extract(meta_json,'$.scrape.extra.poster')=?)`, path, path, path, path).Scan(&n)
+	err := db.QueryRowContext(ctx, `SELECT
+ (SELECT COUNT(*) FROM media_derived_assets WHERE enc_path=?)+
+ (SELECT COUNT(*) FROM media_ingest_evidence WHERE json_extract(artifact_refs_json,'$.path')=? OR json_extract(artifact_refs_json,'$.url')=?)+
+ (SELECT COUNT(*) FROM media_asset_stage_journal WHERE json_extract(hashes_sizes_json,'$.path')=? OR json_extract(hashes_sizes_json,'$.url')=?)+
+
+ (SELECT COUNT(*) FROM media WHERE json_extract(meta_json,'$.scrape.poster')=? OR json_extract(meta_json,'$.scrape.extra.poster')=?)`, path, path, url, path, url, path, url, url, url).Scan(&n)
 	return n, err
 }
-func cleanupPosterPaths(ctx context.Context, db *sql.DB, paths []string) error {
-	for _, p := range paths {
-		if !filepath.IsAbs(p) {
+func managedPosterPath(url, exemplar string) string {
+	const prefix = "/uploads/posters/"
+	if !strings.HasPrefix(url, prefix) || !strings.HasSuffix(url, "/"+posterLogicalName) {
+		return ""
+	}
+	rel := strings.TrimPrefix(url, "/uploads/")
+	parts := strings.Split(filepath.ToSlash(rel), "/")
+	if len(parts) != 4 || parts[0] != "posters" || !strings.HasPrefix(parts[1], "generation-") || parts[2] == "" || parts[2] == "." || parts[2] == ".." {
+		return ""
+	}
+	marker := string(filepath.Separator) + "posters" + string(filepath.Separator)
+	abs, err := filepath.Abs(exemplar)
+	if err != nil {
+		return ""
+	}
+	i := strings.LastIndex(strings.ToLower(abs), strings.ToLower(marker))
+	if i < 0 {
+		return ""
+	}
+	root := abs[:i]
+	candidate := filepath.Join(root, filepath.FromSlash(rel))
+	if !pathInsideResolvedRoot(root, candidate) {
+		return ""
+	}
+	return candidate
+}
+func cleanupPosterPaths(ctx context.Context, db *sql.DB, refs []string, exemplar string) error {
+	for _, ref := range refs {
+		p, url := ref, ""
+		if strings.HasPrefix(ref, "/uploads/") {
+			url, p = ref, managedPosterPath(ref, exemplar)
+		}
+		if p == "" || !filepath.IsAbs(p) {
 			continue
 		}
-		n, err := posterPathReferenceCount(ctx, db, p)
+		if ref == exemplar && strings.HasPrefix(ref, "/uploads/") {
+			continue
+		}
+		n, err := posterPathReferenceCount(ctx, db, p, url)
 		if err != nil {
 			return err
 		}
 		if n == 0 {
+			if st, err := os.Lstat(p); err == nil && st.Mode()&os.ModeSymlink != 0 {
+				continue
+			}
 			if err = os.Remove(p); err != nil && !os.IsNotExist(err) {
 				return err
 			}
@@ -391,7 +462,9 @@ func cleanupPosterPaths(ctx context.Context, db *sql.DB, paths []string) error {
 	return nil
 }
 func cleanupUnreferencedPoster(ctx context.Context, db *sql.DB, s StagedPoster) error {
-	return cleanupPosterPaths(ctx, db, []string{s.Path})
+	_, _ = db.ExecContext(ctx, `DELETE FROM media_asset_stage_journal WHERE stage_id=? AND state='staged' AND media_id=? AND run_id=? AND generation=? AND owner_token=? AND source_fingerprint=?`, s.Stage.StageID, s.Stage.Request.MediaID, s.Stage.Request.RunID, s.Stage.Request.Generation, s.Stage.Request.OwnerToken, s.Stage.Request.SourceFingerprint)
+	_, _ = db.ExecContext(ctx, `DELETE FROM poster_repair_stage WHERE stage_id=? AND state='staged' AND queue_id=? AND media_id=? AND run_id=? AND generation=? AND owner_token=? AND attempt=? AND source_fingerprint=?`, s.Stage.StageID, s.Stage.Request.QueueID, s.Stage.Request.MediaID, s.Stage.Request.RunID, s.Stage.Request.Generation, s.Stage.Request.OwnerToken, s.Stage.Request.Attempt, s.Stage.Request.SourceFingerprint)
+	return cleanupPosterPaths(ctx, db, []string{s.Path}, "")
 }
 
 func (r *LocalPosterRunner) StagePoster(ctx context.Context, req publication.StageRequest, libraryID int64, cfg scraper.Config) (StagedPoster, error) {
@@ -474,10 +547,6 @@ func (r *LocalPosterRunner) StagePoster(ctx context.Context, req publication.Sta
 		return nil
 	}()})
 	staged.Stage.HashesSizesJSON = string(hs)
-	if req.StepID == 0 {
-		cleanup = false
-		return staged, nil
-	}
 	_, err = withImmediatePosterJournalTx(ctx, r.DB, func(tx store.ImmediateConnTx) error {
 		task := Task{MediaID: req.MediaID, RunID: &req.RunID, Generation: req.Generation, LeaseOwner: req.OwnerToken, Attempts: 1, Type: TaskPoster}
 		if req.StepID > 0 {
@@ -489,7 +558,12 @@ func (r *LocalPosterRunner) StagePoster(ctx context.Context, req publication.Sta
 		if e := validatePosterIdentityTx(ctx, tx, task); e != nil {
 			return e
 		}
-		_, e := tx.ExecContext(ctx, `INSERT INTO media_asset_stage_journal(stage_id,media_id,run_id,step_id,generation,owner_token,source_fingerprint,artifact_kind,state,original_path,staged_path,hashes_sizes_json) VALUES(?,?,?,?,?,?,?,'poster','staged',?,?,?)`, stageID, req.MediaID, req.RunID, req.StepID, req.Generation, req.OwnerToken, req.SourceFingerprint, req.SourcePath, dir, string(hs))
+		var e error
+		if req.StepID > 0 {
+			_, e = tx.ExecContext(ctx, `INSERT INTO media_asset_stage_journal(stage_id,media_id,run_id,step_id,generation,owner_token,source_fingerprint,artifact_kind,state,original_path,staged_path,hashes_sizes_json) VALUES(?,?,?,?,?,?,?,'poster','staged',?,?,?)`, stageID, req.MediaID, req.RunID, req.StepID, req.Generation, req.OwnerToken, req.SourceFingerprint, req.SourcePath, dir, string(hs))
+		} else {
+			_, e = tx.ExecContext(ctx, `INSERT INTO poster_repair_stage(stage_id,queue_id,media_id,run_id,generation,owner_token,attempt,source_fingerprint,state,staged_path,hashes_sizes_json) VALUES(?,?,?,?,?,?,?,?,'staged',?,?)`, stageID, task.ID, req.MediaID, req.RunID, req.Generation, req.OwnerToken, task.Attempts, req.SourceFingerprint, dir, staged.Stage.HashesSizesJSON)
+		}
 		return e
 	})
 	if err != nil {

@@ -240,3 +240,49 @@ func TestEncryptedPosterRecoveryPathClassRequiresDerivedRoot(t *testing.T) {
 		t.Fatalf("encrypted sentinel removed: %v", err)
 	}
 }
+
+func TestRepairPosterCommitRetainsNewAndCleansOldImmutableStage(t *testing.T) {
+	db, upload, task := seedCurrentLinkedPosterTask(t)
+	_, err := db.Exec(`UPDATE media SET publication_state='published',published_at=CURRENT_TIMESTAMP WHERE id=?; UPDATE media_ingest_run SET status='published' WHERE id=?; UPDATE post_ingest_task SET task_type='poster_repair',ingest_step_id=NULL WHERE id=?`, task.MediaID, *task.RunID, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task.Type, task.StepID = TaskPosterRepair, nil
+	runner := realPosterStageRunner(t, db, upload)
+	stage := func() StagedPoster {
+		fp, _ := sourceFingerprint(taskSource(t, db, task.MediaID))
+		req := publication.StageRequest{MediaID: task.MediaID, RunID: *task.RunID, Generation: task.Generation, OwnerToken: task.LeaseOwner, SourcePath: taskSource(t, db, task.MediaID), SourceFingerprint: fp}
+		req.StepID = 0
+		req.QueueID = task.ID
+		req.Attempt = task.Attempts
+		got, e := runner.StagePoster(context.Background(), req, 1, screenGrabberConfig())
+		if e != nil {
+			t.Fatal(e)
+		}
+		return got
+	}
+	old := stage()
+	oldURL := old.URL
+	if err = commitStagedPoster(context.Background(), db, task, old); err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`UPDATE post_ingest_task SET status='running',attempts=attempts+1,lease_owner=? WHERE id=?`, task.LeaseOwner, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task.Attempts++
+	newStage := stage()
+	if err = commitStagedPoster(context.Background(), db, task, newStage); err != nil {
+		t.Fatal(err)
+	}
+	if _, e := os.Stat(newStage.Path); e != nil {
+		t.Fatalf("new stage removed: %v", e)
+	}
+	if _, e := os.Stat(old.Path); !os.IsNotExist(e) {
+		t.Fatalf("old stage retained: %v", e)
+	}
+	if p := managedPosterPath("/uploads/posters/../../sentinel", newStage.Path); p != "" {
+		t.Fatalf("traversal resolved %q", p)
+	}
+	_ = oldURL
+}
