@@ -252,7 +252,7 @@ func main() {
 	processID := fmt.Sprintf("%s-%d-%s", hostname, os.Getpid(), uuid.NewString())
 	queueOwner := "postingest-" + processID
 	postIngestQueue := postingest.NewQueue(db, queueOwner, sqliteMetrics, publicationCapabilities)
-	if err := recoverStartupTasks(serverCtx, db, postIngestQueue, StartupRecoveryRoots{Thumbnail: postingest.ThumbnailRecoveryRoots{Preview: filepath.Join(cfg.Data.Preview, "photos"), Derived: filepath.Join(cfg.Data.Dir, ".derived")}, ScrapeArtwork: cfg.Data.MetadataLibrary}); err != nil {
+	if err := recoverStartupTasks(serverCtx, db, postIngestQueue, StartupRecoveryRoots{Thumbnail: postingest.ThumbnailRecoveryRoots{Preview: filepath.Join(cfg.Data.Preview, "photos"), Derived: filepath.Join(cfg.Data.Dir, ".derived")}, Poster: postingest.PosterRecoveryRoots{Upload: cfg.Data.Upload, Derived: filepath.Join(cfg.Data.Dir, ".derived")}, ScrapeArtwork: cfg.Data.MetadataLibrary}); err != nil {
 		log.Fatalf("startup task recovery: %v", err)
 	}
 	postIngestEnqueuer := postingest.NewEnqueuer(db, cfg, sqliteMetrics)
@@ -353,6 +353,9 @@ func main() {
 	})
 	background.Go(serverCtx, func(ctx context.Context) {
 		postingest.RunThumbnailStageReconciler(ctx, db, postingest.ThumbnailRecoveryRoots{Preview: filepath.Join(cfg.Data.Preview, "photos"), Derived: filepath.Join(cfg.Data.Dir, ".derived")}, time.Minute, 100, func(err error) { log.Printf("thumbnail stage reconcile: %v", err) })
+	})
+	background.Go(serverCtx, func(ctx context.Context) {
+		postingest.RunPosterStageReconciler(ctx, db, postingest.PosterRecoveryRoots{Upload: cfg.Data.Upload, Derived: filepath.Join(cfg.Data.Dir, ".derived")}, time.Minute, 100, func(err error) { log.Printf("poster stage reconcile: %v", err) })
 	})
 	deps := handler.Dependencies{
 		ServerContext: serverCtx, Background: background,

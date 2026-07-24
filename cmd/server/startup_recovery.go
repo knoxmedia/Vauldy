@@ -13,6 +13,7 @@ import (
 // recoverStartupTasks performs durable queue recovery before workers claim work.
 type StartupRecoveryRoots struct {
 	Thumbnail     postingest.ThumbnailRecoveryRoots
+	Poster        postingest.PosterRecoveryRoots
 	ScrapeArtwork string
 }
 
@@ -25,6 +26,9 @@ func recoverStartupTasks(ctx context.Context, db *sql.DB, postIngest *postingest
 	}
 	if _, err := metadatalib.ReconcileScrapeArtworkStages(ctx, db, roots.ScrapeArtwork, 100); err != nil {
 		return fmt.Errorf("startup recovery: scrape artwork stages: %w", err)
+	}
+	if _, _, err := postingest.ReconcilePosterStages(ctx, db, roots.Poster, 100); err != nil {
+		return fmt.Errorf("startup recovery: poster stages: %w", err)
 	}
 	if _, _, err := postingest.ReconcileThumbnailStages(ctx, db, roots.Thumbnail, 100); err != nil {
 		return fmt.Errorf("startup recovery: thumbnail stages: %w", err)

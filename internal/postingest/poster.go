@@ -100,6 +100,9 @@ func (a *PosterAdapter) Execute(ctx context.Context, task Task) error {
 		return err
 	}
 	defer unlock()
+	if err := a.validateLease(ctx, task); err != nil {
+		return err
+	}
 
 	var libraryID int64
 	var raw, fileType string
@@ -152,13 +155,35 @@ func (a *PosterAdapter) Execute(ctx context.Context, task Task) error {
 }
 
 func (a *PosterAdapter) validateLease(ctx context.Context, task Task) error {
-	if strings.TrimSpace(task.LeaseOwner) == "" {
+	legacy := task.RunID == nil && task.StepID == nil && task.Generation == 0
+	if legacy && strings.TrimSpace(task.LeaseOwner) == "" {
 		return nil
 	}
+	if strings.TrimSpace(task.LeaseOwner) == "" || task.ID <= 0 {
+		return ClassifiedError{Kind: FailureShutdown, Err: fmt.Errorf("poster adapter: unclaimed task identity")}
+	}
 	var one int
-	err := a.DB.QueryRowContext(ctx, `SELECT 1 FROM post_ingest_task WHERE id=? AND media_id=? AND task_type IN ('poster','poster_repair') AND status='running' AND lease_owner=?`, task.ID, task.MediaID, task.LeaseOwner).Scan(&one)
+	var err error
+	switch {
+	case legacy:
+		query := `SELECT 1 FROM post_ingest_task WHERE id=? AND media_id=? AND task_type=? AND status='running' AND lease_owner=? AND ingest_run_id IS NULL AND ingest_step_id IS NULL AND generation=0`
+		args := []any{task.ID, task.MediaID, task.Type, task.LeaseOwner}
+		if task.Attempts > 0 {
+			query += ` AND attempts=?`
+			args = append(args, task.Attempts)
+		}
+		err = a.DB.QueryRowContext(ctx, query, args...).Scan(&one)
+	case task.Type == TaskPosterRepair && task.RunID != nil && task.StepID == nil && task.Generation > 0:
+		query := `SELECT 1 FROM post_ingest_task p JOIN media m ON m.id=p.media_id JOIN media_ingest_run r ON r.id=p.ingest_run_id WHERE p.id=? AND p.media_id=? AND p.task_type='poster_repair' AND p.status='running' AND p.lease_owner=? AND p.attempts=? AND p.ingest_run_id=? AND p.ingest_step_id IS NULL AND p.generation=? AND m.ingest_generation=p.generation AND m.publication_state IN ('published','degraded') AND m.published_at IS NOT NULL AND r.media_id=p.media_id AND r.generation=p.generation AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL`
+		err = a.DB.QueryRowContext(ctx, query, task.ID, task.MediaID, task.LeaseOwner, task.Attempts, *task.RunID, task.Generation).Scan(&one)
+	case task.Type == TaskPoster && task.RunID != nil && task.StepID != nil && task.Generation > 0:
+		query := `SELECT 1 FROM post_ingest_task p JOIN media_ingest_step s ON s.id=p.ingest_step_id JOIN media_ingest_run r ON r.id=p.ingest_run_id JOIN media m ON m.id=p.media_id WHERE p.id=? AND p.media_id=? AND p.task_type='poster' AND p.status='running' AND p.lease_owner=? AND p.attempts=? AND p.ingest_run_id=? AND p.ingest_step_id=? AND p.generation=? AND s.run_id=p.ingest_run_id AND s.media_id=p.media_id AND s.generation=p.generation AND s.step_type='poster' AND s.status='running' AND s.lease_owner=p.lease_owner AND s.attempts=p.attempts AND r.status='processing' AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND m.ingest_generation=p.generation`
+		err = a.DB.QueryRowContext(ctx, query, task.ID, task.MediaID, task.LeaseOwner, task.Attempts, *task.RunID, *task.StepID, task.Generation).Scan(&one)
+	default:
+		err = sql.ErrNoRows
+	}
 	if errors.Is(err, sql.ErrNoRows) {
-		return ClassifiedError{Kind: FailureShutdown, Err: fmt.Errorf("poster adapter: stale lease for task %d", task.ID)}
+		return ClassifiedError{Kind: FailureShutdown, Err: fmt.Errorf("poster adapter: stale exact task identity for task %d", task.ID)}
 	}
 	return err
 }
