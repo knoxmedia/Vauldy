@@ -1,6 +1,7 @@
 package postingest
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -11,7 +12,14 @@ import (
 	"strings"
 )
 
-type EncryptionRecoveryRoots struct{ Quarantine, Staged string }
+type EncryptionStageRootResolver interface {
+	ResolveEncryptionStageRoot(context.Context, int64, string) (string, error)
+}
+
+type EncryptionRecoveryRoots struct {
+	Quarantine string
+	Resolver   EncryptionStageRootResolver
+}
 
 func quarantinePath(root string, mediaID, generation int64, stageID string) (string, error) {
 	if strings.TrimSpace(root) == "" || mediaID <= 0 || generation <= 0 || strings.TrimSpace(stageID) == "" {

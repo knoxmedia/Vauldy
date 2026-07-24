@@ -445,14 +445,21 @@ type mediaEncryptionStager interface {
 	StageMediaEncryption(context.Context, int64) (storage.StagedMediaEncryption, error)
 }
 
+func NewEncryptAdapterWithSeams(enc interface {
+	EncryptMedia(context.Context, int64) error
+}, seams EncryptionStateMachineSeams) Adapter {
+	return &encryptAdapter{enc: enc, seams: seams}
+}
+
 func NewEncryptAdapter(enc interface {
 	EncryptMedia(context.Context, int64) error
 }) Adapter {
-	return &encryptAdapter{enc: enc}
+	return NewEncryptAdapterWithSeams(enc, EncryptionStateMachineSeams{})
 }
 
 type encryptAdapter struct {
-	enc interface {
+	seams EncryptionStateMachineSeams
+	enc   interface {
 		EncryptMedia(context.Context, int64) error
 	}
 }
@@ -531,7 +538,7 @@ func (a *encryptAdapter) ExecuteWithResult(ctx context.Context, task Task) (Exec
 		quarantineRoot = filepath.Join(filepath.Dir(staged.OriginalPath), ".quarantine", "encryption")
 	}
 
-	if err = commitEncryptionStage(ctx, db, task, staged, quarantineRoot); err != nil {
+	if err = commitEncryptionStage(ctx, db, task, staged, quarantineRoot, a.seams); err != nil {
 		var uncertain *store.ImmediateCommitError
 		if errors.As(err, &uncertain) {
 			return ExecutionResult{Completion: FinalizationOutcomeUncertain}, err
@@ -577,22 +584,28 @@ func loadSelectedEncryptionStage(ctx context.Context, db *sql.DB, task Task) (st
 	s.CleanupPlaintext = cleanup == 1
 	return s, err
 }
-func commitEncryptionStage(ctx context.Context, db *sql.DB, task Task, s storage.StagedMediaEncryption, quarantineRoot string) error {
+func commitEncryptionStage(ctx context.Context, db *sql.DB, task Task, s storage.StagedMediaEncryption, quarantineRoot string, seams EncryptionStateMachineSeams) error {
 	alreadySelected, preflightErr := selectedEncryptionStage(ctx, db, task, s)
 	if preflightErr != nil {
 		return preflightErr
 	}
 	quarantinePath := ""
 	if !alreadySelected {
-		quarantinePath, preflightErr = reserveEncryptionQuarantine(ctx, db, task, s, quarantineRoot)
+		quarantinePath, preflightErr = reserveEncryptionQuarantine(ctx, db, task, s, quarantineRoot, seams)
 		if preflightErr != nil {
 			return preflightErr
 		}
-		if preflightErr = moveReservedEncryptionQuarantine(ctx, db, task, s, quarantineRoot, quarantinePath); preflightErr != nil {
+		if preflightErr = moveReservedEncryptionQuarantine(ctx, db, task, s, quarantineRoot, quarantinePath, seams); preflightErr != nil {
 			return preflightErr
 		}
 	}
-	_, err := withImmediateEncryptionTx(ctx, db, func(tx store.ImmediateConnTx) error {
+	if seams.BeforeFinalCommit != nil {
+		if hookErr := seams.BeforeFinalCommit(); hookErr != nil {
+			return hookErr
+		}
+	}
+
+	_, err := seams.immediate(ctx, db, func(tx store.ImmediateConnTx) error {
 		var selected string
 		guard := `SELECT m.file_path FROM post_ingest_task p JOIN media_ingest_step step ON step.id=p.ingest_step_id JOIN media_ingest_run r ON r.id=p.ingest_run_id JOIN media m ON m.id=p.media_id WHERE p.id=? AND p.task_type='encrypt' AND p.media_id=? AND p.generation=? AND p.ingest_run_id=? AND p.ingest_step_id=? AND p.status='running' AND p.lease_owner=? AND p.attempts=? AND step.status='running' AND step.lease_owner=p.lease_owner AND step.attempts=p.attempts AND r.status='processing' AND r.superseded_at IS NULL AND COALESCE(r.superseded_by_generation,0)=0 AND m.ingest_generation=p.generation AND NOT EXISTS(SELECT 1 FROM media_ingest_step_dependency d JOIN media_ingest_step dep ON dep.id=d.depends_on_step_id WHERE d.step_id=step.id AND d.dependency_kind='step_done' AND dep.status NOT IN ('done','skipped'))`
 		if err := tx.QueryRowContext(ctx, guard, task.ID, task.MediaID, task.Generation, *task.RunID, *task.StepID, task.LeaseOwner, task.Attempts).Scan(&selected); err != nil {
@@ -636,7 +649,7 @@ func commitEncryptionStage(ctx context.Context, db *sql.DB, task Task, s storage
 		if _, err = tx.ExecContext(ctx, `INSERT INTO media_ingest_evidence(run_id,step_id,media_id,generation,kind,source_fingerprint,artifact_refs_json,reason,verified_at,stage_id) VALUES(?,?,?,?,'encrypt',?,?,'generated',CURRENT_TIMESTAMP,?)`, *task.RunID, *task.StepID, task.MediaID, task.Generation, s.SourceFingerprint, string(raw), s.StageID); err != nil {
 			return err
 		}
-		_, _ = tx.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='committed',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='staged'`, s.StageID)
+		_, _ = tx.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='committed',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state IN ('staged','quarantined')`, s.StageID)
 		if err = finishEncryptionLifecycleTx(ctx, tx, task); err != nil {
 			return err
 		}
@@ -713,7 +726,7 @@ func cleanupUnreferencedEncryptionStage(ctx context.Context, db *sql.DB, s stora
 	if err := os.Remove(s.EncPath); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	_, _ = db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='quarantined',recovery_error='cleaned_unreferenced',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='staged'`, s.StageID)
+	_, _ = db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='quarantined',recovery_error='cleaned_unreferenced',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state IN ('staged','quarantined')`, s.StageID)
 	return nil
 }
 func cleanupPlaintextAfterCommittedEncryption(db *sql.DB, s storage.StagedMediaEncryption) {

@@ -234,3 +234,17 @@ func sameEncryptedPath(a, b string) bool {
 	bb, eb := filepath.Abs(b)
 	return ea == nil && eb == nil && strings.EqualFold(filepath.Clean(aa), filepath.Clean(bb))
 }
+
+// ResolveEncryptionStageRoot derives the current authoritative stage container for a media source.
+func (s *AssetEncryptor) ResolveEncryptionStageRoot(ctx context.Context, mediaID int64, source string) (string, error) {
+	var libraryID int64
+	var fileType string
+	if err := s.DB.QueryRowContext(ctx, `SELECT library_id,COALESCE(file_type,'document') FROM media WHERE id=?`, mediaID).Scan(&libraryID, &fileType); err != nil {
+		return "", err
+	}
+	base, err := s.ResolveEncBase(ctx, libraryID, source)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(base, fileType, "stages"), nil
+}

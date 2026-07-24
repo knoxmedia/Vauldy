@@ -17,6 +17,9 @@ func ReconcileEncryptionStages(ctx context.Context, db *sql.DB, roots Encryption
 	if db == nil {
 		return 0, 0, errors.New("encryption stage reconcile: database required")
 	}
+	if roots.Resolver == nil {
+		return 0, 0, errors.New("encryption stage reconcile: stage root resolver required")
+	}
 	if limit <= 0 || limit > encryptionStageBatchMax {
 		limit = encryptionStageBatchMax
 	}
@@ -42,7 +45,11 @@ func ReconcileEncryptionStages(ctx context.Context, db *sql.DB, roots Encryption
 	rows.Close()
 	for _, r := range batch {
 		checked++
-		if !managedEncryptionPath(roots.Staged, r.enc) || r.quarantine != "" && !managedEncryptionPath(roots.Quarantine, r.quarantine) {
+		stageRoot, resolveErr := roots.Resolver.ResolveEncryptionStageRoot(ctx, r.media, r.source)
+		if resolveErr != nil {
+			return checked, cleaned, resolveErr
+		}
+		if !managedEncryptionPath(stageRoot, r.enc) || r.quarantine != "" && !managedEncryptionPath(roots.Quarantine, r.quarantine) {
 			_, _ = db.ExecContext(ctx, `UPDATE media SET publication_state='failed',last_error='unsafe encryption recovery path' WHERE id=?`, r.media)
 			_, _ = db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='failed_closed',recovery_error='unsafe_path' WHERE stage_id=?`, r.stage)
 			return checked, cleaned, errors.New("unsafe encryption recovery path")

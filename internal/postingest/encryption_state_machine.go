@@ -11,8 +11,17 @@ import (
 	"strings"
 )
 
-var encryptionQuarantineHook func(string) error
-var withImmediateEncryptionTx = store.WithImmediateConnTx
+type EncryptionStateMachineSeams struct {
+	BeforeMove, AfterMove, BeforeMarkQuarantined, BeforeFinalCommit func() error
+	ImmediateTx                                                     func(context.Context, *sql.DB, func(store.ImmediateConnTx) error) (store.ImmediateOutcome, error)
+}
+
+func (s EncryptionStateMachineSeams) immediate(ctx context.Context, db *sql.DB, fn func(store.ImmediateConnTx) error) (store.ImmediateOutcome, error) {
+	if s.ImmediateTx != nil {
+		return s.ImmediateTx(ctx, db, fn)
+	}
+	return store.WithImmediateConnTx(ctx, db, fn)
+}
 
 func safeEncryptionStageID(id string) bool {
 	if len(id) != 36 {
@@ -31,7 +40,7 @@ func safeEncryptionStageID(id string) bool {
 	}
 	return true
 }
-func reserveEncryptionQuarantine(ctx context.Context, db *sql.DB, task Task, s storage.StagedMediaEncryption, root string) (string, error) {
+func reserveEncryptionQuarantine(ctx context.Context, db *sql.DB, task Task, s storage.StagedMediaEncryption, root string, seams EncryptionStateMachineSeams) (string, error) {
 	if !safeEncryptionStageID(s.StageID) {
 		return "", errors.New("unsafe encryption stage id")
 	}
@@ -39,7 +48,7 @@ func reserveEncryptionQuarantine(ctx context.Context, db *sql.DB, task Task, s s
 	if err != nil {
 		return "", err
 	}
-	_, err = withImmediateEncryptionTx(ctx, db, func(tx store.ImmediateConnTx) error {
+	_, err = seams.immediate(ctx, db, func(tx store.ImmediateConnTx) error {
 		res, e := tx.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET quarantine_path=?,state='quarantining',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND task_id=? AND attempt=? AND media_id=? AND run_id=? AND step_id=? AND generation=? AND owner_token=? AND source_path=? AND source_fingerprint=? AND state='staged'`, path, s.StageID, task.ID, task.Attempts, task.MediaID, *task.RunID, *task.StepID, task.Generation, task.LeaseOwner, s.OriginalPath, s.SourceFingerprint)
 		if e != nil {
 			return e
@@ -52,9 +61,9 @@ func reserveEncryptionQuarantine(ctx context.Context, db *sql.DB, task Task, s s
 	})
 	return path, err
 }
-func moveReservedEncryptionQuarantine(ctx context.Context, db *sql.DB, task Task, s storage.StagedMediaEncryption, root, path string) error {
-	if encryptionQuarantineHook != nil {
-		if err := encryptionQuarantineHook("before_move"); err != nil {
+func moveReservedEncryptionQuarantine(ctx context.Context, db *sql.DB, task Task, s storage.StagedMediaEncryption, root, path string, seams EncryptionStateMachineSeams) error {
+	if seams.BeforeMove != nil {
+		if err := seams.BeforeMove(); err != nil {
 			return err
 		}
 	}
@@ -65,12 +74,18 @@ func moveReservedEncryptionQuarantine(ctx context.Context, db *sql.DB, task Task
 	if !samePathForEvidence(actual, path) {
 		return errors.New("reserved quarantine path mismatch")
 	}
-	if encryptionQuarantineHook != nil {
-		if err = encryptionQuarantineHook("after_move"); err != nil {
+	if seams.AfterMove != nil {
+		if err = seams.AfterMove(); err != nil {
 			return err
 		}
 	}
-	_, err = withImmediateEncryptionTx(ctx, db, func(tx store.ImmediateConnTx) error {
+	if seams.BeforeMarkQuarantined != nil {
+		if err = seams.BeforeMarkQuarantined(); err != nil {
+			return err
+		}
+	}
+
+	_, err = seams.immediate(ctx, db, func(tx store.ImmediateConnTx) error {
 		res, e := tx.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='quarantined',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND task_id=? AND attempt=? AND media_id=? AND generation=? AND owner_token=? AND quarantine_path=? AND state='quarantining'`, s.StageID, task.ID, task.Attempts, task.MediaID, task.Generation, task.LeaseOwner, path)
 		if e != nil {
 			return e

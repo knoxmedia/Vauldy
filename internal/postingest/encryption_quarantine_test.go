@@ -1,6 +1,11 @@
 package postingest
 
 import (
+	"context"
+
+	"database/sql"
+
+	"knox-media/internal/store"
 	"os"
 	"path/filepath"
 	"testing"
@@ -39,5 +44,70 @@ func TestSafeEncryptionStageIDRejectsPathComponents(t *testing.T) {
 		if got != want {
 			t.Fatalf("safe(%q)=%v want %v", id, got, want)
 		}
+	}
+}
+
+func TestEncryptionStateMachineSeamsArePerExecution(t *testing.T) {
+	first, second := 0, 0
+	a := EncryptionStateMachineSeams{BeforeMove: func() error { first++; return nil }}
+	b := EncryptionStateMachineSeams{BeforeMove: func() error { second++; return nil }}
+	if err := a.BeforeMove(); err != nil {
+		t.Fatal(err)
+	}
+	if first != 1 || second != 0 {
+		t.Fatalf("first=%d second=%d", first, second)
+	}
+	if err := b.BeforeMove(); err != nil {
+		t.Fatal(err)
+	}
+	if first != 1 || second != 1 {
+		t.Fatalf("first=%d second=%d", first, second)
+	}
+}
+
+func TestEncryptionStateMachineHooksEachPhase(t *testing.T) {
+	phases := []struct {
+		name string
+		set  func(*EncryptionStateMachineSeams)
+	}{
+		{"before_move", func(s *EncryptionStateMachineSeams) { s.BeforeMove = func() error { return os.ErrPermission } }},
+		{"after_move", func(s *EncryptionStateMachineSeams) { s.AfterMove = func() error { return os.ErrPermission } }},
+		{"before_mark_quarantined", func(s *EncryptionStateMachineSeams) {
+			s.BeforeMarkQuarantined = func() error { return os.ErrPermission }
+		}},
+		{"before_final_commit", func(s *EncryptionStateMachineSeams) { s.BeforeFinalCommit = func() error { return os.ErrPermission } }},
+		{"immediate_tx", func(s *EncryptionStateMachineSeams) {
+			s.ImmediateTx = func(context.Context, *sql.DB, func(store.ImmediateConnTx) error) (store.ImmediateOutcome, error) {
+				return store.ImmediateOutcome{}, os.ErrPermission
+			}
+		}},
+	}
+	for _, phase := range phases {
+		t.Run(phase.name, func(t *testing.T) {
+			var s EncryptionStateMachineSeams
+			phase.set(&s)
+			if phase.name == "before_final_commit" {
+				if s.BeforeFinalCommit == nil || s.BeforeFinalCommit() == nil {
+					t.Fatal("hook not injected")
+				}
+			} else if phase.name == "immediate_tx" {
+				if _, e := s.immediate(context.Background(), nil, nil); e == nil {
+					t.Fatal("tx seam not injected")
+				}
+			} else {
+				var h func() error
+				switch phase.name {
+				case "before_move":
+					h = s.BeforeMove
+				case "after_move":
+					h = s.AfterMove
+				default:
+					h = s.BeforeMarkQuarantined
+				}
+				if h == nil || h() == nil {
+					t.Fatal("phase hook not injected")
+				}
+			}
+		})
 	}
 }

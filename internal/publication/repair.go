@@ -386,7 +386,11 @@ func loadRepairPreflight(ctx context.Context, db *sql.DB, planner *Planner, medi
 		if regularFile(plainPath) {
 			fingerprintSource = plainPath
 		}
-		preflight.sourceFingerprint, err = SourceFingerprint(fingerprintSource)
+		if !regularFile(fingerprintSource) || samePath(selected, encPath) && strings.TrimSpace(plainPath) != "" && !regularFile(plainPath) {
+			err = db.QueryRowContext(ctx, `SELECT source_fingerprint FROM media_encryption_stage_journal WHERE media_id=? AND state='committed' AND enc_path=? ORDER BY updated_at DESC LIMIT 1`, mediaID, encPath).Scan(&preflight.sourceFingerprint)
+		} else {
+			preflight.sourceFingerprint, err = SourceFingerprint(fingerprintSource)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -464,8 +468,11 @@ func validateImageEvidenceRefsTx(ctx context.Context, tx *sql.Tx, mediaID int64,
 	if step == StepThumbnail {
 		var evidence struct {
 			Variants []struct {
-				Kind, LogicalName, Path, SHA256 string
-				Size                            int64
+				Kind        string `json:"kind"`
+				LogicalName string `json:"logical_name"`
+				Path        string `json:"path"`
+				SHA256      string `json:"sha256"`
+				Size        int64  `json:"size"`
 			} `json:"variants"`
 		}
 		if json.Unmarshal([]byte(raw), &evidence) != nil || len(evidence.Variants) != 2 {
@@ -497,8 +504,11 @@ func validateImageEvidenceRefsTx(ctx context.Context, tx *sql.Tx, mediaID int64,
 		return true, nil
 	}
 	var evidence struct {
-		Path, SHA256, WrappedDEK, IV string
-		Size                         int64
+		Path       string `json:"path"`
+		SHA256     string `json:"sha256"`
+		WrappedDEK string `json:"wrapped_dek"`
+		IV         string `json:"iv"`
+		Size       int64  `json:"size"`
 	}
 	if json.Unmarshal([]byte(raw), &evidence) != nil || evidence.WrappedDEK == "" || evidence.IV == "" || !validFileHash(evidence.Path, evidence.Size, evidence.SHA256) {
 		return false, nil
