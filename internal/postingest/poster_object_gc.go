@@ -11,9 +11,17 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
+
+	"knox-media/internal/store"
 )
 
 var posterObjectName = regexp.MustCompile(`^[0-9a-f]{64}\.jpg$`)
+var withImmediatePosterObjectTx = store.WithImmediateConnTx
+var posterObjectRename = os.Rename
+var posterObjectDeleteQuarantine = os.Remove
+var posterObjectBeforeImmediate = func() {}
 var posterObjectCursors = struct {
 	sync.Mutex
 	next map[string]int
@@ -53,6 +61,12 @@ func prunePosterObjectPrefix(uploadRoot, path string) {
 	}
 }
 
+func posterPathReferenceCountTx(ctx context.Context, tx store.SQLExecutor, path, url string) (int, error) {
+	var n int
+	err := tx.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM media_derived_assets WHERE enc_path=?)+(SELECT COUNT(*) FROM media_ingest_evidence WHERE json_extract(artifact_refs_json,'$.path')=? OR json_extract(artifact_refs_json,'$.url')=?)+(SELECT COUNT(*) FROM media_asset_stage_journal WHERE state!='committed' AND (json_extract(hashes_sizes_json,'$.path')=? OR json_extract(hashes_sizes_json,'$.url')=?))+(SELECT COUNT(*) FROM poster_repair_stage WHERE state!='committed' AND (json_extract(hashes_sizes_json,'$.path')=? OR json_extract(hashes_sizes_json,'$.url')=?))+(SELECT COUNT(*) FROM media WHERE json_extract(meta_json,'$.scrape.poster')=? OR json_extract(meta_json,'$.scrape.extra.poster')=?)`, path, path, url, path, url, path, url, url, url).Scan(&n)
+	return n, err
+}
+
 // ReconcilePosterObjects scans at most limit exact CAS objects and stale seal temps.
 func ReconcilePosterObjects(ctx context.Context, db *sql.DB, uploadRoot string, limit int, minAge time.Duration) (checked, cleaned int, retErr error) {
 	if db == nil {
@@ -77,6 +91,14 @@ func ReconcilePosterObjects(ctx context.Context, db *sql.DB, uploadRoot string, 
 		return 0, 0, e
 	}
 	var candidates []string
+	quarantineDir := filepath.Join(root, "quarantine")
+	if qs, x := os.ReadDir(quarantineDir); x == nil {
+		for _, q := range qs {
+			if !q.IsDir() && q.Type()&os.ModeSymlink == 0 {
+				candidates = append(candidates, filepath.Join(quarantineDir, q.Name()))
+			}
+		}
+	}
 	for _, prefix := range entries {
 		if prefix.Type()&os.ModeSymlink != 0 || !prefix.IsDir() || len(prefix.Name()) != 2 {
 			continue
@@ -87,7 +109,10 @@ func ReconcilePosterObjects(ctx context.Context, db *sql.DB, uploadRoot string, 
 			return checked, cleaned, x
 		}
 		for _, child := range children {
-			if child.Type()&os.ModeSymlink != 0 || child.IsDir() {
+			if child.Type()&os.ModeSymlink != 0 {
+				continue
+			}
+			if child.IsDir() {
 				continue
 			}
 			candidates = append(candidates, filepath.Join(dir, child.Name()))
@@ -112,7 +137,8 @@ func ReconcilePosterObjects(ctx context.Context, db *sql.DB, uploadRoot string, 
 			continue
 		}
 		name := filepath.Base(p)
-		isTemp := (strings.HasPrefix(name, ".seal-") && strings.HasSuffix(name, ".tmp")) || strings.HasPrefix(name, ".tmp-")
+		isQuarantine := strings.HasSuffix(name, ".quarantine") && strings.Contains(filepath.ToSlash(p), "/sha256/quarantine/")
+		isTemp := (strings.HasPrefix(name, ".seal-") && strings.HasSuffix(name, ".tmp")) || strings.HasPrefix(name, ".tmp-") || isQuarantine
 		isObject := exactPosterObjectPath(uploadRoot, p)
 		if (!isTemp && !isObject) || !info.ModTime().Before(cutoff) {
 			continue
@@ -132,14 +158,47 @@ func ReconcilePosterObjects(ctx context.Context, db *sql.DB, uploadRoot string, 
 		}
 		hash := strings.TrimSuffix(name, ".jpg")
 		url := "/uploads/posters/objects/sha256/" + hash[:2] + "/" + name
-		refs, x := posterPathReferenceCount(ctx, db, p, url, "", "")
+		posterObjectBeforeImmediate()
+		quarantineRoot := filepath.Join(root, "quarantine")
+		quarantine := filepath.Join(quarantineRoot, hash+"."+uuid.NewString()+".quarantine")
+		renamed := false
+		outcome, x := withImmediatePosterObjectTx(ctx, db, func(tx store.ImmediateConnTx) error {
+			info, e := os.Lstat(p)
+			if e != nil {
+				return e
+			}
+			if !exactPosterObjectPath(uploadRoot, p) || !info.ModTime().Before(cutoff) {
+				return nil
+			}
+			refs, e := posterPathReferenceCountTx(ctx, tx, p, url)
+			if e != nil {
+				return e
+			}
+			if refs != 0 {
+				return nil
+			}
+			if e = os.MkdirAll(quarantineRoot, 0700); e != nil {
+				return e
+			}
+			if e = posterObjectRename(p, quarantine); e != nil {
+				return e
+			}
+			renamed = true
+			return nil
+		})
 		if x != nil {
-			return checked, cleaned, x
-		}
-		if refs != 0 {
+			if renamed && outcome.CommitAttempted && !outcome.CommitConfirmed {
+				return checked, cleaned, x
+			}
+			if !os.IsNotExist(x) {
+				retErr = x
+			}
 			continue
 		}
-		if x = os.Remove(p); x != nil && !os.IsNotExist(x) {
+		if !renamed {
+			continue
+		}
+		if x = posterObjectDeleteQuarantine(quarantine); x != nil && !os.IsNotExist(x) {
 			retErr = x
 			continue
 		}
