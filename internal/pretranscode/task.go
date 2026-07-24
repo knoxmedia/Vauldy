@@ -28,7 +28,7 @@ type TaskService struct {
 
 	cancelTaskAttempt func(context.Context, int64) error
 	CancelActive      func(int64)
-	beforeCancelCAS   func(store.ImmediateConnTx)
+	beforeCancelCAS   func(store.ImmediateConnTx) error
 }
 
 // UnifiedTask is the joined row for the unified task list (SRS 3.2.1).
@@ -282,7 +282,9 @@ func (s *TaskService) cancelTaskAttemptTx(ctx context.Context, id int64) error {
 			return ErrTaskNotCancellable
 		}
 		if s.beforeCancelCAS != nil {
-			s.beforeCancelCAS(tx)
+			if err := s.beforeCancelCAS(tx); err != nil {
+				return err
+			}
 		}
 		parentSQL := `UPDATE transcode_task SET status='cancelled',completed_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL WHERE id=? AND media_id=? AND ingest_run_id=? AND ingest_step_id=? AND generation=? AND status=? AND EXISTS(SELECT 1 FROM media m JOIN media_ingest_run r ON r.id=? JOIN media_ingest_step s ON s.id=? WHERE m.id=? AND m.ingest_generation=? AND r.media_id=? AND r.generation=? AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND s.run_id=? AND s.media_id=? AND s.generation=? AND s.step_type='prepare')`
 		parentArgs := []any{id, media, run, step, gen, status, run, step, media, gen, media, gen, run, media, gen}

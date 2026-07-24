@@ -39,14 +39,15 @@ type Worker struct {
 	MaxCPU       int
 	MaxGPU       int
 
-	mu                sync.Mutex
-	running           map[int64]context.CancelFunc // jobID -> cancel
-	beforeClaimUpdate func()
-	parentClaims      map[int64]publication.PrepareParentIdentity
-	claimOwner        string
-	registry          coreiface.CapabilityRegistry
-	semCPU            chan struct{}
-	semGPU            chan struct{}
+	mu                 sync.Mutex
+	running            map[int64]context.CancelFunc // jobID -> cancel
+	beforeClaimUpdate  func()
+	parentClaims       map[int64]publication.PrepareParentIdentity
+	claimOwner         string
+	registry           coreiface.CapabilityRegistry
+	semCPU             chan struct{}
+	semGPU             chan struct{}
+	leaseRenewInterval time.Duration
 }
 
 // NewWorker constructs a standalone worker. MaxCPU/MaxGPU default to 4/2
@@ -538,7 +539,11 @@ func (w *Worker) renewJobLease(ctx context.Context, job claimedJob) error {
 }
 
 func (w *Worker) renewJobLeaseLoop(ctx context.Context, job claimedJob, done <-chan struct{}, cancel context.CancelFunc, lost chan<- error) {
-	ticker := time.NewTicker(30 * time.Second)
+	interval := w.leaseRenewInterval
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {

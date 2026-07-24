@@ -79,10 +79,9 @@ func TestOptionalPrepareCancelRejectsRelinkedIdentity(t *testing.T) {
 func TestOptionalPrepareCancelCASRaceRollsBack(t *testing.T) {
 	db, svc, task, job, run, step, media := optionalPrepareFixture(t, "running")
 	before := snapPrepareCancel(t, db, task, job, run, step, media)
-	svc.beforeCancelCAS = func(tx store.ImmediateConnTx) {
-		if _, err := tx.ExecContext(context.Background(), `UPDATE media SET ingest_generation=2 WHERE id=?`, media); err != nil {
-			t.Fatal(err)
-		}
+	svc.beforeCancelCAS = func(tx store.ImmediateConnTx) error {
+		_, err := tx.ExecContext(context.Background(), `UPDATE media SET ingest_generation=2 WHERE id=?`, media)
+		return err
 	}
 	if err := svc.CancelTask(task); !errors.Is(err, ErrTaskNotCancellable) {
 		t.Fatalf("err=%v", err)
@@ -144,25 +143,34 @@ func TestPrepareCancelCommitCancelsAllActiveRenditions(t *testing.T) {
 	}
 }
 func TestPrepareCancelRollbackDoesNotCancelProcesses(t *testing.T) {
-	db, svc, task, _, run, _, _ := optionalPrepareFixture(t, "running")
+	db, svc, task, job, run, step, media := optionalPrepareFixture(t, "running")
+	before := snapPrepareCancel(t, db, task, job, run, step, media)
 	w := NewWorker(db, nil, "ffmpeg", t.TempDir(), 1, 1)
 	ctx, c := context.WithCancel(context.Background())
 	defer c()
 	w.mu.Lock()
-	w.running[999] = c
+	w.running[job] = c
 	w.mu.Unlock()
-	svc.CancelActive = w.CancelParent
-	_, _ = db.Exec(`UPDATE media_ingest_run SET superseded_at=CURRENT_TIMESTAMP WHERE id=?`, run)
-	if err := svc.CancelTask(task); err == nil {
-		t.Fatal("expected rejection")
+	called := 0
+	svc.CancelActive = func(id int64) { called++; w.CancelParent(id) }
+	sentinel := errors.New("rollback")
+	svc.beforeCancelCAS = func(store.ImmediateConnTx) error { return sentinel }
+	if err := svc.CancelTask(task); !errors.Is(err, sentinel) {
+		t.Fatalf("err=%v", err)
+	}
+	if called != 0 {
+		t.Fatalf("CancelActive called=%d", called)
 	}
 	select {
 	case <-ctx.Done():
 		t.Fatal("rollback cancelled process")
 	default:
 	}
+	after := snapPrepareCancel(t, db, task, job, run, step, media)
+	if before != after {
+		t.Fatalf("before=%+v after=%+v", before, after)
+	}
 }
-
 func TestPrepareRenewExtendsParentStepAndRendition(t *testing.T) {
 	db := newTestDB(t)
 	task, _, step, _ := seedLinkedPrepareTerminal(t, db, 1)
@@ -194,35 +202,32 @@ func TestPrepareMissingImmutableParentRejected(t *testing.T) {
 }
 func TestPrepareLeaseLossCancelsActiveExecution(t *testing.T) {
 	db := newTestDB(t)
-	task, _, _, _ := seedLinkedPrepareTerminal(t, db, 1)
+	task, _, step, _ := seedLinkedPrepareTerminal(t, db, 1)
 	r, _ := db.Exec(`INSERT INTO pretranscode_rendition_job(task_id,rendition_name,status,lease_owner)VALUES(?,'x','running','job')`, task)
 	id, _ := r.LastInsertId()
 	job := exactClaimedJob(t, db, id, task, "job")
-	_, _ = db.Exec(`UPDATE transcode_task SET lease_owner='other' WHERE id=?`, task)
 	w := NewWorker(db, nil, "ffmpeg", t.TempDir(), 1, 1)
-	ctx, c := context.WithCancel(context.Background())
+	w.leaseRenewInterval = time.Millisecond
+	execCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := make(chan struct{})
 	lost := make(chan error, 1)
-	tick := make(chan struct{})
-	go func() {
-		if err := w.renewJobLease(ctx, job); err != nil {
-			lost <- err
-			c()
-		}
-		close(tick)
-	}()
-	<-tick
+	started := make(chan struct{})
+	blocked := make(chan struct{})
+	go func() { close(started); <-execCtx.Done(); close(blocked) }()
+	<-started
+	_, _ = db.Exec(`UPDATE media_ingest_step SET lease_owner='other' WHERE id=?`, step)
+	go w.renewJobLeaseLoop(execCtx, job, done, cancel, lost)
 	select {
-	case <-ctx.Done():
+	case <-blocked:
 	case <-time.After(time.Second):
-		t.Fatal("execution was not cancelled")
+		t.Fatal("production lease loop did not cancel execution")
 	}
 	if !errors.Is(<-lost, ErrJobOwnershipLost) {
 		t.Fatal("wrong lease result")
 	}
 	close(done)
 }
-
 func TestPrepareSecondWorkerCannotAdoptLiveParent(t *testing.T) {
 	db := newTestDB(t)
 	task, _, _, _ := seedLinkedPrepareTerminal(t, db, 1)
@@ -236,14 +241,35 @@ func TestPrepareSecondWorkerCannotAdoptLiveParent(t *testing.T) {
 func TestRecoverExpiredPrepareParentThenExactReclaim(t *testing.T) {
 	db := newTestDB(t)
 	task, _, step, _ := seedLinkedPrepareTerminal(t, db, 1)
-	_, _ = db.Exec(`UPDATE transcode_task SET lease_until=datetime('now','-1 second') WHERE id=?;UPDATE media_ingest_step SET lease_until=datetime('now','-1 second') WHERE id=?;INSERT INTO pretranscode_rendition_job(task_id,rendition_name,status)VALUES(?,'x','waiting')`, task, step, task)
+	var old string
+	_ = db.QueryRow(`SELECT lease_owner FROM transcode_task WHERE id=?`, task).Scan(&old)
+	r, _ := db.Exec(`INSERT INTO pretranscode_rendition_job(task_id,rendition_name,status,config_snapshot_json)VALUES(?,'x','waiting','{"preset":{"id":1,"name":"x","output_format":"hls","video_codec":"libx264","audio_codec":"aac"},"rendition":{"id":1,"name":"x","height":360,"video_bitrate":"1k"}}')`, task)
+	jobID, _ := r.LastInsertId()
+	_, _ = db.Exec(`UPDATE transcode_task SET lease_until=datetime('now','-1 second') WHERE id=?;UPDATE media_ingest_step SET lease_until=datetime('now','-1 second') WHERE id=?`, task, step)
 	if n, e := RecoverExpiredPrepareParents(context.Background(), db, 10); e != nil || n != 1 {
-		t.Fatalf("%d %v", n, e)
+		t.Fatalf("recover=%d err=%v", n, e)
 	}
-	var ts, ss string
-	_ = db.QueryRow(`SELECT t.status,s.status FROM transcode_task t JOIN media_ingest_step s ON s.id=? WHERE t.id=?`, step, task).Scan(&ts, &ss)
-	if ts != "waiting" || ss != "waiting" {
-		t.Fatalf("%s/%s", ts, ss)
+	registry := publication.NewCapabilityMatrix([]string{"prepare"})
+	payload, e := publication.ClaimEligible(context.Background(), db, publication.ClaimRequest{Family: publication.QueuePrepare, TaskType: "prepare", Owner: "reclaimer", Registry: registry})
+	if e != nil || payload == nil {
+		t.Fatalf("claim=%+v err=%v", payload, e)
+	}
+	w := NewWorker(db, nil, "ffmpeg", t.TempDir(), 1, 1, registry)
+	parent := publication.PrepareParentIdentity{TaskID: payload.QueueID, RunID: payload.RunID.Int64, StepID: payload.StepID.Int64, MediaID: payload.MediaID, Generation: payload.Generation.Int64, Owner: payload.Owner}
+	w.parentClaims[parent.TaskID] = parent
+	job, _, _, _, _, _, _, e := w.claimNextJob()
+	if e != nil {
+		t.Fatal(e)
+	}
+	if job.ID != jobID || parent.Owner == old {
+		t.Fatalf("job=%+v old=%q parent=%+v", job, old, parent)
+	}
+	var ts, ss, js, to, so, jo string
+	if e = db.QueryRow(`SELECT t.status,s.status,j.status,t.lease_owner,s.lease_owner,j.lease_owner FROM transcode_task t JOIN media_ingest_step s ON s.id=? JOIN pretranscode_rendition_job j ON j.id=? WHERE t.id=?`, step, jobID, task).Scan(&ts, &ss, &js, &to, &so, &jo); e != nil {
+		t.Fatal(e)
+	}
+	if ts != "running" || ss != "running" || js != "running" || to != parent.Owner || so != parent.Owner || jo != job.Owner {
+		t.Fatalf("states=%s/%s/%s owners=%q/%q/%q", ts, ss, js, to, so, jo)
 	}
 }
 
