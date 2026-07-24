@@ -296,7 +296,7 @@ func TestRestartRecoversStartupQueueAndResumesPublication(t *testing.T) {
 	}
 	defer db.Close()
 	restarted := postingest.NewQueue(db, "after-restart", nil)
-	if err = recoverStartupTasks(context.Background(), db, restarted, StartupRecoveryRoots{}); err != nil {
+	if err = recoverStartupTasks(context.Background(), db, restarted, startupRecoveryRoots(t, "")); err != nil {
 		t.Fatal(err)
 	}
 	resumed, err := restarted.Claim(context.Background(), postingest.TaskPoster)
