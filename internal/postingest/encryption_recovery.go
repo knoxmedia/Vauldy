@@ -63,8 +63,49 @@ func ReconcileEncryptionStages(ctx context.Context, db *sql.DB, roots Encryption
 		}
 		var active int
 		_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM post_ingest_task WHERE id=? AND attempts=? AND status='running' AND lease_owner=?`, r.task, r.attempt, r.owner).Scan(&active)
-		if active == 1 {
+		if active == 1 && r.state != "quarantining" {
 			continue
+		}
+		if r.state == "quarantining" {
+			sourceInfo, sourceErr := os.Stat(r.source)
+			quarantineInfo, quarantineErr := os.Stat(r.quarantine)
+			switch {
+			case sourceErr == nil && os.IsNotExist(quarantineErr):
+				actual, moveErr := quarantinePlaintext(r.source, roots.Quarantine, r.media, r.generation, r.stage)
+				if moveErr != nil {
+					return checked, cleaned, moveErr
+				}
+				if !samePathForEvidence(actual, r.quarantine) {
+					return checked, cleaned, errors.New("recovery quarantine reservation mismatch")
+				}
+				_, err = db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='quarantined' WHERE stage_id=? AND state='quarantining'`, r.stage)
+				if err != nil {
+					return checked, cleaned, err
+				}
+				continue
+			case os.IsNotExist(sourceErr) && quarantineErr == nil:
+				_, err = db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='quarantined' WHERE stage_id=? AND state='quarantining'`, r.stage)
+				if err != nil {
+					return checked, cleaned, err
+				}
+				continue
+			case sourceErr == nil && quarantineErr == nil:
+				sourceHash, _ := fileSHA256(r.source)
+				quarantineHash, _ := fileSHA256(r.quarantine)
+				if sourceHash != quarantineHash {
+					return checked, cleaned, errors.New("quarantine duplicate hash mismatch")
+				}
+				_ = sourceInfo
+				_ = quarantineInfo
+				_ = os.Remove(r.source)
+				_, err = db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='quarantined' WHERE stage_id=? AND state='quarantining'`, r.stage)
+				if err != nil {
+					return checked, cleaned, err
+				}
+				continue
+			default:
+				return checked, cleaned, errors.New("unknown quarantining filesystem state")
+			}
 		}
 		if r.quarantine != "" {
 			if err = restoreQuarantinedPlaintext(r.quarantine, r.source, roots.Quarantine); err != nil {

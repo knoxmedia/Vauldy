@@ -31,3 +31,13 @@ func TestQuarantinePlaintextMovesSourceUnderRestrictedRootAndRestores(t *testing
 		t.Fatalf("restored=%q err=%v", got, err)
 	}
 }
+
+func TestSafeEncryptionStageIDRejectsPathComponents(t *testing.T) {
+	for _, id := range []string{"../escape", "stage/child", "selected-1-1", "", "00000000-0000-0000-0000-000000000000"} {
+		got := safeEncryptionStageID(id)
+		want := id == "00000000-0000-0000-0000-000000000000"
+		if got != want {
+			t.Fatalf("safe(%q)=%v want %v", id, got, want)
+		}
+	}
+}
