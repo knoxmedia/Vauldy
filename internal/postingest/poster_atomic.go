@@ -21,6 +21,8 @@ import (
 var withImmediatePosterTx = store.WithImmediateConnTx
 var withImmediatePosterJournalTx = store.WithImmediateConnTx
 var reconcilePosterJournal = reconcilePosterJournalAuthoritative
+var posterHashPath = hashPath
+var posterSourceFingerprint = sourceFingerprint
 
 const posterReconcileTimeout = 5 * time.Second
 
@@ -157,8 +159,34 @@ func commitStagedPoster(ctx context.Context, db *sql.DB, task Task, staged Stage
 	if task.RunID == nil || req.MediaID != task.MediaID || req.RunID != *task.RunID || req.StepID != stepID || req.Generation != task.Generation || req.OwnerToken != task.LeaseOwner || (task.Type == TaskPosterRepair && (req.QueueID != task.ID || req.Attempt != task.Attempts)) {
 		return fmt.Errorf("poster commit: stage/task identity mismatch")
 	}
+	var sourcePath string
+	if err := db.QueryRowContext(ctx, `SELECT file_path FROM media WHERE id=?`, task.MediaID).Scan(&sourcePath); err != nil {
+		return err
+	}
+	sourceFP, err := posterSourceFingerprint(sourcePath)
+	if err != nil {
+		return err
+	}
+	if sourceFP != req.SourceFingerprint {
+		return fmt.Errorf("poster commit: stale source fingerprint")
+	}
+	artifactSize, artifactHash, err := posterHashPath(staged.Path)
+	if err != nil {
+		return err
+	}
+	if artifactSize != staged.Size || artifactHash != staged.Hash {
+		return fmt.Errorf("poster commit: staged hash/size mismatch")
+	}
+	artifactStat, err := os.Stat(staged.Path)
+	if err != nil {
+		return err
+	}
+	sourceStat, err := os.Stat(sourcePath)
+	if err != nil {
+		return err
+	}
 	var replaced []string
-	_, err := withImmediatePosterTx(ctx, db, func(tx store.ImmediateConnTx) error {
+	_, err = withImmediatePosterTx(ctx, db, func(tx store.ImmediateConnTx) error {
 		if task.Type == TaskPoster {
 			var existing string
 			e := tx.QueryRowContext(ctx, `SELECT stage_id FROM media_ingest_evidence WHERE step_id=? AND kind='poster'`, stepID).Scan(&existing)
@@ -179,20 +207,18 @@ func commitStagedPoster(ctx context.Context, db *sql.DB, task Task, staged Stage
 		if err := tx.QueryRowContext(ctx, `SELECT file_path FROM media WHERE id=?`, task.MediaID).Scan(&source); err != nil {
 			return err
 		}
-		fp, err := sourceFingerprint(source)
-		if err != nil {
-			return err
+		if !sameResolvedPath(source, sourcePath) {
+			return fmt.Errorf("poster commit: source path changed")
 		}
-		if fp != req.SourceFingerprint {
-			return fmt.Errorf("poster commit: stale source fingerprint")
+		currentSource, e := os.Stat(source)
+		if e != nil || currentSource.Size() != sourceStat.Size() || !currentSource.ModTime().Equal(sourceStat.ModTime()) {
+			return fmt.Errorf("poster commit: source stat changed")
 		}
-		size, hash, err := hashPath(staged.Path)
-		if err != nil {
-			return err
+		currentArtifact, e := os.Stat(staged.Path)
+		if e != nil || currentArtifact.Size() != artifactStat.Size() || !currentArtifact.ModTime().Equal(artifactStat.ModTime()) {
+			return fmt.Errorf("poster commit: staged stat changed")
 		}
-		if size != staged.Size || hash != staged.Hash {
-			return fmt.Errorf("poster commit: staged hash/size mismatch")
-		}
+		fp := sourceFP
 		var one int
 		if task.Type == TaskPoster {
 			err = tx.QueryRowContext(ctx, `SELECT 1 FROM media_asset_stage_journal WHERE stage_id=? AND media_id=? AND run_id=? AND step_id=? AND generation=? AND owner_token=? AND source_fingerprint=? AND artifact_kind='poster' AND state='staged'`, staged.Stage.StageID, task.MediaID, *task.RunID, stepID, task.Generation, task.LeaseOwner, fp).Scan(&one)
@@ -398,14 +424,22 @@ func reconcilePosterCommit(ctx context.Context, db *sql.DB, task Task, staged St
 	err = verifyCommittedPosterTx(ctx, conn, task, staged)
 	return err == nil, err
 }
-func posterPathReferenceCount(ctx context.Context, db *sql.DB, path, url string) (int, error) {
+
+type posterJournalClass string
+
+const (
+	posterJournalOrdinary posterJournalClass = "ordinary"
+	posterJournalRepair   posterJournalClass = "repair"
+)
+
+func posterPathReferenceCount(ctx context.Context, db *sql.DB, path, url, excludeStageID string, excludeClass posterJournalClass) (int, error) {
 	var n int
 	err := db.QueryRowContext(ctx, `SELECT
  (SELECT COUNT(*) FROM media_derived_assets WHERE enc_path=?)+
- (SELECT COUNT(*) FROM media_ingest_evidence WHERE json_extract(artifact_refs_json,'$.path')=? OR json_extract(artifact_refs_json,'$.url')=?)+
- (SELECT COUNT(*) FROM media_asset_stage_journal WHERE json_extract(hashes_sizes_json,'$.path')=? OR json_extract(hashes_sizes_json,'$.url')=?)+
-
- (SELECT COUNT(*) FROM media WHERE json_extract(meta_json,'$.scrape.poster')=? OR json_extract(meta_json,'$.scrape.extra.poster')=?)`, path, path, url, path, url, path, url, url, url).Scan(&n)
+ (SELECT COUNT(*) FROM media_ingest_evidence WHERE (json_extract(artifact_refs_json,'$.path')=? OR json_extract(artifact_refs_json,'$.url')=?) AND stage_id<>?)+
+ (SELECT COUNT(*) FROM media_asset_stage_journal WHERE (json_extract(hashes_sizes_json,'$.path')=? OR json_extract(hashes_sizes_json,'$.url')=?) AND NOT (?='ordinary' AND stage_id=?))+
+ (SELECT COUNT(*) FROM poster_repair_stage WHERE state!='committed' AND (json_extract(hashes_sizes_json,'$.path')=? OR json_extract(hashes_sizes_json,'$.url')=?) AND NOT (?='repair' AND stage_id=?))+
+ (SELECT COUNT(*) FROM media WHERE json_extract(meta_json,'$.scrape.poster')=? OR json_extract(meta_json,'$.scrape.extra.poster')=?)`, path, path, url, excludeStageID, path, url, string(excludeClass), excludeStageID, path, url, string(excludeClass), excludeStageID, url, url).Scan(&n)
 	return n, err
 }
 func managedPosterPath(url, exemplar string) string {
@@ -446,7 +480,7 @@ func cleanupPosterPaths(ctx context.Context, db *sql.DB, refs []string, exemplar
 		if ref == exemplar && strings.HasPrefix(ref, "/uploads/") {
 			continue
 		}
-		n, err := posterPathReferenceCount(ctx, db, p, url)
+		n, err := posterPathReferenceCount(ctx, db, p, url, "", "")
 		if err != nil {
 			return err
 		}

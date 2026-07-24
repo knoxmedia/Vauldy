@@ -89,7 +89,7 @@ func ReconcilePosterStages(ctx context.Context, db *sql.DB, roots PosterRecovery
 			_, _ = db.ExecContext(ctx, `UPDATE media_asset_stage_journal SET recovery_error=? WHERE stage_id=?`, `unsafe_path: `+err.Error(), r.stageID)
 			return checked, cleaned, err
 		}
-		refs, err := posterPathReferenceCount(ctx, db, path, "")
+		refs, err := posterPathReferenceCount(ctx, db, path, "", r.stageID, posterJournalOrdinary)
 		if err != nil {
 			return checked, cleaned, err
 		}
@@ -109,7 +109,7 @@ func ReconcilePosterStages(ctx context.Context, db *sql.DB, roots PosterRecovery
 			cleaned++
 		}
 	}
-	remaining := limit - checked
+	remaining := limit
 	if remaining > 0 {
 		rows, e := db.QueryContext(ctx, `SELECT stage_id,queue_id,media_id,run_id,generation,owner_token,attempt,source_fingerprint,state,staged_path,hashes_sizes_json FROM poster_repair_stage WHERE recovery_error NOT IN ('cleaned_unreferenced','verified_committed') ORDER BY updated_at,stage_id LIMIT ?`, remaining)
 		if e != nil {
@@ -165,7 +165,7 @@ func ReconcilePosterStages(ctx context.Context, db *sql.DB, roots PosterRecovery
 			if x = validateExactPosterStagePaths(roots, r, path); x != nil {
 				return checked, cleaned, x
 			}
-			refs, x := posterPathReferenceCount(ctx, db, path, "")
+			refs, x := posterPathReferenceCount(ctx, db, path, "", r.stageID, posterJournalRepair)
 			if x != nil {
 				return checked, cleaned, x
 			}
