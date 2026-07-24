@@ -15,6 +15,9 @@ import (
 )
 
 type PosterRecoveryRoots struct{ Upload, Derived string }
+
+const posterObjectMinimumAge = 2 * time.Hour
+
 type repairPosterJournalRow struct {
 	posterJournalRow
 	queueID int64
@@ -57,6 +60,11 @@ func ReconcilePosterStages(ctx context.Context, db *sql.DB, roots PosterRecovery
 			return checked, cleaned, err
 		}
 		if committed {
+			generationPath := filepath.Join(r.stagedPath, posterLogicalName)
+			if validateExactPosterStagePaths(roots, r, generationPath) == nil {
+				_ = os.Remove(generationPath)
+				_ = os.Remove(r.stagedPath)
+			}
 			_, _ = db.ExecContext(ctx, `UPDATE media_asset_stage_journal SET recovery_error='verified_committed',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='committed'`, r.stageID)
 			continue
 		}
@@ -136,6 +144,11 @@ func ReconcilePosterStages(ctx context.Context, db *sql.DB, roots PosterRecovery
 				return checked, cleaned, e
 			}
 			if committed == 1 {
+				generationPath := filepath.Join(r.stagedPath, posterLogicalName)
+				if validateExactPosterStagePaths(roots, r, generationPath) == nil {
+					_ = os.Remove(generationPath)
+					_ = os.Remove(r.stagedPath)
+				}
 				_, _ = db.ExecContext(ctx, `UPDATE poster_repair_stage SET recovery_error='verified_committed',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='committed'`, r.stageID)
 				continue
 			}
@@ -234,6 +247,9 @@ func RunPosterStageReconciler(ctx context.Context, db *sql.DB, roots PosterRecov
 	}
 	run := func() {
 		_, _, err := ReconcilePosterStages(ctx, db, roots, limit)
+		if err == nil {
+			_, _, err = ReconcilePosterObjects(ctx, db, roots.Upload, limit, posterObjectMinimumAge)
+		}
 		if err != nil && report != nil {
 			report(err)
 		}

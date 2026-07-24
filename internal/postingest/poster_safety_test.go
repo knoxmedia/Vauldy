@@ -405,8 +405,12 @@ func TestRepairPosterRecoveryStates(t *testing.T) {
 		if e != nil || cleaned != 0 {
 			t.Fatalf("cleaned=%d err=%v", cleaned, e)
 		}
-		if _, e = os.Stat(staged.Path); e != nil {
-			t.Fatal(e)
+		if _, e = os.Stat(staged.Path); !os.IsNotExist(e) {
+			t.Fatalf("generation temp retained: %v", e)
+		}
+		object := storage.PosterObjectPath(upload, staged.Hash, ".jpg")
+		if _, e = os.Stat(object); e != nil {
+			t.Fatalf("CAS object removed: %v", e)
 		}
 	})
 	t.Run("no starvation", func(t *testing.T) {

@@ -552,33 +552,46 @@ func posterPathReferenceCount(ctx context.Context, db *sql.DB, path, url, exclud
 	err := db.QueryRowContext(ctx, `SELECT
  (SELECT COUNT(*) FROM media_derived_assets WHERE enc_path=?)+
  (SELECT COUNT(*) FROM media_ingest_evidence WHERE (json_extract(artifact_refs_json,'$.path')=? OR json_extract(artifact_refs_json,'$.url')=?) AND stage_id<>?)+
- (SELECT COUNT(*) FROM media_asset_stage_journal WHERE (json_extract(hashes_sizes_json,'$.path')=? OR json_extract(hashes_sizes_json,'$.url')=?) AND NOT (?='ordinary' AND stage_id=?))+
+ (SELECT COUNT(*) FROM media_asset_stage_journal WHERE state!='committed' AND (json_extract(hashes_sizes_json,'$.path')=? OR json_extract(hashes_sizes_json,'$.url')=?) AND NOT (?='ordinary' AND stage_id=?))+
  (SELECT COUNT(*) FROM poster_repair_stage WHERE state!='committed' AND (json_extract(hashes_sizes_json,'$.path')=? OR json_extract(hashes_sizes_json,'$.url')=?) AND NOT (?='repair' AND stage_id=?))+
  (SELECT COUNT(*) FROM media WHERE json_extract(meta_json,'$.scrape.poster')=? OR json_extract(meta_json,'$.scrape.extra.poster')=?)`, path, path, url, excludeStageID, path, url, string(excludeClass), excludeStageID, path, url, string(excludeClass), excludeStageID, url, url).Scan(&n)
 	return n, err
 }
 func managedPosterPath(url, exemplar string) string {
-	const prefix = "/uploads/posters/"
-	if !strings.HasPrefix(url, prefix) || !strings.HasSuffix(url, "/"+posterLogicalName) {
+	const prefix = "/uploads/posters/objects/sha256/"
+	if !strings.HasPrefix(url, prefix) {
 		return ""
 	}
 	rel := strings.TrimPrefix(url, "/uploads/")
 	parts := strings.Split(filepath.ToSlash(rel), "/")
-	if len(parts) != 4 || parts[0] != "posters" || !strings.HasPrefix(parts[1], "generation-") || parts[2] == "" || parts[2] == "." || parts[2] == ".." {
+	if len(parts) != 5 || parts[0] != "posters" || parts[1] != "objects" || parts[2] != "sha256" || len(parts[3]) != 2 || len(parts[4]) != 68 || !strings.HasSuffix(parts[4], ".jpg") {
+		return ""
+	}
+	hash := strings.TrimSuffix(parts[4], ".jpg")
+	if parts[3] != hash[:2] {
+		return ""
+	}
+	for _, c := range hash {
+		if !strings.ContainsRune("0123456789abcdef", c) {
+			return ""
+		}
+	}
+	abs, e := filepath.Abs(exemplar)
+	if e != nil {
 		return ""
 	}
 	marker := string(filepath.Separator) + "posters" + string(filepath.Separator)
-	abs, err := filepath.Abs(exemplar)
-	if err != nil {
-		return ""
-	}
 	i := strings.LastIndex(strings.ToLower(abs), strings.ToLower(marker))
-	if i < 0 {
-		return ""
+	root := abs
+	if i >= 0 {
+		root = abs[:i]
 	}
-	root := abs[:i]
 	candidate := filepath.Join(root, filepath.FromSlash(rel))
 	if !pathInsideResolvedRoot(root, candidate) {
+		return ""
+	}
+	parent := filepath.Dir(candidate)
+	if st, e := os.Lstat(parent); e == nil && st.Mode()&os.ModeSymlink != 0 {
 		return ""
 	}
 	return candidate
@@ -605,6 +618,9 @@ func cleanupPosterPaths(ctx context.Context, db *sql.DB, refs []string, exemplar
 			}
 			if err = os.Remove(p); err != nil && !os.IsNotExist(err) {
 				return err
+			}
+			if strings.Contains(filepath.ToSlash(p), "/posters/objects/sha256/") {
+				prunePosterObjectPrefix(filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(p))))), p)
 			}
 		}
 	}

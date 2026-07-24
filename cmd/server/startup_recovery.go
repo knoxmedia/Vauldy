@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	"knox-media/internal/metadatalib"
 	"knox-media/internal/postingest"
@@ -29,6 +30,9 @@ func recoverStartupTasks(ctx context.Context, db *sql.DB, postIngest *postingest
 	}
 	if _, _, err := postingest.ReconcilePosterStages(ctx, db, roots.Poster, 100); err != nil {
 		return fmt.Errorf("startup recovery: poster stages: %w", err)
+	}
+	if _, _, err := postingest.ReconcilePosterObjects(ctx, db, roots.Poster.Upload, 100, 2*time.Hour); err != nil {
+		return fmt.Errorf("startup recovery: poster objects: %w", err)
 	}
 	if _, _, err := postingest.ReconcileThumbnailStages(ctx, db, roots.Thumbnail, 100); err != nil {
 		return fmt.Errorf("startup recovery: thumbnail stages: %w", err)
