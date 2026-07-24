@@ -46,3 +46,30 @@ func TestRecoverExpiredPrepareParentsLeavesUnexpired(t *testing.T) {
 		t.Fatal(status)
 	}
 }
+
+func TestRecoverExpiredPrepareParentsRejectsGenerationMismatchWithoutSupersession(t *testing.T) {
+	db := newTestDB(t)
+	task, _, step, media := seedLinkedPrepareTerminal(t, db, 1)
+	_, _ = db.Exec(`UPDATE transcode_task SET lease_until=datetime('now','-1 second') WHERE id=?;UPDATE media SET ingest_generation=2 WHERE id=?`, task, media)
+	if _, err := RecoverExpiredPrepareParents(context.Background(), db, 10); err == nil {
+		t.Fatal("expected diagnostic")
+	}
+	var ts, ss string
+	_ = db.QueryRow(`SELECT t.status,s.status FROM transcode_task t JOIN media_ingest_step s ON s.id=? WHERE t.id=?`, step, task).Scan(&ts, &ss)
+	if ts != "running" || ss != "running" {
+		t.Fatalf("%s/%s", ts, ss)
+	}
+}
+func TestRecoverExpiredSupersededPrepareAggregatesNoOp(t *testing.T) {
+	db := newTestDB(t)
+	task, run, step, _ := seedLinkedPrepareTerminal(t, db, 1)
+	_, _ = db.Exec(`UPDATE transcode_task SET lease_until=datetime('now','-1 second') WHERE id=?;UPDATE media_ingest_run SET status='cancelled',superseded_at=CURRENT_TIMESTAMP WHERE id=?`, task, run)
+	if n, err := RecoverExpiredPrepareParents(context.Background(), db, 10); err != nil || n != 1 {
+		t.Fatalf("%d/%v", n, err)
+	}
+	var ts, ss, rs string
+	_ = db.QueryRow(`SELECT t.status,s.status,r.status FROM transcode_task t JOIN media_ingest_step s ON s.id=? JOIN media_ingest_run r ON r.id=? WHERE t.id=?`, step, run, task).Scan(&ts, &ss, &rs)
+	if ts != "cancelled" || ss != "cancelled" || rs != "cancelled" {
+		t.Fatalf("%s/%s/%s", ts, ss, rs)
+	}
+}

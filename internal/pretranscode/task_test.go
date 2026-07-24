@@ -536,3 +536,28 @@ func TestLegacyTaskManagementBehaviorRemainsAvailable(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestLinkedManagementDeletionAPIsRejectWithoutMutation(t *testing.T) {
+	for _, name := range []string{"delete", "remove", "batch"} {
+		t.Run(name, func(t *testing.T) {
+			db := newTestDB(t)
+			svc, task, job, _, _, _ := seedManagedLinkedTask(t, db, "running")
+			var err error
+			if name == "delete" {
+				err = svc.DeleteTask(task)
+			} else if name == "remove" {
+				err = svc.RemoveRenditionJob(job)
+			} else {
+				err = svc.BatchRemoveRenditionJobs([]int64{job})
+			}
+			if !errors.Is(err, ErrLinkedIngestTaskOperation) {
+				t.Fatalf("err=%v", err)
+			}
+			var n int
+			_ = db.QueryRow(`SELECT COUNT(*) FROM transcode_task WHERE id=?`, task).Scan(&n)
+			if n != 1 {
+				t.Fatal("mutated")
+			}
+		})
+	}
+}

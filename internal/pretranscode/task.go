@@ -444,13 +444,30 @@ func (s *TaskService) RetryLatestFailedTaskForMedia(mediaID int64) (int64, error
 // foreign keys on pretranscode_task_meta / pretranscode_rendition_job clean
 // up the metadata rows.
 func (s *TaskService) DeleteTask(id int64) error {
+	var linked int
 	var outputPath string
-	_ = s.DB.QueryRow(`SELECT COALESCE(pt.output_path,'') FROM pretranscode_task_meta pt WHERE pt.task_id = ?`, id).Scan(&outputPath)
-	if outputPath != "" {
-		_ = osRemoveAll(outputPath)
+	if err := s.DB.QueryRow(`SELECT CASE WHEN ingest_run_id IS NOT NULL OR ingest_step_id IS NOT NULL OR generation IS NOT NULL THEN 1 ELSE 0 END,COALESCE((SELECT output_path FROM pretranscode_task_meta WHERE task_id=transcode_task.id),'') FROM transcode_task WHERE id=?`, id).Scan(&linked, &outputPath); err != nil {
+		return err
 	}
-	_, err := s.DB.Exec(`DELETE FROM transcode_task WHERE id = ?`, id)
-	return err
+	if linked == 1 {
+		return ErrLinkedIngestTaskOperation
+	}
+	res, err := s.DB.Exec(`DELETE FROM transcode_task WHERE id=? AND ingest_run_id IS NULL AND ingest_step_id IS NULL AND generation IS NULL`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return ErrTaskNotFound
+	}
+	if s.CancelActive != nil {
+		s.CancelActive(id)
+	}
+	if outputPath != "" {
+		if err = osRemoveAll(outputPath); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // CleanupFailedTasks removes failed tasks older than `days` (SRS ACT-05).
@@ -523,8 +540,14 @@ func (s *TaskService) CancelRenditionJob(id int64) error {
 	if linked {
 		return ErrLinkedIngestTaskOperation
 	}
-	_, err = s.DB.Exec(`UPDATE pretranscode_rendition_job SET status='cancelled',completed_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('waiting','running')`, id)
-	return err
+	res, err := s.DB.Exec(`UPDATE pretranscode_rendition_job SET status='cancelled',completed_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL WHERE id=? AND status IN ('waiting','running')`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return ErrTaskNotCancellable
+	}
+	return nil
 }
 
 // RetryRenditionJob re-queues a single failed/cancelled rendition job.
@@ -793,19 +816,30 @@ func (s *TaskService) GetMediaOptimizationStatus(mediaID int64) (*MediaOptimizat
 
 // RemoveRenditionJob deletes a rendition job and its output file.
 func (s *TaskService) RemoveRenditionJob(jobID int64) error {
+	var taskID int64
 	var outputPath, outputFormat string
-	err := s.DB.QueryRow(`SELECT COALESCE(j.output_path,''), COALESCE(pt.output_format,'hls')
-		FROM pretranscode_rendition_job j
-		JOIN pretranscode_task_meta pt ON pt.task_id = j.task_id
-		WHERE j.id = ?`, jobID).Scan(&outputPath, &outputFormat)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	var linked int
+	err := s.DB.QueryRow(`SELECT j.task_id,COALESCE(j.output_path,''),COALESCE(pt.output_format,'hls'),CASE WHEN t.ingest_run_id IS NOT NULL OR t.ingest_step_id IS NOT NULL OR t.generation IS NOT NULL THEN 1 ELSE 0 END FROM pretranscode_rendition_job j JOIN transcode_task t ON t.id=j.task_id LEFT JOIN pretranscode_task_meta pt ON pt.task_id=j.task_id WHERE j.id=?`, jobID).Scan(&taskID, &outputPath, &outputFormat, &linked)
+	if err != nil {
 		return err
 	}
-	if deletePath := RenditionDeletePath(outputPath, outputFormat); deletePath != "" {
-		_ = osRemoveAll(deletePath)
+	if linked == 1 {
+		return ErrLinkedIngestTaskOperation
 	}
-	_, err = s.DB.Exec(`DELETE FROM pretranscode_rendition_job WHERE id = ?`, jobID)
-	return err
+	res, err := s.DB.Exec(`DELETE FROM pretranscode_rendition_job WHERE id=? AND task_id=?`, jobID, taskID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return ErrTaskNotFound
+	}
+	if s.CancelActive != nil {
+		s.CancelActive(taskID)
+	}
+	if path := RenditionDeletePath(outputPath, outputFormat); path != "" {
+		return osRemoveAll(path)
+	}
+	return nil
 }
 
 // BatchRemoveRenditionJobs deletes multiple rendition jobs and their output files.

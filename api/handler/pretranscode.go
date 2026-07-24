@@ -326,12 +326,11 @@ func (h *Handler) ListRenditionJobs(c *gin.Context) {
 func (h *Handler) CancelRenditionJob(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("job_id"), 10, 64)
 	mod := pretranscodeModule()
-	// Best-effort signal running worker.
-	mod.Worker.CancelRendition(id)
 	if err := mod.Task.CancelRenditionJob(id); err != nil {
 		c.JSON(400, gin.H{"error": err.Error()})
 		return
 	}
+	mod.Worker.CancelRendition(id)
 	c.JSON(200, gin.H{"ok": true})
 }
 

@@ -231,8 +231,9 @@ func (w *Worker) claimNextJob() (*claimedJob, *Preset, *Rendition, int64, string
 		return nil, nil, nil, 0, "", 0, 0, fmt.Errorf("lost race")
 	}
 	hydrated := false
+	poisoned := false
 	defer func() {
-		if !hydrated {
+		if !hydrated && !poisoned {
 			_, _ = w.DB.Exec(`UPDATE pretranscode_rendition_job SET status='waiting',lease_owner=NULL,lease_until=NULL,started_at=NULL WHERE id=? AND status='running' AND lease_owner=?`, c.ID, c.Owner)
 		}
 	}()
@@ -241,19 +242,25 @@ func (w *Worker) claimNextJob() (*claimedJob, *Preset, *Rendition, int64, string
 		return nil, nil, nil, 0, "", 0, 0, err
 	}
 	if linkedGeneration > 0 && snapshotJSON == "" {
-		return nil, nil, nil, 0, "", 0, 0, fmt.Errorf("ingest prepare immutable snapshot missing for job %d", c.ID)
+		poisoned = true
+		err = w.failPoisonedParent(context.Background(), c, "immutable snapshot missing")
+		return nil, nil, nil, 0, "", 0, 0, err
 	}
 	// Linked ingest jobs are hydrated only from their immutable execution snapshot.
 	if snapshotJSON != "" {
 		var snapshot ingestPrepareJobSnapshot
 		if err = json.Unmarshal([]byte(snapshotJSON), &snapshot); err != nil {
-			return nil, nil, nil, 0, "", 0, 0, fmt.Errorf("decode ingest prepare snapshot for job %d: %w", c.ID, err)
+			poisoned = true
+			err = w.failPoisonedParent(context.Background(), c, "malformed immutable snapshot")
+			return nil, nil, nil, 0, "", 0, 0, err
 		}
 		var mediaID, libraryID, sourceWidth, sourceHeight int64
 		var catalogPath string
 		_ = w.DB.QueryRow(`SELECT COALESCE(m.id,0),COALESCE(m.library_id,0),COALESCE(m.width,0),COALESCE(m.height,0),COALESCE(m.file_path,'') FROM transcode_task t LEFT JOIN media m ON m.file_id=t.file_id WHERE t.id=?`, c.TaskID).Scan(&mediaID, &libraryID, &sourceWidth, &sourceHeight, &catalogPath)
 		if catalogPath == "" {
-			return nil, nil, nil, 0, "", 0, 0, fmt.Errorf("input path missing for task %d", c.TaskID)
+			poisoned = true
+			err = w.failPoisonedParent(context.Background(), c, "input path missing")
+			return nil, nil, nil, 0, "", 0, 0, err
 		}
 		if libraryID > 0 {
 			if resolved := storage.ResolveMediaAbsolutePath(w.DB, libraryID, catalogPath); resolved != "" {
@@ -320,6 +327,49 @@ func (w *Worker) claimNextJob() (*claimedJob, *Preset, *Rendition, int64, string
 	}
 	hydrated = true
 	return &c, &p, &r, mediaID, catalogPath, sourceWidth, sourceHeight, nil
+}
+
+func (w *Worker) failPoisonedParent(ctx context.Context, job claimedJob, reason string) error {
+	p := job.Parent
+	if p.TaskID <= 0 || p.Owner == "" {
+		return fmt.Errorf("pretranscode poison %d: %s", job.ID, reason)
+	}
+	tx, err := w.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	r, err := tx.ExecContext(ctx, `UPDATE pretranscode_rendition_job SET status='failed',error_message=?,completed_at=CURRENT_TIMESTAMP WHERE id=? AND task_id=? AND status='running' AND lease_owner=?`, reason, job.ID, job.TaskID, job.Owner)
+	if err != nil {
+		return err
+	}
+	if n, _ := r.RowsAffected(); n != 1 {
+		return ErrJobOwnershipLost
+	}
+	r, err = tx.ExecContext(ctx, `UPDATE transcode_task SET status='failed',error_message=?,completed_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL WHERE id=? AND status='running' AND lease_owner=? AND ingest_run_id=? AND ingest_step_id=? AND media_id=? AND generation=?`, reason, p.TaskID, p.Owner, p.RunID, p.StepID, p.MediaID, p.Generation)
+	if err != nil {
+		return err
+	}
+	if n, _ := r.RowsAffected(); n != 1 {
+		return ErrJobOwnershipLost
+	}
+	r, err = tx.ExecContext(ctx, `UPDATE media_ingest_step SET status='failed',attempts=max_attempts,last_error=?,finished_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND run_id=? AND media_id=? AND generation=? AND step_type='prepare' AND ((status='waiting' AND lease_owner IS NULL) OR (status='running' AND lease_owner=?))`, reason, p.StepID, p.RunID, p.MediaID, p.Generation, p.Owner)
+	if err != nil {
+		return err
+	}
+	if n, _ := r.RowsAffected(); n != 1 {
+		return ErrJobOwnershipLost
+	}
+	if err = publication.AggregateTx(ctx, tx, p.RunID); err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	w.mu.Lock()
+	delete(w.parentClaims, p.TaskID)
+	w.mu.Unlock()
+	return fmt.Errorf("pretranscode poisoned parent %d: %s", p.TaskID, reason)
 }
 
 // runRenditionJob executes FFmpeg and updates progress.
@@ -419,8 +469,10 @@ func (w *Worker) runRenditionJob(parent context.Context, job *claimedJob, p *Pre
 	}
 	// Parse progress (SRS 6.8).
 	durationUS := w.lookupDurationUS(job.TaskID)
-	done := make(chan struct{})
+	progressDone := make(chan struct{})
+	progressErr := make(chan error, 1)
 	go func() {
+		defer close(progressDone)
 		scanner := bufio.NewScanner(stdout)
 		for scanner.Scan() {
 			line := scanner.Text()
@@ -434,7 +486,11 @@ func (w *Worker) runRenditionJob(parent context.Context, job *claimedJob, p *Pre
 					if pct > 99 {
 						pct = 99
 					}
-					if err := w.updateJobProgress(ctx, *job, pct); err != nil {
+					if updateErr := w.updateJobProgress(ctx, *job, pct); updateErr != nil {
+						select {
+						case progressErr <- updateErr:
+						default:
+						}
 						cancel()
 						return
 					}
@@ -442,10 +498,24 @@ func (w *Worker) runRenditionJob(parent context.Context, job *claimedJob, p *Pre
 				}
 			}
 		}
-		close(done)
+		if scanErr := scanner.Err(); scanErr != nil {
+			select {
+			case progressErr <- scanErr:
+			default:
+			}
+			cancel()
+		}
 	}()
 	err = cmd.Wait()
-	<-done
+	<-progressDone
+	select {
+	case progressFailure := <-progressErr:
+		if !errors.Is(progressFailure, ErrJobOwnershipLost) {
+			log.Printf("pretranscode job %d progress failed: %v", job.ID, progressFailure)
+		}
+		return
+	default:
+	}
 	select {
 	case <-leaseLost:
 		return
