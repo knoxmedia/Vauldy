@@ -468,6 +468,21 @@ func (w *Worker) CancelRendition(jobID int64) bool {
 	return false
 }
 
+func (w *Worker) CancelParent(taskID int64) {
+	w.mu.Lock()
+	var cancels []context.CancelFunc
+	for jobID, c := range w.running {
+		var parent int64
+		if w.DB.QueryRow(`SELECT task_id FROM pretranscode_rendition_job WHERE id=?`, jobID).Scan(&parent) == nil && parent == taskID {
+			cancels = append(cancels, c)
+		}
+	}
+	w.mu.Unlock()
+	for _, c := range cancels {
+		c()
+	}
+}
+
 func (w *Worker) failJob(job *claimedJob, msg, encoder string) {
 	if _, err := w.finalizeJobAndTaskTx(context.Background(), *job, renditionJobTerminal{Status: "failed", ErrorMessage: truncate(msg, 1600), Encoder: encoder}); err != nil {
 		log.Printf("pretranscode job %d failure finalize failed: %v", job.ID, err)

@@ -2,7 +2,6 @@ package publication
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"knox-media/internal/store"
 )
@@ -46,7 +45,7 @@ func CancelRunTx(ctx context.Context, tx store.SQLExecutor, runID int64, reason 
 // CancelRunForRequiredStepTx validates a specific required linked task and step
 // before recording whole-run cancellation intent. No run or sibling work is
 // changed when the linkage is stale or either target is already terminal.
-func CancelRunForRequiredStepTx(ctx context.Context, tx *sql.Tx, runID, stepID, taskID int64, reason string) (bool, error) {
+func CancelRunForRequiredStepTx(ctx context.Context, tx store.SQLExecutor, runID, stepID, taskID int64, reason string) (bool, error) {
 	if tx == nil || runID <= 0 || stepID <= 0 || taskID <= 0 || reason == "" {
 		return false, fmt.Errorf("publication cancel target: invalid transaction, run, step, task, or reason")
 	}

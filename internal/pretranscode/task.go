@@ -27,6 +27,8 @@ type TaskService struct {
 	TranscodeDir string
 
 	cancelTaskAttempt func(context.Context, int64) error
+	CancelActive      func(int64)
+	beforeCancelCAS   func()
 }
 
 // UnifiedTask is the joined row for the unified task list (SRS 3.2.1).
@@ -209,60 +211,85 @@ func (s *TaskService) CancelTask(id int64) error {
 		attempt = s.cancelTaskAttemptTx
 	}
 	policy := store.RetryPolicy{Operation: "pretranscode_cancel_task", MaxElapsed: 2 * time.Second, BaseBackoff: 10 * time.Millisecond, MaxBackoff: 100 * time.Millisecond}
-	return store.WithBusyRetryPolicyContext(ctx, nil, policy, func(attemptCtx context.Context) error {
-		return attempt(attemptCtx, id)
-	})
+	err := store.WithBusyRetryPolicyContext(ctx, nil, policy, func(attemptCtx context.Context) error { return attempt(attemptCtx, id) })
+	if err == nil && s.CancelActive != nil {
+		s.CancelActive(id)
+	}
+	return err
 }
 
 func (s *TaskService) cancelTaskAttemptTx(ctx context.Context, id int64) error {
-	tx, err := s.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	linked, runID, stepID, generation, err := taskIngestLinkTx(tx, id)
-	if err != nil {
-		return err
-	}
-	var required bool
-	if linked {
-		if err = tx.QueryRow(`SELECT required=1 FROM media_ingest_step WHERE id=? AND run_id=? AND generation=? AND step_type='prepare'`, stepID, runID, generation).Scan(&required); err != nil {
+	_, err := store.WithImmediateConnTx(ctx, s.DB, func(tx store.ImmediateConnTx) error {
+		var legacy int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM transcode_task WHERE id=? AND ingest_run_id IS NULL AND ingest_step_id IS NULL AND COALESCE(generation,0)=0`, id).Scan(&legacy); err != nil {
 			return err
 		}
-		if required {
-			cancelled, cancelErr := publication.CancelRunForRequiredStepTx(ctx, tx, runID, stepID, id, "admin_cancelled")
-			if cancelErr != nil {
-				return cancelErr
+		if legacy == 1 {
+			if _, err := tx.ExecContext(ctx, `UPDATE pretranscode_rendition_job SET status='cancelled',completed_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL WHERE task_id=? AND status IN ('waiting','running')`, id); err != nil {
+				return err
 			}
-			if !cancelled {
-				return fmt.Errorf("%w: task %d linked ingest target", ErrTaskNotCancellable, id)
+			res, err := tx.ExecContext(ctx, `UPDATE transcode_task SET status='cancelled',completed_at=COALESCE(completed_at,CURRENT_TIMESTAMP) WHERE id=? AND status IN ('waiting','running','paused')`, id)
+			if err != nil {
+				return err
 			}
-			return tx.Commit()
+			if n, _ := res.RowsAffected(); n != 1 {
+				return ErrTaskNotCancellable
+			}
+			return nil
 		}
-	}
-	if _, err = tx.Exec(`UPDATE pretranscode_rendition_job SET status='cancelled',completed_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL WHERE task_id=? AND status IN ('waiting','running')`, id); err != nil {
-		return err
-	}
-	res, err := tx.Exec(`UPDATE transcode_task SET status='cancelled',completed_at=COALESCE(completed_at,CURRENT_TIMESTAMP) WHERE id=? AND status IN ('waiting','running','paused')`, id)
-	if err != nil {
-		return err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("%w: task %d", ErrTaskNotCancellable, id)
-	}
-	if linked {
-		res, err = tx.Exec(`UPDATE media_ingest_step SET status='cancelled',last_error='cancelled',finished_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND run_id=? AND generation=? AND step_type='prepare' AND status IN ('waiting','running')`, stepID, runID, generation)
+		var media, run, step, gen int64
+		var status string
+		var owner sql.NullString
+		var required bool
+		err := tx.QueryRowContext(ctx, `SELECT t.media_id,t.ingest_run_id,t.ingest_step_id,t.generation,t.status,t.lease_owner,s.required=1 FROM transcode_task t JOIN media_ingest_step s ON s.id=t.ingest_step_id WHERE t.id=?`, id).Scan(&media, &run, &step, &gen, &status, &owner, &required)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrTaskNotCancellable
+		}
 		if err != nil {
 			return err
 		}
-		if n, _ := res.RowsAffected(); n != 1 {
-			return fmt.Errorf("task %d linked prepare step is not cancellable", id)
+		if required {
+			cancelled, e := publication.CancelRunForRequiredStepTx(ctx, tx, run, step, id, "admin_cancelled")
+			if e != nil {
+				return e
+			}
+			if !cancelled {
+				return ErrTaskNotCancellable
+			}
+			return nil
 		}
-		if err = publication.AggregateTx(ctx, tx, runID); err != nil {
+		var valid int
+		err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM media m JOIN media_ingest_run r ON r.id=? JOIN media_ingest_step s ON s.id=? WHERE m.id=? AND m.ingest_generation=? AND r.media_id=? AND r.generation=? AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND s.run_id=? AND s.media_id=? AND s.generation=? AND s.step_type='prepare' AND ((?='waiting' AND s.status='waiting' AND s.lease_owner IS NULL AND ? IS NULL) OR (?='running' AND s.status='running' AND s.lease_owner=? AND ? IS NOT NULL))`, run, step, media, gen, media, gen, run, media, gen, status, owner, status, owner, owner).Scan(&valid)
+		if err != nil {
 			return err
 		}
-	}
-	return tx.Commit()
+		if valid != 1 {
+			return ErrTaskNotCancellable
+		}
+		if s.beforeCancelCAS != nil {
+			s.beforeCancelCAS()
+		}
+		r, e := tx.ExecContext(ctx, `UPDATE transcode_task SET status='cancelled',completed_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL WHERE id=? AND media_id=? AND ingest_run_id=? AND ingest_step_id=? AND generation=? AND status=? AND ((? IS NULL AND lease_owner IS NULL) OR lease_owner=?)`, id, media, run, step, gen, status, owner, owner)
+		if e != nil {
+			return e
+		}
+		if n, _ := r.RowsAffected(); n != 1 {
+			return ErrTaskNotCancellable
+		}
+		r, e = tx.ExecContext(ctx, `UPDATE media_ingest_step SET status='cancelled',last_error='cancelled',finished_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND run_id=? AND media_id=? AND generation=? AND status=? AND ((? IS NULL AND lease_owner IS NULL) OR lease_owner=?)`, step, run, media, gen, status, owner, owner)
+		if e != nil {
+			return e
+		}
+		if n, _ := r.RowsAffected(); n != 1 {
+			return ErrTaskNotCancellable
+		}
+		_, e = tx.ExecContext(ctx, `UPDATE pretranscode_rendition_job SET status='cancelled',completed_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL WHERE task_id=? AND status IN ('waiting','running')`, id)
+		if e != nil {
+			return e
+		}
+		return publication.AggregateTx(ctx, tx, run)
+	})
+	return err
 }
 
 func (s *TaskService) PauseTask(id int64) error {
