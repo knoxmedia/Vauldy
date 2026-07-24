@@ -394,3 +394,22 @@ func TestAggregateRequiredTerminalBoundaries(t *testing.T) {
 		})
 	}
 }
+
+func TestAggregateSecureRepairFailureRetainsTimestampButFailsHidden(t *testing.T) {
+	db, runID, mediaID := aggregateFixture(t, "processing", 1, map[string]string{"encrypt": "failed"})
+	const original = "2026-07-01 02:03:04"
+	if _, err := db.Exec(`UPDATE media SET publication_state='processing',published_at=? WHERE id=?`, original, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE media_ingest_run SET reason='repair',preserve_visibility=0 WHERE id=?`, runID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE media_ingest_step SET attempts=max_attempts,last_error='encrypt exhausted' WHERE run_id=?`, runID); err != nil {
+		t.Fatal(err)
+	}
+	aggregateCall(t, db, runID)
+	state, publishedAt, _ := mediaState(t, db, mediaID)
+	if state != "failed" || !publishedAt.Valid || publishedAt.Time.Format("2006-01-02 15:04:05") != original {
+		t.Fatalf("state=%s published=%v", state, publishedAt)
+	}
+}

@@ -2,10 +2,13 @@ package publication
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -76,10 +79,14 @@ var repairRetryPolicy = store.RetryPolicy{
 }
 
 func repairLegacyMediaOne(ctx context.Context, db *sql.DB, planner *Planner, mediaID int64) (bool, error) {
+	preflight, err := loadRepairPreflight(ctx, db, planner, mediaID)
+	if err != nil || preflight == nil {
+		return false, err
+	}
 	created := false
-	err := store.WithBusyRetryPolicyContext(ctx, nil, repairRetryPolicy, func(attemptCtx context.Context) error {
+	err = store.WithBusyRetryPolicyContext(ctx, nil, repairRetryPolicy, func(attemptCtx context.Context) error {
 		var attemptCreated bool
-		attemptCreated, err := repairLegacyMediaOneAttempt(attemptCtx, db, planner, mediaID)
+		attemptCreated, err := repairLegacyMediaOneAttempt(attemptCtx, db, planner, mediaID, preflight)
 		if err == nil {
 			created = attemptCreated
 		}
@@ -116,7 +123,7 @@ func currentRepairCoversRequiredKindsDB(ctx context.Context, db *sql.DB, planner
 	return covered, tx.Commit()
 }
 
-func repairLegacyMediaOneAttempt(ctx context.Context, db *sql.DB, planner *Planner, mediaID int64) (bool, error) {
+func repairLegacyMediaOneAttempt(ctx context.Context, db *sql.DB, planner *Planner, mediaID int64, preflight *repairPreflight) (bool, error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
@@ -140,14 +147,15 @@ func repairLegacyMediaOneAttempt(ctx context.Context, db *sql.DB, planner *Plann
 	if covered {
 		return false, nil
 	}
-	complete, err := hasCompleteEvidenceForStepsTx(ctx, tx, mediaID, required)
+	complete, err := hasCompleteRepairEvidenceTx(ctx, tx, mediaID, required, preflight)
 	if err != nil {
 		return false, err
 	}
 	if complete {
 		return false, nil
 	}
-	run, err := planner.RepairMediaTx(ctx, tx, mediaID)
+	result, err := planner.PlanReplacementTx(ctx, tx, mediaID, ReplacementOptions{Reason: PlanReasonRepair, PreserveVisibility: preflight.preserveVisibility, ExpectedGeneration: preflight.generation})
+	run := result.Run
 	if err != nil {
 		return false, err
 	}
@@ -162,12 +170,16 @@ func repairLegacyMediaOneAttempt(ctx context.Context, db *sql.DB, planner *Plann
 
 func currentRepairCoversRequiredKindsTx(ctx context.Context, tx *sql.Tx, mediaID int64, required []StepType) (bool, error) {
 	var runID int64
-	err := tx.QueryRowContext(ctx, `SELECT r.id FROM media_ingest_run r JOIN media m ON m.id=r.media_id AND m.ingest_generation=r.generation WHERE r.media_id=? AND r.reason='repair'`, mediaID).Scan(&runID)
+	var status string
+	err := tx.QueryRowContext(ctx, `SELECT r.id,r.status FROM media_ingest_run r JOIN media m ON m.id=r.media_id AND m.ingest_generation=r.generation WHERE r.media_id=? AND r.reason='repair'`, mediaID).Scan(&runID, &status)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
+	}
+	if status == "published" {
+		return false, nil
 	}
 	for _, step := range required {
 		var present int
@@ -350,4 +362,162 @@ func regularFile(path string) bool {
 	}
 	info, err := os.Stat(path)
 	return err == nil && info.Mode().IsRegular()
+}
+
+// repairPreflight is computed before opening the replacement transaction so
+// source hashing never holds a SQLite writer transaction.
+type repairPreflight struct {
+	fileType, sourceFingerprint string
+	generation                  int64
+	preserveVisibility          bool
+}
+
+func loadRepairPreflight(ctx context.Context, db *sql.DB, planner *Planner, mediaID int64) (*repairPreflight, error) {
+	var fileType, selected, encPath, plainPath string
+	var generation int64
+	var libraryEncrypt int
+	err := db.QueryRowContext(ctx, `SELECT COALESCE(m.file_type,''),COALESCE(m.file_path,''),m.ingest_generation,COALESCE(l.encrypted_assets_enabled,0),COALESCE(e.enc_path,''),COALESCE(e.plain_path,'') FROM media m JOIN library l ON l.id=m.library_id LEFT JOIN media_encrypted_assets e ON e.media_id=m.id AND e.status='encrypted' WHERE m.id=?`, mediaID).Scan(&fileType, &selected, &generation, &libraryEncrypt, &encPath, &plainPath)
+	if err != nil {
+		return nil, err
+	}
+	preflight := &repairPreflight{fileType: strings.TrimSpace(fileType), generation: generation, preserveVisibility: true}
+	if preflight.fileType == "image" {
+		fingerprintSource := selected
+		if regularFile(plainPath) {
+			fingerprintSource = plainPath
+		}
+		preflight.sourceFingerprint, err = SourceFingerprint(fingerprintSource)
+		if err != nil {
+			return nil, err
+		}
+		if planner.options.EncryptGlobal && libraryEncrypt == 1 && !samePath(selected, encPath) {
+			preflight.preserveVisibility = false
+		}
+	}
+	return preflight, nil
+}
+
+func samePath(a, b string) bool {
+	if strings.TrimSpace(a) == "" || strings.TrimSpace(b) == "" {
+		return false
+	}
+	aa, errA := filepath.Abs(a)
+	bb, errB := filepath.Abs(b)
+	return errA == nil && errB == nil && strings.EqualFold(filepath.Clean(aa), filepath.Clean(bb))
+}
+
+// SourceFingerprint binds publication evidence to exact source bytes and identity.
+func SourceFingerprint(path string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err = io.Copy(h, f); err != nil {
+		return "", err
+	}
+	canonical, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s|%d|%d|sha256:%s", filepath.Clean(canonical), info.Size(), info.ModTime().UnixNano(), hex.EncodeToString(h.Sum(nil))), nil
+}
+
+func hasCompleteRepairEvidenceTx(ctx context.Context, tx *sql.Tx, mediaID int64, steps []StepType, preflight *repairPreflight) (bool, error) {
+	if preflight.fileType != "image" {
+		return hasCompleteEvidenceForStepsTx(ctx, tx, mediaID, steps)
+	}
+	for _, step := range steps {
+		if step == StepThumbnail || step == StepEncrypt {
+			ok, err := exactImageEvidenceTx(ctx, tx, mediaID, step, preflight.sourceFingerprint)
+			if err != nil || !ok {
+				return ok, err
+			}
+			continue
+		}
+		ok, err := stepEvidenceTx(ctx, tx, mediaID, step)
+		if err != nil || !ok {
+			return ok, err
+		}
+	}
+	return true, nil
+}
+
+func exactImageEvidenceTx(ctx context.Context, tx *sql.Tx, mediaID int64, step StepType, fingerprint string) (bool, error) {
+	var refs string
+	err := tx.QueryRowContext(ctx, `SELECT e.artifact_refs_json FROM media_ingest_evidence e JOIN media m ON m.id=e.media_id JOIN media_ingest_run r ON r.id=e.run_id JOIN media_ingest_step s ON s.id=e.step_id WHERE e.media_id=? AND e.generation=m.ingest_generation AND e.kind=? AND e.source_fingerprint=? AND r.status IN ('published','degraded') AND s.status IN ('done','skipped') ORDER BY e.id DESC LIMIT 1`, mediaID, step, fingerprint).Scan(&refs)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return validateImageEvidenceRefsTx(ctx, tx, mediaID, step, refs)
+}
+
+func validateImageEvidenceRefsTx(ctx context.Context, tx *sql.Tx, mediaID int64, step StepType, raw string) (bool, error) {
+	if step == StepThumbnail {
+		var evidence struct {
+			Variants []struct {
+				Kind, LogicalName, Path, SHA256 string
+				Size                            int64
+			} `json:"variants"`
+		}
+		if json.Unmarshal([]byte(raw), &evidence) != nil || len(evidence.Variants) != 2 {
+			return false, nil
+		}
+		for _, kind := range []string{"photo_thumb", "photo_medium"} {
+			found := false
+			for _, variant := range evidence.Variants {
+				if variant.Kind != kind || !validFileHash(variant.Path, variant.Size, variant.SHA256) {
+					continue
+				}
+				var selected string
+				var encrypted int
+				if err := tx.QueryRowContext(ctx, `SELECT COALESCE(l.encrypted_assets_enabled,0) FROM media m JOIN library l ON l.id=m.library_id WHERE m.id=?`, mediaID).Scan(&encrypted); err != nil {
+					return false, err
+				}
+				if encrypted == 0 {
+					found = true
+					continue
+				}
+				if err := tx.QueryRowContext(ctx, `SELECT enc_path FROM media_derived_assets WHERE media_id=? AND artifact_kind=? AND logical_name=?`, mediaID, variant.Kind, variant.LogicalName).Scan(&selected); err == nil && samePath(selected, variant.Path) {
+					found = true
+				}
+			}
+			if !found {
+				return false, nil
+			}
+		}
+		return true, nil
+	}
+	var evidence struct {
+		Path, SHA256, WrappedDEK, IV string
+		Size                         int64
+	}
+	if json.Unmarshal([]byte(raw), &evidence) != nil || evidence.WrappedDEK == "" || evidence.IV == "" || !validFileHash(evidence.Path, evidence.Size, evidence.SHA256) {
+		return false, nil
+	}
+	var selected, wrapped, iv string
+	err := tx.QueryRowContext(ctx, `SELECT m.file_path,a.wrapped_dek,a.iv FROM media m JOIN media_encrypted_assets a ON a.media_id=m.id AND a.status='encrypted' AND a.enc_path=m.file_path WHERE m.id=?`, mediaID).Scan(&selected, &wrapped, &iv)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil && samePath(selected, evidence.Path) && wrapped == evidence.WrappedDEK && iv == evidence.IV, err
+}
+
+func validFileHash(path string, size int64, want string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	h := sha256.New()
+	n, err := io.Copy(h, f)
+	return err == nil && n == size && strings.EqualFold(hex.EncodeToString(h.Sum(nil)), want)
 }

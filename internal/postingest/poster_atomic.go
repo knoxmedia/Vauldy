@@ -552,8 +552,8 @@ func posterPathReferenceCount(ctx context.Context, db *sql.DB, path, url, exclud
 	err := db.QueryRowContext(ctx, `SELECT
  (SELECT COUNT(*) FROM media_derived_assets WHERE enc_path=?)+
  (SELECT COUNT(*) FROM media_ingest_evidence WHERE (json_extract(artifact_refs_json,'$.path')=? OR json_extract(artifact_refs_json,'$.url')=?) AND stage_id<>?)+
- (SELECT COUNT(*) FROM media_asset_stage_journal WHERE state!='committed' AND (json_extract(hashes_sizes_json,'$.path')=? OR json_extract(hashes_sizes_json,'$.url')=?) AND NOT (?='ordinary' AND stage_id=?))+
- (SELECT COUNT(*) FROM poster_repair_stage WHERE state!='committed' AND (json_extract(hashes_sizes_json,'$.path')=? OR json_extract(hashes_sizes_json,'$.url')=?) AND NOT (?='repair' AND stage_id=?))+
+ (SELECT COUNT(*) FROM media_asset_stage_journal WHERE (json_extract(hashes_sizes_json,'$.path')=? OR json_extract(hashes_sizes_json,'$.url')=?) AND NOT (?='ordinary' AND stage_id=?))+
+ (SELECT COUNT(*) FROM poster_repair_stage WHERE (json_extract(hashes_sizes_json,'$.path')=? OR json_extract(hashes_sizes_json,'$.url')=?) AND NOT (?='repair' AND stage_id=?))+
  (SELECT COUNT(*) FROM media WHERE json_extract(meta_json,'$.scrape.poster')=? OR json_extract(meta_json,'$.scrape.extra.poster')=?)`, path, path, url, excludeStageID, path, url, string(excludeClass), excludeStageID, path, url, string(excludeClass), excludeStageID, url, url).Scan(&n)
 	return n, err
 }

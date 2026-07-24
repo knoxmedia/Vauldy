@@ -106,12 +106,12 @@ func TestRepairLegacyPhotoMissingThumbnailPlansPreservingRepair(t *testing.T) {
 	}
 }
 
-func TestRepairLegacyPhotoCompleteThumbnailSkips(t *testing.T) {
+func TestRepairLegacyPhotoCompleteFilesWithoutEvidenceRepairs(t *testing.T) {
 	db := openRepairTestDB(t)
 	root := t.TempDir()
 	id := seedLegacyPhoto(t, db, root, "published", false)
 	addLegacyPhotoThumbnail(t, db, id, root, false)
-	if n, err := RepairLegacyMedia(context.Background(), db, NewPlanner(PlanOptions{}), 8); err != nil || n != 0 {
+	if n, err := RepairLegacyMedia(context.Background(), db, NewPlanner(PlanOptions{}), 8); err != nil || n != 1 {
 		t.Fatalf("repaired=%d err=%v", n, err)
 	}
 }
@@ -134,7 +134,7 @@ func TestRepairLegacyPhotoNewEncryptionPlansThumbnailThenEncrypt(t *testing.T) {
 	}
 }
 
-func TestRepairLegacyEncryptedPhotoCompleteSkips(t *testing.T) {
+func TestRepairLegacyEncryptedPhotoCompleteFilesWithoutEvidenceRepairs(t *testing.T) {
 	db := openRepairTestDB(t)
 	root := t.TempDir()
 	id := seedLegacyPhoto(t, db, root, "published", true)
@@ -146,7 +146,7 @@ func TestRepairLegacyEncryptedPhotoCompleteSkips(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO media_encrypted_assets(media_id,enc_path,wrapped_dek,iv,plain_path,status) SELECT id,?,'wrapped','iv',file_path,'encrypted' FROM media WHERE id=?`, sourceEnc, id); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := RepairLegacyMedia(context.Background(), db, NewPlanner(PlanOptions{EncryptGlobal: true}), 8); err != nil || n != 0 {
+	if n, err := RepairLegacyMedia(context.Background(), db, NewPlanner(PlanOptions{EncryptGlobal: true}), 8); err != nil || n != 1 {
 		t.Fatalf("repaired=%d err=%v", n, err)
 	}
 }
@@ -236,5 +236,73 @@ func TestRepairLegacyMediaMixedBatchRepairsVideoAndImageAndSkipsDocument(t *test
 	}
 	if repairRunCount(t, db, video) != 1 || repairRunCount(t, db, image) != 1 || repairRunCount(t, db, doc) != 0 {
 		t.Fatalf("runs video=%d image=%d doc=%d", repairRunCount(t, db, video), repairRunCount(t, db, image), repairRunCount(t, db, doc))
+	}
+}
+
+func TestRepairLegacyEncryptedPhotoRequiresCanonicalSelectedEncryptedPath(t *testing.T) {
+	db := openRepairTestDB(t)
+	root := t.TempDir()
+	id := seedLegacyPhoto(t, db, root, "published", true)
+	addLegacyPhotoThumbnail(t, db, id, root, true)
+	plain, enc := filepath.Join(root, "photo.jpg"), filepath.Join(root, "photo.enc")
+	if err := os.WriteFile(enc, []byte("encrypted source"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO media_encrypted_assets(media_id,enc_path,wrapped_dek,iv,plain_path,status) VALUES(?,?,'wrapped','iv',?,'encrypted')`, id, enc, plain); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := RepairLegacyMedia(context.Background(), db, NewPlanner(PlanOptions{EncryptGlobal: true}), 8); err != nil || n != 1 {
+		t.Fatalf("repair=%d err=%v", n, err)
+	}
+	var state string
+	var preserve int
+	if err := db.QueryRow(`SELECT m.publication_state,r.preserve_visibility FROM media m JOIN media_ingest_run r ON r.media_id=m.id WHERE m.id=?`, id).Scan(&state, &preserve); err != nil {
+		t.Fatal(err)
+	}
+	if state != "processing" || preserve != 0 {
+		t.Fatalf("state=%s preserve=%d", state, preserve)
+	}
+}
+
+func TestRepairLegacyEncryptedPhotoSecureSelectionPreservesVisibility(t *testing.T) {
+	db := openRepairTestDB(t)
+	root := t.TempDir()
+	id := seedLegacyPhoto(t, db, root, "published", true)
+	plain, enc := filepath.Join(root, "photo.jpg"), filepath.Join(root, "photo.enc")
+	if err := os.WriteFile(enc, []byte("encrypted source"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO media_encrypted_assets(media_id,enc_path,wrapped_dek,iv,plain_path,status) VALUES(?,?,'wrapped','iv',?,'encrypted')`, id, enc, plain); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE media SET file_path=? WHERE id=?`, enc, id); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := RepairLegacyMedia(context.Background(), db, NewPlanner(PlanOptions{EncryptGlobal: true}), 8); err != nil || n != 1 {
+		t.Fatalf("repair=%d err=%v", n, err)
+	}
+	var state string
+	var preserve int
+	if err := db.QueryRow(`SELECT m.publication_state,r.preserve_visibility FROM media m JOIN media_ingest_run r ON r.media_id=m.id WHERE m.id=?`, id).Scan(&state, &preserve); err != nil {
+		t.Fatal(err)
+	}
+	if state != "published" || preserve != 1 {
+		t.Fatalf("state=%s preserve=%d", state, preserve)
+	}
+}
+
+func TestRepairLegacyPhotoPublishedWithoutGenerationEvidenceReopens(t *testing.T) {
+	db := openRepairTestDB(t)
+	root := t.TempDir()
+	id := seedLegacyPhoto(t, db, root, "published", false)
+	addLegacyPhotoThumbnail(t, db, id, root, false)
+	if n, err := RepairLegacyMedia(context.Background(), db, NewPlanner(PlanOptions{}), 8); err != nil || n != 1 {
+		t.Fatalf("repair=%d err=%v", n, err)
+	}
+	if _, err := db.Exec(`UPDATE media_ingest_step SET status='done' WHERE media_id=? AND required=1; UPDATE media_ingest_run SET status='published',finished_at=CURRENT_TIMESTAMP WHERE media_id=?`, id, id); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := RepairLegacyMedia(context.Background(), db, NewPlanner(PlanOptions{}), 8); err != nil || n != 1 {
+		t.Fatalf("restart=%d err=%v", n, err)
 	}
 }

@@ -405,19 +405,7 @@ func (w *LocalThumbnailWorker) Stage(ctx context.Context, task Task) (imagethumb
 	return staged, nil
 }
 func sourceFingerprint(path string) (string, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return "", err
-	}
-	_, hash, err := hashPath(path)
-	if err != nil {
-		return "", err
-	}
-	canonical, err := filepath.Abs(path)
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%s|%d|%d|sha256:%s", filepath.Clean(canonical), info.Size(), info.ModTime().UnixNano(), hash), nil
+	return publication.SourceFingerprint(path)
 }
 func hashPath(path string) (int64, string, error) {
 	f, err := os.Open(path)

@@ -253,3 +253,21 @@ func TestThumbnailDispatcherRepairsLegacyPhotoAndPublishes(t *testing.T) {
 		t.Fatalf("reason=%q preserve=%d err=%v", reason, preserve, err)
 	}
 }
+
+func TestEncryptedLegacyPhotoRepairHidesThenPublishesEncryptedSelection(t *testing.T) {
+	db, mediaID, _ := planThumbnailFixture(t, true)
+	if _, err := db.Exec(`UPDATE media SET ingest_generation=0,publication_state='published',published_at=CURRENT_TIMESTAMP; DELETE FROM media_ingest_step; DELETE FROM media_ingest_run; DELETE FROM post_ingest_task; DELETE FROM scrape_task`); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := publication.RepairLegacyMedia(context.Background(), db, publication.NewPlanner(publication.PlanOptions{EncryptGlobal: true}), 1); err != nil || n != 1 {
+		t.Fatalf("repair=%d err=%v", n, err)
+	}
+	var state string
+	var published sql.NullTime
+	if err := db.QueryRow(`SELECT publication_state,published_at FROM media WHERE id=?`, mediaID).Scan(&state, &published); err != nil {
+		t.Fatal(err)
+	}
+	if state != "processing" || !published.Valid {
+		t.Fatalf("state=%s published=%v", state, published)
+	}
+}

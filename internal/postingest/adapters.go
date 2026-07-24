@@ -3,6 +3,7 @@ package postingest
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"knox-media/internal/atrack"
 	"knox-media/internal/keyframe"
 	"knox-media/internal/preview"
+	"knox-media/internal/publication"
 	"knox-media/internal/storage"
 	"knox-media/internal/subtitle"
 )
@@ -503,6 +505,26 @@ func (a *encryptAdapter) Execute(ctx context.Context, task Task) error {
 	return nil
 }
 
+func recordEncryptionEvidence(ctx context.Context, db *sql.DB, task Task) error {
+	if task.RunID == nil || task.StepID == nil {
+		return nil
+	}
+	var source, path, wrapped, iv string
+	if err := db.QueryRowContext(ctx, `SELECT COALESCE(a.plain_path,''),COALESCE(a.enc_path,''),COALESCE(a.wrapped_dek,''),COALESCE(a.iv,'') FROM media_encrypted_assets a JOIN media m ON m.id=a.media_id AND m.file_path=a.enc_path WHERE a.media_id=? AND a.status='encrypted'`, task.MediaID).Scan(&source, &path, &wrapped, &iv); err != nil {
+		return err
+	}
+	fp, err := publication.SourceFingerprint(source)
+	if err != nil {
+		return err
+	}
+	size, hash, err := hashPath(path)
+	if err != nil {
+		return err
+	}
+	refs, _ := json.Marshal(map[string]any{"path": path, "size": size, "sha256": hash, "wrapped_dek": wrapped, "iv": iv})
+	_, err = db.ExecContext(ctx, `INSERT INTO media_ingest_evidence(run_id,step_id,media_id,generation,kind,source_fingerprint,artifact_refs_json,reason,verified_at,stage_id) VALUES(?,?,?,?,'encrypt',?,?,'generated',CURRENT_TIMESTAMP,?) ON CONFLICT(step_id,kind) DO NOTHING`, *task.RunID, *task.StepID, task.MediaID, task.Generation, fp, string(refs), fmt.Sprintf("encrypt-%d-%d", *task.StepID, task.Generation))
+	return err
+}
 func usableEncryptedOutput(ctx context.Context, db *sql.DB, mediaID int64) (bool, error) {
 	return storage.IsEncryptedAssetRecordValid(ctx, db, mediaID)
 }
