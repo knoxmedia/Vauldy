@@ -11,6 +11,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 func openImmediateTxTestDB(t *testing.T) *sql.DB {
@@ -393,5 +396,134 @@ func TestWithImmediateConnTxRealBeginCancellationDoesNotRetainWriterLock(t *test
 		if _, err = WithImmediateConnTx(context.Background(), db, func(ImmediateConnTx) error { return nil }); err != nil {
 			t.Fatalf("iteration %d: transaction after cancellation: %v", i, err)
 		}
+	}
+}
+
+type countingSQLiteDriver struct {
+	inner  driver.Driver
+	opens  atomic.Int32
+	closes atomic.Int32
+}
+
+func (d *countingSQLiteDriver) Open(name string) (driver.Conn, error) {
+	conn, err := d.inner.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	d.opens.Add(1)
+	return &countingSQLiteConn{Conn: conn, closes: &d.closes}, nil
+}
+
+type countingSQLiteConn struct {
+	driver.Conn
+	closes *atomic.Int32
+}
+
+func (c *countingSQLiteConn) Close() error {
+	c.closes.Add(1)
+	return c.Conn.Close()
+}
+
+func (c *countingSQLiteConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	return c.Conn.(driver.ExecerContext).ExecContext(ctx, query, args)
+}
+
+func (c *countingSQLiteConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	return c.Conn.(driver.QueryerContext).QueryContext(ctx, query, args)
+}
+
+var countingSQLiteDriverSequence atomic.Int64
+
+func TestWithImmediateConnTxLiveBusyRetainsPhysicalConnection(t *testing.T) {
+	driverName := fmt.Sprintf("counting-sqlite-%d", countingSQLiteDriverSequence.Add(1))
+	counter := &countingSQLiteDriver{inner: &sqlite.Driver{}}
+	sql.Register(driverName, counter)
+	path := filepath.ToSlash(filepath.Join(t.TempDir(), "busy-retain.sqlite"))
+	db, err := sql.Open(driverName, "file:"+path+"?_pragma=busy_timeout(1)&_pragma=journal_mode(WAL)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(2)
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err = db.Exec(`CREATE TABLE busy_retain(value TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	locker, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = locker.ExecContext(context.Background(), `BEGIN IMMEDIATE`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = locker.ExecContext(context.Background(), `ROLLBACK`); _ = locker.Close() })
+
+	for i := 0; i < 25; i++ {
+		_, beginErr := WithImmediateConnTx(context.Background(), db, func(ImmediateConnTx) error {
+			t.Fatal("callback entered while writer lock held")
+			return nil
+		})
+		if !IsSQLiteBusy(beginErr) {
+			t.Fatalf("iteration %d: error=%v want SQLite busy", i, beginErr)
+		}
+	}
+	if got := counter.opens.Load(); got != 2 {
+		t.Fatalf("opened physical connections=%d want locker plus one retained busy connection", got)
+	}
+	if got := counter.closes.Load(); got != 0 {
+		t.Fatalf("closed physical connections=%d want no busy churn", got)
+	}
+}
+
+func TestWithImmediateConnTxLiveLockedRetainsConnectionWithoutRollback(t *testing.T) {
+	lockedErr := sqliteTestError(t, sqlite3.SQLITE_LOCKED)
+	testDriver := &immediateRollbackTestDriver{beginErr: lockedErr, rollbackErr: errors.New("cannot rollback - no transaction is active")}
+	db := openImmediateRollbackTestDB(t, testDriver)
+
+	_, err := WithImmediateConnTx(context.Background(), db, func(ImmediateConnTx) error { return nil })
+	if !errors.Is(err, lockedErr) {
+		t.Fatalf("error=%v want original locked error", err)
+	}
+	if got := testDriver.rollbacks.Load(); got != 0 {
+		t.Fatalf("rollbacks=%d want definitive failed BEGIN left untouched", got)
+	}
+	if got := testDriver.closes.Load(); got != 0 {
+		t.Fatalf("closed connections=%d want locked connection retained", got)
+	}
+}
+
+func TestWithImmediateConnTxNoActiveRollbackProvesAmbiguousBeginClean(t *testing.T) {
+	noActive := errors.New("SQL logic error: cannot rollback - no transaction is active (1)")
+	testDriver := &immediateRollbackTestDriver{beginErr: context.Canceled, rollbackErr: noActive}
+	db := openImmediateRollbackTestDB(t, testDriver)
+
+	_, err := WithImmediateConnTx(context.Background(), db, func(ImmediateConnTx) error { return nil })
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error=%v want cancellation", err)
+	}
+	if errors.Is(err, noActive) {
+		t.Fatalf("no-active cleanup error leaked: %v", err)
+	}
+	if got := testDriver.rollbacks.Load(); got != 1 {
+		t.Fatalf("rollbacks=%d want ambiguity cleanup", got)
+	}
+	if got := testDriver.closes.Load(); got != 0 {
+		t.Fatalf("closed connections=%d want proven-clean connection retained", got)
+	}
+}
+
+func TestWithImmediateConnTxDefinitiveSQLErrorRetainsConnectionWithoutRollback(t *testing.T) {
+	sqlErr := sqliteTestError(t, sqlite3.SQLITE_ERROR)
+	testDriver := &immediateRollbackTestDriver{beginErr: sqlErr, rollbackErr: errors.New("cannot rollback - no transaction is active")}
+	db := openImmediateRollbackTestDB(t, testDriver)
+
+	_, err := WithImmediateConnTx(context.Background(), db, func(ImmediateConnTx) error { return nil })
+	if !errors.Is(err, sqlErr) {
+		t.Fatalf("error=%v want original SQL error", err)
+	}
+	if got := testDriver.rollbacks.Load(); got != 0 {
+		t.Fatalf("rollbacks=%d want definitive failed BEGIN left untouched", got)
+	}
+	if got := testDriver.closes.Load(); got != 0 {
+		t.Fatalf("closed connections=%d want connection retained", got)
 	}
 }

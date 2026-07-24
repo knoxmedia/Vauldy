@@ -6,7 +6,10 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
+
+	"knox-media/internal/sqliteretry"
 )
 
 // SQLExecutor is the subset of database/sql execution methods available inside
@@ -93,13 +96,17 @@ func WithImmediateConnTx(ctx context.Context, db *sql.DB, fn func(ImmediateConnT
 
 	if beginErr := immediateBegin(ctx, conn); beginErr != nil {
 		err = beginErr
+		if !ambiguousImmediateBegin(ctx, beginErr) {
+			return outcome, err
+		}
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), immediateCleanupTimeout)
 		_, rollbackErr := conn.ExecContext(cleanupCtx, `ROLLBACK`)
 		cancel()
-		if rollbackErr != nil {
+		clean := isNoActiveTransactionError(rollbackErr)
+		if rollbackErr != nil && !clean {
 			err = errors.Join(err, fmt.Errorf("store: rollback after failed immediate transaction begin: %w", rollbackErr))
 		}
-		if errors.Is(beginErr, context.Canceled) || errors.Is(beginErr, context.DeadlineExceeded) || rollbackErr != nil {
+		if !clean {
 			discarded = true
 			if discardErr := discardSQLConn(conn); discardErr != nil {
 				err = errors.Join(err, fmt.Errorf("store: discard connection after ambiguous immediate transaction begin: %w", discardErr))
@@ -144,4 +151,16 @@ func discardSQLConn(conn *sql.Conn) error {
 		return nil
 	}
 	return err
+}
+
+func ambiguousImmediateBegin(ctx context.Context, beginErr error) bool {
+	if ctx.Err() != nil || errors.Is(beginErr, context.Canceled) || errors.Is(beginErr, context.DeadlineExceeded) {
+		return true
+	}
+	_, _, ok := sqliteretry.ErrorCodes(beginErr)
+	return !ok
+}
+
+func isNoActiveTransactionError(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "no transaction is active")
 }
