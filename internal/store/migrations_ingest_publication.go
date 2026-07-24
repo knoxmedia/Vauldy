@@ -1501,7 +1501,7 @@ const canonicalIngestEvidenceSchema = `CREATE TABLE media_ingest_evidence(
  FOREIGN KEY(media_id) REFERENCES media(id) ON DELETE CASCADE,UNIQUE(step_id,kind),UNIQUE(stage_id))`
 const canonicalAssetStageJournalSchema = `CREATE TABLE media_asset_stage_journal(
  stage_id TEXT PRIMARY KEY,media_id INTEGER NOT NULL,run_id INTEGER NOT NULL,step_id INTEGER NOT NULL,generation INTEGER NOT NULL,owner_token TEXT NOT NULL,source_fingerprint TEXT NOT NULL,
- artifact_kind TEXT NOT NULL CHECK(artifact_kind IN ('poster','thumbnail','encrypt','scrape_artwork')),state TEXT NOT NULL CHECK(state IN ('staged','quarantined','committed')),
+ artifact_kind TEXT NOT NULL CHECK(artifact_kind IN ('poster','thumbnail','encrypt','scrape_artwork')),state TEXT NOT NULL CHECK(state IN ('staged','quarantining','quarantined','restored','committed','failed_closed')),
  original_path TEXT NOT NULL DEFAULT '',quarantine_path TEXT NOT NULL DEFAULT '',staged_path TEXT NOT NULL,hashes_sizes_json TEXT NOT NULL CHECK(json_valid(hashes_sizes_json)),
  recovery_error TEXT NOT NULL DEFAULT '',created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
  FOREIGN KEY(run_id,media_id,generation) REFERENCES media_ingest_run(id,media_id,generation) ON DELETE CASCADE,
@@ -1509,12 +1509,12 @@ const canonicalAssetStageJournalSchema = `CREATE TABLE media_asset_stage_journal
 
 const canonicalEncryptionStageJournalSchema = `CREATE TABLE media_encryption_stage_journal(
  stage_id TEXT PRIMARY KEY,task_id INTEGER NOT NULL,attempt INTEGER NOT NULL,media_id INTEGER NOT NULL,run_id INTEGER NOT NULL,step_id INTEGER NOT NULL,generation INTEGER NOT NULL,owner_token TEXT NOT NULL,
- source_path TEXT NOT NULL,source_fingerprint TEXT NOT NULL,enc_path TEXT NOT NULL,wrapped_dek TEXT NOT NULL,iv TEXT NOT NULL,enc_sha256 TEXT NOT NULL,enc_size INTEGER NOT NULL CHECK(enc_size>0),
- cleanup_plaintext INTEGER NOT NULL DEFAULT 0 CHECK(cleanup_plaintext IN (0,1)),state TEXT NOT NULL CHECK(state IN ('staged','quarantined','committed')),recovery_error TEXT NOT NULL DEFAULT '',created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ source_path TEXT NOT NULL,quarantine_path TEXT NOT NULL DEFAULT '',source_fingerprint TEXT NOT NULL,enc_path TEXT NOT NULL,wrapped_dek TEXT NOT NULL,iv TEXT NOT NULL,enc_sha256 TEXT NOT NULL,enc_size INTEGER NOT NULL CHECK(enc_size>0),
+ cleanup_plaintext INTEGER NOT NULL DEFAULT 0 CHECK(cleanup_plaintext IN (0,1)),state TEXT NOT NULL CHECK(state IN ('staged','quarantining','quarantined','restored','committed','failed_closed')),recovery_error TEXT NOT NULL DEFAULT '',created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
  UNIQUE(task_id,attempt),FOREIGN KEY(task_id) REFERENCES post_ingest_task(id) ON DELETE CASCADE,FOREIGN KEY(run_id,media_id,generation) REFERENCES media_ingest_run(id,media_id,generation) ON DELETE CASCADE,FOREIGN KEY(step_id,media_id,generation) REFERENCES media_ingest_step(id,media_id,generation) ON DELETE CASCADE)`
 const canonicalPosterRepairStageSchema = `CREATE TABLE poster_repair_stage(
  stage_id TEXT PRIMARY KEY,queue_id INTEGER NOT NULL,media_id INTEGER NOT NULL,run_id INTEGER NOT NULL,generation INTEGER NOT NULL,
- owner_token TEXT NOT NULL,attempt INTEGER NOT NULL,source_fingerprint TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('staged','quarantined','committed')),
+ owner_token TEXT NOT NULL,attempt INTEGER NOT NULL,source_fingerprint TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('staged','quarantining','quarantined','restored','committed','failed_closed')),
  staged_path TEXT NOT NULL,hashes_sizes_json TEXT NOT NULL CHECK(json_valid(hashes_sizes_json)),recovery_error TEXT NOT NULL DEFAULT '',created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
  UNIQUE(queue_id,attempt),
  FOREIGN KEY(run_id,media_id,generation) REFERENCES media_ingest_run(id,media_id,generation) ON DELETE CASCADE)`
@@ -2212,7 +2212,7 @@ func validatePublicationV2Schema(ctx context.Context, q SQLExecutor) error {
 	if err := exactPublicationTable(ctx, q, "poster_repair_stage", canonicalPosterRepairStageSchema); err != nil {
 		return err
 	}
-	if err := requirePublicationClauses(ctx, q, "poster_repair_stage", `CHECK(state IN ('staged','quarantined','committed'))`, `CHECK(json_valid(hashes_sizes_json))`, `UNIQUE(queue_id,attempt)`); err != nil {
+	if err := requirePublicationClauses(ctx, q, "poster_repair_stage", `CHECK(state IN ('staged','quarantining','quarantined','restored','committed','failed_closed'))`, `CHECK(json_valid(hashes_sizes_json))`, `UNIQUE(queue_id,attempt)`); err != nil {
 		return err
 	}
 	if err := requirePublicationFKSet(ctx, q, "poster_repair_stage", "media_ingest_run:run_id,media_id,generation:id,media_id,generation:cascade"); err != nil {
@@ -2239,7 +2239,7 @@ func validatePublicationV2Schema(ctx context.Context, q SQLExecutor) error {
 	if err := requirePublicationFKSet(ctx, q, "media_ingest_evidence", "media:media_id:id:cascade", "media_ingest_run:run_id,media_id,generation:id,media_id,generation:cascade", "media_ingest_step:step_id,media_id,generation:id,media_id,generation:cascade", "media_ingest_evidence:reused_from_evidence_id:id:set null"); err != nil {
 		return err
 	}
-	if err := requirePublicationClauses(ctx, q, "media_asset_stage_journal", `CHECK(artifact_kind IN ('poster','thumbnail','encrypt','scrape_artwork'))`, `CHECK(state IN ('staged','quarantined','committed'))`, `CHECK(json_valid(hashes_sizes_json))`); err != nil {
+	if err := requirePublicationClauses(ctx, q, "media_asset_stage_journal", `CHECK(artifact_kind IN ('poster','thumbnail','encrypt','scrape_artwork'))`, `CHECK(state IN ('staged','quarantining','quarantined','restored','committed','failed_closed'))`, `CHECK(json_valid(hashes_sizes_json))`); err != nil {
 		return err
 	}
 	if err := requirePublicationFKSet(ctx, q, "media_asset_stage_journal", "media_ingest_run:run_id,media_id,generation:id,media_id,generation:cascade", "media_ingest_step:step_id,media_id,generation:id,media_id,generation:cascade"); err != nil {

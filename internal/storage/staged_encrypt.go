@@ -131,6 +131,19 @@ func EncryptionPathHash(path string) (int64, string, error) {
 	return n, hex.EncodeToString(h.Sum(nil)), err
 }
 
+func (s *AssetEncryptor) EncryptionPrivateRoot() string {
+	if s == nil {
+		return ""
+	}
+	if strings.TrimSpace(s.DataDir) != "" {
+		return filepath.Join(s.DataDir, ".quarantine", "encryption")
+	}
+	if strings.TrimSpace(s.BasePath) != "" {
+		return filepath.Join(s.BasePath, ".quarantine", "encryption")
+	}
+	return ""
+}
+
 func (s *AssetEncryptor) EncryptMedia(ctx context.Context, mediaID int64) (err error) {
 	leader, flight := acquireEncryptFlight(mediaID)
 	if !leader {

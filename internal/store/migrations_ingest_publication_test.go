@@ -2074,7 +2074,7 @@ func TestMigrationCreatesDedicatedEncryptionStageJournal(t *testing.T) {
 	if err = db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='media_encryption_stage_journal'`).Scan(&sqlText); err != nil {
 		t.Fatal(err)
 	}
-	for _, clause := range []string{"wrapped_dek", "source_fingerprint", "UNIQUE(task_id,attempt)", "CHECK(state IN ('staged','quarantined','committed'))"} {
+	for _, clause := range []string{"wrapped_dek", "source_fingerprint", "quarantine_path", "UNIQUE(task_id,attempt)", "CHECK(state IN ('staged','quarantining','quarantined','restored','committed','failed_closed'))"} {
 		if !strings.Contains(sqlText, clause) {
 			t.Fatalf("schema missing %q: %s", clause, sqlText)
 		}

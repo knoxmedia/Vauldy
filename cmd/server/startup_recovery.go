@@ -13,6 +13,8 @@ import (
 
 // recoverStartupTasks performs durable queue recovery before workers claim work.
 type StartupRecoveryRoots struct {
+	Encryption postingest.EncryptionRecoveryRoots
+
 	Thumbnail     postingest.ThumbnailRecoveryRoots
 	Poster        postingest.PosterRecoveryRoots
 	ScrapeArtwork string
@@ -25,6 +27,10 @@ func recoverStartupTasks(ctx context.Context, db *sql.DB, postIngest *postingest
 	if db == nil || postIngest == nil {
 		return fmt.Errorf("startup recovery: database and post-ingest queue are required")
 	}
+	if _, _, err := postingest.ReconcileEncryptionStages(ctx, db, roots.Encryption, 100); err != nil {
+		return fmt.Errorf("startup recovery: encryption stages: %w", err)
+	}
+
 	if _, err := metadatalib.ReconcileScrapeArtworkStages(ctx, db, roots.ScrapeArtwork, 100); err != nil {
 		return fmt.Errorf("startup recovery: scrape artwork stages: %w", err)
 	}
