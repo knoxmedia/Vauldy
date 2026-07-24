@@ -28,7 +28,7 @@ type TaskService struct {
 
 	cancelTaskAttempt func(context.Context, int64) error
 	CancelActive      func(int64)
-	beforeCancelCAS   func()
+	beforeCancelCAS   func(store.ImmediateConnTx)
 }
 
 // UnifiedTask is the joined row for the unified task list (SRS 3.2.1).
@@ -258,8 +258,23 @@ func (s *TaskService) cancelTaskAttemptTx(ctx context.Context, id int64) error {
 			}
 			return nil
 		}
+		var capturedOwner any
+		if owner.Valid {
+			capturedOwner = owner.String
+		}
 		var valid int
-		err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM media m JOIN media_ingest_run r ON r.id=? JOIN media_ingest_step s ON s.id=? WHERE m.id=? AND m.ingest_generation=? AND r.media_id=? AND r.generation=? AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND s.run_id=? AND s.media_id=? AND s.generation=? AND s.step_type='prepare' AND ((?='waiting' AND s.status='waiting' AND s.lease_owner IS NULL AND ? IS NULL) OR (?='running' AND s.status='running' AND s.lease_owner=? AND ? IS NOT NULL))`, run, step, media, gen, media, gen, run, media, gen, status, owner, status, owner, owner).Scan(&valid)
+		base := `SELECT COUNT(*) FROM media m JOIN media_ingest_run r ON r.id=? JOIN media_ingest_step s ON s.id=? WHERE m.id=? AND m.ingest_generation=? AND r.media_id=? AND r.generation=? AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND s.run_id=? AND s.media_id=? AND s.generation=? AND s.step_type='prepare'`
+		args := []any{run, step, media, gen, media, gen, run, media, gen}
+		if status == "waiting" {
+			base += ` AND s.status='waiting' AND s.lease_owner IS NULL AND ? IS NULL`
+			args = append(args, capturedOwner)
+		} else if status == "running" {
+			base += ` AND s.status='running' AND s.lease_owner=? AND ? IS NOT NULL`
+			args = append(args, capturedOwner, capturedOwner)
+		} else {
+			return ErrTaskNotCancellable
+		}
+		err = tx.QueryRowContext(ctx, base, args...).Scan(&valid)
 		if err != nil {
 			return err
 		}
@@ -267,16 +282,32 @@ func (s *TaskService) cancelTaskAttemptTx(ctx context.Context, id int64) error {
 			return ErrTaskNotCancellable
 		}
 		if s.beforeCancelCAS != nil {
-			s.beforeCancelCAS()
+			s.beforeCancelCAS(tx)
 		}
-		r, e := tx.ExecContext(ctx, `UPDATE transcode_task SET status='cancelled',completed_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL WHERE id=? AND media_id=? AND ingest_run_id=? AND ingest_step_id=? AND generation=? AND status=? AND ((? IS NULL AND lease_owner IS NULL) OR lease_owner=?)`, id, media, run, step, gen, status, owner, owner)
+		parentSQL := `UPDATE transcode_task SET status='cancelled',completed_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL WHERE id=? AND media_id=? AND ingest_run_id=? AND ingest_step_id=? AND generation=? AND status=? AND EXISTS(SELECT 1 FROM media m JOIN media_ingest_run r ON r.id=? JOIN media_ingest_step s ON s.id=? WHERE m.id=? AND m.ingest_generation=? AND r.media_id=? AND r.generation=? AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND s.run_id=? AND s.media_id=? AND s.generation=? AND s.step_type='prepare')`
+		parentArgs := []any{id, media, run, step, gen, status, run, step, media, gen, media, gen, run, media, gen}
+		if status == "waiting" {
+			parentSQL += ` AND lease_owner IS NULL`
+		} else {
+			parentSQL += ` AND lease_owner=?`
+			parentArgs = append(parentArgs, capturedOwner)
+		}
+		r, e := tx.ExecContext(ctx, parentSQL, parentArgs...)
 		if e != nil {
 			return e
 		}
 		if n, _ := r.RowsAffected(); n != 1 {
 			return ErrTaskNotCancellable
 		}
-		r, e = tx.ExecContext(ctx, `UPDATE media_ingest_step SET status='cancelled',last_error='cancelled',finished_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND run_id=? AND media_id=? AND generation=? AND status=? AND ((? IS NULL AND lease_owner IS NULL) OR lease_owner=?)`, step, run, media, gen, status, owner, owner)
+		stepSQL := `UPDATE media_ingest_step SET status='cancelled',last_error='cancelled',finished_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND run_id=? AND media_id=? AND generation=? AND status=?`
+		stepArgs := []any{step, run, media, gen, status}
+		if status == "waiting" {
+			stepSQL += ` AND lease_owner IS NULL`
+		} else {
+			stepSQL += ` AND lease_owner=?`
+			stepArgs = append(stepArgs, capturedOwner)
+		}
+		r, e = tx.ExecContext(ctx, stepSQL, stepArgs...)
 		if e != nil {
 			return e
 		}
