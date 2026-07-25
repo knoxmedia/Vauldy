@@ -34,15 +34,15 @@ api.interceptors.response.use(
       const data = (ax as { response?: { data?: { error?: string } } }).response?.data;
       const errMsg = (data && typeof data.error === "string" && data.error.trim()) || "";
       if (/library access denied|folder access denied/i.test(errMsg)) {
-        message.error("无权限访问该媒体库或目录");
+        message.error("\u65e0\u6743\u9650\u8bbf\u95ee\u8be5\u5a92\u4f53\u5e93\u6216\u76ee\u5f55");
       } else if (/playback denied/i.test(errMsg)) {
-        message.error("无播放权限");
+        message.error("\u65e0\u64ad\u653e\u6743\u9650");
       } else if (/download denied/i.test(errMsg)) {
-        message.error("无下载权限");
+        message.error("\u65e0\u4e0b\u8f7d\u6743\u9650");
       } else if (/parental/i.test(errMsg)) {
-        message.error("家长控制限制：" + errMsg);
+        message.error("\u5bb6\u957f\u63a7\u5236\u9650\u5236\uff1a" + errMsg);
       } else {
-        message.error("权限不足（需要管理员或更高权限）");
+        message.error("\u6743\u9650\u4e0d\u8db3\uff08\u9700\u8981\u7ba1\u7406\u5458\u6216\u66f4\u9ad8\u6743\u9650\uff09");
       }
     }
     return Promise.reject(err);
@@ -101,6 +101,10 @@ export type MediaItem = {
   bitrate?: number;
   format: string;
   status: string;
+  publication_state?: "processing" | "published" | "degraded" | "failed" | "cancelled";
+  published_at?: string;
+  publication_error?: string;
+  ingest_generation?: number;
   created_at?: string;
   last_play_at?: string;
   /** 1 when the current user has marked or finished watching this item. */
@@ -119,8 +123,14 @@ export type MediaItem = {
   photo_tag_ids?: string[];
   /** True when meaningful scrape metadata exists. */
   scraped?: boolean;
-  /** Knox 9527 envelope encryption at rest. */
-  encrypted_asset?: boolean;
+    /** Knox 9527 envelope encryption at rest. */
+    encrypted_asset?: boolean;
+    /** A usable encrypted optimization source asset is recorded in the database. */
+    optimization_asset_recorded?: boolean;
+    /** @deprecated One-release alias for optimization_asset_recorded. */
+    optimization_available?: boolean;
+    /** Detail-only runtime filesystem availability check. */
+    optimization_source_available?: boolean;
   /** Populated for audio tracks linked in music_track. */
   music_album_id?: number;
   music_album_title?: string;
@@ -130,6 +140,10 @@ export type MediaItem = {
 };
 
 /** Normalize poster string from DB (some SQLite/json paths may retain JSON quotes). */
+export function optimizationAssetRecorded(item: MediaItem): boolean {
+  return item.optimization_asset_recorded ?? item.optimization_available ?? false;
+}
+
 export function normalizeListPosterUrl(raw: string): string {
   let s = (raw || "").trim();
   if (s.length >= 2 && s.startsWith('"') && s.endsWith('"')) {
@@ -748,13 +762,12 @@ export async function fetchPhotoFaceThumbnail(faceId: number, signal?: AbortSign
     const { data } = await api.get<Blob>(`/api/v1/photo/face/${faceId}/thumb.jpg`, { responseType: "blob", signal });
     return data;
   } catch (error) {
-    if (axios.isAxiosError(error) && error.response?.status === 404 && String(error.response.headers?.["x-thumbnail-pending"] ?? "") === "1") {
+    if (axios.isAxiosError(error) && error.response?.status === 404 && String(error.response.headers?.["x-knox-thumbnail-pending"] ?? "") === "1") {
       throw new PhotoFaceThumbnailPendingError();
     }
     throw error;
   }
 }
-
 export function photoFaceThumbSrc(faceId: number): string {
   const token = useAuthStore.getState().token;
   const params = new URLSearchParams({ v: "2" });
@@ -784,7 +797,7 @@ export async function fetchPhotoFaceProgress(libraryId: number, signal?: AbortSi
     pending: number;
     failed?: number;
     percent: number;
-  }>(`/api/v1/library/${libraryId}/photo/faces/progress`, { signal });
+   }>(`/api/v1/library/${libraryId}/photo/faces/progress`, { signal });
   return {
     total: data?.total ?? 0,
     processed: data?.processed ?? 0,
@@ -1054,11 +1067,11 @@ export async function fetchPersonCollaborators(personId: number, limit = 20) {
   return data?.items ?? [];
 }
 
-export async function fetchMediaPersons(mediaId: number) {
+export async function fetchMediaPersons(mediaId: number, signal?: AbortSignal) {
   const { data } = await api.get<{
     items?: MediaPersonLink[];
     resolved?: Array<{ person_id: number; person_name: string; avatar_url?: string }>;
-  }>(`/api/v1/media/${mediaId}/persons`);
+  }>(`/api/v1/media/${mediaId}/persons`, { signal });
   return {
     items: data?.items ?? [],
     resolved: data?.resolved ?? [],
@@ -1119,23 +1132,23 @@ export async function importMediaCredits(mediaId: number) {
   return data;
 }
 
-export async function fetchLibraryAlbums(libraryId: number) {
-  const { data } = await api.get<{ items?: AlbumSummary[] }>(`/api/v1/library/${libraryId}/albums`);
+export async function fetchLibraryAlbums(libraryId: number, signal?: AbortSignal) {
+  const { data } = await api.get<{ items?: AlbumSummary[] }>(`/api/v1/library/${libraryId}/albums`, { signal });
   return data?.items ?? [];
 }
 
-export async function fetchLibraryArtists(libraryId: number) {
-  const { data } = await api.get<{ items?: ArtistSummary[] }>(`/api/v1/library/${libraryId}/artists`);
+export async function fetchLibraryArtists(libraryId: number, signal?: AbortSignal) {
+  const { data } = await api.get<{ items?: ArtistSummary[] }>(`/api/v1/library/${libraryId}/artists`, { signal });
   return data?.items ?? [];
 }
 
-export async function fetchLibraryGenres(libraryId: number) {
-  const { data } = await api.get<{ items?: GenreSummary[] }>(`/api/v1/library/${libraryId}/genres`);
+export async function fetchLibraryGenres(libraryId: number, signal?: AbortSignal) {
+  const { data } = await api.get<{ items?: GenreSummary[] }>(`/api/v1/library/${libraryId}/genres`, { signal });
   return data?.items ?? [];
 }
 
-export async function fetchLibraryTracks(libraryId: number) {
-  const { data } = await api.get<{ items?: MusicTrackRow[] }>(`/api/v1/library/${libraryId}/tracks`);
+export async function fetchLibraryTracks(libraryId: number, signal?: AbortSignal) {
+  const { data } = await api.get<{ items?: MusicTrackRow[] }>(`/api/v1/library/${libraryId}/tracks`, { signal });
   return data?.items ?? [];
 }
 
@@ -1245,8 +1258,8 @@ export function seriesPosterSrc(s: Pick<SeriesSummary, "id" | "poster_url" | "po
   return u ? withAccessToken(u) : "";
 }
 
-export async function fetchLibrarySeries(libraryId: number) {
-  const { data } = await api.get<{ items?: SeriesSummary[] }>(`/api/v1/library/${libraryId}/series`);
+export async function fetchLibrarySeries(libraryId: number, signal?: AbortSignal) {
+  const { data } = await api.get<{ items?: SeriesSummary[] }>(`/api/v1/library/${libraryId}/series`, { signal });
   return data?.items ?? [];
 }
 
@@ -1290,8 +1303,8 @@ export type MediaDetail = MediaItem & {
   meta_json?: string;
 };
 
-export async function fetchMediaDetail(mediaId: number) {
-  const { data } = await api.get<MediaDetail>(`/api/v1/media/${mediaId}`);
+export async function fetchMediaDetail(mediaId: number, signal?: AbortSignal) {
+  const { data } = await api.get<MediaDetail>(`/api/v1/media/${mediaId}`, { signal });
   return data;
 }
 
@@ -1345,7 +1358,7 @@ export async function fetchMediaStats(mediaId: number) {
   return data;
 }
 
-/** 继续观看：同一 media 只保留 update_at 最新的一条（与 API 去重一致，前端兜底）。 */
+/** Continue watching: keep only the latest update_at row for each media item. */
 export function dedupeUserHistory(items: HistoryItem[]): HistoryItem[] {
   const out: HistoryItem[] = [];
   const seenMedia = new Set<number>();
@@ -1363,7 +1376,7 @@ export function dedupeUserHistory(items: HistoryItem[]): HistoryItem[] {
   return out;
 }
 
-export async function fetchUserHistory(limit = 24, opts?: { libraryTypes?: readonly string[] }) {
+export async function fetchUserHistory(limit = 24, opts?: { libraryTypes?: readonly string[] }, signal?: AbortSignal) {
   const params: Record<string, string | number> = { limit };
   const types = opts?.libraryTypes?.map((t) => t.trim()).filter(Boolean);
   if (types?.length) {
@@ -1371,6 +1384,7 @@ export async function fetchUserHistory(limit = 24, opts?: { libraryTypes?: reado
   }
   const { data } = await api.get<{ items?: HistoryItem[] }>("/api/v1/user/history", {
     params,
+    signal,
   });
   return dedupeUserHistory(data?.items ?? []);
 }
@@ -1783,7 +1797,7 @@ export async function logout() {
   await api.post("/api/v1/user/logout");
 }
 
-/** Legacy `session_id` remains the JIT HLS ID for older callers. */
+/** Legacy `session_id` remains the JIT HLS ID until Player adopts evidence payloads in Task 7. */
 export type PlaybackLogPayload = {
   position?: number;
   completed?: number;
@@ -1802,33 +1816,56 @@ export async function reportPlaybackEnd(mediaId: number, payload?: PlaybackLogPa
 }
 
 const PLAYBACK_KEEPALIVE_MAX_BYTES = 16 * 1024;
-function playbackKeepaliveHeaders(): Record<string, string> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  const token = useAuthStore.getState().token;
-  if (token) headers.Authorization = `Bearer ${token}`;
-  return headers;
-}
 
-export async function reportPlaybackEndKeepalive(mediaId: number, payload: PlaybackLogPayload = {}): Promise<boolean> {
+/** Authenticated unload-safe activity shutdown. Deliberately avoids query-token exposure. */
+export async function reportPlaybackEndKeepalive(
+  mediaId: number,
+  payload: PlaybackLogPayload = {},
+): Promise<boolean> {
   const body = JSON.stringify(payload);
   if (new TextEncoder().encode(body).byteLength > PLAYBACK_KEEPALIVE_MAX_BYTES) return false;
+  const token = useAuthStore.getState().token;
   const response = await fetch(`/api/v1/media/${mediaId}/playback/end`, {
-    method: "POST", headers: playbackKeepaliveHeaders(), body, keepalive: true,
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body,
+    credentials: "same-origin",
+    keepalive: true,
   });
   return response.ok;
 }
 
-export type PlaybackProgressPayload = PlaybackEvidencePayload | { position: number; completed?: number; session_id?: string };
-export async function savePlaybackProgress(mediaId: number, payload: PlaybackProgressPayload): Promise<PlaybackProgressResult> {
+export type PlaybackProgressPayload =
+  | PlaybackEvidencePayload
+  | { position: number; completed?: number; session_id?: string; jit_session_id?: string };
+
+export async function savePlaybackProgress(
+  mediaId: number,
+  payload: PlaybackProgressPayload,
+): Promise<PlaybackProgressResult> {
   const { data } = await api.post<PlaybackProgressResult>(`/api/v1/media/${mediaId}/progress`, payload);
   return data;
 }
 
-export async function savePlaybackProgressKeepalive(mediaId: number, payload: PlaybackEvidencePayload): Promise<boolean> {
+export async function savePlaybackProgressKeepalive(
+  mediaId: number,
+  payload: PlaybackEvidencePayload,
+): Promise<boolean> {
   const body = JSON.stringify(payload);
   if (new TextEncoder().encode(body).byteLength > PLAYBACK_KEEPALIVE_MAX_BYTES) return false;
+  const token = useAuthStore.getState().token;
   const response = await fetch(`/api/v1/media/${mediaId}/progress`, {
-    method: "POST", headers: playbackKeepaliveHeaders(), body, keepalive: true,
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body,
+    credentials: "same-origin",
+    keepalive: true,
   });
   return response.ok;
 }
@@ -1999,15 +2036,100 @@ export async function retryTranscodeTask(id: number) {
   return data;
 }
 
+export type PublicationPolicyDiagnostic = {
+  media_id: number;
+  run_id: number;
+  generation: number;
+  policy_version: number;
+  status: string;
+  terminal_reason: string;
+  required_waiting: number;
+  required_failed: number;
+  optional_waiting: number;
+  optional_failed: number;
+  adapter_unavailable: string[];
+  metadata_errors: string[];
+  recovery_error: string;
+};
+
 export type AdminOverview = {
-  monitor: { cpu_percent: number; memory_percent: number; disk_percent: number; transcode_task_count: number; media_total: number };
-  system: { cpu_count: number; memory_total: number; os: string; database: string; software_version: string };
-  activities: Array<{ id: number; username: string; action: string; media_id: number; message: string; created_at: string }>;
-  post_ingest_queue: { by_status: Record<string, number>; by_type: Record<string, Record<string, number>>; oldest_waiting_seconds: number; expired_lease_count: number };
-  running_post_ingest_tasks: Array<{ id: number; media_id: number; task_type: string; type: string; scan_task_id: number | null; attempts: number; attempt: number; max_attempts: number; run_seconds: number; started_at: string; lease_owner: string; lease_until: string; lease_expires: string }>;
-  scan_leases: Array<{ library_id: number; scan_task_id: number; owner_id: string; lease_until: string; expired: boolean }>;
-  resource_budget: { global_limit: number; global_used: number; poster_limit: number; poster_used: number; preview_limit: number; preview_used: number };
-  sqlite_metrics: { scope: string; persistent: false; busy_retries: number; busy_exhausted: number; progress_batches: number; log_batches: number; log_failures: number; dropped_logs: number };
+  monitor: {
+    cpu_percent: number;
+    memory_percent: number;
+    disk_percent: number;
+    transcode_task_count: number;
+    media_total: number;
+  };
+  system: {
+    cpu_count: number;
+    memory_total: number;
+    os: string;
+    database: string;
+    software_version: string;
+    software_commit?: string;
+    software_build_time?: string;
+    software_dirty?: boolean;
+    software_dirty_known?: boolean;
+    software_vcs_revision?: string;
+    software_vcs_time?: string;
+    software_vcs_modified?: boolean;
+    software_vcs_modified_known?: boolean;
+  };
+  activities: Array<{
+    id: number;
+    username: string;
+    action: string;
+    media_id: number;
+    message: string;
+    created_at: string;
+  }>;
+  post_ingest_queue: {
+    by_status: Record<string, number>;
+    by_type: Record<string, Record<string, number>>;
+    oldest_waiting_seconds: number;
+    expired_lease_count: number;
+  };
+  running_post_ingest_tasks: Array<{
+    id: number;
+    media_id: number;
+    task_type: string;
+    type: string;
+    scan_task_id: number | null;
+    attempts: number;
+    attempt: number;
+    max_attempts: number;
+    run_seconds: number;
+    started_at: string;
+    lease_owner: string;
+    lease_until: string;
+    lease_expires: string;
+  }>;
+  scan_leases: Array<{
+    library_id: number;
+    scan_task_id: number;
+    owner_id: string;
+    lease_until: string;
+    expired: boolean;
+  }>;
+  resource_budget: {
+    global_limit: number;
+    global_used: number;
+    poster_limit: number;
+    poster_used: number;
+    preview_limit: number;
+    preview_used: number;
+  };
+  sqlite_metrics: {
+    scope: string;
+    persistent: false;
+    busy_retries: number;
+    busy_exhausted: number;
+    progress_batches: number;
+    log_batches: number;
+    log_failures: number;
+    dropped_logs: number;
+  };
+  publication_policy: PublicationPolicyDiagnostic[];
 };
 
 export async function fetchAdminOverview(signal?: AbortSignal) {
@@ -2100,7 +2222,7 @@ export async function fetchLyricTasks(limit = 200) {
   return data.items ?? [];
 }
 
-/** Enqueue ASR lyric recognition for an audio track (VTT → sidecar LRC). */
+/** Enqueue ASR lyric recognition for an audio track (VTT 閳?sidecar LRC). */
 export async function enqueueLyricRecognition(mediaId: number) {
   await api.post(`/api/v1/media/${mediaId}/lyrics/recognize`);
 }
@@ -2652,7 +2774,7 @@ export async function fetchSystemOptions() {
 export async function saveSystemOptions(payload: SystemOptions) {
   const { data } = await api.put<{ ok: boolean; options?: SystemOptions }>("/api/v1/admin/system-options", payload);
   if (!data?.options) {
-    throw new Error("保存响应无效");
+    throw new Error("淇濆瓨鍝嶅簲鏃犳晥");
   }
   return data.options;
 }
@@ -2774,5 +2896,65 @@ export async function installLibreOfficeDocTrans() {
     {},
     { timeout: 30 * 60 * 1000 },
   );
+  return data;
+}
+
+export type PublicationState = "processing" | "published" | "degraded" | "failed" | "cancelled";
+
+export type AdminMediaItem = MediaItem & {
+  publication_state: PublicationState;
+  ingest_generation: number;
+};
+
+export type MediaIngestStep = {
+  id: number;
+  type: "poster" | "scrape" | "preview" | "keyframe" | "subtitle" | "atrack" | "encrypt" | "prepare";
+  required: boolean;
+  status: "waiting" | "running" | "done" | "skipped" | "failed" | "cancelled";
+  attempts: number;
+  max_attempts: number;
+  available_at: string;
+  lease_owner: string;
+  lease_until: string;
+  error: string;
+  created_at: string;
+  updated_at: string;
+  started_at: string;
+  finished_at: string;
+};
+
+export type MediaIngestResponse = {
+  media: { id: number; publication_state: PublicationState; publication_error: string; published_at: string; ingest_generation: number };
+  run: { id: number; generation: number; status: PublicationState; reason: "scan" | "repair" | "manual_retry"; preserve_visibility: boolean; error: string; created_at: string; updated_at: string; finished_at: string };
+  steps: MediaIngestStep[];
+};
+
+export type AdminMediaPage = {
+  items: AdminMediaItem[];
+  next_cursor?: string;
+  has_more: boolean;
+};
+
+export type AdminMediaSort = "id_desc";
+
+export async function fetchAdminMedia(
+  params?: { publication_state?: PublicationState; limit?: number; library_id?: number; file_type?: string; q?: string; sort?: AdminMediaSort; cursor?: string },
+  signal?: AbortSignal,
+): Promise<AdminMediaPage> {
+  const { data } = await api.get<{ items?: AdminMediaItem[]; next_cursor?: string; has_more?: boolean }>("/api/v1/admin/media", { params, signal });
+  return {
+    items: data?.items ?? [],
+    next_cursor: data?.next_cursor,
+    has_more: data?.has_more === true,
+  };
+}
+
+export async function fetchAdminMediaIngest(mediaId: number) {
+  const { data } = await api.get<MediaIngestResponse>(`/api/v1/admin/media/${mediaId}/ingest`);
+  return data;
+}
+
+export async function retryAdminMediaIngest(mediaId: number) {
+  const { data } = await api.post<MediaIngestResponse>(`/api/v1/admin/media/${mediaId}/ingest/retry`);
   return data;
 }

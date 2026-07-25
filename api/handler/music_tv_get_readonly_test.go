@@ -93,6 +93,9 @@ func TestFolderScopedUsersCannotReadMusicTVAggregates(t *testing.T) {
 		{"albums", "2", "/library/2/albums", h.ListLibraryAlbums}, {"artists", "2", "/library/2/artists", h.ListLibraryArtists},
 		{"genres", "2", "/library/2/genres", h.ListLibraryGenres}, {"tracks", "2", "/library/2/tracks", h.ListLibraryTracks},
 		{"album", "40", "/album/40", h.GetAlbum}, {"album artwork", "40", "/album/40/artwork", h.ServeAlbumArtwork},
+		{"album image candidates", "40", "/album/40/image-candidates", h.ListAlbumImageCandidates},
+		{"artist image candidates", "30", "/artist/30/image-candidates", h.ListArtistImageCandidates},
+		{"series image candidates", "70", "/series/70/image-candidates", h.ListSeriesImageCandidates},
 		{"series", "3", "/library/3/series", h.ListLibrarySeries}, {"series detail", "70", "/series/70", h.GetSeries},
 		{"episodes", "71", "/season/71/episodes", h.ListSeasonEpisodes},
 	}

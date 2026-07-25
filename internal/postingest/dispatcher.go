@@ -14,6 +14,25 @@ import (
 type Executor interface {
 	Execute(context.Context, Task) error
 }
+type CompletionDisposition uint8
+
+const (
+	CompleteThroughQueue CompletionDisposition = iota
+	AlreadyCommittedAtomically
+	FinalizationOutcomeUncertain
+)
+
+type ExecutionResult struct{ Completion CompletionDisposition }
+type resultExecutor interface {
+	ExecuteWithResult(context.Context, Task) (ExecutionResult, error)
+}
+
+func executeTask(ctx context.Context, executor Executor, task Task) (ExecutionResult, error) {
+	if atomic, ok := executor.(resultExecutor); ok {
+		return atomic.ExecuteWithResult(ctx, task)
+	}
+	return ExecutionResult{Completion: CompleteThroughQueue}, executor.Execute(ctx, task)
+}
 
 type ClassifiedError struct {
 	Kind FailureKind
@@ -46,7 +65,7 @@ func DefaultDispatcherOptions() DispatcherOptions {
 		global = 4
 	}
 	return DispatcherOptions{Global: global, Poster: min(2, global), Preview: 1, PollInterval: 250 * time.Millisecond, LeaseDuration: leaseDuration, HeartbeatInterval: 30 * time.Second, ExecutorStopGrace: 10 * time.Second, Timeouts: map[TaskType]time.Duration{
-		TaskPoster: 2 * time.Minute, TaskPreview: 30 * time.Minute, TaskKeyframe: 30 * time.Minute, TaskSubtitle: 60 * time.Minute, TaskAtrack: 30 * time.Minute,
+		TaskPoster: 2 * time.Minute, TaskPosterRepair: 2 * time.Minute, TaskThumbnail: 2 * time.Minute, TaskPreview: 30 * time.Minute, TaskKeyframe: 30 * time.Minute, TaskSubtitle: 60 * time.Minute, TaskAtrack: 30 * time.Minute, TaskEncrypt: 120 * time.Minute,
 	}}
 }
 
@@ -129,7 +148,7 @@ func NewDispatcher(q *Queue, executor Executor, opts DispatcherOptions) (*Dispat
 	return &Dispatcher{q: q, executor: executor, opts: opts, global: make(chan struct{}, opts.Global), poster: make(chan struct{}, opts.Poster), preview: make(chan struct{}, opts.Preview), running: map[int64]*workerState{}, scans: map[int64]map[int64]*workerState{}}, nil
 }
 
-var taskTypes = []TaskType{TaskPoster, TaskPreview, TaskKeyframe, TaskSubtitle, TaskAtrack}
+var taskTypes = []TaskType{TaskPoster, TaskPosterRepair, TaskThumbnail, TaskPreview, TaskKeyframe, TaskSubtitle, TaskAtrack, TaskEncrypt}
 
 func (d *Dispatcher) Start(ctx context.Context) error {
 	d.startMu.Lock()
@@ -152,33 +171,30 @@ func (d *Dispatcher) Start(ctx context.Context) error {
 			return nil
 		}
 		for {
-			claimed := false
-			for offset := 0; offset < len(taskTypes); offset++ {
-				index := (next + offset) % len(taskTypes)
-				typ := taskTypes[index]
-				if !d.tryAcquire(typ) {
-					continue
-				}
-				task, err := d.q.Claim(ctx, typ)
-				if err != nil {
-					d.release(typ)
-					if ctx.Err() == nil {
-						log.Printf("postingest dispatcher claim %s: %v", typ, err)
-					}
-					continue
-				}
-				if task == nil {
-					d.release(typ)
-					continue
-				}
-				next = (index + 1) % len(taskTypes)
-				claimed = true
-				d.launch(ctx, *task)
+			allowed := d.allowedTaskTypes(next)
+			if len(allowed) == 0 {
 				break
 			}
-			if !claimed {
+			task, err := d.q.ClaimAny(ctx, allowed)
+			if err != nil {
+				if ctx.Err() == nil {
+					log.Printf("postingest dispatcher claim sweep: %v", err)
+				}
 				break
 			}
+			if task == nil {
+				break
+			}
+			for index, typ := range taskTypes {
+				if typ == task.Type {
+					next = (index + 1) % len(taskTypes)
+					break
+				}
+			}
+			if !d.tryAcquire(task.Type) {
+				return fmt.Errorf("postingest dispatcher claimed unavailable task type %s", task.Type)
+			}
+			d.launch(ctx, *task)
 		}
 		select {
 		case <-ctx.Done():
@@ -190,6 +206,28 @@ func (d *Dispatcher) Start(ctx context.Context) error {
 	}
 }
 
+func (d *Dispatcher) allowedTaskTypes(next int) []TaskType {
+	d.mu.Lock()
+	globalAvailable := d.globalUsed < d.opts.Global
+	posterAvailable := d.posterUsed < d.opts.Poster
+	previewAvailable := d.previewUsed < d.opts.Preview
+	d.mu.Unlock()
+	if !globalAvailable {
+		return nil
+	}
+	allowed := make([]TaskType, 0, len(taskTypes))
+	for offset := 0; offset < len(taskTypes); offset++ {
+		typ := taskTypes[(next+offset)%len(taskTypes)]
+		if (typ == TaskPoster || typ == TaskPosterRepair) && !posterAvailable {
+			continue
+		}
+		if typ == TaskPreview && !previewAvailable {
+			continue
+		}
+		allowed = append(allowed, typ)
+	}
+	return allowed
+}
 func (d *Dispatcher) tryAcquire(typ TaskType) bool {
 	select {
 	case d.global <- struct{}{}:
@@ -197,7 +235,7 @@ func (d *Dispatcher) tryAcquire(typ TaskType) bool {
 		return false
 	}
 	var sub chan struct{}
-	if typ == TaskPoster {
+	if typ == TaskPoster || typ == TaskPosterRepair {
 		sub = d.poster
 	} else if typ == TaskPreview {
 		sub = d.preview
@@ -212,7 +250,7 @@ func (d *Dispatcher) tryAcquire(typ TaskType) bool {
 	}
 	d.mu.Lock()
 	d.globalUsed++
-	if typ == TaskPoster {
+	if typ == TaskPoster || typ == TaskPosterRepair {
 		d.posterUsed++
 	}
 	if typ == TaskPreview {
@@ -222,7 +260,7 @@ func (d *Dispatcher) tryAcquire(typ TaskType) bool {
 	return true
 }
 func (d *Dispatcher) release(typ TaskType) {
-	if typ == TaskPoster {
+	if typ == TaskPoster || typ == TaskPosterRepair {
 		<-d.poster
 	} else if typ == TaskPreview {
 		<-d.preview
@@ -230,7 +268,7 @@ func (d *Dispatcher) release(typ TaskType) {
 	<-d.global
 	d.mu.Lock()
 	d.globalUsed--
-	if typ == TaskPoster {
+	if typ == TaskPoster || typ == TaskPosterRepair {
 		d.posterUsed--
 	}
 	if typ == TaskPreview {
@@ -295,15 +333,21 @@ func (d *Dispatcher) runTask(parent, taskCtx context.Context, task Task, state *
 			return
 		}
 	}
-	result := make(chan error, 1)
-	go func() { result <- d.executor.Execute(taskCtx, task) }()
+	type executionOutcome struct {
+		result ExecutionResult
+		err    error
+	}
+	result := make(chan executionOutcome, 1)
+	go func() { r, e := executeTask(taskCtx, d.executor, task); result <- executionOutcome{r, e} }()
 	heartbeat := time.NewTicker(d.opts.HeartbeatInterval)
 	defer heartbeat.Stop()
 	var execErr error
+	var execResult ExecutionResult
 	executorUnresponsive := false
 	for {
 		select {
-		case execErr = <-result:
+		case outcome := <-result:
+			execResult, execErr = outcome.result, outcome.err
 			goto finish
 		case <-heartbeat.C:
 			if task.ScanTaskID != nil {
@@ -329,7 +373,8 @@ func (d *Dispatcher) runTask(parent, taskCtx context.Context, task Task, state *
 		case <-taskCtx.Done():
 			timer := time.NewTimer(d.opts.ExecutorStopGrace)
 			select {
-			case execErr = <-result:
+			case outcome := <-result:
+				execResult, execErr = outcome.result, outcome.err
 				if !timer.Stop() {
 					<-timer.C
 				}
@@ -382,9 +427,15 @@ finish:
 		execErr = context.DeadlineExceeded
 	}
 	if execErr == nil {
+		if execResult.Completion == AlreadyCommittedAtomically {
+			return
+		}
 		if err := d.q.Complete(writeCtx, task); err != nil {
 			log.Printf("postingest dispatcher complete task %d: %v", task.ID, err)
 		}
+		return
+	}
+	if execResult.Completion == FinalizationOutcomeUncertain {
 		return
 	}
 	kind := failureKind(execErr)

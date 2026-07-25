@@ -125,19 +125,19 @@ func (h *Handler) submitLibraryScan(ctx context.Context, libraryID int64, roots 
 	return h.ScanCoordinator.Submit(ctx, scancoord.ScanRequest{LibraryID: libraryID, Source: source, Roots: roots})
 }
 
-func (h *Handler) startLibraryScanTask(libraryID int64, source string) (taskID int64, runningTaskID int64, err error) {
+func (h *Handler) startLibraryScanTask(ctx context.Context, libraryID int64, source string) (taskID int64, runningTaskID int64, err error) {
 	var root string
 	if h == nil || h.App == nil || h.App.DB == nil {
 		return 0, 0, errors.New("database is not configured")
 	}
-	if err := h.App.DB.QueryRow(`SELECT path FROM library WHERE id = ?`, libraryID).Scan(&root); err != nil {
+	if err := h.App.DB.QueryRowContext(ctx, `SELECT path FROM library WHERE id = ?`, libraryID).Scan(&root); err != nil {
 		return 0, 0, err
 	}
 	scanSource := scancoord.SourceManual
 	if source == "schedule" || source == string(scancoord.SourceScheduled) {
 		scanSource = scancoord.SourceScheduled
 	}
-	result, err := h.submitLibraryScan(context.Background(), libraryID, listLibraryFolders(h.App.DB, libraryID, root), scanSource)
+	result, err := h.submitLibraryScan(ctx, libraryID, listLibraryFoldersContext(ctx, h.App.DB, libraryID, root), scanSource)
 	if err != nil {
 		return 0, 0, err
 	}

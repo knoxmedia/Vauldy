@@ -2,8 +2,12 @@ package postingest
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"testing"
+
+	"knox-media/internal/publication"
+	"knox-media/internal/scanner"
 )
 
 type callbackEnqueuerFunc func(context.Context, int64, *int64, string) ([]TaskType, error)
@@ -27,5 +31,43 @@ func TestNewScanMediaAddedEnqueueCallbackOnlyEnqueues(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("enqueue calls=%d want 1", calls)
+	}
+}
+
+func TestNewScanMediaAddedCallbackUsesProvidedCallback(t *testing.T) {
+	called := 0
+	callback := NewScanMediaAddedEnqueueCallback(callbackEnqueuerFunc(func(context.Context, int64, *int64, string) ([]TaskType, error) { called++; return nil, nil }))
+	if err := callback(context.Background(), 7, 42, "movie", "video"); err != nil {
+		t.Fatal(err)
+	}
+	if called != 1 {
+		t.Fatalf("calls=%d want 1", called)
+	}
+}
+
+type callbackPlannerFunc func(context.Context, *sql.Tx, publication.NewMedia) (publication.Run, error)
+
+func (f callbackPlannerFunc) PlanNewMediaTx(ctx context.Context, tx *sql.Tx, media publication.NewMedia) (publication.Run, error) {
+	return f(ctx, tx, media)
+}
+
+func TestNewScanMediaDiscoveredTxCallbackPlansInCallerTransaction(t *testing.T) {
+	want := errors.New("plan failed")
+	calls := 0
+	callback := NewScanMediaDiscoveredTxCallback(callbackPlannerFunc(func(_ context.Context, tx *sql.Tx, media publication.NewMedia) (publication.Run, error) {
+		calls++
+		if media.MediaID != 42 || media.ScanTaskID != 7 || media.FileType != "video" {
+			t.Fatalf("tx=%v media=%+v", tx, media)
+		}
+		if !media.MetadataAttempt.Attempted || len(media.MetadataAttempt.Fields) != 1 || media.MetadataAttempt.Fields[0] != "duration" || len(media.MetadataAttempt.Errors) != 1 || media.MetadataAttempt.Errors[0].Source != "ffprobe" {
+			t.Fatalf("metadata=%+v", media.MetadataAttempt)
+		}
+		return publication.Run{}, want
+	}))
+	if err := callback(context.Background(), nil, 7, scanner.ScanDiscovery{MediaID: 42, Title: "title", FileType: "video", MetadataAttempt: scanner.MetadataAttempt{Attempted: true, Fields: []string{"duration"}, Errors: []scanner.MetadataDiagnostic{{Source: "ffprobe", Message: "partial"}}}}); !errors.Is(err, want) {
+		t.Fatalf("callback error=%v want %v", err, want)
+	}
+	if calls != 1 {
+		t.Fatalf("planner calls=%d want 1", calls)
 	}
 }

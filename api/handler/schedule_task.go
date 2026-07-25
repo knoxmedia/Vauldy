@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"knox-media/internal/postingest"
 	"knox-media/internal/store"
 )
 
@@ -32,7 +33,7 @@ func (h *Handler) StartScheduleLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-tk.C:
-			h.runDueScheduledTasks()
+			h.runDueScheduledTasks(ctx)
 		}
 	}
 }
@@ -170,7 +171,7 @@ func (h *Handler) RunScheduledTask(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
 		return
 	}
-	msg, runErr := h.runOneScheduledTask(id)
+	msg, runErr := h.runOneScheduledTask(c.Request.Context(), id)
 	if runErr != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": runErr.Error(), "message": msg})
 		return
@@ -178,7 +179,7 @@ func (h *Handler) RunScheduledTask(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true, "message": msg})
 }
 
-func (h *Handler) runDueScheduledTasks() {
+func (h *Handler) runDueScheduledTasks(ctx context.Context) {
 	rows, err := h.App.DB.Query(`
 		SELECT id FROM scheduled_task
 		WHERE enabled = 1
@@ -195,11 +196,11 @@ func (h *Handler) runDueScheduledTasks() {
 		if rows.Scan(&id) != nil {
 			continue
 		}
-		_, _ = h.runOneScheduledTask(id)
+		_, _ = h.runOneScheduledTask(ctx, id)
 	}
 }
 
-func (h *Handler) runOneScheduledTask(id int64) (string, error) {
+func (h *Handler) runOneScheduledTask(ctx context.Context, id int64) (string, error) {
 	var taskType, payloadJSON sql.NullString
 	if err := h.App.DB.QueryRow(`SELECT task_type, payload_json FROM scheduled_task WHERE id = ? LIMIT 1`, id).Scan(&taskType, &payloadJSON); err != nil {
 		if err == sql.ErrNoRows {
@@ -209,7 +210,7 @@ func (h *Handler) runOneScheduledTask(id int64) (string, error) {
 	}
 	payload := map[string]any{}
 	_ = json.Unmarshal([]byte(payloadJSON.String), &payload)
-	msg, runErr := h.executeScheduledTask(taskType.String, payload)
+	msg, runErr := h.executeScheduledTask(ctx, taskType.String, payload)
 	status := "done"
 	if runErr != nil {
 		status = "failed"
@@ -223,19 +224,19 @@ func (h *Handler) runOneScheduledTask(id int64) (string, error) {
 	return msg, runErr
 }
 
-func (h *Handler) executeScheduledTask(taskType string, payload map[string]any) (string, error) {
+func (h *Handler) executeScheduledTask(ctx context.Context, taskType string, payload map[string]any) (string, error) {
 	switch taskType {
 	case "library_scan":
 		libraryID := int64(anyToInt(payload["library_id"]))
 		if libraryID <= 0 {
 			return "", fmt.Errorf("payload.library_id required")
 		}
-		taskID, runningTaskID, err := h.startLibraryScanTask(libraryID, "schedule")
+		taskID, runningTaskID, err := h.startLibraryScanTask(ctx, libraryID, "schedule")
 		if err != nil {
 			return "", err
 		}
 		if runningTaskID > 0 {
-			return "", fmt.Errorf("library scan already running (task #%d)", runningTaskID)
+			return fmt.Sprintf("扫描请求已合并到任务 #%d", runningTaskID), nil
 		}
 		return fmt.Sprintf("已启动扫描任务 #%d", taskID), nil
 	case "scrape_run":
@@ -291,8 +292,8 @@ func (h *Handler) executeScheduledTask(taskType string, payload map[string]any) 
 			limit = 50
 		}
 		libID := int64(anyToInt(payload["library_id"]))
-		done, failed := h.Subtitle.RunBatch(context.Background(), libID, limit)
-		return fmt.Sprintf("字幕处理完成：成功 %d，失败 %d", done, failed), nil
+		n, err := h.enqueueScheduledPostIngest(ctx, postingest.TaskSubtitle, libID, limit)
+		return fmt.Sprintf("字幕任务已入队：%d", n), err
 	case "atrack_process":
 		if h.AtrackWorker == nil {
 			return "", fmt.Errorf("atrack worker disabled")
@@ -301,8 +302,9 @@ func (h *Handler) executeScheduledTask(taskType string, payload map[string]any) 
 		if limit <= 0 {
 			limit = 10
 		}
-		done, failed := h.AtrackWorker.RunBatch(limit)
-		return fmt.Sprintf("音轨提取完成：成功 %d，失败 %d", done, failed), nil
+		libID := int64(anyToInt(payload["library_id"]))
+		n, err := h.enqueueScheduledPostIngest(ctx, postingest.TaskAtrack, libID, limit)
+		return fmt.Sprintf("音轨任务已入队：%d", n), err
 	case "keyframe_process":
 		if h.KeyframeWorker == nil {
 			return "", fmt.Errorf("keyframe worker disabled")
@@ -347,4 +349,59 @@ func anyToInt(v any) int {
 	default:
 		return 0
 	}
+}
+
+func (h *Handler) enqueueScheduledPostIngest(ctx context.Context, typ postingest.TaskType, libraryID int64, limit int) (int, error) {
+	query := `SELECT m.id FROM media m LEFT JOIN post_ingest_task p ON p.media_id=m.id AND p.task_type=? WHERE m.file_type='video' AND COALESCE(m.status,'active')='active' AND (p.id IS NULL OR p.status IN ('failed','cancelled'))`
+	args := []any{typ}
+	if libraryID > 0 {
+		query += ` AND m.library_id=?`
+		args = append(args, libraryID)
+	}
+	query += ` ORDER BY m.id LIMIT ?`
+	args = append(args, limit)
+	rows, err := h.App.DB.QueryContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return 0, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	queued := 0
+	for _, id := range ids {
+		var reset explicitResetTx
+		switch typ {
+		case postingest.TaskSubtitle:
+			reset = subtitleEnsureTx(id)
+		case postingest.TaskAtrack:
+			reset = func(c context.Context, tx *sql.Tx) error {
+				_, e := tx.ExecContext(c, `INSERT INTO atrack_task(media_id,status,updated_at) VALUES(?,'waiting',CURRENT_TIMESTAMP) ON CONFLICT(media_id) DO UPDATE SET status='waiting',error_message=NULL,updated_at=CURRENT_TIMESTAMP`, id)
+				return e
+			}
+		case postingest.TaskKeyframe:
+			reset = func(c context.Context, tx *sql.Tx) error {
+				_, e := tx.ExecContext(c, `INSERT INTO keyframe_task(media_id,status,output_dir,keyframe_count,error_message,updated_at) VALUES(?,'waiting',NULL,0,NULL,CURRENT_TIMESTAMP) ON CONFLICT(media_id) DO UPDATE SET status='waiting',output_dir=NULL,keyframe_count=0,error_message=NULL,updated_at=CURRENT_TIMESTAMP`, id)
+				return e
+			}
+		default:
+			return queued, fmt.Errorf("unsupported scheduled post-ingest type: %s", typ)
+		}
+		r, e := enqueueExplicitPostIngest(ctx, h.App.DB, id, typ, false, reset, nil)
+		if e != nil {
+			return queued, e
+		}
+		if r.Queued() {
+			queued++
+		}
+	}
+	return queued, nil
 }

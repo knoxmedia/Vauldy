@@ -29,7 +29,7 @@ func TestServeAlbumArtworkServesCachedFile(t *testing.T) {
 
 	_, _ = db.Exec(`INSERT INTO library (id, name, type, path, enabled) VALUES (1, 'music', 'music', ?, 1)`, dir)
 	_, _ = db.Exec(`INSERT INTO user (id, username, password, role, can_play, library_scope) VALUES (2, 'admin', 'x', 'admin', 1, 'all')`)
-	_, _ = db.Exec(`INSERT INTO music_album (id, library_id, title, title_norm, artwork_path) VALUES (1, 1, 'Album', 'album', ?)`, art)
+	_, _ = db.Exec(`INSERT INTO music_album (id, library_id, title, title_norm, artwork_path) VALUES (1, 1, 'Album', 'album', ?); INSERT INTO media(id,library_id,file_id,title,file_path,file_type,status,publication_state) VALUES(10,1,'track','Track',?,'audio','active','published'); INSERT INTO music_track(album_id,media_id,title) VALUES(1,10,'Track')`, art, filepath.Join(dir, "track.mp3"))
 
 	h := &Handler{App: &app.App{DB: db}, runningScans: map[int64]scanRuntime{}}
 	w := httptest.NewRecorder()

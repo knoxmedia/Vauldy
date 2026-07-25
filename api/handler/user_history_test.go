@@ -89,3 +89,27 @@ func TestUserHistoryWithoutLibraryTypeFilter(t *testing.T) {
 		t.Fatalf("expected 2 items without filter, got %d body=%s", len(payload.Items), w.Body.String())
 	}
 }
+
+func TestUserHistoryHidesUnpublishedMedia(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := setupUserHistoryTestDB(t)
+	if _, err := h.App.DB.Exec(`UPDATE media SET publication_state='processing' WHERE id=10`); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/user/history?limit=10", nil)
+	setUserCtx(c, 1, "user", "viewer")
+	h.UserHistory(c)
+	var payload struct {
+		Items []struct {
+			MediaID int64 `json:"media_id"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if w.Code != http.StatusOK || len(payload.Items) != 1 || payload.Items[0].MediaID != 20 {
+		t.Fatalf("items=%+v body=%s", payload.Items, w.Body.String())
+	}
+}

@@ -347,7 +347,7 @@ func TestListMediaCancellationAfterFirstBatchReturnsNonSuccessHTTP(t *testing.T)
 		if stats.Batches == 1 {
 			cancel()
 		}
-	})
+	}, "")
 	if w.Code == http.StatusOK || strings.Contains(w.Body.String(), `"items"`) {
 		t.Fatalf("partial success status=%d body=%s", w.Code, w.Body.String())
 	}
@@ -802,5 +802,77 @@ func TestMediaQueryCompletedUsesCandidateBoundedPreaggregation(t *testing.T) {
 	plan := strings.Join(details, "\n")
 	if !strings.Contains(strings.ToUpper(plan), "MATERIALIZE CANDIDATES") || !strings.Contains(plan, "idx_progress_user_file_completed") {
 		t.Fatalf("plan=%s", plan)
+	}
+}
+
+func TestGetMediaReturns404ForProcessingToOrdinaryUser(t *testing.T) {
+	h := setupAccessTestDB(t)
+	if _, err := h.App.DB.Exec(`UPDATE media SET publication_state='processing' WHERE id=10`); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/media/10", nil)
+	c.Params = gin.Params{{Key: "id", Value: "10"}}
+	setUserCtx(c, 1, "user", "normal")
+	h.GetMedia(c)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestGetMediaAdminCanInspectProcessing(t *testing.T) {
+	h := setupAccessTestDB(t)
+	if _, err := h.App.DB.Exec(`UPDATE media SET publication_state='processing',published_at='2026-07-20 01:02:03',publication_error='waiting for poster',ingest_generation=7 WHERE id=10`); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/media/10", nil)
+	c.Params = gin.Params{{Key: "id", Value: "10"}}
+	setUserCtx(c, 2, "admin", "admin")
+	h.GetMedia(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var payload struct {
+		PublicationState string `json:"publication_state"`
+		PublishedAt      string `json:"published_at"`
+		PublicationError string `json:"publication_error"`
+		IngestGeneration int64  `json:"ingest_generation"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.PublicationState != "processing" || payload.PublishedAt == "" || payload.PublicationError != "waiting for poster" || payload.IngestGeneration != 7 {
+		t.Fatalf("payload=%+v body=%s", payload, w.Body.String())
+	}
+}
+
+func TestGetMediaOrdinaryResponseOmitsPublicationDiagnostics(t *testing.T) {
+	h := setupAccessTestDB(t)
+	if _, err := h.App.DB.Exec(`UPDATE media SET publication_state='published',published_at='2026-07-20 01:02:03',publication_error='sensitive diagnostic',ingest_generation=17 WHERE id=10`); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/media/10", nil)
+	c.Params = gin.Params{{Key: "id", Value: "10"}}
+	setUserCtx(c, 1, "user", "normal")
+	h.GetMedia(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["publication_state"] != "published" {
+		t.Fatalf("publication_state=%v body=%s", payload["publication_state"], w.Body.String())
+	}
+	for _, field := range []string{"published_at", "publication_error", "ingest_generation"} {
+		if _, exists := payload[field]; exists {
+			t.Errorf("ordinary GetMedia exposed %s: %s", field, w.Body.String())
+		}
 	}
 }

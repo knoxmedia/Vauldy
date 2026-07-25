@@ -15,6 +15,7 @@ import (
 	"knox-media/api/middleware"
 	"knox-media/internal/playcompletion"
 	"knox-media/internal/scraper"
+	"knox-media/internal/store"
 	"knox-media/internal/textencoding"
 )
 
@@ -31,10 +32,10 @@ type updateMediaAdminBody struct {
 }
 
 func (h *Handler) ListMedia(c *gin.Context) {
-	h.listMediaObserved(c, nil)
+	h.listMediaObserved(c, nil, "")
 }
 
-func (h *Handler) listMediaObserved(c *gin.Context, afterBatch func(mediaListStats)) {
+func (h *Handler) listMediaObserved(c *gin.Context, afterBatch func(mediaListStats), publicationState string) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
 	defer cancel()
 	var profile userPermissionProfile
@@ -55,20 +56,32 @@ func (h *Handler) listMediaObserved(c *gin.Context, afterBatch func(mediaListSta
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	if middleware.IsAdmin(c) {
+		spec.IncludeUnpublished = true
+		spec.PublicationState = publicationState
+	}
 	if spec.LibraryID != nil && spec.RestrictLibraries {
 		if _, ok := profile.AllowedLibraryIDs[*spec.LibraryID]; !ok {
 			c.JSON(http.StatusForbidden, gin.H{"error": "library access denied"})
 			return
 		}
 	}
+	requestedLimit := spec.Limit
+	if spec.IncludeUnpublished {
+		spec.Limit = requestedLimit + 1
+	}
 	rows, _, err := h.listMediaRowsObserved(ctx, spec, afterBatch)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	hasMore := spec.IncludeUnpublished && len(rows) > requestedLimit
+	if hasMore {
+		rows = rows[:requestedLimit]
+	}
 	items := make([]gin.H, 0, len(rows))
 	for _, row := range rows {
-		items = append(items, gin.H{
+		item := gin.H{
 			"id": row.ID, "library_id": row.LibraryID.Int64, "file_id": row.FileID.String,
 			"title": row.Title.String, "original_title": row.OriginalTitle.String, "file_path": row.FilePath.String,
 			"file_type": row.FileType.String, "duration": row.Duration.Int64, "width": row.Width.Int64, "height": row.Height.Int64,
@@ -78,10 +91,24 @@ func (h *Handler) listMediaObserved(c *gin.Context, afterBatch func(mediaListSta
 			"encrypted_asset": row.EncryptedAsset.Int64 == 1,
 			"photo_taken_at":  row.PhotoTakenAt.String, "photo_tags": row.PhotoTags, "photo_tag_ids": row.PhotoTagIDs,
 			"music_album_id": row.MusicAlbumID.Int64, "music_album_title": textencoding.FixMetadataString(row.MusicAlbumTitle.String),
-			"music_artist": textencoding.FixMetadataString(row.MusicArtist.String),
-		})
+			"music_artist":      textencoding.FixMetadataString(row.MusicArtist.String),
+			"publication_state": row.PublicationState.String,
+		}
+		if spec.IncludeUnpublished {
+			item["published_at"] = row.PublishedAt.String
+			item["publication_error"] = row.PublicationError.String
+			item["ingest_generation"] = row.IngestGeneration.Int64
+		}
+		items = append(items, item)
 	}
-	c.JSON(http.StatusOK, gin.H{"items": items})
+	response := gin.H{"items": items}
+	if spec.IncludeUnpublished {
+		response["has_more"] = hasMore
+		if hasMore && len(rows) > 0 {
+			response["next_cursor"] = strconv.FormatInt(rows[len(rows)-1].ID, 10)
+		}
+	}
+	c.JSON(http.StatusOK, response)
 }
 func photoTagIDMatches(filterID string, tags, tagIDs []string) bool {
 	if filterID == "" || filterID == "all" {
@@ -113,13 +140,17 @@ func (h *Handler) GetMedia(c *gin.Context) {
 		return
 	}
 	row := h.App.DB.QueryRow(`
-		SELECT id, library_id, file_id, title, original_title, file_path, file_type, duration, width, height, bitrate, md5, format, meta_json, status, created_at
-		FROM media WHERE id = ?`, id)
+		SELECT m.id, m.library_id, m.file_id, m.title, m.original_title, m.file_path, m.file_type,
+		       m.duration, m.width, m.height, m.bitrate, m.md5, m.format, m.meta_json, m.status, m.created_at,
+		       m.publication_state, m.published_at, m.publication_error, m.ingest_generation
+		FROM media m
+		WHERE m.id = ? AND `+mediaPublicationVisibilityPredicate("m", middleware.IsAdmin(c)), id)
 	var libID sql.NullInt64
 	var fileID, title, orig, path, ftype, md5, format, meta, status, created sql.NullString
+	var publicationState, publishedAt, publicationError sql.NullString
 	var dur, w, hei, br sql.NullInt64
-	var mid int64
-	if err := row.Scan(&mid, &libID, &fileID, &title, &orig, &path, &ftype, &dur, &w, &hei, &br, &md5, &format, &meta, &status, &created); err != nil {
+	var mid, ingestGeneration int64
+	if err := row.Scan(&mid, &libID, &fileID, &title, &orig, &path, &ftype, &dur, &w, &hei, &br, &md5, &format, &meta, &status, &created, &publicationState, &publishedAt, &publicationError, &ingestGeneration); err != nil {
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 			return
@@ -127,13 +158,19 @@ func (h *Handler) GetMedia(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
+	item := gin.H{
 		"id": mid, "library_id": libID.Int64, "file_id": fileID.String,
 		"title": title.String, "original_title": orig.String, "file_path": path.String,
 		"file_type": ftype.String, "duration": dur.Int64, "width": w.Int64, "height": hei.Int64,
 		"bitrate": br.Int64, "md5": md5.String, "format": format.String, "meta_json": meta.String,
-		"status": status.String, "created_at": created.String,
-	})
+		"status": status.String, "created_at": created.String, "publication_state": publicationState.String,
+	}
+	if middleware.IsAdmin(c) {
+		item["published_at"] = publishedAt.String
+		item["publication_error"] = publicationError.String
+		item["ingest_generation"] = ingestGeneration
+	}
+	c.JSON(http.StatusOK, item)
 }
 
 func (h *Handler) GetMediaMeta(c *gin.Context) {
@@ -231,8 +268,6 @@ func (h *Handler) ScrapeMedia(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	var existing sql.NullString
-	_ = h.App.DB.QueryRow(`SELECT meta_json FROM media WHERE id = ?`, id).Scan(&existing)
 	query := scraper.NormalizeTitle(title.String)
 	if query == "" {
 		query = title.String
@@ -244,7 +279,10 @@ func (h *Handler) ScrapeMedia(c *gin.Context) {
 	}
 	var fileType string
 	_ = h.App.DB.QueryRow(`SELECT COALESCE(file_type,'') FROM media WHERE id = ?`, id).Scan(&fileType)
-	h.applyScrapeLocalImages(id, libraryID, fileType, cfg, res)
+	if err := h.applyScrapeLocalImages(c.Request.Context(), id, libraryID, fileType, cfg, res, true); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	if !scraper.HasMeaningfulScrapeData(res) {
 		msg := scraper.NoDataFailureMessage(res)
 		if err != nil {
@@ -253,22 +291,15 @@ func (h *Handler) ScrapeMedia(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": msg})
 		return
 	}
-	scraper.PreserveScrapeImagesFromExisting(res, existing.String)
 	if _, pErr := h.persistScrapeArtwork(id, res); pErr != nil {
 		log.Printf("scrape media artwork persist id=%d: %v", id, pErr)
 	}
-	patch := map[string]any{
-		"scrape": res,
-	}
-	newMeta, err := scraper.MergeMetaJSON(existing.String, patch)
+	_, committed, err := h.mergeScrapeResultTx(c.Request.Context(), id, res, res.Title)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	if _, err := h.App.DB.Exec(`UPDATE media SET meta_json = ? WHERE id = ?`, newMeta, id); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
+	res = committed
 	h.scheduleLibraryPreviewRefresh(libraryID)
 	c.JSON(http.StatusOK, gin.H{"scrape": res})
 }
@@ -352,7 +383,25 @@ func (h *Handler) UpdateMediaAdmin(c *gin.Context) {
 	}
 	args = append(args, id)
 	query := "UPDATE media SET " + strings.Join(fields, ", ") + " WHERE id = ?"
-	res, err := h.App.DB.Exec(query, args...)
+	var res sql.Result
+	if body.MetaJSON != nil {
+		tx, txErr := h.App.DB.BeginTx(c.Request.Context(), nil)
+		if txErr != nil {
+			err = txErr
+		} else {
+			res, err = tx.ExecContext(c.Request.Context(), query, args...)
+			if err == nil {
+				err = store.UpdateMediaMetaAndPhotoTime(c.Request.Context(), tx, id, strings.TrimSpace(*body.MetaJSON))
+			}
+			if err == nil {
+				err = tx.Commit()
+			} else {
+				_ = tx.Rollback()
+			}
+		}
+	} else {
+		res, err = h.App.DB.ExecContext(c.Request.Context(), query, args...)
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

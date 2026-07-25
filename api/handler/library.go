@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"net/http"
@@ -14,27 +15,33 @@ import (
 )
 
 type libraryBody struct {
-	Name                  string   `json:"name" binding:"required"`
-	Type                  string   `json:"type" binding:"required"`
-	Path                  string   `json:"path"`
-	Folders               []string `json:"folders"`
-	AutoScan              *int     `json:"auto_scan"`
-	Enabled               *int     `json:"enabled"`
-	RealtimeMonitor       *int     `json:"realtime_monitor"`
-	PreviewExtract        *int     `json:"preview_extract"`
-	DRMEnabled            *int     `json:"drm_enabled"`
-	EncryptionMode        string   `json:"encryption_mode"`
-	CleanupLocalSource    *int     `json:"cleanup_local_source_after_package"`
-	MetadataProviders     []string `json:"metadata_providers"`
-	ImageProviders        []string `json:"image_providers"`
-	MetadataRefreshPolicy string   `json:"metadata_refresh_policy"`
-	Scraper               string   `json:"scraper"`
-	JITPrepareOnIngest                 *int `json:"jit_prepare_on_ingest"`
-	EncryptedAssetsEnabled             *int   `json:"encrypted_assets_enabled"`
-	EncryptedAssetsCleanupPlaintext    *int   `json:"encrypted_assets_cleanup_plaintext"`
-	EncryptedAssetsDirMode             string `json:"encrypted_assets_dir_mode"`
-	EncryptedAssetsCustomDir           string `json:"encrypted_assets_custom_dir"`
-	ScanExcludePatterns                string `json:"scan_exclude_patterns"`
+	Name                            string   `json:"name" binding:"required"`
+	Type                            string   `json:"type" binding:"required"`
+	Path                            string   `json:"path"`
+	Folders                         []string `json:"folders"`
+	AutoScan                        *int     `json:"auto_scan"`
+	Enabled                         *int     `json:"enabled"`
+	RealtimeMonitor                 *int     `json:"realtime_monitor"`
+	PreviewExtract                  *int     `json:"preview_extract"`
+	DRMEnabled                      *int     `json:"drm_enabled"`
+	EncryptionMode                  string   `json:"encryption_mode"`
+	CleanupLocalSource              *int     `json:"cleanup_local_source_after_package"`
+	MetadataProviders               []string `json:"metadata_providers"`
+	ImageProviders                  []string `json:"image_providers"`
+	MetadataRefreshPolicy           string   `json:"metadata_refresh_policy"`
+	Scraper                         string   `json:"scraper"`
+	JITPrepareOnIngest              *int     `json:"jit_prepare_on_ingest"`
+	EncryptedAssetsEnabled          *int     `json:"encrypted_assets_enabled"`
+	EncryptedAssetsCleanupPlaintext *int     `json:"encrypted_assets_cleanup_plaintext"`
+	EncryptedAssetsDirMode          string   `json:"encrypted_assets_dir_mode"`
+	EncryptedAssetsCustomDir        string   `json:"encrypted_assets_custom_dir"`
+	ScanExcludePatterns             string   `json:"scan_exclude_patterns"`
+}
+
+type libraryListRow struct {
+	id, auto, enabled, realtime, preview, drmEnabled, cleanupLocal, jitIngest, encAssets, encCleanupPlain, mediaCount                                      int
+	scanTaskID, scanProcessed, scanTotal, scanAdded                                                                                                        int64
+	name, typ, path, encryptionMode, encDirMode, encCustomDir, metadataProviders, imageProviders, refreshPolicy, scraper, created, scanStatus, scanStarted string
 }
 
 func (h *Handler) ListLibraries(c *gin.Context) {
@@ -57,7 +64,7 @@ func (h *Handler) ListLibraries(c *gin.Context) {
 	}
 	rows, err := h.App.DB.Query(`
 		SELECT l.id, l.name, l.type, l.path, l.auto_scan, l.enabled, l.realtime_monitor, l.preview_extract, l.drm_enabled, COALESCE(l.encryption_mode,'drm'), l.cleanup_local_source_after_package, l.jit_prepare_on_ingest, COALESCE(l.encrypted_assets_enabled,0), COALESCE(l.encrypted_assets_cleanup_plaintext,0), COALESCE(l.encrypted_assets_dir_mode,'library'), COALESCE(l.encrypted_assets_custom_dir,''), l.metadata_providers, l.image_providers, l.metadata_refresh_policy, l.scraper, l.created_at,
-			(SELECT COUNT(1) FROM media m WHERE m.library_id = l.id) AS media_count,
+			(SELECT COUNT(1) FROM media m WHERE m.library_id = l.id AND m.publication_state IN ('published','degraded')) AS media_count,
 			(SELECT id FROM scan_task st WHERE st.library_id = l.id ORDER BY st.id DESC LIMIT 1) AS scan_task_id,
 			(SELECT COALESCE(status,'') FROM scan_task st WHERE st.library_id = l.id ORDER BY st.id DESC LIMIT 1) AS scan_status,
 			(SELECT COALESCE(processed_count,0) FROM scan_task st WHERE st.library_id = l.id ORDER BY st.id DESC LIMIT 1) AS scan_processed_count,
@@ -70,50 +77,58 @@ func (h *Handler) ListLibraries(c *gin.Context) {
 		return
 	}
 	defer rows.Close()
-	var list []gin.H
+	visible := make([]libraryListRow, 0)
 	for rows.Next() {
-		var id, auto, enabled, realtime, preview, drmEnabled, cleanupLocal, jitIngest, encAssets, encCleanupPlain, cnt int
-		var name, typ, path, encryptionMode, encDirMode, encCustomDir, metadataProviders, imageProviders, refreshPolicy, scraper, created string
+		var r libraryListRow
 		var scanTaskID, scanProcessed, scanTotal, scanAdded sql.NullInt64
 		var scanStatus, scanStarted sql.NullString
-		if err := rows.Scan(&id, &name, &typ, &path, &auto, &enabled, &realtime, &preview, &drmEnabled, &encryptionMode, &cleanupLocal, &jitIngest, &encAssets, &encCleanupPlain, &encDirMode, &encCustomDir, &metadataProviders, &imageProviders, &refreshPolicy, &scraper, &created, &cnt, &scanTaskID, &scanStatus, &scanProcessed, &scanTotal, &scanAdded, &scanStarted); err != nil {
+		if err := rows.Scan(&r.id, &r.name, &r.typ, &r.path, &r.auto, &r.enabled, &r.realtime, &r.preview, &r.drmEnabled, &r.encryptionMode, &r.cleanupLocal, &r.jitIngest, &r.encAssets, &r.encCleanupPlain, &r.encDirMode, &r.encCustomDir, &r.metadataProviders, &r.imageProviders, &r.refreshPolicy, &r.scraper, &r.created, &r.mediaCount, &scanTaskID, &scanStatus, &scanProcessed, &scanTotal, &scanAdded, &scanStarted); err != nil {
 			continue
 		}
-		folders := foldersForLibrary(folderMap, int64(id), path)
+		r.scanTaskID, r.scanProcessed, r.scanTotal, r.scanAdded = scanTaskID.Int64, scanProcessed.Int64, scanTotal.Int64, scanAdded.Int64
+		r.scanStatus, r.scanStarted = scanStatus.String, scanStarted.String
 		if strings.EqualFold(profile.LibraryScope, "selected") {
-			if _, ok := profile.AllowedLibraryIDs[int64(id)]; !ok {
+			if _, ok := profile.AllowedLibraryIDs[int64(r.id)]; !ok {
 				continue
 			}
 		}
-		if !isAdmin && !middleware.IsAPIClient(c) && enabled != 1 {
+		if !isAdmin && !middleware.IsAPIClient(c) && r.enabled != 1 {
 			continue
 		}
-		item := gin.H{
-			"id": id, "name": name, "type": typ, "path": path,
-			"folders":   folders,
-			"auto_scan": auto, "enabled": enabled, "realtime_monitor": realtime, "preview_extract": preview, "drm_enabled": drmEnabled, "encryption_mode": h.normalizeEncryptionMode(encryptionMode), "cleanup_local_source_after_package": cleanupLocal, "jit_prepare_on_ingest": jitIngest,
-			"encrypted_assets_enabled": encAssets, "encrypted_assets_cleanup_plaintext": encCleanupPlain,
-			"encrypted_assets_dir_mode": storage.NormalizeEncDirMode(encDirMode), "encrypted_assets_custom_dir": encCustomDir,
-			"metadata_providers": splitCSVList(metadataProviders), "image_providers": splitCSVList(imageProviders), "metadata_refresh_policy": refreshPolicy,
-			"scraper": scraper, "created_at": created,
-			"media_count":          cnt,
-			"scan_task_id":         scanTaskID.Int64,
-			"scan_status":          scanStatus.String,
-			"scan_processed_count": scanProcessed.Int64,
-			"scan_total_count":     scanTotal.Int64,
-			"scan_added_count":     scanAdded.Int64,
-			"scan_started_at":      scanStarted.String,
-		}
-		if previewURL := h.libraryPreviewPublicURL(int64(id)); previewURL != "" {
-			item["preview_url"] = previewURL
-		} else if cnt > 0 {
-			h.scheduleLibraryPreviewRefresh(int64(id))
-		}
-		list = append(list, item)
+		visible = append(visible, r)
 	}
 	if err := rows.Err(); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
+	}
+	if err := applyFolderScopedLibraryCounts(h.App.DB, visible, profile, folderMap); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	var list []gin.H
+	for _, r := range visible {
+		item := gin.H{
+			"id": r.id, "name": r.name, "type": r.typ, "path": r.path,
+			"folders":   responseFoldersForLibrary(profile, folderMap, int64(r.id), r.path),
+			"auto_scan": r.auto, "enabled": r.enabled, "realtime_monitor": r.realtime, "preview_extract": r.preview, "drm_enabled": r.drmEnabled, "encryption_mode": h.normalizeEncryptionMode(r.encryptionMode), "cleanup_local_source_after_package": r.cleanupLocal, "jit_prepare_on_ingest": r.jitIngest,
+			"encrypted_assets_enabled": r.encAssets, "encrypted_assets_cleanup_plaintext": r.encCleanupPlain,
+			"encrypted_assets_dir_mode": storage.NormalizeEncDirMode(r.encDirMode), "encrypted_assets_custom_dir": r.encCustomDir,
+			"metadata_providers": splitCSVList(r.metadataProviders), "image_providers": splitCSVList(r.imageProviders), "metadata_refresh_policy": r.refreshPolicy,
+			"scraper": r.scraper, "created_at": r.created,
+			"media_count":          r.mediaCount,
+			"scan_task_id":         r.scanTaskID,
+			"scan_status":          r.scanStatus,
+			"scan_processed_count": r.scanProcessed,
+			"scan_total_count":     r.scanTotal,
+			"scan_added_count":     r.scanAdded,
+			"scan_started_at":      r.scanStarted,
+		}
+		if previewURL := h.libraryPreviewPublicURL(int64(r.id)); previewURL != "" {
+			item["preview_url"] = previewURL
+		} else if r.mediaCount > 0 {
+			h.scheduleLibraryPreviewRefresh(int64(r.id))
+		}
+		list = append(list, item)
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"items": list,
@@ -331,7 +346,7 @@ func (h *Handler) ScanLibrary(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	taskID, runningTaskID, err := h.startLibraryScanTask(id, "manual")
+	taskID, runningTaskID, err := h.startLibraryScanTask(c.Request.Context(), id, "manual")
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -413,8 +428,70 @@ func foldersForLibrary(byID map[int64][]string, libraryID int64, fallbackPath st
 	return []string{strings.TrimSpace(fallbackPath)}
 }
 
+func sqlPlaceholders(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
+}
+
+func responseFoldersForLibrary(profile userPermissionProfile, folderMap map[int64][]string, libraryID int64, fallback string) []string {
+	if allowed := profile.AllowedLibraryFolders[libraryID]; len(allowed) > 0 {
+		out := make([]string, 0, len(allowed))
+		for _, p := range allowed {
+			if p = strings.TrimSpace(p); p != "" {
+				out = append(out, p)
+			}
+		}
+		return out
+	}
+	return foldersForLibrary(folderMap, libraryID, fallback)
+}
+
+func applyFolderScopedLibraryCounts(db *sql.DB, visible []libraryListRow, profile userPermissionProfile, folderMap map[int64][]string) error {
+	ids := make([]int64, 0)
+	index := map[int64]int{}
+	for i := range visible {
+		id := int64(visible[i].id)
+		if len(profile.AllowedLibraryFolders[id]) > 0 {
+			ids = append(ids, id)
+			index[id] = i
+			visible[i].mediaCount = 0
+			folderMap[id] = nil
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	query := `SELECT library_id,file_path FROM media WHERE publication_state IN ('published','degraded') AND library_id IN (` + sqlPlaceholders(len(ids)) + `)`
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var p string
+		if err := rows.Scan(&id, &p); err != nil {
+			return err
+		}
+		if pathMatchesAnyFolder(p, profile.AllowedLibraryFolders[id]) {
+			visible[index[id]].mediaCount++
+		}
+	}
+	return rows.Err()
+}
+
 func listLibraryFolders(db *sql.DB, libraryID int64, fallbackPath string) []string {
-	rows, err := db.Query(`SELECT path FROM library_folder WHERE library_id = ? ORDER BY sort_order, id`, libraryID)
+	return listLibraryFoldersContext(context.Background(), db, libraryID, fallbackPath)
+}
+
+func listLibraryFoldersContext(ctx context.Context, db *sql.DB, libraryID int64, fallbackPath string) []string {
+	rows, err := db.QueryContext(ctx, `SELECT path FROM library_folder WHERE library_id = ? ORDER BY sort_order, id`, libraryID)
 	if err != nil {
 		if strings.TrimSpace(fallbackPath) == "" {
 			return nil

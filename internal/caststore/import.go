@@ -1,9 +1,11 @@
 package caststore
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"knox-media/internal/store"
 	"strings"
 
 	"knox-media/internal/scraper"
@@ -11,6 +13,9 @@ import (
 
 // ImportCredits links TMDB credits to media and upserts person records.
 func ImportCredits(db *sql.DB, mediaID int64, credits []scraper.CreditMember, avatarBaseURL string) (int, error) {
+	return ImportCreditsExecutor(context.Background(), db, mediaID, credits, avatarBaseURL)
+}
+func ImportCreditsExecutor(ctx context.Context, db store.SQLExecutor, mediaID int64, credits []scraper.CreditMember, avatarBaseURL string) (int, error) {
 	if db == nil || mediaID <= 0 || len(credits) == 0 {
 		return 0, nil
 	}
@@ -20,9 +25,12 @@ func ImportCredits(db *sql.DB, mediaID int64, credits []scraper.CreditMember, av
 		if name == "" {
 			continue
 		}
-		personID, err := FindOrCreateByTMDB(db, c.TMDBPersonID, name)
-		if err != nil || personID <= 0 {
-			continue
+		personID, err := findOrCreateByTMDBExecutor(ctx, db, c.TMDBPersonID, name)
+		if err != nil {
+			return imported, err
+		}
+		if personID <= 0 {
+			return imported, sql.ErrNoRows
 		}
 		avatar := strings.TrimSpace(c.ProfilePath)
 		if avatar != "" && !strings.HasPrefix(avatar, "http") {
@@ -42,14 +50,19 @@ func ImportCredits(db *sql.DB, mediaID int64, credits []scraper.CreditMember, av
 			TMDBID:      c.TMDBPersonID,
 			Occupations: []string{c.Occupation},
 		}
-		_ = ApplyScrapePatch(db, personID, patch)
-		MergePersonOccupations(db, personID, c.Occupation)
-		if err := LinkMediaPerson(db, mediaID, personID, c.Occupation, c.CharacterName, c.RoleType, c.SortOrder); err != nil {
-			continue
+		if err := applyScrapePatchExecutor(ctx, db, personID, patch); err != nil {
+			return imported, err
+		}
+		if err := mergePersonOccupationsExecutor(ctx, db, personID, c.Occupation); err != nil {
+			return imported, err
+		}
+		if err := linkMediaPersonExecutor(ctx, db, mediaID, personID, c.Occupation, c.CharacterName, c.RoleType, c.SortOrder); err != nil {
+			return imported, err
 		}
 		imported++
 	}
 	return imported, nil
+
 }
 
 // BackfillFromMetaJSON creates person links from legacy scrape.extra.cast JSON.

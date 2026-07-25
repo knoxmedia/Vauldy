@@ -104,6 +104,10 @@ func render(ctx context.Context, db *sql.DB, vault *keystore.Vault, derived *sto
 	if _, err := storage.RunFFmpeg(ctx, db, vault, ffmpegPath, mediaID, srcPath, 0, 0, nil, post, ""); err != nil {
 		return fmt.Errorf("ffmpeg thumb: %w", err)
 	}
+	if err := runCommitGuard(ctx); err != nil {
+		_ = os.Remove(dstPath)
+		return err
+	}
 	if derived != nil {
 		final, err := derived.FinalizePath(ctx, mediaID, kind, logicalName, dstPath)
 		if err != nil {

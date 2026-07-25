@@ -5,17 +5,21 @@ import (
 	"database/sql"
 	"time"
 
+	"knox-media/internal/coreiface"
 	"knox-media/internal/store"
 )
 
 type TaskType string
 
 const (
-	TaskPoster   TaskType = "poster"
-	TaskPreview  TaskType = "preview"
-	TaskKeyframe TaskType = "keyframe"
-	TaskSubtitle TaskType = "subtitle"
-	TaskAtrack   TaskType = "atrack"
+	TaskPoster       TaskType = "poster"
+	TaskPosterRepair TaskType = "poster_repair"
+	TaskThumbnail    TaskType = "thumbnail"
+	TaskPreview      TaskType = "preview"
+	TaskKeyframe     TaskType = "keyframe"
+	TaskSubtitle     TaskType = "subtitle"
+	TaskAtrack       TaskType = "atrack"
+	TaskEncrypt      TaskType = "encrypt"
 )
 
 type Status string
@@ -41,10 +45,14 @@ type Task struct {
 	ID          int64
 	MediaID     int64
 	ScanTaskID  *int64
+	RunID       *int64
+	StepID      *int64
 	Type        TaskType
 	Status      Status
 	Attempts    int
 	MaxAttempts int
+	Generation  int64
+	RetryRound  int
 	LeaseOwner  string
 	LeaseUntil  time.Time
 	LastError   string
@@ -56,8 +64,21 @@ type Queue struct {
 	metrics              *store.SQLiteMetrics
 	isScanCancelled      func(context.Context, int64) (bool, error)
 	beforeFailTransition func()
+	registry             coreiface.CapabilityRegistry
 }
 
-func NewQueue(db *sql.DB, owner string, metrics *store.SQLiteMetrics) *Queue {
-	return &Queue{db: db, owner: owner, metrics: metrics}
+type compatibilityCapabilities struct{}
+
+// Available reports true for community post-ingest/scrape adapters and false for
+// prepare, which requires enterprise tables and an explicit capability registry.
+func (compatibilityCapabilities) Available(step string) bool {
+	return step != "" && step != "prepare"
+}
+
+func NewQueue(db *sql.DB, owner string, metrics *store.SQLiteMetrics, registries ...coreiface.CapabilityRegistry) *Queue {
+	var registry coreiface.CapabilityRegistry = compatibilityCapabilities{}
+	if len(registries) > 0 {
+		registry = registries[0]
+	}
+	return &Queue{db: db, owner: owner, metrics: metrics, registry: registry}
 }

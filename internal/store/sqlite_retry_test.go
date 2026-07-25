@@ -507,3 +507,97 @@ func TestSQLiteBusyIntegrationDoesNotRetryRealReadonlyStorageError(t *testing.T)
 		t.Fatalf("calls=%d sleeps=%d retries=%d exhausted=%d", calls, sleeps, metrics.BusyRetries.Load(), metrics.BusyExhausted.Load())
 	}
 }
+
+func TestWithBusyRetryPolicyStopsAtBudget(t *testing.T) {
+	busy := sqliteTestError(t, sqlite3.SQLITE_BUSY_SNAPSHOT)
+	now := time.Unix(100, 0)
+	calls := 0
+	var sleeps []time.Duration
+	policy := RetryPolicy{Operation: "claim", MaxElapsed: 70 * time.Millisecond, BaseBackoff: 25 * time.Millisecond, MaxBackoff: 100 * time.Millisecond}
+
+	err := withBusyRetryPolicy(context.Background(), nil, policy,
+		func() time.Time { return now },
+		func(_ context.Context, delay time.Duration) error {
+			sleeps = append(sleeps, delay)
+			now = now.Add(delay)
+			return nil
+		},
+		func(base, _ time.Duration) time.Duration { return base },
+		func() error { calls++; return busy },
+	)
+	if err != busy {
+		t.Fatalf("error=%v, want original busy error", err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls=%d, want 2", calls)
+	}
+	if want := []time.Duration{25 * time.Millisecond}; !reflect.DeepEqual(sleeps, want) {
+		t.Fatalf("sleeps=%v, want %v", sleeps, want)
+	}
+}
+
+func TestWithBusyRetryPolicyUsesHeartbeatLeaseBudget(t *testing.T) {
+	policy := HeartbeatLeaseRetryPolicy("heartbeat", 800*time.Millisecond, 150*time.Millisecond)
+	if policy.Operation != "heartbeat" {
+		t.Fatalf("operation=%q", policy.Operation)
+	}
+	if policy.MaxElapsed != 650*time.Millisecond {
+		t.Fatalf("MaxElapsed=%v, want 650ms", policy.MaxElapsed)
+	}
+	if policy.BaseBackoff <= 0 || policy.MaxBackoff < policy.BaseBackoff {
+		t.Fatalf("invalid backoff bounds: base=%v max=%v", policy.BaseBackoff, policy.MaxBackoff)
+	}
+
+	zero := HeartbeatLeaseRetryPolicy("heartbeat", 100*time.Millisecond, 150*time.Millisecond)
+	if zero.MaxElapsed != 0 {
+		t.Fatalf("exhausted lease MaxElapsed=%v, want 0", zero.MaxElapsed)
+	}
+}
+
+func TestWithBusyRetryPolicyContextStoreWrapperAndOperationMetrics(t *testing.T) {
+	busy := sqliteTestError(t, sqlite3.SQLITE_BUSY_SNAPSHOT)
+	metrics := &SQLiteMetrics{}
+	calls := 0
+	err := WithBusyRetryPolicyContext(context.Background(), metrics, RetryPolicy{Operation: "heartbeat", MaxElapsed: time.Second, BaseBackoff: time.Millisecond, MaxBackoff: time.Millisecond}, func(context.Context) error {
+		calls++
+		if calls == 2 {
+			return nil
+		}
+		return fmt.Errorf("wrapped: %w", busy)
+	})
+	if err != nil || calls != 2 {
+		t.Fatalf("err=%v calls=%d", err, calls)
+	}
+	if metrics.BusyRetries.Load() != 1 || metrics.OperationRetries("heartbeat") != 1 {
+		t.Fatalf("retries=%d operation=%d", metrics.BusyRetries.Load(), metrics.OperationRetries("heartbeat"))
+	}
+}
+
+func TestWithBusyRetryPolicyLegacyWrapperDoesNotCallAtBudgetBoundary(t *testing.T) {
+	busy := sqliteTestError(t, sqlite3.SQLITE_BUSY)
+	now := time.Unix(100, 0)
+	calls := 0
+	err := withBusyRetryPolicy(context.Background(), nil, RetryPolicy{MaxElapsed: 25 * time.Millisecond, BaseBackoff: 25 * time.Millisecond, MaxBackoff: 25 * time.Millisecond}, func() time.Time { return now }, func(context.Context, time.Duration) error { now = now.Add(25 * time.Millisecond); return nil }, func(base, _ time.Duration) time.Duration { return base }, func() error { calls++; return busy })
+	if err != busy || calls != 1 {
+		t.Fatalf("err=%v calls=%d", err, calls)
+	}
+}
+
+func TestWithBusyRetryPolicyContextZeroBudgetCountsExhaustedWithoutRetry(t *testing.T) {
+	busy := sqliteTestError(t, sqlite3.SQLITE_BUSY)
+	metrics := &SQLiteMetrics{}
+	calls := 0
+	err := WithBusyRetryPolicyContext(context.Background(), metrics, RetryPolicy{Operation: "heartbeat", MaxElapsed: 0}, func(ctx context.Context) error {
+		calls++
+		if ctx.Err() != nil {
+			t.Fatalf("first context done: %v", ctx.Err())
+		}
+		return busy
+	})
+	if err != busy || calls != 1 {
+		t.Fatalf("err=%v calls=%d", err, calls)
+	}
+	if metrics.BusyRetries.Load() != 0 || metrics.OperationRetries("heartbeat") != 0 || metrics.BusyExhausted.Load() != 1 {
+		t.Fatalf("retries=%d op=%d exhausted=%d", metrics.BusyRetries.Load(), metrics.OperationRetries("heartbeat"), metrics.BusyExhausted.Load())
+	}
+}

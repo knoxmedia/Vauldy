@@ -26,18 +26,18 @@ type playlistItem struct {
 }
 
 type playlistResp struct {
-	ID           int64          `json:"id"`
-	Name         string         `json:"name"`
-	Description  string         `json:"description"`
-	PosterURL    string         `json:"poster_url"`
-	BackgroundURL string        `json:"background_url"`
+	ID            int64          `json:"id"`
+	Name          string         `json:"name"`
+	Description   string         `json:"description"`
+	PosterURL     string         `json:"poster_url"`
+	BackgroundURL string         `json:"background_url"`
 	LogoURL       string         `json:"logo_url"`
 	SquareArtURL  string         `json:"square_art_url"`
 	ItemCount     int            `json:"item_count"`
-	FirstMediaID int64          `json:"first_media_id"`
-	CreatedAt    string         `json:"created_at"`
-	UpdatedAt    string         `json:"updated_at"`
-	Items        []playlistItem `json:"items,omitempty"`
+	FirstMediaID  int64          `json:"first_media_id"`
+	CreatedAt     string         `json:"created_at"`
+	UpdatedAt     string         `json:"updated_at"`
+	Items         []playlistItem `json:"items,omitempty"`
 }
 
 // ListPlaylists returns all playlists for the current user (summary, no items).
@@ -54,8 +54,8 @@ func (h *Handler) ListPlaylists(c *gin.Context) {
 	rows, err := h.App.DB.Query(`
 		SELECT p.id, p.name, p.description, p.poster_url, p.background_url, p.logo_url, p.square_art_url,
 			p.created_at, p.updated_at,
-			(SELECT COUNT(*) FROM playlist_item WHERE playlist_id = p.id) AS item_count,
-			(SELECT pi.media_id FROM playlist_item pi WHERE pi.playlist_id = p.id
+			(SELECT COUNT(*) FROM playlist_item pi JOIN media m ON m.id=pi.media_id WHERE pi.playlist_id = p.id AND m.publication_state IN ('published','degraded')) AS item_count,
+			(SELECT pi.media_id FROM playlist_item pi JOIN media m ON m.id=pi.media_id WHERE pi.playlist_id = p.id AND m.publication_state IN ('published','degraded')
 			 ORDER BY pi.sort_order ASC, pi.id ASC LIMIT 1) AS first_media_id
 		FROM playlist p
 		WHERE p.user_id = ?
@@ -90,8 +90,8 @@ func (h *Handler) ListPlaylists(c *gin.Context) {
 			SquareArtURL:  squareArtURL.String,
 			ItemCount:     itemCount,
 			FirstMediaID:  fm,
-			CreatedAt:    created.String,
-			UpdatedAt:    updated.String,
+			CreatedAt:     created.String,
+			UpdatedAt:     updated.String,
 		})
 	}
 	if playlists == nil {
@@ -140,7 +140,7 @@ func (h *Handler) GetPlaylist(c *gin.Context) {
 			m.title, m.file_type, m.duration, m.width, m.height
 		FROM playlist_item pi
 		JOIN media m ON m.id = pi.media_id
-		WHERE pi.playlist_id = ?
+		WHERE pi.playlist_id = ? AND m.publication_state IN ('published','degraded')
 		ORDER BY pi.sort_order ASC`, pid)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -169,16 +169,16 @@ func (h *Handler) GetPlaylist(c *gin.Context) {
 		items = []playlistItem{}
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"id":           pid,
-		"name":         name.String,
-		"description":  desc.String,
-		"poster_url":   posterURL.String,
+		"id":             pid,
+		"name":           name.String,
+		"description":    desc.String,
+		"poster_url":     posterURL.String,
 		"background_url": bgURL.String,
-		"logo_url":        logoURL.String,
+		"logo_url":       logoURL.String,
 		"square_art_url": squareArtURL.String,
-		"created_at":    created.String,
-		"updated_at":   updated.String,
-		"items":        items,
+		"created_at":     created.String,
+		"updated_at":     updated.String,
+		"items":          items,
 	})
 }
 
@@ -525,6 +525,6 @@ func (h *Handler) UploadPlaylistImage(c *gin.Context) {
 	}
 	url := "/uploads/playlists/" + filename
 	col := field + "_url"
-	_, _ = h.App.DB.Exec(`UPDATE playlist SET ` + col + ` = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, url, pid)
+	_, _ = h.App.DB.Exec(`UPDATE playlist SET `+col+` = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, url, pid)
 	c.JSON(http.StatusOK, gin.H{"ok": true, "url": url})
 }

@@ -1,8 +1,11 @@
 package caststore
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"knox-media/internal/store"
 	"strings"
 	"time"
 
@@ -38,27 +41,27 @@ const mediaPersonMediaOrder = `
 
 // Person is a cast/crew member record.
 type Person struct {
-	ID           int64
-	Name         string
-	NameNorm     string
-	EnglishName  string
-	Gender       int
-	BirthDate    string
-	BirthPlace   string
-	Nationality  string
-	Occupations  []string
-	Biography    string
-	AvatarURL    string
-	Aliases      string
-	Scraped      bool
-	ScrapedAt    string
-	TMDBID       string
-	IMDBID       string
-	DoubanID     string
-	FieldLocks   map[string]bool
-	WorkCount    int64
-	CreatedAt    string
-	UpdatedAt    string
+	ID          int64
+	Name        string
+	NameNorm    string
+	EnglishName string
+	Gender      int
+	BirthDate   string
+	BirthPlace  string
+	Nationality string
+	Occupations []string
+	Biography   string
+	AvatarURL   string
+	Aliases     string
+	Scraped     bool
+	ScrapedAt   string
+	TMDBID      string
+	IMDBID      string
+	DoubanID    string
+	FieldLocks  map[string]bool
+	WorkCount   int64
+	CreatedAt   string
+	UpdatedAt   string
 }
 
 // MediaPersonLink is a filmography / cast credit row.
@@ -79,11 +82,11 @@ type MediaPersonLink struct {
 
 // Collaborator is a co-star summary.
 type Collaborator struct {
-	PersonID            int64
-	Name                string
-	AvatarURL           string
-	CollaborationCount  int64
-	RecentMovieTitles   []string
+	PersonID           int64
+	Name               string
+	AvatarURL          string
+	CollaborationCount int64
+	RecentMovieTitles  []string
 }
 
 // PersonPatch holds editable person fields.
@@ -773,4 +776,120 @@ func SearchPersons(db *sql.DB, query string, limit int) ([]Person, error) {
 func MarkScraped(db *sql.DB, personID int64) {
 	_, _ = db.Exec(`UPDATE cast_person SET scraped = 1, scraped_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 		time.Now().UTC().Format("2006-01-02 15:04:05"), personID)
+}
+
+func findOrCreateByTMDBExecutor(ctx context.Context, db store.SQLExecutor, tmdbID, name string) (int64, error) {
+	tmdbID = strings.TrimSpace(tmdbID)
+	if tmdbID == "" {
+		return findOrCreateByNameExecutor(ctx, db, name)
+	}
+	var id int64
+	err := db.QueryRowContext(ctx, `SELECT id FROM cast_person WHERE tmdb_id=? AND deleted_at IS NULL LIMIT 1`, tmdbID).Scan(&id)
+	if err == nil && id > 0 {
+		return id, nil
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, err
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "Unknown"
+	}
+	r, e := db.ExecContext(ctx, `INSERT INTO cast_person(name,name_norm,tmdb_id,occupation_json) VALUES(?,?,?,'[]')`, name, normName(name), tmdbID)
+	if e != nil {
+		return 0, e
+	}
+	return r.LastInsertId()
+}
+func findOrCreateByNameExecutor(ctx context.Context, db store.SQLExecutor, name string) (int64, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return 0, sql.ErrNoRows
+	}
+	var id int64
+	err := db.QueryRowContext(ctx, `SELECT id FROM cast_person WHERE name_norm=? AND deleted_at IS NULL LIMIT 1`, normName(name)).Scan(&id)
+	if err == nil && id > 0 {
+		return id, nil
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, err
+	}
+	r, e := db.ExecContext(ctx, `INSERT INTO cast_person(name,name_norm,occupation_json) VALUES(?,?,'[]')`, name, normName(name))
+	if e != nil {
+		return 0, e
+	}
+	return r.LastInsertId()
+}
+func linkMediaPersonExecutor(ctx context.Context, db store.SQLExecutor, mediaID, personID int64, occupation, character, role string, sortOrder int) error {
+	occupation = strings.TrimSpace(occupation)
+	if occupation == "" {
+		occupation = OccActor
+	}
+	if !ValidOccupations[occupation] {
+		occupation = OccOther
+	}
+	if sortOrder <= 0 {
+		sortOrder = 9999
+	}
+	_, e := db.ExecContext(ctx, `INSERT INTO media_person(media_id,person_id,occupation,character_name,role_type,sort_order) VALUES(?,?,?,?,?,?) ON CONFLICT(media_id,person_id,occupation) DO UPDATE SET character_name=excluded.character_name,role_type=excluded.role_type,sort_order=excluded.sort_order,updated_at=CURRENT_TIMESTAMP`, mediaID, personID, occupation, strings.TrimSpace(character), strings.TrimSpace(role), sortOrder)
+	return e
+}
+func mergePersonOccupationsExecutor(ctx context.Context, db store.SQLExecutor, id int64, occupations ...string) error {
+	var raw sql.NullString
+	if err := db.QueryRowContext(ctx, `SELECT occupation_json FROM cast_person WHERE id=?`, id).Scan(&raw); err != nil {
+		return err
+	}
+	existing := decodeOccupations(raw.String)
+	seen := map[string]bool{}
+	for _, o := range existing {
+		seen[o] = true
+	}
+	for _, o := range occupations {
+		o = strings.TrimSpace(o)
+		if o != "" && ValidOccupations[o] && !seen[o] {
+			seen[o] = true
+			existing = append(existing, o)
+		}
+	}
+	r, err := db.ExecContext(ctx, `UPDATE cast_person SET occupation_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`, encodeOccupations(existing), id)
+	if err != nil {
+		return err
+	}
+	n, err := r.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+func applyScrapePatchExecutor(ctx context.Context, db store.SQLExecutor, id int64, patch PersonPatch) error {
+	var locksRaw, name sql.NullString
+	if e := db.QueryRowContext(ctx, `SELECT name,field_locks_json FROM cast_person WHERE id=? AND deleted_at IS NULL`, id).Scan(&name, &locksRaw); e != nil {
+		return e
+	}
+	locks := decodeFieldLocks(locksRaw.String)
+	updates := []string{"updated_at=CURRENT_TIMESTAMP", "scraped=1", "scraped_at=CURRENT_TIMESTAMP"}
+	args := []any{}
+	if v := strings.TrimSpace(patch.Name); v != "" && !locks["name"] {
+		updates = append(updates, "name=?", "name_norm=?")
+		args = append(args, v, normName(v))
+	}
+	if v := strings.TrimSpace(patch.AvatarURL); v != "" && !locks["avatar_url"] {
+		updates = append(updates, "avatar_url=?")
+		args = append(args, v)
+	}
+	if v := strings.TrimSpace(patch.TMDBID); v != "" && !locks["tmdb_id"] {
+		updates = append(updates, "tmdb_id=?")
+		args = append(args, v)
+	}
+	if len(patch.Occupations) > 0 && !locks["occupation"] {
+		updates = append(updates, "occupation_json=?")
+		args = append(args, encodeOccupations(patch.Occupations))
+	}
+	updates = append(updates, "field_locks_json=?")
+	args = append(args, encodeFieldLocks(locks), id)
+	_, e := db.ExecContext(ctx, "UPDATE cast_person SET "+strings.Join(updates, ",")+" WHERE id=?", args...)
+	return e
 }

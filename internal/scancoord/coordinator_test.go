@@ -76,55 +76,194 @@ func newTestCoordinator(t *testing.T, db *sql.DB, owner string, scanner Scanner)
 
 func TestCoordinator_CompetesAcrossInstances(t *testing.T) {
 	db, libraries := openCoordinatorTestDB(t, 1)
-	scannerA, scannerB := newBlockingScanner(), newBlockingScanner()
-	defer close(scannerA.release)
-	defer close(scannerB.release)
-	coordinators := []*Coordinator{
-		newTestCoordinator(t, db, "instance-a", scannerA),
-		newTestCoordinator(t, db, "instance-b", scannerB),
+	const submitters = 20
+	coordinators := make([]*Coordinator, 0, submitters)
+	for i := 0; i < submitters; i++ {
+		scanner := newBlockingScanner()
+		defer close(scanner.release)
+		coordinators = append(coordinators, newTestCoordinator(t, db, fmt.Sprintf("instance-%d", i), scanner))
 	}
-
 	start := make(chan struct{})
-	results := make(chan SubmitResult, 2)
-	errs := make(chan error, 2)
+	results := make(chan SubmitResult, submitters)
+	errs := make(chan error, submitters)
+	var ready sync.WaitGroup
+	ready.Add(submitters)
 	for _, coordinator := range coordinators {
-		coordinator := coordinator
-		go func() {
+		go func(c *Coordinator) {
+			ready.Done()
 			<-start
-			result, err := coordinator.Submit(context.Background(), ScanRequest{LibraryID: libraries[0], Source: SourceManual, Roots: []string{"/root"}})
+			result, err := c.Submit(context.Background(), ScanRequest{LibraryID: libraries[0], Source: SourceManual, Roots: []string{"/root"}})
 			results <- result
 			errs <- err
-		}()
+		}(coordinator)
 	}
+	ready.Wait()
 	close(start)
 
-	first, second := <-results, <-results
-	if err := <-errs; err != nil {
-		t.Fatalf("Submit: %v", err)
+	started, winnerID := 0, int64(0)
+	all := make([]SubmitResult, 0, submitters)
+	for i := 0; i < submitters; i++ {
+		if err := <-errs; err != nil {
+			t.Fatalf("Submit: %v", err)
+		}
+		result := <-results
+		all = append(all, result)
+		if result.Started {
+			started++
+			winnerID = result.TaskID
+		}
 	}
-	if err := <-errs; err != nil {
-		t.Fatalf("Submit: %v", err)
+	if started != 1 || winnerID == 0 {
+		t.Fatalf("started=%d winner=%d results=%+v", started, winnerID, all)
 	}
-	if first.Started == second.Started {
-		t.Fatalf("Started values = %v and %v, want exactly one true", first.Started, second.Started)
+	for _, result := range all {
+		if !result.Started && (result.TaskID != 0 || result.ExistingTaskID != winnerID) {
+			t.Fatalf("loser=%+v want no new task and existing=%d", result, winnerID)
+		}
 	}
-	winner, loser := first, second
-	if !winner.Started {
-		winner, loser = second, first
+	var taskCount, cancelledCount int
+	if err := db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(CASE WHEN status='cancelled' THEN 1 ELSE 0 END),0) FROM scan_task WHERE library_id=?`, libraries[0]).Scan(&taskCount, &cancelledCount); err != nil {
+		t.Fatal(err)
 	}
-	if winner.TaskID == 0 || loser.ExistingTaskID != winner.TaskID {
-		t.Fatalf("winner=%+v loser=%+v, want loser to reference winner", winner, loser)
+	if taskCount != 1 || cancelledCount != 0 {
+		t.Fatalf("tasks=%d cancelled=%d want 1,0", taskCount, cancelledCount)
 	}
-	if loser.TaskID == 0 || loser.TaskID == winner.TaskID {
-		t.Fatalf("loser TaskID=%d, want distinct persisted rejected task", loser.TaskID)
-	}
+}
 
-	var leaseCount int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM scan_lease WHERE library_id=? AND lease_until > CURRENT_TIMESTAMP`, libraries[0]).Scan(&leaseCount); err != nil {
-		t.Fatalf("count leases: %v", err)
+func TestCoordinatorActiveLeaseReturnsExistingWithoutCancelledTaskRow(t *testing.T) {
+	db, libraries := openCoordinatorTestDB(t, 1)
+	old, err := db.Exec(`INSERT INTO scan_task(library_id,status,source,started_at) VALUES(?,'running',?,CURRENT_TIMESTAMP)`, libraries[0], SourceManual)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if leaseCount != 1 {
-		t.Fatalf("valid lease count=%d, want 1", leaseCount)
+	oldTaskID, _ := old.LastInsertId()
+	if _, err := db.Exec(`INSERT INTO scan_lease(library_id,scan_task_id,owner_id,lease_until) VALUES(?,?,?,datetime(CURRENT_TIMESTAMP,'+1 minute'))`, libraries[0], oldTaskID, "other/active"); err != nil {
+		t.Fatal(err)
+	}
+	coordinator := newTestCoordinator(t, db, "new-instance", &countingScanner{})
+	got, err := coordinator.Submit(context.Background(), ScanRequest{LibraryID: libraries[0], Source: SourceScheduled, Roots: []string{"/ignored"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Started || got.TaskID != 0 || got.ExistingTaskID != oldTaskID {
+		t.Fatalf("Submit=%+v want existing task %d without insertion", got, oldTaskID)
+	}
+	var count, cancelled int
+	if err := db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(cancelled),0) FROM scan_task WHERE library_id=?`, libraries[0]).Scan(&count, &cancelled); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || cancelled != 0 {
+		t.Fatalf("count=%d cancelled=%d want 1,0", count, cancelled)
+	}
+}
+
+func TestCoordinatorUnexpiredStaleLeaseStartsNewTask(t *testing.T) {
+	for _, status := range []string{"done", "failed", "cancelled", "missing"} {
+		t.Run(status, func(t *testing.T) {
+			db, libraries := openCoordinatorTestDB(t, 1)
+			staleTaskID := int64(999999)
+			if status != "missing" {
+				cancelled := 0
+				if status == "cancelled" {
+					cancelled = 1
+				}
+				res, err := db.Exec(`INSERT INTO scan_task(library_id,status,source,cancelled) VALUES(?,?,?,?)`, libraries[0], status, SourceManual, cancelled)
+				if err != nil {
+					t.Fatal(err)
+				}
+				staleTaskID, _ = res.LastInsertId()
+			}
+			if status == "missing" {
+				if _, err := db.Exec(`PRAGMA foreign_keys=OFF`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := db.Exec(`INSERT INTO scan_lease(library_id,scan_task_id,owner_id,lease_until) VALUES(?,?,?,datetime(CURRENT_TIMESTAMP,'+1 minute'))`, libraries[0], staleTaskID, "stale/owner"); err != nil {
+				t.Fatal(err)
+			}
+			coordinator := newTestCoordinator(t, db, "replacement", &countingScanner{})
+			got, err := coordinator.Submit(context.Background(), ScanRequest{LibraryID: libraries[0], Source: SourceScheduled, Roots: []string{"/new"}})
+			if err != nil || !got.Started || got.TaskID == staleTaskID {
+				t.Fatalf("Submit=%+v err=%v stale=%d", got, err, staleTaskID)
+			}
+			var leaseTask int64
+			if err := db.QueryRow(`SELECT scan_task_id FROM scan_lease WHERE library_id=?`, libraries[0]).Scan(&leaseTask); err != nil {
+				t.Fatal(err)
+			}
+			if leaseTask != got.TaskID {
+				t.Fatalf("lease task=%d want %d", leaseTask, got.TaskID)
+			}
+		})
+	}
+}
+
+func TestCoordinatorCommitErrorAfterCommitConfirmsAndStartsScanner(t *testing.T) {
+	db, libraries := openCoordinatorTestDB(t, 1)
+	scanner := newBlockingScanner()
+	defer close(scanner.release)
+	coordinator := newTestCoordinator(t, db, "commit-confirm", scanner)
+	coordinator.withImmediateTx = func(ctx context.Context, db *sql.DB, fn func(store.ImmediateConnTx) error) (store.ImmediateOutcome, error) {
+		outcome, err := store.WithImmediateConnTx(ctx, db, fn)
+		if err != nil {
+			return outcome, err
+		}
+		return store.ImmediateOutcome{CommitAttempted: true}, &store.ImmediateCommitError{Cause: errors.New("injected error after actual commit")}
+	}
+	got, err := coordinator.Submit(context.Background(), ScanRequest{LibraryID: libraries[0], Source: SourceManual, Roots: []string{"/root"}})
+	if err != nil || !got.Started || got.TaskID == 0 {
+		t.Fatalf("Submit=%+v err=%v", got, err)
+	}
+	select {
+	case <-scanner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("confirmed committed scan did not start")
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM scan_task WHERE library_id=?`, libraries[0]).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("tasks=%d want 1", count)
+	}
+}
+
+func TestCoordinatorAmbiguousCommitConfirmationDoesNotRetryInsert(t *testing.T) {
+	db, libraries := openCoordinatorTestDB(t, 1)
+	coordinator := newTestCoordinator(t, db, "commit-ambiguous", &countingScanner{})
+	commitCalls := 0
+	coordinator.withImmediateTx = func(ctx context.Context, db *sql.DB, fn func(store.ImmediateConnTx) error) (store.ImmediateOutcome, error) {
+		commitCalls++
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			return store.ImmediateOutcome{}, err
+		}
+		defer conn.Close()
+		if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+			return store.ImmediateOutcome{}, err
+		}
+		if err := fn(conn); err != nil {
+			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+			return store.ImmediateOutcome{}, err
+		}
+		_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+		return store.ImmediateOutcome{CommitAttempted: true}, &store.ImmediateCommitError{Cause: errors.New("commit outcome unknown")}
+	}
+	coordinator.confirmSubmit = func(int64, int64, string) (time.Time, bool, error) {
+		return time.Time{}, false, errors.New("database is locked (5)")
+	}
+	_, err := coordinator.Submit(context.Background(), ScanRequest{LibraryID: libraries[0], Source: SourceManual, Roots: []string{"/root"}})
+	if err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("err=%v want ambiguous commit", err)
+	}
+	if commitCalls != 1 {
+		t.Fatalf("commit calls=%d want no blind retry", commitCalls)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM scan_task WHERE library_id=?`, libraries[0]).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("tasks=%d want rolled back candidate", count)
 	}
 }
 
@@ -813,6 +952,7 @@ type cancelTargetSpy struct {
 	mu    sync.Mutex
 	calls []int64
 	ctxs  []error
+	err   error
 }
 
 func (s *cancelTargetSpy) cancel(ctx context.Context, taskID int64) error {
@@ -820,7 +960,7 @@ func (s *cancelTargetSpy) cancel(ctx context.Context, taskID int64) error {
 	defer s.mu.Unlock()
 	s.calls = append(s.calls, taskID)
 	s.ctxs = append(s.ctxs, ctx.Err())
-	return nil
+	return s.err
 }
 
 func insertScanPostTask(t *testing.T, db *sql.DB, libraryID, scanTaskID int64, status postingest.Status, suffix string) int64 {
@@ -859,7 +999,7 @@ func TestCoordinator_CancelScanAtomicallyCancelsWaitingPostTasksAfterCommit(t *t
 		t.Fatal(err)
 	}
 	waitForTaskStatus(t, db, result.TaskID, "cancelled")
-	for id, want := range map[int64]postingest.Status{waitingID: postingest.StatusCancelled, runningID: postingest.StatusRunning, doneID: postingest.StatusDone} {
+	for id, want := range map[int64]postingest.Status{waitingID: postingest.StatusCancelled, runningID: postingest.StatusCancelled, doneID: postingest.StatusDone} {
 		var got postingest.Status
 		var finished sql.NullTime
 		if err := db.QueryRow(`SELECT status,finished_at FROM post_ingest_task WHERE id=?`, id).Scan(&got, &finished); err != nil {
@@ -876,6 +1016,30 @@ func TestCoordinator_CancelScanAtomicallyCancelsWaitingPostTasksAfterCommit(t *t
 	defer target.mu.Unlock()
 	if len(target.calls) != 1 || target.calls[0] != result.TaskID {
 		t.Fatalf("cancel target calls=%v", target.calls)
+	}
+}
+
+func TestCoordinator_CancelIgnoresPostCommitLocalCallbackError(t *testing.T) {
+	db, libraries := openCoordinatorTestDB(t, 1)
+	target := &cancelTargetSpy{err: errors.New("local dispatcher unavailable")}
+	coordinator, err := New(db, Options{LeaseDuration: time.Minute, HeartbeatInterval: 20 * time.Second, OwnerInstanceID: "local-error-owner", Scanner: &countingScanner{}, OnScanCancelled: target.cancel})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := coordinator.Submit(context.Background(), ScanRequest{LibraryID: libraries[0], Source: SourceManual, Roots: []string{"/a"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForTaskStatus(t, db, result.TaskID, "done")
+	if _, err = db.Exec(`UPDATE scan_task SET status='waiting',cancelled=0,finished_at=NULL WHERE id=?`, result.TaskID); err != nil {
+		t.Fatal(err)
+	}
+	cancelResult, err := coordinator.Cancel(context.Background(), result.TaskID)
+	if err != nil || !cancelResult.Cancelled {
+		t.Fatalf("result=%+v err=%v", cancelResult, err)
+	}
+	if len(target.calls) != 1 || target.calls[0] != result.TaskID {
+		t.Fatalf("calls=%v", target.calls)
 	}
 }
 
@@ -1444,5 +1608,48 @@ func TestFinalizeAndReleaseDoesNotMutateAfterTakeover(t *testing.T) {
 	_ = db.QueryRow(`SELECT scan_task_id,owner_id FROM scan_lease WHERE library_id=?`, libraries[0]).Scan(&leaseTask, &leaseOwner)
 	if status != "failed" || message != "taken over" || leaseTask != newTaskID || leaseOwner != "new-owner" {
 		t.Fatalf("old=%s/%q lease=%d/%q", status, message, leaseTask, leaseOwner)
+	}
+}
+
+type discoveryCallbackScanner struct {
+	discovery scanner.ScanDiscovery
+}
+
+func (s *discoveryCallbackScanner) ScanLibraryFoldersWithContextAndCallbacks(ctx context.Context, _ int64, _ []string, callbacks scanner.ScanCallbacks) (int, error) {
+	return 1, callbacks.OnMediaDiscoveredTx(ctx, nil, s.discovery)
+}
+
+func TestCoordinatorForwardsDiscoveryDiagnosticsWithTaskID(t *testing.T) {
+	db, libraries := openCoordinatorTestDB(t, 1)
+	discovery := scanner.ScanDiscovery{MediaID: 99, FileType: "video", MetadataAttempt: scanner.MetadataAttempt{Attempted: true, Fields: []string{"duration"}, Errors: []scanner.MetadataDiagnostic{{Source: "probe", Message: "partial"}}}}
+	seen := make(chan struct {
+		taskID int64
+		value  scanner.ScanDiscovery
+	}, 1)
+	coordinator, err := New(db, Options{
+		LeaseDuration: time.Minute, HeartbeatInterval: 20 * time.Second,
+		OwnerInstanceID: "discovery-callback-test", Scanner: &discoveryCallbackScanner{discovery: discovery},
+		OnMediaDiscoveredTx: func(_ context.Context, _ *sql.Tx, taskID int64, got scanner.ScanDiscovery) error {
+			seen <- struct {
+				taskID int64
+				value  scanner.ScanDiscovery
+			}{taskID: taskID, value: got}
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := coordinator.Submit(context.Background(), ScanRequest{LibraryID: libraries[0], Source: SourceManual, Roots: []string{t.TempDir()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-seen:
+		if got.taskID != result.TaskID || got.value.MediaID != 99 || !got.value.MetadataAttempt.Attempted || len(got.value.MetadataAttempt.Errors) != 1 {
+			t.Fatalf("callback task=%d discovery=%+v", got.taskID, got.value)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for discovery callback")
 	}
 }

@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -15,17 +16,22 @@ type scanSubmitterSpy struct {
 	mu       sync.Mutex
 	requests []scancoord.ScanRequest
 	called   chan struct{}
+	errs     []error
 }
 
 func (s *scanSubmitterSpy) Submit(_ context.Context, req scancoord.ScanRequest) (scancoord.SubmitResult, error) {
 	s.mu.Lock()
 	s.requests = append(s.requests, req)
+	var err error
+	if len(s.errs) > 0 {
+		err, s.errs = s.errs[0], s.errs[1:]
+	}
 	s.mu.Unlock()
 	select {
 	case s.called <- struct{}{}:
 	default:
 	}
-	return scancoord.SubmitResult{TaskID: 41, Started: true}, nil
+	return scancoord.SubmitResult{TaskID: 41, Started: err == nil}, err
 }
 
 func TestUnifiedScanSubmitterMonitorUsesMonitorSource(t *testing.T) {
@@ -114,36 +120,98 @@ func TestScanSourcesDistinguishRealtimeAndAutoScan(t *testing.T) {
 	}
 }
 
-func TestScanSourcesRealtimeWinsThenScheduledWhenDue(t *testing.T) {
+func TestScanSourcesCoalesceRealtimeAndAutoScanPerTick(t *testing.T) {
 	db, err := store.OpenSQLite(filepath.Join(t.TempDir(), "both.sqlite"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	root := t.TempDir()
-	result, err := db.Exec(`INSERT INTO library(name,path,type,enabled,realtime_monitor,auto_scan) VALUES('both',?,'movie',1,1,1)`, root)
+	fallback := filepath.Clean(filepath.Join(t.TempDir(), "fallback"))
+	rootA := filepath.Clean(filepath.Join(t.TempDir(), "a"))
+	rootB := filepath.Clean(filepath.Join(t.TempDir(), "b"))
+	result, err := db.Exec(`INSERT INTO library(name,path,type,enabled,realtime_monitor,auto_scan) VALUES('both',?,'movie',1,1,1)`, fallback)
 	if err != nil {
 		t.Fatal(err)
 	}
 	id, _ := result.LastInsertId()
+	for i, folder := range []string{"  " + rootA + "  ", rootA, rootB} {
+		if _, err := db.Exec(`INSERT INTO library_folder(library_id,path,sort_order) VALUES(?,?,?)`, id, folder, i); err != nil {
+			t.Fatal(err)
+		}
+	}
 	spy := &scanSubmitterSpy{called: make(chan struct{}, 4)}
 	service := NewService(db, spy, time.Hour)
 	service.AutoScanInterval = time.Hour
+
 	service.tick(context.Background())
 	service.mu.Lock()
 	service.lastAutoScan[id] = time.Now().Add(-2 * time.Hour)
 	service.mu.Unlock()
 	service.tick(context.Background())
+
+	spy.mu.Lock()
+	defer spy.mu.Unlock()
+	if len(spy.requests) != 2 {
+		t.Fatalf("requests=%+v want one per tick", spy.requests)
+	}
+	for i, req := range spy.requests {
+		if req.LibraryID != id || req.Source != scancoord.SourceMonitor {
+			t.Fatalf("request %d=%+v want realtime monitor precedence", i, req)
+		}
+		if len(req.Roots) != 2 || req.Roots[0] != rootA || req.Roots[1] != rootB {
+			t.Fatalf("request %d roots=%q want normalized unique roots [%q %q]", i, req.Roots, rootA, rootB)
+		}
+	}
+}
+
+func TestAutoScanRetriesImmediatelyAfterSubmitFailureAndMarksAccepted(t *testing.T) {
+	db, err := store.OpenSQLite(filepath.Join(t.TempDir(), "auto-retry.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	root := t.TempDir()
+	res, err := db.Exec(`INSERT INTO library(name,path,type,enabled,realtime_monitor,auto_scan) VALUES('auto',?,'movie',1,0,1)`, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	libraryID, _ := res.LastInsertId()
+	spy := &scanSubmitterSpy{errs: []error{errors.New("submit failed"), nil}}
+	service := NewService(db, spy, time.Hour)
+	service.AutoScanInterval = time.Hour
+	service.tick(context.Background())
+	service.tick(context.Background())
 	service.tick(context.Background())
 	spy.mu.Lock()
 	defer spy.mu.Unlock()
-	want := []scancoord.Source{scancoord.SourceMonitor, scancoord.SourceScheduled, scancoord.SourceMonitor, scancoord.SourceScheduled, scancoord.SourceMonitor}
-	if len(spy.requests) != len(want) {
-		t.Fatalf("requests=%+v", spy.requests)
+	if len(spy.requests) != 2 {
+		t.Fatalf("requests=%d want failed retry then accepted suppression", len(spy.requests))
 	}
-	for i, source := range want {
-		if spy.requests[i].Source != source {
-			t.Fatalf("request %d source=%q want=%q", i, spy.requests[i].Source, source)
-		}
+	service.mu.Lock()
+	_, marked := service.lastAutoScan[libraryID]
+	service.mu.Unlock()
+	if !marked {
+		t.Fatal("accepted/coalesced nil submit did not advance auto-scan time")
+	}
+}
+
+func TestAutoScanWithoutRootsDoesNotAdvance(t *testing.T) {
+	db, err := store.OpenSQLite(filepath.Join(t.TempDir(), "auto-no-roots.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	res, err := db.Exec(`INSERT INTO library(name,path,type,enabled,realtime_monitor,auto_scan) VALUES('auto','','movie',1,0,1)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	libraryID, _ := res.LastInsertId()
+	service := NewService(db, &scanSubmitterSpy{}, time.Hour)
+	service.tick(context.Background())
+	service.mu.Lock()
+	_, marked := service.lastAutoScan[libraryID]
+	service.mu.Unlock()
+	if marked {
+		t.Fatal("no-roots scan advanced auto-scan time")
 	}
 }

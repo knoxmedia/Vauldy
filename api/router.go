@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -13,6 +15,9 @@ import (
 )
 
 func NewEngine(cfg *config.Config, application *app.App, deps handler.Dependencies) *gin.Engine {
+	if deps.ServerContext == nil || deps.Background == nil {
+		panic("api: ServerContext and Background dependencies are required")
+	}
 	if cfg.Server.Mode == "release" {
 		gin.SetMode(gin.ReleaseMode)
 	}
@@ -25,24 +30,45 @@ func NewEngine(cfg *config.Config, application *app.App, deps handler.Dependenci
 	mountStaticRoutes(r, cfg.Data.Static, resolvePowerPlayerStatic(webBundle))
 	r.Static(metadatalib.PublicURLPrefix, cfg.Data.MetadataLibrary)
 
-	if deps.ServerContext == nil || deps.Background == nil {
-		panic("api: lifecycle dependencies are required")
-	}
 	h := handler.New(application, deps)
 	if deps.DocCoverWorker != nil {
 		deps.DocCoverWorker.SetOnCoverReady(h.ScheduleLibraryPreviewRefreshForMedia)
 	}
-	deps.Background.Go(deps.ServerContext, h.StartScheduleLoop)
-	deps.Background.Go(deps.ServerContext, h.StartScrapeTaskLoop)
-	deps.Background.Go(deps.ServerContext, h.StartSubtitleTaskLoop)
-	deps.Background.Go(deps.ServerContext, h.StartKeyframeTaskLoop)
-	deps.Background.Go(deps.ServerContext, h.StartAtrackTaskLoop)
-	deps.Background.Go(deps.ServerContext, h.StartPreviewTaskLoop)
-	deps.Background.Go(deps.ServerContext, h.StartTranscodeTaskLoop)
-	deps.Background.Go(deps.ServerContext, h.StartLyricTaskLoop)
-	deps.Background.Go(deps.ServerContext, h.StartPhotoClassifyLoop)
-	deps.Background.Go(deps.ServerContext, h.StartPhotoLocationLoop)
-	deps.Background.Go(deps.ServerContext, h.StartPhotoFaceLoop)
+	// Defer claim loops until publication v2 startup finishes preflight/recovery.
+	// Preview/subtitle/keyframe/atrack execute through the post-ingest dispatcher.
+	startLoop := func(loop func(context.Context)) {
+		deps.Background.Go(deps.ServerContext, func(ctx context.Context) {
+			if deps.StartupReady != nil {
+				select {
+				case <-ctx.Done():
+					return
+				case <-deps.StartupReady:
+				}
+			}
+			loop(ctx)
+		})
+	}
+	startLoop(h.StartScheduleLoop)
+	startLoop(h.StartScrapeTaskLoop)
+	startLoop(h.StartTranscodeTaskLoop)
+	startLoop(h.StartLyricTaskLoop)
+	startLoop(h.StartPhotoClassifyLoop)
+	startLoop(h.StartPhotoLocationLoop)
+	startLoop(h.StartPhotoFaceLoop)
+	startLoop(h.StartMediaFileCleanupLoop)
+	if deps.DocCoverWorker != nil {
+		deps.Background.Go(deps.ServerContext, deps.DocCoverWorker.Start)
+		deps.Background.Go(deps.ServerContext, func(ctx context.Context) {
+			timer := time.NewTimer(500 * time.Millisecond)
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+				return
+			case <-timer.C:
+				deps.DocCoverWorker.BackfillAllLibraries()
+			}
+		})
+	}
 
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "knox-media"})
@@ -107,6 +133,12 @@ func NewEngine(cfg *config.Config, application *app.App, deps handler.Dependenci
 			auth.GET("/artist/:id", h.GetArtist)
 			auth.PATCH("/artist/:id", h.UpdateArtist)
 			auth.GET("/artist/:id/image-candidates", h.ListArtistImageCandidates)
+			auth.GET("/persons", h.ListPersons)
+			auth.GET("/persons/search", h.SearchCastPersons)
+			auth.GET("/person/:id", h.GetPerson)
+			auth.GET("/person/:id/works", h.ListPersonWorks)
+			auth.GET("/person/:id/collaborators", h.ListPersonCollaborators)
+			auth.GET("/media/:id/persons", h.ListMediaPersons)
 			auth.PATCH("/library/:id/genre", h.UpdateLibraryGenre)
 			auth.GET("/series/:id", h.GetSeries)
 			auth.GET("/series/:id/play-target", h.GetSeriesPlayTarget)
@@ -164,6 +196,7 @@ func NewEngine(cfg *config.Config, application *app.App, deps handler.Dependenci
 			play.GET("/media/:id/poster.jpg", h.ServeMediaPoster)
 			play.GET("/album/:id/artwork", h.ServeAlbumArtwork)
 			play.GET("/artist/:id/artwork", h.ServeArtistArtwork)
+			play.GET("/person/:id/avatar", h.ServePersonAvatar)
 			play.GET("/media/:id/photo", h.PhotoPreviewInfo)
 			play.GET("/media/:id/photo/thumb.jpg", h.ServePhotoThumb)
 			play.GET("/media/:id/photo/medium.jpg", h.ServePhotoMedium)
@@ -214,6 +247,11 @@ func NewEngine(cfg *config.Config, application *app.App, deps handler.Dependenci
 			adm.GET("/scan/task", h.ListScanTasks)
 			adm.POST("/scan/task/:id/cancel", h.CancelScanTask)
 
+			adm.GET("/admin/media", h.AdminListMedia)
+			adm.GET("/admin/media/:id/ingest", h.AdminGetMediaIngest)
+			adm.POST("/admin/media/:id/ingest/retry", h.AdminRetryMediaIngest)
+			adm.POST("/admin/media/:id/ingest/steps/:step_id/retry", h.AdminRetryOptionalScrape)
+
 			adm.POST("/media/:id/scrape", h.ScrapeMedia)
 			adm.POST("/media/:id/subtitle/process", h.ProcessMediaSubtitles)
 			adm.POST("/media/:id/subtitle", h.EnqueueSubtitleProcessing)
@@ -246,6 +284,19 @@ func NewEngine(cfg *config.Config, application *app.App, deps handler.Dependenci
 			adm.GET("/scrape/search", h.SearchScrapeMatches)
 			adm.GET("/scrape/parse-title", h.ParseScrapeTitle)
 			adm.GET("/scrape/tmdb/images", h.SearchTMDbImages)
+			adm.GET("/scrape/person/search", h.SearchPersonCandidates)
+			adm.POST("/persons", h.CreatePerson)
+			adm.PATCH("/person/:id", h.UpdatePerson)
+			adm.DELETE("/person/:id", h.DeletePerson)
+			adm.POST("/person/:id/scrape", h.ApplyPersonScrape)
+			adm.GET("/person/scrape/tasks", h.ListPersonScrapeTasks)
+			adm.POST("/person/scrape/tasks", h.EnqueuePersonScrapeTask)
+			adm.POST("/media/:id/persons", h.AddMediaPerson)
+			adm.PATCH("/media/:id/persons/:linkId", h.UpdateMediaPersonLink)
+			adm.DELETE("/media/:id/persons/:linkId", h.DeleteMediaPersonLink)
+			adm.POST("/media/:id/import-credits", h.ImportMediaCreditsFromTMDB)
+			adm.POST("/library/:id/import-credits", h.RescrapeAllMediaCredits)
+			adm.GET("/cast/stats", h.GetCastStats)
 
 			adm.POST("/upload", h.UploadSingle)
 			adm.POST("/upload/mkdir", h.CreateUploadDirectory)

@@ -73,7 +73,7 @@ func (h *Handler) ListPlaybackHistory(c *gin.Context) {
 			LEFT JOIN media m ON m.id = a.media_id
 			LEFT JOIN library l ON l.id = m.library_id
 			LEFT JOIN user u ON u.id = a.user_id
-			WHERE a.action = 'playback_start' AND %s
+			WHERE a.action = 'playback_start' AND m.publication_state IN ('published','degraded') AND %s
 
 			UNION ALL
 
@@ -96,7 +96,7 @@ func (h *Handler) ListPlaybackHistory(c *gin.Context) {
 			INNER JOIN media m ON m.file_id = p.file_id
 			LEFT JOIN user u ON u.id = p.user_id
 			LEFT JOIN library l ON l.id = m.library_id
-			WHERE %s
+			WHERE m.publication_state IN ('published','degraded') AND %s
 			  AND NOT EXISTS (
 			      SELECT 1 FROM activity_log a2
 			      WHERE a2.action = 'playback_start'

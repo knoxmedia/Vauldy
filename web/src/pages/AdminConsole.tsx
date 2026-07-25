@@ -48,8 +48,16 @@ export function isAdminOverview(value: unknown): value is AdminOverview {
     && ["owner_id", "lease_until"].every((key) => typeof lease[key] === "string")
     && typeof lease.expired === "boolean")) return false;
   if (!["global_limit", "global_used", "poster_limit", "poster_used", "preview_limit", "preview_used"].every((key) => typeof budget[key] === "number")) return false;
-  return typeof metrics.scope === "string" && metrics.persistent === false
-    && ["busy_retries", "busy_exhausted", "progress_batches", "log_batches", "log_failures", "dropped_logs"].every((key) => typeof metrics[key] === "number");
+  if (!(typeof metrics.scope === "string" && metrics.persistent === false
+    && ["busy_retries", "busy_exhausted", "progress_batches", "log_batches", "log_failures", "dropped_logs"].every((key) => typeof metrics[key] === "number"))) return false;
+  if (!Array.isArray(value.publication_policy)) return false;
+  const policyNumbers = ["media_id", "run_id", "generation", "policy_version", "required_waiting", "required_failed", "optional_waiting", "optional_failed"];
+  const policyStrings = ["status", "terminal_reason", "recovery_error"];
+  return value.publication_policy.every((row) => isRecord(row)
+    && policyNumbers.every((key) => typeof row[key] === "number")
+    && policyStrings.every((key) => typeof row[key] === "string")
+    && Array.isArray(row.adapter_unavailable) && row.adapter_unavailable.every((item) => typeof item === "string")
+    && Array.isArray(row.metadata_errors) && row.metadata_errors.every((item) => typeof item === "string"));
 }
 
 export default function AdminConsolePage() {
@@ -240,6 +248,28 @@ export default function AdminConsolePage() {
             </Row>
           </Card>
         </Space>
+      </Card>
+      <Card title={t("pages.admin_console.publication_policy")} loading={overviewLoading}>
+        <Table
+          rowKey="run_id"
+          size="small"
+          pagination={false}
+          scroll={{ x: 1400 }}
+          dataSource={(overview?.publication_policy ?? []).slice(0, 100)}
+          locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
+          columns={[
+            { title: t("pages.admin_console.col_media_id"), dataIndex: "media_id" },
+            { title: t("pages.admin_console.col_policy_version"), dataIndex: "policy_version" },
+            { title: t("pages.admin_console.col_generation"), dataIndex: "generation" },
+            { title: t("pages.admin_console.col_status"), dataIndex: "status" },
+            { title: t("pages.admin_console.col_terminal_reason"), dataIndex: "terminal_reason", render: (value: string) => value || "-" },
+            { title: t("pages.admin_console.col_required_counts"), render: (_, row) => `${row.required_waiting} / ${row.required_failed}` },
+            { title: t("pages.admin_console.col_optional_counts"), render: (_, row) => `${row.optional_waiting} / ${row.optional_failed}` },
+            { title: t("pages.admin_console.col_adapter_unavailable"), dataIndex: "adapter_unavailable", render: (value: string[]) => (value?.length ? value.join(", ") : "-") },
+            { title: t("pages.admin_console.col_metadata_errors"), dataIndex: "metadata_errors", render: (value: string[]) => (value?.length ? value.join("; ") : "-"), ellipsis: true },
+            { title: t("pages.admin_console.col_recovery_error"), dataIndex: "recovery_error", render: (value: string) => value || "-", ellipsis: true },
+          ]}
+        />
       </Card>
       <Card title={t("pages.admin_console.current_activities")} loading={overviewLoading}>
         <Table rowKey="id" pagination={{ pageSize: 10 }} dataSource={overview?.activities ?? []} columns={[

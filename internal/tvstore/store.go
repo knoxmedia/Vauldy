@@ -17,6 +17,10 @@ import (
 func LinkEpisode(db *sql.DB, libraryID, mediaID int64, info tvparse.EpisodeInfo) error {
 	return linkEpisodeContext(context.Background(), db, libraryID, mediaID, info)
 }
+func LinkEpisodeExecutor(ctx context.Context, db relationDB, libraryID, mediaID int64, info tvparse.EpisodeInfo) error {
+	return linkEpisodeContext(ctx, db, libraryID, mediaID, info)
+}
+
 func LinkEpisodeTx(ctx context.Context, tx *sql.Tx, libraryID, mediaID int64, info tvparse.EpisodeInfo) error {
 	return linkEpisodeContext(ctx, tx, libraryID, mediaID, info)
 }

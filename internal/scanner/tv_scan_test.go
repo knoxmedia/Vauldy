@@ -43,6 +43,7 @@ func newTVScannerTestDB(t *testing.T) *sql.DB {
 		file_path TEXT
 	)`)
 	_, _ = db.Exec(`CREATE UNIQUE INDEX idx_episode_season_num ON episode(season_id, episode_num)`)
+	_, _ = db.Exec(`DROP TABLE IF EXISTS episode_media`)
 	_, _ = db.Exec(`CREATE TABLE episode_media (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		episode_id INTEGER NOT NULL,
