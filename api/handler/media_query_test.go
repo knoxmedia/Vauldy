@@ -347,7 +347,7 @@ func TestListMediaCancellationAfterFirstBatchReturnsNonSuccessHTTP(t *testing.T)
 		if stats.Batches == 1 {
 			cancel()
 		}
-	})
+	}, "")
 	if w.Code == http.StatusOK || strings.Contains(w.Body.String(), `"items"`) {
 		t.Fatalf("partial success status=%d body=%s", w.Code, w.Body.String())
 	}

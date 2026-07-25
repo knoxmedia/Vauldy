@@ -36,6 +36,12 @@ func (h *Handler) applyScrapeLocalImages(mediaID, libraryID int64, fileType stri
 	h.applyCapturedPoster(res, posterURL, source)
 }
 
+func (h *Handler) applyManualMatchLocalImages(ctx context.Context, mediaID, libraryID int64, fileType string, cfg scraper.Config, res *scraper.ScrapeResult) error {
+	_ = ctx
+	h.applyScrapeLocalImages(mediaID, libraryID, fileType, cfg, res)
+	return nil
+}
+
 func (h *Handler) applyCapturedPoster(res *scraper.ScrapeResult, posterURL, source string) {
 	res.Poster = posterURL
 	if res.Extra == nil {

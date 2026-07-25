@@ -202,11 +202,12 @@ func TestCoordinatorCommitErrorAfterCommitConfirmsAndStartsScanner(t *testing.T)
 	scanner := newBlockingScanner()
 	defer close(scanner.release)
 	coordinator := newTestCoordinator(t, db, "commit-confirm", scanner)
-	coordinator.submitCommit = func(ctx context.Context, conn *sql.Conn) error {
-		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-			return err
+	coordinator.withImmediateTx = func(ctx context.Context, db *sql.DB, fn func(store.ImmediateConnTx) error) (store.ImmediateOutcome, error) {
+		outcome, err := store.WithImmediateConnTx(ctx, db, fn)
+		if err != nil {
+			return outcome, err
 		}
-		return errors.New("injected error after actual commit")
+		return store.ImmediateOutcome{CommitAttempted: true}, &store.ImmediateCommitError{Cause: errors.New("injected error after actual commit")}
 	}
 	got, err := coordinator.Submit(context.Background(), ScanRequest{LibraryID: libraries[0], Source: SourceManual, Roots: []string{"/root"}})
 	if err != nil || !got.Started || got.TaskID == 0 {
@@ -230,9 +231,22 @@ func TestCoordinatorAmbiguousCommitConfirmationDoesNotRetryInsert(t *testing.T) 
 	db, libraries := openCoordinatorTestDB(t, 1)
 	coordinator := newTestCoordinator(t, db, "commit-ambiguous", &countingScanner{})
 	commitCalls := 0
-	coordinator.submitCommit = func(context.Context, *sql.Conn) error {
+	coordinator.withImmediateTx = func(ctx context.Context, db *sql.DB, fn func(store.ImmediateConnTx) error) (store.ImmediateOutcome, error) {
 		commitCalls++
-		return errors.New("commit outcome unknown")
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			return store.ImmediateOutcome{}, err
+		}
+		defer conn.Close()
+		if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+			return store.ImmediateOutcome{}, err
+		}
+		if err := fn(conn); err != nil {
+			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+			return store.ImmediateOutcome{}, err
+		}
+		_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+		return store.ImmediateOutcome{CommitAttempted: true}, &store.ImmediateCommitError{Cause: errors.New("commit outcome unknown")}
 	}
 	coordinator.confirmSubmit = func(int64, int64, string) (time.Time, bool, error) {
 		return time.Time{}, false, errors.New("database is locked (5)")
@@ -938,6 +952,7 @@ type cancelTargetSpy struct {
 	mu    sync.Mutex
 	calls []int64
 	ctxs  []error
+	err   error
 }
 
 func (s *cancelTargetSpy) cancel(ctx context.Context, taskID int64) error {
@@ -945,7 +960,7 @@ func (s *cancelTargetSpy) cancel(ctx context.Context, taskID int64) error {
 	defer s.mu.Unlock()
 	s.calls = append(s.calls, taskID)
 	s.ctxs = append(s.ctxs, ctx.Err())
-	return nil
+	return s.err
 }
 
 func insertScanPostTask(t *testing.T, db *sql.DB, libraryID, scanTaskID int64, status postingest.Status, suffix string) int64 {
@@ -984,7 +999,7 @@ func TestCoordinator_CancelScanAtomicallyCancelsWaitingPostTasksAfterCommit(t *t
 		t.Fatal(err)
 	}
 	waitForTaskStatus(t, db, result.TaskID, "cancelled")
-	for id, want := range map[int64]postingest.Status{waitingID: postingest.StatusCancelled, runningID: postingest.StatusRunning, doneID: postingest.StatusDone} {
+	for id, want := range map[int64]postingest.Status{waitingID: postingest.StatusCancelled, runningID: postingest.StatusCancelled, doneID: postingest.StatusDone} {
 		var got postingest.Status
 		var finished sql.NullTime
 		if err := db.QueryRow(`SELECT status,finished_at FROM post_ingest_task WHERE id=?`, id).Scan(&got, &finished); err != nil {
@@ -1001,6 +1016,30 @@ func TestCoordinator_CancelScanAtomicallyCancelsWaitingPostTasksAfterCommit(t *t
 	defer target.mu.Unlock()
 	if len(target.calls) != 1 || target.calls[0] != result.TaskID {
 		t.Fatalf("cancel target calls=%v", target.calls)
+	}
+}
+
+func TestCoordinator_CancelIgnoresPostCommitLocalCallbackError(t *testing.T) {
+	db, libraries := openCoordinatorTestDB(t, 1)
+	target := &cancelTargetSpy{err: errors.New("local dispatcher unavailable")}
+	coordinator, err := New(db, Options{LeaseDuration: time.Minute, HeartbeatInterval: 20 * time.Second, OwnerInstanceID: "local-error-owner", Scanner: &countingScanner{}, OnScanCancelled: target.cancel})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := coordinator.Submit(context.Background(), ScanRequest{LibraryID: libraries[0], Source: SourceManual, Roots: []string{"/a"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForTaskStatus(t, db, result.TaskID, "done")
+	if _, err = db.Exec(`UPDATE scan_task SET status='waiting',cancelled=0,finished_at=NULL WHERE id=?`, result.TaskID); err != nil {
+		t.Fatal(err)
+	}
+	cancelResult, err := coordinator.Cancel(context.Background(), result.TaskID)
+	if err != nil || !cancelResult.Cancelled {
+		t.Fatalf("result=%+v err=%v", cancelResult, err)
+	}
+	if len(target.calls) != 1 || target.calls[0] != result.TaskID {
+		t.Fatalf("calls=%v", target.calls)
 	}
 }
 
@@ -1569,5 +1608,48 @@ func TestFinalizeAndReleaseDoesNotMutateAfterTakeover(t *testing.T) {
 	_ = db.QueryRow(`SELECT scan_task_id,owner_id FROM scan_lease WHERE library_id=?`, libraries[0]).Scan(&leaseTask, &leaseOwner)
 	if status != "failed" || message != "taken over" || leaseTask != newTaskID || leaseOwner != "new-owner" {
 		t.Fatalf("old=%s/%q lease=%d/%q", status, message, leaseTask, leaseOwner)
+	}
+}
+
+type discoveryCallbackScanner struct {
+	discovery scanner.ScanDiscovery
+}
+
+func (s *discoveryCallbackScanner) ScanLibraryFoldersWithContextAndCallbacks(ctx context.Context, _ int64, _ []string, callbacks scanner.ScanCallbacks) (int, error) {
+	return 1, callbacks.OnMediaDiscoveredTx(ctx, nil, s.discovery)
+}
+
+func TestCoordinatorForwardsDiscoveryDiagnosticsWithTaskID(t *testing.T) {
+	db, libraries := openCoordinatorTestDB(t, 1)
+	discovery := scanner.ScanDiscovery{MediaID: 99, FileType: "video", MetadataAttempt: scanner.MetadataAttempt{Attempted: true, Fields: []string{"duration"}, Errors: []scanner.MetadataDiagnostic{{Source: "probe", Message: "partial"}}}}
+	seen := make(chan struct {
+		taskID int64
+		value  scanner.ScanDiscovery
+	}, 1)
+	coordinator, err := New(db, Options{
+		LeaseDuration: time.Minute, HeartbeatInterval: 20 * time.Second,
+		OwnerInstanceID: "discovery-callback-test", Scanner: &discoveryCallbackScanner{discovery: discovery},
+		OnMediaDiscoveredTx: func(_ context.Context, _ *sql.Tx, taskID int64, got scanner.ScanDiscovery) error {
+			seen <- struct {
+				taskID int64
+				value  scanner.ScanDiscovery
+			}{taskID: taskID, value: got}
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := coordinator.Submit(context.Background(), ScanRequest{LibraryID: libraries[0], Source: SourceManual, Roots: []string{t.TempDir()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-seen:
+		if got.taskID != result.TaskID || got.value.MediaID != 99 || !got.value.MetadataAttempt.Attempted || len(got.value.MetadataAttempt.Errors) != 1 {
+			t.Fatalf("callback task=%d discovery=%+v", got.taskID, got.value)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for discovery callback")
 	}
 }

@@ -75,6 +75,15 @@ type StagedDerivedAsset struct {
 	kind, logicalName, encPath, wrappedDEK, iv string
 }
 
+func (a *StagedDerivedAsset) RecoveryMetadata() map[string]any {
+	if a == nil {
+		return nil
+	}
+	return map[string]any{"media_id": a.mediaID, "kind": a.kind, "logical_name": a.logicalName, "enc_path": a.encPath}
+}
+func RestoreStagedDerivedAsset(mediaID int64, kind, logicalName, encPath, wrappedDEK, iv string) *StagedDerivedAsset {
+	return &StagedDerivedAsset{mediaID: mediaID, kind: kind, logicalName: logicalName, encPath: encPath, wrappedDEK: wrappedDEK, iv: iv}
+}
 func (a *StagedDerivedAsset) EncPath() string {
 	if a == nil {
 		return ""
@@ -139,7 +148,7 @@ func (s *DerivedAssetStore) StagePath(ctx context.Context, mediaID int64, kind, 
 	defer f.Close()
 	return s.stageReader(ctx, mediaID, kind, logicalName, f)
 }
-func (s *DerivedAssetStore) CommitStagedTx(ctx context.Context, tx *sql.Tx, assets ...*StagedDerivedAsset) ([]string, error) {
+func (s *DerivedAssetStore) CommitStagedTx(ctx context.Context, tx store.SQLExecutor, assets ...*StagedDerivedAsset) ([]string, error) {
 	if tx == nil {
 		return nil, fmt.Errorf("derived staged transaction is nil")
 	}
@@ -196,6 +205,9 @@ func (s *DerivedAssetStore) Write(ctx context.Context, mediaID int64, kind, logi
 			return e
 		}
 		defer tx.Rollback()
+		if e = runDerivedCommitGuardTx(ctx, tx); e != nil {
+			return e
+		}
 		old, e = s.CommitStagedTx(ctx, tx, a)
 		if e != nil {
 			return e

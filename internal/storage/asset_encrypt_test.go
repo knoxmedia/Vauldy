@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 
@@ -49,19 +48,9 @@ func TestEncryptMediaConcurrentSingleOutput(t *testing.T) {
 	}
 	wg.Wait()
 
-	encDir := filepath.Join(dir, ".encrypted", "video")
-	entries, err := os.ReadDir(encDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var encFiles int
-	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), ".enc") {
-			encFiles++
-		}
-	}
-	if encFiles != 1 {
-		t.Fatalf("expected 1 .enc file, got %d (%v)", encFiles, entries)
+	encPath := filepath.Join(dir, ".encrypted", "video", "fid-1.enc")
+	if !crypto.IsEncFile(encPath) {
+		t.Fatalf("canonical encrypted output missing: %s", encPath)
 	}
 }
 
@@ -480,5 +469,71 @@ func TestEncryptMedia_WaiterSuccessLeavesValidAsset(t *testing.T) {
 	valid, err := IsEncryptedAssetRecordValid(context.Background(), db, 509)
 	if err != nil || !valid || !crypto.IsEncFile(out) {
 		t.Fatalf("valid=%v err=%v", valid, err)
+	}
+}
+
+func TestStageMediaEncryptionLeavesCatalogAndSelectionUnchanged(t *testing.T) {
+	db, err := store.OpenSQLite(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	vault, err := keystore.NewVault(string(bytes.Repeat([]byte{0x42}, 32)), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	plain := filepath.Join(dir, "photo.jpg")
+	if err = os.WriteFile(plain, []byte("photo bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = db.Exec(`INSERT INTO library(id,name,type,path,encrypted_assets_enabled) VALUES(1,'photos','photo',?,1)`, dir)
+	_, _ = db.Exec(`INSERT INTO media(id,library_id,file_id,file_path,file_type,status) VALUES(10,1,'photo-1',?,'image','active')`, plain)
+	enc := &AssetEncryptor{DB: db, Vault: vault, BasePath: filepath.Join(dir, "encrypted")}
+	stage, err := enc.StageMediaEncryption(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stage.OriginalPath != plain || stage.EncPath == "" || stage.WrappedDEK == "" || stage.IV == "" || stage.SHA256 == "" || stage.Size <= 0 {
+		t.Fatalf("stage=%+v", stage)
+	}
+	var selected string
+	var records int
+	if err = db.QueryRow(`SELECT file_path,(SELECT COUNT(*) FROM media_encrypted_assets WHERE media_id=10) FROM media WHERE id=10`).Scan(&selected, &records); err != nil {
+		t.Fatal(err)
+	}
+	if selected != plain || records != 0 {
+		t.Fatalf("selected=%q records=%d", selected, records)
+	}
+	if ok, _ := ValidEncryptedFile(stage.EncPath); !ok {
+		t.Fatalf("invalid staged output %q", stage.EncPath)
+	}
+}
+
+func TestStageMediaEncryptionSyncFailurePreventsSuccess(t *testing.T) {
+	db, err := store.OpenSQLite(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	vault, err := keystore.NewVault(string(bytes.Repeat([]byte{0x42}, 32)), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	plain := filepath.Join(dir, "photo.jpg")
+	if err = os.WriteFile(plain, []byte("photo bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = db.Exec(`INSERT INTO library(id,name,type,path,encrypted_assets_enabled) VALUES(1,'photos','photo',?,1)`, dir)
+	_, _ = db.Exec(`INSERT INTO media(id,library_id,file_id,file_path,file_type,status) VALUES(10,1,'photo-1',?,'image','active')`, plain)
+	want := errors.New("injected staged sync failure")
+	enc := &AssetEncryptor{DB: db, Vault: vault, BasePath: filepath.Join(dir, "encrypted"), syncStagedFile: func(*os.File) error { return want }}
+	if _, err = enc.StageMediaEncryption(context.Background(), 10); !errors.Is(err, want) {
+		t.Fatalf("err=%v want=%v", err, want)
+	}
+	matches, _ := filepath.Glob(filepath.Join(dir, "encrypted", "image", "stages", "*", "*.enc"))
+	if len(matches) != 0 {
+		t.Fatalf("non-durable stage retained: %v", matches)
 	}
 }

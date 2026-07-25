@@ -29,6 +29,7 @@ type AssetEncryptor struct {
 	FFmpegPath     string
 	FFprobePath    string
 	onFlightJoined func(mediaID int64)
+	syncStagedFile func(*os.File) error
 }
 
 // IsMediaEncrypted reports whether the media item is already stored as an encrypted asset.
@@ -45,12 +46,12 @@ func IsMediaEncrypted(db *sql.DB, mediaID int64, filePath string) bool {
 }
 
 // EncryptMedia encrypts the file at plainPath for mediaID when the library has encrypted_assets_enabled.
-func (s *AssetEncryptor) EncryptMedia(ctx context.Context, mediaID int64) error {
+func (s *AssetEncryptor) encryptMediaLegacyPublic(ctx context.Context, mediaID int64) error {
 	return s.encryptMedia(ctx, mediaID, false)
 }
 
 // EncryptMediaManual encrypts a single media item on demand (ignores library encrypted_assets_enabled).
-func (s *AssetEncryptor) EncryptMediaManual(ctx context.Context, mediaID int64) error {
+func (s *AssetEncryptor) encryptMediaManualLegacy(ctx context.Context, mediaID int64) error {
 	return s.encryptMedia(ctx, mediaID, true)
 }
 

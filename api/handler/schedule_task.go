@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"knox-media/internal/postingest"
 	"knox-media/internal/store"
 )
 
@@ -291,8 +292,8 @@ func (h *Handler) executeScheduledTask(ctx context.Context, taskType string, pay
 			limit = 50
 		}
 		libID := int64(anyToInt(payload["library_id"]))
-		done, failed := h.Subtitle.RunBatch(context.Background(), libID, limit)
-		return fmt.Sprintf("字幕处理完成：成功 %d，失败 %d", done, failed), nil
+		n, err := h.enqueueScheduledPostIngest(ctx, postingest.TaskSubtitle, libID, limit)
+		return fmt.Sprintf("字幕任务已入队：%d", n), err
 	case "atrack_process":
 		if h.AtrackWorker == nil {
 			return "", fmt.Errorf("atrack worker disabled")
@@ -301,8 +302,9 @@ func (h *Handler) executeScheduledTask(ctx context.Context, taskType string, pay
 		if limit <= 0 {
 			limit = 10
 		}
-		done, failed := h.AtrackWorker.RunBatch(limit)
-		return fmt.Sprintf("音轨提取完成：成功 %d，失败 %d", done, failed), nil
+		libID := int64(anyToInt(payload["library_id"]))
+		n, err := h.enqueueScheduledPostIngest(ctx, postingest.TaskAtrack, libID, limit)
+		return fmt.Sprintf("音轨任务已入队：%d", n), err
 	case "keyframe_process":
 		if h.KeyframeWorker == nil {
 			return "", fmt.Errorf("keyframe worker disabled")
@@ -347,4 +349,59 @@ func anyToInt(v any) int {
 	default:
 		return 0
 	}
+}
+
+func (h *Handler) enqueueScheduledPostIngest(ctx context.Context, typ postingest.TaskType, libraryID int64, limit int) (int, error) {
+	query := `SELECT m.id FROM media m LEFT JOIN post_ingest_task p ON p.media_id=m.id AND p.task_type=? WHERE m.file_type='video' AND COALESCE(m.status,'active')='active' AND (p.id IS NULL OR p.status IN ('failed','cancelled'))`
+	args := []any{typ}
+	if libraryID > 0 {
+		query += ` AND m.library_id=?`
+		args = append(args, libraryID)
+	}
+	query += ` ORDER BY m.id LIMIT ?`
+	args = append(args, limit)
+	rows, err := h.App.DB.QueryContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return 0, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	queued := 0
+	for _, id := range ids {
+		var reset explicitResetTx
+		switch typ {
+		case postingest.TaskSubtitle:
+			reset = subtitleEnsureTx(id)
+		case postingest.TaskAtrack:
+			reset = func(c context.Context, tx *sql.Tx) error {
+				_, e := tx.ExecContext(c, `INSERT INTO atrack_task(media_id,status,updated_at) VALUES(?,'waiting',CURRENT_TIMESTAMP) ON CONFLICT(media_id) DO UPDATE SET status='waiting',error_message=NULL,updated_at=CURRENT_TIMESTAMP`, id)
+				return e
+			}
+		case postingest.TaskKeyframe:
+			reset = func(c context.Context, tx *sql.Tx) error {
+				_, e := tx.ExecContext(c, `INSERT INTO keyframe_task(media_id,status,output_dir,keyframe_count,error_message,updated_at) VALUES(?,'waiting',NULL,0,NULL,CURRENT_TIMESTAMP) ON CONFLICT(media_id) DO UPDATE SET status='waiting',output_dir=NULL,keyframe_count=0,error_message=NULL,updated_at=CURRENT_TIMESTAMP`, id)
+				return e
+			}
+		default:
+			return queued, fmt.Errorf("unsupported scheduled post-ingest type: %s", typ)
+		}
+		r, e := enqueueExplicitPostIngest(ctx, h.App.DB, id, typ, false, reset, nil)
+		if e != nil {
+			return queued, e
+		}
+		if r.Queued() {
+			queued++
+		}
+	}
+	return queued, nil
 }

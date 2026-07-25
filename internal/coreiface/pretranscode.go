@@ -1,6 +1,10 @@
 package coreiface
 
-import "context"
+import (
+	"context"
+
+	"knox-media/internal/store"
+)
 
 // PretranscodeModule is the playback-facing capability contract for the
 // pretranscode subsystem. The community build registers nil; commercial
@@ -35,4 +39,17 @@ type RenditionStatus struct {
 	Name     string
 	Status   string
 	Progress int
+}
+
+// IngestPreparePlanner is the narrow transaction-only capability used by the
+// publication planner. Implementations must create executable work linked to
+// the supplied immutable ingest run and step within the caller transaction.
+type IngestPreparePlanner interface {
+	PlanIngestPrepareTx(ctx context.Context, tx store.SQLExecutor, mediaID, runID, stepID, generation int64) error
+}
+
+// CapabilityRegistry is the narrow contract for checking registered
+// publication capabilities.
+type CapabilityRegistry interface {
+	Available(step string) bool
 }

@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"knox-media/internal/publication"
 	"knox-media/internal/scanner"
 	"knox-media/internal/store"
 )
@@ -62,7 +63,7 @@ type Scanner interface {
 }
 
 type MediaAddedFunc func(context.Context, int64, int64, string, string) error
-type MediaDiscoveredTxFunc func(context.Context, *sql.Tx, int64, int64, string, string) error
+type MediaDiscoveredTxFunc func(context.Context, *sql.Tx, int64, scanner.ScanDiscovery) error
 
 type ScanCancelledFunc func(context.Context, int64) error
 
@@ -99,7 +100,7 @@ type Coordinator struct {
 	finalizeAttempt        func(context.Context, int64, int64, string, string, any) error
 	// afterSubmitEntry and afterSubmitCommit are internal synchronization seams used by same-package tests.
 	afterSubmitEntry    func()
-	submitCommit        func(context.Context, *sql.Conn) error
+	withImmediateTx     func(context.Context, *sql.DB, func(store.ImmediateConnTx) error) (store.ImmediateOutcome, error)
 	confirmSubmit       func(int64, int64, string) (time.Time, bool, error)
 	afterSubmitCommit   func()
 	afterScanRegistered func()
@@ -201,126 +202,110 @@ func (c *Coordinator) Submit(ctx context.Context, req ScanRequest) (SubmitResult
 		result = SubmitResult{}
 		owner = ""
 		initialLeaseDeadline = time.Time{}
-		conn, err := c.db.Conn(attemptCtx)
-		if err != nil {
-			return err
+		withImmediateTx := c.withImmediateTx
+		if withImmediateTx == nil {
+			withImmediateTx = store.WithImmediateConnTx
 		}
-		defer conn.Close()
-		if _, err := conn.ExecContext(attemptCtx, `BEGIN IMMEDIATE`); err != nil {
-			return err
-		}
-		committed := false
-		defer func() {
-			if !committed {
-				_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+		_, txErr := withImmediateTx(attemptCtx, c.db, func(tx store.ImmediateConnTx) error {
+			var existingTaskID int64
+			err := tx.QueryRowContext(attemptCtx, `
+				SELECT l.scan_task_id
+				FROM scan_lease l
+				JOIN scan_task t ON t.id=l.scan_task_id
+				WHERE l.library_id=? AND l.lease_until >= CURRENT_TIMESTAMP
+				  AND t.status IN ('waiting','running') AND t.cancelled=0`, req.LibraryID).Scan(&existingTaskID)
+			if err == nil {
+				result.ExistingTaskID = existingTaskID
+				return nil
 			}
-		}()
-
-		var existingTaskID int64
-		err = conn.QueryRowContext(attemptCtx, `
-			SELECT l.scan_task_id
-			FROM scan_lease l
-			JOIN scan_task t ON t.id=l.scan_task_id
-			WHERE l.library_id=? AND l.lease_until >= CURRENT_TIMESTAMP
-			  AND t.status IN ('waiting','running') AND t.cancelled=0`, req.LibraryID).Scan(&existingTaskID)
-		if err == nil {
-			result.ExistingTaskID = existingTaskID
-			if _, err := conn.ExecContext(attemptCtx, `COMMIT`); err != nil {
+			if !errors.Is(err, sql.ErrNoRows) {
 				return err
 			}
-			committed = true
+			if _, err := tx.ExecContext(attemptCtx, `
+				DELETE FROM scan_lease
+				WHERE library_id=? AND lease_until >= CURRENT_TIMESTAMP
+				  AND NOT EXISTS (
+					SELECT 1 FROM scan_task t
+					WHERE t.id=scan_lease.scan_task_id
+					  AND t.status IN ('waiting','running') AND t.cancelled=0
+				  )`, req.LibraryID); err != nil {
+				return err
+			}
+
+			var previousTaskID int64
+			var previousOwner string
+			var previousExpired bool
+			err = tx.QueryRowContext(attemptCtx, `
+				SELECT scan_task_id, owner_id, lease_until < CURRENT_TIMESTAMP
+				FROM scan_lease WHERE library_id=?`, req.LibraryID).Scan(&previousTaskID, &previousOwner, &previousExpired)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+			if err == nil && previousExpired {
+				if _, err := tx.ExecContext(attemptCtx, `
+					UPDATE scan_task SET
+						status=CASE WHEN cancelled=1 THEN 'cancelled' ELSE 'failed' END,
+						error_message='scan lease expired and was taken over',
+						finished_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
+					WHERE id=? AND status='running'`, previousTaskID); err != nil {
+					return fmt.Errorf("scancoord: finalize expired lease owner %q task %d: %w", previousOwner, previousTaskID, err)
+				}
+			}
+
+			insert, err := tx.ExecContext(attemptCtx, `
+				INSERT INTO scan_task (library_id, status, source, started_at, updated_at)
+				VALUES (?, 'waiting', ?, NULL, CURRENT_TIMESTAMP)`, req.LibraryID, req.Source)
+			if err != nil {
+				return err
+			}
+			taskID, err := insert.LastInsertId()
+			if err != nil {
+				return err
+			}
+			result.TaskID = taskID
+			owner = fmt.Sprintf("%s/%d/%s", c.ownerInstanceID, taskID, uuid.NewString())
+			modifier := fmt.Sprintf("+%d seconds", int64(c.leaseDuration/time.Second))
+			if _, err := tx.ExecContext(attemptCtx, `
+				INSERT INTO scan_lease (library_id, scan_task_id, owner_id, lease_until)
+				VALUES (?, ?, ?, datetime(CURRENT_TIMESTAMP, ?))
+				ON CONFLICT(library_id) DO UPDATE SET
+					scan_task_id=excluded.scan_task_id,
+					owner_id=excluded.owner_id,
+					lease_until=excluded.lease_until,
+					updated_at=CURRENT_TIMESTAMP
+				WHERE scan_lease.lease_until < CURRENT_TIMESTAMP`, req.LibraryID, taskID, owner, modifier); err != nil {
+				return err
+			}
+			if err := tx.QueryRowContext(attemptCtx, `SELECT lease_until FROM scan_lease WHERE library_id=? AND scan_task_id=? AND owner_id=?`, req.LibraryID, taskID, owner).Scan(&initialLeaseDeadline); err != nil {
+				return err
+			}
+			initialLeaseDeadline = initialLeaseDeadline.UTC()
+			if _, err := tx.ExecContext(attemptCtx, `
+				UPDATE scan_task SET status='running', started_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
+				WHERE id=?`, taskID); err != nil {
+				return err
+			}
 			return nil
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-		if _, err := conn.ExecContext(attemptCtx, `
-			DELETE FROM scan_lease
-			WHERE library_id=? AND lease_until >= CURRENT_TIMESTAMP
-			  AND NOT EXISTS (
-				SELECT 1 FROM scan_task t
-				WHERE t.id=scan_lease.scan_task_id
-				  AND t.status IN ('waiting','running') AND t.cancelled=0
-			  )`, req.LibraryID); err != nil {
-			return err
-		}
-
-		var previousTaskID int64
-		var previousOwner string
-		var previousExpired bool
-		err = conn.QueryRowContext(attemptCtx, `
-			SELECT scan_task_id, owner_id, lease_until < CURRENT_TIMESTAMP
-			FROM scan_lease WHERE library_id=?`, req.LibraryID).Scan(&previousTaskID, &previousOwner, &previousExpired)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-		if err == nil && previousExpired {
-			if _, err := conn.ExecContext(attemptCtx, `
-				UPDATE scan_task SET
-					status=CASE WHEN cancelled=1 THEN 'cancelled' ELSE 'failed' END,
-					error_message='scan lease expired and was taken over',
-					finished_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
-				WHERE id=? AND status='running'`, previousTaskID); err != nil {
-				return fmt.Errorf("scancoord: finalize expired lease owner %q task %d: %w", previousOwner, previousTaskID, err)
+		})
+		if txErr != nil {
+			var commitErr *store.ImmediateCommitError
+			if !errors.As(txErr, &commitErr) || result.TaskID == 0 {
+				return txErr
 			}
-		}
-
-		insert, err := conn.ExecContext(attemptCtx, `
-			INSERT INTO scan_task (library_id, status, source, started_at, updated_at)
-			VALUES (?, 'waiting', ?, NULL, CURRENT_TIMESTAMP)`, req.LibraryID, req.Source)
-		if err != nil {
-			return err
-		}
-		taskID, err := insert.LastInsertId()
-		if err != nil {
-			return err
-		}
-		result.TaskID = taskID
-		owner = fmt.Sprintf("%s/%d/%s", c.ownerInstanceID, taskID, uuid.NewString())
-		modifier := fmt.Sprintf("+%d seconds", int64(c.leaseDuration/time.Second))
-		if _, err := conn.ExecContext(attemptCtx, `
-			INSERT INTO scan_lease (library_id, scan_task_id, owner_id, lease_until)
-			VALUES (?, ?, ?, datetime(CURRENT_TIMESTAMP, ?))
-			ON CONFLICT(library_id) DO UPDATE SET
-				scan_task_id=excluded.scan_task_id,
-				owner_id=excluded.owner_id,
-				lease_until=excluded.lease_until,
-				updated_at=CURRENT_TIMESTAMP
-			WHERE scan_lease.lease_until < CURRENT_TIMESTAMP`, req.LibraryID, taskID, owner, modifier); err != nil {
-			return err
-		}
-		if err := conn.QueryRowContext(attemptCtx, `SELECT lease_until FROM scan_lease WHERE library_id=? AND scan_task_id=? AND owner_id=?`, req.LibraryID, taskID, owner).Scan(&initialLeaseDeadline); err != nil {
-			return err
-		}
-		initialLeaseDeadline = initialLeaseDeadline.UTC()
-		if _, err := conn.ExecContext(attemptCtx, `
-			UPDATE scan_task SET status='running', started_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
-			WHERE id=?`, taskID); err != nil {
-			return err
-		}
-		commit := c.submitCommit
-		if commit == nil {
-			commit = func(commitCtx context.Context, commitConn *sql.Conn) error {
-				_, err := commitConn.ExecContext(commitCtx, `COMMIT`)
-				return err
-			}
-		}
-		if commitErr := commit(attemptCtx, conn); commitErr != nil {
 			confirm := c.confirmSubmit
 			if confirm == nil {
 				confirm = c.confirmCommittedSubmit
 			}
-			confirmedDeadline, confirmed, confirmErr := confirm(req.LibraryID, taskID, owner)
+			confirmedDeadline, confirmed, confirmErr := confirm(req.LibraryID, result.TaskID, owner)
 			if confirmErr != nil {
-				return ErrAmbiguousSubmitCommit{TaskID: taskID, CommitErr: commitErr, ConfirmErr: confirmErr}
+				return ErrAmbiguousSubmitCommit{TaskID: result.TaskID, CommitErr: commitErr.Cause, ConfirmErr: confirmErr}
 			}
 			if !confirmed {
-				return commitErr
+				return txErr
 			}
 			initialLeaseDeadline = confirmedDeadline
 		}
-		result.Started = true
-		committed = true
+		result.Started = result.TaskID != 0
 		return nil
 	})
 	if err != nil {
@@ -404,11 +389,11 @@ func (c *Coordinator) run(ctx context.Context, taskID, libraryID int64, owner st
 			var enqueueErrors []error
 			callbacks := scanner.ScanCallbacks{
 				OnFile: progress.File,
-				OnMediaDiscoveredTx: func(callbackCtx context.Context, tx *sql.Tx, mediaID int64, title, fileType string) error {
+				OnMediaDiscoveredTx: func(callbackCtx context.Context, tx *sql.Tx, discovery scanner.ScanDiscovery) error {
 					if c.onMediaDiscoveredTx == nil {
 						return nil
 					}
-					return c.onMediaDiscoveredTx(callbackCtx, tx, taskID, mediaID, title, fileType)
+					return c.onMediaDiscoveredTx(callbackCtx, tx, taskID, discovery)
 				},
 				OnMediaAdded: func(callbackCtx context.Context, mediaID int64, title, fileType string) error {
 					progress.MediaAdded(mediaID, title, fileType)
@@ -716,10 +701,31 @@ func (c *Coordinator) Cancel(ctx context.Context, taskID int64) (CancelResult, e
 		if result.Status == "running" {
 			result.Status = "cancelling"
 		}
+		runRows, err := tx.QueryContext(ctx, `SELECT r.id FROM media_ingest_run r JOIN media m ON m.id=r.media_id AND m.ingest_generation=r.generation WHERE r.scan_task_id=? AND r.status='processing' AND r.superseded_by_generation IS NULL AND r.superseded_at IS NULL`, taskID)
+		if err != nil {
+			return err
+		}
+		var runIDs []int64
+		for runRows.Next() {
+			var runID int64
+			if err = runRows.Scan(&runID); err != nil {
+				runRows.Close()
+				return err
+			}
+			runIDs = append(runIDs, runID)
+		}
+		if err = runRows.Close(); err != nil {
+			return err
+		}
+		for _, runID := range runIDs {
+			if _, err = publication.CancelRunTx(ctx, tx, runID, "scan_cancelled"); err != nil {
+				return err
+			}
+		}
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE post_ingest_task SET status='cancelled', lease_owner=NULL, lease_until=NULL,
-				last_error='scan cancelled', finished_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
-			WHERE scan_task_id=? AND status='waiting'`, taskID); err != nil {
+				last_error='scan cancelled', finished_at=COALESCE(finished_at,CURRENT_TIMESTAMP), updated_at=CURRENT_TIMESTAMP
+			WHERE scan_task_id=? AND ingest_run_id IS NULL AND status IN ('waiting','running')`, taskID); err != nil {
 			return err
 		}
 		if err := tx.Commit(); err != nil {
@@ -746,8 +752,8 @@ func (c *Coordinator) Cancel(ctx context.Context, taskID int64) (CancelResult, e
 	if c.onScanCancelled != nil {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cleanupCancel()
-		if err := c.onScanCancelled(cleanupCtx, taskID); err != nil {
-			return CancelResult{}, fmt.Errorf("scancoord: cancel post-ingest for task %d: %w", taskID, err)
+		if err := c.onScanCancelled(cleanupCtx, taskID); err != nil && c.onError != nil {
+			c.onError(fmt.Errorf("scancoord: cancel local scan task %d: %w", taskID, err))
 		}
 	}
 	return result, nil

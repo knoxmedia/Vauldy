@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"knox-media/internal/store"
 	"time"
 
 	"knox-media/internal/scancoord"
@@ -62,7 +64,7 @@ func TestDefaultDispatcherOptions(t *testing.T) {
 	if o.Global != wantGlobal || o.Poster != min(2, wantGlobal) || o.Preview != 1 {
 		t.Fatalf("budgets=%d/%d/%d", o.Global, o.Poster, o.Preview)
 	}
-	wants := map[TaskType]time.Duration{TaskPoster: 2 * time.Minute, TaskPreview: 30 * time.Minute, TaskKeyframe: 30 * time.Minute, TaskAtrack: 30 * time.Minute, TaskSubtitle: 60 * time.Minute}
+	wants := map[TaskType]time.Duration{TaskPoster: 2 * time.Minute, TaskThumbnail: 2 * time.Minute, TaskPreview: 30 * time.Minute, TaskKeyframe: 30 * time.Minute, TaskAtrack: 30 * time.Minute, TaskSubtitle: 60 * time.Minute, TaskEncrypt: 120 * time.Minute}
 	for typ, want := range wants {
 		if o.Timeouts[typ] != want {
 			t.Fatalf("timeout %s=%v", typ, o.Timeouts[typ])
@@ -287,7 +289,11 @@ func dispatcherOptions(owner string) DispatcherOptions {
 func TestDispatcher_RoundRobinPersistsAcrossSlots(t *testing.T) {
 	db, _ := openQueueTestDB(t)
 	q := NewQueue(db, "owner", nil)
-	enqueueDispatcherTasks(t, q, 12, taskTypes...)
+	for _, typ := range taskTypes {
+		for i := 0; i < 12; i++ {
+			insertDispatcherTask(t, q, typ, nil, fmt.Sprintf("fairness-%s-%d", typ, i))
+		}
+	}
 	started := make(chan TaskType, 20)
 	release := make(chan struct{}, 20)
 	exec := executorFunc(func(ctx context.Context, task Task) error {
@@ -311,7 +317,7 @@ func TestDispatcher_RoundRobinPersistsAcrossSlots(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- d.Start(ctx) }()
 	seen := map[TaskType]bool{}
-	for i := 0; i < 6; i++ {
+	for i := 0; i < len(taskTypes); i++ {
 		select {
 		case typ := <-started:
 			seen[typ] = true
@@ -322,7 +328,7 @@ func TestDispatcher_RoundRobinPersistsAcrossSlots(t *testing.T) {
 	}
 	for _, typ := range taskTypes {
 		if !seen[typ] {
-			t.Fatalf("first six starts=%v missing %s", seen, typ)
+			t.Fatalf("first task cycle starts=%v missing %s", seen, typ)
 		}
 	}
 	cancel()
@@ -538,7 +544,7 @@ func TestDispatcher_ErrorClassification(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			db, _ := openQueueTestDB(t)
 			q := NewQueue(db, "owner", nil)
-			id := insertDispatcherTask(t, q, TaskAtrack, nil, "classify-"+tc.name)
+			id := insertDispatcherTask(t, q, TaskEncrypt, nil, "classify-"+tc.name)
 			exec := executorFunc(func(context.Context, Task) error { return tc.err })
 			o := dispatcherOptions("owner")
 			d, _ := NewDispatcher(q, exec, o)
@@ -758,6 +764,46 @@ func TestDispatcher_CancelScanFencesSuccessfulExecutorBeforeComplete(t *testing.
 	}
 	cancel()
 	<-done
+}
+
+func TestDispatcherUncertainAtomicFinalizationDoesNotFailQueue(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	mediaID, _, _ := seedQueueTest(t, db)
+	q := NewQueue(db, "owner", nil)
+	if _, err := q.Enqueue(context.Background(), mediaID, nil, TaskThumbnail); err != nil {
+		t.Fatal(err)
+	}
+	exec := uncertainResultExecutor{}
+	o := dispatcherOptions("owner")
+	d, err := NewDispatcher(q, exec, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- d.Start(ctx) }()
+	waitUntil(t, time.Second, func() bool {
+		var status string
+		_ = db.QueryRow(`SELECT status FROM post_ingest_task WHERE media_id=?`, mediaID).Scan(&status)
+		return status == "running"
+	})
+	cancel()
+	if err = <-done; err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	var attempts int
+	_ = db.QueryRow(`SELECT status,attempts FROM post_ingest_task WHERE media_id=?`, mediaID).Scan(&status, &attempts)
+	if status != "running" || attempts != 1 {
+		t.Fatalf("task=%s/%d want preserved running", status, attempts)
+	}
+}
+
+type uncertainResultExecutor struct{}
+
+func (uncertainResultExecutor) Execute(context.Context, Task) error { return errors.New("unused") }
+func (uncertainResultExecutor) ExecuteWithResult(context.Context, Task) (ExecutionResult, error) {
+	return ExecutionResult{Completion: FinalizationOutcomeUncertain}, &store.ImmediateCommitError{Cause: errors.New("unknown")}
 }
 
 func TestDispatcher_UnregisterIsGenerationSafe(t *testing.T) {

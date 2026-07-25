@@ -3,24 +3,22 @@ package main
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
-	"net/http"
-	"os/signal"
-	"syscall"
-
-	"github.com/google/uuid"
 	"math"
+	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/go-redis/redis/v8"
+	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 
 	"knox-media/api"
@@ -30,18 +28,21 @@ import (
 	"knox-media/cmd/transcodeworker"
 	"knox-media/internal/app"
 	"knox-media/internal/atrack"
+	"knox-media/internal/buildinfo"
 	"knox-media/internal/config"
+	"knox-media/internal/coreiface"
 	"knox-media/internal/doccover"
-	"knox-media/internal/imagethumb"
 	"knox-media/internal/jit/hwenc"
 	jitmetrics "knox-media/internal/jit/metrics"
 	jitsession "knox-media/internal/jit/session"
 	"knox-media/internal/keyframe"
-	"knox-media/internal/keystore"
+	// Community builds intentionally omit blank-imports of commercial packages
+	// (license, pretranscode). coreiface.EnterpriseModules and
+	// IngestPreparePlannerHandle stay empty/nil, so prepare is never advertised.
 	"knox-media/internal/lyrictask"
+	"knox-media/internal/metadatalib"
 	"knox-media/internal/monitor"
 	"knox-media/internal/photoclass"
-	"knox-media/internal/photoface"
 	"knox-media/internal/postingest"
 	"knox-media/internal/preview"
 	"knox-media/internal/publication"
@@ -56,9 +57,19 @@ import (
 	"knox-media/pkg/ffprobe"
 )
 
+type cancelScanPersistence func(context.Context, int64) (int64, error)
+
+func handleScanCancelled(ctx context.Context, taskID int64, persist cancelScanPersistence, cancelLocal func(int64)) error {
+	// Stop local execution first so a running worker cannot race a durable cancel.
+	// Persistence is still attempted and its error is returned to the coordinator.
+	cancelLocal(taskID)
+	_, err := persist(ctx, taskID)
+	return err
+}
 func main() {
 	zlog := zapglobal.MustReplaceGlobals()
 	defer func() { _ = zlog.Sync() }()
+
 	serverCtx, serverCancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer serverCancel()
 
@@ -75,15 +86,23 @@ func main() {
 	if err := cfg.EnsureDirs(); err != nil {
 		log.Fatalf("dirs: %v", err)
 	}
-	log.Printf("build marker: no_audio_master_patch=v1")
-
-	db, err := store.OpenSQLite(cfg.Data.DB)
+	// (1) Database, metrics, and validated configuration. Configuration is validated above; OpenSQLite lives here rather than app.New.
+	db, err := store.OpenSQLiteContext(serverCtx, cfg.Data.DB)
 	if err != nil {
 		log.Fatalf("db: %v", err)
 	}
 	defer db.Close()
+	info := buildinfo.Current()
+	identity, identityOK := store.SQLiteIdentity(db)
+	if !identityOK {
+		identity = store.SQLiteDBIdentity{Path: "unknown"}
+	}
+	log.Printf("%s", startupBuildLog(info, identity))
+	for _, warning := range buildinfo.ValidateDevelopment(info) {
+		log.Printf("build metadata warning: %s", warning)
+	}
+	log.Printf("build marker: no_audio_master_patch=v1")
 	sqliteMetrics := &store.SQLiteMetrics{}
-	store.ResetInterruptedTasks(db)
 
 	if err := seedUsers(db); err != nil {
 		log.Fatalf("seed: %v", err)
@@ -102,8 +121,9 @@ func main() {
 			hwenc.DetectHWAccel(cfg.FFmpeg.FFmpegPath),
 		)
 	}
+	// (2) Vault, derived storage, and domain workers.
 	transcodeSettings := loadSystemOptionsTranscodeSettings(db)
-	keyVault, assetEncryptor := storage.NewAssetEncryptorFromConfig(cfg, db)
+	keyVault, assetEnc := storage.NewAssetEncryptorFromConfig(cfg, db)
 	derivedStore := storage.NewDerivedAssetStoreFromConfig(cfg, db, keyVault)
 	worker := transcode.NewWorker(db, cfg.FFmpeg.FFmpegPath, cfg.Data.Transcode)
 	packageWorker := transcode.NewPackageWorker(db, cfg, keyVault)
@@ -151,17 +171,6 @@ func main() {
 	photoClassifyWorker := photoclass.NewWorker(db, keyVault, filepath.Dir(cfgPath), cfg.FFmpeg.FFmpegPath, cfg.Data.Preview, func() config.PhotoClassifyConfig {
 		return cfg.PhotoClassify
 	})
-	_ = photoface.NewWorker(db, keyVault, derivedStore, filepath.Dir(cfgPath), cfg.FFmpeg.FFmpegPath, cfg.Data.Preview, func() config.PhotoFaceConfig {
-		faceCfg := cfg.PhotoFace
-		if strings.TrimSpace(faceCfg.PythonPath) == "" {
-			faceCfg.PythonPath = cfg.PhotoClassify.PythonPath
-		}
-		if strings.TrimSpace(faceCfg.ScriptPath) == "" {
-			faceCfg.ScriptPath = "tools/photo_face/detect.py"
-		}
-		return faceCfg
-	})
-
 	redisAddr := strings.TrimSpace(os.Getenv("KNOX_MEDIA_REDIS_ADDR"))
 	if redisAddr == "" {
 		redisAddr = "127.0.0.1:6379"
@@ -183,8 +192,6 @@ func main() {
 	}
 	storage.SetMediaPlaintextBusy(sessionMgr.HasActiveMedia)
 	go storage.KickPendingPlaintextCleanups(db)
-	go storage.KickEncryptedMP4PipeRepairs(assetEncryptor)
-	go storage.KickPendingMediaEncryption(assetEncryptor, cfg)
 
 	instantSliceWorker := sliceworker.NewSliceWorker(&sliceworker.Config{
 		RedisAddr:   redisAddr,
@@ -230,50 +237,200 @@ func main() {
 		DocTrans:   cfg.DocTrans,
 		TimeoutSec: cfg.DocTransTimeoutSeconds,
 	})
-	processID := fmt.Sprintf("%s-%d-%s", hostnameOrUnknown(), os.Getpid(), uuid.NewString())
-	queueOwner := "postingest-" + processID
-	postIngestQueue := postingest.NewQueue(db, queueOwner, sqliteMetrics)
-	postIngestEnqueuer := postingest.NewEnqueuer(db, cfg, sqliteMetrics)
-	publicationPlanner := publication.NewPlanner(publication.PlanOptions{SubtitleAuto: cfg.SubtitleAutoOnScan(), ATrackAuto: cfg.ATrackAutoOnScan(), EncryptGlobal: cfg.EncryptedAssetsEnabled()})
-	adapters := postingest.AdapterSet{
-		Poster:  postingest.NewPosterAdapter(db, cfg.Data.Upload, derivedStore, &postingest.LocalPosterRunner{DB: db, Vault: keyVault, Derived: derivedStore, FFmpegPath: cfg.FFmpeg.FFmpegPath, FFprobePath: cfg.FFmpeg.FFprobePath, UploadDir: cfg.Data.Upload}),
-		Preview: postingest.NewPreviewAdapter(db, previewWorker), Keyframe: postingest.NewKeyframeAdapter(db, keyframeWorker),
-		Subtitle: postingest.NewSubtitleAdapter(db, subSvc), Atrack: postingest.NewAtrackAdapter(db, atrackWorker),
+	// (3) Shared post-ingest queue, enqueuer, seven adapters, and dispatcher.
+	publicationSteps := []string{"poster", "thumbnail", "preview", "keyframe", "subtitle", "atrack", "encrypt", "scrape"}
+	if coreiface.IngestPreparePlannerHandle() != nil {
+		publicationSteps = append(publicationSteps, "prepare")
 	}
-	dispatcher, err := postingest.NewDispatcher(postIngestQueue, adapters, buildDispatcherOptions(cfg, queueOwner))
+	publicationCapabilities := publication.NewCapabilityMatrix(publicationSteps)
+	hostname, err := os.Hostname()
+	if err != nil || strings.TrimSpace(hostname) == "" {
+		hostname = "unknown-host"
+	}
+	processID := fmt.Sprintf("%s-%d-%s", hostname, os.Getpid(), uuid.NewString())
+	queueOwner := "postingest-" + processID
+	postIngestQueue := postingest.NewQueue(db, queueOwner, sqliteMetrics, publicationCapabilities)
+	postIngestEnqueuer := postingest.NewEnqueuer(db, cfg, sqliteMetrics)
+	thumbnailWorker := &postingest.LocalThumbnailWorker{DB: db, Vault: keyVault, Derived: derivedStore, FFmpegPath: cfg.FFmpeg.FFmpegPath, PreviewDir: cfg.Data.Preview}
+	posterRunner := &postingest.LocalPosterRunner{DB: db, Vault: keyVault, Derived: derivedStore, FFmpegPath: cfg.FFmpeg.FFmpegPath, FFprobePath: cfg.FFmpeg.FFprobePath, UploadDir: cfg.Data.Upload}
+	adapters := postingest.AdapterSet{
+		Thumbnail: postingest.NewThumbnailAdapter(db, thumbnailWorker),
+		Poster:    postingest.NewPosterAdapter(db, cfg.Data.Upload, derivedStore, posterRunner),
+		Preview:   postingest.NewPreviewAdapter(db, previewWorker),
+		Keyframe:  postingest.NewKeyframeAdapter(db, keyframeWorker),
+		Subtitle:  postingest.NewSubtitleAdapter(db, subSvc),
+		Atrack:    postingest.NewAtrackAdapter(db, atrackWorker),
+		Encrypt:   postingest.NewEncryptAdapter(assetEnc),
+	}
+	dispatcherOptions := buildDispatcherOptions(cfg, queueOwner)
+	dispatcher, err := postingest.NewDispatcher(postIngestQueue, adapters, dispatcherOptions)
 	if err != nil {
 		log.Fatalf("post-ingest dispatcher: %v", err)
 	}
+	dispatcherDone := make(chan error, 1)
+
+	preparePlanner := coreiface.IngestPreparePlannerHandle()
+
+	publicationPlanner := publication.NewPlanner(publication.PlanOptions{
+		SubtitleAuto: cfg.SubtitleAutoOnScan(), ATrackAuto: cfg.ATrackAutoOnScan(),
+		EncryptGlobal: cfg.EncryptedAssetsEnabled(), PreparePlanner: preparePlanner, Capabilities: publicationCapabilities,
+	})
+
+	startupReady := make(chan struct{})
+	startupRoots := StartupRecoveryRoots{Encryption: postingest.EncryptionRecoveryRoots{Quarantine: assetEnc.EncryptionPrivateRoot(), Resolver: assetEnc}, Thumbnail: postingest.ThumbnailRecoveryRoots{Preview: filepath.Join(cfg.Data.Preview, "photos"), Derived: filepath.Join(cfg.Data.Dir, ".derived")}, Poster: postingest.PosterRecoveryRoots{Upload: cfg.Data.Upload, Derived: filepath.Join(cfg.Data.Dir, ".derived")}, ScrapeArtwork: cfg.Data.MetadataLibrary}
+	enterpriseCtx, enterpriseCancel := context.WithCancel(serverCtx)
+	defer enterpriseCancel()
+	for _, mod := range coreiface.EnterpriseModules {
+		if err := mod.Init(enterpriseCtx, coreiface.ModuleDeps{DB: db, Config: cfg, Vault: keyVault, TranscodeDir: cfg.Data.Transcode, FFmpegPath: cfg.FFmpeg.FFmpegPath, FFprobePath: cfg.FFmpeg.FFprobePath, Capabilities: publicationCapabilities}); err != nil {
+			log.Fatalf("enterprise module %s init failed: %v", mod.Name(), err)
+		}
+	}
+	preparePlanner = coreiface.IngestPreparePlannerHandle()
+	publicationResources := serverPublicationResources{Vault: keyVault, Encryptor: assetEnc, Derived: derivedStore, PosterRoot: cfg.Data.Upload, ThumbnailRoot: filepath.Join(cfg.Data.Preview, "photos")}
+	publicationPlanner = publication.NewPlanner(publication.PlanOptions{SubtitleAuto: cfg.SubtitleAutoOnScan(), ATrackAuto: cfg.ATrackAutoOnScan(), EncryptGlobal: cfg.EncryptedAssetsEnabled(), PreparePlanner: preparePlanner, Capabilities: publicationCapabilities, EncryptionValidator: publicationResources})
+	warnings, err := PreparePublicationV2Startup(serverCtx, publicationV2StartupHooks{
+		Preflight: func(ctx context.Context) ([]string, error) {
+			return publication.PreflightPublicationV2(ctx, db, publicationPlanner, publicationCapabilities, publicationResources)
+		},
+		RecoverArtifacts: func(ctx context.Context) error { return recoverStartupArtifacts(ctx, db, startupRoots) },
+		RecoverLeases:    func(ctx context.Context) error { return recoverStartupLeases(ctx, db, postIngestQueue) },
+		ReplaceActiveV1: func(ctx context.Context) error {
+			_, reconcileErr := publication.ReplaceActiveV1Runs(ctx, db, publicationPlanner)
+			return reconcileErr
+		},
+		ValidateAggregateV2: func(ctx context.Context) error { return publication.ValidateAggregateCurrentV2(ctx, db) },
+		StartClaimers: func() {
+			go func() {
+				err := dispatcher.Start(serverCtx)
+				dispatcherDone <- err
+				if err != nil && serverCtx.Err() == nil {
+					log.Printf("post-ingest dispatcher stopped: %v", err)
+					serverCancel()
+				}
+			}()
+			for _, mod := range coreiface.EnterpriseModules {
+				if starter, ok := mod.(interface{ StartWorkers(context.Context) }); ok {
+					starter.StartWorkers(enterpriseCtx)
+				}
+			}
+		},
+		StartSubmissionSources: func() { close(startupReady) },
+	})
+	if err != nil {
+		log.Fatalf("publication v2 startup: %v", err)
+	}
+	for _, warning := range warnings {
+		log.Printf("publication v2 preflight warning: %.300s", warning)
+	}
+	if cfg.EncryptedAssetsEnabled() {
+		go func() {
+			if err := postingest.EnqueuePendingMediaEncryption(serverCtx, db, func(ctx context.Context, mediaID int64, scanTaskID *int64, _ postingest.TaskType) (bool, error) {
+				return postIngestQueue.Enqueue(ctx, mediaID, scanTaskID, postingest.TaskEncrypt)
+			}); err != nil && serverCtx.Err() == nil {
+				log.Printf("asset encrypt: pending enqueue: %v", err)
+			}
+		}()
+	}
+	// (4) Scanner dependencies and the process-wide scan coordinator.
+	sc := &scanner.Scanner{
+		DB:            db,
+		Vault:         keyVault,
+		FFprobePath:   cfg.FFmpeg.FFprobePath,
+		SkipHash:      !cfg.LibraryScanFileHash(),
+		PhotoCacheDir: filepath.Join(cfg.Data.Preview, "photos"),
+		CleanupRoots:  []string{cfg.Data.Dir, cfg.Data.Preview},
+		FFprobeExtra:  ffprobeExtra,
+	}
+	sc.OnDocumentScanned = func(mediaID int64) { docCoverWorker.Enqueue(mediaID) }
+	coordinator, err := scancoord.New(db, scancoord.Options{
+		LeaseDuration: 60 * time.Second, HeartbeatInterval: 20 * time.Second,
+		OwnerInstanceID: "scancoord-" + processID, Scanner: sc, Metrics: sqliteMetrics,
+
+		OnMediaDiscoveredTx: scancoord.MediaDiscoveredTxFunc(postingest.NewScanMediaDiscoveredTxCallback(publicationPlanner)),
+		OnScanCancelled: func(_ context.Context, taskID int64) error {
+			dispatcher.CancelScan(taskID)
+			return nil
+		},
+
+		OnError: func(err error) { log.Printf("scan coordinator: %v", err) },
+	})
+	if err != nil {
+		log.Fatalf("scan coordinator: %v", err)
+	}
+	finalizeRecoveryDone := make(chan struct{})
 	go func() {
-		ticker := time.NewTicker(30 * time.Second)
+		defer close(finalizeRecoveryDone)
+		recoverPending := func() {
+			if _, err := scancoord.RecoverPendingFinalizations(serverCtx, db, 16); err != nil && serverCtx.Err() == nil {
+				log.Printf("scan finalize recovery: %v", err)
+			}
+		}
+		recoverPending()
+		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-serverCtx.Done():
 				return
 			case <-ticker.C:
-				if _, err := publication.RetryDegradedRuns(serverCtx, db, 8); err != nil && serverCtx.Err() == nil {
-					log.Printf("publication degraded retry: %v", err)
-				}
+				recoverPending()
 			}
 		}
 	}()
-	dispatcherDone := make(chan error, 1)
-	go func() { dispatcherDone <- dispatcher.Start(serverCtx) }()
 
-	sc := &scanner.Scanner{DB: db, Vault: keyVault, FFprobePath: cfg.FFmpeg.FFprobePath, SkipHash: !cfg.LibraryScanFileHash(), FFprobeExtra: ffprobeExtra}
-	sc.OnDocumentScanned = func(mediaID int64) { docCoverWorker.Enqueue(mediaID) }
-	coordinator, err := scancoord.New(db, scancoord.Options{LeaseDuration: 60 * time.Second, HeartbeatInterval: 20 * time.Second, OwnerInstanceID: "scancoord-" + processID, Scanner: sc, Metrics: sqliteMetrics, OnMediaAdded: scancoord.MediaAddedFunc(postingest.NewScanMediaAddedEnqueueCallback(postIngestEnqueuer)), OnMediaDiscoveredTx: scancoord.MediaDiscoveredTxFunc(postingest.NewScanMediaDiscoveredTxCallback(publicationPlanner)), OnScanCancelled: func(_ context.Context, taskID int64) error { dispatcher.CancelScan(taskID); return nil }, OnError: func(err error) { log.Printf("scan coordinator: %v", err) }})
-	if err != nil {
-		log.Fatalf("scan coordinator: %v", err)
-	}
-	finalizeRecoveryDone := startFinalizeRecoveryLoop(serverCtx, db, 10*time.Second, func(err error) { log.Printf("scan finalize recovery: %v", err) })
+	// (5) Admin overview uses the shared resource-control instances.
 	background := &handler.BackgroundGroup{}
-	deps := handler.Dependencies{ServerContext: serverCtx, Background: background, Coordinator: coordinator, Queue: postIngestQueue, PostIngest: postIngestEnqueuer, Dispatcher: dispatcher, AdminOverviewBuilder: handler.NewAdminOverviewBuilder(db, dispatcher, sqliteMetrics), Worker: worker, PackageWorker: packageWorker, PreviewWorker: previewWorker, Subtitle: subSvc, Upload: up, Instant: instantScheduler, SessionManager: sessionMgr, AtrackWorker: atrackWorker, KeyframeWorker: keyframeWorker, LyricWorker: lyricWorker, PhotoClassifyWorker: photoClassifyWorker, DocCoverWorker: docCoverWorker, KeyVault: keyVault, AssetEncryptor: assetEncryptor, DerivedStore: derivedStore}
+	background.Go(serverCtx, func(ctx context.Context) {
+		metadatalib.RunScrapeArtworkStageReconciler(ctx, db, cfg.Data.MetadataLibrary, time.Minute, 100, func(err error) { log.Printf("scrape artwork stage reconcile: %v", err) })
+	})
+	background.Go(serverCtx, func(ctx context.Context) {
+		postingest.RunEncryptionStageReconciler(ctx, db, postingest.EncryptionRecoveryRoots{Quarantine: assetEnc.EncryptionPrivateRoot(), Resolver: assetEnc}, time.Minute, 100, func(err error) { log.Printf("encryption stage reconcile: %v", err) })
+	})
+	background.Go(serverCtx, func(ctx context.Context) {
+		postingest.RunThumbnailStageReconciler(ctx, db, postingest.ThumbnailRecoveryRoots{Preview: filepath.Join(cfg.Data.Preview, "photos"), Derived: filepath.Join(cfg.Data.Dir, ".derived")}, time.Minute, 100, func(err error) { log.Printf("thumbnail stage reconcile: %v", err) })
+	})
+	background.Go(serverCtx, func(ctx context.Context) {
+		postingest.RunPosterStageReconciler(ctx, db, postingest.PosterRecoveryRoots{Upload: cfg.Data.Upload, Derived: filepath.Join(cfg.Data.Dir, ".derived")}, time.Minute, 100, func(err error) { log.Printf("poster stage reconcile: %v", err) })
+	})
+	deps := handler.Dependencies{
+		ServerContext: serverCtx, Background: background, StartupReady: startupReady,
+		Coordinator: coordinator, Queue: postIngestQueue, PostIngest: postIngestEnqueuer, Dispatcher: dispatcher, AdminOverviewBuilder: func() handler.OverviewBuilder {
+			b := handler.NewAdminOverviewBuilder(db, dispatcher, sqliteMetrics)
+			b.Capabilities = publicationCapabilities
+			return b
+		}(),
+		Worker: worker, PackageWorker: packageWorker, PreviewWorker: previewWorker, Subtitle: subSvc, Upload: up,
+		Instant: instantScheduler, SessionManager: sessionMgr, AtrackWorker: atrackWorker, KeyframeWorker: keyframeWorker,
+		LyricWorker: lyricWorker, PhotoClassifyWorker: photoClassifyWorker, DocCoverWorker: docCoverWorker,
+		KeyVault: keyVault, AssetEncryptor: assetEnc, DerivedStore: derivedStore, PublicationPlanner: publicationPlanner, PublicationCapabilities: publicationCapabilities,
+	}
+
+	// (6) Handler dependencies are injected into the API router.
 	engine := api.NewEngine(cfg, application, deps)
+
+	// Repair runs only after post-ingest, scrape/API, and enterprise prepare workers exist.
+	// ResetInterruptedTasks already ran, so a restarted current repair suppresses duplicates.
+	repairPlanner := publicationPlanner
+	background.Go(serverCtx, func(repairCtx context.Context) {
+		repaired, repairErr := publication.RepairLegacyMedia(repairCtx, db, repairPlanner, 64)
+		if repairErr != nil && repairCtx.Err() == nil {
+			log.Printf("publication legacy repair: %v", repairErr)
+			return
+		}
+		if repaired > 0 {
+			log.Printf("publication legacy repair scheduled: %d media", repaired)
+		}
+	})
+
+	// (7) Monitor submits through the same coordinator and starts last.
 	mon := monitor.NewService(db, coordinator, 15*time.Second)
 	monitorDone := make(chan struct{})
-	go func() { defer close(monitorDone); mon.Start(serverCtx) }()
+	go func() {
+		defer close(monitorDone)
+		mon.Start(serverCtx)
+	}()
+
+	// (8) Root cancellation stops monitor, scans, and dispatcher.
 	httpServer := &http.Server{Addr: cfg.Addr(), Handler: engine}
 	serverDone := make(chan error, 1)
 	go func() {
@@ -288,18 +445,30 @@ func main() {
 		serverCancel()
 	case <-serverCtx.Done():
 	}
+
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
-	_ = httpServer.Shutdown(shutdownCtx)
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		log.Printf("http server shutdown: %v", err)
+	}
 	serverCancel()
 	select {
 	case <-finalizeRecoveryDone:
 	case <-shutdownCtx.Done():
 		log.Printf("scan finalize recovery shutdown: %v", shutdownCtx.Err())
 	}
-	<-monitorDone
-	_ = background.Wait(shutdownCtx)
-	_ = coordinator.ShutdownContext(shutdownCtx)
+	// Wait for monitor submission to stop before waiting on the Coordinator WaitGroup.
+	select {
+	case <-monitorDone:
+	case <-shutdownCtx.Done():
+		log.Printf("monitor shutdown: %v", shutdownCtx.Err())
+	}
+	if err := background.Wait(shutdownCtx); err != nil {
+		log.Printf("handler background shutdown: %v", err)
+	}
+	if err := coordinator.ShutdownContext(shutdownCtx); err != nil {
+		log.Printf("scan coordinator shutdown: %v", err)
+	}
 	select {
 	case err := <-dispatcherDone:
 		if err != nil {
@@ -308,7 +477,15 @@ func main() {
 	case <-shutdownCtx.Done():
 		log.Printf("post-ingest dispatcher shutdown: %v", shutdownCtx.Err())
 	}
+}
 
+func buildDispatcherOptions(cfg *config.Config, owner string) postingest.DispatcherOptions {
+	opts := postingest.DefaultDispatcherOptions()
+	opts.OwnerID = owner
+	opts.Global = cfg.PostIngest.MaxConcurrent
+	opts.Poster = cfg.PostIngest.PosterMaxConcurrent
+	opts.Preview = cfg.PostIngest.PreviewMaxConcurrent
+	return opts
 }
 
 // seedUsers creates default admin + demo viewer when DB is empty; ensures viewer exists on old DBs.
@@ -364,45 +541,6 @@ func instantMaxConcurrent() int {
 		n = 8
 	}
 	return n
-}
-
-func enqueueAutoTasksOnMediaAdded(db *sql.DB, vault *keystore.Vault, cfg *config.Config, assetEnc *storage.AssetEncryptor, derivedStore *storage.DerivedAssetStore, previewWorker *preview.Worker, dcw *doccover.Worker, subSvc *subtitle.Service, atw *atrack.Worker, kfw *keyframe.Worker, lw *lyrictask.Worker, pcw *photoclass.Worker, pfw *photoface.Worker, mediaID int64, fileType string) {
-	if db == nil || cfg == nil || mediaID <= 0 {
-		return
-	}
-	// 顺序与产品流水线对齐：本地预览图/海报 → 刮削（元数据与远端配图）。
-	// JIT 关键帧索引：仅 jit_prepare_on_ingest 时在 scanner/upload 路径触发；传输流实时加密在点播时处理。
-	enqueueAutoPreviewTask(db, mediaID, fileType)
-	ensureAutoPreviewGeneration(db, previewWorker, mediaID, fileType)
-	capturePosterOnScan(db, vault, derivedStore, cfg, mediaID, fileType)
-	generatePhotoVariantsOnScan(db, vault, cfg, mediaID, fileType)
-	if fileType == "document" && dcw != nil {
-		dcw.Enqueue(mediaID)
-	}
-	if fileType != "image" {
-		enqueueAutoScrapeTask(db, mediaID)
-	}
-	if subSvc != nil && cfg.SubtitleAutoOnScan() && fileType == "video" {
-		_ = subSvc.EnsurePendingSubtitleTask(mediaID)
-	}
-	if lw != nil && cfg.LyricAutoOnScan() {
-		_ = lw.EnsurePendingIfNoLyrics(mediaID, fileType)
-	}
-	if pcw != nil && cfg.PhotoClassifyAutoOnScan() && fileType == "image" {
-		_ = pcw.EnsurePendingIfPhoto(mediaID, fileType)
-	}
-	if pfw != nil && cfg.PhotoFaceAutoOnScan() && fileType == "image" {
-		_ = pfw.EnsurePendingIfPhoto(mediaID, fileType)
-	}
-	if fileType == "video" {
-		if atw != nil && cfg.ATrackAutoOnScan() {
-			atw.Enqueue(mediaID)
-		}
-		if kfw != nil {
-			kfw.Enqueue(mediaID)
-		}
-	}
-	storage.KickEncryptMedia(assetEnc, cfg, mediaID)
 }
 
 func enqueueAutoScrapeTask(db *sql.DB, mediaID int64) {
@@ -469,120 +607,6 @@ func ensureAutoPreviewGeneration(db *sql.DB, previewWorker *preview.Worker, medi
 	_, _ = previewWorker.Ensure(context.Background(), mediaID, inputPath, duration.Int64)
 }
 
-func capturePosterOnScan(db *sql.DB, vault *keystore.Vault, derivedStore *storage.DerivedAssetStore, cfg *config.Config, mediaID int64, fileType string) {
-	if fileType != "video" {
-		return
-	}
-	ffmpegPath := strings.TrimSpace(cfg.FFmpeg.FFmpegPath)
-	uploadDir := strings.TrimSpace(cfg.Data.Upload)
-	if ffmpegPath == "" || uploadDir == "" {
-		return
-	}
-	var filePath sql.NullString
-	var duration sql.NullInt64
-	var metaRaw sql.NullString
-	var libraryID sql.NullInt64
-	if err := db.QueryRow(`SELECT library_id, file_path, COALESCE(duration,0), COALESCE(meta_json,'') FROM media WHERE id = ? LIMIT 1`, mediaID).
-		Scan(&libraryID, &filePath, &duration, &metaRaw); err != nil {
-		return
-	}
-	inputPath := storage.PreferredFFmpegPath(db, mediaID, libraryID.Int64, filePath.String)
-	if inputPath == "" {
-		return
-	}
-	posterDir := filepath.Join(uploadDir, "posters")
-	if err := os.MkdirAll(posterDir, 0o755); err != nil {
-		return
-	}
-	posterFile := filepath.Join(posterDir, fmt.Sprintf("%d.jpg", mediaID))
-
-	snapSec := 10
-	if duration.Int64 > 0 {
-		sec := int(duration.Int64 / 5)
-		if sec < 10 {
-			sec = 10
-		}
-		if sec > 180 {
-			sec = 180
-		}
-		snapSec = sec
-	}
-	post := []string{"-frames:v", "1", "-q:v", "3", posterFile}
-	pre := storage.PosterSeekPreInput(snapSec, inputPath)
-	if _, err := storage.RunFFmpeg(context.Background(), db, vault, ffmpegPath, mediaID, inputPath, 0, 0, pre, post, ""); err != nil {
-		return
-	}
-	posterURL, err := storage.FinalizeLocalPoster(context.Background(), derivedStore, db, mediaID, posterFile)
-	if err != nil {
-		_ = os.Remove(posterFile)
-		return
-	}
-
-	var root map[string]any
-	if strings.TrimSpace(metaRaw.String) != "" {
-		_ = json.Unmarshal([]byte(metaRaw.String), &root)
-	}
-	if root == nil {
-		root = map[string]any{}
-	}
-	scrape, _ := root["scrape"].(map[string]any)
-	if scrape == nil {
-		scrape = map[string]any{}
-	}
-	extra, _ := scrape["extra"].(map[string]any)
-	if extra == nil {
-		extra = map[string]any{}
-	}
-	if strings.TrimSpace(fmt.Sprintf("%v", extra["poster"])) == "" {
-		extra["poster"] = posterURL
-	}
-	scrape["extra"] = extra
-	root["scrape"] = scrape
-	merged, _ := json.Marshal(root)
-	_, _ = db.Exec(`UPDATE media SET meta_json = ? WHERE id = ?`, string(merged), mediaID)
-}
-
-func generatePhotoVariantsOnScan(db *sql.DB, vault *keystore.Vault, cfg *config.Config, mediaID int64, fileType string) {
-	if fileType != "image" || db == nil || cfg == nil || mediaID <= 0 {
-		return
-	}
-	ffmpegPath := strings.TrimSpace(cfg.FFmpeg.FFmpegPath)
-	if ffmpegPath == "" {
-		return
-	}
-	derivedStore := storage.NewDerivedAssetStoreFromConfig(cfg, db, vault)
-	var filePath sql.NullString
-	var metaRaw sql.NullString
-	if err := db.QueryRow(`SELECT file_path, COALESCE(meta_json,'') FROM media WHERE id = ? LIMIT 1`, mediaID).
-		Scan(&filePath, &metaRaw); err != nil {
-		return
-	}
-	if strings.TrimSpace(filePath.String) == "" {
-		return
-	}
-	cacheDir := filepath.Join(cfg.Data.Preview, "photos")
-	paths, err := imagethumb.Ensure(context.Background(), db, vault, derivedStore, ffmpegPath, filePath.String, cacheDir, mediaID)
-	if err != nil {
-		return
-	}
-	var root map[string]any
-	if strings.TrimSpace(metaRaw.String) != "" {
-		_ = json.Unmarshal([]byte(metaRaw.String), &root)
-	}
-	if root == nil {
-		root = map[string]any{}
-	}
-	photo, _ := root["photo"].(map[string]any)
-	if photo == nil {
-		photo = map[string]any{}
-	}
-	photo["thumb_path"] = paths.Thumb
-	photo["medium_path"] = paths.Medium
-	root["photo"] = photo
-	merged, _ := json.Marshal(root)
-	_, _ = db.Exec(`UPDATE media SET meta_json = ? WHERE id = ?`, string(merged), mediaID)
-}
-
 func loadSystemOptionsTranscodeSettings(db *sql.DB) transcode.Settings {
 	if db == nil {
 		return transcode.DefaultSettings()
@@ -594,18 +618,6 @@ func loadSystemOptionsTranscodeSettings(db *sql.DB) transcode.Settings {
 	return transcode.SettingsFromOptionsJSON(raw.String)
 }
 
-func hostnameOrUnknown() string {
-	h, err := os.Hostname()
-	if err != nil || strings.TrimSpace(h) == "" {
-		return "unknown-host"
-	}
-	return h
-}
-func buildDispatcherOptions(cfg *config.Config, owner string) postingest.DispatcherOptions {
-	opts := postingest.DefaultDispatcherOptions()
-	opts.OwnerID = owner
-	opts.Global = cfg.PostIngest.MaxConcurrent
-	opts.Poster = cfg.PostIngest.PosterMaxConcurrent
-	opts.Preview = cfg.PostIngest.PreviewMaxConcurrent
-	return opts
+func startupBuildLog(info buildinfo.Info, identity store.SQLiteDBIdentity) string {
+	return fmt.Sprintf("build_info %s db_path=%s schema_version=%d user_version=%d", info.String(), identity.Path, identity.SchemaRevision, identity.UserRevision)
 }

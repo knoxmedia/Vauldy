@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"knox-media/internal/publication"
 	"knox-media/internal/store"
 	"os"
 	"path/filepath"
@@ -126,8 +127,8 @@ func TestQueue_RetryExplicitly(t *testing.T) {
 		}
 	}
 
-	for i, status := range []Status{StatusWaiting, StatusRunning} {
-		typ := []TaskType{TaskSubtitle, TaskAtrack}[i]
+	for i, status := range []Status{StatusWaiting, StatusRunning, StatusDone} {
+		typ := []TaskType{TaskSubtitle, TaskAtrack, TaskEncrypt}[i]
 		res, err := db.Exec(`INSERT INTO post_ingest_task (media_id, task_type, status) VALUES (?, ?, ?)`, mediaID, typ, status)
 		if err != nil {
 			t.Fatalf("insert %s: %v", status, err)
@@ -1074,7 +1075,7 @@ func TestLeaseExpiryAttemptLimitFailsOnThirdExpiredLeaseAndFencesOldOwners(t *te
 func TestSQLiteBusyIntegrationRetryExplicitRetriesRealWriterLock(t *testing.T) {
 	bootstrap, path := openQueueTestDB(t)
 	mediaID, _, _ := seedQueueTest(t, bootstrap)
-	result, err := bootstrap.Exec(`INSERT INTO post_ingest_task(media_id,task_type,status) VALUES(?,?,'failed')`, mediaID, TaskAtrack)
+	result, err := bootstrap.Exec(`INSERT INTO post_ingest_task(media_id,task_type,status) VALUES(?,?,'failed')`, mediaID, TaskEncrypt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1118,4 +1119,625 @@ func TestSQLiteBusyIntegrationRetryExplicitRetriesRealWriterLock(t *testing.T) {
 	if metrics.BusyRetries.Load() == 0 || metrics.BusyExhausted.Load() != 0 {
 		t.Fatalf("metrics retries=%d exhausted=%d", metrics.BusyRetries.Load(), metrics.BusyExhausted.Load())
 	}
+}
+
+func linkedQueueFixture(t *testing.T, db *sql.DB, runStatus, stepStatus string, attempts, maxAttempts int) (mediaID, runID, stepID, taskID int64) {
+	t.Helper()
+	mediaID, _, _ = seedQueueTest(t, db)
+	if _, err := db.Exec(`UPDATE media SET publication_state='processing', ingest_generation=1 WHERE id=?`, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	res, err := db.Exec(`INSERT INTO media_ingest_run(media_id,generation,reason,status,config_snapshot_json) VALUES(?,1,'scan',?,'{}')`, mediaID, runStatus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID, _ = res.LastInsertId()
+	res, err = db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status,attempts,max_attempts) VALUES(?,?,1,'poster',1,?,?,?)`, runID, mediaID, stepStatus, attempts, maxAttempts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stepID, _ = res.LastInsertId()
+	res, err = db.Exec(`INSERT INTO post_ingest_task(media_id,ingest_run_id,ingest_step_id,generation,task_type,status,attempts,max_attempts) VALUES(?,?,?,1,'poster','waiting',0,?)`, mediaID, runID, stepID, maxAttempts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, _ = res.LastInsertId()
+	return
+}
+
+func TestQueueLinkedFailAggregatesQueueStepRunAndMedia(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	ctx := context.Background()
+	mediaID, runID, stepID, taskID := linkedQueueFixture(t, db, "processing", "waiting", 0, 3)
+	q := NewQueue(db, "linked-fail", nil)
+	task, err := q.Claim(ctx, TaskPoster)
+	if err != nil || task == nil || task.ID != taskID {
+		t.Fatalf("claim=(%+v,%v)", task, err)
+	}
+	if err := q.Fail(ctx, task, FailureRetryable, errors.New("temporary")); err != nil {
+		t.Fatal(err)
+	}
+	var queueStatus, stepState, runState, mediaState string
+	if err := db.QueryRow(`SELECT status FROM post_ingest_task WHERE id=?`, taskID).Scan(&queueStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT status FROM media_ingest_step WHERE id=?`, stepID).Scan(&stepState); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT status FROM media_ingest_run WHERE id=?`, runID).Scan(&runState); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT publication_state FROM media WHERE id=?`, mediaID).Scan(&mediaState); err != nil {
+		t.Fatal(err)
+	}
+	if queueStatus != "waiting" || stepState != "waiting" || runState != "processing" || mediaState != "processing" {
+		t.Fatalf("states queue=%s step=%s run=%s media=%s", queueStatus, stepState, runState, mediaState)
+	}
+}
+
+func TestQueueLinkedRecoverExpiredFailsInitialPublicationAtomically(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	mediaID, runID, stepID, taskID := linkedQueueFixture(t, db, "processing", "running", 3, 3)
+	if _, err := db.Exec(`UPDATE post_ingest_task SET status='running',attempts=3,lease_owner='old',lease_until=datetime(CURRENT_TIMESTAMP,'-1 second') WHERE id=?`, taskID); err != nil {
+		t.Fatal(err)
+	}
+	q := NewQueue(db, "recovery", nil)
+	if n, err := q.RecoverExpired(context.Background()); err != nil || n != 1 {
+		t.Fatalf("recover=(%d,%v)", n, err)
+	}
+	var queueStatus, stepState, runState, mediaState string
+	if err := db.QueryRow(`SELECT status FROM post_ingest_task WHERE id=?`, taskID).Scan(&queueStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT status FROM media_ingest_step WHERE id=?`, stepID).Scan(&stepState); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT status FROM media_ingest_run WHERE id=?`, runID).Scan(&runState); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT publication_state FROM media WHERE id=?`, mediaID).Scan(&mediaState); err != nil {
+		t.Fatal(err)
+	}
+	if queueStatus != "failed" || stepState != "failed" || runState != "failed" || mediaState != "failed" {
+		t.Fatalf("states queue=%s step=%s run=%s media=%s", queueStatus, stepState, runState, mediaState)
+	}
+}
+
+func TestQueueLinkedCancelScanPersistsIntentAndLeavesOtherScan(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	mediaID, scanID, otherScan := seedQueueTest(t, db)
+	libraryID := mediaLibraryID(t, db, mediaID)
+	otherMedia := insertQueueMedia(t, db, libraryID, "other-cancel-scan")
+	if _, err := db.Exec(`UPDATE media SET ingest_generation=1 WHERE id IN (?,?)`, mediaID, otherMedia); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range []struct{ media, scan int64 }{{mediaID, scanID}, {otherMedia, otherScan}} {
+		res, err := db.Exec(`INSERT INTO media_ingest_run(media_id,generation,scan_task_id,reason,status,config_snapshot_json) VALUES(?,1,?,'scan','processing','{}')`, item.media, item.scan)
+		if err != nil {
+			t.Fatal(err)
+		}
+		runID, _ := res.LastInsertId()
+		res, err = db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status) VALUES(?, ?,1,'poster',1,'waiting')`, runID, item.media)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stepID, _ := res.LastInsertId()
+		if _, err = db.Exec(`INSERT INTO post_ingest_task(media_id,scan_task_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(?,?,?, ?,1,'poster','waiting')`, item.media, item.scan, runID, stepID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	q := NewQueue(db, "canceller", nil)
+	if n, err := q.CancelScan(context.Background(), scanID); err != nil || n != 1 {
+		t.Fatalf("cancel=(%d,%v)", n, err)
+	}
+	var queueStatus, stepState, runState, mediaState, reason string
+	var finished sql.NullTime
+	if err := db.QueryRow(`SELECT q.status,s.status,r.status,m.publication_state,r.terminal_reason,r.finished_at FROM post_ingest_task q JOIN media_ingest_step s ON s.id=q.ingest_step_id JOIN media_ingest_run r ON r.id=q.ingest_run_id JOIN media m ON m.id=q.media_id WHERE q.scan_task_id=?`, scanID).Scan(&queueStatus, &stepState, &runState, &mediaState, &reason, &finished); err != nil {
+		t.Fatal(err)
+	}
+	if queueStatus != "cancelled" || stepState != "cancelled" || runState != "cancelled" || mediaState != "cancelled" || reason != "scan_cancelled" || !finished.Valid {
+		t.Fatalf("cancelled states queue=%s step=%s run=%s media=%s reason=%q finished=%v", queueStatus, stepState, runState, mediaState, reason, finished)
+	}
+	var otherStatus string
+	if err := db.QueryRow(`SELECT status FROM post_ingest_task WHERE scan_task_id=?`, otherScan).Scan(&otherStatus); err != nil {
+		t.Fatal(err)
+	}
+	if otherStatus != "waiting" {
+		t.Fatalf("other scan status=%s", otherStatus)
+	}
+}
+
+func TestQueueCancelScanRollsBackIntentWithTaskCancellation(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	mediaID, scanID, _ := seedQueueTest(t, db)
+	if _, err := db.Exec(`UPDATE media SET ingest_generation=1 WHERE id=?`, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	res, err := db.Exec(`INSERT INTO media_ingest_run(media_id,generation,scan_task_id,reason,status,config_snapshot_json,error_message) VALUES(?,1,?,'scan','processing','{}','original')`, mediaID, scanID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID, _ := res.LastInsertId()
+	res, err = db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status) VALUES(?,?,1,'poster',1,'waiting')`, runID, mediaID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stepID, _ := res.LastInsertId()
+	if _, err = db.Exec(`INSERT INTO post_ingest_task(media_id,scan_task_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(?,?,?,?,1,'poster','waiting')`, mediaID, scanID, runID, stepID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`CREATE TRIGGER reject_scan_cancel BEFORE UPDATE ON post_ingest_task WHEN NEW.status='cancelled' BEGIN SELECT RAISE(ABORT,'injected cancel failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	q := NewQueue(db, "rollback", nil)
+	if _, err = q.CancelScan(context.Background(), scanID); err == nil {
+		t.Fatal("expected cancellation failure")
+	}
+	var runStatus, reason, runError, stepStatus, taskStatus string
+	var finished sql.NullTime
+	if err = db.QueryRow(`SELECT status,terminal_reason,error_message,finished_at FROM media_ingest_run WHERE id=?`, runID).Scan(&runStatus, &reason, &runError, &finished); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.QueryRow(`SELECT status FROM media_ingest_step WHERE id=?`, stepID).Scan(&stepStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.QueryRow(`SELECT status FROM post_ingest_task WHERE ingest_run_id=?`, runID).Scan(&taskStatus); err != nil {
+		t.Fatal(err)
+	}
+	if runStatus != "processing" || reason != "" || runError != "original" || finished.Valid || stepStatus != "waiting" || taskStatus != "waiting" {
+		t.Fatalf("rollback run=%s reason=%q error=%q finished=%v step=%s task=%s", runStatus, reason, runError, finished, stepStatus, taskStatus)
+	}
+}
+
+func assertLinkedExecutionStateEqual(t *testing.T, db *sql.DB, taskID int64) {
+	t.Helper()
+	var equal int
+	if err := db.QueryRow(`SELECT q.status=s.status AND q.attempts=s.attempts AND q.max_attempts=s.max_attempts AND q.last_error=s.last_error AND q.available_at=s.available_at AND q.lease_owner IS s.lease_owner AND q.lease_until IS s.lease_until AND q.started_at IS s.started_at AND q.finished_at IS s.finished_at FROM post_ingest_task q JOIN media_ingest_step s ON s.id=q.ingest_step_id WHERE q.id=?`, taskID).Scan(&equal); err != nil {
+		t.Fatal(err)
+	}
+	if equal != 1 {
+		var qState, sState string
+		if err := db.QueryRow(`SELECT printf('%s|%d|%d|%s|%s|%s|%s|%s|%s',q.status,q.attempts,q.max_attempts,q.last_error,q.available_at,COALESCE(q.lease_owner,'NULL'),COALESCE(q.lease_until,'NULL'),COALESCE(q.started_at,'NULL'),COALESCE(q.finished_at,'NULL')),printf('%s|%d|%d|%s|%s|%s|%s|%s|%s',s.status,s.attempts,s.max_attempts,s.last_error,s.available_at,COALESCE(s.lease_owner,'NULL'),COALESCE(s.lease_until,'NULL'),COALESCE(s.started_at,'NULL'),COALESCE(s.finished_at,'NULL')) FROM post_ingest_task q JOIN media_ingest_step s ON s.id=q.ingest_step_id WHERE q.id=?`, taskID).Scan(&qState, &sState); err != nil {
+			t.Fatal(err)
+		}
+		t.Fatalf("linked execution state differs queue=%s step=%s", qState, sState)
+	}
+}
+
+func TestQueueLinkedTransitionsSynchronizeCompleteExecutionState(t *testing.T) {
+	ctx := context.Background()
+	t.Run("claim and permanent failure fail initial publication", func(t *testing.T) {
+		db, _ := openQueueTestDB(t)
+		mediaID, runID, _, taskID := linkedQueueFixture(t, db, "processing", "waiting", 0, 3)
+		q := NewQueue(db, "sync-permanent", nil)
+		task, err := q.Claim(ctx, TaskPoster)
+		if err != nil || task == nil || task.ID != taskID {
+			t.Fatalf("claim=(%+v,%v)", task, err)
+		}
+		assertLinkedExecutionStateEqual(t, db, taskID)
+		if err := q.Fail(ctx, task, FailurePermanent, errors.New("permanent")); err != nil {
+			t.Fatal(err)
+		}
+		assertLinkedExecutionStateEqual(t, db, taskID)
+		var rs, ms string
+		if err := db.QueryRow(`SELECT status FROM media_ingest_run WHERE id=?`, runID).Scan(&rs); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.QueryRow(`SELECT publication_state FROM media WHERE id=?`, mediaID).Scan(&ms); err != nil {
+			t.Fatal(err)
+		}
+		if rs != "failed" || ms != "failed" {
+			t.Fatalf("permanent failure states: run=%s media=%s", rs, ms)
+		}
+	})
+	t.Run("processing retry exhausts once and remains terminal", func(t *testing.T) {
+		db, _ := openQueueTestDB(t)
+		mediaID, runID, _, taskID := linkedQueueFixture(t, db, "processing", "waiting", 1, 3)
+		if _, err := db.Exec(`UPDATE media_ingest_run SET preserve_visibility=1 WHERE id=?; UPDATE media SET publication_state='published',published_at=CURRENT_TIMESTAMP WHERE id=?; UPDATE post_ingest_task SET attempts=1 WHERE id=?`, runID, mediaID, taskID); err != nil {
+			t.Fatal(err)
+		}
+		q := NewQueue(db, "sync-exhaust", nil)
+		for attempt := 2; attempt <= 3; attempt++ {
+			task, err := q.Claim(ctx, TaskPoster)
+			if err != nil || task == nil {
+				t.Fatalf("attempt %d claim=(%+v,%v)", attempt, task, err)
+			}
+			if err := q.Fail(ctx, task, FailureRetryable, errors.New("exhausted")); err != nil {
+				t.Fatal(err)
+			}
+			assertLinkedExecutionStateEqual(t, db, taskID)
+			if attempt < 3 {
+				if _, err := db.Exec(`UPDATE post_ingest_task SET available_at=CURRENT_TIMESTAMP WHERE id=?; UPDATE media_ingest_step SET available_at=CURRENT_TIMESTAMP WHERE id=(SELECT ingest_step_id FROM post_ingest_task WHERE id=?)`, taskID, taskID); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		var runState, taskState string
+		var attempts int
+		if err := db.QueryRow(`SELECT status FROM media_ingest_run WHERE id=?`, runID).Scan(&runState); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.QueryRow(`SELECT status,attempts FROM post_ingest_task WHERE id=?`, taskID).Scan(&taskState, &attempts); err != nil {
+			t.Fatal(err)
+		}
+		if runState != "degraded" || taskState != "failed" || attempts != 3 {
+			t.Fatalf("run=%s task=%s/%d", runState, taskState, attempts)
+		}
+		if task, err := q.Claim(ctx, TaskPoster); err != nil || task != nil {
+			t.Fatalf("terminal claim=(%+v,%v)", task, err)
+		}
+	})
+
+	t.Run("explicit retry and complete", func(t *testing.T) {
+		db, _ := openQueueTestDB(t)
+		_, _, _, taskID := linkedQueueFixture(t, db, "degraded", "failed", 3, 3)
+		if _, err := db.Exec(`UPDATE post_ingest_task SET status='failed',attempts=3,last_error='x',finished_at=CURRENT_TIMESTAMP WHERE id=?`, taskID); err != nil {
+			t.Fatal(err)
+		}
+		q := NewQueue(db, "sync-complete", nil)
+		if err := q.RetryExplicit(ctx, taskID, nil); err != nil {
+			t.Fatal(err)
+		}
+		assertLinkedExecutionStateEqual(t, db, taskID)
+		task, err := q.Claim(ctx, TaskPoster)
+		if err != nil || task == nil {
+			t.Fatalf("claim=(%+v,%v)", task, err)
+		}
+		assertLinkedExecutionStateEqual(t, db, taskID)
+		if err := q.Complete(ctx, *task); err != nil {
+			t.Fatal(err)
+		}
+		assertLinkedExecutionStateEqual(t, db, taskID)
+	})
+}
+
+func TestQueueLinkedOwnerMismatchLeavesAllFourLayersUnchanged(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	ctx := context.Background()
+	mediaID, runID, _, taskID := linkedQueueFixture(t, db, "processing", "waiting", 0, 3)
+	owner := NewQueue(db, "right", nil)
+	task, err := owner.Claim(ctx, TaskPoster)
+	if err != nil || task == nil {
+		t.Fatal(err)
+	}
+	var before string
+	query := `SELECT printf('%s/%d/%s',q.status,q.attempts,COALESCE(q.lease_owner,''))||'|'||printf('%s/%d/%s',s.status,s.attempts,COALESCE(s.lease_owner,''))||'|'||r.status||'|'||m.publication_state FROM post_ingest_task q JOIN media_ingest_step s ON s.id=q.ingest_step_id JOIN media_ingest_run r ON r.id=q.ingest_run_id JOIN media m ON m.id=q.media_id WHERE q.id=?`
+	if err := db.QueryRow(query, taskID).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	stale := *task
+	stale.LeaseOwner = "wrong/" + strings.TrimPrefix(task.LeaseOwner, "right/")
+	if err := owner.Fail(ctx, &stale, FailurePermanent, errors.New("wrong owner")); err == nil {
+		t.Fatal("owner mismatch accepted")
+	}
+	var after string
+	if err := db.QueryRow(query, taskID).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Fatalf("four layers changed before=%s after=%s run=%d media=%d", before, after, runID, mediaID)
+	}
+}
+
+func TestQueueLinkedCompleteRollsBackWhenStepSyncFails(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	ctx := context.Background()
+	mediaID, runID, stepID, taskID := linkedQueueFixture(t, db, "processing", "waiting", 0, 3)
+	q := NewQueue(db, "atomic-complete", nil)
+	task, err := q.Claim(ctx, TaskPoster)
+	if err != nil || task == nil || task.ID != taskID {
+		t.Fatalf("claim=(%+v,%v)", task, err)
+	}
+	if _, err := db.Exec(`CREATE TRIGGER fail_step_sync BEFORE UPDATE ON media_ingest_step BEGIN SELECT RAISE(ABORT, 'step sync blocked'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Complete(ctx, *task); err == nil {
+		t.Fatal("Complete succeeded despite step sync failure")
+	}
+	assertLinkedState(t, db, mediaID, runID, stepID, taskID, "running", "running", "processing", "processing")
+}
+
+func TestQueueLinkedRetryRollsBackWhenStepSyncFails(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	ctx := context.Background()
+	mediaID, runID, stepID, taskID := linkedQueueFixture(t, db, "degraded", "failed", 3, 3)
+	if _, err := db.Exec(`UPDATE post_ingest_task SET status='failed',last_error='old' WHERE id=?`, taskID); err != nil {
+		t.Fatal(err)
+	}
+	q := NewQueue(db, "atomic-retry", nil)
+	if _, err := db.Exec(`CREATE TRIGGER fail_step_sync BEFORE UPDATE ON media_ingest_step BEGIN SELECT RAISE(ABORT, 'step sync blocked'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Retry(ctx, taskID, nil); err == nil {
+		t.Fatal("Retry succeeded despite step sync failure")
+	}
+	assertLinkedState(t, db, mediaID, runID, stepID, taskID, "failed", "failed", "degraded", "processing")
+}
+
+func assertLinkedState(t *testing.T, db *sql.DB, mediaID, runID, stepID, taskID int64, wantQueue, wantStep, wantRun, wantMedia string) {
+	t.Helper()
+	var queue, step, run, media string
+	if err := db.QueryRow(`SELECT status FROM post_ingest_task WHERE id=?`, taskID).Scan(&queue); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT status FROM media_ingest_step WHERE id=?`, stepID).Scan(&step); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT status FROM media_ingest_run WHERE id=?`, runID).Scan(&run); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT publication_state FROM media WHERE id=?`, mediaID).Scan(&media); err != nil {
+		t.Fatal(err)
+	}
+	if queue != wantQueue || step != wantStep || run != wantRun || media != wantMedia {
+		t.Fatalf("states queue=%s step=%s run=%s media=%s", queue, step, run, media)
+	}
+}
+
+func TestQueueRenewSynchronizesLinkedStepLease(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	ctx := context.Background()
+	mediaID, _, stepID, taskID := linkedQueueFixture(t, db, "processing", "waiting", 0, 3)
+	q := NewQueue(db, "renew-linked", nil)
+	task, err := q.Claim(ctx, TaskPoster)
+	if err != nil || task == nil {
+		t.Fatalf("claim=(%+v,%v)", task, err)
+	}
+	if ok, err := q.Renew(ctx, *task); err != nil || !ok {
+		t.Fatalf("renew=(%v,%v)", ok, err)
+	}
+	var queueLease, stepLease, queueOwner, stepOwner, queueStatus, stepStatus string
+	if err := db.QueryRow(`SELECT lease_until,lease_owner,status FROM post_ingest_task WHERE id=?`, taskID).Scan(&queueLease, &queueOwner, &queueStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT lease_until,lease_owner,status FROM media_ingest_step WHERE id=?`, stepID).Scan(&stepLease, &stepOwner, &stepStatus); err != nil {
+		t.Fatal(err)
+	}
+	if queueLease != stepLease || queueOwner != stepOwner || queueStatus != stepStatus || queueLease == "" || queueOwner == "" || mediaID <= 0 {
+		t.Fatalf("queue=%q/%q/%q step=%q/%q/%q", queueLease, queueOwner, queueStatus, stepLease, stepOwner, stepStatus)
+	}
+}
+
+func TestQueueRecoverExpiredIsBounded(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	mediaID, _, _ := seedQueueTest(t, db)
+	libraryID := mediaLibraryID(t, db, mediaID)
+	for i := 0; i < 101; i++ {
+		id := mediaID
+		if i > 0 {
+			id = insertQueueMedia(t, db, libraryID, fmt.Sprintf("expired-media-%03d", i))
+		}
+		if _, err := db.Exec(`INSERT INTO post_ingest_task(media_id,task_type,status,attempts,max_attempts,lease_owner,lease_until) VALUES(?,?, 'running',1,3,?,datetime(CURRENT_TIMESTAMP,'-1 second'))`, id, TaskPoster, fmt.Sprintf("expired-%03d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	q := NewQueue(db, "bounded-recovery", nil)
+	n, err := q.RecoverExpired(context.Background())
+	if err != nil || n != 100 {
+		t.Fatalf("recover=(%d,%v), want (100,nil)", n, err)
+	}
+	var running, waiting int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM post_ingest_task WHERE status='running'`).Scan(&running); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM post_ingest_task WHERE status='waiting'`).Scan(&waiting); err != nil {
+		t.Fatal(err)
+	}
+	if running != 1 || waiting != 100 {
+		t.Fatalf("running=%d waiting=%d", running, waiting)
+	}
+	if n, err = q.RecoverExpired(context.Background()); err != nil || n != 1 {
+		t.Fatalf("second recover=(%d,%v), want (1,nil)", n, err)
+	}
+}
+
+func TestQueue_ClaimEnforcesLinkedDependenciesAndKeepsLegacy(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	mediaID, scanID, _ := seedQueueTest(t, db)
+	_, _ = db.Exec(`UPDATE media SET ingest_generation=1,publication_state='processing' WHERE id=?`, mediaID)
+	r, _ := db.Exec(`INSERT INTO media_ingest_run(media_id,generation,scan_task_id,reason,status,config_snapshot_json,policy_version) VALUES(?,1,?,'scan','processing','{}',2)`, mediaID, scanID)
+	runID, _ := r.LastInsertId()
+	r, _ = db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status) VALUES(?,?,1,'poster',1,'waiting')`, runID, mediaID)
+	posterID, _ := r.LastInsertId()
+	r, _ = db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status) VALUES(?,?,1,'encrypt',1,'waiting')`, runID, mediaID)
+	encryptID, _ := r.LastInsertId()
+	_, _ = db.Exec(`INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(?,?,'step_done')`, encryptID, posterID)
+	_, _ = db.Exec(`INSERT INTO post_ingest_task(media_id,scan_task_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(?,?,?,?,1,'encrypt','waiting')`, mediaID, scanID, runID, encryptID)
+	q := NewQueue(db, "owner", nil)
+	if got, err := q.Claim(context.Background(), TaskEncrypt); err != nil || got != nil {
+		t.Fatalf("blocked claim=%+v err=%v", got, err)
+	}
+	_, _ = db.Exec(`UPDATE media_ingest_step SET status='done' WHERE id=?`, posterID)
+	if got, err := q.Claim(context.Background(), TaskEncrypt); err != nil || got == nil {
+		t.Fatalf("ready claim=%+v err=%v", got, err)
+	}
+	_, _ = db.Exec(`INSERT INTO post_ingest_task(media_id,task_type,status) VALUES(?,'subtitle','waiting')`, mediaID)
+	if got, err := q.Claim(context.Background(), TaskSubtitle); err != nil || got == nil {
+		t.Fatalf("legacy claim=%+v err=%v", got, err)
+	}
+}
+
+func TestQueue_ClaimCASRechecksDependency(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	mediaID, scanID, _ := seedQueueTest(t, db)
+	_, _ = db.Exec(`UPDATE media SET ingest_generation=1 WHERE id=?`, mediaID)
+	r, _ := db.Exec(`INSERT INTO media_ingest_run(media_id,generation,scan_task_id,reason,status,config_snapshot_json,policy_version) VALUES(?,1,?,'scan','processing','{}',2)`, mediaID, scanID)
+	runID, _ := r.LastInsertId()
+	r, _ = db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status) VALUES(?,?,1,'poster',1,'done')`, runID, mediaID)
+	posterID, _ := r.LastInsertId()
+	r, _ = db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status) VALUES(?,?,1,'encrypt',1,'waiting')`, runID, mediaID)
+	encryptID, _ := r.LastInsertId()
+	_, _ = db.Exec(`INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(?,?,'step_done')`, encryptID, posterID)
+	_, _ = db.Exec(`INSERT INTO post_ingest_task(media_id,scan_task_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(?,?,?,?,1,'encrypt','waiting')`, mediaID, scanID, runID, encryptID)
+	q := NewQueue(db, "owner", nil)
+	_, _ = db.Exec(`UPDATE media_ingest_step SET status='waiting' WHERE id=?`, posterID)
+	if got, err := q.Claim(context.Background(), TaskEncrypt); err != nil || got != nil {
+		t.Fatalf("invalidated claim=%+v err=%v", got, err)
+	}
+}
+
+func TestQueue_LinkedLifecycleRejectsRelinkWithSameOwner(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	ctx := context.Background()
+	mediaID, runID, stepID, taskID := linkedQueueFixture(t, db, "processing", "waiting", 0, 3)
+	q := NewQueue(db, "relink-owner", nil, testCapabilities{})
+	task, err := q.Claim(ctx, TaskPoster)
+	if err != nil || task == nil {
+		t.Fatalf("claim=%+v err=%v", task, err)
+	}
+	_, err = db.Exec(`INSERT INTO media_ingest_run(media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(?,2,'repair','processing','{}',2)`, mediaID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var newRun int64
+	_ = db.QueryRow(`SELECT max(id) FROM media_ingest_run`).Scan(&newRun)
+	_, err = db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status,lease_owner) VALUES(?,?,2,'poster',1,'running',?)`, newRun, mediaID, task.LeaseOwner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var newStep int64
+	_ = db.QueryRow(`SELECT max(id) FROM media_ingest_step`).Scan(&newStep)
+	_, err = db.Exec(`UPDATE media SET ingest_generation=2 WHERE id=?; UPDATE post_ingest_task SET ingest_run_id=?,ingest_step_id=?,generation=2 WHERE id=?`, mediaID, newRun, newStep, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := q.Renew(ctx, *task); err != nil || ok {
+		t.Fatalf("stale renew=(%v,%v)", ok, err)
+	}
+	if err := q.Complete(ctx, *task); err == nil {
+		t.Fatal("stale complete accepted")
+	}
+	if err := q.Fail(ctx, task, FailurePermanent, errors.New("stale")); err == nil {
+		t.Fatal("stale fail accepted")
+	}
+	var status string
+	_ = db.QueryRow(`SELECT status FROM post_ingest_task WHERE id=?`, taskID).Scan(&status)
+	if status != "running" {
+		t.Fatalf("status=%s old=%d/%d", status, runID, stepID)
+	}
+}
+
+type testCapabilities struct{}
+
+func (testCapabilities) Available(string) bool { return true }
+
+func TestQueue_PosterRepairExactLifecycleDoesNotSyncPublication(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	mid, _, _ := seedQueueTest(t, db)
+	_, _ = db.Exec(`UPDATE media SET ingest_generation=1,publication_state='published',published_at=CURRENT_TIMESTAMP WHERE id=?; INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(900,?,1,'repair','published','{}',2); INSERT INTO post_ingest_task(media_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(?,900,NULL,1,'poster_repair','waiting')`, mid, mid)
+	q := NewQueue(db, "repair-owner", nil)
+	task, err := q.Claim(context.Background(), TaskPosterRepair)
+	if err != nil || task == nil {
+		t.Fatalf("claim=%+v err=%v", task, err)
+	}
+	if ok, err := q.Renew(context.Background(), *task); err != nil || !ok {
+		t.Fatalf("renew=%v,%v", ok, err)
+	}
+	if err = q.Complete(context.Background(), *task); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	_ = db.QueryRow(`SELECT status FROM post_ingest_task WHERE id=?`, task.ID).Scan(&status)
+	if status != "done" {
+		t.Fatalf("status=%s", status)
+	}
+	var steps int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM media_ingest_step WHERE run_id=900`).Scan(&steps)
+	if steps != 0 {
+		t.Fatalf("steps=%d", steps)
+	}
+}
+func TestQueue_PosterRepairFailAndStaleFence(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	mid, _, _ := seedQueueTest(t, db)
+	_, _ = db.Exec(`UPDATE media SET ingest_generation=1,publication_state='published',published_at=CURRENT_TIMESTAMP WHERE id=?;INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(901,?,1,'repair','published','{}',2);INSERT INTO post_ingest_task(media_id,ingest_run_id,generation,task_type,status,max_attempts) VALUES(?,901,1,'poster_repair','waiting',2)`, mid, mid)
+	q := NewQueue(db, "repair-owner", nil)
+	task, _ := q.Claim(context.Background(), TaskPosterRepair)
+	if err := q.Fail(context.Background(), task, FailureRetryable, errors.New("x")); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	_ = db.QueryRow(`SELECT status FROM post_ingest_task WHERE id=?`, task.ID).Scan(&status)
+	if status != "waiting" {
+		t.Fatalf("retry=%s", status)
+	}
+	_, _ = db.Exec(`UPDATE post_ingest_task SET available_at=CURRENT_TIMESTAMP WHERE id=?`, task.ID)
+	task, _ = q.Claim(context.Background(), TaskPosterRepair)
+	_, _ = db.Exec(`UPDATE media SET ingest_generation=2 WHERE id=?`, mid)
+	if err := q.Complete(context.Background(), *task); err == nil {
+		t.Fatal("stale completed")
+	}
+	_ = db.QueryRow(`SELECT status FROM media_ingest_run WHERE id=901`).Scan(&status)
+	if status != "published" {
+		t.Fatalf("run=%s", status)
+	}
+}
+
+func TestQueue_ClaimAnyAvoidsIdleImmediateTransactions(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	metrics := &store.SQLiteMetrics{}
+	q := NewQueue(db, "claim-any-idle", metrics)
+	for cycle := 0; cycle < 20; cycle++ {
+		task, err := q.ClaimAny(context.Background(), taskTypes)
+		if err != nil || task != nil {
+			t.Fatalf("idle cycle %d claim=(%+v,%v)", cycle, task, err)
+		}
+	}
+	if got := metrics.ImmediateTransactions.Load(); got != 0 {
+		t.Fatalf("idle immediate transactions=%d want 0", got)
+	}
+}
+
+func TestQueue_ClaimAnyUsesOneImmediateTransactionPerClaim(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	metrics := &store.SQLiteMetrics{}
+	q := NewQueue(db, "claim-any-work", metrics)
+	enqueueDispatcherTasks(t, q, 1, TaskPoster, TaskPreview, TaskKeyframe)
+	allowed := []TaskType{TaskPoster, TaskPreview, TaskKeyframe}
+	for want := uint64(1); want <= 3; want++ {
+		task, err := q.ClaimAny(context.Background(), allowed)
+		if err != nil || task == nil {
+			t.Fatalf("claim %d=(%+v,%v)", want, task, err)
+		}
+		if got := metrics.ImmediateTransactions.Load(); got != want {
+			t.Fatalf("after claim %d immediate transactions=%d want %d", want, got, want)
+		}
+	}
+	if task, err := q.ClaimAny(context.Background(), allowed); err != nil || task != nil {
+		t.Fatalf("empty tail claim=(%+v,%v)", task, err)
+	}
+	if got := metrics.ImmediateTransactions.Load(); got != 3 {
+		t.Fatalf("empty tail added immediate transaction: %d", got)
+	}
+}
+
+func TestQueueRetryRoundFencesStaleClaim(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	mediaID, runID, stepID, taskID := linkedQueueFixture(t, db, "published", "failed", 3, 3)
+	if _, err := db.Exec(`UPDATE media_ingest_step SET step_type='subtitle',required=0,status='failed' WHERE id=?`, stepID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE media SET publication_state='published',published_at=CURRENT_TIMESTAMP WHERE id=?`, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE post_ingest_task SET task_type='subtitle',status='failed',attempts=3 WHERE id=?`, taskID); err != nil {
+		t.Fatal(err)
+	}
+	if err := publication.RetryOptionalPostIngest(context.Background(), db, publication.OptionalPostIngestRetryRequest{MediaID: mediaID, StepID: stepID, ActorID: 1, Reason: "fence"}); err != nil {
+		t.Fatal(err)
+	}
+	q := NewQueue(db, "round-owner", nil)
+	task, err := q.Claim(context.Background(), TaskSubtitle)
+	if err != nil || task == nil || task.RetryRound != 1 {
+		t.Fatalf("claim=%+v err=%v", task, err)
+	}
+	stale := *task
+	stale.RetryRound = 0
+	if err := q.Complete(context.Background(), stale); err == nil {
+		t.Fatal("stale retry round completed")
+	}
+	if err := q.Complete(context.Background(), *task); err != nil {
+		t.Fatal(err)
+	}
+	_ = runID
 }

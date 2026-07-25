@@ -26,6 +26,54 @@ func cloneScrapeResult(res *scraper.ScrapeResult) (*scraper.ScrapeResult, error)
 	return &cloned, nil
 }
 
+func prepareScrapeMerge(ctx context.Context, tx store.SQLExecutor, mediaID int64, res *scraper.ScrapeResult) (string, *scraper.ScrapeResult, error) {
+	source, err := cloneScrapeResult(res)
+	if err != nil {
+		return "", nil, err
+	}
+	var current sql.NullString
+	if err = tx.QueryRowContext(ctx, `SELECT meta_json FROM media WHERE id=?`, mediaID).Scan(&current); err != nil {
+		return "", nil, err
+	}
+	scraper.PreserveScrapeImagesFromExisting(source, current.String)
+	var root map[string]any
+	_ = json.Unmarshal([]byte(current.String), &root)
+	existingExtra := map[string]any{}
+	if scrapeMap, ok := root["scrape"].(map[string]any); ok {
+		if extra, ok := scrapeMap["extra"].(map[string]any); ok {
+			for k, v := range extra {
+				existingExtra[k] = v
+			}
+		}
+	}
+	for k, v := range source.Extra {
+		existingExtra[k] = v
+	}
+	source.Extra = existingExtra
+	next, err := scraper.MergeMetaJSON(current.String, map[string]any{"scrape": source})
+	return next, source, err
+}
+func commitScrapeMediaTx(ctx context.Context, tx store.SQLExecutor, mediaID int64, res *scraper.ScrapeResult, title string) (string, *scraper.ScrapeResult, error) {
+	next, candidate, err := prepareScrapeMerge(ctx, tx, mediaID, res)
+	if err != nil {
+		return "", nil, err
+	}
+	r, err := tx.ExecContext(ctx, `UPDATE media SET title=? WHERE id=?`, title, mediaID)
+	if err != nil {
+		return "", nil, err
+	}
+	if n, _ := r.RowsAffected(); n != 1 {
+		return "", nil, sql.ErrNoRows
+	}
+	if err = store.UpdateMediaMetaAndPhotoTime(ctx, tx, mediaID, next); err != nil {
+		return "", nil, err
+	}
+	if err = relationshipsync.SyncExecutor(ctx, tx, mediaID); err != nil {
+		return "", nil, err
+	}
+	return next, candidate, nil
+}
+
 // mergeScrapeResultTx merges against the latest media metadata and atomically updates title and meta.
 func (h *Handler) mergeScrapeResultTx(ctx context.Context, mediaID int64, res *scraper.ScrapeResult, title string) (merged string, committed *scraper.ScrapeResult, err error) {
 	if h == nil || h.App == nil || h.App.DB == nil {

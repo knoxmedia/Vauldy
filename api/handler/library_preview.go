@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"image"
@@ -8,7 +9,6 @@ import (
 	"image/draw"
 	"image/jpeg"
 	_ "image/png"
-	"log"
 	"math"
 	"os"
 	"path/filepath"
@@ -24,9 +24,11 @@ import (
 const (
 	libraryPreviewVersion = 2
 	// Portrait strips (2:3) packed edge-to-edge; main + reflection below.
-	libraryPreviewSlots   = 4
-	libraryPreviewMainH   = 360
-	libraryPreviewReflect = 140
+	libraryPreviewSlots         = 4
+	libraryPreviewMainH         = 360
+	libraryPreviewReflect       = 140
+	libraryPreviewMaxConcurrent = 4
+	libraryPreviewMaxPending    = 256
 )
 
 // libraryPreviewWidth derives strip width from height so posters keep 2:3 without letterboxing.
@@ -41,6 +43,7 @@ func libraryPreviewTotalH() int {
 
 var libraryPreviewLocks sync.Map
 var libraryPreviewPending sync.Map
+var libraryPreviewSemaphore = make(chan struct{}, libraryPreviewMaxConcurrent)
 
 const (
 	libraryPreviewKindPoster       = "poster"
@@ -57,59 +60,82 @@ type libraryPreviewSource struct {
 }
 
 // scheduleLibraryPreviewRefresh regenerates the composite preview asynchronously.
-func (h *Handler) scheduleLibraryPreviewRefresh(libraryID int64) {
-	if h == nil || h.App == nil || h.App.DB == nil || h.App.Config == nil || libraryID <= 0 {
-		return
+func (h *Handler) scheduleLibraryPreviewIfMissing(libraryID int64) bool {
+	return h.scheduleLibraryPreview(libraryID, false)
+}
+func (h *Handler) scheduleLibraryPreviewRefresh(libraryID int64) bool {
+	return h.scheduleLibraryPreview(libraryID, true)
+}
+func (h *Handler) scheduleLibraryPreview(libraryID int64, dirty bool) bool {
+	if h == nil || h.App == nil || h.App.DB == nil || h.App.Config == nil || libraryID <= 0 || h.libraryPreviewScheduler == nil {
+		return false
 	}
-	if _, loaded := libraryPreviewPending.LoadOrStore(libraryID, true); loaded {
-		return
+	if dirty {
+		return h.libraryPreviewScheduler.enqueueDirty(libraryID)
 	}
-	go func(lid int64) {
-		defer libraryPreviewPending.Delete(lid)
-		h.refreshLibraryPreview(lid)
-	}(libraryID)
+	return h.libraryPreviewScheduler.enqueueIfMissing(libraryID)
 }
 
-func (h *Handler) refreshLibraryPreview(libraryID int64) {
+func (h *Handler) runLibraryPreviewRefresh(ctx context.Context, libraryID int64) error {
+	if h.libraryPreviewRefresh != nil {
+		return h.libraryPreviewRefresh(ctx, libraryID)
+	}
+	return h.refreshLibraryPreview(ctx, libraryID)
+}
+func (h *Handler) refreshLibraryPreview(ctx context.Context, libraryID int64) error {
 	lockAny, _ := libraryPreviewLocks.LoadOrStore(libraryID, &sync.Mutex{})
 	lock := lockAny.(*sync.Mutex)
 	lock.Lock()
 	defer lock.Unlock()
-
 	uploadDir := strings.TrimSpace(h.App.Config.Data.Upload)
 	if uploadDir == "" {
-		return
+		return ErrLibraryPreviewUnavailable
 	}
-	sources, err := h.latestLibraryPreviewSources(libraryID)
+	sources, err := h.latestLibraryPreviewSourcesContext(ctx, libraryID)
 	if err != nil {
-		log.Printf("library preview sources library=%d: %v", libraryID, err)
-		return
+		return err
 	}
 	outDir := filepath.Join(uploadDir, "library_previews")
 	outFile := filepath.Join(outDir, fmt.Sprintf("%d_v%d.jpg", libraryID, libraryPreviewVersion))
 	if len(sources) == 0 {
 		_ = os.Remove(outFile)
-		return
+		return ErrLibraryPreviewUnavailable
 	}
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
-		log.Printf("library preview mkdir library=%d: %v", libraryID, err)
-		return
+		return err
 	}
 	tmpFile := outFile + ".tmp"
-	if err := composeLibraryPreviewImage(h, sources, tmpFile); err != nil {
-		log.Printf("library preview compose library=%d: %v", libraryID, err)
+	if err := composeLibraryPreviewImageContext(ctx, h, sources, tmpFile); err != nil {
 		_ = os.Remove(tmpFile)
-		return
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		_ = os.Remove(tmpFile)
+		return err
 	}
 	if err := os.Rename(tmpFile, outFile); err != nil {
 		_ = os.Remove(tmpFile)
-		log.Printf("library preview rename library=%d: %v", libraryID, err)
+		return err
 	}
+	st, err := os.Stat(outFile)
+	if err != nil || st.IsDir() || st.Size() == 0 {
+		if err != nil {
+			return err
+		}
+		return ErrLibraryPreviewUnavailable
+	}
+	return nil
+}
+func (h *Handler) latestLibraryPreviewSources(libraryID int64) ([]libraryPreviewSource, error) {
+	return h.latestLibraryPreviewSourcesContext(context.Background(), libraryID)
 }
 
-func (h *Handler) latestLibraryPreviewSources(libraryID int64) ([]libraryPreviewSource, error) {
-	libType := strings.ToLower(strings.TrimSpace(h.loadLibraryType(libraryID)))
-	candidates, err := h.queryLibraryPreviewCandidates(libraryID, libType, libraryPreviewSlots*5)
+func (h *Handler) latestLibraryPreviewSourcesContext(ctx context.Context, libraryID int64) ([]libraryPreviewSource, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	libType := strings.ToLower(strings.TrimSpace(h.loadLibraryTypeContext(ctx, libraryID)))
+	candidates, err := h.queryLibraryPreviewCandidatesContext(ctx, libraryID, libType, libraryPreviewSlots*5)
 	if err != nil {
 		return nil, err
 	}
@@ -127,23 +153,29 @@ func (h *Handler) latestLibraryPreviewSources(libraryID int64) ([]libraryPreview
 }
 
 func (h *Handler) queryLibraryPreviewCandidates(libraryID int64, libType string, limit int) ([]libraryPreviewSource, error) {
+	return h.queryLibraryPreviewCandidatesContext(context.Background(), libraryID, libType, limit)
+}
+func (h *Handler) queryLibraryPreviewCandidatesContext(ctx context.Context, libraryID int64, libType string, limit int) ([]libraryPreviewSource, error) {
 	if limit <= 0 {
 		limit = libraryPreviewSlots
 	}
 	switch libType {
 	case "music":
-		return h.queryMusicPreviewCandidates(libraryID, limit)
+		return h.queryMusicPreviewCandidatesContext(ctx, libraryID, limit)
 	case "photo":
-		return h.queryPhotoPreviewCandidates(libraryID, limit)
+		return h.queryPhotoPreviewCandidatesContext(ctx, libraryID, limit)
 	case "document":
-		return h.queryDocumentPreviewCandidates(libraryID, limit)
+		return h.queryDocumentPreviewCandidatesContext(ctx, libraryID, limit)
 	default:
-		return h.queryVideoPreviewCandidates(libraryID, limit)
+		return h.queryVideoPreviewCandidatesContext(ctx, libraryID, limit)
 	}
 }
 
 func (h *Handler) queryVideoPreviewCandidates(libraryID int64, limit int) ([]libraryPreviewSource, error) {
-	rows, err := h.App.DB.Query(`
+	return h.queryVideoPreviewCandidatesContext(context.Background(), libraryID, limit)
+}
+func (h *Handler) queryVideoPreviewCandidatesContext(ctx context.Context, libraryID int64, limit int) ([]libraryPreviewSource, error) {
+	rows, err := h.App.DB.QueryContext(ctx, `
 		SELECT m.id,
 			COALESCE(
 				NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.poster')), ''),
@@ -161,7 +193,10 @@ func (h *Handler) queryVideoPreviewCandidates(libraryID int64, limit int) ([]lib
 }
 
 func (h *Handler) queryPhotoPreviewCandidates(libraryID int64, limit int) ([]libraryPreviewSource, error) {
-	rows, err := h.App.DB.Query(`
+	return h.queryPhotoPreviewCandidatesContext(context.Background(), libraryID, limit)
+}
+func (h *Handler) queryPhotoPreviewCandidatesContext(ctx context.Context, libraryID int64, limit int) ([]libraryPreviewSource, error) {
+	rows, err := h.App.DB.QueryContext(ctx, `
 		SELECT m.id, ''
 		FROM media m
 		WHERE m.library_id = ? AND m.file_type = 'image' AND m.status = 'active' AND m.publication_state IN ('published','degraded')
@@ -186,7 +221,10 @@ func (h *Handler) queryPhotoPreviewCandidates(libraryID int64, limit int) ([]lib
 }
 
 func (h *Handler) queryDocumentPreviewCandidates(libraryID int64, limit int) ([]libraryPreviewSource, error) {
-	rows, err := h.App.DB.Query(`
+	return h.queryDocumentPreviewCandidatesContext(context.Background(), libraryID, limit)
+}
+func (h *Handler) queryDocumentPreviewCandidatesContext(ctx context.Context, libraryID int64, limit int) ([]libraryPreviewSource, error) {
+	rows, err := h.App.DB.QueryContext(ctx, `
 		SELECT m.id, ''
 		FROM media m
 		WHERE m.library_id = ? AND m.file_type = 'document' AND m.status = 'active' AND m.publication_state IN ('published','degraded')
@@ -210,7 +248,10 @@ func (h *Handler) queryDocumentPreviewCandidates(libraryID int64, limit int) ([]
 }
 
 func (h *Handler) queryMusicPreviewCandidates(libraryID int64, limit int) ([]libraryPreviewSource, error) {
-	rows, err := h.App.DB.Query(`
+	return h.queryMusicPreviewCandidatesContext(context.Background(), libraryID, limit)
+}
+func (h *Handler) queryMusicPreviewCandidatesContext(ctx context.Context, libraryID int64, limit int) ([]libraryPreviewSource, error) {
+	rows, err := h.App.DB.QueryContext(ctx, `
 		SELECT a.id,
 			COALESCE(NULLIF(TRIM(a.artwork_path), ''), ''),
 			COALESCE((
@@ -222,7 +263,11 @@ func (h *Handler) queryMusicPreviewCandidates(libraryID int64, limit int) ([]lib
 				LIMIT 1
 			), 0)
 		FROM music_album a
-		WHERE a.library_id = ? AND EXISTS (SELECT 1 FROM music_track visible_mt JOIN media visible_m ON visible_m.id=visible_mt.media_id WHERE visible_mt.album_id=a.id AND visible_m.publication_state IN ('published','degraded'))
+		WHERE a.library_id = ? AND EXISTS (
+			SELECT 1 FROM music_track visible_mt
+			JOIN media visible_m ON visible_m.id = visible_mt.media_id
+			WHERE visible_mt.album_id = a.id AND visible_m.publication_state IN ('published','degraded')
+		)
 		ORDER BY datetime(COALESCE(a.updated_at, a.created_at)) DESC, a.id DESC
 		LIMIT ?`, libraryID, limit)
 	if err != nil {
@@ -456,6 +501,12 @@ func (h *Handler) loadPosterImageForCompose(mediaID int64, posterURL string) (im
 }
 
 func composeLibraryPreviewImage(h *Handler, sources []libraryPreviewSource, outFile string) error {
+	return composeLibraryPreviewImageContext(context.Background(), h, sources, outFile)
+}
+func composeLibraryPreviewImageContext(ctx context.Context, h *Handler, sources []libraryPreviewSource, outFile string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	width := libraryPreviewWidth()
 	slotW := width / libraryPreviewSlots
 	totalH := libraryPreviewTotalH()
@@ -465,6 +516,9 @@ func composeLibraryPreviewImage(h *Handler, sources []libraryPreviewSource, outF
 
 	loaded := 0
 	for i := 0; i < libraryPreviewSlots; i++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		x0 := i * slotW
 		x1 := x0 + slotW
 		if i == libraryPreviewSlots-1 {

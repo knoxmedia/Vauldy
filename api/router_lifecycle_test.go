@@ -41,3 +41,14 @@ func TestRouterBackgroundLoopsUseInjectedLifecycle(t *testing.T) {
 	}
 	_ = context.Background()
 }
+
+func TestNewEngineDefersBackgroundLoopsUntilStartupReady(t *testing.T) {
+	data, err := os.ReadFile("router.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(data)
+	if !strings.Contains(src, "deps.StartupReady") || !strings.Contains(src, "<-deps.StartupReady") {
+		t.Fatal("router background loops are not publication-startup gated")
+	}
+}

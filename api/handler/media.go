@@ -31,10 +31,10 @@ type updateMediaAdminBody struct {
 }
 
 func (h *Handler) ListMedia(c *gin.Context) {
-	h.listMediaObserved(c, nil)
+	h.listMediaObserved(c, nil, "")
 }
 
-func (h *Handler) listMediaObserved(c *gin.Context, afterBatch func(mediaListStats)) {
+func (h *Handler) listMediaObserved(c *gin.Context, afterBatch func(mediaListStats), publicationState string) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
 	defer cancel()
 	var profile userPermissionProfile
@@ -55,21 +55,32 @@ func (h *Handler) listMediaObserved(c *gin.Context, afterBatch func(mediaListSta
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	spec.IncludeUnpublished = middleware.IsAdmin(c)
+	if middleware.IsAdmin(c) {
+		spec.IncludeUnpublished = true
+		spec.PublicationState = publicationState
+	}
 	if spec.LibraryID != nil && spec.RestrictLibraries {
 		if _, ok := profile.AllowedLibraryIDs[*spec.LibraryID]; !ok {
 			c.JSON(http.StatusForbidden, gin.H{"error": "library access denied"})
 			return
 		}
 	}
+	requestedLimit := spec.Limit
+	if spec.IncludeUnpublished {
+		spec.Limit = requestedLimit + 1
+	}
 	rows, _, err := h.listMediaRowsObserved(ctx, spec, afterBatch)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	hasMore := spec.IncludeUnpublished && len(rows) > requestedLimit
+	if hasMore {
+		rows = rows[:requestedLimit]
+	}
 	items := make([]gin.H, 0, len(rows))
 	for _, row := range rows {
-		items = append(items, gin.H{
+		item := gin.H{
 			"id": row.ID, "library_id": row.LibraryID.Int64, "file_id": row.FileID.String,
 			"title": row.Title.String, "original_title": row.OriginalTitle.String, "file_path": row.FilePath.String,
 			"file_type": row.FileType.String, "duration": row.Duration.Int64, "width": row.Width.Int64, "height": row.Height.Int64,
@@ -79,10 +90,24 @@ func (h *Handler) listMediaObserved(c *gin.Context, afterBatch func(mediaListSta
 			"encrypted_asset": row.EncryptedAsset.Int64 == 1,
 			"photo_taken_at":  row.PhotoTakenAt.String, "photo_tags": row.PhotoTags, "photo_tag_ids": row.PhotoTagIDs,
 			"music_album_id": row.MusicAlbumID.Int64, "music_album_title": textencoding.FixMetadataString(row.MusicAlbumTitle.String),
-			"music_artist": textencoding.FixMetadataString(row.MusicArtist.String),
-		})
+			"music_artist":      textencoding.FixMetadataString(row.MusicArtist.String),
+			"publication_state": row.PublicationState.String,
+		}
+		if spec.IncludeUnpublished {
+			item["published_at"] = row.PublishedAt.String
+			item["publication_error"] = row.PublicationError.String
+			item["ingest_generation"] = row.IngestGeneration.Int64
+		}
+		items = append(items, item)
 	}
-	c.JSON(http.StatusOK, gin.H{"items": items})
+	response := gin.H{"items": items}
+	if spec.IncludeUnpublished {
+		response["has_more"] = hasMore
+		if hasMore && len(rows) > 0 {
+			response["next_cursor"] = strconv.FormatInt(rows[len(rows)-1].ID, 10)
+		}
+	}
+	c.JSON(http.StatusOK, response)
 }
 func photoTagIDMatches(filterID string, tags, tagIDs []string) bool {
 	if filterID == "" || filterID == "all" {
