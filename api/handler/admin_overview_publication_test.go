@@ -167,6 +167,83 @@ INSERT INTO poster_repair_stage(stage_id,queue_id,media_id,run_id,generation,own
 	}
 }
 
+func TestAdminOverviewPublicationIgnoresCommittedRecoveryMarkers(t *testing.T) {
+	db, err := store.OpenSQLite(filepath.Join(t.TempDir(), "pub-committed-recovery.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	snapshot := `{"policy_version":2,"library_id":1,"file_type":"video","metadata":{"attempted":true,"fields":["title"],"errors":[]},"optional_steps":[],"required_steps":["poster"],"steps":["poster"]}`
+	_, err = db.Exec(`
+INSERT INTO library(id,name,type,path) VALUES(1,'movies','video','E:/movies');
+INSERT INTO media(id,library_id,file_id,title,file_path,file_type,status,publication_state,publication_error,ingest_generation) VALUES
+ (20,1,'enc-ok','PublishedEncMarker','enc.mkv','video','active','published','',1),
+ (21,1,'asset-ok','PublishedAssetMarker','asset.mkv','video','active','published','',1),
+ (22,1,'poster-ok','PublishedPosterMarker','poster.mkv','video','active','published','',1),
+ (23,1,'unresolved','PublishedUnresolved','bad.mkv','video','active','published','',1);
+INSERT INTO media_ingest_run(id,media_id,generation,reason,status,preserve_visibility,config_snapshot_json,error_message,policy_version,terminal_reason,updated_at) VALUES
+ (120,20,1,'scan','published',0,?,'',2,'required_done',datetime('2026-07-22 10:00:00')),
+ (121,21,1,'scan','published',0,?,'',2,'required_done',datetime('2026-07-22 09:00:00')),
+ (122,22,1,'scan','published',0,?,'',2,'required_done',datetime('2026-07-22 08:00:00')),
+ (123,23,1,'scan','published',0,?,'',2,'required_done',datetime('2026-07-22 07:00:00'));
+INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status,attempts,max_attempts,last_error) VALUES
+ (220,120,20,1,'poster',1,'done',1,3,''),
+ (221,121,21,1,'poster',1,'done',1,3,''),
+ (222,122,22,1,'poster',1,'done',1,3,''),
+ (223,123,23,1,'poster',1,'done',1,3,'');
+INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES
+ (320,20,120,220,1,'encrypt','done'),
+ (321,22,122,222,1,'poster_repair','done'),
+ (322,23,123,223,1,'encrypt','failed');
+INSERT INTO media_encryption_stage_journal(stage_id,task_id,attempt,media_id,run_id,step_id,generation,owner_token,source_path,source_fingerprint,enc_path,wrapped_dek,iv,enc_sha256,enc_size,state,recovery_error,updated_at)
+ VALUES('enc-20',320,1,20,120,220,1,'owner','/src','fp','/enc','dek','iv','abc',10,'committed','verified_committed',datetime('2026-07-22 10:05:00'));
+INSERT INTO media_asset_stage_journal(stage_id,media_id,run_id,step_id,generation,owner_token,source_fingerprint,artifact_kind,state,staged_path,hashes_sizes_json,recovery_error,updated_at)
+ VALUES('asset-21',21,121,221,1,'owner','fp','poster','committed','/tmp/stage','{}','verified_committed',datetime('2026-07-22 09:05:00'));
+INSERT INTO poster_repair_stage(stage_id,queue_id,media_id,run_id,generation,owner_token,attempt,source_fingerprint,state,staged_path,hashes_sizes_json,recovery_error,updated_at)
+ VALUES('repair-22',321,22,122,1,'owner',1,'fp','committed','/staged','{}','cleaned_unreferenced',datetime('2026-07-22 08:05:00'));
+INSERT INTO media_encryption_stage_journal(stage_id,task_id,attempt,media_id,run_id,step_id,generation,owner_token,source_path,source_fingerprint,enc_path,wrapped_dek,iv,enc_sha256,enc_size,state,recovery_error,updated_at)
+ VALUES('enc-23',322,1,23,123,223,1,'owner','/src','fp','/enc','dek','iv','abc',10,'failed_closed','encrypt still broken',datetime('2026-07-22 07:05:00'));
+`, snapshot, snapshot, snapshot, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	b := NewAdminOverviewBuilder(db, nil, nil)
+	b.Capabilities = publication.NewCapabilityMatrix([]string{"poster", "thumbnail", "encrypt"})
+	b.SampleSystem = func(context.Context, string) (SystemSample, error) { return SystemSample{}, nil }
+
+	data, err := b.Build(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		PublicationPolicy []PublicationPolicyDiagnostic `json:"publication_policy"`
+	}
+	if err := json.Unmarshal(mustJSON(t, data), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	byMedia := map[int64]PublicationPolicyDiagnostic{}
+	for _, row := range decoded.PublicationPolicy {
+		byMedia[row.MediaID] = row
+	}
+	for _, id := range []int64{20, 21, 22} {
+		if row, ok := byMedia[id]; ok {
+			t.Fatalf("published media %d with committed recovery markers must be excluded, got %+v", id, row)
+		}
+	}
+	unresolved, ok := byMedia[23]
+	if !ok {
+		t.Fatalf("published media with unresolved recovery_error missing: %+v", decoded.PublicationPolicy)
+	}
+	if unresolved.RecoveryError != "encrypt still broken" {
+		t.Fatalf("unresolved recovery_error=%q want encrypt still broken", unresolved.RecoveryError)
+	}
+	if len(decoded.PublicationPolicy) > 100 {
+		t.Fatalf("bounded to 100 got %d", len(decoded.PublicationPolicy))
+	}
+}
+
 func TestAdminGetMediaIngestPublicationV2Enrichment(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db, err := store.OpenSQLite(filepath.Join(t.TempDir(), "media-ingest-enrich.sqlite"))

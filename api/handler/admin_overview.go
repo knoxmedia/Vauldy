@@ -518,30 +518,11 @@ func parseBoundedMetadataErrors(raw string) []string {
 }
 
 func loadLatestRecoveryError(ctx context.Context, db *sql.DB, mediaID int64) string {
-	rows, err := db.QueryContext(ctx, `
-SELECT recovery_error, updated_at, preference FROM (
-  SELECT recovery_error, updated_at, CASE WHEN state='committed' THEN 1 ELSE 0 END AS preference
-  FROM media_asset_stage_journal WHERE media_id=? AND TRIM(recovery_error)<>''
-  UNION ALL
-  SELECT recovery_error, updated_at, CASE WHEN state='committed' THEN 1 ELSE 0 END
-  FROM media_encryption_stage_journal WHERE media_id=? AND TRIM(recovery_error)<>''
-  UNION ALL
-  SELECT recovery_error, updated_at, CASE WHEN state='committed' THEN 1 ELSE 0 END
-  FROM poster_repair_stage WHERE media_id=? AND TRIM(recovery_error)<>''
-) ORDER BY preference ASC, updated_at DESC LIMIT 1`, mediaID, mediaID, mediaID)
-	if err != nil {
+	errs := loadUnresolvedRecoveryErrors(ctx, db, mediaID)
+	if len(errs) == 0 {
 		return ""
 	}
-	defer rows.Close()
-	if !rows.Next() {
-		return ""
-	}
-	var msg, updated string
-	var preference int
-	if err := rows.Scan(&msg, &updated, &preference); err != nil {
-		return ""
-	}
-	return truncateUTF8Bound(strings.TrimSpace(msg), maxPublicationDiagnosticMessage)
+	return errs[0]
 }
 
 func truncateUTF8Bound(s string, max int) string {
