@@ -50,6 +50,17 @@ func ReconcileEncryptionStages(ctx context.Context, db *sql.DB, roots Encryption
 	rows.Close()
 	for _, r := range batch {
 		checked++
+		safeSource, identityErr := authoritativeEncryptionRestoreSource(ctx, db, r.media, r.source)
+		if identityErr != nil || !safeSource {
+			if _, err = db.ExecContext(ctx, `UPDATE media SET publication_state='failed',publication_error='unsafe encryption recovery identity' WHERE id=?`, r.media); err != nil {
+				return checked, cleaned, err
+			}
+			if _, err = db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='failed_closed',recovery_error='unsafe_identity',next_retry_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE stage_id=?`, r.stage); err != nil {
+				return checked, cleaned, err
+			}
+			retErr = errors.Join(retErr, errors.New("unsafe encryption recovery identity"))
+			continue
+		}
 		stageRoot, resolveErr := roots.Resolver.ResolveEncryptionStageRoot(ctx, r.media, r.source)
 		if resolveErr != nil {
 			return checked, cleaned, resolveErr
@@ -181,6 +192,91 @@ func cleanupCommittedEncryptionPlaintext(ctx context.Context, db *sql.DB, stageI
 	}
 	_, err := db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET recovery_error='verified_committed',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='committed'`, stageID)
 	return err
+}
+
+func authoritativeEncryptionRestoreSource(ctx context.Context, db *sql.DB, mediaID int64, source string) (bool, error) {
+	var selected, libraryRoot string
+	if err := db.QueryRowContext(ctx, `SELECT COALESCE(m.file_path,''),COALESCE(l.path,'') FROM media m JOIN library l ON l.id=m.library_id WHERE m.id=?`, mediaID).Scan(&selected, &libraryRoot); err != nil {
+		return false, err
+	}
+	var plain string
+	err := db.QueryRowContext(ctx, `SELECT COALESCE(plain_path,'') FROM media_encrypted_assets WHERE media_id=?`, mediaID).Scan(&plain)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, err
+	}
+	if strings.TrimSpace(plain) != "" && !samePathForEvidence(source, plain) {
+		return false, nil
+	}
+	if strings.TrimSpace(plain) == "" && !strings.HasSuffix(strings.ToLower(strings.TrimSpace(selected)), ".enc") && !samePathForEvidence(source, selected) {
+		return false, nil
+	}
+	roots := []string{libraryRoot}
+	rows, err := db.QueryContext(ctx, `SELECT path FROM library_folder WHERE library_id=(SELECT library_id FROM media WHERE id=?)`, mediaID)
+	if err != nil {
+		return false, err
+	}
+	for rows.Next() {
+		var root string
+		if err = rows.Scan(&root); err != nil {
+			rows.Close()
+			return false, err
+		}
+		roots = append(roots, root)
+	}
+	if err = rows.Close(); err != nil {
+		return false, err
+	}
+	for _, root := range roots {
+		if safeEncryptionPlainPath(root, source) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func safeEncryptionPlainPath(root, path string) bool {
+	if strings.TrimSpace(root) == "" || strings.TrimSpace(path) == "" || !filepath.IsAbs(path) {
+		return false
+	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return false
+	}
+	pathAbs, err := filepath.Abs(path)
+	if err != nil || !pathWithinRoot(rootAbs, pathAbs) {
+		return false
+	}
+	rel, err := filepath.Rel(rootAbs, pathAbs)
+	if err != nil || rel == "." {
+		return false
+	}
+	reserved := map[string]bool{".encrypted": true, ".quarantine": true, "quarantine": true, "derived": true, "metadata": true, "upload": true, "uploads": true}
+	for _, part := range strings.FieldsFunc(filepath.ToSlash(rel), func(r rune) bool { return r == '/' }) {
+		if reserved[strings.ToLower(part)] {
+			return false
+		}
+	}
+	rootResolved, err := filepath.EvalSymlinks(rootAbs)
+	if err != nil {
+		return false
+	}
+	parent := filepath.Dir(pathAbs)
+	for {
+		resolved, resolveErr := filepath.EvalSymlinks(parent)
+		if resolveErr == nil {
+			return pathWithinRoot(rootResolved, resolved)
+		}
+		next := filepath.Dir(parent)
+		if next == parent || !pathWithinRoot(rootAbs, next) {
+			return false
+		}
+		parent = next
+	}
+}
+
+func pathWithinRoot(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func managedEncryptionPath(root, path string) bool {

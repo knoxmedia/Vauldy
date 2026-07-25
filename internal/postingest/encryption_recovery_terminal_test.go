@@ -128,7 +128,10 @@ func TestReconcileEncryptionStagesRetriesTransientRestoreWithoutStarving(t *test
 		t.Fatal(err)
 	}
 	root, quarantineRoot := t.TempDir(), t.TempDir()
-	if _, err := db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1,'retry','photo',?); INSERT INTO media(id,library_id,file_id,file_path,file_type,status,publication_state,ingest_generation) VALUES(1,1,'retry',?,'image','active','processing',1)`, root, filepath.Join(root, "selected.enc")); err != nil {
+	if _, err := db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1,'retry','photo',?)`, root); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO media(id,library_id,file_id,file_path,file_type,status,publication_state,ingest_generation) VALUES(1,1,'retry',?,'image','active','processing',1)`, filepath.Join(root, "selected.enc")); err != nil {
 		t.Fatal(err)
 	}
 	source := filepath.Join(root, "source.jpg")
@@ -187,7 +190,10 @@ func TestReconcileEncryptionStagesExhaustedRestoreDoesNotStarveDueWork(t *testin
 		t.Fatal(err)
 	}
 	root, quarantineRoot := t.TempDir(), t.TempDir()
-	if _, err := db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1,'retry','photo',?); INSERT INTO media(id,library_id,file_id,file_path,file_type,status,publication_state,ingest_generation) VALUES(1,1,'retry',?,'image','active','processing',1)`, root, filepath.Join(root, "selected.enc")); err != nil {
+	if _, err := db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1,'retry','photo',?)`, root); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO media(id,library_id,file_id,file_path,file_type,status,publication_state,ingest_generation) VALUES(1,1,'retry',?,'image','active','processing',1)`, filepath.Join(root, "selected.enc")); err != nil {
 		t.Fatal(err)
 	}
 	nextTask := int64(1)
