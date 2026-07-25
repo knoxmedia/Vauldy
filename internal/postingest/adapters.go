@@ -656,12 +656,12 @@ func commitEncryptionStage(ctx context.Context, db *sql.DB, task Task, s storage
 		return publication.AggregateTx(ctx, tx, *task.RunID)
 	})
 	if err == nil {
-		return cleanupCommittedEncryptionPlaintext(ctx, db, s.StageID, quarantinePath, defaultEncryptionFileOps())
+		return cleanupCommittedEncryptionPlaintext(ctx, db, quarantineRoot, task.MediaID, task.Generation, s.StageID, quarantinePath, defaultEncryptionFileOps())
 	}
 	var uncertain *store.ImmediateCommitError
 	if !errors.As(err, &uncertain) {
 		if quarantinePath != "" {
-			if restoreErr := restoreQuarantinedPlaintext(quarantinePath, s.OriginalPath, quarantineRoot); restoreErr != nil {
+			if restoreErr := restoreQuarantinedPlaintext(quarantinePath, s.OriginalPath, quarantineRoot, task.MediaID, task.Generation, s.StageID); restoreErr != nil {
 				_, _ = db.ExecContext(context.Background(), `UPDATE media SET publication_state='failed',status='active',last_error=? WHERE id=?`, "encryption restore failed: "+restoreErr.Error(), task.MediaID)
 				_, _ = db.ExecContext(context.Background(), `UPDATE media_encryption_stage_journal SET state='failed_closed',recovery_error=? WHERE stage_id=?`, restoreErr.Error(), s.StageID)
 				return errors.Join(err, restoreErr)

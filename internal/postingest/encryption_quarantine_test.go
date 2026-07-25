@@ -9,6 +9,7 @@ import (
 	"knox-media/internal/store"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -19,7 +20,7 @@ func TestQuarantinePlaintextMovesSourceUnderRestrictedRootAndRestores(t *testing
 	if err := os.WriteFile(source, payload, 0644); err != nil {
 		t.Fatal(err)
 	}
-	q, err := quarantinePlaintext(source, root, 41, 2, "stage-one")
+	q, err := quarantinePlaintext(source, root, 41, 2, "00000000-0000-0000-0000-000000000001")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +31,7 @@ func TestQuarantinePlaintextMovesSourceUnderRestrictedRootAndRestores(t *testing
 	if err != nil || string(got) != string(payload) {
 		t.Fatalf("quarantine=%q err=%v", got, err)
 	}
-	if err = restoreQuarantinedPlaintext(q, source, root); err != nil {
+	if err = restoreQuarantinedPlaintext(q, source, root, 41, 2, "00000000-0000-0000-0000-000000000001"); err != nil {
 		t.Fatal(err)
 	}
 	if got, err = os.ReadFile(source); err != nil || string(got) != string(payload) {
@@ -149,3 +150,111 @@ func TestQuarantinePlaintextDirectorySyncFailureIsRecoverable(t *testing.T) {
 		}
 	}
 }
+
+func TestRestoreQuarantinedPlaintextRejectsWrongJournalLayout(t *testing.T) {
+	root := t.TempDir()
+	stage := "00000000-0000-0000-0000-000000000010"
+	wrong := filepath.Join(root, "2", "3", stage, "source")
+	if err := os.MkdirAll(filepath.Dir(wrong), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(wrong, []byte("plain"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(t.TempDir(), "restored.jpg")
+	if err := restoreQuarantinedPlaintext(wrong, destination, root, 1, 3, stage); err == nil {
+		t.Fatal("wrong media identity accepted")
+	}
+	if _, err := os.Stat(wrong); err != nil {
+		t.Fatalf("quarantine changed: %v", err)
+	}
+	if _, err := os.Stat(destination); !os.IsNotExist(err) {
+		t.Fatalf("destination changed: %v", err)
+	}
+}
+
+func TestRestoreQuarantinedPlaintextRejectsIntermediateSymlink(t *testing.T) {
+	root, outside := t.TempDir(), t.TempDir()
+	stage := "00000000-0000-0000-0000-000000000011"
+	if err := os.MkdirAll(filepath.Join(root, "1"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "1", "2")); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+	external := filepath.Join(outside, stage, "source")
+	if err := os.MkdirAll(filepath.Dir(external), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(external, []byte("external"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	quarantine := filepath.Join(root, "1", "2", stage, "source")
+	destination := filepath.Join(t.TempDir(), "restored.jpg")
+	if err := restoreQuarantinedPlaintext(quarantine, destination, root, 1, 2, stage); err == nil {
+		t.Fatal("intermediate symlink accepted")
+	}
+	if got, err := os.ReadFile(external); err != nil || string(got) != "external" {
+		t.Fatalf("external changed: %q %v", got, err)
+	}
+	if _, err := os.Stat(destination); !os.IsNotExist(err) {
+		t.Fatalf("destination changed: %v", err)
+	}
+}
+
+func TestRestoreQuarantinedPlaintextRejectsFinalSymlink(t *testing.T) {
+	root, outside := t.TempDir(), t.TempDir()
+	stage := "00000000-0000-0000-0000-000000000012"
+	quarantine := filepath.Join(root, "1", "2", stage, "source")
+	if err := os.MkdirAll(filepath.Dir(quarantine), 0700); err != nil {
+		t.Fatal(err)
+	}
+	external := filepath.Join(outside, "external")
+	if err := os.WriteFile(external, []byte("external"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(external, quarantine); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+	destination := filepath.Join(t.TempDir(), "restored.jpg")
+	if err := restoreQuarantinedPlaintext(quarantine, destination, root, 1, 2, stage); err == nil {
+		t.Fatal("final symlink accepted")
+	}
+	if got, err := os.ReadFile(external); err != nil || string(got) != "external" {
+		t.Fatalf("external changed: %q %v", got, err)
+	}
+}
+
+func TestValidateQuarantinePathUsesInjectableLstat(t *testing.T) {
+	root := t.TempDir()
+	stage := "00000000-0000-0000-0000-000000000013"
+	quarantine := filepath.Join(root, "1", "2", stage, "source")
+	if err := os.MkdirAll(filepath.Dir(quarantine), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(quarantine, []byte("plain"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	original := encryptionLstat
+	encryptionLstat = func(path string) (os.FileInfo, error) {
+		info, err := os.Lstat(path)
+		if err == nil && sameQuarantinePath(path, filepath.Join(root, "1", "2")) {
+			return symlinkFileInfo{FileInfo: info}, nil
+		}
+		return info, err
+	}
+	t.Cleanup(func() { encryptionLstat = original })
+	if _, err := validateExistingQuarantinePath(root, quarantine, 1, 2, stage); err == nil {
+		t.Fatal("simulated reparse/symlink component accepted")
+	}
+}
+
+type symlinkFileInfo struct{ os.FileInfo }
+
+func (s symlinkFileInfo) Mode() os.FileMode { return s.FileInfo.Mode() | os.ModeSymlink }

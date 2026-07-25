@@ -92,7 +92,7 @@ func ReconcileEncryptionStages(ctx context.Context, db *sql.DB, roots Encryption
 				retErr = errors.Join(retErr, errors.New("committed encryption recovery mismatch"))
 				continue
 			}
-			if err = cleanupCommittedEncryptionPlaintext(ctx, db, r.stage, r.quarantine, defaultEncryptionFileOps()); err != nil {
+			if err = cleanupCommittedEncryptionPlaintext(ctx, db, roots.Quarantine, r.media, r.generation, r.stage, r.quarantine, defaultEncryptionFileOps()); err != nil {
 				retErr = errors.Join(retErr, err)
 			}
 			continue
@@ -146,7 +146,7 @@ func ReconcileEncryptionStages(ctx context.Context, db *sql.DB, roots Encryption
 			}
 		}
 		if r.quarantine != "" {
-			if err = reconcileRestoreQuarantinedPlaintext(r.quarantine, r.source, roots.Quarantine); err != nil {
+			if err = reconcileRestoreQuarantinedPlaintext(r.quarantine, r.source, roots.Quarantine, r.media, r.generation, r.stage); err != nil {
 				if strings.Contains(err.Error(), "unsafe encryption quarantine path") || strings.Contains(err.Error(), "restore target already exists") {
 					if _, updateErr := db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='failed_closed',recovery_error=?,recovery_attempts=recovery_attempts+1,next_retry_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE stage_id=?`, boundedRecoveryError("failed_closed: ", err), r.stage); updateErr != nil {
 						return checked, cleaned, updateErr
@@ -167,8 +167,11 @@ func ReconcileEncryptionStages(ctx context.Context, db *sql.DB, roots Encryption
 	}
 	return checked, cleaned, retErr
 }
-func cleanupCommittedEncryptionPlaintext(ctx context.Context, db *sql.DB, stageID, quarantine string, ops encryptionFileOps) error {
+func cleanupCommittedEncryptionPlaintext(ctx context.Context, db *sql.DB, root string, mediaID, generation int64, stageID, quarantine string, ops encryptionFileOps) error {
 	if quarantine != "" {
+		if _, err := validateExistingQuarantinePath(root, quarantine, mediaID, generation, stageID); err != nil {
+			return err
+		}
 		if err := ops.remove(quarantine); err != nil && !os.IsNotExist(err) {
 			marker := "plaintext_cleanup_pending:" + err.Error()
 			if len(marker) > 512 {

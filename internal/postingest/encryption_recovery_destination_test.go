@@ -114,7 +114,7 @@ func TestReconcileEncryptionStagesRejectsSymlinkEscapeDestination(t *testing.T) 
 func TestReconcileEncryptionStagesRestoresValidLibrarySource(t *testing.T) {
 	root, quarantineRoot := t.TempDir(), t.TempDir()
 	source := filepath.Join(root, "Movies", "valid.mp4")
-	db, _ := seedRestoreDestinationJournal(t, root, source, "", source, quarantineRoot, "valid-stage")
+	db, _ := seedRestoreDestinationJournal(t, root, source, "", source, quarantineRoot, "00000000-0000-0000-0000-000000000101")
 	_, cleaned, err := ReconcileEncryptionStages(context.Background(), db, EncryptionRecoveryRoots{Quarantine: quarantineRoot, Resolver: fixedStageRoot(filepath.Join(root, ".encrypted", "video", "stages"))}, 100)
 	if err != nil || cleaned != 1 {
 		t.Fatalf("cleaned=%d err=%v", cleaned, err)
