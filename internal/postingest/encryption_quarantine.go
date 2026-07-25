@@ -35,9 +35,10 @@ func quarantinePath(root string, mediaID, generation int64, stageID string) (str
 }
 
 type encryptionFileOps struct {
-	syncFile func(*os.File) error
-	syncDir  func(string) error
-	remove   func(string) error
+	syncFile  func(*os.File) error
+	syncDir   func(string) error
+	remove    func(string) error
+	afterMove func() error
 }
 
 func defaultEncryptionFileOps() encryptionFileOps {
@@ -153,6 +154,11 @@ func restoreQuarantinedPlaintextWithOps(quarantine, source, root string, mediaID
 		return err
 	}
 	if err = os.Rename(qAbs, source); err == nil {
+		if ops.afterMove != nil {
+			if err = ops.afterMove(); err != nil {
+				return err
+			}
+		}
 		return syncEncryptionParents(ops, qAbs, source)
 	}
 	src, e := os.Open(qAbs)
@@ -174,6 +180,11 @@ func restoreQuarantinedPlaintextWithOps(quarantine, source, root string, mediaID
 	}
 	if err = os.Rename(tmp, source); err != nil {
 		return err
+	}
+	if ops.afterMove != nil {
+		if err = ops.afterMove(); err != nil {
+			return err
+		}
 	}
 	if err = syncEncryptionParents(ops, tmp, source); err != nil {
 		return err

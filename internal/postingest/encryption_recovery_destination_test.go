@@ -3,10 +3,24 @@ package postingest
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func testEncryptionSourceFingerprint(t *testing.T, source, actual string) string {
+	t.Helper()
+	info, err := os.Stat(actual)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash, err := fileSHA256(actual)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fmt.Sprintf("%s|%d|%d|sha256:%s", filepath.Clean(source), info.Size(), info.ModTime().UnixNano(), hash)
+}
 
 func seedRestoreDestinationJournal(t *testing.T, libraryRoot, selected, plainPath, source, quarantineRoot, stage string) (*sql.DB, string) {
 	t.Helper()
@@ -32,6 +46,7 @@ func seedRestoreDestinationJournal(t *testing.T, libraryRoot, selected, plainPat
 	if err := os.WriteFile(quarantine, []byte("plain"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	fingerprint := testEncryptionSourceFingerprint(t, source, quarantine)
 	enc := filepath.Join(libraryRoot, ".encrypted", "video", "stages", stage, "restore.enc")
 	if err := os.MkdirAll(filepath.Dir(enc), 0700); err != nil {
 		t.Fatal(err)
@@ -39,7 +54,7 @@ func seedRestoreDestinationJournal(t *testing.T, libraryRoot, selected, plainPat
 	if err := os.WriteFile(enc, []byte("enc"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO media_encryption_stage_journal(stage_id,task_id,attempt,media_id,run_id,step_id,generation,owner_token,source_path,quarantine_path,source_fingerprint,enc_path,wrapped_dek,iv,enc_sha256,enc_size,state) VALUES(?,1,1,1,1,1,1,'owner',?,?,'fingerprint',?,'wrapped','iv','hash',3,'quarantined')`, stage, source, quarantine, enc); err != nil {
+	if _, err := db.Exec(`INSERT INTO media_encryption_stage_journal(stage_id,task_id,attempt,media_id,run_id,step_id,generation,owner_token,source_path,quarantine_path,source_fingerprint,enc_path,wrapped_dek,iv,enc_sha256,enc_size,state) VALUES(?,1,1,1,1,1,1,'owner',?,?,?,?,'wrapped','iv','hash',3,'quarantined')`, stage, source, quarantine, fingerprint, enc); err != nil {
 		t.Fatal(err)
 	}
 	return db, quarantine
@@ -146,5 +161,173 @@ func TestReconcileEncryptionStagesUsesEncryptedAssetPlainPathExactly(t *testing.
 	}
 	if _, err := os.Stat(quarantine); err != nil {
 		t.Fatalf("quarantine changed: %v", err)
+	}
+}
+
+func restoreJournalState(t *testing.T, db *sql.DB, stage string) (string, string) {
+	t.Helper()
+	var state, marker string
+	if err := db.QueryRow(`SELECT state,recovery_error FROM media_encryption_stage_journal WHERE stage_id=?`, stage).Scan(&state, &marker); err != nil {
+		t.Fatal(err)
+	}
+	return state, marker
+}
+
+func TestReconcileEncryptionStagesRecognizesCompletedRestore(t *testing.T) {
+	root, quarantineRoot := t.TempDir(), t.TempDir()
+	stage := "00000000-0000-0000-0000-000000000201"
+	source := filepath.Join(root, "Movies", "restored.mp4")
+	db, quarantine := seedRestoreDestinationJournal(t, root, source, "", source, quarantineRoot, stage)
+	if err := os.MkdirAll(filepath.Dir(source), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(quarantine, source); err != nil {
+		t.Fatal(err)
+	}
+	_, cleaned, err := ReconcileEncryptionStages(context.Background(), db, EncryptionRecoveryRoots{Quarantine: quarantineRoot, Resolver: fixedStageRoot(filepath.Join(root, ".encrypted", "video", "stages"))}, 100)
+	if err != nil || cleaned != 1 {
+		t.Fatalf("cleaned=%d err=%v", cleaned, err)
+	}
+	state, _ := restoreJournalState(t, db, stage)
+	if state != "restored" {
+		t.Fatalf("state=%s", state)
+	}
+}
+
+func TestReconcileEncryptionStagesRemovesExpectedCrossFSResidual(t *testing.T) {
+	root, quarantineRoot := t.TempDir(), t.TempDir()
+	stage := "00000000-0000-0000-0000-000000000202"
+	source := filepath.Join(root, "Movies", "restored.mp4")
+	db, quarantine := seedRestoreDestinationJournal(t, root, source, "", source, quarantineRoot, stage)
+	if err := os.MkdirAll(filepath.Dir(source), 0755); err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := os.ReadFile(quarantine)
+	if err := os.WriteFile(source, payload, 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, cleaned, err := ReconcileEncryptionStages(context.Background(), db, EncryptionRecoveryRoots{Quarantine: quarantineRoot, Resolver: fixedStageRoot(filepath.Join(root, ".encrypted", "video", "stages"))}, 100)
+	if err != nil || cleaned != 1 {
+		t.Fatalf("cleaned=%d err=%v", cleaned, err)
+	}
+	if _, err := os.Lstat(quarantine); !os.IsNotExist(err) {
+		t.Fatalf("residual remains: %v", err)
+	}
+}
+
+func TestReconcileEncryptionStagesPreservesConflictingRestoreCopies(t *testing.T) {
+	cases := []struct{ name, source, quarantine string }{
+		{"expected source different quarantine", "plain", "other"},
+		{"different source expected quarantine", "other", "plain"},
+		{"both different", "other", "another"},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root, quarantineRoot := t.TempDir(), t.TempDir()
+			stage := fmt.Sprintf("00000000-0000-0000-0000-%012d", 210+i)
+			source := filepath.Join(root, "Movies", "restored.mp4")
+			db, quarantine := seedRestoreDestinationJournal(t, root, source, "", source, quarantineRoot, stage)
+			if err := os.MkdirAll(filepath.Dir(source), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(source, []byte(tc.source), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(quarantine, []byte(tc.quarantine), 0600); err != nil {
+				t.Fatal(err)
+			}
+			_, cleaned, _ := ReconcileEncryptionStages(context.Background(), db, EncryptionRecoveryRoots{Quarantine: quarantineRoot, Resolver: fixedStageRoot(filepath.Join(root, ".encrypted", "video", "stages"))}, 100)
+			if cleaned != 0 {
+				t.Fatalf("cleaned=%d", cleaned)
+			}
+			state, marker := restoreJournalState(t, db, stage)
+			if state != "failed_closed" || marker != "restore_conflict" {
+				t.Fatalf("state=%s marker=%q", state, marker)
+			}
+			if _, err := os.Lstat(source); err != nil {
+				t.Fatalf("source changed: %v", err)
+			}
+			if _, err := os.Lstat(quarantine); err != nil {
+				t.Fatalf("quarantine changed: %v", err)
+			}
+		})
+	}
+}
+
+func TestReconcileEncryptionStagesFailsClosedWhenRestoreCopiesMissing(t *testing.T) {
+	root, quarantineRoot := t.TempDir(), t.TempDir()
+	stage := "00000000-0000-0000-0000-000000000220"
+	source := filepath.Join(root, "Movies", "restored.mp4")
+	db, quarantine := seedRestoreDestinationJournal(t, root, source, "", source, quarantineRoot, stage)
+	if err := os.Remove(quarantine); err != nil {
+		t.Fatal(err)
+	}
+	_, cleaned, _ := ReconcileEncryptionStages(context.Background(), db, EncryptionRecoveryRoots{Quarantine: quarantineRoot, Resolver: fixedStageRoot(filepath.Join(root, ".encrypted", "video", "stages"))}, 100)
+	if cleaned != 0 {
+		t.Fatalf("cleaned=%d", cleaned)
+	}
+	state, marker := restoreJournalState(t, db, stage)
+	if state != "failed_closed" || marker != "restore_missing" {
+		t.Fatalf("state=%s marker=%q", state, marker)
+	}
+}
+
+func TestReconcileEncryptionStagesRecoversCrashAfterRestoreMove(t *testing.T) {
+	root, quarantineRoot := t.TempDir(), t.TempDir()
+	stage := "00000000-0000-0000-0000-000000000230"
+	source := filepath.Join(root, "Movies", "restored.mp4")
+	db, quarantine := seedRestoreDestinationJournal(t, root, source, "", source, quarantineRoot, stage)
+	original := reconcileRestoreAfterMove
+	reconcileRestoreAfterMove = func() error { return os.ErrPermission }
+	t.Cleanup(func() { reconcileRestoreAfterMove = original })
+	roots := EncryptionRecoveryRoots{Quarantine: quarantineRoot, Resolver: fixedStageRoot(filepath.Join(root, ".encrypted", "video", "stages"))}
+	_, cleaned, err := ReconcileEncryptionStages(context.Background(), db, roots, 100)
+	if err != nil || cleaned != 0 {
+		t.Fatalf("first cleaned=%d err=%v", cleaned, err)
+	}
+	if _, err := os.Stat(source); err != nil {
+		t.Fatalf("move not completed: %v", err)
+	}
+	if _, err := os.Stat(quarantine); !os.IsNotExist(err) {
+		t.Fatalf("quarantine remains: %v", err)
+	}
+	reconcileRestoreAfterMove = original
+	if _, err := db.Exec(`UPDATE media_encryption_stage_journal SET next_retry_at=datetime(CURRENT_TIMESTAMP,'-1 second') WHERE stage_id=?`, stage); err != nil {
+		t.Fatal(err)
+	}
+	_, cleaned, err = ReconcileEncryptionStages(context.Background(), db, roots, 100)
+	if err != nil || cleaned != 1 {
+		t.Fatalf("retry cleaned=%d err=%v", cleaned, err)
+	}
+	state, _ := restoreJournalState(t, db, stage)
+	if state != "restored" {
+		t.Fatalf("state=%s", state)
+	}
+}
+
+func TestReconcileEncryptionStagesRecoversCrashAfterRestoreSync(t *testing.T) {
+	root, quarantineRoot := t.TempDir(), t.TempDir()
+	stage := "00000000-0000-0000-0000-000000000231"
+	source := filepath.Join(root, "Movies", "restored.mp4")
+	db, _ := seedRestoreDestinationJournal(t, root, source, "", source, quarantineRoot, stage)
+	original := reconcileRestoreAfterSync
+	reconcileRestoreAfterSync = func() error { return os.ErrPermission }
+	t.Cleanup(func() { reconcileRestoreAfterSync = original })
+	roots := EncryptionRecoveryRoots{Quarantine: quarantineRoot, Resolver: fixedStageRoot(filepath.Join(root, ".encrypted", "video", "stages"))}
+	_, cleaned, err := ReconcileEncryptionStages(context.Background(), db, roots, 100)
+	if err != nil || cleaned != 0 {
+		t.Fatalf("first cleaned=%d err=%v", cleaned, err)
+	}
+	reconcileRestoreAfterSync = original
+	if _, err := db.Exec(`UPDATE media_encryption_stage_journal SET next_retry_at=datetime(CURRENT_TIMESTAMP,'-1 second') WHERE stage_id=?`, stage); err != nil {
+		t.Fatal(err)
+	}
+	_, cleaned, err = ReconcileEncryptionStages(context.Background(), db, roots, 100)
+	if err != nil || cleaned != 1 {
+		t.Fatalf("retry cleaned=%d err=%v", cleaned, err)
+	}
+	state, _ := restoreJournalState(t, db, stage)
+	if state != "restored" {
+		t.Fatalf("state=%s", state)
 	}
 }

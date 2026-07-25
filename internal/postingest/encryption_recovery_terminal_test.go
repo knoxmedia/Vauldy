@@ -136,18 +136,19 @@ func TestReconcileEncryptionStagesRetriesTransientRestoreWithoutStarving(t *test
 	if err := os.WriteFile(quarantine, []byte("plain"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	_, err := db.Exec(`INSERT INTO media_encryption_stage_journal(stage_id,task_id,attempt,media_id,run_id,step_id,generation,owner_token,source_path,quarantine_path,source_fingerprint,enc_path,wrapped_dek,iv,enc_sha256,enc_size,state) VALUES('00000000-0000-0000-0000-000000000102',1,1,1,1,1,1,'owner',?,?,'fp',?,'wrapped','iv','hash',1,'quarantined')`, source, quarantine, filepath.Join(root, "00000000-0000-0000-0000-000000000102.enc"))
+	fingerprint := testEncryptionSourceFingerprint(t, source, quarantine)
+	_, err := db.Exec(`INSERT INTO media_encryption_stage_journal(stage_id,task_id,attempt,media_id,run_id,step_id,generation,owner_token,source_path,quarantine_path,source_fingerprint,enc_path,wrapped_dek,iv,enc_sha256,enc_size,state) VALUES('00000000-0000-0000-0000-000000000102',1,1,1,1,1,1,'owner',?,?,?,?,'wrapped','iv','hash',1,'quarantined')`, source, quarantine, fingerprint, filepath.Join(root, "00000000-0000-0000-0000-000000000102.enc"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	original := reconcileRestoreQuarantinedPlaintext
 	calls := 0
-	reconcileRestoreQuarantinedPlaintext = func(q, s, root string, mediaID, generation int64, stageID string) error {
+	reconcileRestoreQuarantinedPlaintext = func(q, s, root string, mediaID, generation int64, stageID string, ops encryptionFileOps) error {
 		calls++
 		if calls == 1 {
 			return os.ErrPermission
 		}
-		return restoreQuarantinedPlaintext(q, s, root, mediaID, generation, stageID)
+		return restoreQuarantinedPlaintextWithOps(q, s, root, mediaID, generation, stageID, ops)
 	}
 	t.Cleanup(func() { reconcileRestoreQuarantinedPlaintext = original })
 	roots := EncryptionRecoveryRoots{Quarantine: quarantineRoot, Resolver: fixedStageRoot(root)}
@@ -200,7 +201,8 @@ func TestReconcileEncryptionStagesExhaustedRestoreDoesNotStarveDueWork(t *testin
 		if err := os.WriteFile(q, []byte(stage), 0600); err != nil {
 			t.Fatal(err)
 		}
-		_, err := db.Exec(`INSERT INTO media_encryption_stage_journal(stage_id,task_id,attempt,media_id,run_id,step_id,generation,owner_token,source_path,quarantine_path,source_fingerprint,enc_path,wrapped_dek,iv,enc_sha256,enc_size,state,recovery_error,recovery_attempts,next_retry_at,updated_at) VALUES(?,?,1,1,1,1,1,'owner',?,?,'fp',?,'wrapped','iv','hash',1,'failed_closed','restore_pending: permission',?,datetime(CURRENT_TIMESTAMP,'-1 second'),?)`, stage, nextTask, source, q, filepath.Join(root, stage+".enc"), attempts, updated)
+		fingerprint := testEncryptionSourceFingerprint(t, source, q)
+		_, err := db.Exec(`INSERT INTO media_encryption_stage_journal(stage_id,task_id,attempt,media_id,run_id,step_id,generation,owner_token,source_path,quarantine_path,source_fingerprint,enc_path,wrapped_dek,iv,enc_sha256,enc_size,state,recovery_error,recovery_attempts,next_retry_at,updated_at) VALUES(?,?,1,1,1,1,1,'owner',?,?,?,?, 'wrapped','iv','hash',1,'failed_closed','restore_pending: permission',?,datetime(CURRENT_TIMESTAMP,'-1 second'),?)`, stage, nextTask, source, q, fingerprint, filepath.Join(root, stage+".enc"), attempts, updated)
 		nextTask++
 		if err != nil {
 			t.Fatal(err)

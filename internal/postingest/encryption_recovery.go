@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"time"
@@ -16,7 +17,9 @@ const (
 	encryptionRecoveryMaxAttempts = 5
 )
 
-var reconcileRestoreQuarantinedPlaintext = restoreQuarantinedPlaintext
+var reconcileRestoreQuarantinedPlaintext = restoreQuarantinedPlaintextWithOps
+var reconcileRestoreAfterMove = func() error { return nil }
+var reconcileRestoreAfterSync = func() error { return nil }
 
 func ReconcileEncryptionStages(ctx context.Context, db *sql.DB, roots EncryptionRecoveryRoots, limit int) (checked, cleaned int, retErr error) {
 	if db == nil {
@@ -147,15 +150,23 @@ func ReconcileEncryptionStages(ctx context.Context, db *sql.DB, roots Encryption
 			}
 		}
 		if r.quarantine != "" {
-			if err = reconcileRestoreQuarantinedPlaintext(r.quarantine, r.source, roots.Quarantine, r.media, r.generation, r.stage); err != nil {
-				if strings.Contains(err.Error(), "unsafe encryption quarantine path") || strings.Contains(err.Error(), "restore target already exists") {
-					if _, updateErr := db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='failed_closed',recovery_error=?,recovery_attempts=recovery_attempts+1,next_retry_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE stage_id=?`, boundedRecoveryError("failed_closed: ", err), r.stage); updateErr != nil {
+			outcome, restoreErr := reconcilePlaintextRestore(r.quarantine, r.source, roots.Quarantine, r.fp, r.media, r.generation, r.stage, defaultEncryptionFileOps())
+			if restoreErr != nil {
+				if outcome == plaintextRestoreConflict || outcome == plaintextRestoreMissing || errors.Is(restoreErr, errUnsafeEncryptionQuarantinePath) {
+					marker := "restore_conflict"
+					if outcome == plaintextRestoreMissing {
+						marker = "restore_missing"
+					}
+					if errors.Is(restoreErr, errUnsafeEncryptionQuarantinePath) {
+						marker = "unsafe_path"
+					}
+					if _, updateErr := db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='failed_closed',recovery_error=?,recovery_attempts=recovery_attempts+1,next_retry_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE stage_id=?`, marker, r.stage); updateErr != nil {
 						return checked, cleaned, updateErr
 					}
-					retErr = errors.Join(retErr, err)
+					retErr = errors.Join(retErr, restoreErr)
 					continue
 				}
-				marker := boundedRecoveryError("restore_pending: ", err)
+				marker := boundedRecoveryError("restore_pending: ", restoreErr)
 				if _, updateErr := db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='failed_closed',recovery_error=?,recovery_attempts=recovery_attempts+1,next_retry_at=datetime(CURRENT_TIMESTAMP,'+' || min(3600,30*(1 << min(recovery_attempts,7))) || ' seconds'),updated_at=CURRENT_TIMESTAMP WHERE stage_id=?`, marker, r.stage); updateErr != nil {
 					return checked, cleaned, updateErr
 				}
@@ -163,10 +174,142 @@ func ReconcileEncryptionStages(ctx context.Context, db *sql.DB, roots Encryption
 			}
 		}
 		_ = os.Remove(r.enc)
-		_, _ = db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='restored',quarantine_path='',recovery_error='stale_restored',updated_at=CURRENT_TIMESTAMP WHERE stage_id=?`, r.stage)
+		if _, err = db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='restored',quarantine_path='',recovery_error='stale_restored',updated_at=CURRENT_TIMESTAMP WHERE stage_id=?`, r.stage); err != nil {
+			return checked, cleaned, err
+		}
 		cleaned++
 	}
 	return checked, cleaned, retErr
+}
+
+type plaintextRestoreOutcome uint8
+
+const (
+	plaintextRestoreComplete plaintextRestoreOutcome = iota
+	plaintextRestoreRetry
+	plaintextRestoreConflict
+	plaintextRestoreMissing
+)
+
+type plaintextIdentity struct {
+	size int64
+	hash string
+}
+
+func plaintextIdentityFromFingerprint(fingerprint string) (plaintextIdentity, error) {
+	hashAt := strings.LastIndex(fingerprint, "|sha256:")
+	if hashAt < 0 || hashAt+8 >= len(fingerprint) {
+		return plaintextIdentity{}, errors.New("invalid encryption source fingerprint")
+	}
+	prefix := fingerprint[:hashAt]
+	mtimeAt := strings.LastIndex(prefix, "|")
+	if mtimeAt < 0 {
+		return plaintextIdentity{}, errors.New("invalid encryption source fingerprint")
+	}
+	sizePrefix := prefix[:mtimeAt]
+	sizeAt := strings.LastIndex(sizePrefix, "|")
+	if sizeAt < 0 {
+		return plaintextIdentity{}, errors.New("invalid encryption source fingerprint")
+	}
+	size, err := strconv.ParseInt(sizePrefix[sizeAt+1:], 10, 64)
+	if err != nil || size < 0 {
+		return plaintextIdentity{}, errors.New("invalid encryption source fingerprint")
+	}
+	return plaintextIdentity{size: size, hash: fingerprint[hashAt+8:]}, nil
+}
+
+func regularPlaintextIdentity(path string) (plaintextIdentity, bool, error) {
+	info, err := encryptionLstat(path)
+	if os.IsNotExist(err) {
+		return plaintextIdentity{}, false, nil
+	}
+	if err != nil {
+		return plaintextIdentity{}, false, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return plaintextIdentity{}, true, errUnsafeEncryptionQuarantinePath
+	}
+	hash, err := fileSHA256(path)
+	if err != nil {
+		return plaintextIdentity{}, true, err
+	}
+	return plaintextIdentity{size: info.Size(), hash: hash}, true, nil
+}
+
+func syncRestoredPlaintext(source, quarantine string, ops encryptionFileOps) error {
+	f, err := os.OpenFile(source, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	err = errors.Join(ops.syncFile(f), f.Close())
+	if err != nil {
+		return err
+	}
+	return syncEncryptionParents(ops, source, quarantine)
+}
+
+func reconcilePlaintextRestore(quarantine, source, root, fingerprint string, mediaID, generation int64, stageID string, ops encryptionFileOps) (plaintextRestoreOutcome, error) {
+	expected, err := plaintextIdentityFromFingerprint(fingerprint)
+	if err != nil {
+		return plaintextRestoreConflict, err
+	}
+	qPath, qState, err := validateQuarantineParentLayout(root, quarantine, mediaID, generation, stageID)
+	if err != nil {
+		return plaintextRestoreRetry, err
+	}
+	sourceID, sourceExists, err := regularPlaintextIdentity(source)
+	if err != nil {
+		return plaintextRestoreConflict, err
+	}
+	var quarantineID plaintextIdentity
+	quarantineExists := qState == quarantineLeafExists
+	if quarantineExists {
+		quarantineID, _, err = regularPlaintextIdentity(qPath)
+		if err != nil {
+			return plaintextRestoreConflict, err
+		}
+	}
+	sourceExpected := sourceExists && sourceID == expected
+	quarantineExpected := quarantineExists && quarantineID == expected
+	switch {
+	case sourceExists && !quarantineExists:
+		if !sourceExpected {
+			return plaintextRestoreConflict, errors.New("restored plaintext conflicts with journal identity")
+		}
+		if err = syncRestoredPlaintext(source, quarantine, ops); err != nil {
+			return plaintextRestoreRetry, err
+		}
+	case sourceExists && quarantineExists:
+		if !sourceExpected || !quarantineExpected {
+			return plaintextRestoreConflict, errors.New("plaintext restore copies conflict with journal identity")
+		}
+		if err = syncRestoredPlaintext(source, quarantine, ops); err != nil {
+			return plaintextRestoreRetry, err
+		}
+		if err = ops.remove(qPath); err != nil && !os.IsNotExist(err) {
+			return plaintextRestoreRetry, err
+		}
+		if err = ops.syncDir(filepath.Dir(qPath)); err != nil {
+			return plaintextRestoreRetry, err
+		}
+	case !sourceExists && quarantineExists:
+		if !quarantineExpected {
+			return plaintextRestoreConflict, errors.New("quarantined plaintext conflicts with journal identity")
+		}
+		ops.afterMove = reconcileRestoreAfterMove
+		if err = reconcileRestoreQuarantinedPlaintext(qPath, source, root, mediaID, generation, stageID, ops); err != nil {
+			return plaintextRestoreRetry, err
+		}
+		if err = syncRestoredPlaintext(source, quarantine, ops); err != nil {
+			return plaintextRestoreRetry, err
+		}
+	default:
+		return plaintextRestoreMissing, errors.New("plaintext restore source and quarantine missing")
+	}
+	if err = reconcileRestoreAfterSync(); err != nil {
+		return plaintextRestoreRetry, err
+	}
+	return plaintextRestoreComplete, nil
 }
 
 type committedCleanupOutcome uint8
