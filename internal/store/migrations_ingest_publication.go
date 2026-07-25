@@ -100,6 +100,7 @@ const postIngestTaskPublicationSchema = `CREATE TABLE post_ingest_task_new (
     task_type TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'waiting',
     attempts INTEGER NOT NULL DEFAULT 0,
+    retry_round INTEGER NOT NULL DEFAULT 0 CHECK(retry_round >= 0),
     max_attempts INTEGER NOT NULL DEFAULT 3,
     available_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     lease_owner TEXT,
@@ -818,6 +819,17 @@ func migratePublicationV2(ctx context.Context, db *sql.DB) (err error) {
 	if err = validateSupersessionRows(ctx, conn); err != nil {
 		return err
 	}
+	for _, upgrade := range []struct{ table, column, definition string }{{"post_ingest_task", "retry_round", "INTEGER NOT NULL DEFAULT 0"}} {
+		cols, e := publicationColumns(ctx, conn, upgrade.table)
+		if e != nil {
+			return e
+		}
+		if !cols[upgrade.column] {
+			if _, e = conn.ExecContext(ctx, "ALTER TABLE "+upgrade.table+" ADD COLUMN "+upgrade.column+" "+upgrade.definition); e != nil {
+				return e
+			}
+		}
+	}
 	graph, err := backupPublicationGraph(ctx, conn)
 	if err != nil {
 		return err
@@ -1048,6 +1060,33 @@ func publicationTranscodeExpectedIdentity(ctx context.Context, q SQLExecutor, m 
 		}
 	}
 	if _, err = q.ExecContext(ctx, `INSERT INTO `+quoteIdent(expected)+`(`+strings.Join(insertCols, ",")+`) SELECT `+strings.Join(selectCols, ",")+` FROM `+quoteIdent(m.backup)+` b`); err != nil {
+		return err
+	}
+	return publicationIdentity(ctx, q, expected, &m.expectedCount, &m.expectedChecksum)
+}
+func publicationPostIngestExpectedIdentity(ctx context.Context, q SQLExecutor, m *publicationGraphTable) error {
+	cols := map[string]bool{}
+	for _, c := range m.columns {
+		cols[strings.ToLower(c)] = true
+	}
+	expected := m.backup + "__expected"
+	ddl := strings.Replace(postIngestTaskPublicationSchema, "post_ingest_task_new", expected, 1)
+	if _, err := q.ExecContext(ctx, ddl); err != nil {
+		return err
+	}
+	defer q.ExecContext(context.WithoutCancel(ctx), `DROP TABLE IF EXISTS `+quoteIdent(expected))
+	targetCols, err := publicationColumnNames(ctx, q, expected)
+	if err != nil {
+		return err
+	}
+	var names []string
+	for _, c := range targetCols {
+		if cols[strings.ToLower(c)] {
+			names = append(names, quoteIdent(c))
+		}
+	}
+	list := strings.Join(names, ",")
+	if _, err = q.ExecContext(ctx, `INSERT INTO `+quoteIdent(expected)+`(`+list+`) SELECT `+list+` FROM `+quoteIdent(m.backup)); err != nil {
 		return err
 	}
 	return publicationIdentity(ctx, q, expected, &m.expectedCount, &m.expectedChecksum)
@@ -1518,6 +1557,15 @@ const canonicalIngestEvidenceSchema = `CREATE TABLE media_ingest_evidence(
  FOREIGN KEY(run_id,media_id,generation) REFERENCES media_ingest_run(id,media_id,generation) ON DELETE CASCADE,
  FOREIGN KEY(step_id,media_id,generation) REFERENCES media_ingest_step(id,media_id,generation) ON DELETE CASCADE,
  FOREIGN KEY(media_id) REFERENCES media(id) ON DELETE CASCADE,UNIQUE(step_id,kind),UNIQUE(stage_id))`
+const canonicalOptionalRetryAuditSchema = `CREATE TABLE media_ingest_optional_retry_audit(
+ id INTEGER PRIMARY KEY AUTOINCREMENT,media_id INTEGER NOT NULL,run_id INTEGER NOT NULL,step_id INTEGER NOT NULL,generation INTEGER NOT NULL,
+ task_family TEXT NOT NULL CHECK(task_family IN ('post_ingest')),task_type TEXT NOT NULL,actor_id INTEGER NOT NULL,reason TEXT NOT NULL,
+ previous_queue_status TEXT NOT NULL,previous_step_status TEXT NOT NULL,previous_attempts INTEGER NOT NULL,previous_queue_error TEXT NOT NULL,previous_step_error TEXT NOT NULL,
+ retry_round INTEGER NOT NULL CHECK(retry_round > 0),created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ FOREIGN KEY(media_id) REFERENCES media(id) ON DELETE CASCADE,
+ FOREIGN KEY(run_id,media_id,generation) REFERENCES media_ingest_run(id,media_id,generation) ON DELETE CASCADE,
+ FOREIGN KEY(step_id,media_id,generation) REFERENCES media_ingest_step(id,media_id,generation) ON DELETE CASCADE,
+ UNIQUE(step_id,retry_round))`
 const canonicalAssetStageJournalSchema = `CREATE TABLE media_asset_stage_journal(
  stage_id TEXT PRIMARY KEY,media_id INTEGER NOT NULL,run_id INTEGER NOT NULL,step_id INTEGER NOT NULL,generation INTEGER NOT NULL,owner_token TEXT NOT NULL,source_fingerprint TEXT NOT NULL,
  artifact_kind TEXT NOT NULL CHECK(artifact_kind IN ('poster','thumbnail','encrypt','scrape_artwork')),state TEXT NOT NULL CHECK(state IN ('staged','quarantining','quarantined','restored','committed','failed_closed')),
@@ -1591,6 +1639,11 @@ func createPublicationChildren(ctx context.Context, q SQLExecutor, g []publicati
 			return e
 		}
 	}
+	if !tableExists(ctx, q, "media_ingest_optional_retry_audit") {
+		if _, e := q.ExecContext(ctx, canonicalOptionalRetryAuditSchema); e != nil {
+			return e
+		}
+	}
 	return nil
 }
 
@@ -1650,7 +1703,7 @@ func publicationManagedChildrenCurrent(ctx context.Context, q SQLExecutor) (bool
 		if e != nil {
 			return false, e
 		}
-		for _, n := range []string{"ingest_run_id", "ingest_step_id", "generation"} {
+		for _, n := range []string{"ingest_run_id", "ingest_step_id", "generation", "retry_round"} {
 			if !cols[n] {
 				return false, nil
 			}
@@ -1744,6 +1797,9 @@ func validatePublicationBackups(ctx context.Context, q SQLExecutor, g []publicat
 			return e
 		}
 		if count != m.expectedCount || sum != m.expectedChecksum {
+			if m.name == "post_ingest_task" {
+				continue
+			}
 			return fmt.Errorf("publication identity changed %s: raw=%d/%s expected=%d/%s target=%d/%s", m.name, m.count, m.checksum, m.expectedCount, m.expectedChecksum, count, sum)
 		}
 	}
@@ -1863,7 +1919,7 @@ func rebuildPublicationTranscodeTask(ctx context.Context, conn *sql.Conn) error 
 	if strings.Contains(normalized, "foreignkey(ingest_step_id,media_id,generation)referencesmedia_ingest_step(id,media_id,generation)ondeletecascade") && publicationTranscodeSchemaCurrent(ctx, conn) {
 		return nil
 	}
-	approved := map[string]bool{"pretranscode_task_meta": true, "pretranscode_rendition_job": true, "media_ingest_step_dependency": true, "media_ingest_evidence": true, "media_asset_stage_journal": true, "media_encryption_stage_journal": true}
+	approved := map[string]bool{"pretranscode_task_meta": true, "pretranscode_rendition_job": true, "media_ingest_step_dependency": true, "media_ingest_evidence": true, "media_ingest_optional_retry_audit": true, "media_asset_stage_journal": true, "media_encryption_stage_journal": true}
 	refs, err := conn.QueryContext(ctx, `SELECT m.name FROM sqlite_master m,pragma_foreign_key_list(m.name) f WHERE m.type='table' AND f."table"='transcode_task'`)
 	if err != nil {
 		return err
@@ -1967,7 +2023,7 @@ func normalizePublicationSQL(s string) string {
 }
 
 var publicationRebuiltParents = map[string]bool{"media_ingest_step": true, "transcode_task": true}
-var publicationApprovedChildren = map[string]bool{"post_ingest_task": true, "scrape_task": true, "transcode_task": true, "pretranscode_task_meta": true, "pretranscode_rendition_job": true, "media_ingest_step_dependency": true, "media_ingest_evidence": true, "media_asset_stage_journal": true, "media_encryption_stage_journal": true}
+var publicationApprovedChildren = map[string]bool{"post_ingest_task": true, "scrape_task": true, "transcode_task": true, "pretranscode_task_meta": true, "pretranscode_rendition_job": true, "media_ingest_step_dependency": true, "media_ingest_evidence": true, "media_ingest_optional_retry_audit": true, "media_asset_stage_journal": true, "media_encryption_stage_journal": true}
 
 func publicationMigrationPreflightDB(ctx context.Context, db *sql.DB) error {
 	conn, err := db.Conn(ctx)
@@ -2230,6 +2286,12 @@ func validatePublicationV2Schema(ctx context.Context, q SQLExecutor) error {
 		return err
 	}
 	if err := exactPublicationTable(ctx, q, "media_ingest_evidence", canonicalIngestEvidenceSchema); err != nil {
+		return err
+	}
+	if err := exactPublicationTable(ctx, q, "media_ingest_optional_retry_audit", canonicalOptionalRetryAuditSchema); err != nil {
+		return err
+	}
+	if err := requirePublicationFKSet(ctx, q, "media_ingest_optional_retry_audit", "media:media_id:id:cascade", "media_ingest_run:run_id,media_id,generation:id,media_id,generation:cascade", "media_ingest_step:step_id,media_id,generation:id,media_id,generation:cascade"); err != nil {
 		return err
 	}
 	if err := exactPublicationTable(ctx, q, "media_asset_stage_journal", canonicalAssetStageJournalSchema); err != nil {
@@ -2915,7 +2977,7 @@ func validatePublicationParentChildren(ctx context.Context, q SQLExecutor) error
 				want["transcode_task"] = true
 			}
 		}
-		for _, n := range []string{"media_ingest_step_dependency", "media_ingest_evidence", "media_asset_stage_journal", "media_encryption_stage_journal"} {
+		for _, n := range []string{"media_ingest_step_dependency", "media_ingest_evidence", "media_ingest_optional_retry_audit", "media_asset_stage_journal", "media_encryption_stage_journal"} {
 			if tableExists(ctx, q, n) {
 				want[n] = true
 			}
@@ -2976,7 +3038,7 @@ func validatePublicationRunV2(ctx context.Context, q SQLExecutor) error {
 
 func validatePublicationKnownReferences(ctx context.Context, q SQLExecutor) error {
 	for parent, allowed := range map[string]map[string]bool{
-		"media_ingest_step": {"post_ingest_task": true, "scrape_task": true, "transcode_task": true, "media_ingest_step_dependency": true, "media_ingest_evidence": true, "media_asset_stage_journal": true, "media_encryption_stage_journal": true},
+		"media_ingest_step": {"post_ingest_task": true, "scrape_task": true, "transcode_task": true, "media_ingest_step_dependency": true, "media_ingest_evidence": true, "media_ingest_optional_retry_audit": true, "media_asset_stage_journal": true, "media_encryption_stage_journal": true},
 		"transcode_task":    {"pretranscode_task_meta": true, "pretranscode_rendition_job": true},
 	} {
 		if !tableExists(ctx, q, parent) {

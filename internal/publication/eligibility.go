@@ -26,7 +26,7 @@ type ClaimPayload struct {
 	QueueID, MediaID                      int64
 	RunID, StepID, ScanTaskID, Generation sql.NullInt64
 	TaskType, Owner                       string
-	Attempts, MaxAttempts                 int
+	Attempts, MaxAttempts, RetryRound     int
 	LeaseUntil                            time.Time
 }
 
@@ -427,7 +427,7 @@ func updateFamilyClaim(ctx context.Context, tx store.SQLExecutor, req ClaimReque
 	var lease sql.NullTime
 	switch req.Family {
 	case QueuePostIngest:
-		err = tx.QueryRowContext(ctx, `SELECT media_id,ingest_run_id,ingest_step_id,scan_task_id,generation,task_type,attempts,max_attempts,lease_until FROM post_ingest_task WHERE id=?`, id).Scan(&p.MediaID, &p.RunID, &p.StepID, &p.ScanTaskID, &p.Generation, &p.TaskType, &p.Attempts, &p.MaxAttempts, &lease)
+		err = tx.QueryRowContext(ctx, `SELECT media_id,ingest_run_id,ingest_step_id,scan_task_id,generation,task_type,attempts,max_attempts,retry_round,lease_until FROM post_ingest_task WHERE id=?`, id).Scan(&p.MediaID, &p.RunID, &p.StepID, &p.ScanTaskID, &p.Generation, &p.TaskType, &p.Attempts, &p.MaxAttempts, &p.RetryRound, &lease)
 	case QueueScrape:
 		err = tx.QueryRowContext(ctx, `SELECT media_id,ingest_run_id,ingest_step_id,generation,COALESCE(fail_count,0),lease_until FROM scrape_task WHERE id=?`, id).Scan(&p.MediaID, &p.RunID, &p.StepID, &p.Generation, &p.Attempts, &lease)
 		p.TaskType = "scrape"
@@ -466,7 +466,7 @@ func claimByOwner(ctx context.Context, db *sql.DB, f QueueFamily, owner string) 
 	var err error
 	switch f {
 	case QueuePostIngest:
-		err = db.QueryRowContext(ctx, `SELECT q.id,q.media_id,q.ingest_run_id,q.ingest_step_id,q.scan_task_id,q.generation,q.task_type,q.attempts,q.max_attempts,q.lease_until FROM post_ingest_task q LEFT JOIN media_ingest_step st ON st.id=q.ingest_step_id LEFT JOIN media_ingest_run r ON r.id=q.ingest_run_id LEFT JOIN media m ON m.id=q.media_id WHERE q.lease_owner=? AND q.status='running' AND ((q.ingest_run_id IS NULL AND q.ingest_step_id IS NULL AND q.generation IS NULL) OR (st.status='running' AND st.lease_owner=q.lease_owner AND st.run_id=q.ingest_run_id AND st.media_id=q.media_id AND st.generation=q.generation AND r.id=st.run_id AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND m.ingest_generation=q.generation))`, owner).Scan(&p.QueueID, &p.MediaID, &p.RunID, &p.StepID, &p.ScanTaskID, &p.Generation, &p.TaskType, &p.Attempts, &p.MaxAttempts, &lease)
+		err = db.QueryRowContext(ctx, `SELECT q.id,q.media_id,q.ingest_run_id,q.ingest_step_id,q.scan_task_id,q.generation,q.task_type,q.attempts,q.max_attempts,q.retry_round,q.lease_until FROM post_ingest_task q LEFT JOIN media_ingest_step st ON st.id=q.ingest_step_id LEFT JOIN media_ingest_run r ON r.id=q.ingest_run_id LEFT JOIN media m ON m.id=q.media_id WHERE q.lease_owner=? AND q.status='running' AND ((q.ingest_run_id IS NULL AND q.ingest_step_id IS NULL AND q.generation IS NULL) OR (st.status='running' AND st.lease_owner=q.lease_owner AND st.run_id=q.ingest_run_id AND st.media_id=q.media_id AND st.generation=q.generation AND r.id=st.run_id AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND m.ingest_generation=q.generation))`, owner).Scan(&p.QueueID, &p.MediaID, &p.RunID, &p.StepID, &p.ScanTaskID, &p.Generation, &p.TaskType, &p.Attempts, &p.MaxAttempts, &p.RetryRound, &lease)
 	case QueueScrape:
 		err = db.QueryRowContext(ctx, `SELECT q.id,q.media_id,q.ingest_run_id,q.ingest_step_id,q.generation,COALESCE(q.fail_count,0),q.lease_until FROM scrape_task q LEFT JOIN media_ingest_step st ON st.id=q.ingest_step_id LEFT JOIN media_ingest_run r ON r.id=q.ingest_run_id LEFT JOIN media m ON m.id=q.media_id WHERE q.lease_owner=? AND q.status='running' AND ((q.ingest_run_id IS NULL AND q.ingest_step_id IS NULL AND q.generation IS NULL) OR (st.status='running' AND st.lease_owner=q.lease_owner AND st.run_id=q.ingest_run_id AND st.media_id=q.media_id AND st.generation=q.generation AND r.id=st.run_id AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND m.ingest_generation=q.generation))`, owner).Scan(&p.QueueID, &p.MediaID, &p.RunID, &p.StepID, &p.Generation, &p.Attempts, &lease)
 		p.TaskType = "scrape"

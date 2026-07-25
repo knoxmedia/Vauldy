@@ -52,6 +52,7 @@ type Task struct {
 	Attempts    int
 	MaxAttempts int
 	Generation  int64
+	RetryRound  int
 	LeaseOwner  string
 	LeaseUntil  time.Time
 	LastError   string

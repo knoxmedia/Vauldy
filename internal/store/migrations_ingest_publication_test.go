@@ -1770,7 +1770,7 @@ func TestMigrateIngestPublicationV2UpgradesFullD725EnterpriseGraph(t *testing.T)
 	}
 	after := publicationTableDigests(t, db)
 	for table, want := range before {
-		if table == "transcode_task" {
+		if table == "transcode_task" || table == "post_ingest_task" {
 			continue
 		}
 		if after[table] != want {

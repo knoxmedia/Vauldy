@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"knox-media/internal/publication"
 	"knox-media/internal/store"
 	"os"
 	"path/filepath"
@@ -1708,4 +1709,35 @@ func TestQueue_ClaimAnyUsesOneImmediateTransactionPerClaim(t *testing.T) {
 	if got := metrics.ImmediateTransactions.Load(); got != 3 {
 		t.Fatalf("empty tail added immediate transaction: %d", got)
 	}
+}
+
+func TestQueueRetryRoundFencesStaleClaim(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	mediaID, runID, stepID, taskID := linkedQueueFixture(t, db, "published", "failed", 3, 3)
+	if _, err := db.Exec(`UPDATE media_ingest_step SET step_type='subtitle',required=0,status='failed' WHERE id=?`, stepID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE media SET publication_state='published',published_at=CURRENT_TIMESTAMP WHERE id=?`, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE post_ingest_task SET task_type='subtitle',status='failed',attempts=3 WHERE id=?`, taskID); err != nil {
+		t.Fatal(err)
+	}
+	if err := publication.RetryOptionalPostIngest(context.Background(), db, publication.OptionalPostIngestRetryRequest{MediaID: mediaID, StepID: stepID, ActorID: 1, Reason: "fence"}); err != nil {
+		t.Fatal(err)
+	}
+	q := NewQueue(db, "round-owner", nil)
+	task, err := q.Claim(context.Background(), TaskSubtitle)
+	if err != nil || task == nil || task.RetryRound != 1 {
+		t.Fatalf("claim=%+v err=%v", task, err)
+	}
+	stale := *task
+	stale.RetryRound = 0
+	if err := q.Complete(context.Background(), stale); err == nil {
+		t.Fatal("stale retry round completed")
+	}
+	if err := q.Complete(context.Background(), *task); err != nil {
+		t.Fatal(err)
+	}
+	_ = runID
 }

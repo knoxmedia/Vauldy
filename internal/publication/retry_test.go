@@ -527,3 +527,153 @@ func TestRetryIngestHistoricalEvidenceStagesImmutable(t *testing.T) {
 		}
 	}
 }
+
+func seedOptionalPostIngestRetry(t *testing.T, db *sql.DB, mediaState, runState, stepType string, required int) (mediaID, runID, stepID, queueID int64) {
+	t.Helper()
+	res, err := db.Exec(`INSERT INTO library(name,type,path) VALUES('optional-retry','video','/optional-retry')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	libraryID, _ := res.LastInsertId()
+	res, err = db.Exec(`INSERT INTO media(library_id,file_id,file_type,publication_state,published_at,publication_error,ingest_generation) VALUES(?,?,'video',?,'2026-07-01 00:00:00','preserve me',1)`, libraryID, "optional-retry-"+stepType, mediaState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mediaID, _ = res.LastInsertId()
+	res, err = db.Exec(`INSERT INTO media_ingest_run(media_id,generation,reason,status,preserve_visibility,config_snapshot_json,error_message,finished_at) VALUES(?,1,'scan',?,1,'{}','run outcome',CURRENT_TIMESTAMP)`, mediaID, runState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID, _ = res.LastInsertId()
+	res, err = db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status,attempts,max_attempts,last_error,lease_owner,lease_until,started_at,finished_at) VALUES(?,?,1,?,?, 'failed',3,3,'old step error','old-owner','2026-01-01','2026-01-01','2026-01-01')`, runID, mediaID, stepType, required)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stepID, _ = res.LastInsertId()
+	res, err = db.Exec(`INSERT INTO post_ingest_task(media_id,ingest_run_id,ingest_step_id,generation,task_type,status,attempts,max_attempts,last_error,lease_owner,lease_until,started_at,finished_at) VALUES(?,?,?,1,?,'failed',3,3,'old queue error','old-owner','2026-01-01','2026-01-01','2026-01-01')`, mediaID, runID, stepID, stepType)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queueID, _ = res.LastInsertId()
+	return
+}
+
+func TestRetryOptionalPostIngestResetsOnlyTerminalOptionalWork(t *testing.T) {
+	db := openRetryTestDB(t)
+	mediaID, _, stepID, queueID := seedOptionalPostIngestRetry(t, db, "published", "published", "preview", 0)
+	err := RetryOptionalPostIngest(context.Background(), db, OptionalPostIngestRetryRequest{MediaID: mediaID, StepID: stepID, ActorID: 42, Reason: "operator requested preview"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var qs, ss, rs, ms, qe, se, me string
+	var qa, sa, qr int
+	err = db.QueryRow(`SELECT q.status,s.status,r.status,m.publication_state,q.attempts,s.attempts,q.retry_round,q.last_error,s.last_error,m.publication_error FROM post_ingest_task q JOIN media_ingest_step s ON s.id=q.ingest_step_id JOIN media_ingest_run r ON r.id=q.ingest_run_id JOIN media m ON m.id=q.media_id WHERE q.id=?`, queueID).Scan(&qs, &ss, &rs, &ms, &qa, &sa, &qr, &qe, &se, &me)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if qs != "waiting" || ss != "waiting" || qa != 0 || sa != 0 || qr != 1 || qe != "" || se != "" {
+		t.Fatalf("queue/step=%s/%s attempts=%d/%d round=%d errors=%q/%q", qs, ss, qa, sa, qr, qe, se)
+	}
+	if rs != "published" || ms != "published" || me != "preserve me" {
+		t.Fatalf("outcome mutated run=%s media=%s error=%q", rs, ms, me)
+	}
+	var family, typ, reason, pqs, pss, pqe, pse string
+	var actor, attempts, round int
+	err = db.QueryRow(`SELECT task_family,task_type,actor_id,reason,previous_queue_status,previous_step_status,previous_attempts,previous_queue_error,previous_step_error,retry_round FROM media_ingest_optional_retry_audit WHERE step_id=?`, stepID).Scan(&family, &typ, &actor, &reason, &pqs, &pss, &attempts, &pqe, &pse, &round)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if family != "post_ingest" || typ != "preview" || actor != 42 || reason != "operator requested preview" || pqs != "failed" || pss != "failed" || attempts != 3 || pqe != "old queue error" || pse != "old step error" || round != 1 {
+		t.Fatalf("audit mismatch")
+	}
+}
+
+func TestRetryOptionalPostIngestRejectsRequiredNonterminalAndStale(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		required int
+		mutate   func(*sql.DB, int64, int64)
+	}{
+		{"required", 1, nil},
+		{"nonterminal", 0, func(db *sql.DB, step, queue int64) {
+			db.Exec(`UPDATE media_ingest_step SET status='waiting' WHERE id=?`, step)
+			db.Exec(`UPDATE post_ingest_task SET status='waiting' WHERE id=?`, queue)
+		}},
+		{"stale", 0, func(db *sql.DB, step, queue int64) {
+			db.Exec(`UPDATE media SET ingest_generation=2 WHERE id=(SELECT media_id FROM media_ingest_step WHERE id=?)`, step)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openRetryTestDB(t)
+			mediaID, _, stepID, queueID := seedOptionalPostIngestRetry(t, db, "published", "published", "subtitle", tc.required)
+			if tc.mutate != nil {
+				tc.mutate(db, stepID, queueID)
+			}
+			if err := RetryOptionalPostIngest(context.Background(), db, OptionalPostIngestRetryRequest{MediaID: mediaID, StepID: stepID, ActorID: 1, Reason: "test"}); !errors.Is(err, ErrNoRetryableWork) {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+}
+
+func TestRetryOptionalPostIngestAllowsExhaustedCancelledWork(t *testing.T) {
+	db := openRetryTestDB(t)
+	mediaID, _, stepID, queueID := seedOptionalPostIngestRetry(t, db, "degraded", "degraded", "subtitle", 0)
+	if _, err := db.Exec(`UPDATE media_ingest_step SET status='cancelled' WHERE id=?`, stepID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE post_ingest_task SET status='cancelled',attempts=max_attempts WHERE id=?`, queueID); err != nil {
+		t.Fatal(err)
+	}
+	if err := RetryOptionalPostIngest(context.Background(), db, OptionalPostIngestRetryRequest{MediaID: mediaID, StepID: stepID, ActorID: 9, Reason: "retry cancelled subtitle"}); err != nil {
+		t.Fatal(err)
+	}
+	var queueStatus, stepStatus, runStatus, mediaStatus string
+	if err := db.QueryRow(`SELECT q.status,s.status,r.status,m.publication_state FROM post_ingest_task q JOIN media_ingest_step s ON s.id=q.ingest_step_id JOIN media_ingest_run r ON r.id=q.ingest_run_id JOIN media m ON m.id=q.media_id WHERE q.id=?`, queueID).Scan(&queueStatus, &stepStatus, &runStatus, &mediaStatus); err != nil {
+		t.Fatal(err)
+	}
+	if queueStatus != "waiting" || stepStatus != "waiting" || runStatus != "degraded" || mediaStatus != "degraded" {
+		t.Fatalf("states queue=%s step=%s run=%s media=%s", queueStatus, stepStatus, runStatus, mediaStatus)
+	}
+}
+
+func TestRetryOptionalPostIngestRejectsUnexhaustedQueue(t *testing.T) {
+	db := openRetryTestDB(t)
+	mediaID, _, stepID, queueID := seedOptionalPostIngestRetry(t, db, "published", "published", "preview", 0)
+	if _, err := db.Exec(`UPDATE post_ingest_task SET attempts=2,max_attempts=3 WHERE id=?`, queueID); err != nil {
+		t.Fatal(err)
+	}
+	if err := RetryOptionalPostIngest(context.Background(), db, OptionalPostIngestRetryRequest{MediaID: mediaID, StepID: stepID, ActorID: 1, Reason: "too early"}); !errors.Is(err, ErrNoRetryableWork) {
+		t.Fatalf("err=%v", err)
+	}
+}
+func TestRetryOptionalPostIngestConcurrentCreatesOneAudit(t *testing.T) {
+	db := openRetryTestDB(t)
+	mediaID, _, stepID, _ := seedOptionalPostIngestRetry(t, db, "degraded", "degraded", "subtitle", 0)
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- RetryOptionalPostIngest(context.Background(), db, OptionalPostIngestRetryRequest{MediaID: mediaID, StepID: stepID, ActorID: 7, Reason: "concurrent"})
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	var successes int
+	for err := range errs {
+		if err == nil {
+			successes++
+		} else if !errors.Is(err, ErrNoRetryableWork) {
+			t.Fatal(err)
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("successes=%d", successes)
+	}
+	var audits int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM media_ingest_optional_retry_audit WHERE step_id=?`, stepID).Scan(&audits); err != nil || audits != 1 {
+		t.Fatalf("audits=%d err=%v", audits, err)
+	}
+}
