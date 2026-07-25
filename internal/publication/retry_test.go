@@ -229,7 +229,7 @@ func TestRetryIngestDegradedReplacementTerminalOutcome(t *testing.T) {
 		name, stepStatus, stepError, wantState, wantError string
 	}{
 		{name: "success", stepStatus: "done", wantState: "published"},
-		{name: "failure", stepStatus: "failed", stepError: "new poster failure", wantState: "degraded", wantError: "new poster failure"},
+		{name: "failure", stepStatus: "failed", stepError: "new poster failure", wantState: "degraded", wantError: "poster: new poster failure; encrypt: new poster failure"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db := openRetryTestDB(t)
