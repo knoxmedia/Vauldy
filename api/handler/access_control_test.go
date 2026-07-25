@@ -81,6 +81,43 @@ func TestListLibrariesFiltersBySelectedScope(t *testing.T) {
 	}
 }
 
+func TestListLibrariesFolderScopedPublishedCounts(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := setupAccessTestDB(t)
+	if _, err := h.App.DB.Exec(`INSERT INTO user_library_folder_permission(user_id,library_id,folder_path) VALUES(1,1,'E:/lib1/allowed');
+		UPDATE media SET file_path='E:/lib1/allowed/legacy.mp4',publication_state='processing' WHERE id=10;
+		INSERT INTO media(id,library_id,file_id,file_path,publication_state) VALUES
+		(51,1,'folder-published','E:/lib1/allowed/published.mp4','published'),
+		(52,1,'folder-degraded','E:/lib1/allowed/degraded.mp4','degraded'),
+		(53,1,'folder-failed','E:/lib1/allowed/failed.mp4','failed'),
+		(54,1,'folder-hidden','E:/lib1/other/published.mp4','published')`); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/library", nil)
+	setUserCtx(c, 1, "user", "normal")
+	h.ListLibraries(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var payload struct {
+		Items []struct {
+			Folders    []string `json:"folders"`
+			MediaCount int64    `json:"media_count"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Items) != 1 || payload.Items[0].MediaCount != 2 {
+		t.Fatalf("items=%d media_count=%v body=%s", len(payload.Items), payload.Items, w.Body.String())
+	}
+	if len(payload.Items[0].Folders) != 1 || payload.Items[0].Folders[0] != "E:/lib1/allowed" {
+		t.Fatalf("folders=%v", payload.Items[0].Folders)
+	}
+}
+
 func TestListLibrariesHidesDisabledFromNonAdmin(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	h := setupAccessTestDB(t)
@@ -434,8 +471,49 @@ func TestMediaDetailMetaAndPlayAllowVisiblePublicationStates(t *testing.T) {
 					if w.Code != http.StatusOK {
 						t.Fatalf("state=%s status=%d body=%s", state, w.Code, w.Body.String())
 					}
+					if endpoint.name == "detail" {
+						var payload map[string]any
+						if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+							t.Fatal(err)
+						}
+						if payload["publication_state"] != state {
+							t.Fatalf("publication_state=%v want %s", payload["publication_state"], state)
+						}
+						for _, field := range []string{"published_at", "publication_error", "ingest_generation"} {
+							if _, exists := payload[field]; exists {
+								t.Errorf("ordinary GetMedia exposed %s", field)
+							}
+						}
+					}
 				})
 			}
 		})
+	}
+}
+
+func TestGetMediaAdminBypassesPublicationVisibility(t *testing.T) {
+	h := setupAccessTestDB(t)
+	if _, err := h.App.DB.Exec(`UPDATE media SET publication_state='failed',publication_error='ingest failed',ingest_generation=3 WHERE id=10`); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/media/10", nil)
+	c.Params = gin.Params{{Key: "id", Value: "10"}}
+	setUserCtx(c, 2, "admin", "admin")
+	h.GetMedia(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var payload struct {
+		PublicationState string `json:"publication_state"`
+		PublicationError string `json:"publication_error"`
+		IngestGeneration int64  `json:"ingest_generation"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.PublicationState != "failed" || payload.PublicationError != "ingest failed" || payload.IngestGeneration != 3 {
+		t.Fatalf("payload=%+v", payload)
 	}
 }

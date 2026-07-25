@@ -4,53 +4,151 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
-	"knox-media/internal/atomicfile"
+	"knox-media/internal/postingest"
 	"knox-media/internal/scraper"
 	"knox-media/internal/storage"
 	"knox-media/pkg/ffprobe"
 )
 
-// applyScrapeLocalImages fills poster from embedded cover or ffmpeg frame capture when configured
-// and scrape providers did not already return a poster. screen_grabber is skipped once any poster exists.
-func (h *Handler) applyScrapeLocalImages(mediaID, libraryID int64, fileType string, cfg scraper.Config, res *scraper.ScrapeResult) {
-	if h == nil || res == nil || mediaID <= 0 || !strings.EqualFold(fileType, "video") {
-		return
-	}
-	if scraper.HasScrapePoster(res) {
-		return
+// applyScrapeLocalImages schedules the unified poster adapter when providers returned no poster.
+// It waits briefly for compatibility with synchronous scrape responses, but never captures locally here.
+func (h *Handler) applyScrapeLocalImages(ctx context.Context, mediaID, _ int64, fileType string, cfg scraper.Config, res *scraper.ScrapeResult, wait bool) error {
+	if h == nil || res == nil || mediaID <= 0 || !strings.EqualFold(fileType, "video") || scraper.HasScrapePoster(res) {
+		return nil
 	}
 	if !imageSourceEnabled(cfg, "embedded") && !imageSourceEnabled(cfg, "screen_grabber") {
-		return
+		return nil
 	}
-	posterURL, source := h.captureLocalPoster(mediaID, libraryID, cfg, false)
-	if posterURL == "" {
-		log.Printf("scrape local poster media=%d: capture failed (check ffmpeg/ffprobe and file_path)", mediaID)
-		return
+	if err := h.enqueueScrapePosterFallback(ctx, mediaID); err != nil {
+		return err
 	}
-	h.applyCapturedPoster(res, posterURL, source)
-}
-
-func (h *Handler) applyManualMatchLocalImages(ctx context.Context, mediaID, libraryID int64, fileType string, cfg scraper.Config, res *scraper.ScrapeResult) error {
-	_ = ctx
-	h.applyScrapeLocalImages(mediaID, libraryID, fileType, cfg, res)
+	if !wait {
+		return nil
+	}
+	posterURL, ok, err := h.waitPosterResult(ctx, mediaID, 2*time.Second)
+	if err != nil {
+		return err
+	}
+	if ok {
+		res.Poster = posterURL
+		if res.Extra == nil {
+			res.Extra = map[string]any{}
+		}
+		if strings.TrimSpace(fmt.Sprint(res.Extra["poster"])) == "" {
+			res.Extra["poster"] = posterURL
+		}
+	}
 	return nil
 }
 
-func (h *Handler) applyCapturedPoster(res *scraper.ScrapeResult, posterURL, source string) {
-	res.Poster = posterURL
-	if res.Extra == nil {
-		res.Extra = map[string]any{}
+func (h *Handler) applyManualMatchLocalImages(ctx context.Context, mediaID, libraryID int64, fileType string, cfg scraper.Config, res *scraper.ScrapeResult) error {
+	return h.applyScrapeLocalImages(ctx, mediaID, libraryID, fileType, cfg, res, true)
+}
+
+func (h *Handler) enqueueScrapePosterFallback(ctx context.Context, mediaID int64) error {
+	if h == nil || h.Queue == nil {
+		return fmt.Errorf("poster fallback queue is not configured")
 	}
-	if strings.TrimSpace(fmt.Sprint(res.Extra["poster"])) == "" {
-		res.Extra["poster"] = posterURL
+	_, err := h.Queue.Enqueue(ctx, mediaID, nil, postingest.TaskPoster)
+	return err
+}
+
+func (h *Handler) waitPosterResult(ctx context.Context, mediaID int64, maxWait time.Duration) (string, bool, error) {
+	if h == nil || h.App == nil || h.App.DB == nil {
+		return "", false, fmt.Errorf("poster result database is not configured")
 	}
-	res.Extra["local_poster_source"] = source
+	if mediaID <= 0 {
+		return "", false, fmt.Errorf("invalid media id")
+	}
+	if err := ctx.Err(); err != nil {
+		return "", false, err
+	}
+	if maxWait <= 0 {
+		return "", false, nil
+	}
+	if maxWait > 2*time.Second {
+		maxWait = 2 * time.Second
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, maxWait)
+	defer cancel()
+	lookup := func() (string, bool, error) {
+		var poster string
+		err := h.App.DB.QueryRowContext(waitCtx, `SELECT COALESCE(NULLIF(TRIM(json_extract(meta_json,'$.scrape.poster')),''),NULLIF(TRIM(json_extract(meta_json,'$.scrape.extra.poster')),''),'') FROM media WHERE id=?`, mediaID).Scan(&poster)
+		if err != nil {
+			return "", false, err
+		}
+		if poster = strings.TrimSpace(poster); poster != "" {
+			return poster, true, nil
+		}
+		upload := ""
+		if h.App.Config != nil {
+			upload = strings.TrimSpace(h.App.Config.Data.Upload)
+		}
+		if upload != "" {
+			plain := filepath.Join(upload, "posters", fmt.Sprintf("%d.jpg", mediaID))
+			if exists, err := nonEmptyPosterFile(plain); err != nil {
+				return "", false, err
+			} else if exists {
+				return storage.PlainPosterURL(mediaID), true, nil
+			}
+		}
+		var encPath string
+		err = h.App.DB.QueryRowContext(waitCtx, `SELECT enc_path FROM media_derived_assets WHERE media_id=? AND artifact_kind='poster' AND logical_name='poster.jpg'`, mediaID).Scan(&encPath)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return "", false, err
+		}
+		if err == nil {
+			if exists, statErr := nonEmptyPosterFile(encPath); statErr != nil {
+				return "", false, statErr
+			} else if exists {
+				return storage.DerivedPosterAPIPath(mediaID), true, nil
+			}
+		}
+		return "", false, nil
+	}
+	if poster, ok, err := lookup(); err != nil || ok {
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			return "", false, nil
+		}
+		return poster, ok, err
+	}
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-waitCtx.Done():
+			if err := ctx.Err(); err != nil {
+				return "", false, err
+			}
+			return "", false, nil
+		case <-ticker.C:
+			if poster, ok, err := lookup(); err != nil || ok {
+				if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+					return "", false, nil
+				}
+				return poster, ok, err
+			}
+		}
+	}
+}
+
+func nonEmptyPosterFile(path string) (bool, error) {
+	st, err := os.Stat(strings.TrimSpace(path))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return !st.IsDir() && st.Size() > 0, nil
 }
 
 func imageSourceEnabled(cfg scraper.Config, name string) bool {
@@ -61,93 +159,6 @@ func imageSourceEnabled(cfg scraper.Config, name string) bool {
 		}
 	}
 	return false
-}
-
-// captureLocalPoster tries embedded cover first, then screen_grabber unless skipScreenGrabber is set.
-func (h *Handler) captureLocalPoster(mediaID, libraryID int64, cfg scraper.Config, skipScreenGrabber bool) (posterURL, source string) {
-	absPath, duration, err := h.mediaVideoPath(mediaID, libraryID)
-	if err != nil || absPath == "" {
-		return "", ""
-	}
-	ffmpegPath := strings.TrimSpace(h.App.Config.FFmpeg.FFmpegPath)
-	ffprobePath := strings.TrimSpace(h.App.Config.FFmpeg.FFprobePath)
-	uploadDir := strings.TrimSpace(h.App.Config.Data.Upload)
-	if ffmpegPath == "" || uploadDir == "" {
-		return "", ""
-	}
-	posterDir := filepath.Join(uploadDir, "posters")
-	if err := os.MkdirAll(posterDir, 0o755); err != nil {
-		return "", ""
-	}
-	posterFile := filepath.Join(posterDir, fmt.Sprintf("%d.jpg", mediaID))
-	stagedPoster, err := newPosterStagingPath(posterFile)
-	if err != nil {
-		return "", ""
-	}
-	defer os.Remove(stagedPoster)
-
-	if imageSourceEnabled(cfg, "embedded") {
-		if ffprobePath != "" && h.extractEmbeddedCover(ffprobePath, ffmpegPath, mediaID, absPath, stagedPoster) {
-			return h.publishCapturedPoster(mediaID, stagedPoster, posterFile, "embedded")
-		}
-	}
-	if !skipScreenGrabber && imageSourceEnabled(cfg, "screen_grabber") {
-		if h.extractFramePoster(ffmpegPath, mediaID, absPath, stagedPoster, duration) {
-			return h.publishCapturedPoster(mediaID, stagedPoster, posterFile, "screen_grabber")
-		}
-	}
-	return "", ""
-}
-
-func newPosterStagingPath(target string) (string, error) {
-	f, err := os.CreateTemp(filepath.Dir(target), filepath.Base(target)+".tmp-")
-	if err != nil {
-		return "", err
-	}
-	path := f.Name()
-	if err := f.Close(); err != nil {
-		_ = os.Remove(path)
-		return "", err
-	}
-	_ = os.Remove(path)
-	return path, nil
-}
-
-func (h *Handler) publishCapturedPoster(mediaID int64, stagedPoster, targetPoster, source string) (posterURL, src string) {
-	if h.DerivedStore == nil || !storage.NeedsDerivedEncryption(h.App.DB, mediaID) {
-		if err := atomicfile.ReplaceFile(stagedPoster, targetPoster); err != nil {
-			log.Printf("poster publish media=%d: %v", mediaID, err)
-			return "", ""
-		}
-		return storage.PlainPosterURL(mediaID), source
-	}
-	return h.finalizeCapturedPosterURL(mediaID, stagedPoster, source)
-}
-
-func (h *Handler) finalizeCapturedPosterURL(mediaID int64, plainPosterFile, source string) (posterURL, src string) {
-	posterURL, err := storage.FinalizeLocalPoster(context.Background(), h.DerivedStore, h.App.DB, mediaID, plainPosterFile)
-	if err != nil {
-		log.Printf("poster finalize media=%d: %v", mediaID, err)
-		_ = os.Remove(plainPosterFile)
-		return "", ""
-	}
-	return posterURL, source
-}
-
-func (h *Handler) mediaVideoPath(mediaID, libraryID int64) (absPath string, durationSec int64, err error) {
-	var filePath sql.NullString
-	var duration sql.NullInt64
-	if err = h.App.DB.QueryRow(
-		`SELECT file_path, COALESCE(duration,0) FROM media WHERE id = ? LIMIT 1`,
-		mediaID,
-	).Scan(&filePath, &duration); err != nil {
-		return "", 0, err
-	}
-	absPath = storage.PreferredFFmpegPath(h.App.DB, mediaID, libraryID, filePath.String)
-	if absPath == "" {
-		return "", 0, fmt.Errorf("empty file path")
-	}
-	return absPath, duration.Int64, nil
 }
 
 func (h *Handler) resolveMediaAbsolutePath(libraryID int64, filePath string) string {
@@ -205,33 +216,6 @@ func (h *Handler) extractEmbeddedCover(ffprobePath, ffmpegPath string, mediaID i
 	return false
 }
 
-func (h *Handler) extractFramePoster(ffmpegPath string, mediaID int64, videoPath, outFile string, durationSec int64) bool {
-	snapSec := posterSnapSecond(durationSec)
-	post := []string{"-frames:v", "1", "-q:v", "3", outFile}
-	pre := storage.PosterSeekPreInput(snapSec, videoPath)
-	if _, err := storage.RunFFmpeg(context.Background(), h.App.DB, h.KeyVault, ffmpegPath, mediaID, videoPath, 0, 0, pre, post, ""); err != nil {
-		log.Printf("ffmpeg poster frame media=%d %q: %v", mediaID, videoPath, err)
-		return false
-	}
-	info, err := os.Stat(outFile)
-	return err == nil && info.Size() > 0
-}
-
-func posterSnapSecond(durationSec int64) int {
-	snapSec := 10
-	if durationSec > 0 {
-		sec := int(durationSec / 5)
-		if sec < 10 {
-			sec = 10
-		}
-		if sec > 180 {
-			sec = 180
-		}
-		snapSec = sec
-	}
-	return snapSec
-}
-
 func (h *Handler) runFFmpegPoster(ffmpegPath string, mediaID int64, videoPath, outFile string, extraArgs []string) bool {
 	post := append(append([]string{}, extraArgs...), outFile)
 	if _, err := storage.RunFFmpeg(context.Background(), h.App.DB, h.KeyVault, ffmpegPath, mediaID, videoPath, 0, 0, nil, post, ""); err != nil {
@@ -240,47 +224,4 @@ func (h *Handler) runFFmpegPoster(ffmpegPath string, mediaID int64, videoPath, o
 	}
 	info, err := os.Stat(outFile)
 	return err == nil && info.Size() > 0
-}
-
-// capturePosterFromVideo extracts a local poster and stores it in meta_json (scan/upload ingest).
-func (h *Handler) capturePosterFromVideo(mediaID int64, fileType string) {
-	if h == nil || mediaID <= 0 || fileType != "video" {
-		return
-	}
-	var libraryID int64
-	var metaRaw sql.NullString
-	_ = h.App.DB.QueryRow(`SELECT library_id, COALESCE(meta_json,'') FROM media WHERE id = ?`, mediaID).Scan(&libraryID, &metaRaw)
-	cfg := h.readLibraryScrapeConfig(libraryID)
-	skipGrab := scraper.HasScrapePosterFromMeta(metaRaw.String)
-	posterURL, source := h.captureLocalPoster(mediaID, libraryID, cfg, skipGrab)
-	if posterURL == "" {
-		return
-	}
-	var root map[string]any
-	if strings.TrimSpace(metaRaw.String) != "" {
-		_ = json.Unmarshal([]byte(metaRaw.String), &root)
-	}
-	if root == nil {
-		root = map[string]any{}
-	}
-	scrape, _ := root["scrape"].(map[string]any)
-	if scrape == nil {
-		scrape = map[string]any{}
-	}
-	if strings.TrimSpace(fmt.Sprint(scrape["poster"])) == "" {
-		scrape["poster"] = posterURL
-	}
-	extra, _ := scrape["extra"].(map[string]any)
-	if extra == nil {
-		extra = map[string]any{}
-	}
-	if strings.TrimSpace(fmt.Sprint(extra["poster"])) == "" {
-		extra["poster"] = posterURL
-	}
-	extra["local_poster_source"] = source
-	scrape["extra"] = extra
-	root["scrape"] = scrape
-	merged, _ := json.Marshal(root)
-	_, _ = h.App.DB.Exec(`UPDATE media SET meta_json = ? WHERE id = ?`, string(merged), mediaID)
-	h.scheduleLibraryPreviewRefresh(libraryID)
 }
