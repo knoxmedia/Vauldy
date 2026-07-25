@@ -162,5 +162,9 @@ func ambiguousImmediateBegin(ctx context.Context, beginErr error) bool {
 }
 
 func isNoActiveTransactionError(err error) bool {
-	return err != nil && strings.Contains(strings.ToLower(err.Error()), "no transaction is active")
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	return message == "cannot rollback - no transaction is active" || message == "sql logic error: cannot rollback - no transaction is active (1)"
 }

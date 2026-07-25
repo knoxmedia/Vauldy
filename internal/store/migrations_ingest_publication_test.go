@@ -16,8 +16,12 @@ import (
 )
 
 func openIngestPublicationMigrationTestDB(t *testing.T) *sql.DB {
+	return openIngestPublicationMigrationTestDBPath(t, ":memory:")
+}
+
+func openIngestPublicationMigrationTestDBPath(t *testing.T, path string) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
+	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2318,5 +2322,91 @@ func TestScrapeClaimColumnsUncertainCommitReconcilesPostcondition(t *testing.T) 
 	var backups int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name GLOB '*__publication_v2_backup'`).Scan(&backups); err != nil || backups != 0 {
 		t.Fatalf("backups=%d err=%v", backups, err)
+	}
+}
+
+func TestMigrationCommitErrorWithActiveTransactionRollsBack(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "active-commit.db")
+	db := openIngestPublicationMigrationTestDBPath(t, path)
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	installLegacyAssetStageJournal(t, db)
+	before := snapshotWholeSQLite(t, db)
+	oldCommit := publicationMigrationCommit
+	publicationMigrationCommit = func(context.Context, *sql.Conn) error {
+		return errors.New("commit transport failed before sqlite commit")
+	}
+	t.Cleanup(func() { publicationMigrationCommit = oldCommit })
+	if err := migrateIngestPublication(context.Background(), db); err == nil {
+		t.Fatal("active transaction commit error accepted")
+	}
+	if after := snapshotWholeSQLite(t, db); after != before {
+		t.Fatal("active transaction was not rolled back")
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if after := snapshotWholeSQLite(t, reopened); after != before {
+		t.Fatal("reopened database changed after rollback")
+	}
+}
+
+func TestMigrationCommitAppliedThenErrorAcceptsProvenPostcondition(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	installLegacyAssetStageJournal(t, db)
+	oldCommit := publicationMigrationCommit
+	publicationMigrationCommit = func(ctx context.Context, conn *sql.Conn) error {
+		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+			return err
+		}
+		return errors.New("commit response lost")
+	}
+	t.Cleanup(func() { publicationMigrationCommit = oldCommit })
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"scrape_task_id", "scrape_attempt", "scrape_retry_round"} {
+		var n int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('media_asset_stage_journal') WHERE name=?`, name).Scan(&n); err != nil || n != 1 {
+			t.Fatalf("column %s count=%d err=%v", name, n, err)
+		}
+	}
+	var legacyRows int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM media_asset_stage_journal WHERE stage_id='legacy-stage' AND scrape_task_id IS NULL AND scrape_attempt IS NULL AND scrape_retry_round IS NULL`).Scan(&legacyRows); err != nil || legacyRows != 1 {
+		t.Fatalf("legacy rows=%d err=%v", legacyRows, err)
+	}
+}
+
+func TestMigrationCommitRollbackProbeErrorFailsAndDiscardsConnection(t *testing.T) {
+	db := openIngestPublicationMigrationTestDBPath(t, filepath.Join(t.TempDir(), "probe-error.db"))
+	db.SetMaxOpenConns(2)
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	installLegacyAssetStageJournal(t, db)
+	oldCommit, oldProbe := publicationMigrationCommit, publicationMigrationRollbackProbe
+	publicationMigrationCommit = func(context.Context, *sql.Conn) error { return errors.New("commit uncertain") }
+	publicationMigrationRollbackProbe = func(context.Context, *sql.Conn) error { return errors.New("rollback probe transport failure") }
+	t.Cleanup(func() { publicationMigrationCommit, publicationMigrationRollbackProbe = oldCommit, oldProbe })
+	if err := migrateIngestPublication(context.Background(), db); err == nil || !strings.Contains(err.Error(), "rollback probe") {
+		t.Fatalf("err=%v", err)
+	}
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	var n int
+	if err := conn.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='media'`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("fresh connection unusable n=%d err=%v", n, err)
 	}
 }

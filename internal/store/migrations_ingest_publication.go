@@ -649,6 +649,10 @@ func (e *PostCommitMigrationValidationError) Unwrap() error { return e.Cause }
 
 var publicationMigrationPostCommitValidation = validatePublicationForeignKeys
 var publicationMigrationCommit = func(ctx context.Context, conn *sql.Conn) error { _, err := conn.ExecContext(ctx, `COMMIT`); return err }
+var publicationMigrationRollbackProbe = func(ctx context.Context, conn *sql.Conn) error {
+	_, err := conn.ExecContext(ctx, `ROLLBACK`)
+	return err
+}
 
 func migrateIngestPublication(ctx context.Context, db *sql.DB) error {
 	publicationMigrationMu.Lock()
@@ -912,26 +916,42 @@ func migratePublicationV2(ctx context.Context, db *sql.DB) (err error) {
 			return err
 		}
 	}
-	if err = publicationMigrationCommit(ctx, conn); err != nil {
-		// COMMIT errors are uncertain: verify the full canonical postcondition on a
-		// same pinned connection before reuse. A successful check proves the migration
-		// committed.
-		committed = true
-		checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	if commitErr := publicationMigrationCommit(ctx, conn); commitErr != nil {
+		probeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 		defer cancel()
-		_, restoreErr := conn.ExecContext(checkCtx, `PRAGMA foreign_keys=ON`)
-		checkErr := restoreErr
-		if checkErr == nil {
-			checkErr = validatePublicationV2Schema(checkCtx, conn)
-		}
-		if checkErr == nil {
-			checkErr = foreignKeyCheckExecutor(checkCtx, conn)
-		}
-		if checkErr != nil {
+		probeErr := publicationMigrationRollbackProbe(probeCtx, conn)
+		switch {
+		case probeErr == nil:
+			// ROLLBACK succeeded: COMMIT did not end the transaction. The migration
+			// is definitely rolled back and must never be accepted.
+			committed = true
+			return &ImmediateCommitError{Cause: commitErr}
+		case isNoActiveTransactionError(probeErr):
+			// The transaction ended. Only exact canonical and FK postconditions can
+			// prove that the uncertain COMMIT actually applied.
+			committed = true
+			if _, restoreErr := conn.ExecContext(probeCtx, `PRAGMA foreign_keys=ON`); restoreErr != nil {
+				discard = true
+				return &ImmediateCommitError{Cause: errors.Join(commitErr, fmt.Errorf("restore foreign keys after uncertain commit: %w", restoreErr))}
+			}
+			if checkErr := validatePublicationV2Schema(probeCtx, conn); checkErr != nil {
+				discard = true
+				return &ImmediateCommitError{Cause: errors.Join(commitErr, fmt.Errorf("uncertain commit schema postcondition: %w", checkErr))}
+			}
+			if checkErr := foreignKeyCheckExecutor(probeCtx, conn); checkErr != nil {
+				discard = true
+				return &ImmediateCommitError{Cause: errors.Join(commitErr, fmt.Errorf("uncertain commit foreign key postcondition: %w", checkErr))}
+			}
+			if checkErr := validatePublicationBackups(probeCtx, conn, graph); checkErr != nil {
+				discard = true
+				return &ImmediateCommitError{Cause: errors.Join(commitErr, fmt.Errorf("uncertain commit data postcondition: %w", checkErr))}
+			}
+			err = nil
+		default:
 			discard = true
-			return errors.Join(fmt.Errorf("publication v2 commit: %w", err), fmt.Errorf("publication v2 uncertain commit postcondition: %w", checkErr))
+			committed = true
+			return &ImmediateCommitError{Cause: errors.Join(commitErr, fmt.Errorf("rollback probe: %w", probeErr))}
 		}
-		err = nil
 	} else {
 		committed = true
 	}
