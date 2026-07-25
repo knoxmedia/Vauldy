@@ -18,6 +18,7 @@ import (
 	"knox-media/internal/keyframe"
 	"knox-media/internal/keystore"
 	"knox-media/internal/lyrictask"
+	"knox-media/internal/metadatalib"
 	"knox-media/internal/photoclass"
 	"knox-media/internal/photoface"
 	"knox-media/internal/photogeocode"
@@ -108,6 +109,7 @@ type Handler struct {
 	scanMu                  sync.Mutex
 	scrapeRunMu             sync.Mutex
 	scrapeWithConfig        func(string, string, scraper.Config) (*scraper.ScrapeResult, error)
+	scrapeAfterStage        func(scrapeClaim, metadatalib.StagedScrapeArtwork)
 	runningScans            map[int64]scanRuntime
 }
 

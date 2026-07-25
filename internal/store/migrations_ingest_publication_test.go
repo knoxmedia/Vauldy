@@ -2146,3 +2146,26 @@ func TestMigrateIngestPublicationRebuildsLegacyScrapeEffectCommit(t *testing.T) 
 		t.Fatal(err)
 	}
 }
+
+func TestMigrateIngestPublicationPreservesLegacyArtworkStagesAndAddsExactClaims(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json) VALUES(1,20,1,'scan','processing','{}'); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status,attempts) VALUES(70,1,20,1,'scrape',1,'running',2); DROP TABLE media_asset_stage_journal; CREATE TABLE media_asset_stage_journal(stage_id TEXT PRIMARY KEY,media_id INTEGER NOT NULL,run_id INTEGER NOT NULL,step_id INTEGER NOT NULL,generation INTEGER NOT NULL,owner_token TEXT NOT NULL,source_fingerprint TEXT NOT NULL,artifact_kind TEXT NOT NULL CHECK(artifact_kind IN ('poster','thumbnail','encrypt','scrape_artwork')),state TEXT NOT NULL CHECK(state IN ('staged','quarantining','quarantined','restored','committed','failed_closed')),original_path TEXT NOT NULL DEFAULT '',quarantine_path TEXT NOT NULL DEFAULT '',staged_path TEXT NOT NULL,hashes_sizes_json TEXT NOT NULL CHECK(json_valid(hashes_sizes_json)),recovery_error TEXT NOT NULL DEFAULT '',created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,FOREIGN KEY(run_id,media_id,generation) REFERENCES media_ingest_run(id,media_id,generation) ON DELETE CASCADE,FOREIGN KEY(step_id,media_id,generation) REFERENCES media_ingest_step(id,media_id,generation) ON DELETE CASCADE); CREATE INDEX idx_asset_stage_recovery ON media_asset_stage_journal(state,updated_at); INSERT INTO media_asset_stage_journal(stage_id,media_id,run_id,step_id,generation,owner_token,source_fingerprint,artifact_kind,state,staged_path,hashes_sizes_json) VALUES('legacy-stage',20,1,70,1,'legacy','fp','scrape_artwork','staged','legacy-path','{}')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	var task, attempt, round sql.NullInt64
+	if err := db.QueryRow(`SELECT scrape_task_id,scrape_attempt,scrape_retry_round FROM media_asset_stage_journal WHERE stage_id='legacy-stage'`).Scan(&task, &attempt, &round); err != nil {
+		t.Fatal(err)
+	}
+	if task.Valid || attempt.Valid || round.Valid {
+		t.Fatalf("legacy claim=%v/%v/%v", task, attempt, round)
+	}
+	if _, err := db.Exec(`INSERT INTO scrape_task(id,media_id,status,ingest_run_id,ingest_step_id,generation,retry_round) VALUES(72,20,'running',1,70,1,4); INSERT INTO media_asset_stage_journal(stage_id,media_id,run_id,step_id,generation,owner_token,source_fingerprint,artifact_kind,state,staged_path,hashes_sizes_json,scrape_task_id,scrape_attempt,scrape_retry_round) VALUES('exact-stage',20,1,70,1,'owner','fp','scrape_artwork','staged','exact-path','{}',72,2,4)`); err != nil {
+		t.Fatal(err)
+	}
+}

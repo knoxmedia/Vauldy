@@ -505,9 +505,12 @@ func (h *Handler) runScrapeTasksWithLimit(ctx context.Context, ids []int64, limi
 
 		effects := scrapeCompletionEffects{LibraryID: libraryID}
 		if claim.Generation.Valid && h.App.Config != nil {
-			stageID := fmt.Sprintf("scrape:%d:%d:%d", claim.ID, claim.Attempts, claim.Generation.Int64)
-			if staged, e := metadatalib.StageScrapeImagesDurable(workCtx, h.App.DB, h.App.Config.Data.MetadataLibrary, h.App.Config.Data.Upload, claim.RunID.Int64, claim.StepID.Int64, mediaID, claim.Generation.Int64, claim.Owner, stageID, res); e == nil {
+			stageID := fmt.Sprintf("scrape-%d-%d-%d-%d", claim.ID, claim.Attempts, claim.RetryRound, claim.Generation.Int64)
+			if staged, e := metadatalib.StageScrapeImagesDurable(workCtx, h.App.DB, h.App.Config.Data.MetadataLibrary, h.App.Config.Data.Upload, metadatalib.ScrapeStageClaim{TaskID: claim.ID, MediaID: mediaID, RunID: claim.RunID.Int64, StepID: claim.StepID.Int64, Generation: claim.Generation.Int64, LeaseOwner: claim.Owner, Attempt: claim.Attempts, RetryRound: claim.RetryRound}, stageID, res); e == nil {
 				effects.Artwork = staged
+				if h.scrapeAfterStage != nil {
+					h.scrapeAfterStage(*claim, staged)
+				}
 			}
 		}
 		if strings.EqualFold(fileType, "video") && !scraper.HasScrapePoster(res) && (imageSourceEnabled(cfg, "embedded") || imageSourceEnabled(cfg, "screen_grabber")) {

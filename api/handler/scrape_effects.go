@@ -32,7 +32,7 @@ func applyScrapeCompletionEffectsTx(ctx context.Context, tx store.SQLExecutor, c
 			return "", err
 		}
 		var one int
-		if err := tx.QueryRowContext(ctx, `SELECT 1 FROM media_asset_stage_journal WHERE stage_id=? AND media_id=? AND run_id=? AND step_id=? AND generation=? AND owner_token=? AND artifact_kind='scrape_artwork' AND state='staged'`, e.Artwork.StageID, c.MediaID, c.RunID.Int64, c.StepID.Int64, c.Generation.Int64, c.Owner).Scan(&one); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT 1 FROM media_asset_stage_journal WHERE stage_id=? AND media_id=? AND run_id=? AND step_id=? AND generation=? AND owner_token=? AND scrape_task_id=? AND scrape_attempt=? AND scrape_retry_round=? AND artifact_kind='scrape_artwork' AND state='staged'`, e.Artwork.StageID, c.MediaID, c.RunID.Int64, c.StepID.Int64, c.Generation.Int64, c.Owner, c.ID, c.Attempts, c.RetryRound).Scan(&one); err != nil {
 			return "", err
 		}
 		metadatalib.SelectStagedScrapeArtwork(result, e.Artwork)
@@ -40,8 +40,12 @@ func applyScrapeCompletionEffectsTx(ctx context.Context, tx store.SQLExecutor, c
 		if _, err := tx.ExecContext(ctx, `INSERT INTO media_ingest_evidence(run_id,step_id,media_id,generation,kind,source_fingerprint,artifact_refs_json,reason,verified_at,stage_id) VALUES(?,?,?,?,'scrape_artwork',?,?, 'scrape',CURRENT_TIMESTAMP,?)`, c.RunID.Int64, c.StepID.Int64, c.MediaID, c.Generation.Int64, "scrape_artwork:"+e.Artwork.StageID, string(raw), e.Artwork.StageID); err != nil {
 			return "", err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE media_asset_stage_journal SET state='committed',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='staged'`, e.Artwork.StageID); err != nil {
+		updated, err := tx.ExecContext(ctx, `UPDATE media_asset_stage_journal SET state='committed',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='staged' AND scrape_task_id=? AND scrape_attempt=? AND scrape_retry_round=?`, e.Artwork.StageID, c.ID, c.Attempts, c.RetryRound)
+		if err != nil {
 			return "", err
+		}
+		if n, _ := updated.RowsAffected(); n != 1 {
+			return "", ErrScrapeClaimLost
 		}
 	}
 	if e.PreparedSeries != nil {

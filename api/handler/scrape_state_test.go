@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -551,6 +552,76 @@ func TestScrapeLeaseLossLeavesAllMetadataSideEffectsUnchanged(t *testing.T) {
 	}
 }
 
+func TestProductionScrapeStageRetryRoundChangeHasZeroEffectsAndRecovers(t *testing.T) {
+	db, mediaID := posterHandlerTestDB(t)
+	_, _ = db.Exec(`UPDATE media SET ingest_generation=1,title='before',meta_json='{"keep":true}' WHERE id=?`, mediaID)
+	r, _ := db.Exec(`INSERT INTO media_ingest_run(media_id,generation,reason,status,config_snapshot_json) VALUES(?,1,'scan','processing','{}')`, mediaID)
+	runID, _ := r.LastInsertId()
+	s, _ := db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status) VALUES(?,?,1,'scrape',1,'waiting')`, runID, mediaID)
+	stepID, _ := s.LastInsertId()
+	q, _ := db.Exec(`INSERT INTO scrape_task(media_id,status,source,ingest_run_id,ingest_step_id,generation) VALUES(?,'waiting','auto',?,?,1)`, mediaID, runID, stepID)
+	taskID, _ := q.LastInsertId()
+	root := t.TempDir()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("production-image")) }))
+	defer srv.Close()
+	h := &Handler{App: &app.App{DB: db, Config: &config.Config{Data: config.DataConfig{MetadataLibrary: root, Dir: root, Upload: filepath.Join(root, "uploads")}}}, PublicationCapabilities: publication.NewCapabilityMatrix([]string{"scrape"}), scrapeWithConfig: func(string, string, scraper.Config) (*scraper.ScrapeResult, error) {
+		return &scraper.ScrapeResult{Title: "after", Overview: "changed", Poster: srv.URL + "/poster.jpg", Extra: map[string]any{}}, nil
+	}}
+	barrierCalled := false
+	h.scrapeAfterStage = func(c scrapeClaim, _ metadatalib.StagedScrapeArtwork) {
+		barrierCalled = true
+		_, _ = db.Exec(`UPDATE scrape_task SET retry_round=retry_round+1,lease_until=datetime(CURRENT_TIMESTAMP,'-1 second') WHERE id=?; UPDATE media_ingest_step SET lease_until=datetime(CURRENT_TIMESTAMP,'-1 second') WHERE id=?`, c.ID, c.StepID.Int64)
+	}
+	done, _ := h.runScrapeTasksWithLimit(context.Background(), []int64{taskID}, 1)
+	if !barrierCalled {
+		t.Fatal("stage barrier not called")
+	}
+	if done != 0 {
+		t.Fatalf("done=%d", done)
+	}
+	var title, meta, taskStatus, stepStatus string
+	_ = db.QueryRow(`SELECT title,meta_json FROM media WHERE id=?`, mediaID).Scan(&title, &meta)
+	_ = db.QueryRow(`SELECT status FROM scrape_task WHERE id=?`, taskID).Scan(&taskStatus)
+	_ = db.QueryRow(`SELECT status FROM media_ingest_step WHERE id=?`, stepID).Scan(&stepStatus)
+	if title != "before" || meta != `{"keep":true}` || taskStatus != "running" || stepStatus != "running" {
+		t.Fatalf("media=%q/%s status=%s/%s", title, meta, taskStatus, stepStatus)
+	}
+	for name, q := range map[string]string{"evidence": `SELECT COUNT(*) FROM media_ingest_evidence WHERE media_id=?`, "history": `SELECT COUNT(*) FROM scrape_history WHERE task_id=?`, "manifest": `SELECT COUNT(*) FROM scrape_effect_commit WHERE task_id=?`} {
+		var n int
+		_ = db.QueryRow(q, taskID).Scan(&n)
+		if name == "evidence" {
+			_ = db.QueryRow(q, mediaID).Scan(&n)
+		}
+		if n != 0 {
+			t.Fatalf("%s=%d", name, n)
+		}
+	}
+	var stageID string
+	if err := db.QueryRow(`SELECT stage_id FROM media_asset_stage_journal WHERE scrape_task_id=?`, taskID).Scan(&stageID); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = db.Exec(`UPDATE media_asset_stage_journal SET updated_at=datetime(CURRENT_TIMESTAMP,'-11 minutes') WHERE stage_id=?`, stageID)
+	cleaned, err := metadatalib.ReconcileScrapeArtworkStages(context.Background(), db, root, 10)
+	if err != nil || cleaned != 1 {
+		t.Fatalf("cleaned=%d err=%v", cleaned, err)
+	}
+}
+
+func TestCurrentExactScrapeClaimStagesAndCompletes(t *testing.T) {
+	db, mid := posterHandlerTestDB(t)
+	claim := seedAndClaimLinkedScrape(t, db, mid)
+	stage, res, _ := stageAcceptanceArtwork(t, db, claim, mid)
+	if err := completeScrapeClaimWithEffects(context.Background(), db, *claim, "auto", "q", "ok", res, scrapeCompletionEffects{Artwork: stage}); err != nil {
+		t.Fatal(err)
+	}
+	var task, state, evidence string
+	_ = db.QueryRow(`SELECT status FROM scrape_task WHERE id=?`, claim.ID).Scan(&task)
+	_ = db.QueryRow(`SELECT state FROM media_asset_stage_journal WHERE stage_id=?`, stage.StageID).Scan(&state)
+	_ = db.QueryRow(`SELECT kind FROM media_ingest_evidence WHERE stage_id=?`, stage.StageID).Scan(&evidence)
+	if task != "done" || state != "committed" || evidence != "scrape_artwork" {
+		t.Fatalf("task=%s stage=%s evidence=%s", task, state, evidence)
+	}
+}
 func TestAutomaticScrapeSuccessRestoresFencedEffects(t *testing.T) {
 	db, mediaID := posterHandlerTestDB(t)
 	claim := seedAndClaimLinkedScrape(t, db, mediaID)
@@ -712,7 +783,7 @@ func stageAcceptanceArtwork(t *testing.T, db *sql.DB, c *scrapeClaim, mid int64)
 	t.Cleanup(srv.Close)
 	root := t.TempDir()
 	res := &scraper.ScrapeResult{Title: "accepted", Poster: srv.URL + "/poster.jpg", Backdrop: srv.URL + "/backdrop.jpg", Logo: srv.URL + "/logo.png", Extra: map[string]any{"series_title": "Accepted Show"}}
-	stage, err := metadatalib.StageScrapeImagesDurable(context.Background(), db, root, "", c.RunID.Int64, c.StepID.Int64, mid, c.Generation.Int64, c.Owner, "acceptance-stage", res)
+	stage, err := metadatalib.StageScrapeImagesDurable(context.Background(), db, root, "", metadatalib.ScrapeStageClaim{TaskID: c.ID, MediaID: mid, RunID: c.RunID.Int64, StepID: c.StepID.Int64, Generation: c.Generation.Int64, LeaseOwner: c.Owner, Attempt: c.Attempts, RetryRound: c.RetryRound}, "acceptance-stage", res)
 	if err != nil {
 		t.Fatal(err)
 	}

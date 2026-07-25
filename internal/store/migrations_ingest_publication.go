@@ -649,6 +649,37 @@ func (e *PostCommitMigrationValidationError) Unwrap() error { return e.Cause }
 
 var publicationMigrationPostCommitValidation = validatePublicationForeignKeys
 
+func ensureAssetStageScrapeClaimColumns(ctx context.Context, db *sql.DB) error {
+	if !tableExists(ctx, db, "media_asset_stage_journal") {
+		return nil
+	}
+	cols, err := publicationColumns(ctx, db, "media_asset_stage_journal")
+	if err != nil {
+		return err
+	}
+	present := 0
+	for _, name := range []string{"scrape_task_id", "scrape_attempt", "scrape_retry_round"} {
+		if cols[name] {
+			present++
+		}
+	}
+	if present == 3 {
+		return nil
+	}
+	if present != 0 {
+		return fmt.Errorf("media_asset_stage_journal partial scrape claim columns: %d/3", present)
+	}
+	_, err = WithImmediateConnTx(ctx, db, func(tx ImmediateConnTx) error {
+		for _, ddl := range []string{"ALTER TABLE media_asset_stage_journal ADD COLUMN scrape_task_id INTEGER", "ALTER TABLE media_asset_stage_journal ADD COLUMN scrape_attempt INTEGER", "ALTER TABLE media_asset_stage_journal ADD COLUMN scrape_retry_round INTEGER"} {
+			if _, e := tx.ExecContext(ctx, ddl); e != nil {
+				return e
+			}
+		}
+		return nil
+	})
+	return err
+}
+
 func migrateIngestPublication(ctx context.Context, db *sql.DB) error {
 	publicationMigrationMu.Lock()
 	defer publicationMigrationMu.Unlock()
@@ -656,6 +687,9 @@ func migrateIngestPublication(ctx context.Context, db *sql.DB) error {
 	// before current-schema detection so rebuild paths cannot preserve it.
 	if _, err := db.ExecContext(ctx, `DROP INDEX IF EXISTS idx_scrape_task_status`); err != nil {
 		return fmt.Errorf("drop obsolete scrape status index: %w", err)
+	}
+	if err := ensureAssetStageScrapeClaimColumns(ctx, db); err != nil {
+		return err
 	}
 	if current, err := publicationV2CurrentDB(ctx, db); err != nil {
 		return err
@@ -1131,6 +1165,12 @@ func publicationIdentity(ctx context.Context, q SQLExecutor, table string, count
 		cols = slicesWithout(cols, "retry_round")
 		pk = slicesWithout(pk, "retry_round")
 	}
+	if strings.Contains(table, "media_asset_stage_journal") {
+		for _, claimColumn := range []string{"scrape_task_id", "scrape_attempt", "scrape_retry_round"} {
+			cols = slicesWithout(cols, claimColumn)
+			pk = slicesWithout(pk, claimColumn)
+		}
+	}
 	if err != nil {
 		return err
 	}
@@ -1591,6 +1631,7 @@ const canonicalAssetStageJournalSchema = `CREATE TABLE media_asset_stage_journal
  artifact_kind TEXT NOT NULL CHECK(artifact_kind IN ('poster','thumbnail','encrypt','scrape_artwork')),state TEXT NOT NULL CHECK(state IN ('staged','quarantining','quarantined','restored','committed','failed_closed')),
  original_path TEXT NOT NULL DEFAULT '',quarantine_path TEXT NOT NULL DEFAULT '',staged_path TEXT NOT NULL,hashes_sizes_json TEXT NOT NULL CHECK(json_valid(hashes_sizes_json)),
  recovery_error TEXT NOT NULL DEFAULT '',created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ scrape_task_id INTEGER,scrape_attempt INTEGER,scrape_retry_round INTEGER,
  FOREIGN KEY(run_id,media_id,generation) REFERENCES media_ingest_run(id,media_id,generation) ON DELETE CASCADE,
  FOREIGN KEY(step_id,media_id,generation) REFERENCES media_ingest_step(id,media_id,generation) ON DELETE CASCADE)`
 
