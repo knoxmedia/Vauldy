@@ -6,27 +6,33 @@ import (
 )
 
 type publicationV2StartupHooks struct {
-	Preflight           func(context.Context) ([]string, error)
-	RecoverArtifacts    func(context.Context) error
-	ReplaceAndAggregate func(context.Context) error
-	StartClaimers       func()
+	RecoverArtifacts       func(context.Context) error
+	RecoverLeases          func(context.Context) error
+	ReplaceActiveV1        func(context.Context) error
+	ValidateAggregateV2    func(context.Context) error
+	Preflight              func(context.Context) ([]string, error)
+	StartClaimers          func()
+	StartSubmissionSources func()
 }
 
 // PreparePublicationV2Startup is the single fail-closed gate before publication claimers or scan sources start.
 func PreparePublicationV2Startup(ctx context.Context, hooks publicationV2StartupHooks) ([]string, error) {
-	if hooks.Preflight == nil || hooks.RecoverArtifacts == nil || hooks.ReplaceAndAggregate == nil || hooks.StartClaimers == nil {
+	if hooks.RecoverArtifacts == nil || hooks.RecoverLeases == nil || hooks.ReplaceActiveV1 == nil || hooks.ValidateAggregateV2 == nil || hooks.Preflight == nil || hooks.StartClaimers == nil || hooks.StartSubmissionSources == nil {
 		return nil, fmt.Errorf("publication v2 startup: incomplete lifecycle hooks")
+	}
+	for _, phase := range []struct {
+		name string
+		run  func(context.Context) error
+	}{{"artifact recovery", hooks.RecoverArtifacts}, {"lease recovery", hooks.RecoverLeases}, {"active v1 replacement", hooks.ReplaceActiveV1}, {"v2 validation/aggregation", hooks.ValidateAggregateV2}} {
+		if err := phase.run(ctx); err != nil {
+			return nil, fmt.Errorf("publication v2 startup %s: %w", phase.name, err)
+		}
 	}
 	warnings, err := hooks.Preflight(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("publication v2 startup preflight: %w", err)
 	}
-	if err = hooks.RecoverArtifacts(ctx); err != nil {
-		return nil, fmt.Errorf("publication v2 artifact recovery: %w", err)
-	}
-	if err = hooks.ReplaceAndAggregate(ctx); err != nil {
-		return nil, fmt.Errorf("publication v2 reconciliation: %w", err)
-	}
 	hooks.StartClaimers()
+	hooks.StartSubmissionSources()
 	return warnings, nil
 }

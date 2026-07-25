@@ -170,6 +170,11 @@ FROM media m JOIN library l ON l.id=m.library_id WHERE m.id=?`, mediaID).Scan(
 	}
 	encrypt := p.options.EncryptGlobal && policy.libraryEncrypt
 	if encrypt {
+		if p.options.EncryptionValidator != nil {
+			if err := p.options.EncryptionValidator.ValidateEncryptedLibrary(ctx, tx, EncryptedLibrary{ID: policy.libraryID}); err != nil {
+				return nil, fmt.Errorf("publication planner: encrypted library validation: %w", err)
+			}
+		}
 		required = append(required, StepEncrypt)
 	}
 	prepare := p.options.PreparePlanner != nil && p.options.Capabilities != nil && p.options.Capabilities.Available(string(StepPrepare)) && policy.jitPrepare

@@ -9,27 +9,29 @@ import (
 
 func TestStartupPublicationV2Order(t *testing.T) {
 	var got []string
+	phase := func(name string) func(context.Context) error {
+		return func(context.Context) error { got = append(got, name); return nil }
+	}
 	hooks := publicationV2StartupHooks{
-		Preflight:           func(context.Context) ([]string, error) { got = append(got, "preflight"); return nil, nil },
-		RecoverArtifacts:    func(context.Context) error { got = append(got, "artifact_recovery"); return nil },
-		ReplaceAndAggregate: func(context.Context) error { got = append(got, "replace_aggregate"); return nil },
-		StartClaimers:       func() { got = append(got, "claimers") },
+		RecoverArtifacts: phase("recover_artifacts"), RecoverLeases: phase("recover_leases"), ReplaceActiveV1: phase("replace_v1"), ValidateAggregateV2: phase("validate_aggregate_v2"),
+		Preflight:     func(context.Context) ([]string, error) { got = append(got, "preflight"); return nil, nil },
+		StartClaimers: func() { got = append(got, "claimers") }, StartSubmissionSources: func() { got = append(got, "submissions") },
 	}
 	if _, err := PreparePublicationV2Startup(context.Background(), hooks); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(got, []string{"preflight", "artifact_recovery", "replace_aggregate", "claimers"}) {
-		t.Fatalf("order=%v", got)
+	want := []string{"recover_artifacts", "recover_leases", "replace_v1", "validate_aggregate_v2", "preflight", "claimers", "submissions"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("order=%v want=%v", got, want)
 	}
 }
 
 func TestStartupPublicationV2FailureDoesNotInvokeClaimer(t *testing.T) {
 	claimed := false
-	hooks := publicationV2StartupHooks{
-		Preflight:           func(context.Context) ([]string, error) { return nil, errors.New("fatal preflight") },
-		RecoverArtifacts:    func(context.Context) error { t.Fatal("recovery after failed preflight"); return nil },
-		ReplaceAndAggregate: func(context.Context) error { t.Fatal("reconcile after failed preflight"); return nil },
-		StartClaimers:       func() { claimed = true },
+	ok := func(context.Context) error { return nil }
+	hooks := publicationV2StartupHooks{RecoverArtifacts: ok, RecoverLeases: ok, ReplaceActiveV1: ok, ValidateAggregateV2: ok,
+		Preflight:     func(context.Context) ([]string, error) { return nil, errors.New("fatal preflight") },
+		StartClaimers: func() { claimed = true }, StartSubmissionSources: func() { t.Fatal("submission source invoked") },
 	}
 	if _, err := PreparePublicationV2Startup(context.Background(), hooks); err == nil {
 		t.Fatal("expected failure")

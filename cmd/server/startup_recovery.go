@@ -20,12 +20,12 @@ type StartupRecoveryRoots struct {
 	ScrapeArtwork string
 }
 
-func recoverStartupTasks(ctx context.Context, db *sql.DB, postIngest *postingest.Queue, roots StartupRecoveryRoots) error {
+func recoverStartupArtifacts(ctx context.Context, db *sql.DB, roots StartupRecoveryRoots) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if db == nil || postIngest == nil {
-		return fmt.Errorf("startup recovery: database and post-ingest queue are required")
+	if db == nil {
+		return fmt.Errorf("startup recovery: database is required")
 	}
 	if _, _, err := postingest.ReconcileEncryptionStages(ctx, db, roots.Encryption, 100); err != nil {
 		return fmt.Errorf("startup recovery: encryption stages: %w", err)
@@ -43,9 +43,23 @@ func recoverStartupTasks(ctx context.Context, db *sql.DB, postIngest *postingest
 	if _, _, err := postingest.ReconcileThumbnailStages(ctx, db, roots.Thumbnail, 100); err != nil {
 		return fmt.Errorf("startup recovery: thumbnail stages: %w", err)
 	}
+	return nil
+}
+
+func recoverStartupLeases(ctx context.Context, db *sql.DB, postIngest *postingest.Queue) error {
+	if db == nil {
+		return fmt.Errorf("startup recovery: database is required")
+	}
 	store.ResetInterruptedTasks(db)
 	if _, err := postIngest.RecoverExpired(ctx); err != nil {
 		return fmt.Errorf("startup recovery: post-ingest: %w", err)
 	}
 	return nil
+}
+
+func recoverStartupTasks(ctx context.Context, db *sql.DB, postIngest *postingest.Queue, roots StartupRecoveryRoots) error {
+	if err := recoverStartupArtifacts(ctx, db, roots); err != nil {
+		return err
+	}
+	return recoverStartupLeases(ctx, db, postIngest)
 }

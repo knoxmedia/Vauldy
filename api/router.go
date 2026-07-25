@@ -42,14 +42,26 @@ func NewEngine(cfg *config.Config, application *app.App, deps handler.Dependenci
 	if deps.DocCoverWorker != nil {
 		deps.DocCoverWorker.SetOnCoverReady(h.ScheduleLibraryPreviewRefreshForMedia)
 	}
-	deps.Background.Go(deps.ServerContext, h.StartScheduleLoop)
-	deps.Background.Go(deps.ServerContext, h.StartScrapeTaskLoop)
-	deps.Background.Go(deps.ServerContext, h.StartTranscodeTaskLoop)
-	deps.Background.Go(deps.ServerContext, h.StartLyricTaskLoop)
-	deps.Background.Go(deps.ServerContext, h.StartPhotoClassifyLoop)
-	deps.Background.Go(deps.ServerContext, h.StartPhotoLocationLoop)
-	deps.Background.Go(deps.ServerContext, h.StartPhotoFaceLoop)
-	deps.Background.Go(deps.ServerContext, h.StartMediaFileCleanupLoop)
+	startLoop := func(loop func(context.Context)) {
+		deps.Background.Go(deps.ServerContext, func(ctx context.Context) {
+			if deps.StartupReady != nil {
+				select {
+				case <-ctx.Done():
+					return
+				case <-deps.StartupReady:
+				}
+			}
+			loop(ctx)
+		})
+	}
+	startLoop(h.StartScheduleLoop)
+	startLoop(h.StartScrapeTaskLoop)
+	startLoop(h.StartTranscodeTaskLoop)
+	startLoop(h.StartLyricTaskLoop)
+	startLoop(h.StartPhotoClassifyLoop)
+	startLoop(h.StartPhotoLocationLoop)
+	startLoop(h.StartPhotoFaceLoop)
+	startLoop(h.StartMediaFileCleanupLoop)
 	if deps.DocCoverWorker != nil {
 		deps.Background.Go(deps.ServerContext, deps.DocCoverWorker.Start)
 		deps.Background.Go(deps.ServerContext, func(ctx context.Context) {

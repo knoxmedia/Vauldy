@@ -19,7 +19,7 @@ func TestPreflightRejectsEncryptedLibraryCapabilityGap(t *testing.T) {
 		t.Fatal(err)
 	}
 	registry := NewCapabilityMatrix([]string{"poster", "thumbnail", "scrape"})
-	_, err = PreflightPublicationV2(context.Background(), db, NewPlanner(PlanOptions{EncryptGlobal: true, Capabilities: registry}), registry, PreflightResources{})
+	_, err = PreflightPublicationV2(context.Background(), db, NewPlanner(PlanOptions{EncryptGlobal: true, Capabilities: registry}), registry, &recordingResourceValidator{})
 	if err == nil || !strings.Contains(err.Error(), "encrypted library") || !strings.Contains(err.Error(), "encrypt") {
 		t.Fatalf("err=%v", err)
 	}
@@ -36,7 +36,7 @@ func TestPreflightOptionalAdapterOnlyWarns(t *testing.T) {
 		t.Fatal(err)
 	}
 	registry := NewCapabilityMatrix([]string{"poster", "thumbnail", "scrape"})
-	warnings, err := PreflightPublicationV2(context.Background(), db, NewPlanner(PlanOptions{Capabilities: registry}), registry, PreflightResources{StageRoot: root, QuarantineRoot: root, DerivedRoot: root, PosterResolver: true, ThumbnailResolver: true})
+	warnings, err := PreflightPublicationV2(context.Background(), db, NewPlanner(PlanOptions{Capabilities: registry}), registry, &recordingResourceValidator{})
 	if err != nil {
 		t.Fatal(err)
 	}

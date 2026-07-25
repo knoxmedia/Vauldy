@@ -69,12 +69,13 @@ type MetadataAttempt struct {
 	Errors    []MetadataDiagnostic `json:"errors"`
 }
 type PlanOptions struct {
-	SubtitleAuto     bool
-	ATrackAuto       bool
-	EncryptGlobal    bool
-	PreparePlanner   coreiface.IngestPreparePlanner
-	Capabilities     coreiface.CapabilityRegistry
-	PrepareAvailable bool
+	SubtitleAuto        bool
+	ATrackAuto          bool
+	EncryptGlobal       bool
+	PreparePlanner      coreiface.IngestPreparePlanner
+	Capabilities        coreiface.CapabilityRegistry
+	PrepareAvailable    bool
+	EncryptionValidator EncryptionPolicyValidator
 }
 type NewMedia struct {
 	MediaID         int64

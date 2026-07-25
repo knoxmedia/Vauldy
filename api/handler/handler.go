@@ -44,6 +44,7 @@ type PostIngestEnqueuer interface {
 type Dependencies struct {
 	ServerContext           context.Context
 	Background              *BackgroundGroup
+	StartupReady            <-chan struct{}
 	Coordinator             ScanCoordinator
 	Queue                   *postingest.Queue
 	PostIngest              *postingest.Enqueuer
@@ -99,6 +100,7 @@ type Handler struct {
 	ScanCoordinator         ScanCoordinator
 	OnPostIngestError       func(error)
 	Background              *BackgroundGroup
+	StartupReady            <-chan struct{}
 	ServerContext           context.Context
 	PlayCompletionNow       func() time.Time
 	libraryPreviewRefresh   func(context.Context, int64) error

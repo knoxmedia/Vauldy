@@ -278,6 +278,7 @@ func main() {
 		EncryptGlobal: cfg.EncryptedAssetsEnabled(), PreparePlanner: preparePlanner, Capabilities: publicationCapabilities,
 	})
 
+	startupReady := make(chan struct{})
 	startupRoots := StartupRecoveryRoots{Encryption: postingest.EncryptionRecoveryRoots{Quarantine: assetEnc.EncryptionPrivateRoot(), Resolver: assetEnc}, Thumbnail: postingest.ThumbnailRecoveryRoots{Preview: filepath.Join(cfg.Data.Preview, "photos"), Derived: filepath.Join(cfg.Data.Dir, ".derived")}, Poster: postingest.PosterRecoveryRoots{Upload: cfg.Data.Upload, Derived: filepath.Join(cfg.Data.Dir, ".derived")}, ScrapeArtwork: cfg.Data.MetadataLibrary}
 	enterpriseCtx, enterpriseCancel := context.WithCancel(serverCtx)
 	defer enterpriseCancel()
@@ -287,21 +288,19 @@ func main() {
 		}
 	}
 	preparePlanner = coreiface.IngestPreparePlannerHandle()
-	publicationPlanner = publication.NewPlanner(publication.PlanOptions{SubtitleAuto: cfg.SubtitleAutoOnScan(), ATrackAuto: cfg.ATrackAutoOnScan(), EncryptGlobal: cfg.EncryptedAssetsEnabled(), PreparePlanner: preparePlanner, Capabilities: publicationCapabilities})
+	publicationResources := serverPublicationResources{Vault: keyVault, Encryptor: assetEnc, Derived: derivedStore, PosterRoot: cfg.Data.Upload, ThumbnailRoot: filepath.Join(cfg.Data.Preview, "photos")}
+	publicationPlanner = publication.NewPlanner(publication.PlanOptions{SubtitleAuto: cfg.SubtitleAutoOnScan(), ATrackAuto: cfg.ATrackAutoOnScan(), EncryptGlobal: cfg.EncryptedAssetsEnabled(), PreparePlanner: preparePlanner, Capabilities: publicationCapabilities, EncryptionValidator: publicationResources})
 	warnings, err := PreparePublicationV2Startup(serverCtx, publicationV2StartupHooks{
 		Preflight: func(ctx context.Context) ([]string, error) {
-			keyReady := false
-			if keyVault != nil {
-				_, keyErr := keyVault.GetKEK(ctx)
-				keyReady = keyErr == nil
-			}
-			return publication.PreflightPublicationV2(ctx, db, publicationPlanner, publicationCapabilities, publication.PreflightResources{StageRoot: cfg.EncryptedAssetsStoragePath(), QuarantineRoot: startupRoots.Encryption.Quarantine, DerivedRoot: filepath.Join(cfg.Data.Dir, ".derived"), VaultReady: keyVault != nil, KeyReady: keyReady, PosterResolver: true, ThumbnailResolver: true})
+			return publication.PreflightPublicationV2(ctx, db, publicationPlanner, publicationCapabilities, publicationResources)
 		},
-		RecoverArtifacts: func(ctx context.Context) error { return recoverStartupTasks(ctx, db, postIngestQueue, startupRoots) },
-		ReplaceAndAggregate: func(ctx context.Context) error {
-			_, reconcileErr := publication.ReconcileStartupPublicationV2(ctx, db, publicationPlanner)
+		RecoverArtifacts: func(ctx context.Context) error { return recoverStartupArtifacts(ctx, db, startupRoots) },
+		RecoverLeases:    func(ctx context.Context) error { return recoverStartupLeases(ctx, db, postIngestQueue) },
+		ReplaceActiveV1: func(ctx context.Context) error {
+			_, reconcileErr := publication.ReplaceActiveV1Runs(ctx, db, publicationPlanner)
 			return reconcileErr
 		},
+		ValidateAggregateV2: func(ctx context.Context) error { return publication.ValidateAggregateCurrentV2(ctx, db) },
 		StartClaimers: func() {
 			go func() {
 				err := dispatcher.Start(serverCtx)
@@ -317,6 +316,7 @@ func main() {
 				}
 			}
 		},
+		StartSubmissionSources: func() { close(startupReady) },
 	})
 	if err != nil {
 		log.Fatalf("publication v2 startup: %v", err)
@@ -395,7 +395,7 @@ func main() {
 		postingest.RunPosterStageReconciler(ctx, db, postingest.PosterRecoveryRoots{Upload: cfg.Data.Upload, Derived: filepath.Join(cfg.Data.Dir, ".derived")}, time.Minute, 100, func(err error) { log.Printf("poster stage reconcile: %v", err) })
 	})
 	deps := handler.Dependencies{
-		ServerContext: serverCtx, Background: background,
+		ServerContext: serverCtx, Background: background, StartupReady: startupReady,
 		Coordinator: coordinator, Queue: postIngestQueue, PostIngest: postIngestEnqueuer, Dispatcher: dispatcher, AdminOverviewBuilder: handler.NewAdminOverviewBuilder(db, dispatcher, sqliteMetrics),
 		Worker: worker, PackageWorker: packageWorker, PreviewWorker: previewWorker, Subtitle: subSvc, Upload: up,
 		Instant: instantScheduler, SessionManager: sessionMgr, AtrackWorker: atrackWorker, KeyframeWorker: keyframeWorker,

@@ -115,3 +115,44 @@ func TestActiveV1ReplacementConcurrentIdempotent(t *testing.T) {
 		t.Fatalf("second n=%d err=%v", n, err)
 	}
 }
+
+func TestActiveV1ReplacementNewEncryptionHidesVideoAndPhoto(t *testing.T) {
+	for _, typ := range []string{"video", "image"} {
+		t.Run(typ, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "security.sqlite")
+			planner, mid := seedActiveV1(t, path, typ, "published")
+			db, _ := store.OpenSQLite(path)
+			defer db.Close()
+			_, _ = db.Exec(`UPDATE library SET encrypted_assets_enabled=1 WHERE id=(SELECT library_id FROM media WHERE id=?)`, mid)
+			planner.options.EncryptGlobal = true
+			n, err := ReplaceActiveV1Runs(context.Background(), db, planner)
+			if err != nil || n != 1 {
+				t.Fatalf("n=%d err=%v", n, err)
+			}
+			var preserve int
+			var state string
+			_ = db.QueryRow(`SELECT preserve_visibility FROM media_ingest_run WHERE media_id=? AND generation=2`, mid).Scan(&preserve)
+			_ = db.QueryRow(`SELECT publication_state FROM media WHERE id=?`, mid).Scan(&state)
+			if preserve != 0 || state != "processing" {
+				t.Fatalf("preserve=%d state=%s", preserve, state)
+			}
+		})
+	}
+}
+
+func TestValidateCurrentV2RejectsEmptyAndMismatchedSnapshots(t *testing.T) {
+	for _, tc := range []struct{ name, mutation string }{{"empty", `UPDATE media_ingest_run SET config_snapshot_json='{}'`}, {"required", `UPDATE media_ingest_step SET required=0 WHERE step_type='poster'`}, {"queue", `DELETE FROM post_ingest_task`}, {"dependency", `DELETE FROM media_ingest_step_dependency`}} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openPlannerTestDB(t)
+			_, mid, scan := seedPlannerMedia(t, db, "video", 0, 0, 0)
+			run := planAndCommit(t, db, NewPlanner(PlanOptions{}), NewMedia{MediaID: mid, ScanTaskID: scan, FileType: "video"})
+			if _, err := db.Exec(tc.mutation); err != nil {
+				t.Fatal(err)
+			}
+			err := ValidateAggregateCurrentV2(context.Background(), db)
+			if err == nil {
+				t.Fatalf("run %d accepted malformed %s", run.ID, tc.name)
+			}
+		})
+	}
+}
