@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"knox-media/internal/keystore"
@@ -19,6 +17,7 @@ type serverPublicationResources struct {
 	Encryptor                 *storage.AssetEncryptor
 	Derived                   *storage.DerivedAssetStore
 	PosterRoot, ThumbnailRoot string
+	ProbeOps                  artifactProbeOps
 }
 
 func (r serverPublicationResources) ValidateEncryptedLibrary(ctx context.Context, q store.SQLExecutor, lib publication.EncryptedLibrary) error {
@@ -36,27 +35,38 @@ func (r serverPublicationResources) ValidateEncryptedLibrary(ctx context.Context
 	if strings.TrimSpace(root) == "" {
 		return errors.New("encryption root unresolved")
 	}
-	if strings.TrimSpace(r.Encryptor.EncryptionPrivateRoot()) == "" {
+	if err = r.probeRoot(root); err != nil {
+		return fmt.Errorf("encryption root: %w", err)
+	}
+	quarantineRoot := r.Encryptor.EncryptionPrivateRoot()
+	if strings.TrimSpace(quarantineRoot) == "" {
 		return errors.New("quarantine root unresolved")
 	}
-	if _, err = r.Encryptor.ResolveLibraryEncryptionStageRootTx(ctx, q, lib.ID, lib.Path); err != nil {
+	if err = r.probeRoot(quarantineRoot); err != nil {
+		return fmt.Errorf("quarantine root: %w", err)
+	}
+	stageRoot, err := r.Encryptor.ResolveLibraryEncryptionStageRootTx(ctx, q, lib.ID, lib.Path)
+	if err != nil {
 		return fmt.Errorf("stage root: %w", err)
 	}
-	return probeRoot(r.Derived.BaseDir)
+	if err = r.probeRoot(stageRoot); err != nil {
+		return fmt.Errorf("stage root: %w", err)
+	}
+	if err = r.probeRoot(r.Derived.BaseDir); err != nil {
+		return fmt.Errorf("derived root: %w", err)
+	}
+	return nil
 }
 func (r serverPublicationResources) ProbePosterResolver(context.Context) error {
-	return probeRoot(r.PosterRoot)
+	return r.probeRoot(r.PosterRoot)
 }
 func (r serverPublicationResources) ProbeThumbnailResolver(context.Context) error {
-	return probeRoot(r.ThumbnailRoot)
+	return r.probeRoot(r.ThumbnailRoot)
 }
-func probeRoot(root string) error {
-	if strings.TrimSpace(root) == "" {
-		return errors.New("resolver root unavailable")
+func (r serverPublicationResources) probeRoot(root string) error {
+	ops := r.ProbeOps
+	if ops == nil {
+		ops = osArtifactProbeOps{}
 	}
-	if err := os.MkdirAll(root, 0700); err != nil {
-		return err
-	}
-	_, err := filepath.Abs(root)
-	return err
+	return probeArtifactRoot(root, ops)
 }

@@ -3,7 +3,6 @@ package storage
 import (
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -45,24 +44,6 @@ func (s *AssetEncryptor) ResolveLibraryEncBaseTx(ctx context.Context, q store.SQ
 	abs = filepath.Clean(abs)
 	if abs == filepath.VolumeName(abs)+string(filepath.Separator) {
 		return "", errors.New("encrypted root cannot be volume root")
-	}
-	if err = os.MkdirAll(abs, 0700); err != nil {
-		return "", err
-	}
-	f, err := os.CreateTemp(abs, ".preflight-")
-	if err != nil {
-		return "", err
-	}
-	name := f.Name()
-	_ = f.Chmod(0600)
-	_, werr := f.Write([]byte{0})
-	cerr := f.Close()
-	_ = os.Remove(name)
-	if werr != nil {
-		return "", werr
-	}
-	if cerr != nil {
-		return "", cerr
 	}
 	return abs, nil
 }

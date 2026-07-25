@@ -40,3 +40,15 @@ func TestStartupPublicationV2FailureDoesNotInvokeClaimer(t *testing.T) {
 		t.Fatal("claimer callback invoked")
 	}
 }
+
+func TestStartupPublicationV2ProbeFailurePreventsClaimersAndSources(t *testing.T) {
+	claimed, sourced := false, false
+	ok := func(context.Context) error { return nil }
+	hooks := publicationV2StartupHooks{RecoverArtifacts: ok, RecoverLeases: ok, ReplaceActiveV1: ok, ValidateAggregateV2: ok, Preflight: func(context.Context) ([]string, error) { return nil, errors.New("artifact root read only") }, StartClaimers: func() { claimed = true }, StartSubmissionSources: func() { sourced = true }}
+	if _, err := PreparePublicationV2Startup(context.Background(), hooks); err == nil {
+		t.Fatal("expected failure")
+	}
+	if claimed || sourced {
+		t.Fatalf("claimed=%v sourced=%v", claimed, sourced)
+	}
+}
