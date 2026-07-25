@@ -56,7 +56,7 @@ func RecoverExpiredPrepareParents(ctx context.Context, db *sql.DB, limit int) (i
 			status := "waiting"
 			if superseded == 1 {
 				status = "cancelled"
-			} else if runStatus != "processing" {
+			} else if runStatus != "processing" && runStatus != "published" && runStatus != "degraded" {
 				return fmt.Errorf("prepare recovery task %d run status %s", id, runStatus)
 			}
 			taskSQL := `UPDATE transcode_task SET status=?,lease_owner=NULL,lease_until=NULL,completed_at=CASE WHEN ?='cancelled' THEN CURRENT_TIMESTAMP ELSE NULL END WHERE id=? AND ingest_run_id=? AND ingest_step_id=? AND media_id=? AND generation=? AND retry_round=? AND status='running' AND lease_owner=? AND lease_until<CURRENT_TIMESTAMP`

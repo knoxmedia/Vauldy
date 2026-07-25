@@ -347,7 +347,7 @@ func (w *Worker) failPoisonedParent(ctx context.Context, job claimedJob, reason 
 		return err
 	}
 	defer tx.Rollback()
-	r, err := tx.ExecContext(ctx, `UPDATE pretranscode_rendition_job SET status='failed',error_message=?,completed_at=CURRENT_TIMESTAMP WHERE id=? AND task_id=? AND status='running' AND lease_owner=?`, reason, job.ID, job.TaskID, job.Owner)
+	r, err := tx.ExecContext(ctx, `UPDATE pretranscode_rendition_job SET status='failed',error_message=?,completed_at=CURRENT_TIMESTAMP WHERE id=? AND task_id=? AND status='running' AND lease_owner=? AND retry_round=?`, reason, job.ID, job.TaskID, job.Owner, job.RetryRound)
 	if err != nil {
 		return err
 	}
@@ -647,7 +647,7 @@ func (w *Worker) renewJobLease(ctx context.Context, job claimedJob) error {
 		return err
 	}
 	_, err := store.WithImmediateConnTx(ctx, w.DB, func(tx store.ImmediateConnTx) error {
-		pred := `EXISTS(SELECT 1 FROM transcode_task t JOIN media_ingest_run r ON r.id=t.ingest_run_id JOIN media_ingest_step s ON s.id=t.ingest_step_id JOIN media m ON m.id=t.media_id WHERE t.id=? AND t.status='running' AND t.lease_owner=? AND t.ingest_run_id=? AND t.ingest_step_id=? AND t.media_id=? AND t.generation=? AND t.retry_round=? AND r.id=? AND r.media_id=? AND r.generation=? AND r.status='processing' AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND s.id=? AND s.run_id=? AND s.media_id=? AND s.generation=? AND s.status='running' AND s.lease_owner=? AND m.id=? AND m.ingest_generation=?)`
+		pred := `EXISTS(SELECT 1 FROM transcode_task t JOIN media_ingest_run r ON r.id=t.ingest_run_id JOIN media_ingest_step s ON s.id=t.ingest_step_id JOIN media m ON m.id=t.media_id WHERE t.id=? AND t.status='running' AND t.lease_owner=? AND t.ingest_run_id=? AND t.ingest_step_id=? AND t.media_id=? AND t.generation=? AND t.retry_round=? AND r.id=? AND r.media_id=? AND r.generation=? AND r.status IN ('processing','published','degraded') AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND s.id=? AND s.run_id=? AND s.media_id=? AND s.generation=? AND s.status='running' AND s.lease_owner=? AND m.id=? AND m.ingest_generation=?)`
 		args := []any{p.TaskID, p.Owner, p.RunID, p.StepID, p.MediaID, p.Generation, p.RetryRound, p.RunID, p.MediaID, p.Generation, p.StepID, p.RunID, p.MediaID, p.Generation, p.Owner, p.MediaID, p.Generation}
 		r, e := tx.ExecContext(ctx, `UPDATE pretranscode_rendition_job SET lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds') WHERE id=? AND task_id=? AND status='running' AND lease_owner=? AND retry_round=? AND `+pred, append([]any{job.ID, job.TaskID, job.Owner, job.RetryRound}, args...)...)
 		if e != nil {
@@ -717,7 +717,7 @@ func (w *Worker) updateJobProgress(ctx context.Context, job claimedJob, progress
 		}
 		return nil
 	}
-	r, err := w.DB.ExecContext(ctx, `UPDATE pretranscode_rendition_job AS j SET progress=?,lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds') WHERE j.id=? AND j.task_id=? AND j.status='running' AND j.lease_owner=? AND j.retry_round=? AND EXISTS(SELECT 1 FROM transcode_task t JOIN media_ingest_run r ON r.id=t.ingest_run_id JOIN media_ingest_step s ON s.id=t.ingest_step_id JOIN media m ON m.id=t.media_id WHERE t.id=j.task_id AND t.status='running' AND t.lease_owner=? AND t.ingest_run_id=? AND t.ingest_step_id=? AND t.media_id=? AND t.generation=? AND t.retry_round=? AND r.status='processing' AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND s.status='running' AND s.lease_owner=? AND m.ingest_generation=?)`, progress, job.ID, job.TaskID, job.Owner, job.RetryRound, p.Owner, p.RunID, p.StepID, p.MediaID, p.Generation, p.RetryRound, p.Owner, p.Generation)
+	r, err := w.DB.ExecContext(ctx, `UPDATE pretranscode_rendition_job AS j SET progress=?,lease_until=datetime(CURRENT_TIMESTAMP,'+90 seconds') WHERE j.id=? AND j.task_id=? AND j.status='running' AND j.lease_owner=? AND j.retry_round=? AND EXISTS(SELECT 1 FROM transcode_task t JOIN media_ingest_run r ON r.id=t.ingest_run_id JOIN media_ingest_step s ON s.id=t.ingest_step_id JOIN media m ON m.id=t.media_id WHERE t.id=j.task_id AND t.status='running' AND t.lease_owner=? AND t.ingest_run_id=? AND t.ingest_step_id=? AND t.media_id=? AND t.generation=? AND t.retry_round=? AND r.status IN ('processing','published','degraded') AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND s.status='running' AND s.lease_owner=? AND m.ingest_generation=?)`, progress, job.ID, job.TaskID, job.Owner, job.RetryRound, p.Owner, p.RunID, p.StepID, p.MediaID, p.Generation, p.RetryRound, p.Owner, p.Generation)
 	if err != nil {
 		return err
 	}
