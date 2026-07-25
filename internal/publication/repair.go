@@ -236,8 +236,11 @@ func (p *Planner) requiredStepsTx(ctx context.Context, tx *sql.Tx, mediaID int64
 }
 
 func stepEvidenceTx(ctx context.Context, tx *sql.Tx, mediaID int64, step StepType) (bool, error) {
-	// A terminal successful run is durable intent evidence even if workers later
-	// clean task history or an operator removes the physical artifact.
+	// Critical artifact steps must be validated through exactRepairEvidenceTx.
+	// Historical completion is only admissible for optional/non-artifact work.
+	if step == StepPoster || step == StepThumbnail || step == StepEncrypt {
+		return false, nil
+	}
 	var done int
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM media_ingest_step s JOIN media_ingest_run r ON r.id=s.run_id WHERE s.media_id=? AND s.step_type=? AND s.status IN ('done','skipped') AND r.status IN ('published','degraded'))`, mediaID, step).Scan(&done); err != nil {
 		return false, err
@@ -382,14 +385,17 @@ func loadRepairPreflight(ctx context.Context, db *sql.DB, planner *Planner, medi
 		return nil, err
 	}
 	preflight := &repairPreflight{fileType: strings.TrimSpace(fileType), generation: generation, preserveVisibility: true}
-	fingerprintSource := selected
-	if regularFile(plainPath) {
-		fingerprintSource = plainPath
-	}
-	if !regularFile(fingerprintSource) || samePath(selected, encPath) && strings.TrimSpace(plainPath) != "" && !regularFile(plainPath) {
-		err = db.QueryRowContext(ctx, `SELECT source_fingerprint FROM media_encryption_stage_journal WHERE media_id=? AND state='committed' AND enc_path=? ORDER BY updated_at DESC LIMIT 1`, mediaID, encPath).Scan(&preflight.sourceFingerprint)
-	} else {
-		preflight.sourceFingerprint, err = SourceFingerprint(fingerprintSource)
+	// Fingerprint the plaintext source before opening the replacement write
+	// transaction. When the selected file is encrypted, bind it to the
+	// committed journal's plaintext fingerprint rather than hashing ciphertext.
+	if samePath(selected, encPath) {
+		if regularFile(plainPath) {
+			preflight.sourceFingerprint, err = SourceFingerprint(plainPath)
+		} else {
+			err = db.QueryRowContext(ctx, `SELECT source_fingerprint FROM media_encryption_stage_journal WHERE media_id=? AND state='committed' AND enc_path=? ORDER BY updated_at DESC LIMIT 1`, mediaID, encPath).Scan(&preflight.sourceFingerprint)
+		}
+	} else if regularFile(selected) {
+		preflight.sourceFingerprint, err = SourceFingerprint(selected)
 	}
 	if errors.Is(err, sql.ErrNoRows) {
 		err = nil
@@ -460,15 +466,7 @@ func SourceFingerprint(path string) (string, error) {
 
 func hasCompleteRepairEvidenceTx(ctx context.Context, tx *sql.Tx, mediaID int64, steps []StepType, preflight *repairPreflight) (bool, error) {
 	for _, step := range steps {
-		exact := preflight.fileType == "image" && (step == StepThumbnail || step == StepEncrypt) || preflight.fileType == "video" && preflight.encryptionRequired && (step == StepPoster || step == StepEncrypt)
-		if exact {
-			ok, err := exactRepairEvidenceTx(ctx, tx, mediaID, step, preflight.sourceFingerprint)
-			if err != nil || !ok {
-				return ok, err
-			}
-			continue
-		}
-		ok, err := stepEvidenceTx(ctx, tx, mediaID, step)
+		ok, err := exactRepairEvidenceTx(ctx, tx, mediaID, step, preflight.sourceFingerprint)
 		if err != nil || !ok {
 			return ok, err
 		}
@@ -477,8 +475,11 @@ func hasCompleteRepairEvidenceTx(ctx context.Context, tx *sql.Tx, mediaID int64,
 }
 
 func exactRepairEvidenceTx(ctx context.Context, tx *sql.Tx, mediaID int64, step StepType, fingerprint string) (bool, error) {
+	if strings.TrimSpace(fingerprint) == "" {
+		return false, nil
+	}
 	var refs string
-	err := tx.QueryRowContext(ctx, `SELECT e.artifact_refs_json FROM media_ingest_evidence e JOIN media m ON m.id=e.media_id JOIN media_ingest_run r ON r.id=e.run_id JOIN media_ingest_step s ON s.id=e.step_id WHERE e.media_id=? AND e.generation=m.ingest_generation AND e.kind=? AND e.source_fingerprint=? AND r.status IN ('published','degraded') AND s.status IN ('done','skipped') ORDER BY e.id DESC LIMIT 1`, mediaID, step, fingerprint).Scan(&refs)
+	err := tx.QueryRowContext(ctx, `SELECT e.artifact_refs_json FROM media_ingest_evidence e JOIN media m ON m.id=e.media_id JOIN media_ingest_run r ON r.id=e.run_id AND r.media_id=e.media_id AND r.generation=e.generation JOIN media_ingest_step s ON s.id=e.step_id AND s.run_id=e.run_id AND s.media_id=e.media_id AND s.generation=e.generation AND s.step_type=e.kind WHERE e.media_id=? AND e.generation=m.ingest_generation AND e.kind=? AND e.source_fingerprint=? AND r.status IN ('published','degraded') AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND s.status IN ('done','skipped') ORDER BY e.id DESC LIMIT 1`, mediaID, step, fingerprint).Scan(&refs)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -497,23 +498,9 @@ func validateRepairEvidenceRefsTx(ctx context.Context, tx *sql.Tx, mediaID int64
 		if json.Unmarshal([]byte(raw), &evidence) != nil || !validFileHash(evidence.Path, evidence.Size, evidence.SHA256) {
 			return false, nil
 		}
-		var catalogPath, wrapped, iv string
-		err := tx.QueryRowContext(ctx, `SELECT enc_path,wrapped_dek,iv FROM media_derived_assets WHERE media_id=? AND artifact_kind='poster' AND logical_name='poster.jpg'`, mediaID).Scan(&catalogPath, &wrapped, &iv)
-		if errors.Is(err, sql.ErrNoRows) {
-			return false, nil
-		}
-		if err != nil {
-			return false, err
-		}
-		if !samePath(catalogPath, evidence.Path) || strings.TrimSpace(wrapped) == "" || strings.TrimSpace(iv) == "" {
-			return false, nil
-		}
-		expectedURL := fmt.Sprintf("/api/v1/media/%d/poster.jpg", mediaID)
-		if strings.TrimSpace(evidence.URL) != expectedURL {
-			return false, nil
-		}
 		var metaRaw string
-		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(meta_json,'{}') FROM media WHERE id=?`, mediaID).Scan(&metaRaw); err != nil {
+		var encrypted int
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(m.meta_json,'{}'),COALESCE(l.encrypted_assets_enabled,0) FROM media m JOIN library l ON l.id=m.library_id WHERE m.id=?`, mediaID).Scan(&metaRaw, &encrypted); err != nil {
 			return false, err
 		}
 		var meta struct {
@@ -531,7 +518,22 @@ func validateRepairEvidenceRefsTx(ctx context.Context, tx *sql.Tx, mediaID int64
 		if selected == "" {
 			selected = strings.TrimSpace(meta.Scrape.Extra.Poster)
 		}
-		return selected == expectedURL, nil
+		if selected == "" || selected != strings.TrimSpace(evidence.URL) {
+			return false, nil
+		}
+		if encrypted == 0 {
+			return true, nil
+		}
+		var catalogPath, wrapped, iv string
+		err := tx.QueryRowContext(ctx, `SELECT enc_path,wrapped_dek,iv FROM media_derived_assets WHERE media_id=? AND artifact_kind='poster' AND logical_name='poster.jpg'`, mediaID).Scan(&catalogPath, &wrapped, &iv)
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		expectedURL := fmt.Sprintf("/api/v1/media/%d/poster.jpg", mediaID)
+		return samePath(catalogPath, evidence.Path) && strings.TrimSpace(wrapped) != "" && strings.TrimSpace(iv) != "" && selected == expectedURL, nil
 	}
 	if step == StepThumbnail {
 		var evidence struct {
@@ -546,8 +548,25 @@ func validateRepairEvidenceRefsTx(ctx context.Context, tx *sql.Tx, mediaID int64
 		if json.Unmarshal([]byte(raw), &evidence) != nil || len(evidence.Variants) != 2 {
 			return false, nil
 		}
+		var metaRaw string
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(meta_json,'{}') FROM media WHERE id=?`, mediaID).Scan(&metaRaw); err != nil {
+			return false, err
+		}
+		var meta struct {
+			Photo struct {
+				ThumbPath  string `json:"thumb_path"`
+				MediumPath string `json:"medium_path"`
+			} `json:"photo"`
+		}
+		if json.Unmarshal([]byte(metaRaw), &meta) != nil {
+			return false, nil
+		}
 		for _, kind := range []string{"photo_thumb", "photo_medium"} {
 			found := false
+			metaPath := meta.Photo.ThumbPath
+			if kind == "photo_medium" {
+				metaPath = meta.Photo.MediumPath
+			}
 			for _, variant := range evidence.Variants {
 				if variant.Kind != kind || !validFileHash(variant.Path, variant.Size, variant.SHA256) {
 					continue
@@ -556,6 +575,9 @@ func validateRepairEvidenceRefsTx(ctx context.Context, tx *sql.Tx, mediaID int64
 				var encrypted int
 				if err := tx.QueryRowContext(ctx, `SELECT COALESCE(l.encrypted_assets_enabled,0) FROM media m JOIN library l ON l.id=m.library_id WHERE m.id=?`, mediaID).Scan(&encrypted); err != nil {
 					return false, err
+				}
+				if !samePath(metaPath, variant.Path) {
+					continue
 				}
 				if encrypted == 0 {
 					found = true

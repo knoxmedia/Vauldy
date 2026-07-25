@@ -103,8 +103,11 @@ func TestRepairLegacyMediaIsIdempotent(t *testing.T) {
 	if _, err := db.Exec(`UPDATE media_ingest_step SET status='done' WHERE media_id=?; UPDATE media_ingest_run SET status='published' WHERE media_id=?`, mediaID, mediaID); err != nil {
 		t.Fatal(err)
 	}
+	if n, err := RepairLegacyMedia(context.Background(), db, NewPlanner(PlanOptions{}), 2); err != nil || n != 1 {
+		t.Fatalf("completed repair without evidence=%d err=%v", n, err)
+	}
 	if n, err := RepairLegacyMedia(context.Background(), db, NewPlanner(PlanOptions{}), 2); err != nil || n != 0 {
-		t.Fatalf("after completed repair=%d err=%v", n, err)
+		t.Fatalf("pending evidence repair duplicated=%d err=%v", n, err)
 	}
 }
 
@@ -389,13 +392,7 @@ func TestRepairLegacyMediaPendingCurrentRepairSkipsDuplicate(t *testing.T) {
 
 func TestRepairLegacyMediaDoesNotRequireOptionalStepEvidence(t *testing.T) {
 	db := openRepairTestDB(t)
-	mediaID := seedLegacyVideo(t, db, 1, "published")
-	for _, step := range []StepType{StepPoster, StepScrape, StepKeyframe} {
-		addRepairEvidence(t, db, mediaID, step)
-	}
-	if _, err := db.Exec(`INSERT INTO media_ingest_run(media_id,generation,reason,status,preserve_visibility,config_snapshot_json) VALUES(?,1,'scan','published',0,'{}')`, mediaID); err != nil {
-		t.Fatal(err)
-	}
+	mediaID, _, _, _ := seedPublishedPlainVideoEvidence(t, db)
 	var runID int64
 	if err := db.QueryRow(`SELECT id FROM media_ingest_run WHERE media_id=?`, mediaID).Scan(&runID); err != nil {
 		t.Fatal(err)
