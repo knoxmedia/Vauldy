@@ -2,8 +2,11 @@ package publication
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -181,13 +184,180 @@ func seedAllRequiredLegacyVideo(t *testing.T, db *sql.DB) int64 {
 	return mediaID
 }
 
+func seedCompliantEncryptedVideoEvidence(t *testing.T, db *sql.DB) (int64, string) {
+	t.Helper()
+	mediaID, source := seedEncryptionRequiredLegacyVideo(t, db)
+	enc := filepath.Join(filepath.Dir(source), "legacy.enc")
+	poster := filepath.Join(filepath.Dir(source), "poster.jpg.fixture.enc")
+	if err := os.WriteFile(enc, []byte("encrypted video"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(poster, []byte("encrypted poster"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	posterURL := fmt.Sprintf("/api/v1/media/%d/poster.jpg", mediaID)
+	meta := fmt.Sprintf(`{"scrape":{"poster":%q,"extra":{"poster":%q}}}`, posterURL, posterURL)
+	if _, err := db.Exec(`UPDATE media SET file_path=?,ingest_generation=1,meta_json=? WHERE id=?`, enc, meta, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO media_encrypted_assets(media_id,enc_path,wrapped_dek,iv,plain_path,status) VALUES(?,?,'wrapped','iv',?,'encrypted')`, mediaID, enc, source); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO media_derived_assets(media_id,artifact_kind,logical_name,enc_path,wrapped_dek,iv) VALUES(?,'poster','poster.jpg',?,'poster-wrapped','poster-iv')`, mediaID, poster); err != nil {
+		t.Fatal(err)
+	}
+	fp, err := SourceFingerprint(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encHash := sha256.Sum256([]byte("encrypted video"))
+	posterHash := sha256.Sum256([]byte("encrypted poster"))
+	if _, err = db.Exec(`INSERT INTO media_ingest_run(media_id,generation,reason,status,preserve_visibility,config_snapshot_json,policy_version) VALUES(?,1,'scan','published',0,'{}',2)`, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	var runID int64
+	if err = db.QueryRow(`SELECT id FROM media_ingest_run WHERE media_id=?`, mediaID).Scan(&runID); err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range []StepType{StepPoster, StepEncrypt} {
+		res, e := db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status) VALUES(?,?,1,?,1,'done')`, runID, mediaID, step)
+		if e != nil {
+			t.Fatal(e)
+		}
+		stepID, _ := res.LastInsertId()
+		refs := fmt.Sprintf(`{"path":%q,"url":%q,"source":%q,"size":%d,"sha256":%q,"generation":1,"stage_id":"poster-stage"}`, poster, posterURL, source, len("encrypted poster"), hex.EncodeToString(posterHash[:]))
+		if step == StepEncrypt {
+			refs = fmt.Sprintf(`{"path":%q,"size":%d,"sha256":%q,"wrapped_dek":"wrapped","iv":"iv"}`, enc, len("encrypted video"), hex.EncodeToString(encHash[:]))
+		}
+		if _, e = db.Exec(`INSERT INTO media_ingest_evidence(run_id,step_id,media_id,generation,kind,source_fingerprint,artifact_refs_json,reason,verified_at,stage_id) VALUES(?,?,?,?,?,?,?,'test',CURRENT_TIMESTAMP,?)`, runID, stepID, mediaID, 1, step, fp, refs, string(step)+"-stage"); e != nil {
+			t.Fatal(e)
+		}
+	}
+	return mediaID, source
+}
+
 func TestRepairLegacyMediaSkipsCompleteEvidence(t *testing.T) {
 	db := openRepairTestDB(t)
-	mediaID := seedAllRequiredLegacyVideo(t, db)
-	addRepairEvidence(t, db, mediaID, StepPoster)
-	addRepairEvidence(t, db, mediaID, StepEncrypt)
+	_, _ = seedCompliantEncryptedVideoEvidence(t, db)
 	if repaired, err := RepairLegacyMedia(context.Background(), db, allRepairPlanner(t), 4); err != nil || repaired != 0 {
 		t.Fatalf("repaired=%d err=%v", repaired, err)
+	}
+}
+
+func TestRepairLegacyUnencryptedVideoAcceptsPlaintextPosterEvidence(t *testing.T) {
+	db := openRepairTestDB(t)
+	mediaID := seedLegacyVideo(t, db, 1, "published")
+	source := filepath.Join(t.TempDir(), "legacy.mp4")
+	posterBytes := []byte("plain CAS poster")
+	hash := sha256.Sum256(posterBytes)
+	poster := filepath.Join(t.TempDir(), hex.EncodeToString(hash[:])+".jpg")
+	if err := os.WriteFile(source, []byte("legacy source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(poster, posterBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	url := fmt.Sprintf("/uploads/posters/objects/sha256/%s/%s.jpg", hex.EncodeToString(hash[:2]), hex.EncodeToString(hash[:]))
+	if _, err := db.Exec(`UPDATE media SET file_path=?,ingest_generation=1,meta_json=? WHERE id=?`, source, fmt.Sprintf(`{"scrape":{"poster":%q}}`, url), mediaID); err != nil {
+		t.Fatal(err)
+	}
+	fp, err := SourceFingerprint(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO media_ingest_run(media_id,generation,reason,status,preserve_visibility,config_snapshot_json,policy_version) VALUES(?,1,'scan','published',1,'{}',2)`, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	var runID int64
+	if err = db.QueryRow(`SELECT id FROM media_ingest_run WHERE media_id=?`, mediaID).Scan(&runID); err != nil {
+		t.Fatal(err)
+	}
+	res, err := db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status) VALUES(?,?,1,'poster',1,'done')`, runID, mediaID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stepID, _ := res.LastInsertId()
+	refs := fmt.Sprintf(`{"path":%q,"url":%q,"size":%d,"sha256":%q}`, poster, url, len(posterBytes), hex.EncodeToString(hash[:]))
+	if _, err = db.Exec(`INSERT INTO media_ingest_evidence(run_id,step_id,media_id,generation,kind,source_fingerprint,artifact_refs_json,reason,verified_at,stage_id) VALUES(?,?,?,1,'poster',?,?,'test',CURRENT_TIMESTAMP,'plain-poster-stage')`, runID, stepID, mediaID, fp, refs); err != nil {
+		t.Fatal(err)
+	}
+	if repaired, err := RepairLegacyMedia(context.Background(), db, NewPlanner(PlanOptions{}), 4); err != nil || repaired != 0 {
+		t.Fatalf("repaired=%d err=%v", repaired, err)
+	}
+}
+
+func TestRepairLegacyEncryptedVideoRejectsPlaintextPosterEvidence(t *testing.T) {
+	db := openRepairTestDB(t)
+	mediaID, _ := seedCompliantEncryptedVideoEvidence(t, db)
+	plain := filepath.Join(t.TempDir(), "poster.jpg")
+	if err := os.WriteFile(plain, []byte("plaintext poster"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hash := sha256.Sum256([]byte("plaintext poster"))
+	refs := fmt.Sprintf(`{"path":%q,"url":%q,"size":%d,"sha256":%q}`, plain, fmt.Sprintf("/api/v1/media/%d/poster.jpg", mediaID), len("plaintext poster"), hex.EncodeToString(hash[:]))
+	if _, err := db.Exec(`UPDATE media_ingest_evidence SET artifact_refs_json=? WHERE media_id=? AND kind='poster'`, refs, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := RepairLegacyMedia(context.Background(), db, allRepairPlanner(t), 4); err != nil || n != 1 {
+		t.Fatalf("repaired=%d err=%v", n, err)
+	}
+}
+
+func TestRepairLegacyEncryptedVideoRejectsMismatchedPosterCatalog(t *testing.T) {
+	for _, tc := range []struct {
+		name, update string
+	}{
+		{"path", `UPDATE media_derived_assets SET enc_path='mismatched.enc' WHERE media_id=? AND artifact_kind='poster'`},
+		{"key", `UPDATE media_derived_assets SET logical_name='wrong.jpg' WHERE media_id=? AND artifact_kind='poster'`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openRepairTestDB(t)
+			mediaID, _ := seedCompliantEncryptedVideoEvidence(t, db)
+			if _, err := db.Exec(tc.update, mediaID); err != nil {
+				t.Fatal(err)
+			}
+			if n, err := RepairLegacyMedia(context.Background(), db, allRepairPlanner(t), 4); err != nil || n != 1 {
+				t.Fatalf("repaired=%d err=%v", n, err)
+			}
+		})
+	}
+}
+
+func TestRepairLegacyEncryptedVideoMissingPosterPreservesVisibility(t *testing.T) {
+	db := openRepairTestDB(t)
+	mediaID, _ := seedCompliantEncryptedVideoEvidence(t, db)
+	if _, err := db.Exec(`DELETE FROM media_ingest_evidence WHERE media_id=? AND kind='poster'`, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := RepairLegacyMedia(context.Background(), db, allRepairPlanner(t), 4); err != nil || n != 1 {
+		t.Fatalf("repaired=%d err=%v", n, err)
+	}
+	var state string
+	var preserve int
+	if err := db.QueryRow(`SELECT m.publication_state,r.preserve_visibility FROM media m JOIN media_ingest_run r ON r.media_id=m.id AND r.generation=m.ingest_generation WHERE m.id=?`, mediaID).Scan(&state, &preserve); err != nil {
+		t.Fatal(err)
+	}
+	if state != "published" || preserve != 1 {
+		t.Fatalf("state=%s preserve=%d", state, preserve)
+	}
+}
+
+func TestRepairLegacyEncryptedVideoSourceMismatchHidesRepair(t *testing.T) {
+	db := openRepairTestDB(t)
+	mediaID, source := seedCompliantEncryptedVideoEvidence(t, db)
+	if err := os.WriteFile(source, []byte("changed plaintext source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := RepairLegacyMedia(context.Background(), db, allRepairPlanner(t), 4); err != nil || n != 1 {
+		t.Fatalf("repaired=%d err=%v", n, err)
+	}
+	var state string
+	var preserve int
+	if err := db.QueryRow(`SELECT m.publication_state,r.preserve_visibility FROM media m JOIN media_ingest_run r ON r.media_id=m.id AND r.generation=m.ingest_generation WHERE m.id=?`, mediaID).Scan(&state, &preserve); err != nil {
+		t.Fatal(err)
+	}
+	if state != "processing" || preserve != 0 {
+		t.Fatalf("state=%s preserve=%d", state, preserve)
 	}
 }
 
@@ -339,5 +509,101 @@ func TestRepairLegacyMediaAggregateSuccessAndFailureVisibility(t *testing.T) {
 		if got != tc.want || (tc.want == "published" && publicationError != "") || (tc.want == "degraded" && publicationError == "") {
 			t.Fatalf("media=%d state=%s error=%q want=%s", tc.id, got, publicationError, tc.want)
 		}
+	}
+}
+
+func seedEncryptionRequiredLegacyVideo(t *testing.T, db *sql.DB) (int64, string) {
+	t.Helper()
+	root := t.TempDir()
+	source := filepath.Join(root, "legacy.mp4")
+	if err := os.WriteFile(source, []byte("legacy video source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	id := seedLegacyVideo(t, db, 1, "published")
+	if _, err := db.Exec(`UPDATE media SET file_path=? WHERE id=?`, source, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE library SET encrypted_assets_enabled=1 WHERE id=(SELECT library_id FROM media WHERE id=?)`, id); err != nil {
+		t.Fatal(err)
+	}
+	return id, source
+}
+
+func TestRepairLegacyVideoNewEncryptionHidesPlaintextSelection(t *testing.T) {
+	db := openRepairTestDB(t)
+	id, _ := seedEncryptionRequiredLegacyVideo(t, db)
+	var publishedAt string
+	if err := db.QueryRow(`SELECT published_at FROM media WHERE id=?`, id).Scan(&publishedAt); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := RepairLegacyMedia(context.Background(), db, NewPlanner(PlanOptions{EncryptGlobal: true}), 8); err != nil || n != 1 {
+		t.Fatalf("repair=%d err=%v", n, err)
+	}
+	var state, after string
+	var preserve int
+	if err := db.QueryRow(`SELECT m.publication_state,m.published_at,r.preserve_visibility FROM media m JOIN media_ingest_run r ON r.media_id=m.id AND r.generation=m.ingest_generation WHERE m.id=?`, id).Scan(&state, &after, &preserve); err != nil {
+		t.Fatal(err)
+	}
+	if state != "processing" || preserve != 0 || after != publishedAt {
+		t.Fatalf("state=%s preserve=%d published=%q want processing/0/%q", state, preserve, after, publishedAt)
+	}
+}
+
+func TestRepairLegacyVideoOrphanEncryptedRowDoesNotPreservePlaintext(t *testing.T) {
+	db := openRepairTestDB(t)
+	id, source := seedEncryptionRequiredLegacyVideo(t, db)
+	enc := filepath.Join(filepath.Dir(source), "legacy.enc")
+	if err := os.WriteFile(enc, []byte("orphan encrypted bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO media_encrypted_assets(media_id,enc_path,wrapped_dek,iv,plain_path,status) VALUES(?,?,'wrapped','iv',?,'encrypted')`, id, enc, source); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := RepairLegacyMedia(context.Background(), db, NewPlanner(PlanOptions{EncryptGlobal: true}), 8); err != nil || n != 1 {
+		t.Fatalf("repair=%d err=%v", n, err)
+	}
+	var state string
+	var preserve int
+	if err := db.QueryRow(`SELECT m.publication_state,r.preserve_visibility FROM media m JOIN media_ingest_run r ON r.media_id=m.id WHERE m.id=?`, id).Scan(&state, &preserve); err != nil {
+		t.Fatal(err)
+	}
+	if state != "processing" || preserve != 0 {
+		t.Fatalf("state=%s preserve=%d", state, preserve)
+	}
+}
+
+func TestRepairLegacyVideoEncryptionFailureStaysHiddenAndRetainsPublishedAt(t *testing.T) {
+	db := openRepairTestDB(t)
+	id, source := seedEncryptionRequiredLegacyVideo(t, db)
+	var publishedAt string
+	if err := db.QueryRow(`SELECT published_at FROM media WHERE id=?`, id).Scan(&publishedAt); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := RepairLegacyMedia(context.Background(), db, NewPlanner(PlanOptions{EncryptGlobal: true}), 8); err != nil || n != 1 {
+		t.Fatalf("repair=%d err=%v", n, err)
+	}
+	var runID int64
+	if err := db.QueryRow(`SELECT id FROM media_ingest_run WHERE media_id=? AND generation=(SELECT ingest_generation FROM media WHERE id=?)`, id, id).Scan(&runID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE media_ingest_step SET status='done' WHERE run_id=? AND step_type='poster'; UPDATE media_ingest_step SET status='failed',last_error='encrypt failed' WHERE run_id=? AND step_type='encrypt'`, runID, runID); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = AggregateTx(context.Background(), tx, runID); err != nil {
+		t.Fatal(err)
+	}
+	if err = tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	var state, selected, after string
+	if err = db.QueryRow(`SELECT publication_state,file_path,published_at FROM media WHERE id=?`, id).Scan(&state, &selected, &after); err != nil {
+		t.Fatal(err)
+	}
+	if state != "failed" || selected != source || after != publishedAt {
+		t.Fatalf("state=%s selected=%q published=%q want failed/%q/%q", state, selected, after, source, publishedAt)
 	}
 }
