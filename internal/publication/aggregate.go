@@ -74,11 +74,14 @@ func AggregateTx(ctx context.Context, tx store.SQLExecutor, runID int64) error {
 	var preserve int
 	var runState, terminalReason, runError, reason string
 	var supersededBy sql.NullInt64
-	var supersededAt sql.NullTime
-	if err := tx.QueryRowContext(ctx, `SELECT media_id,generation,status,preserve_visibility,terminal_reason,error_message,reason,superseded_by_generation,superseded_at FROM media_ingest_run WHERE id=?`, runID).Scan(&mediaID, &generation, &runState, &preserve, &terminalReason, &runError, &reason, &supersededBy, &supersededAt); err != nil {
+	var supersededAt, finishedAt sql.NullTime
+	if err := tx.QueryRowContext(ctx, `SELECT media_id,generation,status,preserve_visibility,terminal_reason,error_message,reason,superseded_by_generation,superseded_at,finished_at FROM media_ingest_run WHERE id=?`, runID).Scan(&mediaID, &generation, &runState, &preserve, &terminalReason, &runError, &reason, &supersededBy, &supersededAt, &finishedAt); err != nil {
 		return err
 	}
 	if supersededBy.Valid || supersededAt.Valid {
+		return nil
+	}
+	if finishedAt.Valid && (runState == "published" || runState == "degraded") {
 		return nil
 	}
 	var pending, failed, cancelled int

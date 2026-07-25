@@ -677,3 +677,31 @@ func TestRetryOptionalPostIngestConcurrentCreatesOneAudit(t *testing.T) {
 		t.Fatalf("audits=%d err=%v", audits, err)
 	}
 }
+
+func TestAggregatePreservesTerminalOutcomeAfterOptionalRetry(t *testing.T) {
+	db := openRetryTestDB(t)
+	mediaID, runID, stepID, _ := seedOptionalPostIngestRetry(t, db, "degraded", "degraded", "subtitle", 0)
+	db.Exec(`UPDATE media SET publication_state='degraded',publication_error='media exact error',published_at='2026-07-02 03:04:05' WHERE id=?`, mediaID)
+	db.Exec(`UPDATE media_ingest_run SET status='degraded',error_message='run exact error',finished_at='2026-07-02 03:04:05' WHERE id=?`, runID)
+	if err := RetryOptionalPostIngest(context.Background(), db, OptionalPostIngestRetryRequest{MediaID: mediaID, StepID: stepID, ActorID: 7, Reason: "preserve"}); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := AggregateTx(context.Background(), tx, runID); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	var runStatus, runErr, runFinished, mediaStatus, mediaErr, published string
+	err = db.QueryRow(`SELECT r.status,r.error_message,r.finished_at,m.publication_state,m.publication_error,m.published_at FROM media_ingest_run r JOIN media m ON m.id=r.media_id WHERE r.id=?`, runID).Scan(&runStatus, &runErr, &runFinished, &mediaStatus, &mediaErr, &published)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runStatus != "degraded" || runErr != "run exact error" || runFinished != "2026-07-02T03:04:05Z" || mediaStatus != "degraded" || mediaErr != "media exact error" || published != "2026-07-02T03:04:05Z" {
+		t.Fatalf("status=%s/%s/%s media=%s/%s/%s", runStatus, runErr, runFinished, mediaStatus, mediaErr, published)
+	}
+}
