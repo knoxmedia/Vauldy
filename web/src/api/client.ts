@@ -2036,6 +2036,22 @@ export async function retryTranscodeTask(id: number) {
   return data;
 }
 
+export type PublicationPolicyDiagnostic = {
+  media_id: number;
+  run_id: number;
+  generation: number;
+  policy_version: number;
+  status: string;
+  terminal_reason: string;
+  required_waiting: number;
+  required_failed: number;
+  optional_waiting: number;
+  optional_failed: number;
+  adapter_unavailable: string[];
+  metadata_errors: string[];
+  recovery_error: string;
+};
+
 export type AdminOverview = {
   monitor: {
     cpu_percent: number;
@@ -2113,6 +2129,7 @@ export type AdminOverview = {
     log_failures: number;
     dropped_logs: number;
   };
+  publication_policy: PublicationPolicyDiagnostic[];
 };
 
 export async function fetchAdminOverview(signal?: AbortSignal) {

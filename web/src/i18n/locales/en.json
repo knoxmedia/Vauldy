@@ -610,7 +610,16 @@
       "progress_batches": "Progress batches",
       "log_batches": "Log batches",
       "log_failures": "Log failures",
-      "dropped_logs": "Dropped logs"
+      "dropped_logs": "Dropped logs",
+      "publication_policy": "Publication policy diagnostics",
+      "col_policy_version": "Policy",
+      "col_generation": "Generation",
+      "col_terminal_reason": "Terminal reason",
+      "col_required_counts": "Required waiting / failed",
+      "col_optional_counts": "Optional waiting / failed",
+      "col_adapter_unavailable": "Adapter unavailable",
+      "col_metadata_errors": "Metadata errors",
+      "col_recovery_error": "Recovery error"
     },
     "task_manager": {
       "all_statuses": "All statuses",

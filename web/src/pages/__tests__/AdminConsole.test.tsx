@@ -35,7 +35,10 @@ vi.mock("antd", () => {
     Space: Wrapper,
     Statistic: ({ title, value, suffix }: { title: React.ReactNode; value: React.ReactNode; suffix?: React.ReactNode }) => <div><span>{title}</span><span>{String(value)}{suffix}</span></div>,
     Table: ({ dataSource = [], columns = [], rowKey }: { dataSource?: Array<Record<string, unknown>>; columns?: Array<{ dataIndex?: string; render?: (value: unknown, row: Record<string, unknown>) => React.ReactNode }>; rowKey?: string | ((row: Record<string, unknown>) => React.Key) }) => {
-      const tableName = dataSource.some((row) => "lease_owner" in row) ? "running-table" : dataSource.some((row) => "owner_id" in row) ? "lease-table" : "other-table";
+      const tableName = dataSource.some((row) => "adapter_unavailable" in row) ? "publication-policy-table"
+        : dataSource.some((row) => "lease_owner" in row) ? "running-table"
+          : dataSource.some((row) => "owner_id" in row) ? "lease-table"
+            : "other-table";
       return <div data-testid={tableName} data-row-key={typeof rowKey === "string" ? rowKey : "function"}>{dataSource.map((row, index) => <div key={index}>{columns.map((column, columnIndex) => <span key={columnIndex}>{column.render ? column.render(column.dataIndex ? row[column.dataIndex] : undefined, row) : String(column.dataIndex ? row[column.dataIndex] ?? "" : "")}</span>)}</div>)}</div>;
     },
     Tag: ({ children }: React.PropsWithChildren) => <span>{children}</span>,
@@ -87,6 +90,7 @@ const overview = (cpu: number, message: string): AdminOverview => ({
   scan_leases: [{ library_id: 12, scan_task_id: 71, owner_id: "scanner-a", lease_until: "2026-07-17T00:02:00Z", expired: true }],
   resource_budget: { global_limit: 8, global_used: 5, poster_limit: 3, poster_used: 2, preview_limit: 4, preview_used: 3 },
   sqlite_metrics: { scope: "process_since_start", persistent: false, busy_retries: 11, busy_exhausted: 2, progress_batches: 13, log_batches: 17, log_failures: 5, dropped_logs: 7 },
+  publication_policy: [],
 });
 
 function deferred<T>() {
@@ -351,5 +355,62 @@ describe("AdminConsolePage", () => {
     expect(screen.getByText("keep-me")).toBeInTheDocument();
     expect(screen.getAllByText("72%")[0]).toBeInTheDocument();
     expect(screen.getByText("pages.admin_console.polling_mode")).toBeInTheDocument();
+  });
+
+  it("renders publication policy diagnostics with policy generation status and error counts", async () => {
+    const data = overview(70, "publication-policy-overview");
+    data.publication_policy = [{
+      media_id: 10,
+      run_id: 100,
+      generation: 2,
+      policy_version: 2,
+      status: "failed",
+      terminal_reason: "required_failed",
+      required_waiting: 0,
+      required_failed: 1,
+      optional_waiting: 1,
+      optional_failed: 0,
+      adapter_unavailable: ["scrape", "prepare"],
+      metadata_errors: ["ffprobe: duration unavailable"],
+      recovery_error: "asset recovery failed",
+    }];
+    fetchAdminOverviewMock.mockResolvedValueOnce(data);
+    render(<AdminConsolePage />);
+
+    expect(await screen.findByText("pages.admin_console.publication_policy")).toBeInTheDocument();
+    const table = screen.getByTestId("publication-policy-table");
+    expect(table).toBeInTheDocument();
+    expect(table).toHaveTextContent("10");
+    expect(table).toHaveTextContent("failed");
+    expect(table).toHaveTextContent("required_failed");
+    expect(table).toHaveTextContent("0 / 1");
+    expect(table).toHaveTextContent("1 / 0");
+    expect(table).toHaveTextContent("scrape, prepare");
+    expect(table).toHaveTextContent("ffprobe: duration unavailable");
+    expect(table).toHaveTextContent("asset recovery failed");
+    expect(table.textContent).toMatch(/2.*2/);
+    for (const key of ["col_policy_version", "col_generation", "col_terminal_reason", "col_required_counts", "col_optional_counts", "col_adapter_unavailable", "col_metadata_errors", "col_recovery_error"] as const) {
+      expect(en.pages.admin_console[key]).not.toMatch(/[?\uFFFD]/);
+      expect(zhCN.pages.admin_console[key]).not.toMatch(/[?\uFFFD]/);
+      expect(zhTW.pages.admin_console[key]).not.toMatch(/[?\uFFFD]/);
+    }
+  });
+
+  it("rejects SSE overviews with malformed publication_policy payloads while loading continues", async () => {
+    const rest = deferred<AdminOverview>();
+    let signal: AbortSignal | undefined;
+    fetchAdminOverviewMock.mockImplementation((value?: AbortSignal) => { signal = value; return rest.promise; });
+    render(<AdminConsolePage />);
+    await waitFor(() => expect(MockEventSource.instances).toHaveLength(1));
+    expect(screen.getAllByRole("status").length).toBeGreaterThan(0);
+
+    const malformed = { ...overview(71, "malformed-publication"), publication_policy: [{ media_id: "bad" }] };
+    act(() => MockEventSource.instances[0].emitRaw(JSON.stringify(malformed)));
+
+    expect(signal?.aborted).toBe(false);
+    expect(screen.queryByText("malformed-publication")).not.toBeInTheDocument();
+    expect(screen.getAllByRole("status").length).toBeGreaterThan(0);
+    await act(async () => rest.resolve(overview(72, "valid-after-malformed-publication")));
+    expect(screen.getByText("valid-after-malformed-publication")).toBeInTheDocument();
   });
 });

@@ -396,7 +396,11 @@ func main() {
 	})
 	deps := handler.Dependencies{
 		ServerContext: serverCtx, Background: background, StartupReady: startupReady,
-		Coordinator: coordinator, Queue: postIngestQueue, PostIngest: postIngestEnqueuer, Dispatcher: dispatcher, AdminOverviewBuilder: handler.NewAdminOverviewBuilder(db, dispatcher, sqliteMetrics),
+		Coordinator: coordinator, Queue: postIngestQueue, PostIngest: postIngestEnqueuer, Dispatcher: dispatcher, AdminOverviewBuilder: func() handler.OverviewBuilder {
+			b := handler.NewAdminOverviewBuilder(db, dispatcher, sqliteMetrics)
+			b.Capabilities = publicationCapabilities
+			return b
+		}(),
 		Worker: worker, PackageWorker: packageWorker, PreviewWorker: previewWorker, Subtitle: subSvc, Upload: up,
 		Instant: instantScheduler, SessionManager: sessionMgr, AtrackWorker: atrackWorker, KeyframeWorker: keyframeWorker,
 		LyricWorker: lyricWorker, PhotoClassifyWorker: photoClassifyWorker, DocCoverWorker: docCoverWorker,

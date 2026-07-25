@@ -607,7 +607,16 @@
       "progress_batches": "進度更新批次數",
       "log_batches": "日誌寫入批次數",
       "log_failures": "日誌寫入失敗次數",
-      "dropped_logs": "丟棄日誌數"
+      "dropped_logs": "丟棄日誌數",
+      "publication_policy": "發佈策略診斷",
+      "col_policy_version": "策略版本",
+      "col_generation": "代數",
+      "col_terminal_reason": "終態原因",
+      "col_required_counts": "必選 等待 / 失敗",
+      "col_optional_counts": "可選 等待 / 失敗",
+      "col_adapter_unavailable": "適配器不可用",
+      "col_metadata_errors": "中繼資料錯誤",
+      "col_recovery_error": "復原錯誤"
     },
     "task_manager": {
       "all_statuses": "全部狀態",

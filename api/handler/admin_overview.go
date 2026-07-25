@@ -9,7 +9,10 @@ import (
 	"net/http"
 	"path/filepath"
 	"runtime"
+	"sort"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/shirou/gopsutil/v3/cpu"
@@ -17,7 +20,9 @@ import (
 	"github.com/shirou/gopsutil/v3/mem"
 
 	"knox-media/internal/buildinfo"
+	"knox-media/internal/coreiface"
 	"knox-media/internal/postingest"
+	"knox-media/internal/publication"
 	"knox-media/internal/store"
 )
 
@@ -37,8 +42,32 @@ type AdminOverviewBuilder struct {
 	DB           *sql.DB
 	Dispatcher   budgetSnapshotter
 	Metrics      *store.SQLiteMetrics
+	Capabilities coreiface.CapabilityRegistry
 	SampleSystem func(context.Context, string) (SystemSample, error)
 }
+
+type PublicationPolicyDiagnostic struct {
+	MediaID            int64    `json:"media_id"`
+	RunID              int64    `json:"run_id"`
+	Generation         int64    `json:"generation"`
+	PolicyVersion      int      `json:"policy_version"`
+	Status             string   `json:"status"`
+	TerminalReason     string   `json:"terminal_reason"`
+	RequiredWaiting    int      `json:"required_waiting"`
+	RequiredFailed     int      `json:"required_failed"`
+	OptionalWaiting    int      `json:"optional_waiting"`
+	OptionalFailed     int      `json:"optional_failed"`
+	AdapterUnavailable []string `json:"adapter_unavailable"`
+	MetadataErrors     []string `json:"metadata_errors"`
+	RecoveryError      string   `json:"recovery_error"`
+}
+
+const (
+	maxPublicationPolicyRows          = 100
+	maxPublicationDiagnosticMessage   = 256
+	maxPublicationMetadataErrorCount  = 8
+	maxPublicationMetadataErrorsBytes = 2048
+)
 
 type SystemSample struct {
 	CPUPercent    float64
@@ -173,11 +202,16 @@ func (b *AdminOverviewBuilder) Build(ctx context.Context) (AdminOverviewData, er
 	if err != nil {
 		return nil, err
 	}
+	publicationPolicy, err := b.loadPublicationPolicy(ctx)
+	if err != nil {
+		return nil, err
+	}
 	softwareBuild := buildinfo.Current()
 	return AdminOverviewData{
 		"monitor":    map[string]any{"cpu_percent": sample.CPUPercent, "memory_percent": sample.MemoryPercent, "disk_percent": sample.DiskPercent, "transcode_task_count": transcodeTasks, "media_total": mediaTotal},
 		"system":     map[string]any{"cpu_count": runtime.NumCPU(), "memory_total": sample.MemoryTotal, "os": runtime.GOOS + "/" + runtime.GOARCH, "database": "sqlite " + dbVersion.String, "software_version": softwareBuild.Version, "software_commit": softwareBuild.Commit, "software_build_time": softwareBuild.BuildTime, "software_dirty": softwareBuild.Dirty, "software_dirty_known": softwareBuild.DirtyKnown, "software_vcs_revision": softwareBuild.VCS.Revision, "software_vcs_time": softwareBuild.VCS.Time, "software_vcs_modified": softwareBuild.VCS.Modified, "software_vcs_modified_known": softwareBuild.VCS.ModifiedKnown},
 		"activities": activities, "post_ingest_queue": queue, "running_post_ingest_tasks": running, "scan_leases": leases, "resource_budget": b.budget(), "sqlite_metrics": b.sqliteMetrics(),
+		"publication_policy": publicationPolicy,
 	}, nil
 }
 
@@ -306,6 +340,219 @@ func (b *AdminOverviewBuilder) sqliteMetrics() SQLiteMetricsOverview {
 		o.DroppedLogs = b.Metrics.DroppedLogs.Load()
 	}
 	return o
+}
+
+func (b *AdminOverviewBuilder) loadPublicationPolicy(ctx context.Context) ([]PublicationPolicyDiagnostic, error) {
+	out := make([]PublicationPolicyDiagnostic, 0)
+	rows, err := b.DB.QueryContext(ctx, `
+SELECT r.id, r.media_id, r.generation, COALESCE(r.policy_version,1), r.status, COALESCE(r.terminal_reason,''), COALESCE(r.config_snapshot_json,''), COALESCE(r.updated_at,''),
+       COALESCE(SUM(CASE WHEN s.required=1 AND s.status='waiting' THEN 1 ELSE 0 END),0),
+       COALESCE(SUM(CASE WHEN s.required=1 AND s.status='failed' THEN 1 ELSE 0 END),0),
+       COALESCE(SUM(CASE WHEN s.required=0 AND s.status='waiting' THEN 1 ELSE 0 END),0),
+       COALESCE(SUM(CASE WHEN s.required=0 AND s.status='failed' THEN 1 ELSE 0 END),0)
+FROM media_ingest_run r
+JOIN media m ON m.id=r.media_id AND m.ingest_generation=r.generation
+LEFT JOIN media_ingest_step s ON s.run_id=r.id
+WHERE r.superseded_at IS NULL AND r.superseded_by_generation IS NULL
+GROUP BY r.id
+ORDER BY r.id`)
+	if err != nil {
+		return out, err
+	}
+	defer rows.Close()
+
+	type candidate struct {
+		row       PublicationPolicyDiagnostic
+		snapshot  string
+		updatedAt string
+		severity  int
+	}
+	candidates := make([]candidate, 0)
+	for rows.Next() {
+		var c candidate
+		if err := rows.Scan(&c.row.RunID, &c.row.MediaID, &c.row.Generation, &c.row.PolicyVersion, &c.row.Status, &c.row.TerminalReason, &c.snapshot, &c.updatedAt,
+			&c.row.RequiredWaiting, &c.row.RequiredFailed, &c.row.OptionalWaiting, &c.row.OptionalFailed); err != nil {
+			return out, err
+		}
+		c.row.AdapterUnavailable = b.adapterUnavailableForRun(ctx, c.row.RunID, c.snapshot)
+		c.row.MetadataErrors = parseBoundedMetadataErrors(c.snapshot)
+		c.row.RecoveryError = loadLatestRecoveryError(ctx, b.DB, c.row.MediaID)
+		if !publicationPolicyActionable(c.row) {
+			continue
+		}
+		c.severity = publicationPolicySeverity(c.row.Status)
+		candidates = append(candidates, c)
+	}
+	if err := rows.Err(); err != nil {
+		return out, err
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].severity != candidates[j].severity {
+			return candidates[i].severity < candidates[j].severity
+		}
+		if candidates[i].row.RequiredFailed != candidates[j].row.RequiredFailed {
+			return candidates[i].row.RequiredFailed > candidates[j].row.RequiredFailed
+		}
+		if candidates[i].row.OptionalFailed != candidates[j].row.OptionalFailed {
+			return candidates[i].row.OptionalFailed > candidates[j].row.OptionalFailed
+		}
+		if candidates[i].updatedAt != candidates[j].updatedAt {
+			return candidates[i].updatedAt > candidates[j].updatedAt
+		}
+		return candidates[i].row.RunID > candidates[j].row.RunID
+	})
+	if len(candidates) > maxPublicationPolicyRows {
+		candidates = candidates[:maxPublicationPolicyRows]
+	}
+	for _, c := range candidates {
+		row := c.row
+		if row.AdapterUnavailable == nil {
+			row.AdapterUnavailable = []string{}
+		}
+		if row.MetadataErrors == nil {
+			row.MetadataErrors = []string{}
+		}
+		out = append(out, row)
+	}
+	return out, nil
+}
+
+func publicationPolicyActionable(row PublicationPolicyDiagnostic) bool {
+	switch row.Status {
+	case "processing", "degraded", "failed", "cancelled":
+		return true
+	}
+	return row.RequiredWaiting > 0 || row.RequiredFailed > 0 || row.OptionalWaiting > 0 || row.OptionalFailed > 0 ||
+		row.RecoveryError != "" || len(row.AdapterUnavailable) > 0 || len(row.MetadataErrors) > 0
+}
+
+func publicationPolicySeverity(status string) int {
+	switch status {
+	case "failed":
+		return 0
+	case "cancelled":
+		return 1
+	case "degraded":
+		return 2
+	case "processing":
+		return 3
+	default:
+		return 4
+	}
+}
+
+func (b *AdminOverviewBuilder) adapterUnavailableForRun(ctx context.Context, runID int64, snapshot string) []string {
+	if b == nil || b.Capabilities == nil {
+		return []string{}
+	}
+	steps := optionalStepTypesFromSnapshot(snapshot)
+	if len(steps) == 0 {
+		rows, err := b.DB.QueryContext(ctx, `SELECT DISTINCT step_type FROM media_ingest_step WHERE run_id=? AND required=0 ORDER BY step_type`, runID)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var step string
+				if err := rows.Scan(&step); err != nil {
+					break
+				}
+				steps = append(steps, step)
+			}
+		}
+	}
+	out := make([]string, 0)
+	seen := map[string]bool{}
+	for _, step := range steps {
+		step = strings.TrimSpace(step)
+		if step == "" || seen[step] {
+			continue
+		}
+		seen[step] = true
+		if !b.Capabilities.Available(step) {
+			out = append(out, step)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func optionalStepTypesFromSnapshot(raw string) []string {
+	var snap publication.ConfigSnapshot
+	if err := json.Unmarshal([]byte(raw), &snap); err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(snap.OptionalSteps))
+	for _, step := range snap.OptionalSteps {
+		out = append(out, string(step))
+	}
+	return out
+}
+
+func parseBoundedMetadataErrors(raw string) []string {
+	var snap struct {
+		Metadata publication.MetadataAttempt `json:"metadata"`
+	}
+	if err := json.Unmarshal([]byte(raw), &snap); err != nil {
+		return []string{}
+	}
+	out := make([]string, 0, len(snap.Metadata.Errors))
+	total := 0
+	for _, diag := range snap.Metadata.Errors {
+		msg := strings.TrimSpace(diag.Source)
+		if diag.Message != "" {
+			if msg != "" {
+				msg += ": "
+			}
+			msg += diag.Message
+		}
+		msg = truncateUTF8Bound(msg, maxPublicationDiagnosticMessage)
+		if msg == "" {
+			continue
+		}
+		if len(out) >= maxPublicationMetadataErrorCount || total+len(msg) > maxPublicationMetadataErrorsBytes {
+			break
+		}
+		out = append(out, msg)
+		total += len(msg)
+	}
+	return out
+}
+
+func loadLatestRecoveryError(ctx context.Context, db *sql.DB, mediaID int64) string {
+	rows, err := db.QueryContext(ctx, `
+SELECT recovery_error, updated_at, preference FROM (
+  SELECT recovery_error, updated_at, CASE WHEN state='committed' THEN 1 ELSE 0 END AS preference
+  FROM media_asset_stage_journal WHERE media_id=? AND TRIM(recovery_error)<>''
+  UNION ALL
+  SELECT recovery_error, updated_at, CASE WHEN state='committed' THEN 1 ELSE 0 END
+  FROM media_encryption_stage_journal WHERE media_id=? AND TRIM(recovery_error)<>''
+  UNION ALL
+  SELECT recovery_error, updated_at, CASE WHEN state='committed' THEN 1 ELSE 0 END
+  FROM poster_repair_stage WHERE media_id=? AND TRIM(recovery_error)<>''
+) ORDER BY preference ASC, updated_at DESC LIMIT 1`, mediaID, mediaID, mediaID)
+	if err != nil {
+		return ""
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return ""
+	}
+	var msg, updated string
+	var preference int
+	if err := rows.Scan(&msg, &updated, &preference); err != nil {
+		return ""
+	}
+	return truncateUTF8Bound(strings.TrimSpace(msg), maxPublicationDiagnosticMessage)
+}
+
+func truncateUTF8Bound(s string, max int) string {
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	s = s[:max]
+	for !utf8.ValidString(s) {
+		s = s[:len(s)-1]
+	}
+	return s
 }
 
 func (h *Handler) AdminOverview(c *gin.Context) {

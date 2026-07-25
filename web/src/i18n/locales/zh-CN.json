@@ -609,7 +609,16 @@
       "progress_batches": "进度更新批次数",
       "log_batches": "日志写入批次数",
       "log_failures": "日志写入失败次数",
-      "dropped_logs": "丢弃日志数"
+      "dropped_logs": "丢弃日志数",
+      "publication_policy": "发布策略诊断",
+      "col_policy_version": "策略版本",
+      "col_generation": "代数",
+      "col_terminal_reason": "终态原因",
+      "col_required_counts": "必选 等待 / 失败",
+      "col_optional_counts": "可选 等待 / 失败",
+      "col_adapter_unavailable": "适配器不可用",
+      "col_metadata_errors": "元数据错误",
+      "col_recovery_error": "恢复错误"
     },
     "task_manager": {
       "all_statuses": "全部状态",
