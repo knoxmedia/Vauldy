@@ -648,49 +648,11 @@ func (e *PostCommitMigrationValidationError) Error() string {
 func (e *PostCommitMigrationValidationError) Unwrap() error { return e.Cause }
 
 var publicationMigrationPostCommitValidation = validatePublicationForeignKeys
-
-func ensureAssetStageScrapeClaimColumns(ctx context.Context, db *sql.DB) error {
-	if !tableExists(ctx, db, "media_asset_stage_journal") {
-		return nil
-	}
-	cols, err := publicationColumns(ctx, db, "media_asset_stage_journal")
-	if err != nil {
-		return err
-	}
-	present := 0
-	for _, name := range []string{"scrape_task_id", "scrape_attempt", "scrape_retry_round"} {
-		if cols[name] {
-			present++
-		}
-	}
-	if present == 3 {
-		return nil
-	}
-	if present != 0 {
-		return fmt.Errorf("media_asset_stage_journal partial scrape claim columns: %d/3", present)
-	}
-	_, err = WithImmediateConnTx(ctx, db, func(tx ImmediateConnTx) error {
-		for _, ddl := range []string{"ALTER TABLE media_asset_stage_journal ADD COLUMN scrape_task_id INTEGER", "ALTER TABLE media_asset_stage_journal ADD COLUMN scrape_attempt INTEGER", "ALTER TABLE media_asset_stage_journal ADD COLUMN scrape_retry_round INTEGER"} {
-			if _, e := tx.ExecContext(ctx, ddl); e != nil {
-				return e
-			}
-		}
-		return nil
-	})
-	return err
-}
+var publicationMigrationCommit = func(ctx context.Context, conn *sql.Conn) error { _, err := conn.ExecContext(ctx, `COMMIT`); return err }
 
 func migrateIngestPublication(ctx context.Context, db *sql.DB) error {
 	publicationMigrationMu.Lock()
 	defer publicationMigrationMu.Unlock()
-	// The base schema still declares this legacy index on every open. Remove it
-	// before current-schema detection so rebuild paths cannot preserve it.
-	if _, err := db.ExecContext(ctx, `DROP INDEX IF EXISTS idx_scrape_task_status`); err != nil {
-		return fmt.Errorf("drop obsolete scrape status index: %w", err)
-	}
-	if err := ensureAssetStageScrapeClaimColumns(ctx, db); err != nil {
-		return err
-	}
 	if current, err := publicationV2CurrentDB(ctx, db); err != nil {
 		return err
 	} else if current {
@@ -726,6 +688,25 @@ func publicationV2CurrentDB(ctx context.Context, db *sql.DB) (bool, error) {
 	if ok, childErr := publicationManagedChildrenCurrent(ctx, conn); childErr != nil {
 		return false, childErr
 	} else if !ok {
+		return false, nil
+	}
+	assetCols, err := publicationColumns(ctx, conn, "media_asset_stage_journal")
+	if err != nil {
+		return false, err
+	}
+	claimColumns := 0
+	for _, name := range []string{"scrape_task_id", "scrape_attempt", "scrape_retry_round"} {
+		if assetCols[name] {
+			claimColumns++
+		}
+	}
+	if claimColumns == 0 {
+		return false, nil
+	}
+	if claimColumns != 3 {
+		return false, fmt.Errorf("media_asset_stage_journal partial scrape claim columns: %d/3", claimColumns)
+	}
+	if publicationIndexExists(ctx, conn, "idx_scrape_task_status") {
 		return false, nil
 	}
 	if exactPublicationTable(ctx, conn, "media_encryption_stage_journal", canonicalEncryptionStageJournalSchema) != nil || requirePublicationFKSet(ctx, conn, "media_encryption_stage_journal", "post_ingest_task:task_id:id:cascade", "media_ingest_run:run_id,media_id,generation:id,media_id,generation:cascade", "media_ingest_step:step_id,media_id,generation:id,media_id,generation:cascade") != nil {
@@ -819,6 +800,11 @@ func migratePublicationV2(ctx context.Context, db *sql.DB) (err error) {
 	if err = publicationMigrationHook(publicationStagePreflight); err != nil {
 		return err
 	}
+	// The base schema may recreate this obsolete index on open. Drop it only
+	// after the complete fail-before-mutation preflight and inside this transaction.
+	if _, err = conn.ExecContext(ctx, `DROP INDEX IF EXISTS idx_scrape_task_status`); err != nil {
+		return fmt.Errorf("drop obsolete scrape status index: %w", err)
+	}
 	if tableExists(ctx, conn, "media_encryption_stage_journal") {
 		cols, inspectErr := publicationColumns(ctx, conn, "media_encryption_stage_journal")
 		if inspectErr != nil {
@@ -840,9 +826,10 @@ func migratePublicationV2(ctx context.Context, db *sql.DB) (err error) {
 			complete = complete && cols[name]
 		}
 		if complete {
-			journalCanonical := exactPublicationTable(ctx, conn, "media_encryption_stage_journal", canonicalEncryptionStageJournalSchema) == nil
-			journalFKCanonical := requirePublicationFKSet(ctx, conn, "media_encryption_stage_journal", "post_ingest_task:task_id:id:cascade", "media_ingest_run:run_id,media_id,generation:id,media_id,generation:cascade", "media_ingest_step:step_id,media_id,generation:id,media_id,generation:cascade") == nil
-			if journalCanonical && journalFKCanonical {
+			encryptionCanonical := exactPublicationTable(ctx, conn, "media_encryption_stage_journal", canonicalEncryptionStageJournalSchema) == nil
+			encryptionFKCanonical := requirePublicationFKSet(ctx, conn, "media_encryption_stage_journal", "post_ingest_task:task_id:id:cascade", "media_ingest_run:run_id,media_id,generation:id,media_id,generation:cascade", "media_ingest_step:step_id,media_id,generation:id,media_id,generation:cascade") == nil
+			assetCanonical := exactPublicationTable(ctx, conn, "media_asset_stage_journal", canonicalAssetStageJournalSchema) == nil
+			if encryptionCanonical && encryptionFKCanonical && assetCanonical {
 				if err = validatePublicationV2Schema(ctx, conn); err != nil {
 					return fmt.Errorf("publication v2 precommit existing schema: %w", err)
 				}
@@ -925,10 +912,29 @@ func migratePublicationV2(ctx context.Context, db *sql.DB) (err error) {
 			return err
 		}
 	}
-	if _, err = conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return fmt.Errorf("publication v2 commit: %w", err)
+	if err = publicationMigrationCommit(ctx, conn); err != nil {
+		// COMMIT errors are uncertain: verify the full canonical postcondition on a
+		// same pinned connection before reuse. A successful check proves the migration
+		// committed.
+		committed = true
+		checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+		defer cancel()
+		_, restoreErr := conn.ExecContext(checkCtx, `PRAGMA foreign_keys=ON`)
+		checkErr := restoreErr
+		if checkErr == nil {
+			checkErr = validatePublicationV2Schema(checkCtx, conn)
+		}
+		if checkErr == nil {
+			checkErr = foreignKeyCheckExecutor(checkCtx, conn)
+		}
+		if checkErr != nil {
+			discard = true
+			return errors.Join(fmt.Errorf("publication v2 commit: %w", err), fmt.Errorf("publication v2 uncertain commit postcondition: %w", checkErr))
+		}
+		err = nil
+	} else {
+		committed = true
 	}
-	committed = true
 	if _, err = conn.ExecContext(ctx, `PRAGMA foreign_keys=ON`); err != nil {
 		discard = true
 		return &PostCommitMigrationValidationError{err}
@@ -2186,6 +2192,21 @@ func publicationMigrationPreflight(ctx context.Context, q SQLExecutor) error {
 	}
 	if err := validatePublicationKnownReferences(ctx, q); err != nil {
 		return err
+	}
+	if tableExists(ctx, q, "media_asset_stage_journal") {
+		cols, e := publicationColumns(ctx, q, "media_asset_stage_journal")
+		if e != nil {
+			return e
+		}
+		present := 0
+		for _, name := range []string{"scrape_task_id", "scrape_attempt", "scrape_retry_round"} {
+			if cols[name] {
+				present++
+			}
+		}
+		if present != 0 && present != 3 {
+			return fmt.Errorf("media_asset_stage_journal partial scrape claim columns: %d/3", present)
+		}
 	}
 	if tableExists(ctx, q, "media_ingest_run") {
 		cols, e := publicationColumns(ctx, q, "media_ingest_run")

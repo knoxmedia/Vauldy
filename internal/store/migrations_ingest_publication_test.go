@@ -2169,3 +2169,154 @@ func TestMigrateIngestPublicationPreservesLegacyArtworkStagesAndAddsExactClaims(
 		t.Fatal(err)
 	}
 }
+
+func snapshotPublicationSchemaOnly(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	var out strings.Builder
+	rows, err := db.Query(`SELECT type,name,tbl_name,COALESCE(sql,'') FROM sqlite_master ORDER BY type,name`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var typ, name, table, ddl string
+		if err := rows.Scan(&typ, &name, &table, &ddl); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		fmt.Fprintf(&out, "%q|%q|%q|%q;", typ, name, table, ddl)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range publicationGraphOrder {
+		if !tableExists(context.Background(), db, table) {
+			continue
+		}
+		cols, err := publicationColumnSpecs(context.Background(), db, table)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprintf(&out, "%s=%q;", table, cols)
+	}
+	return out.String()
+}
+
+func installLegacyAssetStageJournal(t *testing.T, db *sql.DB) {
+	t.Helper()
+	if _, err := db.Exec(`INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json) VALUES(1,20,1,'scan','processing','{}'); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status,attempts) VALUES(70,1,20,1,'scrape',1,'running',2); DROP TABLE media_asset_stage_journal; CREATE TABLE media_asset_stage_journal(stage_id TEXT PRIMARY KEY,media_id INTEGER NOT NULL,run_id INTEGER NOT NULL,step_id INTEGER NOT NULL,generation INTEGER NOT NULL,owner_token TEXT NOT NULL,source_fingerprint TEXT NOT NULL,artifact_kind TEXT NOT NULL CHECK(artifact_kind IN ('poster','thumbnail','encrypt','scrape_artwork')),state TEXT NOT NULL CHECK(state IN ('staged','quarantining','quarantined','restored','committed','failed_closed')),original_path TEXT NOT NULL DEFAULT '',quarantine_path TEXT NOT NULL DEFAULT '',staged_path TEXT NOT NULL,hashes_sizes_json TEXT NOT NULL CHECK(json_valid(hashes_sizes_json)),recovery_error TEXT NOT NULL DEFAULT '',created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,FOREIGN KEY(run_id,media_id,generation) REFERENCES media_ingest_run(id,media_id,generation) ON DELETE CASCADE,FOREIGN KEY(step_id,media_id,generation) REFERENCES media_ingest_step(id,media_id,generation) ON DELETE CASCADE); CREATE INDEX idx_asset_stage_recovery ON media_asset_stage_journal(state,updated_at); INSERT INTO media_asset_stage_journal(stage_id,media_id,run_id,step_id,generation,owner_token,source_fingerprint,artifact_kind,state,staged_path,hashes_sizes_json) VALUES('legacy-stage',20,1,70,1,'legacy','fp','scrape_artwork','staged','legacy-path','{}')`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestScrapeClaimColumnsUnknownTriggerPreflightLeavesSchemaUnchanged(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	installLegacyAssetStageJournal(t, db)
+	if _, err := db.Exec(`CREATE TRIGGER extension_stage_trigger AFTER INSERT ON media_asset_stage_journal BEGIN SELECT 1; END`); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotPublicationSchemaOnly(t, db)
+	if err := migrateIngestPublication(context.Background(), db); err == nil || !strings.Contains(err.Error(), "extension_stage_trigger") {
+		t.Fatalf("err=%v", err)
+	}
+	if after := snapshotPublicationSchemaOnly(t, db); after != before {
+		t.Fatalf("schema changed on rejected preflight\nbefore=%s\nafter=%s", before, after)
+	}
+}
+
+func TestScrapeClaimColumnsUnsupportedDriftLeavesSchemaUnchanged(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	installLegacyAssetStageJournal(t, db)
+	if _, err := db.Exec(`ALTER TABLE media_asset_stage_journal ADD COLUMN scrape_task_id INTEGER`); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotPublicationSchemaOnly(t, db)
+	if err := migrateIngestPublication(context.Background(), db); err == nil || !strings.Contains(err.Error(), "partial scrape claim") {
+		t.Fatalf("err=%v", err)
+	}
+	if after := snapshotPublicationSchemaOnly(t, db); after != before {
+		t.Fatalf("schema changed on drift rejection\nbefore=%s\nafter=%s", before, after)
+	}
+}
+
+func TestScrapeClaimColumnsRollbackWithPublicationGraph(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	installLegacyAssetStageJournal(t, db)
+	before := snapshotPublicationSchemaOnly(t, db)
+	old := publicationMigrationTestHook
+	publicationMigrationTestHook = func(stage publicationMigrationStage) error {
+		if stage == publicationStageAfterChildCreate {
+			return errors.New("injected claim column rollback")
+		}
+		return nil
+	}
+	t.Cleanup(func() { publicationMigrationTestHook = old })
+	if err := migrateIngestPublication(context.Background(), db); err == nil {
+		t.Fatal("migration unexpectedly succeeded")
+	}
+	if after := snapshotPublicationSchemaOnly(t, db); after != before {
+		t.Fatalf("schema escaped rollback\nbefore=%s\nafter=%s", before, after)
+	}
+}
+
+func TestScrapeClaimColumnsLegacyMigrationIsIdempotent(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	installLegacyAssetStageJournal(t, db)
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	var task, attempt, round sql.NullInt64
+	if err := db.QueryRow(`SELECT scrape_task_id,scrape_attempt,scrape_retry_round FROM media_asset_stage_journal WHERE stage_id='legacy-stage'`).Scan(&task, &attempt, &round); err != nil {
+		t.Fatal(err)
+	}
+	if task.Valid || attempt.Valid || round.Valid {
+		t.Fatalf("legacy claim=%v/%v/%v", task, attempt, round)
+	}
+	before := snapshotWholeSQLite(t, db)
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	if after := snapshotWholeSQLite(t, db); after != before {
+		t.Fatal("second migration changed database")
+	}
+}
+
+func TestScrapeClaimColumnsUncertainCommitReconcilesPostcondition(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	installLegacyAssetStageJournal(t, db)
+	old := publicationMigrationCommit
+	publicationMigrationCommit = func(ctx context.Context, conn *sql.Conn) error {
+		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+			return err
+		}
+		return errors.New("lost commit response")
+	}
+	t.Cleanup(func() { publicationMigrationCommit = old })
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"scrape_task_id", "scrape_attempt", "scrape_retry_round"} {
+		var n int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('media_asset_stage_journal') WHERE name=?`, name).Scan(&n); err != nil || n != 1 {
+			t.Fatalf("column %s count=%d err=%v", name, n, err)
+		}
+	}
+	var backups int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name GLOB '*__publication_v2_backup'`).Scan(&backups); err != nil || backups != 0 {
+		t.Fatalf("backups=%d err=%v", backups, err)
+	}
+}
