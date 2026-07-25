@@ -171,33 +171,30 @@ func (d *Dispatcher) Start(ctx context.Context) error {
 			return nil
 		}
 		for {
-			claimed := false
-			for offset := 0; offset < len(taskTypes); offset++ {
-				index := (next + offset) % len(taskTypes)
-				typ := taskTypes[index]
-				if !d.tryAcquire(typ) {
-					continue
-				}
-				task, err := d.q.Claim(ctx, typ)
-				if err != nil {
-					d.release(typ)
-					if ctx.Err() == nil {
-						log.Printf("postingest dispatcher claim %s: %v", typ, err)
-					}
-					continue
-				}
-				if task == nil {
-					d.release(typ)
-					continue
-				}
-				next = (index + 1) % len(taskTypes)
-				claimed = true
-				d.launch(ctx, *task)
+			allowed := d.allowedTaskTypes(next)
+			if len(allowed) == 0 {
 				break
 			}
-			if !claimed {
+			task, err := d.q.ClaimAny(ctx, allowed)
+			if err != nil {
+				if ctx.Err() == nil {
+					log.Printf("postingest dispatcher claim sweep: %v", err)
+				}
 				break
 			}
+			if task == nil {
+				break
+			}
+			for index, typ := range taskTypes {
+				if typ == task.Type {
+					next = (index + 1) % len(taskTypes)
+					break
+				}
+			}
+			if !d.tryAcquire(task.Type) {
+				return fmt.Errorf("postingest dispatcher claimed unavailable task type %s", task.Type)
+			}
+			d.launch(ctx, *task)
 		}
 		select {
 		case <-ctx.Done():
@@ -209,6 +206,28 @@ func (d *Dispatcher) Start(ctx context.Context) error {
 	}
 }
 
+func (d *Dispatcher) allowedTaskTypes(next int) []TaskType {
+	d.mu.Lock()
+	globalAvailable := d.globalUsed < d.opts.Global
+	posterAvailable := d.posterUsed < d.opts.Poster
+	previewAvailable := d.previewUsed < d.opts.Preview
+	d.mu.Unlock()
+	if !globalAvailable {
+		return nil
+	}
+	allowed := make([]TaskType, 0, len(taskTypes))
+	for offset := 0; offset < len(taskTypes); offset++ {
+		typ := taskTypes[(next+offset)%len(taskTypes)]
+		if (typ == TaskPoster || typ == TaskPosterRepair) && !posterAvailable {
+			continue
+		}
+		if typ == TaskPreview && !previewAvailable {
+			continue
+		}
+		allowed = append(allowed, typ)
+	}
+	return allowed
+}
 func (d *Dispatcher) tryAcquire(typ TaskType) bool {
 	select {
 	case d.global <- struct{}{}:

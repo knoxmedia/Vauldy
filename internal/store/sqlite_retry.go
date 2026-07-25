@@ -16,15 +16,22 @@ import (
 type RetryPolicy = sqliteretry.RetryPolicy
 
 type SQLiteMetrics struct {
-	BusyRetries      atomic.Uint64
-	BusyExhausted    atomic.Uint64
-	ProgressBatches  atomic.Uint64
-	LogBatches       atomic.Uint64
-	LogBatchFailures atomic.Uint64
-	DroppedLogs      atomic.Uint64
+	BusyRetries           atomic.Uint64
+	BusyExhausted         atomic.Uint64
+	ProgressBatches       atomic.Uint64
+	LogBatches            atomic.Uint64
+	LogBatchFailures      atomic.Uint64
+	DroppedLogs           atomic.Uint64
+	ImmediateTransactions atomic.Uint64
 
 	operationsMu sync.Mutex
 	operations   map[string]uint64
+}
+
+func (m *SQLiteMetrics) RecordImmediateTransaction() {
+	if m != nil {
+		m.ImmediateTransactions.Add(1)
+	}
 }
 
 func (m *SQLiteMetrics) recordOperation(operation string) {

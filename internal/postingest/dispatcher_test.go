@@ -289,7 +289,11 @@ func dispatcherOptions(owner string) DispatcherOptions {
 func TestDispatcher_RoundRobinPersistsAcrossSlots(t *testing.T) {
 	db, _ := openQueueTestDB(t)
 	q := NewQueue(db, "owner", nil)
-	enqueueDispatcherTasks(t, q, 12, taskTypes...)
+	for _, typ := range taskTypes {
+		for i := 0; i < 12; i++ {
+			insertDispatcherTask(t, q, typ, nil, fmt.Sprintf("fairness-%s-%d", typ, i))
+		}
+	}
 	started := make(chan TaskType, 20)
 	release := make(chan struct{}, 20)
 	exec := executorFunc(func(ctx context.Context, task Task) error {

@@ -1671,3 +1671,41 @@ func TestQueue_PosterRepairFailAndStaleFence(t *testing.T) {
 		t.Fatalf("run=%s", status)
 	}
 }
+
+func TestQueue_ClaimAnyAvoidsIdleImmediateTransactions(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	metrics := &store.SQLiteMetrics{}
+	q := NewQueue(db, "claim-any-idle", metrics)
+	for cycle := 0; cycle < 20; cycle++ {
+		task, err := q.ClaimAny(context.Background(), taskTypes)
+		if err != nil || task != nil {
+			t.Fatalf("idle cycle %d claim=(%+v,%v)", cycle, task, err)
+		}
+	}
+	if got := metrics.ImmediateTransactions.Load(); got != 0 {
+		t.Fatalf("idle immediate transactions=%d want 0", got)
+	}
+}
+
+func TestQueue_ClaimAnyUsesOneImmediateTransactionPerClaim(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	metrics := &store.SQLiteMetrics{}
+	q := NewQueue(db, "claim-any-work", metrics)
+	enqueueDispatcherTasks(t, q, 1, TaskPoster, TaskPreview, TaskKeyframe)
+	allowed := []TaskType{TaskPoster, TaskPreview, TaskKeyframe}
+	for want := uint64(1); want <= 3; want++ {
+		task, err := q.ClaimAny(context.Background(), allowed)
+		if err != nil || task == nil {
+			t.Fatalf("claim %d=(%+v,%v)", want, task, err)
+		}
+		if got := metrics.ImmediateTransactions.Load(); got != want {
+			t.Fatalf("after claim %d immediate transactions=%d want %d", want, got, want)
+		}
+	}
+	if task, err := q.ClaimAny(context.Background(), allowed); err != nil || task != nil {
+		t.Fatalf("empty tail claim=(%+v,%v)", task, err)
+	}
+	if got := metrics.ImmediateTransactions.Load(); got != 3 {
+		t.Fatalf("empty tail added immediate transaction: %d", got)
+	}
+}

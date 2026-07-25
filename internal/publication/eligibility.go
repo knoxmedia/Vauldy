@@ -33,8 +33,10 @@ type ClaimPayload struct {
 type ClaimRequest struct {
 	Family          QueueFamily
 	TaskType, Owner string
+	TaskTypes       []string
 	QueueID         *int64
 	Registry        coreiface.CapabilityRegistry
+	Metrics         *store.SQLiteMetrics
 	afterCommit     func() error
 }
 
@@ -45,7 +47,35 @@ type PrepareParentIdentity struct {
 
 var ErrClaimCommitUncertain = errors.New("publication claim commit outcome uncertain")
 
+func ClaimEligibleAny(ctx context.Context, db *sql.DB, req ClaimRequest) (*ClaimPayload, error) {
+	if req.Family != QueuePostIngest || len(req.TaskTypes) == 0 {
+		return nil, errors.New("publication claim any: post-ingest task types are required")
+	}
+	seen := make(map[string]bool, len(req.TaskTypes))
+	filtered := make([]string, 0, len(req.TaskTypes))
+	for _, typ := range req.TaskTypes {
+		typ = strings.TrimSpace(typ)
+		if typ == "" || seen[typ] || req.Registry == nil || !req.Registry.Available(typ) {
+			continue
+		}
+		seen[typ] = true
+		filtered = append(filtered, typ)
+	}
+	if len(filtered) == 0 {
+		return nil, nil
+	}
+	req.TaskTypes = filtered
+	if ok, err := postIngestCandidateHint(ctx, db, req); err != nil || !ok {
+		return nil, err
+	}
+	return claimEligible(ctx, db, req, true)
+}
+
 func ClaimEligible(ctx context.Context, db *sql.DB, req ClaimRequest) (*ClaimPayload, error) {
+	return claimEligible(ctx, db, req, false)
+}
+
+func claimEligible(ctx context.Context, db *sql.DB, req ClaimRequest, any bool) (*ClaimPayload, error) {
 	if db == nil || strings.TrimSpace(req.Owner) == "" {
 		return nil, errors.New("publication claim: invalid database or owner")
 	}
@@ -54,9 +84,14 @@ func ClaimEligible(ctx context.Context, db *sql.DB, req ClaimRequest) (*ClaimPay
 	policy := store.RetryPolicy{Operation: "publication_claim", MaxElapsed: 2 * time.Second, BaseBackoff: 10 * time.Millisecond, MaxBackoff: 100 * time.Millisecond}
 	err := store.WithBusyRetryPolicyContext(ctx, nil, policy, func(attempt context.Context) error {
 		payload = nil
+		req.Metrics.RecordImmediateTransaction()
 		outcome, err := store.WithImmediateConnTx(attempt, db, func(tx store.ImmediateConnTx) error {
 			var inner error
-			payload, inner = claimEligibleTx(attempt, tx, req, ownerToken)
+			if any {
+				payload, inner = claimEligibleAnyTx(attempt, tx, req, ownerToken)
+			} else {
+				payload, inner = claimEligibleTx(attempt, tx, req, ownerToken)
+			}
 			return inner
 		})
 		if err != nil && outcome.CommitAttempted {
@@ -85,6 +120,67 @@ func tableAvailable(ctx context.Context, tx store.SQLExecutor, table string) (bo
 	return n == 1, err
 }
 
+func sqlPlaceholders(n int) string {
+	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
+}
+
+func postIngestCandidateHint(ctx context.Context, db *sql.DB, req ClaimRequest) (bool, error) {
+	args := make([]any, len(req.TaskTypes))
+	for i, typ := range req.TaskTypes {
+		args[i] = typ
+	}
+	query := fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM post_ingest_task q LEFT JOIN media_ingest_step st ON st.id=q.ingest_step_id WHERE %s AND q.task_type IN (%s) AND (%s OR (%s) OR (q.task_type='poster_repair' AND q.ingest_run_id IS NOT NULL AND q.ingest_step_id IS NULL AND q.generation>0 AND EXISTS(SELECT 1 FROM media m JOIN media_ingest_run r ON r.id=q.ingest_run_id WHERE m.id=q.media_id AND m.ingest_generation=q.generation AND m.publication_state IN ('published','degraded') AND m.published_at IS NOT NULL AND r.media_id=q.media_id AND r.generation=q.generation AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL))))`, familyDueSQL(QueuePostIngest, "q"), sqlPlaceholders(len(args)), familyLegacySQL(QueuePostIngest, "q"), linkedEligibilitySQL("q"))
+	var available bool
+	err := db.QueryRowContext(ctx, query, args...).Scan(&available)
+	return available, err
+}
+
+func claimEligibleAnyTx(ctx context.Context, tx store.ImmediateConnTx, req ClaimRequest, owner string) (*ClaimPayload, error) {
+	present, err := tableAvailable(ctx, tx, "post_ingest_task")
+	if err != nil || !present {
+		return nil, err
+	}
+	oldest, err := oldestEligibleRequired(ctx, tx, req.Registry)
+	if err != nil {
+		return nil, err
+	}
+	if oldest != nil {
+		if oldest.family != QueuePostIngest || !containsString(req.TaskTypes, oldest.taskType) {
+			return nil, nil
+		}
+		req.TaskType = oldest.taskType
+		return updateFamilyClaim(ctx, tx, req, oldest.id, owner)
+	}
+	args := make([]any, 0, len(req.TaskTypes)*2)
+	for _, typ := range req.TaskTypes {
+		args = append(args, typ)
+	}
+	caseOrder := "CASE q.task_type "
+	for index, typ := range req.TaskTypes {
+		caseOrder += fmt.Sprintf("WHEN ? THEN %d ", index)
+		args = append(args, typ)
+	}
+	caseOrder += fmt.Sprintf("ELSE %d END", len(req.TaskTypes))
+	query := fmt.Sprintf(`SELECT q.id,q.task_type FROM post_ingest_task q LEFT JOIN media_ingest_step st ON st.id=q.ingest_step_id WHERE %s AND q.task_type IN (%s) AND COALESCE(st.required,0)=0 AND (%s OR (%s) OR (q.task_type='poster_repair' AND q.ingest_run_id IS NOT NULL AND q.ingest_step_id IS NULL AND q.generation>0 AND EXISTS(SELECT 1 FROM media m JOIN media_ingest_run r ON r.id=q.ingest_run_id WHERE m.id=q.media_id AND m.ingest_generation=q.generation AND m.publication_state IN ('published','degraded') AND m.published_at IS NOT NULL AND r.media_id=q.media_id AND r.generation=q.generation AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL))) ORDER BY %s,%s LIMIT 1`, familyDueSQL(QueuePostIngest, "q"), sqlPlaceholders(len(req.TaskTypes)), familyLegacySQL(QueuePostIngest, "q"), linkedEligibilitySQL("q"), caseOrder, familyOrderSQL(QueuePostIngest, "q"))
+	var id int64
+	var typ string
+	if err := tx.QueryRowContext(ctx, query, args...).Scan(&id, &typ); errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+	req.TaskType = typ
+	return updateFamilyClaim(ctx, tx, req, id, owner)
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
 func claimEligibleTx(ctx context.Context, tx store.ImmediateConnTx, req ClaimRequest, owner string) (*ClaimPayload, error) {
 	if req.Family != QueuePostIngest && req.Family != QueueScrape && req.Family != QueuePrepare {
 		return nil, errors.New("publication claim: invalid family")
@@ -205,6 +301,7 @@ func selectFamilyCandidate(ctx context.Context, tx store.SQLExecutor, req ClaimR
 type requiredCandidate struct {
 	family             QueueFamily
 	id                 int64
+	taskType           string
 	available, created string
 }
 
@@ -231,6 +328,10 @@ func familyAdvertised(registry coreiface.CapabilityRegistry, f QueueFamily) bool
 	return false
 }
 func oldestEligibleRequired(ctx context.Context, tx store.SQLExecutor, registry coreiface.CapabilityRegistry) (*requiredCandidate, error) {
+	return oldestEligibleRequiredFor(ctx, tx, registry, nil)
+}
+
+func oldestEligibleRequiredFor(ctx context.Context, tx store.SQLExecutor, registry coreiface.CapabilityRegistry, postTypes []string) (*requiredCandidate, error) {
 	var best *requiredCandidate
 	for _, f := range []QueueFamily{QueuePostIngest, QueueScrape, QueuePrepare} {
 		table, a := familySource(f)
@@ -251,16 +352,23 @@ func oldestEligibleRequired(ctx context.Context, tx store.SQLExecutor, registry 
 		availableExpr := familyAvailableSQL(f, a)
 		query := fmt.Sprintf(`SELECT q.id,st.step_type,CAST(%s AS TEXT),CAST(q.created_at AS TEXT) FROM %s q JOIN media_ingest_step st ON st.id=q.ingest_step_id WHERE st.required=1 AND %s AND %s%s ORDER BY %s LIMIT 1`, availableExpr, table, familyDueSQL(f, a), linkedEligibilitySQL(a), typeFilter, familyOrderSQL(f, a))
 		var c requiredCandidate
-		var typ string
 		c.family = f
-		err = tx.QueryRowContext(ctx, query).Scan(&c.id, &typ, &c.available, &c.created)
+		queryArgs := make([]any, len(postTypes))
+		if f == QueuePostIngest {
+			for i, postType := range postTypes {
+				queryArgs[i] = postType
+			}
+		} else {
+			queryArgs = nil
+		}
+		err = tx.QueryRowContext(ctx, query, queryArgs...).Scan(&c.id, &c.taskType, &c.available, &c.created)
 		if errors.Is(err, sql.ErrNoRows) {
 			continue
 		}
 		if err != nil {
 			return nil, err
 		}
-		if registry == nil || !registry.Available(typ) {
+		if registry == nil || !registry.Available(c.taskType) {
 			continue
 		}
 		if best == nil || requiredLess(c, *best) {

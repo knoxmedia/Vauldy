@@ -207,6 +207,23 @@ func (q *Queue) RetryExplicit(ctx context.Context, id int64, scanTaskID *int64) 
 	return q.retry(ctx, id, scanTaskID, true)
 }
 
+func (q *Queue) ClaimAny(ctx context.Context, types []TaskType) (*Task, error) {
+	if err := q.validate(true); err != nil {
+		return nil, err
+	}
+	requested := make([]string, 0, len(types))
+	for _, typ := range types {
+		if err := validateTaskType(typ); err != nil {
+			return nil, err
+		}
+		requested = append(requested, string(typ))
+	}
+	payload, err := publication.ClaimEligibleAny(ctx, q.db, publication.ClaimRequest{Family: publication.QueuePostIngest, TaskTypes: requested, Owner: q.owner, Registry: q.registry, Metrics: q.metrics})
+	if err != nil || payload == nil {
+		return nil, err
+	}
+	return q.taskFromClaimPayload(ctx, payload)
+}
 func (q *Queue) Claim(ctx context.Context, typ TaskType) (*Task, error) {
 	if err := q.validate(true); err != nil {
 		return nil, err
@@ -214,16 +231,20 @@ func (q *Queue) Claim(ctx context.Context, typ TaskType) (*Task, error) {
 	if err := validateTaskType(typ); err != nil {
 		return nil, err
 	}
-	payload, err := publication.ClaimEligible(ctx, q.db, publication.ClaimRequest{Family: publication.QueuePostIngest, TaskType: string(typ), Owner: q.owner, Registry: q.registry})
+	payload, err := publication.ClaimEligible(ctx, q.db, publication.ClaimRequest{Family: publication.QueuePostIngest, TaskType: string(typ), Owner: q.owner, Registry: q.registry, Metrics: q.metrics})
 	if err != nil || payload == nil {
 		return nil, err
 	}
+	return q.taskFromClaimPayload(ctx, payload)
+}
+
+func (q *Queue) taskFromClaimPayload(ctx context.Context, payload *publication.ClaimPayload) (*Task, error) {
 	var stillOwned int
-	if err = q.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM post_ingest_task WHERE id=? AND status='running' AND lease_owner=? AND ((ingest_run_id IS NULL AND ingest_step_id IS NULL AND ? IS NULL AND ? IS NULL) OR (ingest_run_id=? AND ingest_step_id=? AND generation=? AND media_id=? AND EXISTS(SELECT 1 FROM media_ingest_step st JOIN media_ingest_run r ON r.id=st.run_id JOIN media m ON m.id=st.media_id WHERE st.id=post_ingest_task.ingest_step_id AND st.status='running' AND st.lease_owner=post_ingest_task.lease_owner AND st.run_id=post_ingest_task.ingest_run_id AND st.media_id=post_ingest_task.media_id AND st.generation=post_ingest_task.generation AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND m.ingest_generation=post_ingest_task.generation)))`, payload.QueueID, payload.Owner, nullableNullInt(payload.RunID), nullableNullInt(payload.StepID), nullableNullInt(payload.RunID), nullableNullInt(payload.StepID), payload.Generation.Int64, payload.MediaID).Scan(&stillOwned); err != nil {
+	if err := q.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM post_ingest_task WHERE id=? AND status='running' AND lease_owner=? AND ((ingest_run_id IS NULL AND ingest_step_id IS NULL AND ? IS NULL AND ? IS NULL) OR (ingest_run_id=? AND ingest_step_id=? AND generation=? AND media_id=? AND EXISTS(SELECT 1 FROM media_ingest_step st JOIN media_ingest_run r ON r.id=st.run_id JOIN media m ON m.id=st.media_id WHERE st.id=post_ingest_task.ingest_step_id AND st.status='running' AND st.lease_owner=post_ingest_task.lease_owner AND st.run_id=post_ingest_task.ingest_run_id AND st.media_id=post_ingest_task.media_id AND st.generation=post_ingest_task.generation AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND m.ingest_generation=post_ingest_task.generation)))`, payload.QueueID, payload.Owner, nullableNullInt(payload.RunID), nullableNullInt(payload.StepID), nullableNullInt(payload.RunID), nullableNullInt(payload.StepID), payload.Generation.Int64, payload.MediaID).Scan(&stillOwned); err != nil {
 		return nil, err
 	}
-	if stillOwned != 1 && typ == TaskPosterRepair {
-		err = q.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM post_ingest_task p JOIN media m ON m.id=p.media_id JOIN media_ingest_run r ON r.id=p.ingest_run_id WHERE p.id=? AND p.task_type='poster_repair' AND p.status='running' AND p.lease_owner=? AND p.ingest_step_id IS NULL AND p.generation=m.ingest_generation AND m.publication_state IN ('published','degraded') AND m.published_at IS NOT NULL AND r.id=p.ingest_run_id AND r.media_id=p.media_id AND r.generation=p.generation AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL`, payload.QueueID, payload.Owner).Scan(&stillOwned)
+	if stillOwned != 1 && TaskType(payload.TaskType) == TaskPosterRepair {
+		err := q.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM post_ingest_task p JOIN media m ON m.id=p.media_id JOIN media_ingest_run r ON r.id=p.ingest_run_id WHERE p.id=? AND p.task_type='poster_repair' AND p.status='running' AND p.lease_owner=? AND p.ingest_step_id IS NULL AND p.generation=m.ingest_generation AND m.publication_state IN ('published','degraded') AND m.published_at IS NOT NULL AND r.id=p.ingest_run_id AND r.media_id=p.media_id AND r.generation=p.generation AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL`, payload.QueueID, payload.Owner).Scan(&stillOwned)
 		if err != nil {
 			return nil, err
 		}
