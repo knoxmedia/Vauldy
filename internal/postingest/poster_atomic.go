@@ -27,6 +27,12 @@ var withImmediatePosterJournalTx = store.WithImmediateConnTx
 var reconcilePosterJournal = reconcilePosterJournalAuthoritative
 var posterHashPath = hashPath
 var posterSourceFingerprint = sourceFingerprint
+var posterLoadSourcePath = func(ctx context.Context, db *sql.DB, mediaID int64) (string, error) {
+	var sourcePath string
+	err := db.QueryRowContext(ctx, `SELECT file_path FROM media WHERE id=?`, mediaID).Scan(&sourcePath)
+	return sourcePath, err
+}
+var posterSourceStat = os.Stat
 var posterBeforeSealHook = func() {}
 var posterAfterSealHook = func() {}
 
@@ -263,7 +269,7 @@ func sealPlainPosterObject(ctx context.Context, uploadRoot string, staged Staged
 	return staged, created, nil
 }
 
-func commitStagedPoster(ctx context.Context, db *sql.DB, task Task, staged StagedPoster, roots PosterRecoveryRoots) error {
+func commitStagedPoster(ctx context.Context, db *sql.DB, task Task, staged StagedPoster, roots PosterRecoveryRoots) (retErr error) {
 	req := staged.Stage.Request
 	stepID := int64(0)
 	if task.StepID != nil {
@@ -287,8 +293,19 @@ func commitStagedPoster(ctx context.Context, db *sql.DB, task Task, staged Stage
 			return sealErr
 		}
 	}
-	var sourcePath string
-	if err := db.QueryRowContext(ctx, `SELECT file_path FROM media WHERE id=?`, task.MediaID).Scan(&sourcePath); err != nil {
+	cleanupSealed := sealedNew
+	if cleanupSealed {
+		defer func() {
+			if retErr == nil || !cleanupSealed {
+				return
+			}
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), posterReconcileTimeout)
+			defer cancel()
+			_ = cleanupUnreferencedPoster(cleanupCtx, db, staged)
+		}()
+	}
+	sourcePath, err := posterLoadSourcePath(ctx, db, task.MediaID)
+	if err != nil {
 		return err
 	}
 	sourceFP, err := posterSourceFingerprint(sourcePath)
@@ -304,7 +321,7 @@ func commitStagedPoster(ctx context.Context, db *sql.DB, task Task, staged Stage
 	if err != nil {
 		return err
 	}
-	sourceStat, err := os.Stat(sourcePath)
+	sourceStat, err := posterSourceStat(sourcePath)
 	if err != nil {
 		return err
 	}
@@ -406,14 +423,17 @@ func commitStagedPoster(ctx context.Context, db *sql.DB, task Task, staged Stage
 			if reconcileErr == nil && state == posterCommitExact {
 				return nil
 			}
-			if reconcileErr == nil && state == posterCommitAbsent {
-				_ = cleanupUnreferencedPoster(cleanupCtx, db, staged)
+			if reconcileErr != nil || state == posterCommitUnknown {
+				cleanupSealed = false
+				return err
 			}
-			return err
 		}
-		_ = cleanupUnreferencedPoster(cleanupCtx, db, staged)
+		if !sealedNew {
+			_ = cleanupUnreferencedPoster(cleanupCtx, db, staged)
+		}
 		return err
 	}
+	cleanupSealed = false
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), posterReconcileTimeout)
 	defer cancel()
 	_ = cleanupPosterPaths(cleanupCtx, db, replaced, staged.Path)
