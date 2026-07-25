@@ -2,6 +2,7 @@ package handler
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
@@ -9,8 +10,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"knox-media/api/middleware"
+
 	"knox-media/internal/publication"
 )
+
+type optionalScrapeRetryBody struct{ Reason string }
 
 var validPublicationStates = map[string]bool{"processing": true, "published": true, "degraded": true, "failed": true, "cancelled": true}
 
@@ -46,6 +51,32 @@ func (h *Handler) AdminRetryMediaIngest(c *gin.Context) {
 	h.writeAdminMediaIngest(c, id)
 }
 
+func (h *Handler) AdminRetryOptionalScrape(c *gin.Context) {
+	mediaID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || mediaID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid media id"})
+		return
+	}
+	stepID, err := strconv.ParseInt(c.Param("step_id"), 10, 64)
+	if err != nil || stepID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid step id"})
+		return
+	}
+	var body optionalScrapeRetryBody
+	if err := json.NewDecoder(c.Request.Body).Decode(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	err = publication.RetryOptionalScrape(c.Request.Context(), h.App.DB, publication.OptionalScrapeRetryRequest{MediaID: mediaID, StepID: stepID, ActorID: middleware.UserID(c), Reason: body.Reason}, h.PublicationCapabilities)
+	switch {
+	case errors.Is(err, publication.ErrNoRetryableWork):
+		c.JSON(http.StatusConflict, gin.H{"error": "no retryable scrape work"})
+	case err != nil:
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	default:
+		c.JSON(http.StatusOK, gin.H{"ok": true, "media_id": mediaID, "step_id": stepID})
+	}
+}
 func (h *Handler) writeAdminMediaIngest(c *gin.Context, knownID int64) {
 	id := knownID
 	var err error

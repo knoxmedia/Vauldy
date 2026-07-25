@@ -77,6 +77,7 @@ const scrapeTaskPublicationSchema = `CREATE TABLE scrape_task_new (
     ingest_run_id INTEGER,
     ingest_step_id INTEGER,
     generation INTEGER,
+    retry_round INTEGER NOT NULL DEFAULT 0 CHECK(retry_round >= 0),
     lease_owner TEXT,
     lease_until TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -479,7 +480,7 @@ SELECT id,media_id,scan_task_id,%s,%s,%s,task_type,status,attempts,max_attempts,
 }
 
 func scrapeTaskPublicationSchemaCurrent(ctx context.Context, tx *sql.Tx, columns map[string]bool) (bool, error) {
-	for _, name := range []string{"ingest_run_id", "ingest_step_id", "generation", "lease_owner", "lease_until"} {
+	for _, name := range []string{"ingest_run_id", "ingest_step_id", "generation", "retry_round", "lease_owner", "lease_until"} {
 		if !columns[name] {
 			return false, nil
 		}
@@ -488,7 +489,7 @@ func scrapeTaskPublicationSchemaCurrent(ctx context.Context, tx *sql.Tx, columns
 	if err != nil {
 		return false, err
 	}
-	for _, required := range []string{"check(statusin('waiting','running','done','failed','abandoned','cancelled'))", "unique(ingest_run_id,ingest_step_id,generation)"} {
+	for _, required := range []string{"check(statusin('waiting','running','done','failed','abandoned','cancelled'))", "retry_roundintegernotnulldefault0check(retry_round>=0)", "unique(ingest_run_id,ingest_step_id,generation)"} {
 		if !strings.Contains(normalized, required) {
 			return false, nil
 		}
@@ -570,7 +571,7 @@ func ensureScrapeTaskPublicationSchema(ctx context.Context, tx *sql.Tx) error {
 	if err != nil {
 		return err
 	}
-	needed := []string{"ingest_run_id", "ingest_step_id", "generation", "lease_owner", "lease_until"}
+	needed := []string{"ingest_run_id", "ingest_step_id", "generation", "retry_round", "lease_owner", "lease_until"}
 	_ = needed
 	current, err := scrapeTaskPublicationSchemaCurrent(ctx, tx, columns)
 	if err != nil {
@@ -605,8 +606,8 @@ func ensureScrapeTaskPublicationSchema(ctx context.Context, tx *sql.Tx) error {
 		}
 		return fallback
 	}
-	q := fmt.Sprintf(`INSERT INTO scrape_task_new(id,media_id,task_type,source,query,year,status,progress,fail_count,available_at,message,created_by,ingest_run_id,ingest_step_id,generation,lease_owner,lease_until,created_at,started_at,finished_at)
-SELECT id,media_id,task_type,source,query,year,status,progress,COALESCE(fail_count,0),%s,message,created_by,%s,%s,%s,%s,%s,created_at,started_at,finished_at FROM scrape_task`, value("available_at", "CURRENT_TIMESTAMP"), value("ingest_run_id", "NULL"), value("ingest_step_id", "NULL"), value("generation", "NULL"), value("lease_owner", "NULL"), value("lease_until", "NULL"))
+	q := fmt.Sprintf(`INSERT INTO scrape_task_new(id,media_id,task_type,source,query,year,status,progress,fail_count,available_at,message,created_by,ingest_run_id,ingest_step_id,generation,retry_round,lease_owner,lease_until,created_at,started_at,finished_at)
+SELECT id,media_id,task_type,source,query,year,status,progress,COALESCE(fail_count,0),%s,message,created_by,%s,%s,%s,%s,%s,%s,created_at,started_at,finished_at FROM scrape_task`, value("available_at", "CURRENT_TIMESTAMP"), value("ingest_run_id", "NULL"), value("ingest_step_id", "NULL"), value("generation", "NULL"), value("retry_round", "0"), value("lease_owner", "NULL"), value("lease_until", "NULL"))
 	if _, err := tx.ExecContext(ctx, q); err != nil {
 		return fmt.Errorf("copy scrape tasks: %w", err)
 	}
@@ -819,7 +820,7 @@ func migratePublicationV2(ctx context.Context, db *sql.DB) (err error) {
 	if err = validateSupersessionRows(ctx, conn); err != nil {
 		return err
 	}
-	for _, upgrade := range []struct{ table, column, definition string }{{"post_ingest_task", "retry_round", "INTEGER NOT NULL DEFAULT 0"}} {
+	for _, upgrade := range []struct{ table, column, definition string }{{"post_ingest_task", "retry_round", "INTEGER NOT NULL DEFAULT 0"}, {"scrape_task", "retry_round", "INTEGER NOT NULL DEFAULT 0"}} {
 		cols, e := publicationColumns(ctx, conn, upgrade.table)
 		if e != nil {
 			return e
@@ -1109,8 +1110,21 @@ func publicationColumnNames(ctx context.Context, q SQLExecutor, table string) ([
 	}
 	return out, rows.Err()
 }
+func slicesWithout(values []string, unwanted string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if !strings.EqualFold(value, unwanted) {
+			out = append(out, value)
+		}
+	}
+	return out
+}
 func publicationIdentity(ctx context.Context, q SQLExecutor, table string, count *int64, sum *string) error {
 	cols, pk, err := publicationDigestColumns(ctx, q, table)
+	if strings.Contains(table, "scrape_task") {
+		cols = slicesWithout(cols, "retry_round")
+		pk = slicesWithout(pk, "retry_round")
+	}
 	if err != nil {
 		return err
 	}
@@ -1559,7 +1573,7 @@ const canonicalIngestEvidenceSchema = `CREATE TABLE media_ingest_evidence(
  FOREIGN KEY(media_id) REFERENCES media(id) ON DELETE CASCADE,UNIQUE(step_id,kind),UNIQUE(stage_id))`
 const canonicalOptionalRetryAuditSchema = `CREATE TABLE media_ingest_optional_retry_audit(
  id INTEGER PRIMARY KEY AUTOINCREMENT,media_id INTEGER NOT NULL,run_id INTEGER NOT NULL,step_id INTEGER NOT NULL,generation INTEGER NOT NULL,
- task_family TEXT NOT NULL CHECK(task_family IN ('post_ingest')),task_type TEXT NOT NULL,actor_id INTEGER NOT NULL,reason TEXT NOT NULL,
+ task_family TEXT NOT NULL CHECK(task_family IN ('post_ingest','scrape')),task_type TEXT NOT NULL,actor_id INTEGER NOT NULL,reason TEXT NOT NULL,
  previous_queue_status TEXT NOT NULL,previous_step_status TEXT NOT NULL,previous_attempts INTEGER NOT NULL,previous_queue_error TEXT NOT NULL,previous_step_error TEXT NOT NULL,
  retry_round INTEGER NOT NULL CHECK(retry_round > 0),created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
  FOREIGN KEY(media_id) REFERENCES media(id) ON DELETE CASCADE,
@@ -1624,7 +1638,7 @@ func createPublicationChildren(ctx context.Context, q SQLExecutor, g []publicati
 			}
 		}
 	}
-	if _, e := q.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS scrape_effect_commit(task_id INTEGER NOT NULL,attempt INTEGER NOT NULL,generation INTEGER NOT NULL,stage_id TEXT NOT NULL DEFAULT '',manifest_json TEXT NOT NULL CHECK(json_valid(manifest_json)),manifest_digest TEXT NOT NULL,created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(task_id,attempt),FOREIGN KEY(task_id) REFERENCES scrape_task(id) ON DELETE CASCADE)`); e != nil {
+	if _, e := q.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS scrape_effect_commit(task_id INTEGER NOT NULL,attempt INTEGER NOT NULL,retry_round INTEGER NOT NULL DEFAULT 0,generation INTEGER NOT NULL,stage_id TEXT NOT NULL DEFAULT '',manifest_json TEXT NOT NULL CHECK(json_valid(manifest_json)),manifest_digest TEXT NOT NULL,created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(task_id,attempt,retry_round),FOREIGN KEY(task_id) REFERENCES scrape_task(id) ON DELETE CASCADE)`); e != nil {
 		return e
 	}
 	statements := []string{canonicalIngestDependencySchema, publicationManagedIndexes["media_ingest_step_dependency"]["idx_ingest_dependency_visible"], canonicalIngestEvidenceSchema, canonicalAssetStageJournalSchema, publicationManagedIndexes["media_asset_stage_journal"]["idx_asset_stage_recovery"], canonicalPosterRepairStageSchema, publicationManagedIndexes["poster_repair_stage"]["idx_poster_repair_stage_recovery"]}
@@ -1771,10 +1785,10 @@ func copyPublicationGraph(ctx context.Context, q SQLExecutor, g []publicationGra
 		}
 		list := strings.Join(quoted, ",")
 		selectList := list
-		if n == "transcode_task" {
+		if n == "transcode_task" || n == "scrape_task" {
 			var expr []string
 			for _, c := range cols {
-				if c == "media_id" {
+				if n == "transcode_task" && c == "media_id" {
 					expr = append(expr, `CASE WHEN b.ingest_step_id IS NOT NULL THEN (SELECT s.media_id FROM media_ingest_step s WHERE s.id=b.ingest_step_id AND s.run_id=b.ingest_run_id AND s.generation=b.generation) ELSE b.media_id END AS media_id`)
 				} else {
 					expr = append(expr, `b.`+quoteIdent(c))
@@ -2106,7 +2120,7 @@ func publicationTranscodeSchemaCurrent(ctx context.Context, q SQLExecutor) bool 
 	if err != nil {
 		return false
 	}
-	for _, n := range []string{"media_id", "ingest_run_id", "ingest_step_id", "generation", "lease_owner", "lease_until"} {
+	for _, n := range []string{"media_id", "ingest_run_id", "ingest_step_id", "generation", "retry_round", "lease_owner", "lease_until"} {
 		if !cols[n] {
 			return false
 		}

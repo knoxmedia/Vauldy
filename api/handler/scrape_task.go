@@ -340,11 +340,11 @@ func (h *Handler) ListScrapeTasks(c *gin.Context) {
 var ErrScrapeClaimLost = errors.New("scrape claim ownership lost")
 
 type scrapeClaim struct {
-	ID, MediaID               int64
-	RunID, StepID, Generation sql.NullInt64
-	Owner                     string
-	Attempts, MaxAttempts     int
-	LeaseUntil                time.Time
+	ID, MediaID                       int64
+	RunID, StepID, Generation         sql.NullInt64
+	Owner                             string
+	Attempts, MaxAttempts, RetryRound int
+	LeaseUntil                        time.Time
 }
 
 func claimScrapeTaskWithOwnerRegistry(ctx context.Context, db *sql.DB, taskID int64, registry coreiface.CapabilityRegistry) (*scrapeClaim, error) {
@@ -352,7 +352,7 @@ func claimScrapeTaskWithOwnerRegistry(ctx context.Context, db *sql.DB, taskID in
 	if err != nil || payload == nil {
 		return nil, err
 	}
-	return &scrapeClaim{ID: payload.QueueID, MediaID: payload.MediaID, RunID: payload.RunID, StepID: payload.StepID, Generation: payload.Generation, Owner: payload.Owner, Attempts: payload.Attempts, MaxAttempts: payload.MaxAttempts, LeaseUntil: payload.LeaseUntil}, nil
+	return &scrapeClaim{ID: payload.QueueID, MediaID: payload.MediaID, RunID: payload.RunID, StepID: payload.StepID, Generation: payload.Generation, Owner: payload.Owner, Attempts: payload.Attempts, MaxAttempts: payload.MaxAttempts, RetryRound: payload.RetryRound, LeaseUntil: payload.LeaseUntil}, nil
 }
 
 func claimScrapeTaskWithOwner(ctx context.Context, db *sql.DB, taskID int64) (*scrapeClaim, error) {
@@ -1262,10 +1262,10 @@ func failScrapeTaskDB(ctx context.Context, db *sql.DB, taskID, mediaID int64, so
 }
 
 func scrapeClaimPredicate() string {
-	return `q.id=? AND q.media_id=? AND q.status='running' AND q.lease_owner=? AND ((q.ingest_run_id IS NULL AND q.ingest_step_id IS NULL AND q.generation IS NULL AND ?=0 AND ?=0 AND ?=0) OR (q.ingest_run_id=? AND q.ingest_step_id=? AND q.generation=? AND EXISTS(SELECT 1 FROM media_ingest_step st JOIN media_ingest_run r ON r.id=st.run_id JOIN media m ON m.id=st.media_id WHERE st.id=q.ingest_step_id AND st.run_id=q.ingest_run_id AND st.media_id=q.media_id AND st.generation=q.generation AND st.status='running' AND st.lease_owner=q.lease_owner AND st.attempts=? AND r.media_id=q.media_id AND r.generation=q.generation AND r.status IN ('processing','published','degraded') AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND m.ingest_generation=q.generation)))`
+	return `q.id=? AND q.media_id=? AND q.status='running' AND q.lease_owner=? AND q.retry_round=? AND ((q.ingest_run_id IS NULL AND q.ingest_step_id IS NULL AND q.generation IS NULL AND ?=0 AND ?=0 AND ?=0) OR (q.ingest_run_id=? AND q.ingest_step_id=? AND q.generation=? AND EXISTS(SELECT 1 FROM media_ingest_step st JOIN media_ingest_run r ON r.id=st.run_id JOIN media m ON m.id=st.media_id WHERE st.id=q.ingest_step_id AND st.run_id=q.ingest_run_id AND st.media_id=q.media_id AND st.generation=q.generation AND st.status='running' AND st.lease_owner=q.lease_owner AND st.attempts=? AND r.media_id=q.media_id AND r.generation=q.generation AND r.status IN ('processing','published','degraded') AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND m.ingest_generation=q.generation)))`
 }
 func scrapeClaimArgs(c scrapeClaim) []any {
-	return []any{c.ID, c.MediaID, c.Owner, c.RunID.Int64, c.StepID.Int64, c.Generation.Int64, c.RunID.Int64, c.StepID.Int64, c.Generation.Int64, c.Attempts}
+	return []any{c.ID, c.MediaID, c.Owner, c.RetryRound, c.RunID.Int64, c.StepID.Int64, c.Generation.Int64, c.RunID.Int64, c.StepID.Int64, c.Generation.Int64, c.Attempts}
 }
 func scrapeClaimImmediate(ctx context.Context, db *sql.DB, fn func(store.ImmediateConnTx) error) error {
 	policy := store.RetryPolicy{Operation: "scrape_claim_lifecycle", MaxElapsed: 2 * time.Second, BaseBackoff: 10 * time.Millisecond, MaxBackoff: 100 * time.Millisecond}
@@ -1281,7 +1281,7 @@ func renewScrapeClaim(ctx context.Context, db *sql.DB, c scrapeClaim) error {
 			return ErrScrapeClaimLost
 		}
 		if c.StepID.Valid {
-			res, err = tx.ExecContext(ctx, `UPDATE media_ingest_step SET lease_until=(SELECT lease_until FROM scrape_task WHERE id=?) WHERE id=? AND run_id=? AND media_id=? AND generation=? AND status='running' AND lease_owner=? AND attempts=?`, c.ID, c.StepID.Int64, c.RunID.Int64, c.MediaID, c.Generation.Int64, c.Owner, c.Attempts)
+			res, err = tx.ExecContext(ctx, `UPDATE media_ingest_step SET lease_until=(SELECT lease_until FROM scrape_task WHERE id=?) WHERE id=? AND run_id=? AND media_id=? AND generation=? AND status='running' AND lease_owner=? AND attempts=? AND (SELECT retry_round FROM scrape_task WHERE id=?)=?`, c.ID, c.StepID.Int64, c.RunID.Int64, c.MediaID, c.Generation.Int64, c.Owner, c.Attempts, c.ID, c.RetryRound)
 			if err != nil {
 				return err
 			}
@@ -1336,7 +1336,7 @@ func completeScrapeClaimWithEffects(ctx context.Context, db *sql.DB, c scrapeCla
 		}
 		resultJSON, _ := json.Marshal(map[string]any{"result": result, "effect_manifest_digest": manifestDigest})
 		if c.StepID.Valid {
-			res, err = tx.ExecContext(ctx, `UPDATE media_ingest_step SET status='done',finished_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND run_id=? AND media_id=? AND generation=? AND status='running' AND lease_owner=? AND attempts=?`, c.StepID.Int64, c.RunID.Int64, c.MediaID, c.Generation.Int64, c.Owner, c.Attempts)
+			res, err = tx.ExecContext(ctx, `UPDATE media_ingest_step SET status='done',finished_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND run_id=? AND media_id=? AND generation=? AND status='running' AND lease_owner=? AND attempts=? AND (SELECT retry_round FROM scrape_task WHERE id=?)=?`, c.StepID.Int64, c.RunID.Int64, c.MediaID, c.Generation.Int64, c.Owner, c.Attempts, c.ID, c.RetryRound)
 			if err != nil {
 				return err
 			}
@@ -1358,8 +1358,8 @@ func completeScrapeClaimWithEffects(ctx context.Context, db *sql.DB, c scrapeCla
 		return err
 	}
 	var n int
-	q := `SELECT COUNT(*) FROM scrape_task q JOIN scrape_history h ON h.task_id=q.id JOIN scrape_effect_commit ec ON ec.task_id=q.id AND ec.attempt=? AND ec.generation=? WHERE q.id=? AND q.media_id=? AND q.status='done' AND h.status='done' AND json_extract(h.result_json,'$.effect_manifest_digest')=ec.manifest_digest AND ec.manifest_digest=? AND ec.manifest_json=?`
-	args := []any{c.Attempts, c.Generation.Int64, c.ID, c.MediaID, expectedDigest, string(expectedManifest)}
+	q := `SELECT COUNT(*) FROM scrape_task q JOIN scrape_history h ON h.task_id=q.id JOIN scrape_effect_commit ec ON ec.task_id=q.id AND ec.attempt=? AND ec.retry_round=? AND ec.generation=? WHERE q.id=? AND q.media_id=? AND q.status='done' AND h.status='done' AND json_extract(h.result_json,'$.effect_manifest_digest')=ec.manifest_digest AND ec.manifest_digest=? AND ec.manifest_json=?`
+	args := []any{c.Attempts, c.RetryRound, c.Generation.Int64, c.ID, c.MediaID, expectedDigest, string(expectedManifest)}
 	if effects.Artwork.StageID != "" {
 		q += ` AND EXISTS(SELECT 1 FROM media_ingest_evidence e JOIN media_asset_stage_journal j ON j.stage_id=e.stage_id WHERE e.stage_id=? AND e.run_id=? AND e.step_id=? AND e.media_id=? AND e.generation=? AND e.kind='scrape_artwork' AND j.state='committed')`
 		args = append(args, effects.Artwork.StageID, c.RunID.Int64, c.StepID.Int64, c.MediaID, c.Generation.Int64)
@@ -1390,7 +1390,7 @@ func failScrapeClaim(ctx context.Context, db *sql.DB, c scrapeClaim, source, que
 			if final {
 				stepStatus = "failed"
 			}
-			res, err = tx.ExecContext(ctx, `UPDATE media_ingest_step SET status=?,attempts=?,last_error=?,finished_at=CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END,lease_owner=NULL,lease_until=NULL,available_at=(SELECT available_at FROM scrape_task WHERE id=?),updated_at=CURRENT_TIMESTAMP WHERE id=? AND run_id=? AND media_id=? AND generation=? AND status='running' AND lease_owner=? AND attempts=?`, stepStatus, c.Attempts, message, final, c.ID, c.StepID.Int64, c.RunID.Int64, c.MediaID, c.Generation.Int64, c.Owner, c.Attempts)
+			res, err = tx.ExecContext(ctx, `UPDATE media_ingest_step SET status=?,attempts=?,last_error=?,finished_at=CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END,lease_owner=NULL,lease_until=NULL,available_at=(SELECT available_at FROM scrape_task WHERE id=?),updated_at=CURRENT_TIMESTAMP WHERE id=? AND run_id=? AND media_id=? AND generation=? AND status='running' AND lease_owner=? AND attempts=? AND (SELECT retry_round FROM scrape_task WHERE id=?)=?`, stepStatus, c.Attempts, message, final, c.ID, c.StepID.Int64, c.RunID.Int64, c.MediaID, c.Generation.Int64, c.Owner, c.Attempts, c.ID, c.RetryRound)
 			if err != nil {
 				return err
 			}

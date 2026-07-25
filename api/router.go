@@ -267,6 +267,7 @@ func NewEngine(cfg *config.Config, application *app.App, deps handler.Dependenci
 			adm.GET("/admin/media", h.AdminListMedia)
 			adm.GET("/admin/media/:id/ingest", h.AdminGetMediaIngest)
 			adm.POST("/admin/media/:id/ingest/retry", h.AdminRetryMediaIngest)
+			adm.POST("/admin/media/:id/ingest/steps/:step_id/retry", h.AdminRetryOptionalScrape)
 
 			adm.POST("/media/:id/scrape", h.ScrapeMedia)
 			adm.POST("/media/:id/subtitle/process", h.ProcessMediaSubtitles)
