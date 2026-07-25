@@ -656,7 +656,11 @@ func commitEncryptionStage(ctx context.Context, db *sql.DB, task Task, s storage
 		return publication.AggregateTx(ctx, tx, *task.RunID)
 	})
 	if err == nil {
-		return cleanupCommittedEncryptionPlaintext(ctx, db, quarantineRoot, task.MediaID, task.Generation, s.StageID, quarantinePath, defaultEncryptionFileOps())
+		outcome, cleanupErr := cleanupCommittedEncryptionPlaintext(quarantineRoot, task.MediaID, task.Generation, s.StageID, quarantinePath, defaultEncryptionFileOps())
+		if updateErr := recordCommittedCleanupOutcome(ctx, db, s.StageID, outcome, cleanupErr); updateErr != nil {
+			return updateErr
+		}
+		return cleanupErr
 	}
 	var uncertain *store.ImmediateCommitError
 	if !errors.As(err, &uncertain) {

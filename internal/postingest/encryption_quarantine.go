@@ -186,6 +186,10 @@ func restoreQuarantinedPlaintextWithOps(quarantine, source, root string, mediaID
 
 var encryptionLstat = os.Lstat
 
+var errUnsafeEncryptionQuarantinePath = errors.New("unsafe encryption quarantine path")
+
+func unsafeEncryptionQuarantinePath() error { return errUnsafeEncryptionQuarantinePath }
+
 func sameQuarantinePath(a, b string) bool {
 	a = filepath.Clean(a)
 	b = filepath.Clean(b)
@@ -197,7 +201,7 @@ func sameQuarantinePath(a, b string) bool {
 
 func resolvedQuarantineRoot(root string, create bool) (string, error) {
 	if strings.TrimSpace(root) == "" {
-		return "", errors.New("unsafe encryption quarantine path")
+		return "", unsafeEncryptionQuarantinePath()
 	}
 	abs, err := filepath.Abs(root)
 	if err != nil {
@@ -210,18 +214,21 @@ func resolvedQuarantineRoot(root string, create bool) (string, error) {
 	}
 	resolved, err := filepath.EvalSymlinks(abs)
 	if err != nil {
-		return "", errors.New("unsafe encryption quarantine path")
+		return "", err
 	}
 	info, err := encryptionLstat(abs)
-	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return "", errors.New("unsafe encryption quarantine path")
+	if err != nil {
+		return "", err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return "", unsafeEncryptionQuarantinePath()
 	}
 	return resolved, nil
 }
 
 func validateQuarantineIdentity(root, quarantine string, mediaID, generation int64, stageID string) (string, string, error) {
 	if !safeEncryptionStageID(stageID) {
-		return "", "", errors.New("unsafe encryption quarantine path")
+		return "", "", unsafeEncryptionQuarantinePath()
 	}
 	rootResolved, err := resolvedQuarantineRoot(root, false)
 	if err != nil {
@@ -230,40 +237,70 @@ func validateQuarantineIdentity(root, quarantine string, mediaID, generation int
 	expected := filepath.Join(rootResolved, fmt.Sprintf("%d", mediaID), fmt.Sprintf("%d", generation), stageID, "source")
 	qAbs, err := filepath.Abs(quarantine)
 	if err != nil || !sameQuarantinePath(qAbs, expected) {
-		return "", "", errors.New("unsafe encryption quarantine path")
+		return "", "", unsafeEncryptionQuarantinePath()
 	}
 	return rootResolved, expected, nil
 }
 
-func validateExistingQuarantinePath(root, quarantine string, mediaID, generation int64, stageID string) (string, error) {
+type quarantineLeafState uint8
+
+const (
+	quarantineLeafExists quarantineLeafState = iota
+	quarantineLeafMissing
+)
+
+// validateQuarantineParentLayout validates the exact journal identity and every
+// parent component independently from whether the final plaintext leaf exists.
+func validateQuarantineParentLayout(root, quarantine string, mediaID, generation int64, stageID string) (string, quarantineLeafState, error) {
 	rootResolved, expected, err := validateQuarantineIdentity(root, quarantine, mediaID, generation, stageID)
+	if err != nil {
+		return "", 0, err
+	}
+	current := rootResolved
+	for _, component := range []string{fmt.Sprintf("%d", mediaID), fmt.Sprintf("%d", generation), stageID} {
+		current = filepath.Join(current, component)
+		info, statErr := encryptionLstat(current)
+		if statErr != nil {
+			return "", 0, statErr
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return "", 0, unsafeEncryptionQuarantinePath()
+		}
+	}
+	info, statErr := encryptionLstat(expected)
+	if os.IsNotExist(statErr) {
+		return expected, quarantineLeafMissing, nil
+	}
+	if statErr != nil {
+		return "", 0, statErr
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return "", 0, unsafeEncryptionQuarantinePath()
+	}
+	resolved, err := filepath.EvalSymlinks(expected)
+	if err != nil {
+		return "", 0, err
+	}
+	if !sameQuarantinePath(resolved, expected) || !pathWithinRoot(rootResolved, resolved) {
+		return "", 0, unsafeEncryptionQuarantinePath()
+	}
+	return expected, quarantineLeafExists, nil
+}
+
+func validateExistingQuarantinePath(root, quarantine string, mediaID, generation int64, stageID string) (string, error) {
+	expected, state, err := validateQuarantineParentLayout(root, quarantine, mediaID, generation, stageID)
 	if err != nil {
 		return "", err
 	}
-	current := rootResolved
-	for _, component := range []string{fmt.Sprintf("%d", mediaID), fmt.Sprintf("%d", generation), stageID, "source"} {
-		current = filepath.Join(current, component)
-		info, statErr := encryptionLstat(current)
-		if statErr != nil || info.Mode()&os.ModeSymlink != 0 {
-			return "", errors.New("unsafe encryption quarantine path")
-		}
-		if current != expected && !info.IsDir() {
-			return "", errors.New("unsafe encryption quarantine path")
-		}
-		if current == expected && !info.Mode().IsRegular() {
-			return "", errors.New("unsafe encryption quarantine path")
-		}
-	}
-	resolved, err := filepath.EvalSymlinks(expected)
-	if err != nil || !sameQuarantinePath(resolved, expected) || !pathWithinRoot(rootResolved, resolved) {
-		return "", errors.New("unsafe encryption quarantine path")
+	if state != quarantineLeafExists {
+		return "", os.ErrNotExist
 	}
 	return expected, nil
 }
 
 func ensureQuarantineParent(root string, mediaID, generation int64, stageID string) (string, error) {
 	if !safeEncryptionStageID(stageID) {
-		return "", errors.New("unsafe encryption quarantine path")
+		return "", unsafeEncryptionQuarantinePath()
 	}
 	rootResolved, err := resolvedQuarantineRoot(root, true)
 	if err != nil {
@@ -277,7 +314,7 @@ func ensureQuarantineParent(root string, mediaID, generation int64, stageID stri
 		}
 		info, statErr := encryptionLstat(current)
 		if statErr != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-			return "", errors.New("unsafe encryption quarantine path")
+			return "", unsafeEncryptionQuarantinePath()
 		}
 	}
 	return filepath.Join(current, "source"), nil
