@@ -143,6 +143,50 @@ func TestReconcileThumbnailStagesMarksCommittedAndReachesStaleAfterHundred(t *te
 	}
 }
 
+func TestReconcileThumbnailStagesActiveRowsDoNotConsumeRecoveryLimit(t *testing.T) {
+	db, _, _ := planThumbnailFixture(t, false)
+	q := NewQueue(db, "thumbnail-owner", nil)
+	task, _ := q.Claim(context.Background(), TaskThumbnail)
+	active, err := realThumbnailStager(t, db).Stage(context.Background(), *task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 11; i++ {
+		_, err = db.Exec(`INSERT INTO media_asset_stage_journal(stage_id,media_id,run_id,step_id,generation,owner_token,source_fingerprint,artifact_kind,state,original_path,staged_path,hashes_sizes_json,updated_at) SELECT ?,media_id,run_id,step_id,generation,owner_token,source_fingerprint,artifact_kind,state,original_path,staged_path,hashes_sizes_json,datetime(updated_at,?) FROM media_asset_stage_journal WHERE stage_id=?`, fmt.Sprintf("active-copy-%02d", i), fmt.Sprintf("-%d seconds", 100+i), active.Stage.StageID)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	staleRoot := t.TempDir()
+	staleID := "stale-behind-active"
+	staleDir := filepath.Join(staleRoot, "generation-1", staleID)
+	if err = os.MkdirAll(staleDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	thumb, medium := filepath.Join(staleDir, "thumb.jpg"), filepath.Join(staleDir, "medium.jpg")
+	if err = os.WriteFile(thumb, []byte("stale"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(medium, []byte("stale"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hashes := `{"thumb":{"path":"` + filepath.ToSlash(thumb) + `"},"medium":{"path":"` + filepath.ToSlash(medium) + `"}}`
+	_, err = db.Exec(`INSERT INTO media_asset_stage_journal(stage_id,media_id,run_id,step_id,generation,owner_token,source_fingerprint,artifact_kind,state,original_path,staged_path,hashes_sizes_json,updated_at) VALUES(?,?,?,?,?,'stale-owner','stale-fp','thumbnail','staged','',?,?,CURRENT_TIMESTAMP)`, staleID, task.MediaID, *task.RunID, *task.StepID, task.Generation, staleDir, hashes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checked, cleaned, err := ReconcileThumbnailStages(context.Background(), db, ThumbnailRecoveryRoots{Preview: staleRoot}, 10)
+	if err != nil || checked != 1 || cleaned != 1 {
+		t.Fatalf("checked=%d cleaned=%d err=%v", checked, cleaned, err)
+	}
+	if _, err = os.Stat(thumb); !os.IsNotExist(err) {
+		t.Fatalf("stale retained: %v", err)
+	}
+	if _, err = os.Stat(active.Thumb.Path); err != nil {
+		t.Fatalf("active removed: %v", err)
+	}
+}
+
 func TestReconcileThumbnailStagesRetainsActiveAndCleansStaleUnreferenced(t *testing.T) {
 	db, _, _ := planThumbnailFixture(t, false)
 	q := NewQueue(db, "thumbnail-owner", nil)
@@ -169,7 +213,7 @@ func TestReconcileThumbnailStagesRetainsActiveAndCleansStaleUnreferenced(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if checked != 2 || cleaned != 1 {
+	if checked != 1 || cleaned != 1 {
 		t.Fatalf("checked=%d cleaned=%d", checked, cleaned)
 	}
 	if _, err = os.Stat(active.Thumb.Path); err != nil {

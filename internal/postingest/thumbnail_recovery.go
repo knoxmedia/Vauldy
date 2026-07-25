@@ -38,7 +38,7 @@ func ReconcileThumbnailStages(ctx context.Context, db *sql.DB, roots ThumbnailRe
 	if limit <= 0 || limit > thumbnailStageBatchMax {
 		limit = thumbnailStageBatchMax
 	}
-	rows, err := db.QueryContext(ctx, `SELECT stage_id,media_id,run_id,step_id,generation,owner_token,source_fingerprint,state,staged_path,hashes_sizes_json FROM media_asset_stage_journal WHERE artifact_kind='thumbnail' AND recovery_error NOT IN ('cleaned_unreferenced','verified_committed') ORDER BY updated_at,stage_id LIMIT ?`, limit)
+	rows, err := db.QueryContext(ctx, `SELECT j.stage_id,j.media_id,j.run_id,j.step_id,j.generation,j.owner_token,j.source_fingerprint,j.state,j.staged_path,j.hashes_sizes_json FROM media_asset_stage_journal j WHERE j.artifact_kind='thumbnail' AND j.state IN ('staged','quarantined','committed') AND j.recovery_error NOT IN ('cleaned_unreferenced','verified_committed') AND (j.state<>'staged' OR NOT EXISTS(SELECT 1 FROM post_ingest_task p JOIN media_ingest_step s ON s.id=p.ingest_step_id JOIN media_ingest_run run ON run.id=p.ingest_run_id JOIN media m ON m.id=p.media_id WHERE p.media_id=j.media_id AND p.ingest_run_id=j.run_id AND p.ingest_step_id=j.step_id AND p.generation=j.generation AND p.task_type='thumbnail' AND p.status='running' AND p.lease_owner=j.owner_token AND s.status='running' AND s.lease_owner=p.lease_owner AND run.status='processing' AND run.superseded_at IS NULL AND run.superseded_by_generation IS NULL AND m.ingest_generation=p.generation)) ORDER BY j.updated_at,j.stage_id LIMIT ?`, limit)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -62,8 +62,11 @@ func ReconcileThumbnailStages(ctx context.Context, db *sql.DB, roots ThumbnailRe
 		checked++
 		if r.state == "committed" {
 			if err := verifyCommittedThumbnailJournal(ctx, db, r); err != nil {
-				_, _ = db.ExecContext(ctx, `UPDATE media_asset_stage_journal SET recovery_error=? WHERE stage_id=?`, "committed_corrupt: "+err.Error(), r.stageID)
-				return checked, cleaned, err
+				if _, updateErr := db.ExecContext(ctx, `UPDATE media_asset_stage_journal SET state='failed_closed',recovery_error=?,updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='committed'`, boundedRecoveryError("committed_corrupt: ", err), r.stageID); updateErr != nil {
+					return checked, cleaned, updateErr
+				}
+				retErr = errors.Join(retErr, err)
+				continue
 			}
 			_, _ = db.ExecContext(ctx, `UPDATE media_asset_stage_journal SET recovery_error='verified_committed',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='committed'`, r.stageID)
 			continue
@@ -99,11 +102,19 @@ func ReconcileThumbnailStages(ctx context.Context, db *sql.DB, roots ThumbnailRe
 		}
 		paths, err := thumbnailJournalPaths(r)
 		if err != nil {
-			return checked, cleaned, err
+			if updateErr := failClosedAssetStage(ctx, db, r.stageID, err); updateErr != nil {
+				return checked, cleaned, updateErr
+			}
+			retErr = errors.Join(retErr, err)
+			continue
 		}
 		meta, metaErr := thumbnailJournalVariantMetadata(r)
 		if metaErr != nil {
-			return checked, cleaned, metaErr
+			if updateErr := failClosedAssetStage(ctx, db, r.stageID, metaErr); updateErr != nil {
+				return checked, cleaned, updateErr
+			}
+			retErr = errors.Join(retErr, metaErr)
+			continue
 		}
 		for i, path := range paths {
 			key := "thumb"
@@ -119,9 +130,16 @@ func ReconcileThumbnailStages(ctx context.Context, db *sql.DB, roots ThumbnailRe
 				pathErr = validateThumbnailManagedPath(roots.Preview, r.generation, r.stageID, expected, path)
 			}
 			if pathErr != nil {
-				_, _ = db.ExecContext(ctx, `UPDATE media_asset_stage_journal SET recovery_error=? WHERE stage_id=?`, "unsafe_path: "+pathErr.Error(), r.stageID)
-				return checked, cleaned, pathErr
+				if updateErr := failClosedAssetStage(ctx, db, r.stageID, pathErr); updateErr != nil {
+					return checked, cleaned, updateErr
+				}
+				retErr = errors.Join(retErr, pathErr)
+				paths = nil
+				break
 			}
+		}
+		if paths == nil {
+			continue
 		}
 		referenced := false
 		for _, path := range paths {
@@ -386,4 +404,16 @@ func validateContainedSymlinks(root, path string) error {
 		}
 	}
 	return nil
+}
+
+func boundedRecoveryError(prefix string, err error) string {
+	message := prefix + err.Error()
+	if len(message) > 512 {
+		message = message[:512]
+	}
+	return message
+}
+func failClosedAssetStage(ctx context.Context, db *sql.DB, stageID string, cause error) error {
+	_, err := db.ExecContext(ctx, `UPDATE media_asset_stage_journal SET state='failed_closed',recovery_error=?,updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state IN ('staged','quarantined','committed')`, boundedRecoveryError("recovery_error: ", cause), stageID)
+	return err
 }

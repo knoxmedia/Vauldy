@@ -37,7 +37,7 @@ func ReconcilePosterStages(ctx context.Context, db *sql.DB, roots PosterRecovery
 	if limit <= 0 || limit > 100 {
 		limit = 100
 	}
-	rows, err := db.QueryContext(ctx, `SELECT stage_id,media_id,run_id,step_id,generation,owner_token,source_fingerprint,state,staged_path,hashes_sizes_json FROM media_asset_stage_journal WHERE artifact_kind='poster' AND recovery_error NOT IN ('cleaned_unreferenced','verified_committed') ORDER BY updated_at,stage_id LIMIT ?`, limit)
+	rows, err := db.QueryContext(ctx, `SELECT j.stage_id,j.media_id,j.run_id,j.step_id,j.generation,j.owner_token,j.source_fingerprint,j.state,j.staged_path,j.hashes_sizes_json FROM media_asset_stage_journal j WHERE j.artifact_kind='poster' AND j.recovery_error NOT IN ('cleaned_unreferenced','verified_committed') AND (j.state<>'staged' OR NOT EXISTS(SELECT 1 FROM post_ingest_task p JOIN media_ingest_run run ON run.id=p.ingest_run_id JOIN media m ON m.id=p.media_id WHERE p.media_id=j.media_id AND p.ingest_run_id=j.run_id AND p.generation=j.generation AND p.task_type IN ('poster','poster_repair') AND p.status='running' AND p.lease_owner=j.owner_token AND run.superseded_at IS NULL AND run.superseded_by_generation IS NULL AND m.ingest_generation=p.generation)) ORDER BY j.updated_at,j.stage_id LIMIT ?`, limit)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -119,7 +119,7 @@ func ReconcilePosterStages(ctx context.Context, db *sql.DB, roots PosterRecovery
 	}
 	remaining := limit
 	if remaining > 0 {
-		rows, e := db.QueryContext(ctx, `SELECT stage_id,queue_id,media_id,run_id,generation,owner_token,attempt,source_fingerprint,state,staged_path,hashes_sizes_json FROM poster_repair_stage WHERE recovery_error NOT IN ('cleaned_unreferenced','verified_committed') ORDER BY updated_at,stage_id LIMIT ?`, remaining)
+		rows, e := db.QueryContext(ctx, `SELECT s.stage_id,s.queue_id,s.media_id,s.run_id,s.generation,s.owner_token,s.attempt,s.source_fingerprint,s.state,s.staged_path,s.hashes_sizes_json FROM poster_repair_stage s WHERE s.recovery_error NOT IN ('cleaned_unreferenced','verified_committed') AND (s.state<>'staged' OR NOT EXISTS(SELECT 1 FROM post_ingest_task p JOIN media_ingest_run run ON run.id=p.ingest_run_id JOIN media m ON m.id=p.media_id WHERE p.id=s.queue_id AND p.task_type='poster_repair' AND p.status='running' AND p.lease_owner=s.owner_token AND p.attempts=s.attempt AND run.superseded_at IS NULL AND run.superseded_by_generation IS NULL AND m.ingest_generation=p.generation AND m.publication_state IN ('published','degraded') AND m.published_at IS NOT NULL)) ORDER BY s.updated_at,s.stage_id LIMIT ?`, remaining)
 		if e != nil {
 			return checked, cleaned, e
 		}
