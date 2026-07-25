@@ -52,3 +52,15 @@ func TestStartupPublicationV2ProbeFailurePreventsClaimersAndSources(t *testing.T
 		t.Fatalf("claimed=%v sourced=%v", claimed, sourced)
 	}
 }
+
+func TestStartupPublicationV2QueueValidationFailurePreventsClaimersAndSources(t *testing.T) {
+	claimed, sourced := false, false
+	ok := func(context.Context) error { return nil }
+	hooks := publicationV2StartupHooks{RecoverArtifacts: ok, RecoverLeases: ok, ReplaceActiveV1: ok, ValidateAggregateV2: func(context.Context) error { return errors.New("queue semantics mismatch") }, Preflight: func(context.Context) ([]string, error) { t.Fatal("preflight after invalid queue"); return nil, nil }, StartClaimers: func() { claimed = true }, StartSubmissionSources: func() { sourced = true }}
+	if _, err := PreparePublicationV2Startup(context.Background(), hooks); err == nil {
+		t.Fatal("expected failure")
+	}
+	if claimed || sourced {
+		t.Fatalf("claimed=%v sourced=%v", claimed, sourced)
+	}
+}

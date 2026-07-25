@@ -23,6 +23,28 @@ type EncryptionPolicyValidator interface {
 	ProbeThumbnailResolver(context.Context) error
 }
 
+type encryptedLibraryRows interface {
+	Next() bool
+	Scan(...any) error
+	Err() error
+	Close() error
+}
+
+func collectEncryptedLibraries(rows encryptedLibraryRows) (libs []EncryptedLibrary, retErr error) {
+	if rows == nil {
+		return nil, errors.New("nil encrypted library rows")
+	}
+	defer func() { retErr = errors.Join(retErr, rows.Close()) }()
+	for rows.Next() {
+		var lib EncryptedLibrary
+		if err := rows.Scan(&lib.ID, &lib.Path, &lib.Mode); err != nil {
+			return nil, err
+		}
+		libs = append(libs, lib)
+	}
+	return libs, rows.Err()
+}
+
 // PreflightPublicationV2 validates exact schema and executable capabilities before claims begin.
 func PreflightPublicationV2(ctx context.Context, db *sql.DB, planner *Planner, registry coreiface.CapabilityRegistry, resources EncryptionPolicyValidator) ([]string, error) {
 	if err := ctx.Err(); err != nil {
@@ -49,17 +71,9 @@ func PreflightPublicationV2(ctx context.Context, db *sql.DB, planner *Planner, r
 	if err != nil {
 		return nil, err
 	}
-	var libs []EncryptedLibrary
-	for rows.Next() {
-		var lib EncryptedLibrary
-		if err = rows.Scan(&lib.ID, &lib.Path, &lib.Mode); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		libs = append(libs, lib)
-	}
-	if err = rows.Close(); err != nil {
-		return nil, err
+	libs, err := collectEncryptedLibraries(rows)
+	if err != nil {
+		return nil, fmt.Errorf("publication v2 preflight: enumerate encrypted libraries: %w", err)
 	}
 	if len(libs) > 0 && (!planner.options.EncryptGlobal || !registry.Available(string(StepEncrypt))) {
 		return nil, errors.New("publication v2 preflight: encrypted library requires executable encrypt capability")

@@ -156,3 +156,52 @@ func TestValidateCurrentV2RejectsEmptyAndMismatchedSnapshots(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateCurrentV2RejectsExactQueueSemanticMismatches(t *testing.T) {
+	cases := []struct{ name, mutation string }{
+		{"post task type", `UPDATE post_ingest_task SET task_type='encrypt' WHERE task_type='poster'`},
+		{"post missing", `DELETE FROM post_ingest_task WHERE task_type='poster'`},
+		{"post extra wrong execution", `INSERT INTO post_ingest_task(media_id,scan_task_id,ingest_run_id,ingest_step_id,generation,task_type,status) SELECT media_id,scan_task_id,ingest_run_id,ingest_step_id,generation,'poster_repair',status FROM post_ingest_task WHERE task_type='poster'`},
+		{"post status", `UPDATE post_ingest_task SET status='running' WHERE task_type='poster'`},
+		{"post generation", `UPDATE post_ingest_task SET generation=generation+1 WHERE task_type='poster'`},
+		{"post media", `UPDATE post_ingest_task SET media_id=media_id+100 WHERE task_type='poster'`},
+		{"post run", `UPDATE post_ingest_task SET ingest_run_id=ingest_run_id+100 WHERE task_type='poster'`},
+		{"scrape source", `UPDATE scrape_task SET source='manual'`},
+		{"scrape status", `UPDATE scrape_task SET status='running'`},
+		{"scrape generation", `UPDATE scrape_task SET generation=generation+1`},
+		{"scrape media", `UPDATE scrape_task SET media_id=media_id+100`},
+		{"scrape run", `UPDATE scrape_task SET ingest_run_id=ingest_run_id+100`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openPlannerTestDB(t)
+			_, mid, scan := seedPlannerMedia(t, db, "video", 0, 0, 0)
+			planAndCommit(t, db, NewPlanner(PlanOptions{}), NewMedia{MediaID: mid, ScanTaskID: scan, FileType: "video"})
+			_, _ = db.Exec("PRAGMA foreign_keys=OFF")
+			if _, err := db.Exec(tc.mutation); err != nil {
+				t.Fatal(err)
+			}
+			if err := ValidateAggregateCurrentV2(context.Background(), db); err == nil {
+				t.Fatal("accepted invalid queue semantics")
+			}
+		})
+	}
+}
+
+func TestValidateCurrentV2RejectsPrepareWrongTypeAndIdentity(t *testing.T) {
+	for _, tc := range []struct{ name, mutation string }{{"type", `UPDATE transcode_task SET task_type='manual'`}, {"generation", `UPDATE transcode_task SET generation=generation+1`}, {"media", `UPDATE transcode_task SET media_id=media_id+100`}, {"run", `UPDATE transcode_task SET ingest_run_id=ingest_run_id+100`}, {"status", `UPDATE transcode_task SET status='running'`}} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openPlannerTestDB(t)
+			_, mid, scan := seedPlannerMedia(t, db, "video", 0, 0, 1)
+			planner := NewPlanner(PlanOptions{PreparePlanner: &recordingPreparePlanner{}, Capabilities: NewCapabilityMatrix([]string{"prepare"})})
+			planAndCommit(t, db, planner, NewMedia{MediaID: mid, ScanTaskID: scan, FileType: "video"})
+			_, _ = db.Exec(`PRAGMA foreign_keys=OFF`)
+			if _, err := db.Exec(tc.mutation); err != nil {
+				t.Fatal(err)
+			}
+			if err := ValidateAggregateCurrentV2(context.Background(), db); err == nil {
+				t.Fatal("accepted invalid prepare queue")
+			}
+		})
+	}
+}

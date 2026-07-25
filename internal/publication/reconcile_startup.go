@@ -111,6 +111,43 @@ func ValidateAggregateCurrentV2(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
+type stepValidationRow struct {
+	id       int64
+	typ      string
+	required int
+}
+
+func validateQueueSemantics(ctx context.Context, q store.SQLExecutor, runID, mediaID, generation int64, steps []stepValidationRow) error {
+	for _, step := range steps {
+		var total, count int
+		if err := q.QueryRowContext(ctx, "SELECT (SELECT COUNT(*) FROM post_ingest_task WHERE ingest_step_id=?)+(SELECT COUNT(*) FROM scrape_task WHERE ingest_step_id=?)+(SELECT COUNT(*) FROM transcode_task WHERE ingest_step_id=?)", step.id, step.id, step.id).Scan(&total); err != nil {
+			return err
+		}
+		if total != 1 {
+			return fmt.Errorf("queue execution count mismatch for step %s", step.typ)
+		}
+		switch StepType(step.typ) {
+		case StepScrape:
+			if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM scrape_task WHERE ingest_step_id=? AND ingest_run_id=? AND media_id=? AND generation=? AND source='auto-scan' AND status=(SELECT status FROM media_ingest_step WHERE id=?)`, step.id, runID, mediaID, generation, step.id).Scan(&count); err != nil {
+				return err
+			}
+		case StepPrepare:
+			if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM transcode_task WHERE ingest_step_id=? AND ingest_run_id=? AND media_id=? AND generation=? AND task_type='pretranscode' AND status=(SELECT status FROM media_ingest_step WHERE id=?)`, step.id, runID, mediaID, generation, step.id).Scan(&count); err != nil {
+				return err
+			}
+		case StepPoster, StepThumbnail, StepPreview, StepSubtitle, StepEncrypt:
+			if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM post_ingest_task WHERE ingest_step_id=? AND ingest_run_id=? AND media_id=? AND generation=? AND task_type=? AND status=(SELECT status FROM media_ingest_step WHERE id=?)`, step.id, runID, mediaID, generation, step.typ, step.id).Scan(&count); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("unsupported policy v2 step %s", step.typ)
+		}
+		if count != 1 {
+			return fmt.Errorf("queue semantics mismatch for step %s", step.typ)
+		}
+	}
+	return nil
+}
 func validateCurrentV2Run(ctx context.Context, q store.SQLExecutor, runID int64) error {
 	var raw string
 	var mediaID, generation int64
@@ -125,18 +162,15 @@ func validateCurrentV2Run(ctx context.Context, q store.SQLExecutor, runID int64)
 	if err := json.Unmarshal([]byte(raw), &snapshot); err != nil || snapshot.PolicyVersion != PolicyV2 || snapshot.FileType == "" || len(snapshot.RequiredSteps) == 0 {
 		return errors.New("malformed policy v2 snapshot")
 	}
-	type stepRow struct {
-		typ      string
-		required int
-	}
-	rows, err := q.QueryContext(ctx, `SELECT step_type,required FROM media_ingest_step WHERE run_id=? ORDER BY id`, runID)
+
+	rows, err := q.QueryContext(ctx, `SELECT id,step_type,required FROM media_ingest_step WHERE run_id=? ORDER BY id`, runID)
 	if err != nil {
 		return err
 	}
-	var actual []stepRow
+	var actual []stepValidationRow
 	for rows.Next() {
-		var row stepRow
-		if err = rows.Scan(&row.typ, &row.required); err != nil {
+		var row stepValidationRow
+		if err = rows.Scan(&row.id, &row.typ, &row.required); err != nil {
 			rows.Close()
 			return err
 		}
@@ -158,12 +192,8 @@ func validateCurrentV2Run(ctx context.Context, q store.SQLExecutor, runID int64)
 			return errors.New("snapshot step requiredness mismatch")
 		}
 	}
-	var queueMismatch int
-	if err = q.QueryRowContext(ctx, `SELECT COUNT(*) FROM media_ingest_step s LEFT JOIN post_ingest_task p ON p.ingest_step_id=s.id LEFT JOIN scrape_task c ON c.ingest_step_id=s.id LEFT JOIN transcode_task t ON t.ingest_step_id=s.id WHERE s.run_id=? AND ((s.step_type='scrape' AND c.id IS NULL) OR (s.step_type='prepare' AND t.id IS NULL) OR (s.step_type NOT IN ('scrape','prepare') AND p.id IS NULL))`, runID).Scan(&queueMismatch); err != nil {
+	if err := validateQueueSemantics(ctx, q, runID, mediaID, generation, actual); err != nil {
 		return err
-	}
-	if queueMismatch != 0 {
-		return errors.New("queue linkage mismatch")
 	}
 	var depCount int
 	if err = q.QueryRowContext(ctx, `SELECT COUNT(*) FROM media_ingest_step_dependency d JOIN media_ingest_step s ON s.id=d.step_id WHERE s.run_id=?`, runID).Scan(&depCount); err != nil {
