@@ -2410,3 +2410,94 @@ func TestMigrationCommitRollbackProbeErrorFailsAndDiscardsConnection(t *testing.
 		t.Fatalf("fresh connection unusable n=%d err=%v", n, err)
 	}
 }
+
+func TestMigrationCommitAppliedErrorAfterCallerCancellationStillSucceeds(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	installLegacyAssetStageJournal(t, db)
+	ctx, cancel := context.WithCancel(context.Background())
+	old := publicationMigrationCommit
+	publicationMigrationCommit = func(_ context.Context, conn *sql.Conn) error {
+		if _, err := conn.ExecContext(context.Background(), `COMMIT`); err != nil {
+			return err
+		}
+		cancel()
+		return errors.New("commit response lost after cancellation")
+	}
+	t.Cleanup(func() { publicationMigrationCommit = old })
+	if err := migrateIngestPublication(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMigrationSuccessfulCommitCancellationStillRestoresAndValidates(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	installLegacyAssetStageJournal(t, db)
+	ctx, cancel := context.WithCancel(context.Background())
+	oldCommit, oldValidate := publicationMigrationCommit, publicationMigrationPostCommitValidation
+	publicationMigrationCommit = func(_ context.Context, conn *sql.Conn) error {
+		_, err := conn.ExecContext(context.Background(), `COMMIT`)
+		cancel()
+		return err
+	}
+	validated := false
+	publicationMigrationPostCommitValidation = func(check context.Context, conn *sql.Conn) error {
+		if check.Err() != nil {
+			return check.Err()
+		}
+		validated = true
+		return validatePublicationForeignKeys(check, conn)
+	}
+	t.Cleanup(func() { publicationMigrationCommit, publicationMigrationPostCommitValidation = oldCommit, oldValidate })
+	if err := migrateIngestPublication(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	if !validated {
+		t.Fatal("post-commit validation skipped")
+	}
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	var fk int
+	if err := conn.QueryRowContext(context.Background(), `PRAGMA foreign_keys`).Scan(&fk); err != nil || fk != 1 {
+		t.Fatalf("foreign_keys=%d err=%v", fk, err)
+	}
+}
+
+func TestMigrationCommittedCleanupTimeoutReturnsFatalAndDiscards(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cleanup-timeout.db")
+	db := openIngestPublicationMigrationTestDBPath(t, path)
+	db.SetMaxOpenConns(2)
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	installLegacyAssetStageJournal(t, db)
+	oldCommit, oldValidate, oldTimeout := publicationMigrationCommit, publicationMigrationPostCommitValidation, publicationMigrationCleanupTimeout
+	publicationMigrationCommit = func(ctx context.Context, conn *sql.Conn) error { _, err := conn.ExecContext(ctx, `COMMIT`); return err }
+	publicationMigrationCleanupTimeout = time.Nanosecond
+	publicationMigrationPostCommitValidation = func(check context.Context, _ *sql.Conn) error { <-check.Done(); return check.Err() }
+	t.Cleanup(func() {
+		publicationMigrationCommit, publicationMigrationPostCommitValidation, publicationMigrationCleanupTimeout = oldCommit, oldValidate, oldTimeout
+	})
+	err := migrateIngestPublication(context.Background(), db)
+	var fatal *PostCommitMigrationValidationError
+	if !errors.As(err, &fatal) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err=%T %v", err, err)
+	}
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	var n int
+	if err := conn.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM pragma_table_info('media_asset_stage_journal') WHERE name='scrape_task_id'`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("committed schema n=%d err=%v", n, err)
+	}
+}

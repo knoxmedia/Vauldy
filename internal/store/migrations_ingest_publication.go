@@ -648,6 +648,7 @@ func (e *PostCommitMigrationValidationError) Error() string {
 func (e *PostCommitMigrationValidationError) Unwrap() error { return e.Cause }
 
 var publicationMigrationPostCommitValidation = validatePublicationForeignKeys
+var publicationMigrationCleanupTimeout = 2 * time.Second
 var publicationMigrationCommit = func(ctx context.Context, conn *sql.Conn) error { _, err := conn.ExecContext(ctx, `COMMIT`); return err }
 var publicationMigrationRollbackProbe = func(ctx context.Context, conn *sql.Conn) error {
 	_, err := conn.ExecContext(ctx, `ROLLBACK`)
@@ -786,15 +787,16 @@ func migratePublicationV2(ctx context.Context, db *sql.DB) (err error) {
 	if err = WithBusyRetry(ctx, nil, func() error { _, e := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); return e }); err != nil {
 		return fmt.Errorf("publication v2 begin immediate: %w", err)
 	}
-	committed := false
+	transactionEnded := false
 	defer func() {
-		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+		if transactionEnded {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), publicationMigrationCleanupTimeout)
 		defer cancel()
-		if !committed {
-			if _, e := conn.ExecContext(cleanupCtx, `ROLLBACK`); e != nil {
-				err = errors.Join(err, fmt.Errorf("publication v2 rollback: %w", e))
-				discard = true
-			}
+		if _, e := conn.ExecContext(cleanupCtx, `ROLLBACK`); e != nil {
+			err = errors.Join(err, fmt.Errorf("publication v2 rollback: %w", e))
+			discard = true
 		}
 		if _, e := conn.ExecContext(cleanupCtx, `PRAGMA foreign_keys=ON`); e != nil {
 			err = errors.Join(err, fmt.Errorf("publication v2 restore foreign keys: %w", e))
@@ -916,51 +918,52 @@ func migratePublicationV2(ctx context.Context, db *sql.DB) (err error) {
 			return err
 		}
 	}
+	postCommitCtx, postCommitCancel := context.WithTimeout(context.WithoutCancel(ctx), publicationMigrationCleanupTimeout)
+	defer postCommitCancel()
 	if commitErr := publicationMigrationCommit(ctx, conn); commitErr != nil {
-		probeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
-		defer cancel()
-		probeErr := publicationMigrationRollbackProbe(probeCtx, conn)
+		probeErr := publicationMigrationRollbackProbe(postCommitCtx, conn)
 		switch {
 		case probeErr == nil:
 			// ROLLBACK succeeded: COMMIT did not end the transaction. The migration
 			// is definitely rolled back and must never be accepted.
-			committed = true
+			transactionEnded = true
 			return &ImmediateCommitError{Cause: commitErr}
 		case isNoActiveTransactionError(probeErr):
 			// The transaction ended. Only exact canonical and FK postconditions can
 			// prove that the uncertain COMMIT actually applied.
-			committed = true
-			if _, restoreErr := conn.ExecContext(probeCtx, `PRAGMA foreign_keys=ON`); restoreErr != nil {
+			transactionEnded = true
+			if _, restoreErr := conn.ExecContext(postCommitCtx, `PRAGMA foreign_keys=ON`); restoreErr != nil {
 				discard = true
 				return &ImmediateCommitError{Cause: errors.Join(commitErr, fmt.Errorf("restore foreign keys after uncertain commit: %w", restoreErr))}
 			}
-			if checkErr := validatePublicationV2Schema(probeCtx, conn); checkErr != nil {
+			if checkErr := validatePublicationV2Schema(postCommitCtx, conn); checkErr != nil {
 				discard = true
 				return &ImmediateCommitError{Cause: errors.Join(commitErr, fmt.Errorf("uncertain commit schema postcondition: %w", checkErr))}
 			}
-			if checkErr := foreignKeyCheckExecutor(probeCtx, conn); checkErr != nil {
+			if checkErr := foreignKeyCheckExecutor(postCommitCtx, conn); checkErr != nil {
 				discard = true
 				return &ImmediateCommitError{Cause: errors.Join(commitErr, fmt.Errorf("uncertain commit foreign key postcondition: %w", checkErr))}
 			}
-			if checkErr := validatePublicationBackups(probeCtx, conn, graph); checkErr != nil {
+			if checkErr := validatePublicationBackups(postCommitCtx, conn, graph); checkErr != nil {
 				discard = true
 				return &ImmediateCommitError{Cause: errors.Join(commitErr, fmt.Errorf("uncertain commit data postcondition: %w", checkErr))}
 			}
 			err = nil
 		default:
 			discard = true
-			committed = true
+			transactionEnded = true
 			return &ImmediateCommitError{Cause: errors.Join(commitErr, fmt.Errorf("rollback probe: %w", probeErr))}
 		}
 	} else {
-		committed = true
+		transactionEnded = true
 	}
-	if _, err = conn.ExecContext(ctx, `PRAGMA foreign_keys=ON`); err != nil {
+	if _, err = conn.ExecContext(postCommitCtx, `PRAGMA foreign_keys=ON`); err != nil {
 		discard = true
-		return &PostCommitMigrationValidationError{err}
+		return &PostCommitMigrationValidationError{Cause: fmt.Errorf("durable commit cleanup restore foreign keys: %w", err)}
 	}
-	if err = publicationMigrationPostCommitValidation(ctx, conn); err != nil {
-		return &PostCommitMigrationValidationError{err}
+	if err = publicationMigrationPostCommitValidation(postCommitCtx, conn); err != nil {
+		discard = true
+		return &PostCommitMigrationValidationError{Cause: fmt.Errorf("durable commit validation: %w", err)}
 	}
 	return nil
 }
