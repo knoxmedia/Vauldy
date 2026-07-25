@@ -272,7 +272,7 @@ func TestEncryptedLegacyPhotoRepairHidesThenPublishesEncryptedSelection(t *testi
 	}
 }
 
-func TestEncryptAdapterFastPathAtomicallyCommitsEvidenceAndPublication(t *testing.T) {
+func TestEncryptAtomicFinalizerFencesStaleRetryRound(t *testing.T) {
 	db, mediaID, runID := planThumbnailFixture(t, true)
 	q := NewQueue(db, "encrypt-atomic-owner", nil)
 	thumb, err := q.Claim(context.Background(), TaskThumbnail)
@@ -354,6 +354,21 @@ func TestEncryptAdapterFastPathAtomicallyCommitsEvidenceAndPublication(t *testin
 	if !ok {
 		t.Fatal("encrypt adapter is not atomic result executor")
 	}
+	if _, err = db.Exec(`UPDATE post_ingest_task SET retry_round=retry_round+1 WHERE id=?`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = atomic.ExecuteWithResult(context.Background(), *task); err == nil {
+		t.Fatal("stale retry round committed")
+	}
+	var staleQueue, staleStep, staleSelection string
+	var staleEvidence int
+	if err = db.QueryRow(`SELECT p.status,s.status,m.file_path,(SELECT COUNT(*) FROM media_ingest_evidence WHERE step_id=s.id AND kind='encrypt') FROM post_ingest_task p JOIN media_ingest_step s ON s.id=p.ingest_step_id JOIN media m ON m.id=p.media_id WHERE p.id=?`, task.ID).Scan(&staleQueue, &staleStep, &staleSelection, &staleEvidence); err != nil {
+		t.Fatal(err)
+	}
+	if staleQueue != "running" || staleStep != "running" || staleSelection != encPath || staleEvidence != 0 {
+		t.Fatalf("stale round mutated queue=%s step=%s selection=%s evidence=%d", staleQueue, staleStep, staleSelection, staleEvidence)
+	}
+	task.RetryRound++
 	result, err := atomic.ExecuteWithResult(context.Background(), *task)
 	if err != nil {
 		t.Fatal(err)
@@ -368,5 +383,44 @@ func TestEncryptAdapterFastPathAtomicallyCommitsEvidenceAndPublication(t *testin
 	}
 	if queueStatus != "done" || stepStatus != "done" || runStatus != "published" || mediaState != "published" || evidence != 1 {
 		t.Fatalf("queue=%s step=%s run=%s media=%s evidence=%d", queueStatus, stepStatus, runStatus, mediaState, evidence)
+	}
+}
+func TestThumbnailAtomicFinalizerFencesStaleRetryRound(t *testing.T) {
+	db, mediaID, _ := planThumbnailFixture(t, false)
+	q := NewQueue(db, "thumbnail-owner", nil)
+	task, err := q.Claim(context.Background(), TaskThumbnail)
+	if err != nil || task == nil {
+		t.Fatalf("claim=%+v err=%v", task, err)
+	}
+	worker := realThumbnailStager(t, db)
+	staged, err := worker.Stage(context.Background(), *task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE post_ingest_task SET retry_round=retry_round+1 WHERE id=?`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := commitStagedThumbnail(context.Background(), db, *task, staged); err == nil {
+		t.Fatal("stale retry round committed")
+	}
+	var meta, taskStatus, stepStatus, journalState string
+	var evidence, thumbPointers int
+	if err := db.QueryRow(`SELECT m.meta_json,p.status,s.status,j.state,(SELECT COUNT(*) FROM media_ingest_evidence WHERE step_id=s.id),(SELECT COUNT(*) FROM media_derived_assets WHERE media_id=m.id) FROM post_ingest_task p JOIN media_ingest_step s ON s.id=p.ingest_step_id JOIN media m ON m.id=p.media_id JOIN media_asset_stage_journal j ON j.stage_id=? WHERE p.id=?`, staged.Stage.StageID, task.ID).Scan(&meta, &taskStatus, &stepStatus, &journalState, &evidence, &thumbPointers); err != nil {
+		t.Fatal(err)
+	}
+	if meta != "{}" || taskStatus != "running" || stepStatus != "running" || journalState != "staged" || evidence != 0 || thumbPointers != 0 {
+		t.Fatalf("stale round mutated meta=%s task=%s step=%s journal=%s evidence=%d pointers=%d", meta, taskStatus, stepStatus, journalState, evidence, thumbPointers)
+	}
+	task.RetryRound++
+	staged, err = worker.Stage(context.Background(), *task)
+	if err != nil {
+		t.Fatalf("current round stage: %v", err)
+	}
+	if err := commitStagedThumbnail(context.Background(), db, *task, staged); err != nil {
+		t.Fatalf("current round finalizer: %v", err)
+	}
+	var selected string
+	if err := db.QueryRow(`SELECT json_extract(meta_json,'$.photo.thumb_path') FROM media WHERE id=?`, mediaID).Scan(&selected); err != nil || selected == "" {
+		t.Fatalf("current round pointer=%q err=%v", selected, err)
 	}
 }

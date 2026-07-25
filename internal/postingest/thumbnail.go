@@ -119,8 +119,8 @@ func commitStagedThumbnail(ctx context.Context, db *sql.DB, task Task, staged im
 		}
 		var source string
 		var one int
-		guard := `SELECT m.file_path FROM post_ingest_task p JOIN media_ingest_step s ON s.id=p.ingest_step_id JOIN media_ingest_run r ON r.id=p.ingest_run_id JOIN media m ON m.id=p.media_id WHERE p.id=? AND p.task_type='thumbnail' AND p.media_id=? AND p.generation=? AND p.ingest_run_id=? AND p.ingest_step_id=? AND p.status='running' AND p.lease_owner=? AND p.attempts=? AND s.status='running' AND s.run_id=p.ingest_run_id AND s.media_id=p.media_id AND s.generation=p.generation AND s.step_type='thumbnail' AND s.attempts=p.attempts AND s.lease_owner=p.lease_owner AND r.status='processing' AND r.superseded_by_generation IS NULL AND r.superseded_at IS NULL AND m.ingest_generation=p.generation`
-		if err := tx.QueryRowContext(ctx, guard, task.ID, task.MediaID, task.Generation, *task.RunID, *task.StepID, task.LeaseOwner, task.Attempts).Scan(&source); err != nil {
+		guard := `SELECT m.file_path FROM post_ingest_task p JOIN media_ingest_step s ON s.id=p.ingest_step_id JOIN media_ingest_run r ON r.id=p.ingest_run_id JOIN media m ON m.id=p.media_id WHERE p.id=? AND p.task_type='thumbnail' AND p.media_id=? AND p.generation=? AND p.retry_round=? AND p.ingest_run_id=? AND p.ingest_step_id=? AND p.status='running' AND p.lease_owner=? AND p.attempts=? AND s.status='running' AND s.run_id=p.ingest_run_id AND s.media_id=p.media_id AND s.generation=p.generation AND s.step_type='thumbnail' AND s.attempts=p.attempts AND s.lease_owner=p.lease_owner AND r.status='processing' AND r.superseded_by_generation IS NULL AND r.superseded_at IS NULL AND m.ingest_generation=p.generation`
+		if err := tx.QueryRowContext(ctx, guard, task.ID, task.MediaID, task.Generation, task.RetryRound, *task.RunID, *task.StepID, task.LeaseOwner, task.Attempts).Scan(&source); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return ClassifiedError{Kind: FailureShutdown, Err: fmt.Errorf("thumbnail commit: stale exact task/step/run identity")}
 			}
@@ -154,7 +154,7 @@ func commitStagedThumbnail(ctx context.Context, db *sql.DB, task Task, staged im
 		if _, err = tx.ExecContext(ctx, `UPDATE media_asset_stage_journal SET state='committed',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='staged'`, staged.Stage.StageID); err != nil {
 			return err
 		}
-		result, err := tx.ExecContext(ctx, `UPDATE post_ingest_task SET status='done',lease_owner=NULL,lease_until=NULL,last_error='',finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='running' AND lease_owner=? AND attempts=?`, task.ID, task.LeaseOwner, task.Attempts)
+		result, err := tx.ExecContext(ctx, `UPDATE post_ingest_task SET status='done',lease_owner=NULL,lease_until=NULL,last_error='',finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='running' AND lease_owner=? AND attempts=? AND retry_round=?`, task.ID, task.LeaseOwner, task.Attempts, task.RetryRound)
 		if err != nil {
 			return err
 		}
@@ -378,7 +378,7 @@ func (w *LocalThumbnailWorker) Stage(ctx context.Context, task Task) (imagethumb
 	staged.Stage.HashesSizesJSON = string(hs)
 	_, err = withImmediateThumbnailJournalTx(ctx, w.DB, func(tx store.ImmediateConnTx) error {
 		var one int
-		if guardErr := tx.QueryRowContext(ctx, `SELECT 1 FROM post_ingest_task p JOIN media_ingest_step s ON s.id=p.ingest_step_id JOIN media_ingest_run r ON r.id=p.ingest_run_id JOIN media m ON m.id=p.media_id WHERE p.id=? AND p.media_id=? AND p.task_type='thumbnail' AND p.ingest_run_id=? AND p.ingest_step_id=? AND p.generation=? AND p.status='running' AND p.lease_owner=? AND p.attempts=? AND s.status='running' AND s.lease_owner=p.lease_owner AND s.attempts=p.attempts AND r.status='processing' AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND m.ingest_generation=p.generation`, task.ID, task.MediaID, *task.RunID, *task.StepID, task.Generation, task.LeaseOwner, task.Attempts).Scan(&one); guardErr != nil {
+		if guardErr := tx.QueryRowContext(ctx, `SELECT 1 FROM post_ingest_task p JOIN media_ingest_step s ON s.id=p.ingest_step_id JOIN media_ingest_run r ON r.id=p.ingest_run_id JOIN media m ON m.id=p.media_id WHERE p.id=? AND p.media_id=? AND p.task_type='thumbnail' AND p.ingest_run_id=? AND p.ingest_step_id=? AND p.generation=? AND p.retry_round=? AND p.status='running' AND p.lease_owner=? AND p.attempts=? AND s.status='running' AND s.lease_owner=p.lease_owner AND s.attempts=p.attempts AND r.status='processing' AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND m.ingest_generation=p.generation`, task.ID, task.MediaID, *task.RunID, *task.StepID, task.Generation, task.RetryRound, task.LeaseOwner, task.Attempts).Scan(&one); guardErr != nil {
 			return guardErr
 		}
 		_, insertErr := tx.ExecContext(ctx, `INSERT INTO media_asset_stage_journal(stage_id,media_id,run_id,step_id,generation,owner_token,source_fingerprint,artifact_kind,state,original_path,staged_path,hashes_sizes_json) VALUES(?,?,?,?,?,?,?,'thumbnail','staged',?,?,?)`, staged.Stage.StageID, task.MediaID, *task.RunID, *task.StepID, task.Generation, task.LeaseOwner, fp, source, staged.Stage.StagedPath, string(hs))

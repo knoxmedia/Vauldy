@@ -131,10 +131,10 @@ func adapterTestDB(t *testing.T) *sql.DB {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	_, err = db.Exec(`
-		CREATE TABLE media(id INTEGER PRIMARY KEY, duration INTEGER);
+		CREATE TABLE media(id INTEGER PRIMARY KEY, duration INTEGER, ingest_generation INTEGER NOT NULL DEFAULT 0);
 		CREATE TABLE preview_task(media_id INTEGER UNIQUE, status TEXT DEFAULT 'waiting', interval_sec INTEGER DEFAULT 10, thumb_count INTEGER DEFAULT 0, thumb_width INTEGER DEFAULT 240, thumb_height INTEGER DEFAULT 135, updated_at TEXT, error_message TEXT);
 		CREATE TABLE keyframe_task(media_id INTEGER UNIQUE, status TEXT DEFAULT 'waiting', updated_at TEXT, error_message TEXT, keyframe_count INTEGER DEFAULT 0);
-		CREATE TABLE post_ingest_task(id INTEGER PRIMARY KEY, media_id INTEGER, task_type TEXT, status TEXT, lease_owner TEXT);
+		CREATE TABLE post_ingest_task(id INTEGER PRIMARY KEY, media_id INTEGER, task_type TEXT, status TEXT, lease_owner TEXT, attempts INTEGER DEFAULT 0, generation INTEGER DEFAULT 0, retry_round INTEGER NOT NULL DEFAULT 0);
 		INSERT INTO media(id,duration) VALUES(41,120);`)
 	if err != nil {
 		t.Fatal(err)
@@ -308,13 +308,13 @@ func task11AdapterDB(t *testing.T) *sql.DB {
 	t.Cleanup(func() { _ = db.Close() })
 	_, err = db.Exec(`
 CREATE TABLE library(id INTEGER PRIMARY KEY, path TEXT);
-CREATE TABLE media(id INTEGER PRIMARY KEY, library_id INTEGER, file_path TEXT, file_type TEXT);
+CREATE TABLE media(id INTEGER PRIMARY KEY, library_id INTEGER, file_path TEXT, file_type TEXT, ingest_generation INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE subtitle_task(media_id INTEGER UNIQUE, status TEXT, message TEXT, created_at TEXT, started_at TEXT, finished_at TEXT, updated_at TEXT);
 CREATE TABLE media_subtitle(id INTEGER PRIMARY KEY, media_id INTEGER, status TEXT, vtt_path TEXT);
 CREATE TABLE atrack_task(media_id INTEGER UNIQUE, status TEXT, output_dir TEXT, error_message TEXT, updated_at TEXT);
 CREATE TABLE media_encrypted_assets(media_id INTEGER, plain_path TEXT, status TEXT);
 CREATE TABLE media_derived_assets(media_id INTEGER, artifact_kind TEXT, logical_name TEXT, enc_path TEXT);
-CREATE TABLE post_ingest_task(id INTEGER PRIMARY KEY, media_id INTEGER, task_type TEXT, status TEXT, lease_owner TEXT, attempts INTEGER);
+CREATE TABLE post_ingest_task(id INTEGER PRIMARY KEY, media_id INTEGER, task_type TEXT, status TEXT, lease_owner TEXT, attempts INTEGER DEFAULT 0, generation INTEGER DEFAULT 0, retry_round INTEGER NOT NULL DEFAULT 0);
 INSERT INTO library(id,path) VALUES(3,'');
 INSERT INTO media(id,library_id,file_path,file_type) VALUES(41,3,'video.mp4','video');`)
 	if err != nil {
@@ -548,10 +548,10 @@ func task12AdapterDB(t *testing.T) *sql.DB {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	_, err = db.Exec(`
-CREATE TABLE media(id INTEGER PRIMARY KEY, library_id INTEGER, status TEXT);
+CREATE TABLE media(id INTEGER PRIMARY KEY, library_id INTEGER, status TEXT, ingest_generation INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE library(id INTEGER PRIMARY KEY, encrypted_assets_enabled INTEGER);
 CREATE TABLE media_encrypted_assets(media_id INTEGER PRIMARY KEY, enc_path TEXT, status TEXT);
-CREATE TABLE post_ingest_task(id INTEGER PRIMARY KEY, media_id INTEGER, task_type TEXT, status TEXT, lease_owner TEXT, attempts INTEGER);
+CREATE TABLE post_ingest_task(id INTEGER PRIMARY KEY, media_id INTEGER, task_type TEXT, status TEXT, lease_owner TEXT, attempts INTEGER DEFAULT 0, generation INTEGER DEFAULT 0, retry_round INTEGER NOT NULL DEFAULT 0);
 INSERT INTO library VALUES(1,1);
 INSERT INTO media(id,library_id,status) VALUES(41,1,'active');`)
 	if err != nil {

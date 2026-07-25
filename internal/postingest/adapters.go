@@ -177,8 +177,8 @@ func validateAdapterLease(ctx context.Context, db *sql.DB, task Task) error {
 		return nil
 	}
 	var one int
-	query := `SELECT 1 FROM post_ingest_task p JOIN media m ON m.id=p.media_id WHERE p.id=? AND p.media_id=? AND p.task_type=? AND p.status='running' AND p.lease_owner=? AND p.generation=m.ingest_generation AND (?<=0 OR p.generation=?) AND (p.ingest_run_id IS NULL OR EXISTS (SELECT 1 FROM media_ingest_run r WHERE r.id=p.ingest_run_id AND r.media_id=p.media_id AND r.generation=p.generation AND r.superseded_by_generation IS NULL AND r.superseded_at IS NULL))`
-	args := []any{task.ID, task.MediaID, task.Type, task.LeaseOwner, task.Generation, task.Generation}
+	query := `SELECT 1 FROM post_ingest_task p JOIN media m ON m.id=p.media_id WHERE p.id=? AND p.media_id=? AND p.task_type=? AND p.status='running' AND p.lease_owner=? AND p.retry_round=? AND p.generation=m.ingest_generation AND (?<=0 OR p.generation=?) AND (p.ingest_run_id IS NULL OR EXISTS (SELECT 1 FROM media_ingest_run r WHERE r.id=p.ingest_run_id AND r.media_id=p.media_id AND r.generation=p.generation AND r.superseded_by_generation IS NULL AND r.superseded_at IS NULL))`
+	args := []any{task.ID, task.MediaID, task.Type, task.LeaseOwner, task.RetryRound, task.Generation, task.Generation}
 	if task.Attempts > 0 {
 		query += ` AND attempts=?`
 		args = append(args, task.Attempts)
@@ -194,8 +194,8 @@ func validateAdapterLeaseTx(ctx context.Context, tx *sql.Tx, task Task) error {
 	if strings.TrimSpace(task.LeaseOwner) == "" {
 		return nil
 	}
-	query := `SELECT 1 FROM post_ingest_task p JOIN media m ON m.id=p.media_id WHERE p.id=? AND p.media_id=? AND p.task_type=? AND p.status='running' AND p.lease_owner=? AND p.generation=m.ingest_generation AND (?<=0 OR p.generation=?) AND (p.ingest_run_id IS NULL OR EXISTS (SELECT 1 FROM media_ingest_run r WHERE r.id=p.ingest_run_id AND r.media_id=p.media_id AND r.generation=p.generation AND r.superseded_by_generation IS NULL AND r.superseded_at IS NULL))`
-	args := []any{task.ID, task.MediaID, task.Type, task.LeaseOwner, task.Generation, task.Generation}
+	query := `SELECT 1 FROM post_ingest_task p JOIN media m ON m.id=p.media_id WHERE p.id=? AND p.media_id=? AND p.task_type=? AND p.status='running' AND p.lease_owner=? AND p.retry_round=? AND p.generation=m.ingest_generation AND (?<=0 OR p.generation=?) AND (p.ingest_run_id IS NULL OR EXISTS (SELECT 1 FROM media_ingest_run r WHERE r.id=p.ingest_run_id AND r.media_id=p.media_id AND r.generation=p.generation AND r.superseded_by_generation IS NULL AND r.superseded_at IS NULL))`
+	args := []any{task.ID, task.MediaID, task.Type, task.LeaseOwner, task.RetryRound, task.Generation, task.Generation}
 	if task.Attempts > 0 {
 		query += ` AND attempts=?`
 		args = append(args, task.Attempts)
@@ -607,8 +607,8 @@ func commitEncryptionStage(ctx context.Context, db *sql.DB, task Task, s storage
 
 	_, err := seams.immediate(ctx, db, func(tx store.ImmediateConnTx) error {
 		var selected string
-		guard := `SELECT m.file_path FROM post_ingest_task p JOIN media_ingest_step step ON step.id=p.ingest_step_id JOIN media_ingest_run r ON r.id=p.ingest_run_id JOIN media m ON m.id=p.media_id WHERE p.id=? AND p.task_type='encrypt' AND p.media_id=? AND p.generation=? AND p.ingest_run_id=? AND p.ingest_step_id=? AND p.status='running' AND p.lease_owner=? AND p.attempts=? AND step.status='running' AND step.lease_owner=p.lease_owner AND step.attempts=p.attempts AND r.status='processing' AND r.superseded_at IS NULL AND COALESCE(r.superseded_by_generation,0)=0 AND m.ingest_generation=p.generation AND NOT EXISTS(SELECT 1 FROM media_ingest_step_dependency d JOIN media_ingest_step dep ON dep.id=d.depends_on_step_id WHERE d.step_id=step.id AND d.dependency_kind='step_done' AND dep.status NOT IN ('done','skipped'))`
-		if err := tx.QueryRowContext(ctx, guard, task.ID, task.MediaID, task.Generation, *task.RunID, *task.StepID, task.LeaseOwner, task.Attempts).Scan(&selected); err != nil {
+		guard := `SELECT m.file_path FROM post_ingest_task p JOIN media_ingest_step step ON step.id=p.ingest_step_id JOIN media_ingest_run r ON r.id=p.ingest_run_id JOIN media m ON m.id=p.media_id WHERE p.id=? AND p.task_type='encrypt' AND p.media_id=? AND p.generation=? AND p.retry_round=? AND p.ingest_run_id=? AND p.ingest_step_id=? AND p.status='running' AND p.lease_owner=? AND p.attempts=? AND step.status='running' AND step.lease_owner=p.lease_owner AND step.attempts=p.attempts AND r.status='processing' AND r.superseded_at IS NULL AND COALESCE(r.superseded_by_generation,0)=0 AND m.ingest_generation=p.generation AND NOT EXISTS(SELECT 1 FROM media_ingest_step_dependency d JOIN media_ingest_step dep ON dep.id=d.depends_on_step_id WHERE d.step_id=step.id AND d.dependency_kind='step_done' AND dep.status NOT IN ('done','skipped'))`
+		if err := tx.QueryRowContext(ctx, guard, task.ID, task.MediaID, task.Generation, task.RetryRound, *task.RunID, *task.StepID, task.LeaseOwner, task.Attempts).Scan(&selected); err != nil {
 			return ClassifiedError{Kind: FailureShutdown, Err: fmt.Errorf("encrypt commit stale fence: %w", err)}
 		}
 		if !alreadySelected {
@@ -683,7 +683,7 @@ func commitEncryptionStage(ctx context.Context, db *sql.DB, task Task, s storage
 }
 func selectedEncryptionStage(ctx context.Context, db *sql.DB, task Task, s storage.StagedMediaEncryption) (bool, error) {
 	var selected string
-	err := db.QueryRowContext(ctx, `SELECT m.file_path FROM post_ingest_task p JOIN media_ingest_step step ON step.id=p.ingest_step_id JOIN media_ingest_run r ON r.id=p.ingest_run_id JOIN media m ON m.id=p.media_id WHERE p.id=? AND p.media_id=? AND p.generation=? AND p.ingest_run_id=? AND p.ingest_step_id=? AND p.status='running' AND p.lease_owner=? AND p.attempts=? AND step.status='running' AND step.lease_owner=p.lease_owner AND step.attempts=p.attempts AND r.status='processing' AND r.superseded_at IS NULL AND COALESCE(r.superseded_by_generation,0)=0 AND m.ingest_generation=p.generation`, task.ID, task.MediaID, task.Generation, *task.RunID, *task.StepID, task.LeaseOwner, task.Attempts).Scan(&selected)
+	err := db.QueryRowContext(ctx, `SELECT m.file_path FROM post_ingest_task p JOIN media_ingest_step step ON step.id=p.ingest_step_id JOIN media_ingest_run r ON r.id=p.ingest_run_id JOIN media m ON m.id=p.media_id WHERE p.id=? AND p.media_id=? AND p.generation=? AND p.retry_round=? AND p.ingest_run_id=? AND p.ingest_step_id=? AND p.status='running' AND p.lease_owner=? AND p.attempts=? AND step.status='running' AND step.lease_owner=p.lease_owner AND step.attempts=p.attempts AND r.status='processing' AND r.superseded_at IS NULL AND COALESCE(r.superseded_by_generation,0)=0 AND m.ingest_generation=p.generation`, task.ID, task.MediaID, task.Generation, task.RetryRound, *task.RunID, *task.StepID, task.LeaseOwner, task.Attempts).Scan(&selected)
 	if err != nil {
 		return false, err
 	}
@@ -707,7 +707,7 @@ func errOrMismatch(err error, got, want string) error {
 }
 func reconcileEncryptionFinalization(ctx context.Context, db *sql.DB, task Task, stageID string) error {
 	var n int
-	err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM media_ingest_evidence e JOIN post_ingest_task p ON p.id=? JOIN media_ingest_step s ON s.id=? JOIN media_ingest_run r ON r.id=? JOIN media m ON m.id=? JOIN media_encrypted_assets a ON a.media_id=m.id AND a.enc_path=m.file_path WHERE e.step_id=s.id AND e.kind='encrypt' AND e.stage_id=? AND e.run_id=r.id AND e.media_id=m.id AND e.generation=? AND p.status='done' AND s.status='done' AND r.status IN ('published','degraded') AND m.ingest_generation=?`, task.ID, *task.StepID, *task.RunID, task.MediaID, stageID, task.Generation, task.Generation).Scan(&n)
+	err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM media_ingest_evidence e JOIN post_ingest_task p ON p.id=? JOIN media_ingest_step s ON s.id=? JOIN media_ingest_run r ON r.id=? JOIN media m ON m.id=? JOIN media_encrypted_assets a ON a.media_id=m.id AND a.enc_path=m.file_path WHERE e.step_id=s.id AND e.kind='encrypt' AND e.stage_id=? AND e.run_id=r.id AND e.media_id=m.id AND e.generation=? AND p.retry_round=? AND p.status='done' AND s.status='done' AND r.status IN ('published','degraded') AND m.ingest_generation=?`, task.ID, *task.StepID, *task.RunID, task.MediaID, stageID, task.Generation, task.RetryRound, task.Generation).Scan(&n)
 	if err != nil {
 		return err
 	}
@@ -735,7 +735,7 @@ func cleanupPlaintextAfterCommittedEncryption(db *sql.DB, s storage.StagedMediaE
 	}
 }
 func finishEncryptionLifecycleTx(ctx context.Context, tx store.SQLExecutor, task Task) error {
-	res, err := tx.ExecContext(ctx, `UPDATE post_ingest_task SET status='done',lease_owner=NULL,lease_until=NULL,last_error='',finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='running' AND lease_owner=? AND attempts=?`, task.ID, task.LeaseOwner, task.Attempts)
+	res, err := tx.ExecContext(ctx, `UPDATE post_ingest_task SET status='done',lease_owner=NULL,lease_until=NULL,last_error='',finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='running' AND lease_owner=? AND attempts=? AND retry_round=?`, task.ID, task.LeaseOwner, task.Attempts, task.RetryRound)
 	if err != nil {
 		return err
 	}

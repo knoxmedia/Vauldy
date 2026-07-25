@@ -31,7 +31,7 @@ func seedLinkedPosterFenceTask(t *testing.T, meta string) (*sql.DB, string, Task
 	}
 	id, _ := res.LastInsertId()
 	runID, stepID := int64(7101), int64(7201)
-	return db, upload, Task{ID: id, MediaID: mediaID, RunID: &runID, StepID: &stepID, Generation: 1, Type: TaskPoster, Status: StatusRunning, Attempts: 1, LeaseOwner: "poster-owner/old"}
+	return db, upload, Task{ID: id, MediaID: mediaID, RunID: &runID, StepID: &stepID, Generation: 1, Type: TaskPoster, Status: StatusRunning, Attempts: 1, RetryRound: 0, LeaseOwner: "poster-owner/old"}
 }
 
 func assertPosterFenceUnchanged(t *testing.T, db *sql.DB, task Task, wantMeta string) {
@@ -126,7 +126,7 @@ func seedCurrentLinkedPosterTask(t *testing.T) (*sql.DB, string, Task) {
 	}
 	id, _ := res.LastInsertId()
 	run, step := int64(7301), int64(7302)
-	return db, upload, Task{ID: id, MediaID: mediaID, RunID: &run, StepID: &step, Generation: 1, Type: TaskPoster, Status: StatusRunning, Attempts: 1, LeaseOwner: "poster-owner/current"}
+	return db, upload, Task{ID: id, MediaID: mediaID, RunID: &run, StepID: &step, Generation: 1, Type: TaskPoster, Status: StatusRunning, Attempts: 1, RetryRound: 0, LeaseOwner: "poster-owner/current"}
 }
 
 type stagedPosterFake struct {
@@ -245,4 +245,43 @@ func TestPosterLegacyClaimedFastPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	requirePosterShutdown(t, NewPosterAdapter(db, upload, nil, &fakePosterRunner{}).Execute(context.Background(), task))
+}
+func TestPosterAtomicFinalizerFencesStaleRetryRound(t *testing.T) {
+	db, upload, task := seedCurrentLinkedPosterTask(t)
+	dir := filepath.Join(upload, "posters", "generation-1", "poster-retry-round")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, posterLogicalName)
+	if err := os.WriteFile(path, []byte("candidate"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	size, hash, err := hashPath(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fp, err := sourceFingerprint(taskSource(t, db, task.MediaID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage := StagedPoster{Stage: publication.StageRecord{StageID: "poster-retry-round", Request: publication.StageRequest{QueueID: task.ID, MediaID: task.MediaID, RunID: *task.RunID, StepID: *task.StepID, Generation: task.Generation, OwnerToken: task.LeaseOwner, Attempt: task.Attempts, SourceFingerprint: fp}, Kind: publication.ArtifactPoster, State: "staged", StagedPath: dir}, Path: path, URL: "/stale.jpg", Size: size, Hash: hash}
+	if _, err := db.Exec(`INSERT INTO media_asset_stage_journal(stage_id,media_id,run_id,step_id,generation,owner_token,source_fingerprint,artifact_kind,state,staged_path,hashes_sizes_json) VALUES(?,?,?,?,?,?,?,'poster','staged',?,'{}')`, stage.Stage.StageID, task.MediaID, *task.RunID, *task.StepID, task.Generation, task.LeaseOwner, fp, dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE post_ingest_task SET retry_round=retry_round+1 WHERE id=?`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	requirePosterShutdown(t, commitStagedPoster(context.Background(), db, task, stage, PosterRecoveryRoots{Upload: upload}))
+	var meta, taskStatus, stepStatus, journalState string
+	var evidence, derived int
+	if err := db.QueryRow(`SELECT m.meta_json,p.status,s.status,j.state,(SELECT COUNT(*) FROM media_ingest_evidence WHERE step_id=s.id),(SELECT COUNT(*) FROM media_derived_assets WHERE media_id=m.id) FROM post_ingest_task p JOIN media_ingest_step s ON s.id=p.ingest_step_id JOIN media m ON m.id=p.media_id JOIN media_asset_stage_journal j ON j.stage_id=? WHERE p.id=?`, stage.Stage.StageID, task.ID).Scan(&meta, &taskStatus, &stepStatus, &journalState, &evidence, &derived); err != nil {
+		t.Fatal(err)
+	}
+	if meta != `{}` || taskStatus != "running" || stepStatus != "running" || journalState != "staged" || evidence != 0 || derived != 0 {
+		t.Fatalf("stale round mutated meta=%s task=%s step=%s journal=%s evidence=%d derived=%d", meta, taskStatus, stepStatus, journalState, evidence, derived)
+	}
+	task.RetryRound++
+	if err := commitStagedPoster(context.Background(), db, task, stage, PosterRecoveryRoots{Upload: upload}); err != nil {
+		t.Fatalf("current round finalizer: %v", err)
+	}
 }

@@ -390,7 +390,7 @@ func commitStagedPoster(ctx context.Context, db *sql.DB, task Task, staged Stage
 		if e != nil {
 			return e
 		}
-		result, e := tx.ExecContext(ctx, `UPDATE post_ingest_task SET status='done',lease_owner=NULL,lease_until=NULL,last_error='',finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='running' AND lease_owner=? AND attempts=?`, task.ID, task.LeaseOwner, task.Attempts)
+		result, e := tx.ExecContext(ctx, `UPDATE post_ingest_task SET status='done',lease_owner=NULL,lease_until=NULL,last_error='',finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='running' AND lease_owner=? AND attempts=? AND retry_round=?`, task.ID, task.LeaseOwner, task.Attempts, task.RetryRound)
 		if e != nil {
 			return e
 		}
@@ -477,9 +477,9 @@ func validatePosterTaskTx(ctx context.Context, tx store.SQLExecutor, task Task) 
 	var one int
 	var err error
 	if task.Type == TaskPoster && task.RunID != nil && task.StepID != nil {
-		err = tx.QueryRowContext(ctx, `SELECT 1 FROM post_ingest_task p JOIN media_ingest_step s ON s.id=p.ingest_step_id JOIN media_ingest_run r ON r.id=p.ingest_run_id JOIN media m ON m.id=p.media_id WHERE p.id=? AND p.media_id=? AND p.task_type='poster' AND p.status='running' AND p.lease_owner=? AND p.attempts=? AND p.ingest_run_id=? AND p.ingest_step_id=? AND p.generation=? AND s.status='running' AND s.lease_owner=p.lease_owner AND s.attempts=p.attempts AND s.run_id=p.ingest_run_id AND s.media_id=p.media_id AND s.generation=p.generation AND r.status='processing' AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND m.ingest_generation=p.generation`, task.ID, task.MediaID, task.LeaseOwner, task.Attempts, *task.RunID, *task.StepID, task.Generation).Scan(&one)
+		err = tx.QueryRowContext(ctx, `SELECT 1 FROM post_ingest_task p JOIN media_ingest_step s ON s.id=p.ingest_step_id JOIN media_ingest_run r ON r.id=p.ingest_run_id JOIN media m ON m.id=p.media_id WHERE p.id=? AND p.media_id=? AND p.task_type='poster' AND p.status='running' AND p.lease_owner=? AND p.attempts=? AND p.ingest_run_id=? AND p.ingest_step_id=? AND p.generation=? AND p.retry_round=? AND s.status='running' AND s.lease_owner=p.lease_owner AND s.attempts=p.attempts AND s.run_id=p.ingest_run_id AND s.media_id=p.media_id AND s.generation=p.generation AND r.status='processing' AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND m.ingest_generation=p.generation`, task.ID, task.MediaID, task.LeaseOwner, task.Attempts, *task.RunID, *task.StepID, task.Generation, task.RetryRound).Scan(&one)
 	} else if task.Type == TaskPosterRepair && task.RunID != nil && task.StepID == nil {
-		err = tx.QueryRowContext(ctx, `SELECT 1 FROM post_ingest_task p JOIN media m ON m.id=p.media_id JOIN media_ingest_run r ON r.id=p.ingest_run_id WHERE p.id=? AND p.media_id=? AND p.task_type='poster_repair' AND p.status='running' AND p.lease_owner=? AND p.attempts=? AND p.ingest_run_id=? AND p.ingest_step_id IS NULL AND p.generation=? AND m.ingest_generation=p.generation AND m.publication_state IN ('published','degraded') AND m.published_at IS NOT NULL AND r.media_id=p.media_id AND r.generation=p.generation AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL`, task.ID, task.MediaID, task.LeaseOwner, task.Attempts, *task.RunID, task.Generation).Scan(&one)
+		err = tx.QueryRowContext(ctx, `SELECT 1 FROM post_ingest_task p JOIN media m ON m.id=p.media_id JOIN media_ingest_run r ON r.id=p.ingest_run_id WHERE p.id=? AND p.media_id=? AND p.task_type='poster_repair' AND p.status='running' AND p.lease_owner=? AND p.attempts=? AND p.ingest_run_id=? AND p.ingest_step_id IS NULL AND p.generation=? AND p.retry_round=? AND m.ingest_generation=p.generation AND m.publication_state IN ('published','degraded') AND m.published_at IS NOT NULL AND r.media_id=p.media_id AND r.generation=p.generation AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL`, task.ID, task.MediaID, task.LeaseOwner, task.Attempts, *task.RunID, task.Generation, task.RetryRound).Scan(&one)
 	} else {
 		err = sql.ErrNoRows
 	}
@@ -546,7 +546,7 @@ func verifyCommittedPosterTx(ctx context.Context, tx store.SQLExecutor, task Tas
 func reconcilePosterCommitState(ctx context.Context, db *sql.DB, task Task, staged StagedPoster) (posterCommitState, error) {
 	if task.Type == TaskPosterRepair {
 		var state, meta string
-		err := db.QueryRowContext(ctx, `SELECT r.state,m.meta_json FROM poster_repair_stage r JOIN post_ingest_task p ON p.id=r.queue_id JOIN media m ON m.id=r.media_id JOIN media_ingest_run run ON run.id=r.run_id WHERE r.stage_id=? AND r.queue_id=? AND r.media_id=? AND r.run_id=? AND r.generation=? AND r.owner_token=? AND r.attempt=? AND r.source_fingerprint=? AND p.status='done' AND p.ingest_step_id IS NULL AND run.superseded_at IS NULL AND run.superseded_by_generation IS NULL AND m.ingest_generation=r.generation`, staged.Stage.StageID, task.ID, task.MediaID, *task.RunID, task.Generation, task.LeaseOwner, task.Attempts, staged.Stage.Request.SourceFingerprint).Scan(&state, &meta)
+		err := db.QueryRowContext(ctx, `SELECT r.state,m.meta_json FROM poster_repair_stage r JOIN post_ingest_task p ON p.id=r.queue_id JOIN media m ON m.id=r.media_id JOIN media_ingest_run run ON run.id=r.run_id WHERE r.stage_id=? AND r.queue_id=? AND r.media_id=? AND r.run_id=? AND r.generation=? AND r.owner_token=? AND r.attempt=? AND r.source_fingerprint=? AND p.status='done' AND p.retry_round=? AND p.ingest_step_id IS NULL AND run.superseded_at IS NULL AND run.superseded_by_generation IS NULL AND m.ingest_generation=r.generation`, staged.Stage.StageID, task.ID, task.MediaID, *task.RunID, task.Generation, task.LeaseOwner, task.Attempts, staged.Stage.Request.SourceFingerprint, task.RetryRound).Scan(&state, &meta)
 		if errors.Is(err, sql.ErrNoRows) {
 			var n int
 			if e := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM poster_repair_stage WHERE stage_id=? OR (queue_id=? AND attempt=?)`, staged.Stage.StageID, task.ID, task.Attempts).Scan(&n); e != nil {
@@ -806,7 +806,7 @@ func (r *LocalPosterRunner) StagePoster(ctx context.Context, req publication.Sta
 		if req.StepID > 0 {
 			task.StepID = &req.StepID
 		}
-		if e := tx.QueryRowContext(ctx, `SELECT id,attempts,task_type FROM post_ingest_task WHERE media_id=? AND ingest_run_id=? AND ((?=0 AND ingest_step_id IS NULL) OR ingest_step_id=?) AND generation=? AND status='running' AND lease_owner=?`, req.MediaID, req.RunID, req.StepID, req.StepID, req.Generation, req.OwnerToken).Scan(&task.ID, &task.Attempts, &task.Type); e != nil {
+		if e := tx.QueryRowContext(ctx, `SELECT id,attempts,retry_round,task_type FROM post_ingest_task WHERE media_id=? AND ingest_run_id=? AND ((?=0 AND ingest_step_id IS NULL) OR ingest_step_id=?) AND generation=? AND status='running' AND lease_owner=?`, req.MediaID, req.RunID, req.StepID, req.StepID, req.Generation, req.OwnerToken).Scan(&task.ID, &task.Attempts, &task.RetryRound, &task.Type); e != nil {
 			return e
 		}
 		if e := validatePosterTaskTx(ctx, tx, task); e != nil {
