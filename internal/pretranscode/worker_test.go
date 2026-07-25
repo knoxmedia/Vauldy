@@ -573,8 +573,12 @@ func TestProcessNextCompletesSkippedRenditionThroughPublicationAggregate(t *test
 func exactClaimedJob(t *testing.T, db *sql.DB, jobID, taskID int64, jobOwner string) claimedJob {
 	t.Helper()
 	var p publication.PrepareParentIdentity
-	if err := db.QueryRow(`SELECT id,COALESCE(ingest_run_id,0),COALESCE(ingest_step_id,0),COALESCE(media_id,0),COALESCE(generation,0),COALESCE(lease_owner,'') FROM transcode_task WHERE id=?`, taskID).Scan(&p.TaskID, &p.RunID, &p.StepID, &p.MediaID, &p.Generation, &p.Owner); err != nil {
+	if err := db.QueryRow(`SELECT id,COALESCE(ingest_run_id,0),COALESCE(ingest_step_id,0),COALESCE(media_id,0),COALESCE(generation,0),COALESCE(lease_owner,''),COALESCE(retry_round,0) FROM transcode_task WHERE id=?`, taskID).Scan(&p.TaskID, &p.RunID, &p.StepID, &p.MediaID, &p.Generation, &p.Owner, &p.RetryRound); err != nil {
 		t.Fatal(err)
 	}
-	return claimedJob{ID: jobID, TaskID: taskID, Owner: jobOwner, Parent: p}
+	var jobRound int
+	if err := db.QueryRow(`SELECT COALESCE(retry_round,0) FROM pretranscode_rendition_job WHERE id=?`, jobID).Scan(&jobRound); err != nil {
+		t.Fatal(err)
+	}
+	return claimedJob{ID: jobID, TaskID: taskID, Owner: jobOwner, Parent: p, RetryRound: jobRound}
 }

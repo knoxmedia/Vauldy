@@ -43,6 +43,7 @@ type ClaimRequest struct {
 type PrepareParentIdentity struct {
 	TaskID, RunID, StepID, MediaID, Generation int64
 	Owner                                      string
+	RetryRound                                 int
 }
 
 var ErrClaimCommitUncertain = errors.New("publication claim commit outcome uncertain")
@@ -433,7 +434,7 @@ func updateFamilyClaim(ctx context.Context, tx store.SQLExecutor, req ClaimReque
 		p.TaskType = "scrape"
 		p.MaxAttempts = 3
 	case QueuePrepare:
-		err = tx.QueryRowContext(ctx, `SELECT COALESCE(media_id,(SELECT m.id FROM media m WHERE m.file_id=transcode_task.file_id),0),ingest_run_id,ingest_step_id,generation,lease_until FROM transcode_task WHERE id=?`, id).Scan(&p.MediaID, &p.RunID, &p.StepID, &p.Generation, &lease)
+		err = tx.QueryRowContext(ctx, `SELECT COALESCE(media_id,(SELECT m.id FROM media m WHERE m.file_id=transcode_task.file_id),0),ingest_run_id,ingest_step_id,generation,COALESCE(retry_round,0),lease_until FROM transcode_task WHERE id=?`, id).Scan(&p.MediaID, &p.RunID, &p.StepID, &p.Generation, &p.RetryRound, &lease)
 		p.TaskType = "prepare"
 		p.Attempts = 1
 		p.MaxAttempts = 1
@@ -472,7 +473,7 @@ func claimByOwner(ctx context.Context, db *sql.DB, f QueueFamily, owner string) 
 		p.TaskType = "scrape"
 		p.MaxAttempts = 3
 	case QueuePrepare:
-		err = db.QueryRowContext(ctx, `SELECT q.id,COALESCE(q.media_id,(SELECT m2.id FROM media m2 WHERE m2.file_id=q.file_id),0),q.ingest_run_id,q.ingest_step_id,q.generation,q.lease_until FROM transcode_task q LEFT JOIN media_ingest_step st ON st.id=q.ingest_step_id LEFT JOIN media_ingest_run r ON r.id=q.ingest_run_id LEFT JOIN media m ON m.id=q.media_id WHERE q.lease_owner=? AND q.status='running' AND ((q.ingest_run_id IS NULL AND q.ingest_step_id IS NULL AND q.generation IS NULL) OR (st.status='running' AND st.lease_owner=q.lease_owner AND st.run_id=q.ingest_run_id AND st.media_id=q.media_id AND st.generation=q.generation AND r.id=st.run_id AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND m.ingest_generation=q.generation))`, owner).Scan(&p.QueueID, &p.MediaID, &p.RunID, &p.StepID, &p.Generation, &lease)
+		err = db.QueryRowContext(ctx, `SELECT q.id,COALESCE(q.media_id,(SELECT m2.id FROM media m2 WHERE m2.file_id=q.file_id),0),q.ingest_run_id,q.ingest_step_id,q.generation,COALESCE(q.retry_round,0),q.lease_until FROM transcode_task q LEFT JOIN media_ingest_step st ON st.id=q.ingest_step_id LEFT JOIN media_ingest_run r ON r.id=q.ingest_run_id LEFT JOIN media m ON m.id=q.media_id WHERE q.lease_owner=? AND q.status='running' AND ((q.ingest_run_id IS NULL AND q.ingest_step_id IS NULL AND q.generation IS NULL) OR (st.status='running' AND st.lease_owner=q.lease_owner AND st.run_id=q.ingest_run_id AND st.media_id=q.media_id AND st.generation=q.generation AND r.id=st.run_id AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND m.ingest_generation=q.generation))`, owner).Scan(&p.QueueID, &p.MediaID, &p.RunID, &p.StepID, &p.Generation, &p.RetryRound, &lease)
 		p.TaskType = "prepare"
 		p.Attempts = 1
 		p.MaxAttempts = 1

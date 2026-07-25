@@ -25,6 +25,7 @@ func init() {
 			addColumnIfMissing(db, "transcode_task", "ingest_run_id INTEGER")
 			addColumnIfMissing(db, "transcode_task", "ingest_step_id INTEGER")
 			addColumnIfMissing(db, "transcode_task", "generation INTEGER")
+			addColumnIfMissing(db, "transcode_task", "retry_round INTEGER NOT NULL DEFAULT 0")
 
 			stmts := []string{
 				`CREATE TABLE IF NOT EXISTS transcode_preset (
@@ -146,6 +147,7 @@ func init() {
 			addColumnIfMissing(db, "pretranscode_rendition_job", "lease_owner TEXT")
 			addColumnIfMissing(db, "pretranscode_rendition_job", "lease_until TIMESTAMP")
 			addColumnIfMissing(db, "pretranscode_rendition_job", "config_snapshot_json TEXT")
+			addColumnIfMissing(db, "pretranscode_rendition_job", "retry_round INTEGER NOT NULL DEFAULT 0")
 			// Ensure pretranscode_task_meta columns exist
 			addColumnIfMissing(db, "pretranscode_task_meta", "output_format TEXT NOT NULL DEFAULT 'hls'")
 			addColumnIfMissing(db, "pretranscode_task_meta", "encryption_mode TEXT DEFAULT 'none'")
@@ -245,7 +247,7 @@ func migratePretranscodeRenditionJobFK(db *sql.DB) error {
 		return nil
 	}
 	normalized := strings.ToLower(strings.Join(strings.Fields(createSQL.String), ""))
-	if strings.Contains(normalized, "foreignkey(task_id)referencestranscode_task(id)ondeletecascade") && strings.Contains(normalized, "foreignkey(rendition_id)referencespreset_rendition(id)ondeletesetnull") && strings.Contains(normalized, "config_snapshot_json") {
+	if strings.Contains(normalized, "foreignkey(task_id)referencestranscode_task(id)ondeletecascade") && strings.Contains(normalized, "foreignkey(rendition_id)referencespreset_rendition(id)ondeletesetnull") && strings.Contains(normalized, "config_snapshot_json") && strings.Contains(normalized, "retry_round") {
 		return nil
 	}
 
@@ -257,6 +259,7 @@ func migratePretranscodeRenditionJobFK(db *sql.DB) error {
 	addColumnIfMissing(db, "pretranscode_rendition_job", "lease_owner TEXT")
 	addColumnIfMissing(db, "pretranscode_rendition_job", "lease_until TIMESTAMP")
 	addColumnIfMissing(db, "pretranscode_rendition_job", "config_snapshot_json TEXT")
+	addColumnIfMissing(db, "pretranscode_rendition_job", "retry_round INTEGER NOT NULL DEFAULT 0")
 
 	stmts := []string{
 		`CREATE TABLE pretranscode_rendition_job_new (
@@ -276,13 +279,14 @@ func migratePretranscodeRenditionJobFK(db *sql.DB) error {
 			lease_owner TEXT,
 			lease_until TIMESTAMP,
 			config_snapshot_json TEXT,
+			retry_round INTEGER NOT NULL DEFAULT 0,
 			FOREIGN KEY (task_id) REFERENCES transcode_task(id) ON DELETE CASCADE,
 			FOREIGN KEY (rendition_id) REFERENCES preset_rendition(id) ON DELETE SET NULL
 		)`,
 		`INSERT INTO pretranscode_rendition_job_new
-			(id, task_id, rendition_id, rendition_name, status, progress, output_path, error_message, encoder_used, started_at, completed_at, created_at, available_at, lease_owner, lease_until, config_snapshot_json)
+			(id, task_id, rendition_id, rendition_name, status, progress, output_path, error_message, encoder_used, started_at, completed_at, created_at, available_at, lease_owner, lease_until, config_snapshot_json, retry_round)
 		 SELECT old.id, old.task_id, old.rendition_id, COALESCE(old.rendition_name,''), old.status, old.progress,
-		        old.output_path, old.error_message, old.encoder_used, old.started_at, old.completed_at, old.created_at, COALESCE(old.available_at,CURRENT_TIMESTAMP), old.lease_owner, old.lease_until, old.config_snapshot_json
+		        old.output_path, old.error_message, old.encoder_used, old.started_at, old.completed_at, old.created_at, COALESCE(old.available_at,CURRENT_TIMESTAMP), old.lease_owner, old.lease_until, old.config_snapshot_json, COALESCE(old.retry_round,0)
 		   FROM pretranscode_rendition_job old
 		  WHERE EXISTS (SELECT 1 FROM transcode_task t WHERE t.id = old.task_id)`,
 		`DROP TABLE pretranscode_rendition_job`,

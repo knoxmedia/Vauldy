@@ -12,6 +12,7 @@ import (
 
 	"knox-media/api/middleware"
 
+	"knox-media/internal/pretranscode"
 	"knox-media/internal/publication"
 )
 
@@ -67,14 +68,43 @@ func (h *Handler) AdminRetryOptionalScrape(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
-	err = publication.RetryOptionalScrape(c.Request.Context(), h.App.DB, publication.OptionalScrapeRetryRequest{MediaID: mediaID, StepID: stepID, ActorID: middleware.UserID(c), Reason: body.Reason}, h.PublicationCapabilities)
+	var stepType string
+	err = h.App.DB.QueryRowContext(c.Request.Context(), `SELECT s.step_type FROM media_ingest_step s JOIN media m ON m.id=s.media_id AND m.ingest_generation=s.generation WHERE s.id=? AND s.media_id=?`, stepID, mediaID).Scan(&stepType)
+	if errors.Is(err, sql.ErrNoRows) {
+		c.JSON(http.StatusConflict, gin.H{"code": "no_retryable_work", "error": "no retryable work"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	switch stepType {
+	case "scrape":
+		err = publication.RetryOptionalScrape(c.Request.Context(), h.App.DB, publication.OptionalScrapeRetryRequest{MediaID: mediaID, StepID: stepID, ActorID: middleware.UserID(c), Reason: body.Reason}, h.PublicationCapabilities)
+	case "preview", "subtitle":
+		err = publication.RetryOptionalPostIngest(c.Request.Context(), h.App.DB, publication.OptionalPostIngestRetryRequest{MediaID: mediaID, StepID: stepID, ActorID: middleware.UserID(c), Reason: body.Reason})
+	case "prepare":
+		req := publication.OptionalPrepareRetryRequest{MediaID: mediaID, StepID: stepID, ActorID: middleware.UserID(c), Reason: body.Reason}
+		if mod := pretranscode.ActiveModule(); mod != nil && mod.Worker != nil {
+			req.CaptureActive = func(taskID int64, retryRound int) func() {
+				_ = retryRound
+				return mod.Worker.CaptureParentCancellation(taskID)
+			}
+		}
+		err = publication.RetryOptionalPrepare(c.Request.Context(), h.App.DB, req, h.PublicationCapabilities)
+	default:
+		c.JSON(http.StatusConflict, gin.H{"code": "no_retryable_work", "error": "no retryable work"})
+		return
+	}
 	switch {
 	case errors.Is(err, publication.ErrInvalidRetryReason):
 		c.JSON(http.StatusBadRequest, gin.H{"code": "invalid_retry_reason", "error": "reason is required"})
 	case errors.Is(err, publication.ErrScrapeCapabilityUnavailable):
 		c.JSON(http.StatusConflict, gin.H{"code": "scrape_capability_unavailable", "error": "scrape capability unavailable"})
+	case errors.Is(err, publication.ErrPrepareCapabilityUnavailable):
+		c.JSON(http.StatusServiceUnavailable, gin.H{"code": "prepare_capability_unavailable", "error": "prepare capability unavailable"})
 	case errors.Is(err, publication.ErrNoRetryableWork):
-		c.JSON(http.StatusConflict, gin.H{"code": "no_retryable_work", "error": "no retryable scrape work"})
+		c.JSON(http.StatusConflict, gin.H{"code": "no_retryable_work", "error": "no retryable work"})
 	case err != nil:
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 	default:

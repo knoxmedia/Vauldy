@@ -658,6 +658,9 @@ var publicationMigrationRollbackProbe = func(ctx context.Context, conn *sql.Conn
 func migrateIngestPublication(ctx context.Context, db *sql.DB) error {
 	publicationMigrationMu.Lock()
 	defer publicationMigrationMu.Unlock()
+	if err := ensureOptionalRetryAuditSchema(ctx, db); err != nil {
+		return err
+	}
 	if current, err := publicationV2CurrentDB(ctx, db); err != nil {
 		return err
 	} else if current {
@@ -806,6 +809,9 @@ func migratePublicationV2(ctx context.Context, db *sql.DB) (err error) {
 	if err = publicationMigrationHook(publicationStagePreflight); err != nil {
 		return err
 	}
+	if err = ensureOptionalRetryAuditSchema(ctx, conn); err != nil {
+		return err
+	}
 	// The base schema may recreate this obsolete index on open. Drop it only
 	// after the complete fail-before-mutation preflight and inside this transaction.
 	if _, err = conn.ExecContext(ctx, `DROP INDEX IF EXISTS idx_scrape_task_status`); err != nil {
@@ -850,7 +856,10 @@ func migratePublicationV2(ctx context.Context, db *sql.DB) (err error) {
 	if err = validateSupersessionRows(ctx, conn); err != nil {
 		return err
 	}
-	for _, upgrade := range []struct{ table, column, definition string }{{"post_ingest_task", "retry_round", "INTEGER NOT NULL DEFAULT 0"}, {"scrape_task", "retry_round", "INTEGER NOT NULL DEFAULT 0"}} {
+	for _, upgrade := range []struct{ table, column, definition string }{{"post_ingest_task", "retry_round", "INTEGER NOT NULL DEFAULT 0"}, {"scrape_task", "retry_round", "INTEGER NOT NULL DEFAULT 0"}, {"transcode_task", "retry_round", "INTEGER NOT NULL DEFAULT 0"}} {
+		if !tableExists(ctx, conn, upgrade.table) {
+			continue
+		}
 		cols, e := publicationColumns(ctx, conn, upgrade.table)
 		if e != nil {
 			return e
@@ -860,6 +869,9 @@ func migratePublicationV2(ctx context.Context, db *sql.DB) (err error) {
 				return e
 			}
 		}
+	}
+	if err = ensureOptionalRetryAuditSchema(ctx, conn); err != nil {
+		return err
 	}
 	graph, err := backupPublicationGraph(ctx, conn)
 	if err != nil {
@@ -1190,7 +1202,7 @@ func slicesWithout(values []string, unwanted string) []string {
 }
 func publicationIdentity(ctx context.Context, q SQLExecutor, table string, count *int64, sum *string) error {
 	cols, pk, err := publicationDigestColumns(ctx, q, table)
-	if strings.Contains(table, "scrape_task") {
+	if strings.Contains(table, "scrape_task") || strings.Contains(table, "pretranscode_rendition_job") || strings.Contains(table, "transcode_task") {
 		cols = slicesWithout(cols, "retry_round")
 		pk = slicesWithout(pk, "retry_round")
 	}
@@ -1617,7 +1629,7 @@ func canonicalTranscodeSQL(original string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	for _, c := range []string{"media_id INTEGER", "ingest_run_id INTEGER", "ingest_step_id INTEGER", "generation INTEGER", "lease_owner TEXT", "lease_until TIMESTAMP"} {
+	for _, c := range []string{"media_id INTEGER", "ingest_run_id INTEGER", "ingest_step_id INTEGER", "generation INTEGER", "retry_round INTEGER NOT NULL DEFAULT 0", "lease_owner TEXT", "lease_until TIMESTAMP"} {
 		name := strings.ToLower(strings.Fields(c)[0])
 		if !columnNames[name] {
 			kept = append(kept, c)
@@ -1648,7 +1660,7 @@ const canonicalIngestEvidenceSchema = `CREATE TABLE media_ingest_evidence(
  FOREIGN KEY(media_id) REFERENCES media(id) ON DELETE CASCADE,UNIQUE(step_id,kind),UNIQUE(stage_id))`
 const canonicalOptionalRetryAuditSchema = `CREATE TABLE media_ingest_optional_retry_audit(
  id INTEGER PRIMARY KEY AUTOINCREMENT,media_id INTEGER NOT NULL,run_id INTEGER NOT NULL,step_id INTEGER NOT NULL,generation INTEGER NOT NULL,
- task_family TEXT NOT NULL CHECK(task_family IN ('post_ingest','scrape')),task_type TEXT NOT NULL,actor_id INTEGER NOT NULL,reason TEXT NOT NULL,
+ task_family TEXT NOT NULL CHECK(task_family IN ('post_ingest','scrape','prepare')),task_type TEXT NOT NULL,actor_id INTEGER NOT NULL,reason TEXT NOT NULL,
  previous_queue_status TEXT NOT NULL,previous_step_status TEXT NOT NULL,previous_attempts INTEGER NOT NULL,previous_queue_error TEXT NOT NULL,previous_step_error TEXT NOT NULL,
  retry_round INTEGER NOT NULL CHECK(retry_round > 0),created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
  FOREIGN KEY(media_id) REFERENCES media(id) ON DELETE CASCADE,
@@ -1718,6 +1730,39 @@ func ensureScrapeEffectCommitSchema(ctx context.Context, q SQLExecutor) error {
 	_, err = q.ExecContext(ctx, `ALTER TABLE scrape_effect_commit_new RENAME TO scrape_effect_commit`)
 	return err
 }
+
+func ensureOptionalRetryAuditSchema(ctx context.Context, q SQLExecutor) error {
+	if !tableExists(ctx, q, "media_ingest_optional_retry_audit") {
+		_, err := q.ExecContext(ctx, canonicalOptionalRetryAuditSchema)
+		return err
+	}
+	if exactPublicationTable(ctx, q, "media_ingest_optional_retry_audit", canonicalOptionalRetryAuditSchema) == nil {
+		return nil
+	}
+	columns, err := publicationColumns(ctx, q, "media_ingest_optional_retry_audit")
+	if err != nil {
+		return err
+	}
+	for _, required := range []string{"media_id", "run_id", "step_id", "generation", "task_family", "task_type", "actor_id", "reason", "previous_queue_status", "previous_step_status", "previous_attempts", "previous_queue_error", "previous_step_error", "retry_round", "created_at"} {
+		if !columns[required] {
+			return fmt.Errorf("media_ingest_optional_retry_audit schema conflict: missing %s", required)
+		}
+	}
+	if _, err = q.ExecContext(ctx, `DROP TABLE IF EXISTS media_ingest_optional_retry_audit_new`); err != nil {
+		return err
+	}
+	if _, err = q.ExecContext(ctx, strings.Replace(canonicalOptionalRetryAuditSchema, "media_ingest_optional_retry_audit", "media_ingest_optional_retry_audit_new", 1)); err != nil {
+		return err
+	}
+	if _, err = q.ExecContext(ctx, `INSERT INTO media_ingest_optional_retry_audit_new(id,media_id,run_id,step_id,generation,task_family,task_type,actor_id,reason,previous_queue_status,previous_step_status,previous_attempts,previous_queue_error,previous_step_error,retry_round,created_at) SELECT id,media_id,run_id,step_id,generation,task_family,task_type,actor_id,reason,previous_queue_status,previous_step_status,previous_attempts,previous_queue_error,previous_step_error,retry_round,created_at FROM media_ingest_optional_retry_audit`); err != nil {
+		return err
+	}
+	if _, err = q.ExecContext(ctx, `DROP TABLE media_ingest_optional_retry_audit`); err != nil {
+		return err
+	}
+	_, err = q.ExecContext(ctx, `ALTER TABLE media_ingest_optional_retry_audit_new RENAME TO media_ingest_optional_retry_audit`)
+	return err
+}
 func createPublicationChildren(ctx context.Context, q SQLExecutor, g []publicationGraphTable) error {
 	if _, ok := graphMeta(g, "post_ingest_task"); ok {
 		if _, e := q.ExecContext(ctx, strings.Replace(postIngestTaskPublicationSchema, "post_ingest_task_new", "post_ingest_task", 1)); e != nil {
@@ -1776,7 +1821,7 @@ func createPublicationChildren(ctx context.Context, q SQLExecutor, g []publicati
 			return e
 		}
 	}
-	return nil
+	return ensureOptionalRetryAuditSchema(ctx, q)
 }
 
 func restorePublicationIndexes(ctx context.Context, q SQLExecutor, g []publicationGraphTable) error {
@@ -2023,7 +2068,7 @@ func rebuildPublicationTranscodeTask(ctx context.Context, conn *sql.Conn) error 
 			}
 		}
 	}
-	for _, def := range []string{"media_id INTEGER", "lease_owner TEXT", "lease_until TIMESTAMP"} {
+	for _, def := range []string{"media_id INTEGER", "lease_owner TEXT", "lease_until TIMESTAMP", "retry_round INTEGER NOT NULL DEFAULT 0"} {
 		name := strings.Fields(def)[0]
 		if !cols[name] {
 			if _, err = conn.ExecContext(ctx, `ALTER TABLE transcode_task ADD COLUMN `+def); err != nil {
@@ -2091,6 +2136,9 @@ func rebuildPublicationTranscodeTask(ctx context.Context, conn *sql.Conn) error 
 		return fmt.Errorf("transcode_task CREATE SQL malformed")
 	}
 	body := original[:closeAt]
+	if !strings.Contains(strings.ToLower(strings.Join(strings.Fields(body), "")), "retry_round") {
+		body += `, retry_round INTEGER NOT NULL DEFAULT 0`
+	}
 	create := strings.Replace(body, "transcode_task", "transcode_task_v2", 1) + `,
  FOREIGN KEY(media_id) REFERENCES media(id) ON DELETE CASCADE,
  FOREIGN KEY(ingest_run_id,media_id,generation) REFERENCES media_ingest_run(id,media_id,generation) ON DELETE CASCADE,
@@ -2262,7 +2310,7 @@ func publicationTranscodeSchemaCurrent(ctx context.Context, q SQLExecutor) bool 
 	if err != nil {
 		return false
 	}
-	wantSpecs := map[string]string{"media_id": "media_id|INTEGER|0||0|0", "ingest_run_id": "ingest_run_id|INTEGER|0||0|0", "ingest_step_id": "ingest_step_id|INTEGER|0||0|0", "generation": "generation|INTEGER|0||0|0", "lease_owner": "lease_owner|TEXT|0||0|0", "lease_until": "lease_until|TIMESTAMP|0||0|0"}
+	wantSpecs := map[string]string{"media_id": "media_id|INTEGER|0||0|0", "ingest_run_id": "ingest_run_id|INTEGER|0||0|0", "ingest_step_id": "ingest_step_id|INTEGER|0||0|0", "generation": "generation|INTEGER|0||0|0", "retry_round": "retry_round|INTEGER|1|0|0|0", "lease_owner": "lease_owner|TEXT|0||0|0", "lease_until": "lease_until|TIMESTAMP|0||0|0"}
 	for _, spec := range specs {
 		parts := strings.SplitN(spec, "|", 2)
 		if want, wanted := wantSpecs[parts[0]]; wanted && spec != want {
@@ -2555,6 +2603,7 @@ const canonicalPretranscodeRenditionJobSchema = `CREATE TABLE pretranscode_rendi
  lease_owner TEXT,
  lease_until TIMESTAMP,
  config_snapshot_json TEXT,
+ retry_round INTEGER NOT NULL DEFAULT 0,
  FOREIGN KEY(task_id) REFERENCES transcode_task(id) ON DELETE CASCADE,
  FOREIGN KEY(rendition_id) REFERENCES preset_rendition(id) ON DELETE SET NULL
 )`

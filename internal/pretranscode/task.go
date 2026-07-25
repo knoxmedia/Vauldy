@@ -243,7 +243,8 @@ func (s *TaskService) cancelTaskAttemptTx(ctx context.Context, id int64) error {
 		var status string
 		var owner sql.NullString
 		var required bool
-		err := tx.QueryRowContext(ctx, `SELECT t.media_id,t.ingest_run_id,t.ingest_step_id,t.generation,t.status,t.lease_owner,s.required=1 FROM transcode_task t JOIN media_ingest_step s ON s.id=t.ingest_step_id WHERE t.id=?`, id).Scan(&media, &run, &step, &gen, &status, &owner, &required)
+		var retryRound int
+		err := tx.QueryRowContext(ctx, `SELECT t.media_id,t.ingest_run_id,t.ingest_step_id,t.generation,t.status,t.lease_owner,t.retry_round,s.required=1 FROM transcode_task t JOIN media_ingest_step s ON s.id=t.ingest_step_id WHERE t.id=?`, id).Scan(&media, &run, &step, &gen, &status, &owner, &retryRound, &required)
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrTaskNotCancellable
 		}
@@ -288,8 +289,8 @@ func (s *TaskService) cancelTaskAttemptTx(ctx context.Context, id int64) error {
 				return err
 			}
 		}
-		parentSQL := `UPDATE transcode_task SET status='cancelled',completed_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL WHERE id=? AND media_id=? AND ingest_run_id=? AND ingest_step_id=? AND generation=? AND status=? AND EXISTS(SELECT 1 FROM media m JOIN media_ingest_run r ON r.id=? JOIN media_ingest_step s ON s.id=? WHERE m.id=? AND m.ingest_generation=? AND r.media_id=? AND r.generation=? AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND s.run_id=? AND s.media_id=? AND s.generation=? AND s.step_type='prepare')`
-		parentArgs := []any{id, media, run, step, gen, status, run, step, media, gen, media, gen, run, media, gen}
+		parentSQL := `UPDATE transcode_task SET status='cancelled',completed_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL WHERE id=? AND media_id=? AND ingest_run_id=? AND ingest_step_id=? AND generation=? AND retry_round=? AND status=? AND EXISTS(SELECT 1 FROM media m JOIN media_ingest_run r ON r.id=? JOIN media_ingest_step s ON s.id=? WHERE m.id=? AND m.ingest_generation=? AND r.media_id=? AND r.generation=? AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND s.run_id=? AND s.media_id=? AND s.generation=? AND s.step_type='prepare')`
+		parentArgs := []any{id, media, run, step, gen, retryRound, status, run, step, media, gen, media, gen, run, media, gen}
 		if status == "waiting" {
 			parentSQL += ` AND lease_owner IS NULL`
 		} else {
@@ -318,7 +319,7 @@ func (s *TaskService) cancelTaskAttemptTx(ctx context.Context, id int64) error {
 		if n, _ := r.RowsAffected(); n != 1 {
 			return ErrTaskNotCancellable
 		}
-		_, e = tx.ExecContext(ctx, `UPDATE pretranscode_rendition_job SET status='cancelled',completed_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL WHERE task_id=? AND status IN ('waiting','running')`, id)
+		_, e = tx.ExecContext(ctx, `UPDATE pretranscode_rendition_job SET status='cancelled',completed_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL WHERE task_id=? AND retry_round=? AND status IN ('waiting','running')`, id, retryRound)
 		if e != nil {
 			return e
 		}

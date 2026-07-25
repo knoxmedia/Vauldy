@@ -3,6 +3,7 @@ package publication
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -235,6 +236,130 @@ func RetryOptionalPostIngest(ctx context.Context, db *sql.DB, req OptionalPostIn
 	}
 	if !changed {
 		return ErrNoRetryableWork
+	}
+	return nil
+}
+
+// OptionalPrepareRetryRequest identifies one exhausted optional prepare step.
+type OptionalPrepareRetryRequest struct {
+	MediaID, StepID, ActorID int64
+	Reason                   string
+	// CaptureActive captures the exact in-memory execution identity before the
+	// database round changes. The returned cancellation runs only after commit.
+	CaptureActive func(taskID int64, retryRound int) func()
+}
+
+var ErrPrepareCapabilityUnavailable = errors.New("prepare capability unavailable")
+
+type optionalPrepareSnapshotJob struct {
+	RenditionID   int64           `json:"rendition_id"`
+	RenditionName string          `json:"rendition_name"`
+	Config        json.RawMessage `json:"config_snapshot"`
+}
+
+// RetryOptionalPrepare reopens one exhausted optional prepare execution in the
+// same immutable publication generation and creates a new fenced retry round.
+func RetryOptionalPrepare(ctx context.Context, db *sql.DB, req OptionalPrepareRetryRequest, registry coreiface.CapabilityRegistry) error {
+	if db == nil || req.MediaID <= 0 || req.StepID <= 0 || req.ActorID <= 0 {
+		return ErrNoRetryableWork
+	}
+	if strings.TrimSpace(req.Reason) == "" {
+		return ErrInvalidRetryReason
+	}
+	if registry == nil || !registry.Available("prepare") {
+		return ErrPrepareCapabilityUnavailable
+	}
+	var changed bool
+	var taskID int64
+	var previousRound, committedRound int
+	var cancel func()
+	err := store.WithBusyRetryPolicyContext(ctx, nil, retryIngestPolicy, func(attempt context.Context) error {
+		changed = false
+		outcome, err := store.WithImmediateConnTx(attempt, db, func(tx store.ImmediateConnTx) error {
+			var runID, generation int64
+			var mediaState, runState, stepType, stepStatus, stepError, taskStatus, taskError, snapshot string
+			var required, attempts, maxAttempts int
+			err := tx.QueryRowContext(attempt, `SELECT r.id,r.generation,m.publication_state,r.status,s.step_type,s.required,s.status,s.attempts,s.max_attempts,s.last_error,t.id,t.status,COALESCE(t.error_message,''),t.retry_round,COALESCE(pm.ingest_jobs_snapshot_json,'') FROM media m JOIN media_ingest_run r ON r.media_id=m.id AND r.generation=m.ingest_generation JOIN media_ingest_step s ON s.run_id=r.id AND s.media_id=m.id AND s.generation=r.generation JOIN transcode_task t ON t.ingest_step_id=s.id AND t.ingest_run_id=r.id AND t.media_id=m.id AND t.generation=r.generation JOIN pretranscode_task_meta pm ON pm.task_id=t.id WHERE m.id=? AND s.id=? AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL`, req.MediaID, req.StepID).Scan(&runID, &generation, &mediaState, &runState, &stepType, &required, &stepStatus, &attempts, &maxAttempts, &stepError, &taskID, &taskStatus, &taskError, &previousRound, &snapshot)
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrNoRetryableWork
+			}
+			if err != nil {
+				// Community builds intentionally have no prepare tables.
+				if strings.Contains(strings.ToLower(err.Error()), "no such table") || strings.Contains(strings.ToLower(err.Error()), "no such column") {
+					return ErrPrepareCapabilityUnavailable
+				}
+				return err
+			}
+			if (mediaState != "published" && mediaState != "degraded") || (runState != "published" && runState != "degraded") || stepType != "prepare" || required != 0 || (stepStatus != "failed" && stepStatus != "cancelled") || (taskStatus != "failed" && taskStatus != "cancelled") || attempts < maxAttempts {
+				return ErrNoRetryableWork
+			}
+			var jobs []optionalPrepareSnapshotJob
+			if json.Unmarshal([]byte(snapshot), &jobs) != nil || len(jobs) == 0 {
+				return ErrNoRetryableWork
+			}
+			for _, job := range jobs {
+				if strings.TrimSpace(job.RenditionName) == "" || len(job.Config) == 0 || !json.Valid(job.Config) {
+					return ErrNoRetryableWork
+				}
+			}
+			committedRound = previousRound + 1
+			if req.CaptureActive != nil {
+				cancel = req.CaptureActive(taskID, previousRound)
+			}
+			if _, err = tx.ExecContext(attempt, `INSERT INTO media_ingest_optional_retry_audit(media_id,run_id,step_id,generation,task_family,task_type,actor_id,reason,previous_queue_status,previous_step_status,previous_attempts,previous_queue_error,previous_step_error,retry_round) VALUES(?,?,?,?, 'prepare','prepare',?,?,?,?,?,?,?,?)`, req.MediaID, runID, req.StepID, generation, req.ActorID, req.Reason, taskStatus, stepStatus, attempts, taskError, stepError, committedRound); err != nil {
+				return err
+			}
+			res, err := tx.ExecContext(attempt, `UPDATE transcode_task SET status='waiting',progress=0,error_message=NULL,output_path=NULL,started_at=NULL,completed_at=NULL,lease_owner=NULL,lease_until=NULL,retry_round=? WHERE id=? AND media_id=? AND ingest_run_id=? AND ingest_step_id=? AND generation=? AND status IN ('failed','cancelled') AND retry_round=?`, committedRound, taskID, req.MediaID, runID, req.StepID, generation, previousRound)
+			if err != nil {
+				return err
+			}
+			if n, _ := res.RowsAffected(); n != 1 {
+				return ErrNoRetryableWork
+			}
+			if _, err = tx.ExecContext(attempt, `DELETE FROM pretranscode_rendition_job WHERE task_id=?`, taskID); err != nil {
+				return err
+			}
+			for _, job := range jobs {
+				if _, err = tx.ExecContext(attempt, `INSERT INTO pretranscode_rendition_job(task_id,rendition_id,rendition_name,status,progress,available_at,config_snapshot_json,retry_round) VALUES(?,?,?,'waiting',0,CURRENT_TIMESTAMP,?,?)`, taskID, nullablePositiveID(job.RenditionID), job.RenditionName, string(job.Config), committedRound); err != nil {
+					return err
+				}
+			}
+			res, err = tx.ExecContext(attempt, `UPDATE media_ingest_step SET status='waiting',attempts=0,last_error='',lease_owner=NULL,lease_until=NULL,started_at=NULL,finished_at=NULL,available_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND run_id=? AND media_id=? AND generation=? AND step_type='prepare' AND required=0 AND status IN ('failed','cancelled') AND attempts>=max_attempts`, req.StepID, runID, req.MediaID, generation)
+			if err != nil {
+				return err
+			}
+			if n, _ := res.RowsAffected(); n != 1 {
+				return ErrNoRetryableWork
+			}
+			changed = true
+			return nil
+		})
+		if err != nil && outcome.CommitAttempted {
+			var audit, round int
+			reconcileErr := db.QueryRowContext(attempt, `SELECT COUNT(*),COALESCE((SELECT retry_round FROM transcode_task WHERE id=?),-1) FROM media_ingest_optional_retry_audit WHERE step_id=? AND retry_round=? AND task_family='prepare'`, taskID, req.StepID, committedRound).Scan(&audit, &round)
+			if reconcileErr == nil && audit == 1 && round == committedRound {
+				changed = true
+				return nil
+			}
+			return retryCommitOutcomeUncertain{err: err}
+		}
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	if !changed {
+		return ErrNoRetryableWork
+	}
+	if cancel != nil {
+		cancel()
+	}
+	return nil
+}
+
+func nullablePositiveID(id int64) any {
+	if id > 0 {
+		return id
 	}
 	return nil
 }
