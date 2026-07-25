@@ -276,6 +276,46 @@ func TestClaimEligibleUncertainCommitReconcilesFullPayloadOnce(t *testing.T) {
 	}
 }
 
+func TestClaimEligibleUncertainCommitReconcilesLegacyGenerationZero(t *testing.T) {
+	db := openEligibilityDB(t)
+	_, err := db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l'); INSERT INTO media(id,library_id,file_id,file_type,publication_state) VALUES(10,1,'f','video','processing'); INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status,max_attempts) VALUES(40,10,NULL,NULL,0,'subtitle','waiting',4)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lost := errors.New("response lost")
+	p, err := ClaimEligible(context.Background(), db, ClaimRequest{Family: QueuePostIngest, TaskType: "subtitle", Owner: "worker", Registry: NewCapabilityMatrix([]string{"subtitle"}), afterCommit: func() error { return lost }})
+	if err != nil || p == nil || p.QueueID != 40 || p.MediaID != 10 || p.RunID.Valid || p.StepID.Valid || p.Generation.Int64 != 0 || p.TaskType != "subtitle" || p.Attempts != 1 || p.MaxAttempts != 4 || p.LeaseUntil.IsZero() {
+		t.Fatalf("payload=%+v err=%v", p, err)
+	}
+	var status, owner string
+	if err = db.QueryRow(`SELECT status,lease_owner FROM post_ingest_task WHERE id=40`).Scan(&status, &owner); err != nil {
+		t.Fatal(err)
+	}
+	if status != "running" || owner != p.Owner {
+		t.Fatalf("status=%s owner=%s payload=%+v", status, owner, p)
+	}
+}
+
+func TestClaimEligibleUncertainCommitReconcilesPosterRepair(t *testing.T) {
+	db := openEligibilityDB(t)
+	_, err := db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l'); INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state,published_at) VALUES(10,1,'f','video',1,'published',CURRENT_TIMESTAMP); INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(20,10,1,'repair','published','{}',2); INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status,max_attempts) VALUES(40,10,20,NULL,1,'poster_repair','waiting',4)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lost := errors.New("response lost")
+	p, err := ClaimEligible(context.Background(), db, ClaimRequest{Family: QueuePostIngest, TaskType: "poster_repair", Owner: "worker", Registry: NewCapabilityMatrix([]string{"poster_repair"}), afterCommit: func() error { return lost }})
+	if err != nil || p == nil || p.QueueID != 40 || p.MediaID != 10 || p.RunID.Int64 != 20 || p.StepID.Valid || p.Generation.Int64 != 1 || p.TaskType != "poster_repair" || p.Attempts != 1 || p.MaxAttempts != 4 || p.LeaseUntil.IsZero() {
+		t.Fatalf("payload=%+v err=%v", p, err)
+	}
+	var status, owner string
+	if err = db.QueryRow(`SELECT status,lease_owner FROM post_ingest_task WHERE id=40`).Scan(&status, &owner); err != nil {
+		t.Fatal(err)
+	}
+	if status != "running" || owner != p.Owner {
+		t.Fatalf("status=%s owner=%s payload=%+v", status, owner, p)
+	}
+}
+
 func TestClaimEligibilityStatusDependencyMatrixAllFamilies(t *testing.T) {
 	cases := []struct {
 		name, run, media   string
