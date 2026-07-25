@@ -1306,7 +1306,7 @@ func containerMimeType(container string) string {
 }
 
 // pickBitrate selects a single bitrate based on source resolution.
-func pickBitrate(media mediaProfile, width, height int) string {
+func pickBitrate(_ mediaProfile, width, height int) string {
 	maxH := height
 	if width > height {
 		maxH = width

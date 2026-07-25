@@ -263,7 +263,7 @@ func (h *Handler) queryLibraryTracksContext(ctx context.Context, libID, albumID,
 	for rows.Next() {
 		var trackID, mediaID, trackNum, duration, bitrate, albumIDVal, artistIDVal, year int64
 		var title, artist, albumTitle, albumArtist, format, artwork, filePath, created sql.NullString
-		if rows.Scan(&trackID, &mediaID, &trackNum, &title, &artist, &duration, &bitrate, &format,
+		if err := rows.Scan(&trackID, &mediaID, &trackNum, &title, &artist, &duration, &bitrate, &format,
 			&albumIDVal, &albumTitle, &albumArtist, &artistIDVal, &year, &artwork, &filePath, &created); err != nil {
 			return nil, err
 		}

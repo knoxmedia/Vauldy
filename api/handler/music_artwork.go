@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"database/sql"
 	"io"
 	"net/http"
@@ -377,6 +378,8 @@ func (h *Handler) downloadArtistArtworkURL(artistID int64, u string) string {
 
 // ServeArtistArtwork serves artist portrait from cache path or stored artwork_path.
 func (h *Handler) ServeArtistArtwork(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+	defer cancel()
 	artistID, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || artistID <= 0 {
 		c.Status(http.StatusBadRequest)
@@ -384,11 +387,11 @@ func (h *Handler) ServeArtistArtwork(c *gin.Context) {
 	}
 	var libID int64
 	var artworkPath sql.NullString
-	if err := h.App.DB.QueryRowContext(c.Request.Context(), `SELECT library_id FROM music_artist WHERE id=?`, artistID).Scan(&libID); err != nil {
-		c.AbortWithStatus(http.StatusNotFound)
+	if err := h.App.DB.QueryRowContext(ctx, `SELECT library_id, artwork_path FROM music_artist WHERE id = ?`, artistID).Scan(&libID, &artworkPath); err != nil {
+		c.Status(http.StatusNotFound)
 		return
 	}
-	if !h.requireLibraryAccess(c, libID) {
+	if !h.requireSpecializedAggregateAccess(c, libID) {
 		return
 	}
 	if err := h.App.DB.QueryRowContext(c.Request.Context(), `SELECT ar.artwork_path FROM music_artist ar WHERE ar.id = ? AND EXISTS (SELECT 1 FROM music_album a JOIN music_track mt ON mt.album_id=a.id JOIN media m ON m.id=mt.media_id WHERE a.album_artist_id=ar.id AND m.publication_state IN ('published','degraded'))`, artistID).Scan(&artworkPath); err != nil {
