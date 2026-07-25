@@ -37,7 +37,7 @@ func ReconcilePosterStages(ctx context.Context, db *sql.DB, roots PosterRecovery
 	if limit <= 0 || limit > 100 {
 		limit = 100
 	}
-	rows, err := db.QueryContext(ctx, `SELECT j.stage_id,j.media_id,j.run_id,j.step_id,j.generation,j.owner_token,j.source_fingerprint,j.state,j.staged_path,j.hashes_sizes_json FROM media_asset_stage_journal j WHERE j.artifact_kind='poster' AND j.recovery_error NOT IN ('cleaned_unreferenced','verified_committed') AND (j.state<>'staged' OR NOT EXISTS(SELECT 1 FROM post_ingest_task p JOIN media_ingest_run run ON run.id=p.ingest_run_id JOIN media m ON m.id=p.media_id WHERE p.media_id=j.media_id AND p.ingest_run_id=j.run_id AND p.generation=j.generation AND p.task_type IN ('poster','poster_repair') AND p.status='running' AND p.lease_owner=j.owner_token AND run.superseded_at IS NULL AND run.superseded_by_generation IS NULL AND m.ingest_generation=p.generation)) ORDER BY j.updated_at,j.stage_id LIMIT ?`, limit)
+	rows, err := db.QueryContext(ctx, `SELECT j.stage_id,j.media_id,j.run_id,j.step_id,j.generation,j.owner_token,j.source_fingerprint,j.state,j.staged_path,j.hashes_sizes_json FROM media_asset_stage_journal j WHERE j.artifact_kind='poster' AND j.state IN ('staged','quarantined','committed') AND j.recovery_error NOT IN ('cleaned_unreferenced','verified_committed') AND (j.state<>'staged' OR NOT EXISTS(SELECT 1 FROM post_ingest_task p JOIN media_ingest_run run ON run.id=p.ingest_run_id JOIN media m ON m.id=p.media_id WHERE p.media_id=j.media_id AND p.ingest_run_id=j.run_id AND p.generation=j.generation AND p.task_type IN ('poster','poster_repair') AND p.status='running' AND p.lease_owner=j.owner_token AND run.superseded_at IS NULL AND run.superseded_by_generation IS NULL AND m.ingest_generation=p.generation)) ORDER BY j.updated_at,j.stage_id LIMIT ?`, limit)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -91,11 +91,16 @@ func ReconcilePosterStages(ctx context.Context, db *sql.DB, roots PosterRecovery
 		}
 		path, err := posterJournalPath(r)
 		if err != nil {
-			return checked, cleaned, err
+			if markErr := markPosterRecoveryTerminal(ctx, db, "media_asset_stage_journal", r.stageID, err); markErr != nil {
+				return checked, cleaned, markErr
+			}
+			continue
 		}
 		if err = validateExactPosterStagePaths(roots, r, path); err != nil {
-			_, _ = db.ExecContext(ctx, `UPDATE media_asset_stage_journal SET recovery_error=? WHERE stage_id=?`, `unsafe_path: `+err.Error(), r.stageID)
-			return checked, cleaned, err
+			if markErr := markPosterRecoveryTerminal(ctx, db, "media_asset_stage_journal", r.stageID, err); markErr != nil {
+				return checked, cleaned, markErr
+			}
+			continue
 		}
 		refs, err := posterPathReferenceCount(ctx, db, path, "", r.stageID, posterJournalOrdinary)
 		if err != nil {
@@ -119,7 +124,7 @@ func ReconcilePosterStages(ctx context.Context, db *sql.DB, roots PosterRecovery
 	}
 	remaining := limit
 	if remaining > 0 {
-		rows, e := db.QueryContext(ctx, `SELECT s.stage_id,s.queue_id,s.media_id,s.run_id,s.generation,s.owner_token,s.attempt,s.source_fingerprint,s.state,s.staged_path,s.hashes_sizes_json FROM poster_repair_stage s WHERE s.recovery_error NOT IN ('cleaned_unreferenced','verified_committed') AND (s.state<>'staged' OR NOT EXISTS(SELECT 1 FROM post_ingest_task p JOIN media_ingest_run run ON run.id=p.ingest_run_id JOIN media m ON m.id=p.media_id WHERE p.id=s.queue_id AND p.task_type='poster_repair' AND p.status='running' AND p.lease_owner=s.owner_token AND p.attempts=s.attempt AND run.superseded_at IS NULL AND run.superseded_by_generation IS NULL AND m.ingest_generation=p.generation AND m.publication_state IN ('published','degraded') AND m.published_at IS NOT NULL)) ORDER BY s.updated_at,s.stage_id LIMIT ?`, remaining)
+		rows, e := db.QueryContext(ctx, `SELECT s.stage_id,s.queue_id,s.media_id,s.run_id,s.generation,s.owner_token,s.attempt,s.source_fingerprint,s.state,s.staged_path,s.hashes_sizes_json FROM poster_repair_stage s WHERE s.state IN ('staged','quarantined','committed') AND s.recovery_error NOT IN ('cleaned_unreferenced','verified_committed') AND (s.state<>'staged' OR NOT EXISTS(SELECT 1 FROM post_ingest_task p JOIN media_ingest_run run ON run.id=p.ingest_run_id JOIN media m ON m.id=p.media_id WHERE p.id=s.queue_id AND p.task_type='poster_repair' AND p.status='running' AND p.lease_owner=s.owner_token AND p.attempts=s.attempt AND run.superseded_at IS NULL AND run.superseded_by_generation IS NULL AND m.ingest_generation=p.generation AND m.publication_state IN ('published','degraded') AND m.published_at IS NOT NULL)) ORDER BY s.updated_at,s.stage_id LIMIT ?`, remaining)
 		if e != nil {
 			return checked, cleaned, e
 		}
@@ -173,10 +178,16 @@ func ReconcilePosterStages(ctx context.Context, db *sql.DB, roots PosterRecovery
 			}
 			path, x := posterJournalPath(r)
 			if x != nil {
-				return checked, cleaned, x
+				if markErr := markPosterRecoveryTerminal(ctx, db, "poster_repair_stage", r.stageID, x); markErr != nil {
+					return checked, cleaned, markErr
+				}
+				continue
 			}
 			if x = validateExactPosterStagePaths(roots, r, path); x != nil {
-				return checked, cleaned, x
+				if markErr := markPosterRecoveryTerminal(ctx, db, "poster_repair_stage", r.stageID, x); markErr != nil {
+					return checked, cleaned, markErr
+				}
+				continue
 			}
 			refs, x := posterPathReferenceCount(ctx, db, path, "", r.stageID, posterJournalRepair)
 			if x != nil {
@@ -200,6 +211,12 @@ func ReconcilePosterStages(ctx context.Context, db *sql.DB, roots PosterRecovery
 	}
 	return checked, cleaned, retErr
 }
+func markPosterRecoveryTerminal(ctx context.Context, db *sql.DB, table, stageID string, cause error) error {
+	marker := boundedRecoveryError("failed_closed: ", cause)
+	_, err := db.ExecContext(ctx, `UPDATE `+table+` SET state='failed_closed',recovery_error=?,updated_at=CURRENT_TIMESTAMP WHERE stage_id=?`, marker, stageID)
+	return err
+}
+
 func posterStageAuthority(ctx context.Context, db *sql.DB, r posterJournalRow) (bool, bool, error) {
 	var n int
 	err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM media_ingest_evidence e JOIN post_ingest_task p ON p.ingest_step_id=e.step_id WHERE e.stage_id=? AND e.kind='poster' AND e.media_id=? AND e.run_id=? AND e.generation=? AND e.source_fingerprint=? AND p.status='done'`, r.stageID, r.mediaID, r.runID, r.generation, r.fingerprint).Scan(&n)

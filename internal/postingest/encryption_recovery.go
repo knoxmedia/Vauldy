@@ -11,7 +11,12 @@ import (
 	"time"
 )
 
-const encryptionStageBatchMax = 100
+const (
+	encryptionStageBatchMax       = 100
+	encryptionRecoveryMaxAttempts = 5
+)
+
+var reconcileRestoreQuarantinedPlaintext = restoreQuarantinedPlaintext
 
 func ReconcileEncryptionStages(ctx context.Context, db *sql.DB, roots EncryptionRecoveryRoots, limit int) (checked, cleaned int, retErr error) {
 	if db == nil {
@@ -23,7 +28,7 @@ func ReconcileEncryptionStages(ctx context.Context, db *sql.DB, roots Encryption
 	if limit <= 0 || limit > encryptionStageBatchMax {
 		limit = encryptionStageBatchMax
 	}
-	rows, err := db.QueryContext(ctx, `SELECT j.stage_id,j.task_id,j.attempt,j.media_id,j.run_id,j.step_id,j.generation,j.owner_token,j.source_path,j.quarantine_path,j.source_fingerprint,j.enc_path,j.wrapped_dek,j.iv,j.enc_sha256,j.enc_size,j.state FROM media_encryption_stage_journal j WHERE (j.state IN ('staged','quarantining','quarantined') OR (j.state='committed' AND (j.recovery_error='' OR j.recovery_error LIKE 'plaintext_cleanup_pending:%'))) AND (j.state='committed' OR j.state='quarantining' OR NOT EXISTS(SELECT 1 FROM post_ingest_task p WHERE p.id=j.task_id AND p.attempts=j.attempt AND p.status='running' AND p.lease_owner=j.owner_token)) ORDER BY j.updated_at,j.stage_id LIMIT ?`, limit)
+	rows, err := db.QueryContext(ctx, `SELECT j.stage_id,j.task_id,j.attempt,j.media_id,j.run_id,j.step_id,j.generation,j.owner_token,j.source_path,j.quarantine_path,j.source_fingerprint,j.enc_path,j.wrapped_dek,j.iv,j.enc_sha256,j.enc_size,j.state FROM media_encryption_stage_journal j WHERE (j.state IN ('staged','quarantining','quarantined') OR (j.state='failed_closed' AND j.quarantine_path<>'' AND j.recovery_error LIKE 'restore_pending:%' AND j.recovery_attempts<? AND j.next_retry_at<=CURRENT_TIMESTAMP) OR (j.state='committed' AND (j.recovery_error='' OR j.recovery_error LIKE 'plaintext_cleanup_pending:%'))) AND (j.state='committed' OR j.state='quarantining' OR NOT EXISTS(SELECT 1 FROM post_ingest_task p WHERE p.id=j.task_id AND p.attempts=j.attempt AND p.status='running' AND p.lease_owner=j.owner_token)) ORDER BY CASE WHEN j.state='failed_closed' THEN j.next_retry_at ELSE j.updated_at END,j.stage_id LIMIT ?`, encryptionRecoveryMaxAttempts, limit)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -130,10 +135,19 @@ func ReconcileEncryptionStages(ctx context.Context, db *sql.DB, roots Encryption
 			}
 		}
 		if r.quarantine != "" {
-			if err = restoreQuarantinedPlaintext(r.quarantine, r.source, roots.Quarantine); err != nil {
-				_, _ = db.ExecContext(ctx, `UPDATE media SET publication_state='failed',last_error=? WHERE id=?`, "encryption recovery restore failed: "+err.Error(), r.media)
-				_, _ = db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='failed_closed',recovery_error=?,updated_at=CURRENT_TIMESTAMP WHERE stage_id=?`, err.Error(), r.stage)
-				return checked, cleaned, err
+			if err = reconcileRestoreQuarantinedPlaintext(r.quarantine, r.source, roots.Quarantine); err != nil {
+				if strings.Contains(err.Error(), "unsafe encryption quarantine path") || strings.Contains(err.Error(), "restore target already exists") {
+					if _, updateErr := db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='failed_closed',recovery_error=?,recovery_attempts=recovery_attempts+1,next_retry_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE stage_id=?`, boundedRecoveryError("failed_closed: ", err), r.stage); updateErr != nil {
+						return checked, cleaned, updateErr
+					}
+					retErr = errors.Join(retErr, err)
+					continue
+				}
+				marker := boundedRecoveryError("restore_pending: ", err)
+				if _, updateErr := db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='failed_closed',recovery_error=?,recovery_attempts=recovery_attempts+1,next_retry_at=datetime(CURRENT_TIMESTAMP,'+' || min(3600,30*(1 << min(recovery_attempts,7))) || ' seconds'),updated_at=CURRENT_TIMESTAMP WHERE stage_id=?`, marker, r.stage); updateErr != nil {
+					return checked, cleaned, updateErr
+				}
+				continue
 			}
 		}
 		_ = os.Remove(r.enc)

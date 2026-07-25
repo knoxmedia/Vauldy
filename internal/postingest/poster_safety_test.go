@@ -77,8 +77,15 @@ func TestPosterRecoveryRejectsExternalStagedPathWithoutRemovingSentinel(t *testi
 		t.Fatal(err)
 	}
 	_, _, err := ReconcilePosterStages(context.Background(), db, PosterRecoveryRoots{Upload: upload}, 100)
-	if err == nil {
-		t.Fatal("external staged path accepted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state, marker string
+	if err = db.QueryRow(`SELECT state,recovery_error FROM media_asset_stage_journal WHERE stage_id='evil'`).Scan(&state, &marker); err != nil {
+		t.Fatal(err)
+	}
+	if state != "failed_closed" || !strings.HasPrefix(marker, "failed_closed:") {
+		t.Fatalf("state=%s marker=%q", state, marker)
 	}
 	if got, _ := os.ReadFile(sentinel); string(got) != "keep" {
 		t.Fatalf("sentinel=%q", got)
@@ -197,8 +204,8 @@ func TestPosterRecoveryRejectsTraversalAndRetainsActiveAndCommitted(t *testing.T
 		badStage := filepath.Join(upload, "posters", "generation-1", "..", "..")
 		_, _ = db.Exec(`INSERT INTO media_asset_stage_journal(stage_id,media_id,run_id,step_id,generation,owner_token,source_fingerprint,artifact_kind,state,staged_path,hashes_sizes_json) VALUES('traversal',?,?,?,?,?,?,'poster','quarantined',?,?)`, task.MediaID, *task.RunID, *task.StepID, task.Generation, task.LeaseOwner, fp, badStage, string(hashes))
 		_, _ = db.Exec(`UPDATE post_ingest_task SET status='cancelled',lease_owner=NULL WHERE id=?`, task.ID)
-		if _, _, err := ReconcilePosterStages(context.Background(), db, PosterRecoveryRoots{Upload: upload}, 100); err == nil {
-			t.Fatal("traversal accepted")
+		if _, _, err := ReconcilePosterStages(context.Background(), db, PosterRecoveryRoots{Upload: upload}, 100); err != nil {
+			t.Fatal(err)
 		}
 		if got, _ := os.ReadFile(outside); string(got) != "keep" {
 			t.Fatalf("outside=%q", got)
@@ -233,8 +240,8 @@ func TestEncryptedPosterRecoveryPathClassRequiresDerivedRoot(t *testing.T) {
 	hashes, _ := json.Marshal(map[string]any{"path": outside})
 	_, _ = db.Exec(`INSERT INTO media_asset_stage_journal(stage_id,media_id,run_id,step_id,generation,owner_token,source_fingerprint,artifact_kind,state,staged_path,hashes_sizes_json) VALUES('encstage',?,?,?,?,?,?,'poster','quarantined',?,?)`, task.MediaID, *task.RunID, *task.StepID, task.Generation, task.LeaseOwner, fp, stageDir, string(hashes))
 	_, _ = db.Exec(`UPDATE post_ingest_task SET status='cancelled',lease_owner=NULL WHERE id=?`, task.ID)
-	if _, _, err := ReconcilePosterStages(context.Background(), db, PosterRecoveryRoots{Upload: upload, Derived: filepath.Join(t.TempDir(), "derived")}, 100); err == nil {
-		t.Fatal("external encrypted path accepted")
+	if _, _, err := ReconcilePosterStages(context.Background(), db, PosterRecoveryRoots{Upload: upload, Derived: filepath.Join(t.TempDir(), "derived")}, 100); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := os.Stat(outside); err != nil {
 		t.Fatalf("encrypted sentinel removed: %v", err)

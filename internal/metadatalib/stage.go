@@ -118,7 +118,7 @@ func ReconcileScrapeArtworkStages(ctx context.Context, db *sql.DB, root string, 
 	if limit <= 0 || limit > 100 {
 		limit = 100
 	}
-	rows, err := db.QueryContext(ctx, `SELECT stage_id,staged_path,state FROM media_asset_stage_journal j WHERE artifact_kind='scrape_artwork' AND state IN ('staged','quarantined') AND updated_at < datetime(CURRENT_TIMESTAMP,'-10 minutes') AND NOT EXISTS(SELECT 1 FROM media_ingest_evidence e WHERE e.stage_id=j.stage_id) AND recovery_error NOT IN ('cleaned_unreferenced','unsafe_path') AND (state='quarantined' OR NOT EXISTS(SELECT 1 FROM scrape_task q JOIN media m ON m.id=q.media_id JOIN media_ingest_step s ON s.id=q.ingest_step_id AND s.run_id=q.ingest_run_id AND s.media_id=q.media_id AND s.generation=q.generation WHERE q.media_id=j.media_id AND q.ingest_run_id=j.run_id AND q.ingest_step_id=j.step_id AND q.generation=j.generation AND q.lease_owner=j.owner_token AND q.status='running' AND q.lease_until>CURRENT_TIMESTAMP AND s.status='running' AND s.lease_owner=j.owner_token AND m.ingest_generation=j.generation)) ORDER BY updated_at,stage_id LIMIT ?`, limit)
+	rows, err := db.QueryContext(ctx, `SELECT stage_id,staged_path,state FROM media_asset_stage_journal j WHERE artifact_kind='scrape_artwork' AND state IN ('staged','quarantined') AND updated_at < datetime(CURRENT_TIMESTAMP,'-10 minutes') AND NOT EXISTS(SELECT 1 FROM media_ingest_evidence e WHERE e.stage_id=j.stage_id) AND recovery_error NOT IN ('cleaned_unreferenced','unsafe_path') AND recovery_error NOT LIKE 'failed_closed:%' AND (state='quarantined' OR NOT EXISTS(SELECT 1 FROM scrape_task q JOIN media m ON m.id=q.media_id JOIN media_ingest_step s ON s.id=q.ingest_step_id AND s.run_id=q.ingest_run_id AND s.media_id=q.media_id AND s.generation=q.generation WHERE q.media_id=j.media_id AND q.ingest_run_id=j.run_id AND q.ingest_step_id=j.step_id AND q.generation=j.generation AND q.lease_owner=j.owner_token AND q.status='running' AND q.lease_until>CURRENT_TIMESTAMP AND s.status='running' AND s.lease_owner=j.owner_token AND m.ingest_generation=j.generation)) ORDER BY updated_at,stage_id LIMIT ?`, limit)
 	if err != nil {
 		return 0, err
 	}
@@ -142,7 +142,7 @@ func ReconcileScrapeArtworkStages(ctx context.Context, db *sql.DB, root string, 
 	n := 0
 	for _, c := range all {
 		if !strings.HasPrefix(filepath.Clean(c.path), filepath.Clean(root)+string(filepath.Separator)) {
-			if _, err := db.ExecContext(ctx, `UPDATE media_asset_stage_journal SET state='failed_closed',recovery_error='unsafe_path',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND artifact_kind='scrape_artwork'`, c.id); err != nil {
+			if _, err := db.ExecContext(ctx, `UPDATE media_asset_stage_journal SET state='failed_closed',recovery_error='failed_closed:unsafe_path',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND artifact_kind='scrape_artwork'`, c.id); err != nil {
 				return n, err
 			}
 			continue

@@ -299,3 +299,76 @@ func TestEncryptedPosterCommitUsesExactUniqueDerivedIdentity(t *testing.T) {
 		t.Fatal("modified encrypted artifact reused")
 	}
 }
+
+func TestPosterRecoveryTerminalizesMalformedThenCleansLaterOrdinary(t *testing.T) {
+	db, upload, task := seedCurrentLinkedPosterTask(t)
+	fp, _ := sourceFingerprint(taskSource(t, db, task.MediaID))
+	goodDir := filepath.Join(upload, "posters", "generation-1", "z-good")
+	goodPath := filepath.Join(goodDir, "poster.jpg")
+	if e := os.MkdirAll(goodDir, 0700); e != nil {
+		t.Fatal(e)
+	}
+	if e := os.WriteFile(goodPath, []byte("good"), 0600); e != nil {
+		t.Fatal(e)
+	}
+	goodJSON, _ := json.Marshal(map[string]any{"path": goodPath})
+	for _, row := range []struct{ id, hashes, dir string }{{"a-malformed", "{}", filepath.Join(upload, "posters", "generation-1", "a-malformed")}, {"z-good", string(goodJSON), goodDir}} {
+		if _, e := db.Exec(`INSERT INTO media_asset_stage_journal(stage_id,media_id,run_id,step_id,generation,owner_token,source_fingerprint,artifact_kind,state,staged_path,hashes_sizes_json) VALUES(?,?,?,?,?,?,?,'poster','quarantined',?,?)`, row.id, task.MediaID, *task.RunID, *task.StepID, task.Generation, task.LeaseOwner, fp, row.dir, row.hashes); e != nil {
+			t.Fatal(e)
+		}
+	}
+	_, _ = db.Exec(`UPDATE post_ingest_task SET status='cancelled',lease_owner=NULL WHERE id=?`, task.ID)
+	checked, cleaned, e := ReconcilePosterStages(context.Background(), db, PosterRecoveryRoots{Upload: upload}, 100)
+	if e != nil || checked < 2 || cleaned != 1 {
+		t.Fatalf("checked=%d cleaned=%d err=%v", checked, cleaned, e)
+	}
+	var state, marker string
+	if e = db.QueryRow(`SELECT state,recovery_error FROM media_asset_stage_journal WHERE stage_id='a-malformed'`).Scan(&state, &marker); e != nil {
+		t.Fatal(e)
+	}
+	if state != "failed_closed" || !strings.HasPrefix(marker, "failed_closed:") {
+		t.Fatalf("state=%s marker=%q", state, marker)
+	}
+	checked, cleaned, e = ReconcilePosterStages(context.Background(), db, PosterRecoveryRoots{Upload: upload}, 100)
+	if e != nil || checked != 0 || cleaned != 0 {
+		t.Fatalf("repeat checked=%d cleaned=%d err=%v", checked, cleaned, e)
+	}
+}
+
+func TestPosterRecoveryTerminalizesUnsafeThenCleansLaterRepair(t *testing.T) {
+	db, upload, task, runner, req := seedRepairPosterStage(t)
+	good, e := runner.StagePoster(context.Background(), req, 1, screenGrabberConfig())
+	if e != nil {
+		t.Fatal(e)
+	}
+	external := filepath.Join(t.TempDir(), "sentinel.jpg")
+	if e = os.WriteFile(external, []byte("keep"), 0600); e != nil {
+		t.Fatal(e)
+	}
+	badJSON, _ := json.Marshal(map[string]any{"path": external})
+	if _, e = db.Exec(`INSERT INTO poster_repair_stage(stage_id,queue_id,media_id,run_id,generation,owner_token,attempt,source_fingerprint,state,staged_path,hashes_sizes_json) VALUES('a-unsafe',?,?,?,?,?,?,?,'quarantined',?,?)`, task.ID+100, task.MediaID, *task.RunID, task.Generation, task.LeaseOwner, task.Attempts+10, req.SourceFingerprint, filepath.Dir(external), string(badJSON)); e != nil {
+		t.Fatal(e)
+	}
+	_, _ = db.Exec(`UPDATE post_ingest_task SET status='cancelled',lease_owner=NULL WHERE id=?`, task.ID)
+	checked, cleaned, e := ReconcilePosterStages(context.Background(), db, PosterRecoveryRoots{Upload: upload}, 100)
+	if e != nil || checked < 2 || cleaned != 1 {
+		t.Fatalf("checked=%d cleaned=%d err=%v", checked, cleaned, e)
+	}
+	if got, _ := os.ReadFile(external); string(got) != "keep" {
+		t.Fatalf("unsafe path deleted: %q", got)
+	}
+	var state, marker string
+	if e = db.QueryRow(`SELECT state,recovery_error FROM poster_repair_stage WHERE stage_id='a-unsafe'`).Scan(&state, &marker); e != nil {
+		t.Fatal(e)
+	}
+	if state != "failed_closed" || !strings.HasPrefix(marker, "failed_closed:") {
+		t.Fatalf("state=%s marker=%q", state, marker)
+	}
+	if _, e = os.Stat(good.Path); !os.IsNotExist(e) {
+		t.Fatalf("later repair retained: %v", e)
+	}
+	checked, cleaned, e = ReconcilePosterStages(context.Background(), db, PosterRecoveryRoots{Upload: upload}, 100)
+	if e != nil || checked != 0 || cleaned != 0 {
+		t.Fatalf("repeat checked=%d cleaned=%d err=%v", checked, cleaned, e)
+	}
+}

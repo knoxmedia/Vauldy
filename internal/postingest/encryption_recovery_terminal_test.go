@@ -121,3 +121,100 @@ func TestCommittedPlaintextCleanupRetriesBeforeVerification(t *testing.T) {
 		t.Fatalf("marker=%q", marker)
 	}
 }
+
+func TestReconcileEncryptionStagesRetriesTransientRestoreWithoutStarving(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	if _, err := db.Exec(`PRAGMA foreign_keys=OFF`); err != nil {
+		t.Fatal(err)
+	}
+	root, quarantineRoot := t.TempDir(), t.TempDir()
+	if _, err := db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1,'retry','photo',?); INSERT INTO media(id,library_id,file_id,file_path,file_type,status,publication_state,ingest_generation) VALUES(1,1,'retry',?,'image','active','processing',1)`, root, filepath.Join(root, "selected.enc")); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(root, "source.jpg")
+	quarantine := filepath.Join(quarantineRoot, "1", "1", "retry-stage", "source")
+	if err := os.MkdirAll(filepath.Dir(quarantine), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(quarantine, []byte("plain"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := db.Exec(`INSERT INTO media_encryption_stage_journal(stage_id,task_id,attempt,media_id,run_id,step_id,generation,owner_token,source_path,quarantine_path,source_fingerprint,enc_path,wrapped_dek,iv,enc_sha256,enc_size,state) VALUES('retry-stage',1,1,1,1,1,1,'owner',?,?,'fp',?,'wrapped','iv','hash',1,'quarantined')`, source, quarantine, filepath.Join(root, "retry-stage.enc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := reconcileRestoreQuarantinedPlaintext
+	calls := 0
+	reconcileRestoreQuarantinedPlaintext = func(q, s, root string) error {
+		calls++
+		if calls == 1 {
+			return os.ErrPermission
+		}
+		return restoreQuarantinedPlaintext(q, s, root)
+	}
+	t.Cleanup(func() { reconcileRestoreQuarantinedPlaintext = original })
+	roots := EncryptionRecoveryRoots{Quarantine: quarantineRoot, Resolver: fixedStageRoot(root)}
+	checked, cleaned, err := ReconcileEncryptionStages(context.Background(), db, roots, 100)
+	if err != nil || checked != 1 || cleaned != 0 {
+		t.Fatalf("first checked=%d cleaned=%d err=%v", checked, cleaned, err)
+	}
+	var state, marker string
+	var attempts int
+	if err = db.QueryRow(`SELECT state,recovery_error,recovery_attempts FROM media_encryption_stage_journal WHERE stage_id='retry-stage'`).Scan(&state, &marker, &attempts); err != nil {
+		t.Fatal(err)
+	}
+	if state != "failed_closed" || !strings.HasPrefix(marker, "restore_pending:") || attempts != 1 {
+		t.Fatalf("state=%s marker=%q attempts=%d", state, marker, attempts)
+	}
+	if _, err = db.Exec(`UPDATE media_encryption_stage_journal SET next_retry_at=datetime(CURRENT_TIMESTAMP,'-1 second') WHERE stage_id='retry-stage'`); err != nil {
+		t.Fatal(err)
+	}
+	checked, cleaned, err = ReconcileEncryptionStages(context.Background(), db, roots, 100)
+	if err != nil || checked != 1 || cleaned != 1 {
+		t.Fatalf("retry checked=%d cleaned=%d err=%v", checked, cleaned, err)
+	}
+	if err = db.QueryRow(`SELECT state,recovery_error FROM media_encryption_stage_journal WHERE stage_id='retry-stage'`).Scan(&state, &marker); err != nil {
+		t.Fatal(err)
+	}
+	if state != "restored" || marker != "stale_restored" {
+		t.Fatalf("state=%s marker=%q", state, marker)
+	}
+}
+
+func TestReconcileEncryptionStagesExhaustedRestoreDoesNotStarveDueWork(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	if _, err := db.Exec(`PRAGMA foreign_keys=OFF`); err != nil {
+		t.Fatal(err)
+	}
+	root, quarantineRoot := t.TempDir(), t.TempDir()
+	if _, err := db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1,'retry','photo',?); INSERT INTO media(id,library_id,file_id,file_path,file_type,status,publication_state,ingest_generation) VALUES(1,1,'retry',?,'image','active','processing',1)`, root, filepath.Join(root, "selected.enc")); err != nil {
+		t.Fatal(err)
+	}
+	nextTask := int64(1)
+	insert := func(stage string, attempts int, updated string) string {
+		source := filepath.Join(root, stage+".jpg")
+		q := filepath.Join(quarantineRoot, "1", "1", stage, "source")
+		if err := os.MkdirAll(filepath.Dir(q), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(q, []byte(stage), 0600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := db.Exec(`INSERT INTO media_encryption_stage_journal(stage_id,task_id,attempt,media_id,run_id,step_id,generation,owner_token,source_path,quarantine_path,source_fingerprint,enc_path,wrapped_dek,iv,enc_sha256,enc_size,state,recovery_error,recovery_attempts,next_retry_at,updated_at) VALUES(?,?,1,1,1,1,1,'owner',?,?,'fp',?,'wrapped','iv','hash',1,'failed_closed','restore_pending: permission',?,datetime(CURRENT_TIMESTAMP,'-1 second'),?)`, stage, nextTask, source, q, filepath.Join(root, stage+".enc"), attempts, updated)
+		nextTask++
+		if err != nil {
+			t.Fatal(err)
+		}
+		return source
+	}
+	insert("exhausted", encryptionRecoveryMaxAttempts, "2000-01-01")
+	dueSource := insert("due", 1, "2001-01-01")
+	roots := EncryptionRecoveryRoots{Quarantine: quarantineRoot, Resolver: fixedStageRoot(root)}
+	checked, cleaned, err := ReconcileEncryptionStages(context.Background(), db, roots, 1)
+	if err != nil || checked != 1 || cleaned != 1 {
+		t.Fatalf("checked=%d cleaned=%d err=%v", checked, cleaned, err)
+	}
+	if _, err = os.Stat(dueSource); err != nil {
+		t.Fatalf("due restore missing: %v", err)
+	}
+}
