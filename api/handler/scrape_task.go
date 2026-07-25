@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/google/uuid"
 	"io"
 	"log"
 	"net/http"
@@ -348,7 +349,7 @@ type scrapeClaim struct {
 }
 
 func claimScrapeTaskWithOwnerRegistry(ctx context.Context, db *sql.DB, taskID int64, registry coreiface.CapabilityRegistry) (*scrapeClaim, error) {
-	payload, err := publication.ClaimEligible(ctx, db, publication.ClaimRequest{Family: publication.QueueScrape, TaskType: "scrape", Owner: "scrape", QueueID: &taskID, Registry: registry})
+	payload, err := publication.ClaimEligible(ctx, db, publication.ClaimRequest{Family: publication.QueueScrape, TaskType: "scrape", Owner: "scrape/" + uuid.NewString(), QueueID: &taskID, Registry: registry})
 	if err != nil || payload == nil {
 		return nil, err
 	}

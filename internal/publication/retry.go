@@ -13,6 +13,8 @@ import (
 
 var ErrIngestNotFound = errors.New("publication ingest not found")
 var ErrNoRetryableWork = errors.New("publication ingest has no retryable work")
+var ErrInvalidRetryReason = errors.New("publication retry reason is required")
+var ErrScrapeCapabilityUnavailable = errors.New("scrape capability unavailable")
 
 // RetryIngest retries exactly one current media generation by planning a fresh
 // immutable generation from current policy. Degraded media remains visible while
@@ -103,7 +105,13 @@ type OptionalScrapeRetryRequest struct {
 // RetryOptionalScrape reopens one exhausted optional scrape step without
 // changing the terminal publication outcome.
 func RetryOptionalScrape(ctx context.Context, db *sql.DB, req OptionalScrapeRetryRequest, registry coreiface.CapabilityRegistry) error {
-	if db == nil || req.MediaID <= 0 || req.StepID <= 0 || req.ActorID <= 0 || strings.TrimSpace(req.Reason) == "" || registry == nil || !registry.Available("scrape") {
+	if db == nil || req.MediaID <= 0 || req.StepID <= 0 || req.ActorID <= 0 {
+		return ErrNoRetryableWork
+	}
+	if strings.TrimSpace(req.Reason) == "" {
+		return ErrInvalidRetryReason
+	}
+	if registry == nil || !registry.Available("scrape") {
 		return ErrNoRetryableWork
 	}
 	var changed bool

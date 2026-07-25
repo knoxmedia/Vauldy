@@ -660,6 +660,9 @@ func migrateIngestPublication(ctx context.Context, db *sql.DB) error {
 	if current, err := publicationV2CurrentDB(ctx, db); err != nil {
 		return err
 	} else if current {
+		if err := ensureScrapeEffectCommitSchema(ctx, db); err != nil {
+			return err
+		}
 		var legacy int
 		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='trg_transcode_task_fill_media'`).Scan(&legacy); err != nil {
 			return err
@@ -851,6 +854,9 @@ func migratePublicationV2(ctx context.Context, db *sql.DB) (err error) {
 		return err
 	}
 	if err = createPublicationChildren(ctx, conn, graph); err != nil {
+		return err
+	}
+	if err = ensureScrapeEffectCommitSchema(ctx, conn); err != nil {
 		return err
 	}
 	if err = restorePublicationIndexes(ctx, conn, graph); err != nil {
@@ -1600,6 +1606,48 @@ const canonicalPosterRepairStageSchema = `CREATE TABLE poster_repair_stage(
  UNIQUE(queue_id,attempt),
  FOREIGN KEY(run_id,media_id,generation) REFERENCES media_ingest_run(id,media_id,generation) ON DELETE CASCADE)`
 
+const canonicalScrapeEffectCommitSchema = `CREATE TABLE scrape_effect_commit(
+ task_id INTEGER NOT NULL,attempt INTEGER NOT NULL,retry_round INTEGER NOT NULL DEFAULT 0,generation INTEGER NOT NULL,
+ stage_id TEXT NOT NULL DEFAULT '',manifest_json TEXT NOT NULL CHECK(json_valid(manifest_json)),manifest_digest TEXT NOT NULL,
+ created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(task_id,attempt,retry_round),
+ FOREIGN KEY(task_id) REFERENCES scrape_task(id) ON DELETE CASCADE)`
+
+func ensureScrapeEffectCommitSchema(ctx context.Context, q SQLExecutor) error {
+	if !tableExists(ctx, q, "scrape_effect_commit") {
+		_, err := q.ExecContext(ctx, canonicalScrapeEffectCommitSchema)
+		return err
+	}
+	if exactPublicationTable(ctx, q, "scrape_effect_commit", canonicalScrapeEffectCommitSchema) == nil {
+		return nil
+	}
+	columns, err := publicationColumns(ctx, q, "scrape_effect_commit")
+	if err != nil {
+		return err
+	}
+	for _, required := range []string{"task_id", "attempt", "generation", "stage_id", "manifest_json", "manifest_digest", "created_at"} {
+		if !columns[required] {
+			return fmt.Errorf("scrape_effect_commit schema conflict: missing %s", required)
+		}
+	}
+	if _, err = q.ExecContext(ctx, `DROP TABLE IF EXISTS scrape_effect_commit_new`); err != nil {
+		return err
+	}
+	if _, err = q.ExecContext(ctx, strings.Replace(canonicalScrapeEffectCommitSchema, "scrape_effect_commit", "scrape_effect_commit_new", 1)); err != nil {
+		return err
+	}
+	round := "0"
+	if columns["retry_round"] {
+		round = "retry_round"
+	}
+	if _, err = q.ExecContext(ctx, `INSERT INTO scrape_effect_commit_new(task_id,attempt,retry_round,generation,stage_id,manifest_json,manifest_digest,created_at) SELECT task_id,attempt,`+round+`,generation,stage_id,manifest_json,manifest_digest,created_at FROM scrape_effect_commit`); err != nil {
+		return err
+	}
+	if _, err = q.ExecContext(ctx, `DROP TABLE scrape_effect_commit`); err != nil {
+		return err
+	}
+	_, err = q.ExecContext(ctx, `ALTER TABLE scrape_effect_commit_new RENAME TO scrape_effect_commit`)
+	return err
+}
 func createPublicationChildren(ctx context.Context, q SQLExecutor, g []publicationGraphTable) error {
 	if _, ok := graphMeta(g, "post_ingest_task"); ok {
 		if _, e := q.ExecContext(ctx, strings.Replace(postIngestTaskPublicationSchema, "post_ingest_task_new", "post_ingest_task", 1)); e != nil {

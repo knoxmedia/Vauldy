@@ -71,7 +71,7 @@ func applyScrapeCompletionEffectsTx(ctx context.Context, tx store.SQLExecutor, c
 	if err != nil {
 		return "", err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO scrape_effect_commit(task_id,attempt,generation,stage_id,manifest_json,manifest_digest) VALUES(?,?,?,?,?,?)`, c.ID, c.Attempts, c.Generation.Int64, e.Artwork.StageID, string(manifestRaw), digest)
+	_, err = tx.ExecContext(ctx, `INSERT INTO scrape_effect_commit(task_id,attempt,retry_round,generation,stage_id,manifest_json,manifest_digest) VALUES(?,?,?,?,?,?,?)`, c.ID, c.Attempts, c.RetryRound, c.Generation.Int64, e.Artwork.StageID, string(manifestRaw), digest)
 	return digest, err
 }
 

@@ -832,3 +832,21 @@ func TestCompleteScrapePreparationHonorsCallerDeadline(t *testing.T) {
 		t.Fatalf("status=%s", status)
 	}
 }
+
+func TestScrapeClaimsUseUniqueOwnerTokens(t *testing.T) {
+	db, mediaID := posterHandlerTestDB(t)
+	if _, err := db.Exec(`INSERT INTO scrape_task(id,media_id,status,fail_count) VALUES(150,?,'waiting',0),(151,?,'waiting',0)`, mediaID, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	first, err := claimScrapeTaskWithOwner(context.Background(), db, 150)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := claimScrapeTaskWithOwner(context.Background(), db, 151)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == nil || second == nil || first.Owner == second.Owner || first.Owner == "scrape" || second.Owner == "scrape" {
+		t.Fatalf("owners=%q/%q", first.Owner, second.Owner)
+	}
+}

@@ -2115,3 +2115,34 @@ func TestMigrationRejectsConflictingEncryptionJournalSchema(t *testing.T) {
 		t.Fatal("conflicting encryption journal schema accepted")
 	}
 }
+
+func TestMigrateIngestPublicationRebuildsLegacyScrapeEffectCommit(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	result, err := db.Exec(`INSERT INTO scrape_task(media_id,status) VALUES(20,'done')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DROP TABLE scrape_effect_commit; CREATE TABLE scrape_effect_commit(task_id INTEGER NOT NULL,attempt INTEGER NOT NULL,generation INTEGER NOT NULL,stage_id TEXT NOT NULL DEFAULT '',manifest_json TEXT NOT NULL,manifest_digest TEXT NOT NULL,created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(task_id,attempt),FOREIGN KEY(task_id) REFERENCES scrape_task(id) ON DELETE CASCADE); INSERT INTO scrape_effect_commit(task_id,attempt,generation,manifest_json,manifest_digest) VALUES(?,1,1,'{}','legacy')`, taskID); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	var round int
+	if err := db.QueryRow(`SELECT retry_round FROM scrape_effect_commit WHERE task_id=? AND attempt=1`, taskID).Scan(&round); err != nil {
+		t.Fatal(err)
+	}
+	if round != 0 {
+		t.Fatalf("retry_round=%d", round)
+	}
+	if _, err := db.Exec(`INSERT INTO scrape_effect_commit(task_id,attempt,retry_round,generation,manifest_json,manifest_digest) VALUES(?,1,1,1,'{}','new')`, taskID); err != nil {
+		t.Fatal(err)
+	}
+}

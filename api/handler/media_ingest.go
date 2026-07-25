@@ -69,8 +69,12 @@ func (h *Handler) AdminRetryOptionalScrape(c *gin.Context) {
 	}
 	err = publication.RetryOptionalScrape(c.Request.Context(), h.App.DB, publication.OptionalScrapeRetryRequest{MediaID: mediaID, StepID: stepID, ActorID: middleware.UserID(c), Reason: body.Reason}, h.PublicationCapabilities)
 	switch {
+	case errors.Is(err, publication.ErrInvalidRetryReason):
+		c.JSON(http.StatusBadRequest, gin.H{"code": "invalid_retry_reason", "error": "reason is required"})
+	case errors.Is(err, publication.ErrScrapeCapabilityUnavailable):
+		c.JSON(http.StatusConflict, gin.H{"code": "scrape_capability_unavailable", "error": "scrape capability unavailable"})
 	case errors.Is(err, publication.ErrNoRetryableWork):
-		c.JSON(http.StatusConflict, gin.H{"error": "no retryable scrape work"})
+		c.JSON(http.StatusConflict, gin.H{"code": "no_retryable_work", "error": "no retryable scrape work"})
 	case err != nil:
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 	default:
