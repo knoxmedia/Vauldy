@@ -49,6 +49,8 @@ encrypted_assets:
 scan:
   file_hash_on_scan: false
   fast_ffprobe: true
+  # Synchronous poster capture during scan (seconds). Default 120. Set 0 to disable.
+  precapture_poster_timeout_seconds: 120
 subtitle:
   auto_on_scan: true
   asr:
