@@ -497,3 +497,13 @@ func posterSnapSecond(duration int64) int {
 	}
 	return sec
 }
+
+// AttachedPicture exports the attachedPicture method for use by poster precapture.
+func (r *LocalPosterRunner) AttachedPicture(ctx context.Context, mediaID int64, input string) (int, bool, error) {
+	return r.attachedPicture(ctx, mediaID, input)
+}
+
+// FFmpeg exports the ffmpeg method for use by poster precapture.
+func (r *LocalPosterRunner) FFmpeg(ctx context.Context, mediaID int64, input string, pre, post []string) ([]byte, error) {
+	return r.ffmpeg(ctx, mediaID, input, pre, post)
+}

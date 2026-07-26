@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"knox-media/internal/branding"
 
@@ -160,6 +161,9 @@ type ScanConfig struct {
 	FileHashOnScan *bool `yaml:"file_hash_on_scan"`
 	// FastFFprobe limits analyzeduration/probesize during scan metadata reads. Default on; set false if metadata is incomplete.
 	FastFFprobe *bool `yaml:"fast_ffprobe"`
+	// PrecapturePosterTimeoutSeconds is the per-file timeout for synchronous poster
+	// capture during scan. Default: 120 (2 minutes). Set to 0 to disable.
+	PrecapturePosterTimeoutSeconds *int `yaml:"precapture_poster_timeout_seconds"`
 }
 
 func defaultPostIngestGlobal() int {
@@ -645,6 +649,23 @@ func (c *Config) LibraryScanFileHash() bool {
 		return false
 	}
 	return c.Scan.FileHashOnScan != nil && *c.Scan.FileHashOnScan
+}
+
+// PrecapturePosterTimeout returns the per-file timeout for synchronous poster
+// capture during scan. Returns 0 if disabled.
+func (c *Config) PrecapturePosterTimeout() time.Duration {
+	if c == nil || c.Scan.PrecapturePosterTimeoutSeconds == nil {
+		return 2 * time.Minute
+	}
+	if *c.Scan.PrecapturePosterTimeoutSeconds <= 0 {
+		return 0
+	}
+	return time.Duration(*c.Scan.PrecapturePosterTimeoutSeconds) * time.Second
+}
+
+// PrecapturePosterEnabled reports whether synchronous poster pre-capture during scan is enabled.
+func (c *Config) PrecapturePosterEnabled() bool {
+	return c.PrecapturePosterTimeout() > 0
 }
 
 // LibraryScanFastFFprobe reports whether to use shorter ffprobe analysis during library scan.

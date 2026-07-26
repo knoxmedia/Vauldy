@@ -46,6 +46,30 @@ func NewScanMediaDiscoveredTxCallback(planner MediaPlanner) ScanMediaDiscoveredT
 	}
 }
 
+// NewScanMediaDiscoveredTxWithPrecaptureCallback returns a scan callback that
+// plans the ingest run AND synchronously captures the poster before the
+// transaction commits. If poster capture fails, the error propagates to the
+// scanner, which rolls back the transaction.
+func NewScanMediaDiscoveredTxWithPrecaptureCallback(planner MediaPlanner, precapture PreCaptureConfig) ScanMediaDiscoveredTxFunc {
+	return func(ctx context.Context, tx *sql.Tx, taskID int64, discovery scanner.ScanDiscovery) error {
+		run, err := planner.PlanNewMediaTx(ctx, tx, publication.NewMedia{
+			MediaID: discovery.MediaID, ScanTaskID: taskID, FileType: discovery.FileType,
+			MetadataAttempt: publication.MetadataAttempt{
+				Attempted: discovery.MetadataAttempt.Attempted,
+				Fields:    append([]string(nil), discovery.MetadataAttempt.Fields...),
+				Errors:    metadataDiagnostics(discovery.MetadataAttempt.Errors),
+			},
+		})
+		if err != nil {
+			return err
+		}
+		if discovery.FileType != "video" || run.ID == 0 {
+			return nil
+		}
+		return PreCapturePoster(ctx, tx, discovery.MediaID, run, precapture)
+	}
+}
+
 func metadataDiagnostics(in []scanner.MetadataDiagnostic) []publication.MetadataDiagnostic {
 	out := make([]publication.MetadataDiagnostic, len(in))
 	for i, diagnostic := range in {
