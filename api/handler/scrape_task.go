@@ -48,6 +48,7 @@ const (
 
 // StartScrapeTaskLoop continuously drains waiting scrape tasks (not only via scheduled_task).
 func (h *Handler) StartScrapeTaskLoop(ctx context.Context) {
+	h.recoverExpiredScrapeTasks(ctx)
 	h.runScrapeWorkerOnce(ctx)
 	tk := time.NewTicker(scrapeWorkerInterval)
 	defer tk.Stop()
@@ -56,8 +57,39 @@ func (h *Handler) StartScrapeTaskLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-tk.C:
+			h.recoverExpiredScrapeTasks(ctx)
 			h.runScrapeWorkerOnce(ctx)
 		}
+	}
+}
+
+// recoverExpiredScrapeTasks resets scrape tasks that are stuck in 'running'
+// with an expired lease back to 'waiting'. This prevents tasks from being
+// permanently stranded when processing hangs or the heartbeat fails.
+func (h *Handler) recoverExpiredScrapeTasks(ctx context.Context) {
+	if h == nil || h.App == nil || h.App.DB == nil {
+		return
+	}
+	res, err := h.App.DB.ExecContext(ctx, `UPDATE scrape_task SET status='waiting',progress=0,message='recovered expired lease',lease_owner=NULL,lease_until=NULL,available_at=CURRENT_TIMESTAMP WHERE status='running' AND lease_until < CURRENT_TIMESTAMP AND COALESCE(fail_count,0) < ?`, maxScrapeTaskFailures)
+	if err != nil {
+		if ctx.Err() == nil {
+			log.Printf("scrape reaper: recover expired: %v", err)
+		}
+		return
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		log.Printf("scrape reaper: recovered %d expired tasks", n)
+	}
+	// Mark permanently stuck tasks (fail_count >= max with expired lease) as failed.
+	res2, err := h.App.DB.ExecContext(ctx, `UPDATE scrape_task SET status='failed',finished_at=CURRENT_TIMESTAMP,message='exhausted retries after expired leases',lease_owner=NULL,lease_until=NULL WHERE status='running' AND lease_until < CURRENT_TIMESTAMP AND COALESCE(fail_count,0) >= ?`, maxScrapeTaskFailures)
+	if err != nil {
+		if ctx.Err() == nil {
+			log.Printf("scrape reaper: fail exhausted: %v", err)
+		}
+		return
+	}
+	if n, _ := res2.RowsAffected(); n > 0 {
+		log.Printf("scrape reaper: marked %d exhausted tasks as failed", n)
 	}
 }
 
@@ -435,7 +467,7 @@ func (h *Handler) runScrapeTasksWithLimit(ctx context.Context, ids []int64, limi
 		if taskStatus != "running" || failCount >= maxScrapeTaskFailures {
 			continue
 		}
-		workCtx, stopWork := context.WithCancel(ctx)
+		workCtx, stopWork := context.WithTimeout(ctx, 80*time.Second)
 		leaseLost := make(chan struct{}, 1)
 		heartbeatDone := make(chan struct{})
 		go func(c scrapeClaim) {
@@ -1320,7 +1352,7 @@ func completeScrapeClaimWithEffects(ctx context.Context, db *sql.DB, c scrapeCla
 	var expectedDigest string
 	err := scrapeClaimImmediate(ctx, db, func(tx store.ImmediateConnTx) error {
 		args := append([]any{message}, scrapeClaimArgs(c)...)
-		res, err := tx.ExecContext(ctx, `UPDATE scrape_task AS q SET status='done',progress=100,finished_at=CURRENT_TIMESTAMP,message=?,lease_owner=NULL,lease_until=NULL WHERE `+scrapeClaimPredicate(), args...)
+		res, err := tx.ExecContext(ctx, `UPDATE scrape_task AS q SET status='done',fail_count=0,progress=100,finished_at=CURRENT_TIMESTAMP,message=?,lease_owner=NULL,lease_until=NULL WHERE `+scrapeClaimPredicate(), args...)
 		if err != nil {
 			return err
 		}
