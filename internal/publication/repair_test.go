@@ -1,11 +1,14 @@
 package publication
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -602,5 +605,120 @@ func TestRepairLegacyVideoEncryptionFailureStaysHiddenAndRetainsPublishedAt(t *t
 	}
 	if state != "failed" || selected != source || after != publishedAt {
 		t.Fatalf("state=%s selected=%q published=%q want failed/%q/%q", state, selected, after, source, publishedAt)
+	}
+}
+
+func TestSourceFingerprintContextPreservesFormatAndWrapperCompatibility(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "source.bin")
+	contents := []byte("fingerprint the complete source, including this tail")
+	if err := os.WriteFile(path, contents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(contents)
+	want := fmt.Sprintf("%s|%d|%d|sha256:%s", filepath.Clean(absolute), info.Size(), info.ModTime().UnixNano(), hex.EncodeToString(digest[:]))
+
+	got, err := SourceFingerprintContext(context.Background(), path)
+	if err != nil {
+		t.Fatalf("SourceFingerprintContext: %v", err)
+	}
+	if got != want {
+		t.Fatalf("fingerprint = %q, want %q", got, want)
+	}
+	legacy, err := SourceFingerprint(path)
+	if err != nil {
+		t.Fatalf("SourceFingerprint: %v", err)
+	}
+	if legacy != got {
+		t.Fatalf("legacy fingerprint = %q, context fingerprint = %q", legacy, got)
+	}
+}
+
+func TestSourceFingerprintContextCanceledBeforeRead(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "source.bin")
+	if err := os.WriteFile(path, []byte("source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := SourceFingerprintContext(ctx, path)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+}
+
+func TestSourceFingerprintContextCancelsDuringRealFileRead(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "source.bin")
+	if err := os.WriteFile(path, bytes.Repeat([]byte("source bytes "), 8192), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sourceFingerprintReadMu.Lock()
+	original := sourceFingerprintRead
+	readCalls := 0
+	sourceFingerprintRead = func(r io.Reader, p []byte) (int, error) {
+		readCalls++
+		n, err := original(r, p[:min(len(p), 16)])
+		cancel()
+		return n, err
+	}
+	sourceFingerprintReadMu.Unlock()
+	t.Cleanup(func() {
+		sourceFingerprintReadMu.Lock()
+		sourceFingerprintRead = original
+		sourceFingerprintReadMu.Unlock()
+	})
+
+	_, err := SourceFingerprintContext(ctx, path)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+	if readCalls != 1 {
+		t.Fatalf("read calls = %d, want 1", readCalls)
+	}
+}
+
+type cancelingFingerprintReader struct {
+	cancel context.CancelFunc
+	read   bool
+}
+
+func (r *cancelingFingerprintReader) Read(p []byte) (int, error) {
+	if r.read {
+		return 0, errors.New("reader called after cancellation")
+	}
+	r.read = true
+	n := copy(p, "first chunk")
+	r.cancel()
+	return n, nil
+}
+
+func TestCopyFingerprintContextStopsAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	reader := &cancelingFingerprintReader{cancel: cancel}
+	var dst bytes.Buffer
+
+	n, err := copyFingerprintContext(ctx, &dst, reader)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+	if n != int64(len("first chunk")) {
+		t.Fatalf("bytes copied = %d, want %d", n, len("first chunk"))
+	}
+	if got := dst.String(); got != "first chunk" {
+		t.Fatalf("copied bytes = %q, want %q", got, "first chunk")
+	}
+	if !reader.read {
+		t.Fatal("reader was not called")
 	}
 }

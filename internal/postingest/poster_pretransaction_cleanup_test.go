@@ -24,29 +24,6 @@ func TestPosterCommitCleansNewSealOnPretransactionFailures(t *testing.T) {
 		inject func(*testing.T, *sql.DB, string, Task, StagedPoster)
 	}{
 		{
-			name: "media source query",
-			inject: func(t *testing.T, _ *sql.DB, _ string, _ Task, _ StagedPoster) {
-				original := posterLoadSourcePath
-				posterLoadSourcePath = func(context.Context, *sql.DB, int64) (string, error) {
-					return "", errors.New("injected media source query failure")
-				}
-				t.Cleanup(func() { posterLoadSourcePath = original })
-			},
-		},
-		{
-			name: "source fingerprint mismatch",
-			inject: func(t *testing.T, db *sql.DB, _ string, task Task, _ StagedPoster) {
-				original := posterAfterSealHook
-				posterAfterSealHook = func() {
-					source := taskSource(t, db, task.MediaID)
-					if err := os.WriteFile(source, []byte("changed source after seal"), 0600); err != nil {
-						t.Fatal(err)
-					}
-				}
-				t.Cleanup(func() { posterAfterSealHook = original })
-			},
-		},
-		{
 			name: "sealed artifact verification",
 			inject: func(t *testing.T, _ *sql.DB, upload string, _ Task, staged StagedPoster) {
 				original := posterAfterSealHook
@@ -108,11 +85,11 @@ func TestPosterCommitPretransactionFailureRetainsSharedCAS(t *testing.T) {
 	if err = os.WriteFile(final, body, 0444); err != nil {
 		t.Fatal(err)
 	}
-	original := posterLoadSourcePath
-	posterLoadSourcePath = func(context.Context, *sql.DB, int64) (string, error) {
-		return "", errors.New("injected media source query failure")
+	original := posterSourceStat
+	posterSourceStat = func(string) (os.FileInfo, error) {
+		return nil, errors.New("injected source stat failure")
 	}
-	t.Cleanup(func() { posterLoadSourcePath = original })
+	t.Cleanup(func() { posterSourceStat = original })
 
 	if err = commitStagedPoster(context.Background(), db, task, staged, PosterRecoveryRoots{Upload: upload}); err == nil {
 		t.Fatal("expected pretransaction rejection")

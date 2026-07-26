@@ -380,7 +380,7 @@ func TestRequireMediaAccessPublicationVisibilityForOrdinaryAndAdmin(t *testing.T
 	}
 }
 
-func TestListMediaPublicationVisibilityAndAdminBypass(t *testing.T) {
+func TestListMediaPublicationVisibilityForOrdinaryEndpoints(t *testing.T) {
 	h := setupAccessTestDB(t)
 	if _, err := h.App.DB.Exec(`UPDATE media SET publication_state='processing', title='Processing Search' WHERE id=10;
 		INSERT INTO media(id,library_id,file_id,title,file_path,file_type,publication_state) VALUES
@@ -394,7 +394,7 @@ func TestListMediaPublicationVisibilityAndAdminBypass(t *testing.T) {
 		name, role string
 		uid        int64
 		want       int
-	}{{"ordinary", "user", 1, 2}, {"admin", "admin", 2, 5}} {
+	}{{"ordinary", "user", 1, 2}, {"admin", "admin", 2, 2}} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := httptest.NewRecorder()
 			c, _ := gin.CreateTestContext(w)
@@ -491,9 +491,9 @@ func TestMediaDetailMetaAndPlayAllowVisiblePublicationStates(t *testing.T) {
 	}
 }
 
-func TestGetMediaAdminBypassesPublicationVisibility(t *testing.T) {
+func TestGetMediaAdminDoesNotBypassPublicationVisibility(t *testing.T) {
 	h := setupAccessTestDB(t)
-	if _, err := h.App.DB.Exec(`UPDATE media SET publication_state='failed',publication_error='ingest failed',ingest_generation=3 WHERE id=10`); err != nil {
+	if _, err := h.App.DB.Exec(`UPDATE media SET publication_state='failed' WHERE id=10`); err != nil {
 		t.Fatal(err)
 	}
 	w := httptest.NewRecorder()
@@ -502,18 +502,7 @@ func TestGetMediaAdminBypassesPublicationVisibility(t *testing.T) {
 	c.Params = gin.Params{{Key: "id", Value: "10"}}
 	setUserCtx(c, 2, "admin", "admin")
 	h.GetMedia(c)
-	if w.Code != http.StatusOK {
+	if w.Code != http.StatusNotFound {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
-	}
-	var payload struct {
-		PublicationState string `json:"publication_state"`
-		PublicationError string `json:"publication_error"`
-		IngestGeneration int64  `json:"ingest_generation"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
-		t.Fatal(err)
-	}
-	if payload.PublicationState != "failed" || payload.PublicationError != "ingest failed" || payload.IngestGeneration != 3 {
-		t.Fatalf("payload=%+v", payload)
 	}
 }

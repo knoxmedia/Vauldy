@@ -3,6 +3,7 @@ package postingest
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 
 	"knox-media/internal/publication"
 	"knox-media/internal/scraper"
+	"knox-media/internal/storage"
 	"testing"
 )
 
@@ -163,9 +165,19 @@ func TestPosterCurrentGenerationCommitsAtomicallyAndIsIdempotent(t *testing.T) {
 	}
 	runner := &stagedPosterFake{staged: StagedPoster{Stage: publication.StageRecord{StageID: stageID, StagedPath: dir}, Path: path, URL: "/immutable/poster.jpg", Source: "screen_grabber", Size: size, Hash: hash}}
 	a := NewPosterAdapter(db, upload, nil, runner)
+	originalFingerprint := posterSourceFingerprint
+	fingerprintCalls := 0
+	posterSourceFingerprint = func(ctx context.Context, path string) (string, error) {
+		fingerprintCalls++
+		return publication.SourceFingerprintContext(ctx, path)
+	}
+	t.Cleanup(func() { posterSourceFingerprint = originalFingerprint })
 	result, err := a.ExecuteWithResult(context.Background(), task)
 	if err != nil || result.Completion != AlreadyCommittedAtomically {
 		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if fingerprintCalls != 1 {
+		t.Fatalf("source fingerprint calls=%d want 1", fingerprintCalls)
 	}
 	var taskStatus, stepStatus, journalState, meta string
 	var evidence int
@@ -178,6 +190,147 @@ func TestPosterCurrentGenerationCommitsAtomicallyAndIsIdempotent(t *testing.T) {
 	result, err = a.ExecuteWithResult(context.Background(), task)
 	if err != nil || result.Completion != AlreadyCommittedAtomically || runner.calls != 1 {
 		t.Fatalf("retry result=%+v err=%v calls=%d", result, err, runner.calls)
+	}
+}
+
+func TestCurrentPosterEvidenceRequiresDoneQueueAndStep(t *testing.T) {
+	for _, target := range []string{"queue", "step"} {
+		t.Run(target, func(t *testing.T) {
+			db, upload, task := seedCurrentLinkedPosterTask(t)
+			source := taskSource(t, db, task.MediaID)
+			poster := filepath.Join(upload, "exact-evidence.jpg")
+			if err := os.WriteFile(poster, []byte("exact poster"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			size, hash, err := hashPath(poster)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fp, err := publication.SourceFingerprintContext(context.Background(), source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			url := "/uploads/exact-evidence.jpg"
+			refs, _ := json.Marshal(map[string]any{"path": poster, "url": url, "size": size, "sha256": hash})
+			if _, err = db.Exec(`UPDATE media SET meta_json=? WHERE id=?`, `{"scrape":{"poster":"`+url+`"}}`, task.MediaID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = db.Exec(`INSERT INTO media_asset_stage_journal(stage_id,media_id,run_id,step_id,generation,owner_token,source_fingerprint,artifact_kind,state,staged_path,hashes_sizes_json) VALUES('exact-evidence',?,?,?,?,?,?,'poster','committed',?,?)`, task.MediaID, *task.RunID, *task.StepID, task.Generation, task.LeaseOwner, fp, filepath.Dir(poster), string(refs)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = db.Exec(`INSERT INTO media_ingest_evidence(run_id,step_id,media_id,generation,kind,source_fingerprint,artifact_refs_json,reason,verified_at,stage_id) VALUES(?,?,?,?,'poster',?,?,'generated',CURRENT_TIMESTAMP,'exact-evidence')`, *task.RunID, *task.StepID, task.MediaID, task.Generation, fp, string(refs)); err != nil {
+				t.Fatal(err)
+			}
+			if target == "queue" {
+				if _, err = db.Exec(`UPDATE media_ingest_step SET status='done' WHERE id=?`, *task.StepID); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if _, err = db.Exec(`UPDATE post_ingest_task SET status='done' WHERE id=?`, task.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			exact, _, err := currentPosterEvidence(context.Background(), db, task, source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if exact {
+				t.Fatalf("%s running evidence accepted", target)
+			}
+		})
+	}
+}
+
+func TestPosterExecutionSelectsSourceOnceForEvidenceAndStage(t *testing.T) {
+	db, upload, task := seedCurrentLinkedPosterTask(t)
+	first := taskSource(t, db, task.MediaID)
+	second := filepath.Join(t.TempDir(), "second.mp4")
+	if err := os.WriteFile(second, []byte("second source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	firstFP, err := publication.SourceFingerprintContext(context.Background(), first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO media_ingest_evidence(run_id,step_id,media_id,generation,kind,source_fingerprint,artifact_refs_json,reason,verified_at,stage_id) VALUES(?,?,?,?,'poster',?,'{}','generated',CURRENT_TIMESTAMP,'prior-selection')`, *task.RunID, *task.StepID, task.MediaID, task.Generation, "stale"); err != nil {
+		t.Fatal(err)
+	}
+
+	stageID := "single-selection"
+	dir := filepath.Join(upload, "posters", "generation-1", stageID)
+	if err = os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	artifact := filepath.Join(dir, posterLogicalName)
+	if err = os.WriteFile(artifact, []byte("poster"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	size, hash, err := hashPath(artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &stagedPosterFake{staged: StagedPoster{Stage: publication.StageRecord{StageID: stageID, StagedPath: dir}, Path: artifact, URL: storage.ImmutablePlainPosterURL(task.Generation, stageID), Source: "screen_grabber", Size: size, Hash: hash}}
+	a := NewPosterAdapter(db, upload, nil, runner)
+	original := posterSourceFingerprint
+	calls := 0
+	posterSourceFingerprint = func(ctx context.Context, path string) (string, error) {
+		calls++
+		if calls == 1 {
+			if _, updateErr := db.ExecContext(ctx, `UPDATE media SET file_path=? WHERE id=?`, second, task.MediaID); updateErr != nil {
+				return "", updateErr
+			}
+		}
+		return publication.SourceFingerprintContext(ctx, path)
+	}
+	t.Cleanup(func() { posterSourceFingerprint = original })
+
+	_, err = a.ExecuteWithResult(context.Background(), task)
+	if err == nil {
+		t.Fatal("selection change was not fenced at commit")
+	}
+	if calls != 1 {
+		t.Fatalf("source fingerprint calls=%d want 1", calls)
+	}
+	if runner.calls != 1 {
+		t.Fatalf("stage calls=%d want 1", runner.calls)
+	}
+	if runner.staged.Stage.Request.SourcePath != first || runner.staged.Stage.Request.SourceFingerprint != firstFP {
+		t.Fatalf("request path=%q fp=%q want path=%q fp=%q", runner.staged.Stage.Request.SourcePath, runner.staged.Stage.Request.SourceFingerprint, first, firstFP)
+	}
+}
+
+func TestPosterStalePriorEvidenceReusesSingleSourceFingerprint(t *testing.T) {
+	db, upload, task := seedCurrentLinkedPosterTask(t)
+	oldStage := "stale-prior-poster"
+	oldDir := filepath.Join(upload, "posters", "generation-1", oldStage)
+	if err := os.MkdirAll(oldDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oldPath := filepath.Join(oldDir, posterLogicalName)
+	if err := os.WriteFile(oldPath, []byte("stale artifact"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldFP := strings.Replace(posterRequest(t, db, task).SourceFingerprint, "sha256:", "sha256:"+strings.Repeat("0", 64), 1)
+	if _, err := db.Exec(`INSERT INTO media_ingest_evidence(run_id,step_id,media_id,generation,kind,source_fingerprint,artifact_refs_json,reason,verified_at,stage_id) VALUES(?,?,?,?,'poster',?,'{}','generated',CURRENT_TIMESTAMP,?)`, *task.RunID, *task.StepID, task.MediaID, task.Generation, oldFP, oldStage); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := realPosterStageRunner(t, db, upload)
+	a := NewPosterAdapter(db, upload, nil, runner)
+	original := posterSourceFingerprint
+	calls := 0
+	posterSourceFingerprint = func(ctx context.Context, path string) (string, error) {
+		calls++
+		return publication.SourceFingerprintContext(ctx, path)
+	}
+	t.Cleanup(func() { posterSourceFingerprint = original })
+
+	_, err := a.ExecuteWithResult(context.Background(), task)
+	if err == nil || !strings.Contains(err.Error(), "poster commit conflict") {
+		t.Fatalf("err=%v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("source fingerprint calls=%d want 1", calls)
 	}
 }
 
