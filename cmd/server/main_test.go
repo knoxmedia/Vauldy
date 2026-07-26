@@ -3,8 +3,12 @@ package main
 import (
 	"context"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -334,14 +338,131 @@ func TestMainWiresOneSharedPublicationCapabilityRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	src := string(data)
-	constructor := strings.Index(src, "publicationCapabilities := publication.NewCapabilityMatrix(publicationSteps)")
-	if constructor < 0 {
-		t.Fatal("missing process publication capability registry")
+	if !hasOneUnconditionalPosterRepairAST(string(data)) {
+		t.Fatal(`publicationSteps literal must contain exact capability "poster_repair" once, adjacent after "poster", and feed exactly one NewCapabilityMatrix call`)
 	}
+	src := string(data)
 	for _, required := range []string{"postingest.NewQueue(db, queueOwner, sqliteMetrics, publicationCapabilities)", "PublicationCapabilities: publicationCapabilities", "Capabilities: publicationCapabilities"} {
 		if !strings.Contains(src, required) {
 			t.Fatalf("missing shared registry wiring %q", required)
 		}
+	}
+}
+
+func hasOneUnconditionalPosterRepairAST(src string) bool {
+	file, err := parser.ParseFile(token.NewFileSet(), "main.go", src, parser.AllErrors)
+	if err != nil {
+		return false
+	}
+	var mainBody *ast.BlockStmt
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if ok && fn.Name.Name == "main" && fn.Recv == nil {
+			mainBody = fn.Body
+			break
+		}
+	}
+	if mainBody == nil {
+		return false
+	}
+	var steps []string
+	declarations := 0
+	constructors := 0
+	ast.Inspect(mainBody, func(node ast.Node) bool {
+		switch n := node.(type) {
+		case *ast.AssignStmt:
+			for i, lhs := range n.Lhs {
+				ident, ok := lhs.(*ast.Ident)
+				if !ok || ident.Name != "publicationSteps" || n.Tok != token.DEFINE || i >= len(n.Rhs) {
+					continue
+				}
+				literal, ok := n.Rhs[i].(*ast.CompositeLit)
+				if !ok || !isStringSliceType(literal.Type) {
+					continue
+				}
+				declarations++
+				steps = steps[:0]
+				for _, element := range literal.Elts {
+					basic, ok := element.(*ast.BasicLit)
+					if !ok || basic.Kind != token.STRING {
+						return true
+					}
+					value, err := strconv.Unquote(basic.Value)
+					if err != nil {
+						return true
+					}
+					steps = append(steps, value)
+				}
+			}
+		case *ast.CallExpr:
+			selector, ok := n.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			pkg, pkgOK := selector.X.(*ast.Ident)
+			if pkgOK && pkg.Name == "publication" && selector.Sel.Name == "NewCapabilityMatrix" && len(n.Args) == 1 {
+				arg, ok := n.Args[0].(*ast.Ident)
+				if ok && arg.Name == "publicationSteps" {
+					constructors++
+				}
+			}
+		}
+		return true
+	})
+	if declarations != 1 || constructors != 1 {
+		return false
+	}
+	posterRepair := 0
+	adjacent := false
+	for i, step := range steps {
+		if step == "poster_repair" {
+			posterRepair++
+			adjacent = i > 0 && steps[i-1] == "poster"
+		}
+	}
+	return posterRepair == 1 && adjacent
+}
+
+func isStringSliceType(expr ast.Expr) bool {
+	array, ok := expr.(*ast.ArrayType)
+	if !ok || array.Len != nil {
+		return false
+	}
+	ident, ok := array.Elt.(*ast.Ident)
+	return ok && ident.Name == "string"
+}
+
+func TestPublicationStepsPosterRepairMustBeUniqueAndUnconditional(t *testing.T) {
+	wrap := func(body string) string { return "package main\nfunc main() {\n" + body + "\n}" }
+	for _, tc := range []struct {
+		name string
+		body string
+		want bool
+	}{
+		{name: "valid", body: `publicationSteps := []string{"poster", "poster_repair", "thumbnail"}
+		if ready() { publicationSteps = append(publicationSteps, "prepare") }
+		publicationCapabilities := publication.NewCapabilityMatrix(publicationSteps)
+		_ = publicationCapabilities`, want: true},
+		{name: "comment and decoy string", body: `publicationSteps := []string{"poster", "thumbnail"}
+		_ = "publicationSteps := []string{\"poster\", \"poster_repair\"}"
+		// publication.NewCapabilityMatrix(publicationSteps) with "poster_repair"
+		publicationCapabilities := publication.NewCapabilityMatrix(publicationSteps)
+		_ = publicationCapabilities`, want: false},
+		{name: "conditional append only", body: `publicationSteps := []string{"poster", "thumbnail"}
+		if ready() { publicationSteps = append(publicationSteps, "poster_repair", "prepare") }
+		publicationCapabilities := publication.NewCapabilityMatrix(publicationSteps)
+		_ = publicationCapabilities`, want: false},
+		{name: "duplicate literal", body: `publicationSteps := []string{"poster", "poster_repair", "poster_repair", "thumbnail"}
+		publicationCapabilities := publication.NewCapabilityMatrix(publicationSteps)
+		_ = publicationCapabilities`, want: false},
+		{name: "duplicate constructor", body: `publicationSteps := []string{"poster", "poster_repair", "thumbnail"}
+		_ = publication.NewCapabilityMatrix(publicationSteps)
+		_ = publication.NewCapabilityMatrix(publicationSteps)`, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hasOneUnconditionalPosterRepairAST(wrap(tc.body)); got != tc.want {
+				t.Fatalf("hasOneUnconditionalPosterRepairAST()=%v want %v", got, tc.want)
+			}
+		})
 	}
 }

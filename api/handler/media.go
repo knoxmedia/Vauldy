@@ -32,10 +32,10 @@ type updateMediaAdminBody struct {
 }
 
 func (h *Handler) ListMedia(c *gin.Context) {
-	h.listMediaObserved(c, nil, "")
+	h.listMediaObserved(c, nil, "", false)
 }
 
-func (h *Handler) listMediaObserved(c *gin.Context, afterBatch func(mediaListStats), publicationState string) {
+func (h *Handler) listMediaObserved(c *gin.Context, afterBatch func(mediaListStats), publicationState string, includeUnpublished bool) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
 	defer cancel()
 	var profile userPermissionProfile
@@ -56,8 +56,8 @@ func (h *Handler) listMediaObserved(c *gin.Context, afterBatch func(mediaListSta
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if middleware.IsAdmin(c) {
-		spec.IncludeUnpublished = true
+	spec.IncludeUnpublished = includeUnpublished
+	if includeUnpublished {
 		spec.PublicationState = publicationState
 	}
 	if spec.LibraryID != nil && spec.RestrictLibraries {
@@ -144,7 +144,7 @@ func (h *Handler) GetMedia(c *gin.Context) {
 		       m.duration, m.width, m.height, m.bitrate, m.md5, m.format, m.meta_json, m.status, m.created_at,
 		       m.publication_state, m.published_at, m.publication_error, m.ingest_generation
 		FROM media m
-		WHERE m.id = ? AND `+mediaPublicationVisibilityPredicate("m", middleware.IsAdmin(c)), id)
+		WHERE m.id = ? AND `+mediaPublicationVisibilityPredicate("m", false), id)
 	var libID sql.NullInt64
 	var fileID, title, orig, path, ftype, md5, format, meta, status, created sql.NullString
 	var publicationState, publishedAt, publicationError sql.NullString
