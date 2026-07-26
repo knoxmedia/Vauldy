@@ -339,9 +339,63 @@ func TestMainWiresOneSharedPublicationCapabilityRegistry(t *testing.T) {
 	if constructor < 0 {
 		t.Fatal("missing process publication capability registry")
 	}
+	if !hasOneUnconditionalPosterRepair(src, constructor) {
+		t.Fatal(`publicationSteps composite literal must contain exact capability "poster_repair" once, adjacent to "poster"`)
+	}
 	for _, required := range []string{"postingest.NewQueue(db, queueOwner, sqliteMetrics, publicationCapabilities)", "PublicationCapabilities: publicationCapabilities", "Capabilities: publicationCapabilities"} {
 		if !strings.Contains(src, required) {
 			t.Fatalf("missing shared registry wiring %q", required)
 		}
+	}
+}
+
+func hasOneUnconditionalPosterRepair(src string, constructor int) bool {
+	const declaration = "publicationSteps := []string{"
+	steps := strings.Index(src, declaration)
+	if steps < 0 || steps >= constructor {
+		return false
+	}
+	literalStart := steps + len(declaration)
+	literalEnd := strings.Index(src[literalStart:constructor], "}")
+	if literalEnd < 0 {
+		return false
+	}
+	literal := src[literalStart : literalStart+literalEnd]
+	const token = `"poster_repair"`
+	if strings.Count(literal, token) != 1 || !strings.Contains(literal, `"poster", "poster_repair"`) {
+		return false
+	}
+	return !strings.Contains(src[literalStart+literalEnd+1:constructor], token)
+}
+
+func TestPublicationStepsPosterRepairMustBeUniqueAndUnconditional(t *testing.T) {
+	const constructor = "publicationCapabilities := publication.NewCapabilityMatrix(publicationSteps)"
+	for _, tc := range []struct {
+		name string
+		src  string
+		want bool
+	}{
+		{name: "valid", src: `publicationSteps := []string{"poster", "poster_repair", "thumbnail"}
+	if coreiface.IngestPreparePlannerHandle() != nil {
+		publicationSteps = append(publicationSteps, "prepare")
+	}
+	` + constructor, want: true},
+		{name: "conditional append", src: `publicationSteps := []string{"poster", "thumbnail"}
+	if coreiface.IngestPreparePlannerHandle() != nil {
+		publicationSteps = append(publicationSteps, "poster_repair", "prepare")
+	}
+	` + constructor, want: false},
+		{name: "duplicate literal", src: `publicationSteps := []string{"poster", "poster_repair", "poster_repair", "thumbnail"}
+	if coreiface.IngestPreparePlannerHandle() != nil {
+		publicationSteps = append(publicationSteps, "prepare")
+	}
+	` + constructor, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := hasOneUnconditionalPosterRepair(tc.src, strings.Index(tc.src, constructor))
+			if got != tc.want {
+				t.Fatalf("hasOneUnconditionalPosterRepair()=%v want %v", got, tc.want)
+			}
+		})
 	}
 }

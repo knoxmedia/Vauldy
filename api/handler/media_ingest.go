@@ -29,7 +29,7 @@ func (h *Handler) AdminListMedia(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid publication_state"})
 		return
 	}
-	h.listMediaObserved(c, nil, state)
+	h.listMediaObserved(c, nil, state, true)
 }
 
 func (h *Handler) AdminGetMediaIngest(c *gin.Context) { h.writeAdminMediaIngest(c, 0) }
@@ -184,7 +184,7 @@ func (h *Handler) writeAdminMediaIngest(c *gin.Context, knownID int64) {
 			"error": runError, "created_at": created, "updated_at": updated, "finished_at": finished,
 			"policy_version": policyVersion, "terminal_reason": terminalReason,
 		},
-		"steps": steps,
+		"steps":                steps,
 		"metadata_diagnostics": metadataDiagnostics, "dependencies": dependencies, "evidence": evidence,
 		"adapter_unavailable": adapterUnavailable, "unresolved_recovery_errors": recoveryErrors,
 	})

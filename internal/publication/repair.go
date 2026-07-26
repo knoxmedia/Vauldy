@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"knox-media/internal/scraper"
@@ -444,6 +445,15 @@ func samePath(a, b string) bool {
 
 // SourceFingerprint binds publication evidence to exact source bytes and identity.
 func SourceFingerprint(path string) (string, error) {
+	return SourceFingerprintContext(context.Background(), path)
+}
+
+// SourceFingerprintContext binds publication evidence to exact source bytes and
+// identity, stopping the full-file hash when ctx is canceled.
+func SourceFingerprintContext(ctx context.Context, path string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	info, err := os.Stat(path)
 	if err != nil {
 		return "", err
@@ -454,7 +464,7 @@ func SourceFingerprint(path string) (string, error) {
 	}
 	defer f.Close()
 	h := sha256.New()
-	if _, err = io.Copy(h, f); err != nil {
+	if _, err = copyFingerprintContext(ctx, h, f); err != nil {
 		return "", err
 	}
 	canonical, err := filepath.Abs(path)
@@ -462,6 +472,37 @@ func SourceFingerprint(path string) (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("%s|%d|%d|sha256:%s", filepath.Clean(canonical), info.Size(), info.ModTime().UnixNano(), hex.EncodeToString(h.Sum(nil))), nil
+}
+
+var (
+	sourceFingerprintReadMu sync.RWMutex
+	sourceFingerprintRead   = func(r io.Reader, p []byte) (int, error) { return r.Read(p) }
+)
+
+type fingerprintContextReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (r fingerprintContextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	sourceFingerprintReadMu.RLock()
+	read := sourceFingerprintRead
+	sourceFingerprintReadMu.RUnlock()
+	n, err := read(r.r, p)
+	if ctxErr := r.ctx.Err(); ctxErr != nil {
+		return n, ctxErr
+	}
+	return n, err
+}
+
+func copyFingerprintContext(ctx context.Context, dst io.Writer, src io.Reader) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	return io.Copy(dst, fingerprintContextReader{ctx: ctx, r: src})
 }
 
 func hasCompleteRepairEvidenceTx(ctx context.Context, tx *sql.Tx, mediaID int64, steps []StepType, preflight *repairPreflight) (bool, error) {

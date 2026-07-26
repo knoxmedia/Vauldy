@@ -240,7 +240,7 @@ func main() {
 		TimeoutSec: cfg.DocTransTimeoutSeconds,
 	})
 	// (3) Shared post-ingest queue, enqueuer, seven adapters, and dispatcher.
-	publicationSteps := []string{"poster", "thumbnail", "preview", "keyframe", "subtitle", "atrack", "encrypt", "scrape"}
+	publicationSteps := []string{"poster", "poster_repair", "thumbnail", "preview", "keyframe", "subtitle", "atrack", "encrypt", "scrape"}
 	if coreiface.IngestPreparePlannerHandle() != nil {
 		publicationSteps = append(publicationSteps, "prepare")
 	}

@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,13 +27,11 @@ var withImmediatePosterPreflightTx = store.WithImmediateConnTx
 var withImmediatePosterJournalTx = store.WithImmediateConnTx
 var reconcilePosterJournal = reconcilePosterJournalAuthoritative
 var posterHashPath = hashPath
-var posterSourceFingerprint = sourceFingerprint
-var posterLoadSourcePath = func(ctx context.Context, db *sql.DB, mediaID int64) (string, error) {
-	var sourcePath string
-	err := db.QueryRowContext(ctx, `SELECT file_path FROM media WHERE id=?`, mediaID).Scan(&sourcePath)
-	return sourcePath, err
-}
+var posterSourceFingerprint = publication.SourceFingerprintContext
 var posterSourceStat = os.Stat
+var posterSourceOpen = os.Open
+var posterLstat = os.Lstat
+var posterPathPlatformLinked = posterPathPlatformLinkedDefault
 var posterBeforeSealHook = func() {}
 var posterAfterSealHook = func() {}
 
@@ -80,18 +79,6 @@ func (a *PosterAdapter) ExecuteWithResult(ctx context.Context, task Task) (Execu
 		return ordinary, err
 	}
 	defer unlock()
-	if task.Type == TaskPoster && task.StepID != nil {
-		exact, checkErr := currentPosterEvidence(ctx, a.DB, task)
-		if checkErr != nil {
-			return ordinary, checkErr
-		}
-		if exact {
-			return ExecutionResult{Completion: AlreadyCommittedAtomically}, nil
-		}
-	}
-	if err = a.validateLease(ctx, task); err != nil {
-		return ordinary, err
-	}
 	var libraryID int64
 	var fileType, catalog string
 	if err = a.DB.QueryRowContext(ctx, `SELECT library_id,COALESCE(file_type,''),COALESCE(file_path,'') FROM media WHERE id=?`, task.MediaID).Scan(&libraryID, &fileType, &catalog); err != nil {
@@ -101,9 +88,25 @@ func (a *PosterAdapter) ExecuteWithResult(ctx context.Context, task Task) (Execu
 		return ordinary, permanentPosterError("poster requires video media")
 	}
 	input := storage.PreferredFFmpegPath(a.DB, task.MediaID, libraryID, catalog)
-	fp, err := sourceFingerprint(input)
-	if err != nil {
+	var fp string
+	if task.Type == TaskPoster && task.StepID != nil {
+		exact, evidenceFP, checkErr := currentPosterEvidence(ctx, a.DB, task, input)
+		if checkErr != nil {
+			return ordinary, checkErr
+		}
+		if exact {
+			return ExecutionResult{Completion: AlreadyCommittedAtomically}, nil
+		}
+		fp = evidenceFP
+	}
+	if err = a.validateLease(ctx, task); err != nil {
 		return ordinary, err
+	}
+	if fp == "" {
+		fp, err = posterSourceFingerprint(ctx, input)
+		if err != nil {
+			return ordinary, err
+		}
 	}
 	stepID := int64(0)
 	if task.StepID != nil {
@@ -132,38 +135,154 @@ func (a *PosterAdapter) ExecuteWithResult(ctx context.Context, task Task) (Execu
 	return ExecutionResult{Completion: AlreadyCommittedAtomically}, nil
 }
 
-func currentPosterEvidence(ctx context.Context, db *sql.DB, task Task) (bool, error) {
+func currentPosterEvidence(ctx context.Context, db *sql.DB, task Task, sourcePath string) (bool, string, error) {
 	if task.StepID == nil {
-		return false, nil
+		return false, "", nil
 	}
-	var refs, fp, catalog string
-	err := db.QueryRowContext(ctx, `SELECT e.artifact_refs_json,e.source_fingerprint,m.file_path FROM media_ingest_evidence e JOIN media m ON m.id=e.media_id JOIN post_ingest_task p ON p.ingest_step_id=e.step_id JOIN media_ingest_step s ON s.id=e.step_id JOIN media_ingest_run r ON r.id=e.run_id WHERE e.run_id=? AND e.step_id=? AND e.media_id=? AND e.generation=? AND e.kind='poster' AND p.id=? AND p.status='done' AND p.ingest_run_id=e.run_id AND p.generation=e.generation AND s.status='done' AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND m.ingest_generation=e.generation`, *task.RunID, *task.StepID, task.MediaID, task.Generation, task.ID).Scan(&refs, &fp, &catalog)
+	var refs, evidenceFP string
+	err := db.QueryRowContext(ctx, `SELECT e.artifact_refs_json,e.source_fingerprint FROM media_ingest_evidence e JOIN post_ingest_task p ON p.ingest_step_id=e.step_id JOIN media_ingest_step s ON s.id=e.step_id JOIN media_ingest_run r ON r.id=e.run_id JOIN media m ON m.id=e.media_id WHERE e.run_id=? AND e.step_id=? AND e.media_id=? AND e.generation=? AND e.kind='poster' AND p.id=? AND p.status='done' AND p.ingest_run_id=e.run_id AND p.generation=e.generation AND s.status='done' AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND m.ingest_generation=e.generation`, *task.RunID, *task.StepID, task.MediaID, task.Generation, task.ID).Scan(&refs, &evidenceFP)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+		return false, "", nil
 	}
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
-	current, err := sourceFingerprint(catalog)
-	if err != nil || current != fp {
-		return false, nil
+	current, err := posterSourceFingerprint(ctx, sourcePath)
+	if err != nil {
+		return false, "", err
+	}
+	if current != evidenceFP {
+		return false, current, nil
 	}
 	var v struct {
 		Path, URL, SHA256 string
 		Size              int64
 	}
 	if json.Unmarshal([]byte(refs), &v) != nil {
-		return false, nil
+		return false, current, nil
 	}
 	size, hash, err := hashPath(v.Path)
 	if err != nil || size != v.Size || hash != v.SHA256 {
-		return false, nil
+		return false, current, nil
 	}
 	var meta string
 	if err = db.QueryRowContext(ctx, `SELECT meta_json FROM media WHERE id=?`, task.MediaID).Scan(&meta); err != nil {
-		return false, err
+		return false, "", err
 	}
-	return posterInMeta(decodePosterMeta(meta)) == v.URL, nil
+	return posterInMeta(decodePosterMeta(meta)) == v.URL, current, nil
+}
+
+type posterSourceSelection struct {
+	path, catalog, libraryRoot, encryptedPath, plainPath, encryptedStatus string
+	libraryID, mediaID                                                    int64
+}
+
+func loadPreferredPosterSource(ctx context.Context, db *sql.DB, mediaID int64) (posterSourceSelection, error) {
+	var v posterSourceSelection
+	v.mediaID = mediaID
+	err := db.QueryRowContext(ctx, `SELECT m.library_id,COALESCE(m.file_path,''),COALESCE(l.path,''),COALESCE(e.enc_path,''),COALESCE(e.plain_path,''),COALESCE(e.status,'') FROM media m JOIN library l ON l.id=m.library_id LEFT JOIN media_encrypted_assets e ON e.media_id=m.id WHERE m.id=?`, mediaID).Scan(&v.libraryID, &v.catalog, &v.libraryRoot, &v.encryptedPath, &v.plainPath, &v.encryptedStatus)
+	if err != nil {
+		return v, err
+	}
+	v.path = resolvePreferredPosterSource(v)
+	return v, nil
+}
+
+func resolvedPosterCatalog(v posterSourceSelection) string {
+	catalog := strings.TrimSpace(v.catalog)
+	if catalog == "" {
+		return ""
+	}
+	if filepath.IsAbs(catalog) {
+		return filepath.Clean(catalog)
+	}
+	if strings.TrimSpace(v.libraryRoot) != "" {
+		return filepath.Clean(filepath.Join(v.libraryRoot, filepath.FromSlash(catalog)))
+	}
+	return filepath.Clean(catalog)
+}
+
+func regularReadablePosterSource(path string) bool {
+	if strings.TrimSpace(path) == "" {
+		return false
+	}
+	st, err := os.Stat(path)
+	if err != nil || !st.Mode().IsRegular() {
+		return false
+	}
+	f, err := posterSourceOpen(path)
+	if err != nil {
+		return false
+	}
+	return f.Close() == nil
+}
+
+func resolvePreferredPosterSource(v posterSourceSelection) string {
+	catalog := resolvedPosterCatalog(v)
+	usesEncrypted := strings.EqualFold(strings.TrimSpace(v.encryptedStatus), "encrypted") && (sameResolvedPath(catalog, v.encryptedPath) || strings.HasSuffix(strings.ToLower(catalog), ".enc"))
+	if usesEncrypted {
+		plain := filepath.Clean(strings.TrimSpace(v.plainPath))
+		if regularReadablePosterSource(plain) {
+			return plain
+		}
+	}
+	if regularReadablePosterSource(catalog) {
+		return catalog
+	}
+	return ""
+}
+
+func samePosterSourceSelectionDB(a, b posterSourceSelection) bool {
+	return a.mediaID == b.mediaID && a.libraryID == b.libraryID && filepath.Clean(a.catalog) == filepath.Clean(b.catalog) && filepath.Clean(a.libraryRoot) == filepath.Clean(b.libraryRoot) && filepath.Clean(a.encryptedPath) == filepath.Clean(b.encryptedPath) && filepath.Clean(a.plainPath) == filepath.Clean(b.plainPath) && a.encryptedStatus == b.encryptedStatus
+}
+
+func selectedPosterSourceMatches(v posterSourceSelection, expected string) bool {
+	preferred := resolvePreferredPosterSource(v)
+	return preferred != "" && sameResolvedPath(expected, preferred)
+}
+
+type parsedSourceFingerprint struct {
+	path        string
+	size, mtime int64
+}
+
+func parsePosterSourceFingerprint(raw, expectedPath string) (parsedSourceFingerprint, error) {
+	if strings.TrimSpace(raw) == "" {
+		return parsedSourceFingerprint{}, fmt.Errorf("poster commit: missing source fingerprint")
+	}
+	digestSep := strings.LastIndex(raw, "|sha256:")
+	if digestSep < 0 {
+		return parsedSourceFingerprint{}, fmt.Errorf("poster commit: malformed source fingerprint")
+	}
+	rest, digest := raw[:digestSep], raw[digestSep+len("|sha256:"):]
+	if len(digest) != 64 {
+		return parsedSourceFingerprint{}, fmt.Errorf("poster commit: malformed source fingerprint")
+	}
+	if _, err := hex.DecodeString(digest); err != nil {
+		return parsedSourceFingerprint{}, fmt.Errorf("poster commit: malformed source fingerprint")
+	}
+	mtimeSep := strings.LastIndex(rest, "|")
+	if mtimeSep < 0 {
+		return parsedSourceFingerprint{}, fmt.Errorf("poster commit: malformed source fingerprint")
+	}
+	sizeRest, mtimeRaw := rest[:mtimeSep], rest[mtimeSep+1:]
+	sizeSep := strings.LastIndex(sizeRest, "|")
+	if sizeSep < 0 {
+		return parsedSourceFingerprint{}, fmt.Errorf("poster commit: malformed source fingerprint")
+	}
+	path, sizeRaw := sizeRest[:sizeSep], sizeRest[sizeSep+1:]
+	size, err := strconv.ParseInt(sizeRaw, 10, 64)
+	if err != nil || size < 0 {
+		return parsedSourceFingerprint{}, fmt.Errorf("poster commit: malformed source fingerprint")
+	}
+	mtime, err := strconv.ParseInt(mtimeRaw, 10, 64)
+	if err != nil {
+		return parsedSourceFingerprint{}, fmt.Errorf("poster commit: malformed source fingerprint")
+	}
+	if strings.TrimSpace(expectedPath) != "" && !sameResolvedPath(path, expectedPath) {
+		return parsedSourceFingerprint{}, fmt.Errorf("poster commit: source fingerprint path mismatch")
+	}
+	return parsedSourceFingerprint{path: path, size: size, mtime: mtime}, nil
 }
 
 type preverifiedPosterIdentity struct {
@@ -177,11 +296,15 @@ type preverifiedPosterIdentity struct {
 
 func (v preverifiedPosterIdentity) verifyStats() error {
 	if v.sourcePath != "" {
-		s, err := os.Stat(v.sourcePath)
+		s, err := posterSourceStat(v.sourcePath)
 		if err != nil || s.Size() != v.sourceSize || !s.ModTime().Equal(v.sourceModTime) {
 			return fmt.Errorf("poster commit: source stat changed")
 		}
 	}
+	return v.verifyArtifactStat()
+}
+
+func (v preverifiedPosterIdentity) verifyArtifactStat() error {
 	a, err := os.Stat(v.artifactPath)
 	if err != nil || a.Size() != v.artifactSize || !a.ModTime().Equal(v.artifactModTime) {
 		return fmt.Errorf("poster commit: staged stat changed")
@@ -275,6 +398,10 @@ func commitStagedPoster(ctx context.Context, db *sql.DB, task Task, staged Stage
 	if task.StepID != nil {
 		stepID = *task.StepID
 	}
+	if _, fingerprintErr := parsePosterSourceFingerprint(req.SourceFingerprint, req.SourcePath); fingerprintErr != nil {
+		cleanupCorruptStagedPoster(ctx, db, task, staged, roots)
+		return fingerprintErr
+	}
 	if err := validateStagedPosterIdentity(task, staged, roots); err != nil {
 		return err
 	}
@@ -301,19 +428,24 @@ func commitStagedPoster(ctx context.Context, db *sql.DB, task Task, staged Stage
 			}
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), posterReconcileTimeout)
 			defer cancel()
-			_ = cleanupUnreferencedPoster(cleanupCtx, db, staged)
+			_ = cleanupUnreferencedPoster(cleanupCtx, db, staged, roots)
 		}()
 	}
-	sourcePath, err := posterLoadSourcePath(ctx, db, task.MediaID)
+	selection, err := loadPreferredPosterSource(ctx, db, task.MediaID)
 	if err != nil {
 		return err
 	}
-	sourceFP, err := posterSourceFingerprint(sourcePath)
+	sourcePath := req.SourcePath
+	if strings.TrimSpace(sourcePath) == "" {
+		sourcePath = selection.path
+	}
+	if !selectedPosterSourceMatches(selection, sourcePath) {
+		return fmt.Errorf("poster commit: source selection changed")
+	}
+	sourceFP := req.SourceFingerprint
+	expected, err := parsePosterSourceFingerprint(sourceFP, sourcePath)
 	if err != nil {
 		return err
-	}
-	if sourceFP != req.SourceFingerprint {
-		return fmt.Errorf("poster commit: stale source fingerprint")
 	}
 	sealedRefs, _ := json.Marshal(map[string]any{"path": staged.Path, "url": staged.URL, "source": staged.Source, "size": staged.Size, "sha256": staged.Hash, "generation": task.Generation, "stage_id": staged.Stage.StageID})
 	staged.Stage.HashesSizesJSON = string(sealedRefs)
@@ -325,7 +457,13 @@ func commitStagedPoster(ctx context.Context, db *sql.DB, task Task, staged Stage
 	if err != nil {
 		return err
 	}
+	if sourceStat.Size() != expected.size || sourceStat.ModTime().UnixNano() != expected.mtime {
+		return fmt.Errorf("poster commit: source stat differs from fingerprint")
+	}
 	verified.sourcePath, verified.sourceFingerprint, verified.sourceSize, verified.sourceModTime = sourcePath, sourceFP, sourceStat.Size(), sourceStat.ModTime()
+	if sourceStat, err = posterSourceStat(sourcePath); err != nil || sourceStat.Size() != verified.sourceSize || !sourceStat.ModTime().Equal(verified.sourceModTime) {
+		return fmt.Errorf("poster commit: source stat changed")
+	}
 	var replaced []string
 	_, err = withImmediatePosterTx(ctx, db, func(tx store.ImmediateConnTx) error {
 		if task.Type == TaskPoster {
@@ -344,14 +482,15 @@ func commitStagedPoster(ctx context.Context, db *sql.DB, task Task, staged Stage
 		if err := validatePosterTaskTx(ctx, tx, task); err != nil {
 			return err
 		}
-		var source string
-		if err := tx.QueryRowContext(ctx, `SELECT file_path FROM media WHERE id=?`, task.MediaID).Scan(&source); err != nil {
+		var current posterSourceSelection
+		current.mediaID = task.MediaID
+		if err := tx.QueryRowContext(ctx, `SELECT m.library_id,COALESCE(m.file_path,''),COALESCE(l.path,''),COALESCE(e.enc_path,''),COALESCE(e.plain_path,''),COALESCE(e.status,'') FROM media m JOIN library l ON l.id=m.library_id LEFT JOIN media_encrypted_assets e ON e.media_id=m.id WHERE m.id=?`, task.MediaID).Scan(&current.libraryID, &current.catalog, &current.libraryRoot, &current.encryptedPath, &current.plainPath, &current.encryptedStatus); err != nil {
 			return err
 		}
-		if !sameResolvedPath(source, sourcePath) {
-			return fmt.Errorf("poster commit: source path changed")
+		if !samePosterSourceSelectionDB(current, selection) {
+			return fmt.Errorf("poster commit: source selection changed")
 		}
-		if e := verified.verifyStats(); e != nil {
+		if e := verified.verifyArtifactStat(); e != nil {
 			return e
 		}
 		fp := sourceFP
@@ -429,7 +568,7 @@ func commitStagedPoster(ctx context.Context, db *sql.DB, task Task, staged Stage
 			}
 		}
 		if !sealedNew {
-			_ = cleanupUnreferencedPoster(cleanupCtx, db, staged)
+			_ = cleanupUnreferencedPoster(cleanupCtx, db, staged, roots)
 		}
 		return err
 	}
@@ -440,6 +579,105 @@ func commitStagedPoster(ctx context.Context, db *sql.DB, task Task, staged Stage
 	return nil
 }
 
+func cleanupCorruptStagedPoster(ctx context.Context, db *sql.DB, task Task, staged StagedPoster, roots PosterRecoveryRoots) {
+	if db == nil || task.RunID == nil || staged.Stage.StageID == "" {
+		return
+	}
+	authoritative := staged
+	var fingerprint, stagedPath string
+	var err error
+	if task.Type == TaskPoster && task.StepID != nil {
+		err = db.QueryRowContext(ctx, `SELECT source_fingerprint,staged_path FROM media_asset_stage_journal WHERE stage_id=? AND media_id=? AND run_id=? AND step_id=? AND generation=? AND owner_token=? AND artifact_kind='poster' AND state='staged'`, staged.Stage.StageID, task.MediaID, *task.RunID, *task.StepID, task.Generation, task.LeaseOwner).Scan(&fingerprint, &stagedPath)
+	} else if task.Type == TaskPosterRepair && task.StepID == nil {
+		err = db.QueryRowContext(ctx, `SELECT source_fingerprint,staged_path FROM poster_repair_stage WHERE stage_id=? AND queue_id=? AND media_id=? AND run_id=? AND generation=? AND owner_token=? AND attempt=? AND state='staged'`, staged.Stage.StageID, task.ID, task.MediaID, *task.RunID, task.Generation, task.LeaseOwner, task.Attempts).Scan(&fingerprint, &stagedPath)
+	} else {
+		return
+	}
+	if err != nil || !sameResolvedPath(stagedPath, staged.Stage.StagedPath) {
+		return
+	}
+	authoritative.Stage.Request.SourceFingerprint = fingerprint
+	if validateStagedPosterIdentity(task, authoritative, roots) != nil {
+		return
+	}
+	_ = cleanupUnreferencedPoster(ctx, db, authoritative, roots)
+}
+
+func posterPathComponentLinked(path string, info os.FileInfo) bool {
+	return info == nil || info.Mode()&os.ModeSymlink != 0 || posterPathPlatformLinked(path, info)
+}
+
+func trustedPosterPathNoLinksAllowMissingFinal(root, target string) bool {
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return false
+	}
+	rootAbs = filepath.Clean(rootAbs)
+	targetAbs, err := filepath.Abs(target)
+	if err != nil {
+		return false
+	}
+	targetAbs = filepath.Clean(targetAbs)
+	rel, err := filepath.Rel(rootAbs, targetAbs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return false
+	}
+	current := rootAbs
+	info, err := posterLstat(current)
+	if err != nil || posterPathComponentLinked(current, info) {
+		return false
+	}
+	if rel == "." {
+		return true
+	}
+	components := strings.Split(rel, string(filepath.Separator))
+	for i, component := range components {
+		current = filepath.Join(current, component)
+		info, err = posterLstat(current)
+		if err != nil {
+			return i == len(components)-1 && os.IsNotExist(err)
+		}
+		if posterPathComponentLinked(current, info) {
+			return false
+		}
+	}
+	return true
+}
+
+func trustedPosterPathNoLinks(root string, paths ...string) bool {
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return false
+	}
+	rootAbs = filepath.Clean(rootAbs)
+	for _, target := range paths {
+		targetAbs, absErr := filepath.Abs(target)
+		if absErr != nil {
+			return false
+		}
+		targetAbs = filepath.Clean(targetAbs)
+		rel, relErr := filepath.Rel(rootAbs, targetAbs)
+		if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+			return false
+		}
+		current := rootAbs
+		if info, statErr := posterLstat(current); statErr != nil || posterPathComponentLinked(current, info) {
+			return false
+		}
+		if rel == "." {
+			continue
+		}
+		for _, component := range strings.Split(rel, string(filepath.Separator)) {
+			current = filepath.Join(current, component)
+			info, statErr := posterLstat(current)
+			if statErr != nil || posterPathComponentLinked(current, info) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func validateStagedPosterIdentity(task Task, staged StagedPoster, roots PosterRecoveryRoots) error {
 	req := staged.Stage.Request
 	stepID := int64(0)
@@ -447,7 +685,7 @@ func validateStagedPosterIdentity(task Task, staged StagedPoster, roots PosterRe
 		stepID = *task.StepID
 	}
 	stageID := strings.TrimSpace(staged.Stage.StageID)
-	if invalidPosterStageID(stageID) || task.RunID == nil || task.ID <= 0 || task.MediaID <= 0 || task.Generation <= 0 || task.Attempts <= 0 || strings.TrimSpace(task.LeaseOwner) == "" || req.QueueID != task.ID || req.MediaID != task.MediaID || req.RunID != *task.RunID || req.StepID != stepID || req.Generation != task.Generation || req.OwnerToken != task.LeaseOwner || req.Attempt != task.Attempts || strings.TrimSpace(req.SourceFingerprint) == "" || staged.Stage.Kind != publication.ArtifactPoster || staged.Stage.State != "staged" {
+	if invalidPosterStageID(stageID) || task.RunID == nil || task.ID <= 0 || task.MediaID <= 0 || task.Generation <= 0 || task.Attempts <= 0 || strings.TrimSpace(task.LeaseOwner) == "" || req.QueueID != task.ID || req.MediaID != task.MediaID || req.RunID != *task.RunID || req.StepID != stepID || req.Generation != task.Generation || req.OwnerToken != task.LeaseOwner || req.Attempt != task.Attempts || staged.Stage.Kind != publication.ArtifactPoster || staged.Stage.State != "staged" {
 		return fmt.Errorf("poster commit: stage/task identity mismatch")
 	}
 	if (task.Type == TaskPoster && (task.StepID == nil || stepID <= 0)) || (task.Type == TaskPosterRepair && task.StepID != nil) || (task.Type != TaskPoster && task.Type != TaskPosterRepair) {
@@ -460,12 +698,27 @@ func validateStagedPosterIdentity(task Task, staged StagedPoster, roots PosterRe
 	if !sameResolvedPath(expectedDir, staged.Stage.StagedPath) {
 		return fmt.Errorf("poster commit: staged path is not exact trusted layout")
 	}
+	if !trustedPosterPathNoLinks(roots.Upload, staged.Stage.StagedPath) {
+		return fmt.Errorf("poster commit: unsafe staged path")
+	}
 	if staged.Derived == nil {
 		if !sameResolvedPath(filepath.Join(expectedDir, posterLogicalName), staged.Path) && !exactPosterObjectPath(roots.Upload, staged.Path) {
 			return fmt.Errorf("poster commit: artifact is outside trusted upload root")
 		}
-	} else if strings.TrimSpace(roots.Derived) == "" || !filepath.IsAbs(roots.Derived) || !pathInsideResolvedRoot(roots.Derived, staged.Path) || !sameResolvedPath(staged.Derived.EncPath(), staged.Path) {
-		return fmt.Errorf("poster commit: artifact is outside trusted derived root")
+		if !trustedPosterPathNoLinks(roots.Upload, staged.Path) {
+			return fmt.Errorf("poster commit: unsafe staged path")
+		}
+	} else {
+		if strings.TrimSpace(roots.Derived) == "" || !filepath.IsAbs(roots.Derived) || !pathInsideResolvedRoot(roots.Derived, staged.Path) || !sameResolvedPath(staged.Derived.EncPath(), staged.Path) {
+			return fmt.Errorf("poster commit: artifact is outside trusted derived root")
+		}
+		if !trustedPosterPathNoLinks(roots.Derived, staged.Path) {
+			return fmt.Errorf("poster commit: unsafe derived artifact path")
+		}
+		info, err := posterLstat(staged.Path)
+		if err != nil || !info.Mode().IsRegular() || posterPathComponentLinked(staged.Path, info) {
+			return fmt.Errorf("poster commit: unsafe derived artifact path")
+		}
 	}
 	return nil
 }
@@ -710,8 +963,38 @@ func cleanupPosterPaths(ctx context.Context, db *sql.DB, refs []string, exemplar
 	}
 	return nil
 }
-func cleanupUnreferencedPoster(ctx context.Context, db *sql.DB, s StagedPoster) error {
+func cleanupUnreferencedPoster(ctx context.Context, db *sql.DB, s StagedPoster, roots PosterRecoveryRoots) error {
+	stageID := strings.TrimSpace(s.Stage.StageID)
+	if invalidPosterStageID(stageID) || strings.TrimSpace(s.Stage.StagedPath) == "" || !filepath.IsAbs(s.Stage.StagedPath) {
+		return fmt.Errorf("poster cleanup: unsafe staged path")
+	}
+	generationRoot := filepath.Dir(filepath.Dir(s.Stage.StagedPath))
+	expected := filepath.Join(generationRoot, fmt.Sprintf("generation-%d", s.Stage.Request.Generation), stageID)
+	if !sameResolvedPath(expected, s.Stage.StagedPath) || !trustedPosterPathNoLinks(generationRoot, s.Stage.StagedPath) {
+		return fmt.Errorf("poster cleanup: unsafe staged path")
+	}
 	generationPath := filepath.Join(s.Stage.StagedPath, posterLogicalName)
+	if s.Derived == nil {
+		if !trustedPosterPathNoLinks(generationRoot, generationPath) {
+			return fmt.Errorf("poster cleanup: unsafe staged path")
+		}
+		info, err := posterLstat(generationPath)
+		if err != nil || !info.Mode().IsRegular() || posterPathComponentLinked(generationPath, info) {
+			return fmt.Errorf("poster cleanup: unsafe staged path")
+		}
+	} else {
+		derivedRoot := strings.TrimSpace(roots.Derived)
+		if derivedRoot == "" || !filepath.IsAbs(derivedRoot) || strings.TrimSpace(s.Path) == "" || !filepath.IsAbs(s.Path) || !pathInsideResolvedRoot(derivedRoot, s.Path) || !sameResolvedPath(s.Derived.EncPath(), s.Path) || !trustedPosterPathNoLinks(derivedRoot, s.Path) {
+			return fmt.Errorf("poster cleanup: unsafe derived path")
+		}
+		info, err := posterLstat(s.Path)
+		if err != nil || !info.Mode().IsRegular() || posterPathComponentLinked(s.Path, info) {
+			return fmt.Errorf("poster cleanup: unsafe derived path")
+		}
+		if !trustedPosterPathNoLinksAllowMissingFinal(generationRoot, generationPath) {
+			return fmt.Errorf("poster cleanup: unsafe staged path")
+		}
+	}
 	_, _ = db.ExecContext(ctx, `DELETE FROM media_asset_stage_journal WHERE stage_id=? AND state='staged' AND media_id=? AND run_id=? AND generation=? AND owner_token=? AND source_fingerprint=?`, s.Stage.StageID, s.Stage.Request.MediaID, s.Stage.Request.RunID, s.Stage.Request.Generation, s.Stage.Request.OwnerToken, s.Stage.Request.SourceFingerprint)
 	_, _ = db.ExecContext(ctx, `DELETE FROM poster_repair_stage WHERE stage_id=? AND state='staged' AND queue_id=? AND media_id=? AND run_id=? AND generation=? AND owner_token=? AND attempt=? AND source_fingerprint=?`, s.Stage.StageID, s.Stage.Request.QueueID, s.Stage.Request.MediaID, s.Stage.Request.RunID, s.Stage.Request.Generation, s.Stage.Request.OwnerToken, s.Stage.Request.Attempt, s.Stage.Request.SourceFingerprint)
 	if err := cleanupPosterPaths(ctx, db, []string{s.Path, generationPath}, ""); err != nil {
@@ -722,8 +1005,11 @@ func cleanupUnreferencedPoster(ctx context.Context, db *sql.DB, s StagedPoster) 
 }
 
 func (r *LocalPosterRunner) StagePoster(ctx context.Context, req publication.StageRequest, libraryID int64, cfg scraper.Config) (StagedPoster, error) {
-	if r == nil || r.DB == nil || req.MediaID <= 0 || req.RunID <= 0 || req.Generation <= 0 || req.OwnerToken == "" || req.SourceFingerprint == "" {
+	if r == nil || r.DB == nil || req.MediaID <= 0 || req.RunID <= 0 || req.Generation <= 0 || req.OwnerToken == "" {
 		return StagedPoster{}, permanentPosterError("invalid poster stage identity")
+	}
+	if _, err := parsePosterSourceFingerprint(req.SourceFingerprint, req.SourcePath); err != nil {
+		return StagedPoster{}, permanentPosterError(err.Error())
 	}
 	var duration int64
 	if err := r.DB.QueryRowContext(ctx, `SELECT COALESCE(duration,0) FROM media WHERE id=? AND library_id=?`, req.MediaID, libraryID).Scan(&duration); err != nil {

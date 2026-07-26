@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -70,6 +72,404 @@ func TestDefaultDispatcherOptions(t *testing.T) {
 			t.Fatalf("timeout %s=%v", typ, o.Timeouts[typ])
 		}
 	}
+}
+
+func TestPosterTaskTimeoutScalesAndCapsBySourceSize(t *testing.T) {
+	const gib = int64(1 << 30)
+	base := 2 * time.Minute
+	cases := []struct {
+		name string
+		typ  TaskType
+		base time.Duration
+		size int64
+		want time.Duration
+	}{
+		{"negative size uses base", TaskPoster, base, -1, base},
+		{"zero size uses base", TaskPoster, base, 0, base},
+		{"one byte adds one unit", TaskPoster, base, 1, 3 * time.Minute},
+		{"exact GiB adds one unit", TaskPoster, base, gib, 3 * time.Minute},
+		{"GiB plus one rounds up", TaskPoster, base, gib + 1, 4 * time.Minute},
+		{"sixteen GiB", TaskPoster, base, 16 * gib, 18 * time.Minute},
+		{"repair two GiB plus one", TaskPosterRepair, base, 2*gib + 1, 5 * time.Minute},
+		{"large source caps", TaskPoster, base, 64 * gib, 30 * time.Minute},
+		{"MaxInt64 size caps without overflow", TaskPosterRepair, base, int64(^uint64(0) >> 1), 30 * time.Minute},
+		{"base at cap remains capped", TaskPoster, 30 * time.Minute, 1, 30 * time.Minute},
+		{"base above cap is reduced to cap", TaskPosterRepair, 31 * time.Minute, 1, 30 * time.Minute},
+		{"zero base scales safely", TaskPoster, 0, 1, time.Minute},
+		{"negative base scales safely", TaskPosterRepair, -2 * time.Minute, 1, -time.Minute},
+		{"minimum duration scales without overflow", TaskPoster, time.Duration(-1 << 63), 1, time.Duration(-1<<63) + time.Minute},
+		{"nonposter unchanged", TaskPreview, base, 64 * gib, base},
+		{"nonposter above cap unchanged", TaskPreview, 31 * time.Minute, 64 * gib, 31 * time.Minute},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := taskTimeoutForSource(tc.typ, tc.base, tc.size); got != tc.want {
+				t.Fatalf("timeout=%v want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDispatcher_PosterDeadlinesUsePreferredSourceSize(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	seed, _, _ := seedQueueTest(t, db)
+	libraryID := mediaLibraryID(t, db, seed)
+	q := NewQueue(db, "deadline-owner", nil)
+
+	type fixture struct {
+		typ  TaskType
+		size int64
+		path string
+	}
+	fixtures := []fixture{
+		{typ: TaskPoster, size: 1},
+		{typ: TaskPosterRepair, size: (2 << 30) + 1},
+		{typ: TaskPoster, path: filepath.Join(t.TempDir(), "missing.mp4")},
+		{typ: TaskPreview, size: 1},
+	}
+	for i := range fixtures {
+		f := &fixtures[i]
+		if f.path == "" {
+			f.path = filepath.Join(t.TempDir(), fmt.Sprintf("source-%d.mp4", i))
+			file, err := os.OpenFile(f.path, os.O_CREATE|os.O_WRONLY, 0o600)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = file.Truncate(f.size); err != nil {
+				_ = file.Close()
+				t.Fatalf("create sparse source of %d bytes: %v", f.size, err)
+			}
+			if err = file.Close(); err != nil {
+				t.Fatal(err)
+			}
+		}
+		mediaID := insertQueueMedia(t, db, libraryID, fmt.Sprintf("deadline-%d", i))
+		if _, err := db.Exec(`UPDATE media SET file_path=? WHERE id=?`, f.path, mediaID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`INSERT INTO post_ingest_task(media_id,task_type) VALUES (?,?)`, mediaID, f.typ); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	type observation struct {
+		typ       TaskType
+		remaining time.Duration
+	}
+	observed := make(chan observation, len(fixtures))
+	exec := executorFunc(func(ctx context.Context, task Task) error {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			return errors.New("missing executor deadline")
+		}
+		observed <- observation{typ: task.Type, remaining: time.Until(deadline)}
+		return context.Canceled
+	})
+	o := dispatcherOptions("deadline-owner")
+	o.Global = 4
+	o.Poster = 2
+	o.Preview = 1
+	for _, typ := range taskTypes {
+		o.Timeouts[typ] = 2 * time.Minute
+	}
+	d, err := NewDispatcher(q, exec, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- d.Start(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("dispatcher shutdown: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("dispatcher did not stop")
+		}
+	})
+
+	wants := map[TaskType][]time.Duration{
+		TaskPoster:       {3 * time.Minute, 2 * time.Minute},
+		TaskPosterRepair: {5 * time.Minute},
+		TaskPreview:      {2 * time.Minute},
+	}
+	for range fixtures {
+		select {
+		case got := <-observed:
+			candidates := wants[got.typ]
+			matched := -1
+			for i, want := range candidates {
+				// Timeout setup and goroutine scheduling consume a small part of the
+				// deadline. Use a one-sided window that remains robust on Windows CI.
+				if got.remaining <= want && got.remaining >= want-2*time.Second {
+					matched = i
+					break
+				}
+			}
+			if matched < 0 {
+				t.Fatalf("%s remaining=%v want one of %v", got.typ, got.remaining, candidates)
+			}
+			wants[got.typ] = append(candidates[:matched], candidates[matched+1:]...)
+		case <-time.After(5 * time.Second):
+			t.Fatal("missing executor deadline")
+		}
+	}
+	for typ, remaining := range wants {
+		if len(remaining) != 0 {
+			t.Fatalf("missing %s deadlines %v", typ, remaining)
+		}
+	}
+	cancel()
+}
+
+func TestDispatcher_PosterHeartbeatRunsBeforeSourceLookup(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	_, scanID, _ := seedQueueTest(t, db)
+	q := NewQueue(db, "heartbeat-order-owner", nil)
+	insertDispatcherTask(t, q, TaskPoster, &scanID, "heartbeat-before-lookup")
+	cancellationChecks := 0
+	q.isScanCancelled = func(context.Context, int64) (bool, error) {
+		cancellationChecks++
+		return false, nil
+	}
+	lookupChecks := make(chan int, 1)
+	executed := make(chan struct{}, 1)
+	d, err := NewDispatcher(q, executorFunc(func(context.Context, Task) error {
+		executed <- struct{}{}
+		return nil
+	}), dispatcherOptions("heartbeat-order-owner"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.sourceSize = func(context.Context, Task) int64 {
+		lookupChecks <- cancellationChecks
+		return 1
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- d.Start(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	select {
+	case got := <-lookupChecks:
+		// One cancellation check is the existing preflight; the second must be
+		// the immediate heartbeat before source lookup starts.
+		if got != 2 {
+			t.Fatalf("cancellation checks before lookup=%d want 2", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("source lookup did not start")
+	}
+	select {
+	case <-executed:
+	case <-time.After(time.Second):
+		t.Fatal("executor did not start")
+	}
+}
+
+func TestDispatcher_FailedImmediatePosterHeartbeatSkipsLookupAndExecutor(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	_, scanID, _ := seedQueueTest(t, db)
+	q := NewQueue(db, "heartbeat-failure-owner", nil)
+	id := insertDispatcherTask(t, q, TaskPosterRepair, &scanID, "heartbeat-cancel")
+	checks := 0
+	q.isScanCancelled = func(context.Context, int64) (bool, error) {
+		checks++
+		return checks == 2, nil
+	}
+	lookup := make(chan struct{}, 1)
+	executed := make(chan struct{}, 1)
+	d, err := NewDispatcher(q, executorFunc(func(context.Context, Task) error {
+		executed <- struct{}{}
+		return nil
+	}), dispatcherOptions("heartbeat-failure-owner"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.sourceSize = func(context.Context, Task) int64 {
+		lookup <- struct{}{}
+		return 1
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- d.Start(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	waitUntil(t, 5*time.Second, func() bool {
+		var status Status
+		_ = db.QueryRow(`SELECT status FROM post_ingest_task WHERE id=?`, id).Scan(&status)
+		return status == StatusCancelled
+	})
+	if checks != 2 {
+		t.Fatalf("cancellation checks=%d want 2", checks)
+	}
+	select {
+	case <-lookup:
+		t.Fatal("source lookup started after failed immediate heartbeat")
+	default:
+	}
+	select {
+	case <-executed:
+		t.Fatal("executor started after failed immediate heartbeat")
+	default:
+	}
+}
+
+func TestDispatcher_BlockingPosterSizeLookupDoesNotBlockDispatchAndFallsBack(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	q := NewQueue(db, "lookup-owner", nil)
+	posterID := insertDispatcherTask(t, q, TaskPoster, nil, "blocked-lookup")
+	previewID := insertDispatcherTask(t, q, TaskPreview, nil, "dispatches")
+	lookupEntered := make(chan struct{})
+	releaseLookup := make(chan struct{})
+	lookupReturned := make(chan struct{})
+	type observation struct {
+		id        int64
+		remaining time.Duration
+	}
+	executed := make(chan observation, 2)
+	exec := executorFunc(func(ctx context.Context, task Task) error {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			return errors.New("missing deadline")
+		}
+		executed <- observation{id: task.ID, remaining: time.Until(deadline)}
+		return context.Canceled
+	})
+	o := dispatcherOptions("lookup-owner")
+	o.Global = 2
+	o.Poster = 1
+	o.Preview = 1
+	o.HeartbeatInterval = 25 * time.Millisecond
+	o.Timeouts[TaskPoster] = 2 * time.Minute
+	o.Timeouts[TaskPreview] = 2 * time.Minute
+	d, err := NewDispatcher(q, exec, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.sourceLookupBudget = 150 * time.Millisecond
+	d.sourceSize = func(context.Context, Task) int64 {
+		close(lookupEntered)
+		<-releaseLookup
+		close(lookupReturned)
+		return 16 << 30
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- d.Start(ctx) }()
+	select {
+	case <-lookupEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("poster lookup did not start")
+	}
+	if _, err = db.Exec(`UPDATE post_ingest_task SET lease_until=datetime(CURRENT_TIMESTAMP,'+1 second') WHERE id=?`, posterID); err != nil {
+		t.Fatal(err)
+	}
+	var shortened time.Time
+	if err = db.QueryRow(`SELECT lease_until FROM post_ingest_task WHERE id=?`, posterID).Scan(&shortened); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-executed:
+		if got.id != previewID {
+			t.Fatalf("first executor task=%d want preview %d while poster lookup blocks", got.id, previewID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("another task did not launch while poster lookup blocked")
+	}
+	waitUntil(t, time.Second, func() bool {
+		var renewed time.Time
+		if db.QueryRow(`SELECT lease_until FROM post_ingest_task WHERE id=?`, posterID).Scan(&renewed) != nil {
+			return false
+		}
+		return renewed.After(shortened.Add(time.Second))
+	})
+	select {
+	case got := <-executed:
+		if got.id != posterID {
+			t.Fatalf("second executor task=%d want poster %d", got.id, posterID)
+		}
+		want := o.Timeouts[TaskPoster]
+		if got.remaining > want || got.remaining < want-2*time.Second {
+			t.Fatalf("poster fallback remaining=%v want near base %v", got.remaining, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("poster executor did not use timeout fallback")
+	}
+	cancel()
+	select {
+	case err = <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("dispatcher stop blocked on late size lookup")
+	}
+	close(releaseLookup)
+	select {
+	case <-lookupReturned:
+	case <-time.After(time.Second):
+		t.Fatal("late size resolver could not return")
+	}
+	waitUntil(t, time.Second, func() bool { return len(d.sourceLookups) == 0 })
+}
+
+func TestDispatcher_CancelDuringPosterSizeLookupSkipsExecutor(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	q := NewQueue(db, "lookup-cancel-owner", nil)
+	insertDispatcherTask(t, q, TaskPoster, nil, "cancelled-lookup")
+	lookupEntered := make(chan struct{})
+	releaseLookup := make(chan struct{})
+	lookupReturned := make(chan struct{})
+	executed := make(chan struct{}, 1)
+	d, err := NewDispatcher(q, executorFunc(func(context.Context, Task) error {
+		executed <- struct{}{}
+		return nil
+	}), dispatcherOptions("lookup-cancel-owner"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.sourceLookupBudget = time.Minute
+	d.sourceSize = func(context.Context, Task) int64 {
+		close(lookupEntered)
+		<-releaseLookup
+		close(lookupReturned)
+		return 1
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- d.Start(ctx) }()
+	select {
+	case <-lookupEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("poster lookup did not start")
+	}
+	started := time.Now()
+	cancel()
+	select {
+	case err = <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("dispatcher cancellation waited for size lookup")
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("dispatcher cancellation took %v", elapsed)
+	}
+	select {
+	case <-executed:
+		t.Fatal("executor started after lifecycle cancellation")
+	default:
+	}
+	close(releaseLookup)
+	select {
+	case <-lookupReturned:
+	case <-time.After(time.Second):
+		t.Fatal("late resolver return blocked after cancellation")
+	}
+	waitUntil(t, time.Second, func() bool { return len(d.sourceLookups) == 0 })
 }
 
 func TestDispatcher_RejectsInvalidBudget(t *testing.T) {
@@ -178,6 +578,42 @@ func TestDispatcher_BudgetsBeforeClaim(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestDispatcher_NonposterDeadlineStartsAtLaunch(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	q := NewQueue(db, "nonposter-origin-owner", nil)
+	insertDispatcherTask(t, q, TaskThumbnail, nil, "deadline-origin")
+	const base = 500 * time.Millisecond
+	observed := make(chan time.Duration, 1)
+	d, err := NewDispatcher(q, executorFunc(func(ctx context.Context, _ Task) error {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			return errors.New("missing deadline")
+		}
+		observed <- time.Until(deadline)
+		return context.Canceled
+	}), dispatcherOptions("nonposter-origin-owner"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.opts.Timeouts[TaskThumbnail] = base
+	d.beforeRun = func(Task) { time.Sleep(200 * time.Millisecond) }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- d.Start(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	select {
+	case remaining := <-observed:
+		// A launch-origin 500ms deadline has spent the 200ms hook delay. The
+		// bounds distinguish it from a fresh runTask-origin 500ms deadline while
+		// allowing generous Windows/CI scheduling overhead.
+		if remaining < 150*time.Millisecond || remaining > 400*time.Millisecond {
+			t.Fatalf("remaining=%v want launch-origin deadline after 200ms delay", remaining)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("executor did not observe deadline")
 	}
 }
 

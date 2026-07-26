@@ -5,10 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
 	"time"
+
+	"knox-media/internal/storage"
 )
 
 type Executor interface {
@@ -99,11 +103,15 @@ type Dispatcher struct {
 	mu                                  sync.Mutex
 	globalUsed, posterUsed, previewUsed int
 	running                             map[int64]*workerState
+	sourceLookupBudget                  time.Duration
+	sourceSize                          func(context.Context, Task) int64
+	sourceLookups                       chan struct{}
 	scans                               map[int64]map[int64]*workerState
 	wg                                  sync.WaitGroup
 	startMu                             sync.Mutex
 	started                             bool
 	beforeRegister                      func(Task)
+	beforeRun                           func(Task)
 }
 
 func NewDispatcher(q *Queue, executor Executor, opts DispatcherOptions) (*Dispatcher, error) {
@@ -145,10 +153,113 @@ func NewDispatcher(q *Queue, executor Executor, opts DispatcherOptions) (*Dispat
 			return nil, fmt.Errorf("Dispatcher.Timeouts[%s] must be positive", typ)
 		}
 	}
-	return &Dispatcher{q: q, executor: executor, opts: opts, global: make(chan struct{}, opts.Global), poster: make(chan struct{}, opts.Poster), preview: make(chan struct{}, opts.Preview), running: map[int64]*workerState{}, scans: map[int64]map[int64]*workerState{}}, nil
+	d := &Dispatcher{q: q, executor: executor, opts: opts, global: make(chan struct{}, opts.Global), poster: make(chan struct{}, opts.Poster), preview: make(chan struct{}, opts.Preview), running: map[int64]*workerState{}, sourceLookupBudget: 2 * time.Second, sourceLookups: make(chan struct{}, opts.Global), scans: map[int64]map[int64]*workerState{}}
+	d.sourceSize = d.posterSourceSize
+	return d, nil
 }
 
 var taskTypes = []TaskType{TaskPoster, TaskPosterRepair, TaskThumbnail, TaskPreview, TaskKeyframe, TaskSubtitle, TaskAtrack, TaskEncrypt}
+
+const (
+	posterTimeoutPerGiB = time.Minute
+	posterTimeoutMax    = 30 * time.Minute
+	posterTimeoutGiB    = int64(1 << 30)
+)
+
+func taskTimeoutForSource(typ TaskType, base time.Duration, size int64) time.Duration {
+	if (typ != TaskPoster && typ != TaskPosterRepair) || size <= 0 {
+		return base
+	}
+	if base >= posterTimeoutMax {
+		return posterTimeoutMax
+	}
+	units := size / posterTimeoutGiB
+	if size%posterTimeoutGiB != 0 {
+		units++
+	}
+	if units > math.MaxInt64/int64(posterTimeoutPerGiB) {
+		return posterTimeoutMax
+	}
+	extra := time.Duration(units) * posterTimeoutPerGiB
+	if base > posterTimeoutMax-extra {
+		return posterTimeoutMax
+	}
+	return base + extra
+}
+
+func (d *Dispatcher) posterSourceSize(ctx context.Context, task Task) int64 {
+	var libraryID int64
+	var catalog string
+	if err := d.q.db.QueryRowContext(ctx, `SELECT library_id,COALESCE(file_path,'') FROM media WHERE id=?`, task.MediaID).Scan(&libraryID, &catalog); err != nil {
+		return 0
+	}
+	sourcePath := storage.PreferredFFmpegPath(d.q.db, task.MediaID, libraryID, catalog)
+	info, err := os.Stat(sourcePath)
+	if err != nil || !info.Mode().IsRegular() {
+		return 0
+	}
+	return info.Size()
+}
+
+func (d *Dispatcher) timeoutForTask(ctx context.Context, task Task, heartbeat *time.Ticker, state *workerState) (time.Duration, bool) {
+	base := d.opts.Timeouts[task.Type]
+	if task.Type != TaskPoster && task.Type != TaskPosterRepair {
+		return base, ctx.Err() == nil
+	}
+	select {
+	case d.sourceLookups <- struct{}{}:
+	default:
+		return base, ctx.Err() == nil
+	}
+	result := make(chan int64, 1)
+	// os.Stat cannot be canceled on every platform. The buffered result and
+	// dispatcher-wide slot bound abandoned lookup goroutines to Global; a stuck
+	// call retains its slot, so later tasks fall back instead of amplifying leaks.
+	go func() {
+		defer func() { <-d.sourceLookups }()
+		result <- d.sourceSize(ctx, task)
+	}()
+	timer := time.NewTimer(d.sourceLookupBudget)
+	defer timer.Stop()
+	for {
+		select {
+		case size := <-result:
+			return taskTimeoutForSource(task.Type, base, size), ctx.Err() == nil
+		case <-timer.C:
+			return base, ctx.Err() == nil
+		case <-heartbeat.C:
+			if !d.heartbeatTask(ctx, task, state) {
+				return base, false
+			}
+		case <-ctx.Done():
+			return base, false
+		}
+	}
+}
+
+func (d *Dispatcher) heartbeatTask(ctx context.Context, task Task, state *workerState) bool {
+	if task.ScanTaskID != nil {
+		cancelled, err := d.q.IsScanCancelled(ctx, *task.ScanTaskID)
+		if err != nil {
+			state.stop(FailureRetryable, fmt.Errorf("check scan cancellation: %w", err))
+			return false
+		}
+		if cancelled {
+			state.stop(FailureCancelled, errors.New("scan cancelled"))
+			return false
+		}
+	}
+	ok, err := d.q.Renew(ctx, task)
+	if err != nil {
+		state.stop(FailureRetryable, fmt.Errorf("renew lease: %w", err))
+		return false
+	}
+	if !ok {
+		state.stop(FailureRetryable, errors.New("post-ingest lease lost"))
+		return false
+	}
+	return true
+}
 
 func (d *Dispatcher) Start(ctx context.Context) error {
 	d.startMu.Lock()
@@ -281,7 +392,13 @@ func (d *Dispatcher) launch(parent context.Context, task Task) {
 	if d.beforeRegister != nil {
 		d.beforeRegister(task)
 	}
-	taskCtx, cancel := context.WithTimeout(parent, d.opts.Timeouts[task.Type])
+	var lifecycleCtx context.Context
+	var cancel context.CancelFunc
+	if task.Type == TaskPoster || task.Type == TaskPosterRepair {
+		lifecycleCtx, cancel = context.WithCancel(parent)
+	} else {
+		lifecycleCtx, cancel = context.WithTimeout(parent, d.opts.Timeouts[task.Type])
+	}
 	state := &workerState{cancel: cancel}
 	d.mu.Lock()
 	d.running[task.ID] = state
@@ -295,11 +412,14 @@ func (d *Dispatcher) launch(parent context.Context, task Task) {
 	}
 	d.mu.Unlock()
 	d.wg.Add(1)
-	go d.runTask(parent, taskCtx, task, state)
+	go d.runTask(parent, lifecycleCtx, task, state)
 }
 
-func (d *Dispatcher) runTask(parent, taskCtx context.Context, task Task, state *workerState) {
+func (d *Dispatcher) runTask(parent, lifecycleCtx context.Context, task Task, state *workerState) {
 	defer d.wg.Done()
+	if d.beforeRun != nil {
+		d.beforeRun(task)
+	}
 	defer state.cancel()
 	var cleanupOnce sync.Once
 	cleanup := func() { cleanupOnce.Do(func() { d.unregister(task, state); d.release(task.Type) }) }
@@ -310,7 +430,7 @@ func (d *Dispatcher) runTask(parent, taskCtx context.Context, task Task, state *
 		}
 	}()
 	if task.ScanTaskID != nil {
-		cancelled, err := d.q.IsScanCancelled(taskCtx, *task.ScanTaskID)
+		cancelled, err := d.q.IsScanCancelled(lifecycleCtx, *task.ScanTaskID)
 		if err != nil {
 			kind := FailureRetryable
 			cause := error(fmt.Errorf("check scan cancellation before execute: %w", err))
@@ -333,14 +453,33 @@ func (d *Dispatcher) runTask(parent, taskCtx context.Context, task Task, state *
 			return
 		}
 	}
+	if (task.Type == TaskPoster || task.Type == TaskPosterRepair) && !d.heartbeatTask(lifecycleCtx, task, state) {
+		d.failBeforeExecute(parent, task, state)
+		return
+	}
+	heartbeat := time.NewTicker(d.opts.HeartbeatInterval)
+	defer heartbeat.Stop()
+	taskCtx := lifecycleCtx
+	taskCancel := func() {}
+	if task.Type == TaskPoster || task.Type == TaskPosterRepair {
+		timeout, proceed := d.timeoutForTask(lifecycleCtx, task, heartbeat, state)
+		if !proceed {
+			d.failBeforeExecute(parent, task, state)
+			return
+		}
+		taskCtx, taskCancel = context.WithTimeout(lifecycleCtx, timeout)
+	}
+	defer taskCancel()
+	if taskCtx.Err() != nil {
+		d.failBeforeExecute(parent, task, state)
+		return
+	}
 	type executionOutcome struct {
 		result ExecutionResult
 		err    error
 	}
 	result := make(chan executionOutcome, 1)
 	go func() { r, e := executeTask(taskCtx, d.executor, task); result <- executionOutcome{r, e} }()
-	heartbeat := time.NewTicker(d.opts.HeartbeatInterval)
-	defer heartbeat.Stop()
 	var execErr error
 	var execResult ExecutionResult
 	executorUnresponsive := false
@@ -350,26 +489,7 @@ func (d *Dispatcher) runTask(parent, taskCtx context.Context, task Task, state *
 			execResult, execErr = outcome.result, outcome.err
 			goto finish
 		case <-heartbeat.C:
-			if task.ScanTaskID != nil {
-				cancelled, err := d.q.IsScanCancelled(taskCtx, *task.ScanTaskID)
-				if err != nil {
-					state.stop(FailureRetryable, fmt.Errorf("check scan cancellation: %w", err))
-					continue
-				}
-				if cancelled {
-					state.stop(FailureCancelled, errors.New("scan cancelled"))
-					continue
-				}
-			}
-			ok, err := d.q.Renew(taskCtx, task)
-			if err != nil {
-				state.stop(FailureRetryable, fmt.Errorf("renew lease: %w", err))
-				continue
-			}
-			if !ok {
-				state.stop(FailureRetryable, errors.New("post-ingest lease lost"))
-				continue
-			}
+			d.heartbeatTask(taskCtx, task, state)
 		case <-taskCtx.Done():
 			timer := time.NewTimer(d.opts.ExecutorStopGrace)
 			select {
@@ -441,6 +561,20 @@ finish:
 	kind := failureKind(execErr)
 	if err := d.q.Fail(writeCtx, &task, kind, execErr); err != nil {
 		log.Printf("postingest dispatcher fail task %d: %v", task.ID, err)
+	}
+}
+
+func (d *Dispatcher) failBeforeExecute(parent context.Context, task Task, state *workerState) {
+	kind, cause := state.reason()
+	if parent.Err() != nil {
+		kind, cause = FailureShutdown, parent.Err()
+	} else if cause == nil {
+		kind, cause = FailureRetryable, errors.New("task lifecycle canceled before execute")
+	}
+	writeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := d.q.Fail(writeCtx, &task, kind, cause); err != nil {
+		log.Printf("postingest dispatcher pre-execute task %d: %v", task.ID, err)
 	}
 }
 
