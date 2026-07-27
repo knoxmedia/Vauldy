@@ -225,6 +225,92 @@ func TestScrapeExhaustionDegradesMedia(t *testing.T) {
 	}
 }
 
+func TestThirdLinkedScrapeAttemptExecutes(t *testing.T) {
+	db, mediaID := posterHandlerTestDB(t)
+	if _, err := db.Exec(`UPDATE media SET ingest_generation=1,publication_state='published',published_at=CURRENT_TIMESTAMP WHERE id=?`, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	runResult, err := db.Exec(`INSERT INTO media_ingest_run(media_id,generation,reason,status,config_snapshot_json) VALUES(?,1,'scan','published','{}')`, mediaID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID, _ := runResult.LastInsertId()
+	stepResult, err := db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status,attempts) VALUES(?,?,1,'scrape',0,'waiting',2)`, runID, mediaID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stepID, _ := stepResult.LastInsertId()
+	taskResult, err := db.Exec(`INSERT INTO scrape_task(media_id,status,fail_count,source,ingest_run_id,ingest_step_id,generation) VALUES(?,'waiting',2,'auto-scan',?,?,1)`, mediaID, runID, stepID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, _ := taskResult.LastInsertId()
+	calls := 0
+	h := &Handler{App: &app.App{DB: db, Config: &config.Config{}}, PublicationCapabilities: publication.NewCapabilityMatrix([]string{"scrape"}), scrapeWithConfig: func(string, string, scraper.Config) (*scraper.ScrapeResult, error) {
+		calls++
+		return &scraper.ScrapeResult{Title: "third-attempt", Overview: "ok", Extra: map[string]any{}}, nil
+	}}
+	if done, failed := h.runScrapeTasksWithLimit(context.Background(), []int64{taskID}, 1); done != 1 || failed != 0 {
+		t.Fatalf("cycle=(%d,%d), want (1,0)", done, failed)
+	}
+	var taskStatus, stepStatus string
+	var failCount, attempts int
+	if err := db.QueryRow(`SELECT status,fail_count FROM scrape_task WHERE id=?`, taskID).Scan(&taskStatus, &failCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT status,attempts FROM media_ingest_step WHERE id=?`, stepID).Scan(&stepStatus, &attempts); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || taskStatus != "done" || stepStatus != "done" || failCount != 0 || attempts != 3 {
+		t.Fatalf("calls=%d task=%q step=%q fail_count=%d attempts=%d", calls, taskStatus, stepStatus, failCount, attempts)
+	}
+}
+
+func TestPendingScrapeCountExcludesExhaustedWaitingTasks(t *testing.T) {
+	db, mediaID := posterHandlerTestDB(t)
+	if _, err := db.Exec(`INSERT INTO scrape_task(media_id,status,fail_count) VALUES(?,'waiting',3)`, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	h := &Handler{App: &app.App{DB: db}}
+	if got := h.countPendingScrapeTasks(context.Background()); got != 0 {
+		t.Fatalf("pending=%d, want 0", got)
+	}
+}
+
+func TestExpiredExhaustedScrapeFailsLinkedStep(t *testing.T) {
+	db, mediaID := posterHandlerTestDB(t)
+	if _, err := db.Exec(`UPDATE media SET ingest_generation=1,publication_state='published',published_at=CURRENT_TIMESTAMP WHERE id=?`, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	runResult, err := db.Exec(`INSERT INTO media_ingest_run(media_id,generation,reason,status,config_snapshot_json) VALUES(?,1,'scan','published','{}')`, mediaID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID, _ := runResult.LastInsertId()
+	stepResult, err := db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status,attempts,lease_owner,lease_until) VALUES(?,?,1,'scrape',0,'running',3,'expired',datetime(CURRENT_TIMESTAMP,'-1 second'))`, runID, mediaID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stepID, _ := stepResult.LastInsertId()
+	taskResult, err := db.Exec(`INSERT INTO scrape_task(media_id,status,fail_count,lease_owner,lease_until,ingest_run_id,ingest_step_id,generation) VALUES(?,'running',3,'expired',datetime(CURRENT_TIMESTAMP,'-1 second'),?,?,1)`, mediaID, runID, stepID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, _ := taskResult.LastInsertId()
+	h := &Handler{App: &app.App{DB: db}}
+	h.recoverExpiredScrapeTasks(context.Background())
+	var taskStatus, stepStatus string
+	if err := db.QueryRow(`SELECT status FROM scrape_task WHERE id=?`, taskID).Scan(&taskStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT status FROM media_ingest_step WHERE id=?`, stepID).Scan(&stepStatus); err != nil {
+		t.Fatal(err)
+	}
+	if taskStatus != "failed" || stepStatus != "failed" {
+		t.Fatalf("expired recovery task=%q step=%q", taskStatus, stepStatus)
+	}
+}
+
 func TestStartupScrapeLoopProcessesScannerPlan(t *testing.T) {
 	db, mediaID := posterHandlerTestDB(t)
 	if _, err := db.Exec(`UPDATE media SET ingest_generation=1 WHERE id=?`, mediaID); err != nil {

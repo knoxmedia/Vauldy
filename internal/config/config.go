@@ -161,8 +161,7 @@ type ScanConfig struct {
 	FileHashOnScan *bool `yaml:"file_hash_on_scan"`
 	// FastFFprobe limits analyzeduration/probesize during scan metadata reads. Default on; set false if metadata is incomplete.
 	FastFFprobe *bool `yaml:"fast_ffprobe"`
-	// PrecapturePosterTimeoutSeconds is the per-file timeout for synchronous poster
-	// capture during scan. Default: 120 (2 minutes). Set to 0 to disable.
+	// PrecapturePosterTimeoutSeconds limits after-commit poster capture. Default: 120 seconds; zero disables it.
 	PrecapturePosterTimeoutSeconds *int `yaml:"precapture_poster_timeout_seconds"`
 }
 
@@ -651,8 +650,7 @@ func (c *Config) LibraryScanFileHash() bool {
 	return c.Scan.FileHashOnScan != nil && *c.Scan.FileHashOnScan
 }
 
-// PrecapturePosterTimeout returns the per-file timeout for synchronous poster
-// capture during scan. Returns 0 if disabled.
+// PrecapturePosterTimeout returns the after-commit poster capture timeout.
 func (c *Config) PrecapturePosterTimeout() time.Duration {
 	if c == nil || c.Scan.PrecapturePosterTimeoutSeconds == nil {
 		return 2 * time.Minute
@@ -663,7 +661,7 @@ func (c *Config) PrecapturePosterTimeout() time.Duration {
 	return time.Duration(*c.Scan.PrecapturePosterTimeoutSeconds) * time.Second
 }
 
-// PrecapturePosterEnabled reports whether synchronous poster pre-capture during scan is enabled.
+// PrecapturePosterEnabled reports whether after-commit poster capture is enabled.
 func (c *Config) PrecapturePosterEnabled() bool {
 	return c.PrecapturePosterTimeout() > 0
 }
