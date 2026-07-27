@@ -36,6 +36,7 @@ function stableLibrarySnapshot(data: Awaited<ReturnType<typeof fetchLibrariesWit
       media_count: item.media_count, scan_task_id: item.scan_task_id, scan_status: item.scan_status,
       scan_processed_count: item.scan_processed_count, scan_total_count: item.scan_total_count,
       scan_added_count: item.scan_added_count, scan_started_at: item.scan_started_at, preview_url: item.preview_url,
+      scan_ingested_count: item.scan_ingested_count, scan_ingesting_count: item.scan_ingesting_count,
     })),
     encryptedAssetsConfig: data.encryptedAssetsConfig,
   });
@@ -228,6 +229,10 @@ export function LibraryPageSession() {
                 {r.scan_status === "running" ? (
                   <Tag color="processing">
                     {t("pages.library.scanning", { processed: r.scan_processed_count ?? 0, added: r.scan_added_count ?? 0 })}
+                  </Tag>
+                ) : (r.scan_ingesting_count ?? 0) > 0 ? (
+                  <Tag color="blue">
+                    {t("pages.library.processing", { ingested: r.scan_ingested_count ?? 0, added: r.scan_added_count ?? 0 })}
                   </Tag>
                 ) : null}
               </Space>

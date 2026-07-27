@@ -23,7 +23,7 @@ function recentLibraryShape(libs: Library[]): string {
 }
 
 function hasActiveScan(libs: Library[]): boolean {
-  return libs.some((lib) => ["running", "scanning"].includes((lib.scan_status || "").trim().toLowerCase()));
+  return libs.some((lib) => ["running", "scanning"].includes((lib.scan_status || "").trim().toLowerCase()) || (lib.scan_ingesting_count ?? 0) > 0);
 }
 
 function stableLibraryProjection(libs: Library[]): string {
@@ -40,6 +40,7 @@ function stableLibraryProjection(libs: Library[]): string {
     media_count: lib.media_count, scan_task_id: lib.scan_task_id, scan_status: lib.scan_status,
     scan_processed_count: lib.scan_processed_count, scan_total_count: lib.scan_total_count,
     scan_added_count: lib.scan_added_count, scan_started_at: lib.scan_started_at, preview_url: lib.preview_url,
+    scan_ingested_count: lib.scan_ingested_count, scan_ingesting_count: lib.scan_ingesting_count,
   })));
 }
 

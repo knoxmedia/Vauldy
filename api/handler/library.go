@@ -45,6 +45,7 @@ type libraryBody struct {
 type libraryListRow struct {
 	id, auto, enabled, realtime, preview, drmEnabled, cleanupLocal, jitIngest, encAssets, encCleanupPlain, mediaCount                                      int
 	scanTaskID, scanProcessed, scanTotal, scanAdded                                                                                                        int64
+	scanIngested, scanIngesting                                                                                                                                                        int
 	name, typ, path, encryptionMode, encDirMode, encCustomDir, metadataProviders, imageProviders, refreshPolicy, scraper, created, scanStatus, scanStarted string
 }
 
@@ -112,6 +113,38 @@ func (h *Handler) ListLibraries(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	// Fetch ingest progress for libraries with a scan task.
+	scanTaskIDs := make([]int64, 0, len(visible))
+	for _, r := range visible {
+		if r.scanTaskID > 0 {
+			scanTaskIDs = append(scanTaskIDs, r.scanTaskID)
+		}
+	}
+	if len(scanTaskIDs) > 0 {
+		ingestQuery := `SELECT r.scan_task_id,SUM(CASE WHEN r.status IN ('published','degraded','failed','cancelled') THEN 1 ELSE 0 END),SUM(CASE WHEN r.status='processing' THEN 1 ELSE 0 END) FROM media_ingest_run r WHERE r.scan_task_id IN (` + sqlPlaceholders(len(scanTaskIDs)) + `) AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL GROUP BY r.scan_task_id`
+		ingestArgs := make([]any, len(scanTaskIDs))
+		for i, id := range scanTaskIDs {
+			ingestArgs[i] = id
+		}
+		ingestRows, err := tx.QueryContext(ctx, ingestQuery, ingestArgs...)
+		if err == nil {
+			ingestMap := map[int64][2]int{}
+			for ingestRows.Next() {
+				var taskID int64
+				var ingested, ingesting int
+				if err := ingestRows.Scan(&taskID, &ingested, &ingesting); err == nil {
+					ingestMap[taskID] = [2]int{ingested, ingesting}
+				}
+			}
+			ingestRows.Close()
+			for i := range visible {
+				if counts, ok := ingestMap[visible[i].scanTaskID]; ok {
+					visible[i].scanIngested = counts[0]
+					visible[i].scanIngesting = counts[1]
+				}
+			}
+		}
+	}
 	ids := make([]int64, len(visible))
 	for i := range visible {
 		ids[i] = int64(visible[i].id)
@@ -130,7 +163,7 @@ func (h *Handler) ListLibraries(c *gin.Context) {
 	}
 	list := make([]gin.H, 0, len(visible))
 	for _, r := range visible {
-		item := gin.H{"id": r.id, "name": r.name, "type": r.typ, "path": r.path, "folders": responseFoldersForLibrary(profile, folderMap, int64(r.id), r.path), "auto_scan": r.auto, "enabled": r.enabled, "realtime_monitor": r.realtime, "preview_extract": r.preview, "drm_enabled": r.drmEnabled, "encryption_mode": h.normalizeEncryptionMode(r.encryptionMode), "cleanup_local_source_after_package": r.cleanupLocal, "jit_prepare_on_ingest": r.jitIngest, "encrypted_assets_enabled": r.encAssets, "encrypted_assets_cleanup_plaintext": r.encCleanupPlain, "encrypted_assets_dir_mode": storage.NormalizeEncDirMode(r.encDirMode), "encrypted_assets_custom_dir": r.encCustomDir, "metadata_providers": splitCSVList(r.metadataProviders), "image_providers": splitCSVList(r.imageProviders), "metadata_refresh_policy": r.refreshPolicy, "scraper": r.scraper, "created_at": r.created, "media_count": r.mediaCount, "scan_task_id": r.scanTaskID, "scan_status": r.scanStatus, "scan_processed_count": r.scanProcessed, "scan_total_count": r.scanTotal, "scan_added_count": r.scanAdded, "scan_started_at": r.scanStarted}
+		item := gin.H{"id": r.id, "name": r.name, "type": r.typ, "path": r.path, "folders": responseFoldersForLibrary(profile, folderMap, int64(r.id), r.path), "auto_scan": r.auto, "enabled": r.enabled, "realtime_monitor": r.realtime, "preview_extract": r.preview, "drm_enabled": r.drmEnabled, "encryption_mode": h.normalizeEncryptionMode(r.encryptionMode), "cleanup_local_source_after_package": r.cleanupLocal, "jit_prepare_on_ingest": r.jitIngest, "encrypted_assets_enabled": r.encAssets, "encrypted_assets_cleanup_plaintext": r.encCleanupPlain, "encrypted_assets_dir_mode": storage.NormalizeEncDirMode(r.encDirMode), "encrypted_assets_custom_dir": r.encCustomDir, "metadata_providers": splitCSVList(r.metadataProviders), "image_providers": splitCSVList(r.imageProviders), "metadata_refresh_policy": r.refreshPolicy, "scraper": r.scraper, "created_at": r.created, "media_count": r.mediaCount, "scan_task_id": r.scanTaskID, "scan_status": r.scanStatus, "scan_processed_count": r.scanProcessed, "scan_total_count": r.scanTotal, "scan_added_count": r.scanAdded, "scan_started_at": r.scanStarted, "scan_ingested_count": r.scanIngested, "scan_ingesting_count": r.scanIngesting}
 		if u := h.libraryPreviewPublicURL(int64(r.id)); u != "" {
 			item["preview_url"] = u
 		} else if r.mediaCount > 0 {
