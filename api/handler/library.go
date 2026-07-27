@@ -41,6 +41,7 @@ type libraryBody struct {
 type libraryListRow struct {
 	id, auto, enabled, realtime, preview, drmEnabled, cleanupLocal, jitIngest, encAssets, encCleanupPlain, mediaCount                                      int
 	scanTaskID, scanProcessed, scanTotal, scanAdded                                                                                                        int64
+	scanIngested, scanIngesting                                                                                                                                                        int
 	name, typ, path, encryptionMode, encDirMode, encCustomDir, metadataProviders, imageProviders, refreshPolicy, scraper, created, scanStatus, scanStarted string
 }
 
@@ -101,6 +102,39 @@ func (h *Handler) ListLibraries(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	// Fetch ingest progress for libraries with a scan task.
+	scanTaskIDs := make([]int64, 0, len(visible))
+	for _, r := range visible {
+		if r.scanTaskID > 0 {
+			scanTaskIDs = append(scanTaskIDs, r.scanTaskID)
+		}
+	}
+	if len(scanTaskIDs) > 0 {
+		ctx := c.Request.Context()
+		ingestQuery := `SELECT r.scan_task_id,SUM(CASE WHEN r.status IN ('published','degraded','failed','cancelled') THEN 1 ELSE 0 END),SUM(CASE WHEN r.status='processing' THEN 1 ELSE 0 END) FROM media_ingest_run r WHERE r.scan_task_id IN (` + sqlPlaceholders(len(scanTaskIDs)) + `) AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL GROUP BY r.scan_task_id`
+		ingestArgs := make([]any, len(scanTaskIDs))
+		for i, id := range scanTaskIDs {
+			ingestArgs[i] = id
+		}
+		ingestRows, err := h.App.DB.QueryContext(ctx, ingestQuery, ingestArgs...)
+		if err == nil {
+			ingestMap := map[int64][2]int{}
+			for ingestRows.Next() {
+				var taskID int64
+				var ingested, ingesting int
+				if err := ingestRows.Scan(&taskID, &ingested, &ingesting); err == nil {
+					ingestMap[taskID] = [2]int{ingested, ingesting}
+				}
+			}
+			ingestRows.Close()
+			for i := range visible {
+				if counts, ok := ingestMap[visible[i].scanTaskID]; ok {
+					visible[i].scanIngested = counts[0]
+					visible[i].scanIngesting = counts[1]
+				}
+			}
+		}
+	}
 	if err := applyFolderScopedLibraryCounts(h.App.DB, visible, profile, folderMap); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -122,6 +156,8 @@ func (h *Handler) ListLibraries(c *gin.Context) {
 			"scan_total_count":     r.scanTotal,
 			"scan_added_count":     r.scanAdded,
 			"scan_started_at":      r.scanStarted,
+			"scan_ingested_count":  r.scanIngested,
+			"scan_ingesting_count": r.scanIngesting,
 		}
 		if previewURL := h.libraryPreviewPublicURL(int64(r.id)); previewURL != "" {
 			item["preview_url"] = previewURL

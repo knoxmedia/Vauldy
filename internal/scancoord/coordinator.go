@@ -428,6 +428,7 @@ func (c *Coordinator) run(ctx context.Context, taskID, libraryID int64, owner st
 			enqueueMu.Lock()
 			err = errors.Join(err, errors.Join(enqueueErrors...))
 			enqueueMu.Unlock()
+			progress.SetTotal(progress.Processed())
 			flushCtx, flushCancel := context.WithTimeout(context.Background(), c.finalizeTimeout)
 			if flushErr := progress.Flush(flushCtx, true); flushErr != nil {
 				progressErr := fmt.Errorf("progress flush: %w", flushErr)

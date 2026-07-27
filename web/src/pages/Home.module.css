@@ -204,6 +204,28 @@
   font-weight: 600;
 }
 
+.libScanSpinner {
+  width: 48px;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.libScanSpinner::after {
+  content: "";
+  width: 24px;
+  height: 24px;
+  border: 2px solid rgba(255,255,255,0.3);
+  border-top-color: #13b6ff;
+  border-radius: 50%;
+  animation: libScanSpin 1s linear infinite;
+}
+
+@keyframes libScanSpin {
+  to { transform: rotate(360deg); }
+}
+
 .libName {
   font-size: 1.5rem;
   font-weight: 700;
