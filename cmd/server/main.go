@@ -346,19 +346,15 @@ func main() {
 		LeaseDuration: 60 * time.Second, HeartbeatInterval: 20 * time.Second,
 		OwnerInstanceID: "scancoord-" + processID, Scanner: sc, Metrics: sqliteMetrics,
 
-		OnMediaDiscoveredTx: scancoord.MediaDiscoveredTxFunc(func() postingest.ScanMediaDiscoveredTxFunc {
-			if cfg.PrecapturePosterEnabled() {
-				precaptureCfg := postingest.PreCaptureConfig{
-					DB:        db,
-					Runner:    posterRunner,
-					Derived:   derivedStore,
-					UploadDir: cfg.Data.Upload,
-					Timeout:   cfg.PrecapturePosterTimeout(),
-				}
-				return postingest.NewScanMediaDiscoveredTxWithPrecaptureCallback(publicationPlanner, precaptureCfg)
+		OnMediaDiscoveredTx: scancoord.MediaDiscoveredTxFunc(postingest.NewScanMediaDiscoveredTxCallback(publicationPlanner)),
+		OnMediaDiscovered: func() scancoord.MediaDiscoveredFunc {
+			if !cfg.PrecapturePosterEnabled() {
+				return nil
 			}
-			return postingest.NewScanMediaDiscoveredTxCallback(publicationPlanner)
-		}()),
+			return scancoord.MediaDiscoveredFunc(postingest.NewScanMediaDiscoveredFinalizer(postingest.PreCaptureConfig{
+				DB: db, Runner: posterRunner, Derived: derivedStore, UploadDir: cfg.Data.Upload, Timeout: cfg.PrecapturePosterTimeout(),
+			}))
+		}(),
 		OnScanCancelled: func(_ context.Context, taskID int64) error {
 			dispatcher.CancelScan(taskID)
 			return nil

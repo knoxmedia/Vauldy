@@ -6,7 +6,11 @@ import (
 	"log"
 )
 
-const restartResetMessage = "服务重启，任务已复位"
+const (
+	restartResetMessage           = "服务重启，任务已复位"
+	scrapeRetriesExhaustedMessage = "服务重启，任务已耗尽重试次数"
+	maxScrapeTaskFailures         = 3
+)
 
 // ResetInterruptedTasks marks in-flight tasks as recoverable after process restart.
 func ResetInterruptedTasks(db *sql.DB) {
@@ -69,7 +73,13 @@ func resetInterruptedScrapeTasks(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, `UPDATE scrape_task SET status='waiting', progress=0, message=?, lease_owner=NULL, lease_until=NULL, available_at=COALESCE(available_at,CURRENT_TIMESTAMP) WHERE status='running'`, restartResetMessage); err != nil {
+	if _, err = tx.ExecContext(ctx, `UPDATE scrape_task SET status='failed', progress=100, finished_at=CURRENT_TIMESTAMP, message=?, lease_owner=NULL, lease_until=NULL WHERE status IN ('running','waiting') AND COALESCE(fail_count,0)>=?`, scrapeRetriesExhaustedMessage, maxScrapeTaskFailures); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE scrape_task SET status='waiting', progress=0, message=?, lease_owner=NULL, lease_until=NULL, available_at=COALESCE(available_at,CURRENT_TIMESTAMP) WHERE status='running' AND COALESCE(fail_count,0)<?`, restartResetMessage, maxScrapeTaskFailures); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE media_ingest_step SET status='failed', lease_owner=NULL, lease_until=NULL, last_error=?, finished_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id IN (SELECT ingest_step_id FROM scrape_task WHERE status='failed' AND COALESCE(fail_count,0)>=? AND ingest_step_id IS NOT NULL) AND status IN ('running','waiting')`, scrapeRetriesExhaustedMessage, maxScrapeTaskFailures); err != nil {
 		return err
 	}
 	if _, err = tx.ExecContext(ctx, `UPDATE media_ingest_step SET status='waiting', lease_owner=NULL, lease_until=NULL, available_at=(SELECT t.available_at FROM scrape_task t WHERE t.ingest_step_id=media_ingest_step.id AND t.status='waiting'), attempts=(SELECT COALESCE(t.fail_count,0) FROM scrape_task t WHERE t.ingest_step_id=media_ingest_step.id AND t.status='waiting'), last_error='', finished_at=NULL, updated_at=CURRENT_TIMESTAMP WHERE id IN (SELECT ingest_step_id FROM scrape_task WHERE status='waiting' AND ingest_step_id IS NOT NULL) AND status='running'`); err != nil {

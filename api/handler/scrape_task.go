@@ -70,26 +70,20 @@ func (h *Handler) recoverExpiredScrapeTasks(ctx context.Context) {
 	if h == nil || h.App == nil || h.App.DB == nil {
 		return
 	}
-	res, err := h.App.DB.ExecContext(ctx, `UPDATE scrape_task SET status='waiting',progress=0,message='recovered expired lease',lease_owner=NULL,lease_until=NULL,available_at=CURRENT_TIMESTAMP WHERE status='running' AND lease_until < CURRENT_TIMESTAMP AND COALESCE(fail_count,0) < ?`, maxScrapeTaskFailures)
-	if err != nil {
-		if ctx.Err() == nil {
-			log.Printf("scrape reaper: recover expired: %v", err)
+	if err := scrapeClaimImmediate(ctx, h.App.DB, func(tx store.ImmediateConnTx) error {
+		if _, err := tx.ExecContext(ctx, `UPDATE media_ingest_step SET status='waiting',lease_owner=NULL,lease_until=NULL,available_at=CURRENT_TIMESTAMP,last_error='recovered expired scrape lease',finished_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE status='running' AND id IN (SELECT ingest_step_id FROM scrape_task WHERE status='running' AND lease_until<CURRENT_TIMESTAMP AND COALESCE(fail_count,0)<? AND ingest_step_id IS NOT NULL)`, maxScrapeTaskFailures); err != nil {
+			return err
 		}
-		return
-	}
-	if n, _ := res.RowsAffected(); n > 0 {
-		log.Printf("scrape reaper: recovered %d expired tasks", n)
-	}
-	// Mark permanently stuck tasks (fail_count >= max with expired lease) as failed.
-	res2, err := h.App.DB.ExecContext(ctx, `UPDATE scrape_task SET status='failed',finished_at=CURRENT_TIMESTAMP,message='exhausted retries after expired leases',lease_owner=NULL,lease_until=NULL WHERE status='running' AND lease_until < CURRENT_TIMESTAMP AND COALESCE(fail_count,0) >= ?`, maxScrapeTaskFailures)
-	if err != nil {
-		if ctx.Err() == nil {
-			log.Printf("scrape reaper: fail exhausted: %v", err)
+		if _, err := tx.ExecContext(ctx, `UPDATE scrape_task SET status='waiting',progress=0,message='recovered expired lease',lease_owner=NULL,lease_until=NULL,available_at=CURRENT_TIMESTAMP WHERE status='running' AND lease_until<CURRENT_TIMESTAMP AND COALESCE(fail_count,0)<?`, maxScrapeTaskFailures); err != nil {
+			return err
 		}
-		return
-	}
-	if n, _ := res2.RowsAffected(); n > 0 {
-		log.Printf("scrape reaper: marked %d exhausted tasks as failed", n)
+		if _, err := tx.ExecContext(ctx, `UPDATE media_ingest_step SET status='failed',lease_owner=NULL,lease_until=NULL,last_error='exhausted retries after expired scrape leases',finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE status='running' AND id IN (SELECT ingest_step_id FROM scrape_task WHERE status='running' AND lease_until<CURRENT_TIMESTAMP AND COALESCE(fail_count,0)>=? AND ingest_step_id IS NOT NULL)`, maxScrapeTaskFailures); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `UPDATE scrape_task SET status='failed',progress=100,finished_at=CURRENT_TIMESTAMP,message='exhausted retries after expired leases',lease_owner=NULL,lease_until=NULL WHERE status='running' AND lease_until<CURRENT_TIMESTAMP AND COALESCE(fail_count,0)>=?`, maxScrapeTaskFailures)
+		return err
+	}); err != nil && ctx.Err() == nil {
+		log.Printf("scrape reaper: recover expired: %v", err)
 	}
 }
 
@@ -124,8 +118,8 @@ func (h *Handler) countPendingScrapeTasks(ctx context.Context) int {
 	var n int
 	_ = h.App.DB.QueryRowContext(ctx, `
 		SELECT COUNT(1) FROM scrape_task
-		WHERE status = 'waiting'
-		   OR (status = 'failed' AND COALESCE(fail_count, 0) < ?)`, maxScrapeTaskFailures,
+		WHERE status IN ('waiting','failed')
+		  AND COALESCE(fail_count, 0) < ?`, maxScrapeTaskFailures,
 	).Scan(&n)
 	return n
 }
@@ -421,8 +415,8 @@ func (h *Handler) runScrapeTasksWithLimit(ctx context.Context, ids []int64, limi
 		rows, err := h.App.DB.QueryContext(ctx, fmt.Sprintf(`
 			SELECT q.id FROM scrape_task q
 			WHERE (q.available_at IS NULL OR q.available_at<=CURRENT_TIMESTAMP)
-			  AND (q.status = 'waiting'
-			   OR (q.status = 'failed' AND COALESCE(q.fail_count, 0) < ?))
+			  AND q.status IN ('waiting','failed')
+			  AND COALESCE(q.fail_count, 0) < ?
 			  AND %s
 			ORDER BY q.id LIMIT ?`, publication.LinkedClaimEligibilitySQL("q")), maxScrapeTaskFailures, limit)
 		if err == nil {
@@ -464,7 +458,7 @@ func (h *Handler) runScrapeTasksWithLimit(ctx context.Context, ids []int64, limi
 		if err != nil {
 			continue
 		}
-		if taskStatus != "running" || failCount >= maxScrapeTaskFailures {
+		if taskStatus != "running" || failCount > maxScrapeTaskFailures {
 			continue
 		}
 		workCtx, stopWork := context.WithTimeout(ctx, 80*time.Second)

@@ -30,6 +30,24 @@ type ImmediateOutcome struct {
 	CommitConfirmed bool
 }
 
+type ImmediateBeginRetryError struct {
+	Cause error
+}
+
+func (e *ImmediateBeginRetryError) Error() string {
+	return fmt.Sprintf("store: immediate transaction begin timed out: %v", e.Cause)
+}
+
+func (e *ImmediateBeginRetryError) Unwrap() error { return e.Cause }
+
+// RetryableSQLiteOperation marks only begin acquisition timeout as retryable.
+func (e *ImmediateBeginRetryError) RetryableSQLiteOperation() bool { return true }
+
+func IsImmediateBeginRetry(err error) bool {
+	var retryErr *ImmediateBeginRetryError
+	return errors.As(err, &retryErr)
+}
+
 type ImmediateCommitError struct {
 	Cause error
 }
@@ -53,6 +71,16 @@ var immediateCommit = func(ctx context.Context, conn *sql.Conn) error {
 }
 
 func WithImmediateConnTx(ctx context.Context, db *sql.DB, fn func(ImmediateConnTx) error) (outcome ImmediateOutcome, err error) {
+	return withImmediateConnTx(ctx, db, 0, fn)
+}
+
+// WithImmediateConnTxBeginTimeout bounds only BEGIN IMMEDIATE acquisition. The
+// caller context remains in force for the transaction body and commit.
+func WithImmediateConnTxBeginTimeout(ctx context.Context, db *sql.DB, beginTimeout time.Duration, fn func(ImmediateConnTx) error) (outcome ImmediateOutcome, err error) {
+	return withImmediateConnTx(ctx, db, beginTimeout, fn)
+}
+
+func withImmediateConnTx(ctx context.Context, db *sql.DB, beginTimeout time.Duration, fn func(ImmediateConnTx) error) (outcome ImmediateOutcome, err error) {
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		return outcome, err
@@ -60,10 +88,18 @@ func WithImmediateConnTx(ctx context.Context, db *sql.DB, fn func(ImmediateConnT
 	discarded := false
 	defer conn.Close()
 
+	beginCtx := ctx
+	cancelBegin := func() {}
+	if beginTimeout > 0 {
+		beginCtx, cancelBegin = context.WithTimeout(ctx, beginTimeout)
+	}
+	defer cancelBegin()
+
 	var restoreBusyTimeout func() error
-	if deadline, ok := ctx.Deadline(); ok {
+	busyTimeoutRestored := false
+	if deadline, ok := beginCtx.Deadline(); ok {
 		var previous int64
-		if err := conn.QueryRowContext(ctx, `PRAGMA busy_timeout`).Scan(&previous); err != nil {
+		if err := conn.QueryRowContext(beginCtx, `PRAGMA busy_timeout`).Scan(&previous); err != nil {
 			return outcome, err
 		}
 		remaining := time.Until(deadline)
@@ -72,15 +108,21 @@ func WithImmediateConnTx(ctx context.Context, db *sql.DB, fn func(ImmediateConnT
 			bounded = 1
 		}
 		if previous <= 0 || bounded < previous {
-			if _, err := conn.ExecContext(ctx, fmt.Sprintf(`PRAGMA busy_timeout=%d`, bounded)); err != nil {
+			if _, err := conn.ExecContext(beginCtx, fmt.Sprintf(`PRAGMA busy_timeout=%d`, bounded)); err != nil {
 				return outcome, err
 			}
 			restoreBusyTimeout = func() error {
+				if busyTimeoutRestored {
+					return nil
+				}
 				_, restoreErr := conn.ExecContext(context.Background(), fmt.Sprintf(`PRAGMA busy_timeout=%d`, previous))
+				if restoreErr == nil {
+					busyTimeoutRestored = true
+				}
 				return restoreErr
 			}
 			defer func() {
-				if discarded {
+				if discarded || busyTimeoutRestored {
 					return
 				}
 				if restoreErr := restoreBusyTimeout(); restoreErr != nil {
@@ -94,9 +136,15 @@ func WithImmediateConnTx(ctx context.Context, db *sql.DB, fn func(ImmediateConnT
 		}
 	}
 
-	if beginErr := immediateBegin(ctx, conn); beginErr != nil {
+	beginErr := immediateBegin(beginCtx, conn)
+	beginCtxErr := beginCtx.Err()
+	cancelBegin()
+	if beginErr != nil {
 		err = beginErr
-		if !ambiguousImmediateBegin(ctx, beginErr) {
+		if beginTimeout > 0 && errors.Is(beginCtxErr, context.DeadlineExceeded) && ctx.Err() == nil {
+			err = &ImmediateBeginRetryError{Cause: beginErr}
+		}
+		if !ambiguousImmediateBegin(beginCtxErr, beginErr) {
 			return outcome, err
 		}
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), immediateCleanupTimeout)
@@ -153,8 +201,8 @@ func discardSQLConn(conn *sql.Conn) error {
 	return err
 }
 
-func ambiguousImmediateBegin(ctx context.Context, beginErr error) bool {
-	if ctx.Err() != nil || errors.Is(beginErr, context.Canceled) || errors.Is(beginErr, context.DeadlineExceeded) {
+func ambiguousImmediateBegin(ctxErr, beginErr error) bool {
+	if ctxErr != nil || errors.Is(beginErr, context.Canceled) || errors.Is(beginErr, context.DeadlineExceeded) {
 		return true
 	}
 	_, _, ok := sqliteretry.ErrorCodes(beginErr)

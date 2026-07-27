@@ -10,6 +10,52 @@ import (
 	"knox-media/internal/store"
 )
 
+func TestRestartRecoveryDoesNotLeaveExhaustedScrapeWaiting(t *testing.T) {
+	db, err := store.OpenSQLite(filepath.Join(t.TempDir(), "scrape-restart.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	libraryResult, err := db.Exec(`INSERT INTO library(name,type,path) VALUES('scrape','video','/scrape')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	libraryID, _ := libraryResult.LastInsertId()
+	mediaResult, err := db.Exec(`INSERT INTO media(library_id,file_id,file_type,ingest_generation,publication_state) VALUES(?,'scrape-media','video',1,'published')`, libraryID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mediaID, _ := mediaResult.LastInsertId()
+	runResult, err := db.Exec(`INSERT INTO media_ingest_run(media_id,generation,reason,status,config_snapshot_json) VALUES(?,1,'scan','published','{}')`, mediaID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID, _ := runResult.LastInsertId()
+	stepResult, err := db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status,attempts) VALUES(?,?,1,'scrape',0,'waiting',3)`, runID, mediaID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stepID, _ := stepResult.LastInsertId()
+	taskResult, err := db.Exec(`INSERT INTO scrape_task(media_id,status,fail_count,lease_owner,ingest_run_id,ingest_step_id,generation) VALUES(?,'running',3,'dead',?,?,1)`, mediaID, runID, stepID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, _ := taskResult.LastInsertId()
+
+	store.ResetInterruptedTasks(db)
+
+	var taskStatus, stepStatus string
+	if err := db.QueryRow(`SELECT status FROM scrape_task WHERE id=?`, taskID).Scan(&taskStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT status FROM media_ingest_step WHERE id=?`, stepID).Scan(&stepStatus); err != nil {
+		t.Fatal(err)
+	}
+	if taskStatus != "failed" || stepStatus != "failed" {
+		t.Fatalf("exhausted recovery left task=%q step=%q", taskStatus, stepStatus)
+	}
+}
+
 func TestRestartRecoveryResetInterruptedTasksPreservesResourceControlledScans(t *testing.T) {
 	db, err := store.OpenSQLite(filepath.Join(t.TempDir(), "restart-reset.sqlite"))
 	if err != nil {

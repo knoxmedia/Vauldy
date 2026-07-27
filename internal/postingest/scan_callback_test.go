@@ -71,3 +71,25 @@ func TestNewScanMediaDiscoveredTxCallbackPlansInCallerTransaction(t *testing.T) 
 		t.Fatalf("planner calls=%d want 1", calls)
 	}
 }
+
+func TestNewScanMediaDiscoveredFinalizerNonVideoNoOp(t *testing.T) {
+	callback := NewScanMediaDiscoveredFinalizer(PreCaptureConfig{})
+	if err := callback(context.Background(), 7, scanner.ScanDiscovery{MediaID: 42, Title: "title", FileType: "image"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNewScanMediaDiscoveredFinalizerRejectsCaptureFailure(t *testing.T) {
+	db, _, _, run := seedPreCapturePlan(t)
+	callback := NewScanMediaDiscoveredFinalizer(PreCaptureConfig{DB: db})
+	if err := callback(context.Background(), run.ScanTaskID, scanner.ScanDiscovery{MediaID: run.MediaID, Title: "title", FileType: "video"}); err == nil {
+		t.Fatal("capture failure was not returned")
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM media WHERE id=?`, run.MediaID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("failed media count=%d want 0", count)
+	}
+}

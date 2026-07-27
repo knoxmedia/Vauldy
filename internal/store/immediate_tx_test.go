@@ -511,6 +511,150 @@ func TestWithImmediateConnTxNoActiveRollbackProvesAmbiguousBeginClean(t *testing
 	}
 }
 
+func TestWithImmediateConnTxBeginTimeoutRetriesRealContention(t *testing.T) {
+	db := openImmediateTxTestDB(t)
+	db.SetMaxOpenConns(2)
+	locker, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = locker.ExecContext(context.Background(), `BEGIN IMMEDIATE`); err != nil {
+		t.Fatal(err)
+	}
+	released := make(chan struct{})
+	go func() {
+		time.Sleep(40 * time.Millisecond)
+		_, _ = locker.ExecContext(context.Background(), `ROLLBACK`)
+		_ = locker.Close()
+		close(released)
+	}()
+	t.Cleanup(func() {
+		<-released
+	})
+
+	attempts := 0
+	bodyCalls := 0
+	err = WithBusyRetryPolicyContext(context.Background(), nil, RetryPolicy{Operation: "immediate_begin_test", MaxElapsed: time.Second, BaseBackoff: 5 * time.Millisecond, MaxBackoff: 10 * time.Millisecond}, func(attemptCtx context.Context) error {
+		attempts++
+		_, txErr := WithImmediateConnTxBeginTimeout(attemptCtx, db, 10*time.Millisecond, func(tx ImmediateConnTx) error {
+			bodyCalls++
+			_, execErr := tx.ExecContext(attemptCtx, `INSERT INTO immediate_test(value) VALUES ('after-contention')`)
+			return execErr
+		})
+		return txErr
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempts < 2 || bodyCalls != 1 {
+		t.Fatalf("attempts=%d body calls=%d", attempts, bodyCalls)
+	}
+}
+
+func TestWithImmediateConnTxBeginTimeoutOnlyBoundsBegin(t *testing.T) {
+	db := openImmediateTxTestDB(t)
+	original := immediateBegin
+	var beginDeadline time.Time
+	immediateBegin = func(ctx context.Context, conn *sql.Conn) error {
+		beginDeadline, _ = ctx.Deadline()
+		return original(ctx, conn)
+	}
+	t.Cleanup(func() { immediateBegin = original })
+
+	started := time.Now()
+	bodyCalls := 0
+	outcome, err := WithImmediateConnTxBeginTimeout(context.Background(), db, 20*time.Millisecond, func(tx ImmediateConnTx) error {
+		bodyCalls++
+		time.Sleep(60 * time.Millisecond)
+		_, err := tx.ExecContext(context.Background(), `INSERT INTO immediate_test(value) VALUES ('slow-body')`)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bodyCalls != 1 || !outcome.CommitConfirmed {
+		t.Fatalf("body calls=%d outcome=%+v", bodyCalls, outcome)
+	}
+	if beginDeadline.IsZero() || beginDeadline.Sub(started) > 50*time.Millisecond {
+		t.Fatalf("begin deadline=%v started=%v", beginDeadline, started)
+	}
+}
+
+func TestWithImmediateConnTxBeginTimeoutSignalsRetryableContention(t *testing.T) {
+	db := openImmediateTxTestDB(t)
+	original := immediateBegin
+	immediateBegin = func(ctx context.Context, _ *sql.Conn) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	t.Cleanup(func() { immediateBegin = original })
+
+	_, err := WithImmediateConnTxBeginTimeout(context.Background(), db, 10*time.Millisecond, func(ImmediateConnTx) error {
+		t.Fatal("body called after timed out begin")
+		return nil
+	})
+	if !IsImmediateBeginRetry(err) {
+		t.Fatalf("error=%T %v want immediate begin retry signal", err, err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error=%v want preserved deadline cause", err)
+	}
+	if IsSQLiteBusy(err) {
+		t.Fatalf("error=%v must not be misclassified as SQLite busy", err)
+	}
+}
+
+func TestWithImmediateConnTxBeginTimeoutPreservesCallerCancellation(t *testing.T) {
+	db := openImmediateTxTestDB(t)
+	original := immediateBegin
+	immediateBegin = func(ctx context.Context, _ *sql.Conn) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	t.Cleanup(func() { immediateBegin = original })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := WithImmediateConnTxBeginTimeout(ctx, db, time.Second, func(ImmediateConnTx) error { return nil })
+	if !errors.Is(err, context.Canceled) || IsImmediateBeginRetry(err) {
+		t.Fatalf("error=%T %v want caller cancellation without retry signal", err, err)
+	}
+}
+
+func TestWithImmediateConnTxBeginTimeoutPreservesCallerDeadline(t *testing.T) {
+	db := openImmediateTxTestDB(t)
+	original := immediateBegin
+	immediateBegin = func(ctx context.Context, _ *sql.Conn) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	t.Cleanup(func() { immediateBegin = original })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	_, err := WithImmediateConnTxBeginTimeout(ctx, db, time.Second, func(ImmediateConnTx) error { return nil })
+	if !errors.Is(err, context.DeadlineExceeded) || IsImmediateBeginRetry(err) {
+		t.Fatalf("error=%T %v want caller deadline without retry signal", err, err)
+	}
+}
+
+func TestWithImmediateConnTxBeginTimeoutPreservesAmbiguousCommit(t *testing.T) {
+	db := openImmediateTxTestDB(t)
+	original := immediateCommit
+	commitErr := errors.New("commit response lost")
+	immediateCommit = func(context.Context, *sql.Conn) error { return commitErr }
+	t.Cleanup(func() { immediateCommit = original })
+
+	outcome, err := WithImmediateConnTxBeginTimeout(context.Background(), db, 10*time.Millisecond, func(ImmediateConnTx) error { return nil })
+	var uncertain *ImmediateCommitError
+	if !errors.As(err, &uncertain) || !errors.Is(err, commitErr) || IsImmediateBeginRetry(err) {
+		t.Fatalf("error=%T %v want ambiguous commit only", err, err)
+	}
+	if !outcome.CommitAttempted || outcome.CommitConfirmed {
+		t.Fatalf("outcome=%+v", outcome)
+	}
+}
+
 func TestWithImmediateConnTxDefinitiveSQLErrorRetainsConnectionWithoutRollback(t *testing.T) {
 	sqlErr := sqliteTestError(t, sqlite3.SQLITE_ERROR)
 	testDriver := &immediateRollbackTestDriver{beginErr: sqlErr, rollbackErr: errors.New("cannot rollback - no transaction is active")}

@@ -78,7 +78,8 @@ func withBusyRetryPolicyContext(ctx context.Context, policy RetryPolicy, now fun
 		err := op(attemptCtx)
 		cancel()
 		attempt++
-		if err == nil || !IsBusy(err) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		retryable := isRetryableOperation(err)
+		if err == nil || (!IsBusy(err) && !retryable) || (!retryable && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))) {
 			return err
 		}
 		lastBusyErr = err
@@ -104,6 +105,11 @@ func withBusyRetryPolicyContext(ctx context.Context, policy RetryPolicy, now fun
 		}
 		backoff = saturatingDouble(backoff, policy.MaxBackoff)
 	}
+}
+
+func isRetryableOperation(err error) bool {
+	var retryable interface{ RetryableSQLiteOperation() bool }
+	return errors.As(err, &retryable) && retryable.RetryableSQLiteOperation()
 }
 
 func normalizePolicy(policy RetryPolicy) RetryPolicy {
