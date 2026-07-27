@@ -78,6 +78,8 @@ export type Library = {
   scan_total_count?: number;
   scan_added_count?: number;
   scan_started_at?: string;
+  scan_ingested_count?: number;
+  scan_ingesting_count?: number;
   /** Composite preview from latest 4 video posters (/uploads/library_previews/{id}.jpg). */
   preview_url?: string;
 };

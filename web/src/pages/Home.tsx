@@ -1424,8 +1424,16 @@ export default function HomePage() {
               {libs.map((lib) => {
               const processed = lib.scan_processed_count ?? 0;
               const total = lib.scan_total_count ?? 0;
-              const percent = total > 0 ? Math.max(0, Math.min(100, Math.round((processed / total) * 100))) : 0;
-              const progressColor = percent < 50 ? "#13b6ff" : percent < 90 ? "#ed6d00" : "#52c41a";
+              const added = lib.scan_added_count ?? 0;
+              const ingested = lib.scan_ingested_count ?? 0;
+              const ingesting = lib.scan_ingesting_count ?? 0;
+              const isScanning = lib.scan_status === "running";
+              const isIngesting = !isScanning && ingesting > 0;
+              const hasTotal = isScanning ? total > 0 : added > 0;
+              const done = isScanning ? processed : ingested;
+              const denom = isScanning ? total : added;
+              const percent = hasTotal ? Math.max(0, Math.min(100, Math.round((done / denom) * 100))) : 0;
+              const progressColor = isScanning ? (percent < 50 ? "#13b6ff" : percent < 90 ? "#ed6d00" : "#52c41a") : "#13b6ff";
               const typeLabel =
                 lib.type === "movie"
                   ? t("pages.home.lib_type_movie")
@@ -1457,22 +1465,28 @@ export default function HomePage() {
                         style={{ background: libGradient(lib.id, lib.type) }}
                       />
                     )}
-                    {lib.scan_status === "running" ? (
+                    {isScanning || isIngesting ? (
                       <div className={styles.libScanOverlay}>
-                        <Progress
-                          type="circle"
-                          size={48}
-                          percent={percent}
-                          strokeColor={progressColor}
-                          railColor="rgba(255,255,255,0.2)"
-                          className={styles.libScanCircle}
-                        />
+                        {hasTotal ? (
+                          <Progress
+                            type="circle"
+                            size={48}
+                            percent={percent}
+                            strokeColor={progressColor}
+                            railColor="rgba(255,255,255,0.2)"
+                            className={styles.libScanCircle}
+                          />
+                        ) : (
+                          <div className={styles.libScanSpinner} />
+                        )}
                         <div className={styles.libScanInfo}>
-                          <div className={styles.libScanTitle}>{t("pages.home.lib_scanning")}</div>
+                          <div className={styles.libScanTitle}>{isScanning ? t("pages.home.lib_scanning") : t("pages.home.lib_processing")}</div>
                           <div className={styles.libScanMeta}>
-                            {total > 0
-                              ? t("pages.home.lib_scan_progress", { processed, total, added: lib.scan_added_count ?? 0 })
-                              : t("pages.home.lib_scan_processed", { processed, added: lib.scan_added_count ?? 0 })}
+                            {isScanning
+                              ? (total > 0
+                                ? t("pages.home.lib_scan_progress", { processed, total, added })
+                                : t("pages.home.lib_scan_processed", { processed, added }))
+                              : t("pages.home.lib_ingest_progress", { ingested, added })}
                           </div>
                         </div>
                       </div>

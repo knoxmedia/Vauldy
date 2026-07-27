@@ -223,7 +223,7 @@ func validateCurrentV2Run(ctx context.Context, q store.SQLExecutor, runID int64)
 		}
 	}
 	var evidenceMismatch int
-	if err = q.QueryRowContext(ctx, `SELECT COUNT(*) FROM media_ingest_evidence e JOIN media_ingest_step s ON s.id=e.step_id WHERE e.run_id=? AND (e.media_id<>s.media_id OR e.generation<>s.generation OR e.kind<>s.step_type OR s.status NOT IN ('done','skipped') OR json_valid(e.artifact_refs_json)<>1)`, runID).Scan(&evidenceMismatch); err != nil {
+	if err = q.QueryRowContext(ctx, `SELECT COUNT(*) FROM media_ingest_evidence e JOIN media_ingest_step s ON s.id=e.step_id WHERE e.run_id=? AND (e.media_id<>s.media_id OR e.generation<>s.generation OR (e.kind<>s.step_type AND NOT (s.step_type='scrape' AND e.kind='scrape_artwork')) OR s.status NOT IN ('done','skipped') OR json_valid(e.artifact_refs_json)<>1)`, runID).Scan(&evidenceMismatch); err != nil {
 		return err
 	}
 	if evidenceMismatch != 0 {

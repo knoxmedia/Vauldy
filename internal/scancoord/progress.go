@@ -48,9 +48,11 @@ type ProgressWriter struct {
 	processed         int64
 	failed            int64
 	added             int64
+	total             int64
 	flushedProcessed  int64
 	flushedFailed     int64
 	flushedAdded      int64
+	flushedTotal      int64
 	lastProgressFlush time.Time
 	lastLogFlush      time.Time
 	logs              []progressLogEntry
@@ -115,6 +117,25 @@ func (w *ProgressWriter) MediaAdded(mediaID int64, title, fileType string) {
 	w.added++
 	w.mu.Unlock()
 	w.appendLog(ScanLog{FilePath: fmt.Sprintf("media:%d", mediaID), Action: "added", Message: fmt.Sprintf("%s (%s)", title, fileType)})
+}
+
+func (w *ProgressWriter) Processed() int64 {
+	if w == nil {
+		return 0
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.processed
+}
+
+func (w *ProgressWriter) SetTotal(total int64) {
+	if w == nil || total <= 0 {
+		return
+	}
+	w.mu.Lock()
+	w.total = total
+	w.mu.Unlock()
+	w.flushSynchronously()
 }
 
 func (w *ProgressWriter) Log(entry ScanLog) {
@@ -196,12 +217,13 @@ func (w *ProgressWriter) Flush(ctx context.Context, force bool) error {
 func (w *ProgressWriter) flushOwned(ctx context.Context, force bool, targetLogID uint64, targetProcessed, targetFailed, targetAdded int64) error {
 	now := w.opts.Now()
 	w.mu.Lock()
-	progressDirty := targetProcessed > w.flushedProcessed || targetFailed > w.flushedFailed || targetAdded > w.flushedAdded
+	targetTotal := w.total
+	progressDirty := targetProcessed > w.flushedProcessed || targetFailed > w.flushedFailed || targetAdded > w.flushedAdded || (targetTotal > 0 && targetTotal != w.flushedTotal)
 	progressDue := force || targetProcessed-w.flushedProcessed >= int64(w.opts.FileThreshold) || now.Sub(w.lastProgressFlush) >= w.opts.FlushInterval
 	w.mu.Unlock()
 	if progressDirty && progressDue {
 		if err := store.WithBusyRetry(ctx, w.metrics, func() error {
-			_, err := w.db.ExecContext(ctx, `UPDATE scan_task SET processed_count=?,failed_count=?,added_count=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`, targetProcessed, targetFailed, targetAdded, w.taskID)
+			_, err := w.db.ExecContext(ctx, `UPDATE scan_task SET processed_count=?,failed_count=?,added_count=?,total_count=CASE WHEN ? > 0 THEN ? ELSE total_count END,updated_at=CURRENT_TIMESTAMP WHERE id=?`, targetProcessed, targetFailed, targetAdded, targetTotal, targetTotal, w.taskID)
 			return err
 		}); err != nil {
 			return err
@@ -210,7 +232,7 @@ func (w *ProgressWriter) flushOwned(ctx context.Context, force bool, targetLogID
 			w.metrics.ProgressBatches.Add(1)
 		}
 		w.mu.Lock()
-		w.flushedProcessed, w.flushedFailed, w.flushedAdded = targetProcessed, targetFailed, targetAdded
+		w.flushedProcessed, w.flushedFailed, w.flushedAdded, w.flushedTotal = targetProcessed, targetFailed, targetAdded, targetTotal
 		w.lastProgressFlush = now
 		w.mu.Unlock()
 	}
