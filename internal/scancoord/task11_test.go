@@ -219,6 +219,60 @@ func TestFinalizeFailureIncludesCompleteScanDiagnostic(t *testing.T) {
 	requireScanDiagnostic(t, err, "scan_finalize", "final-owner/task", taskID, libraries[0], false)
 }
 
+type task11BeginRetry struct{ cause error }
+
+func (e task11BeginRetry) Error() string                  { return e.cause.Error() }
+func (e task11BeginRetry) Unwrap() error                  { return e.cause }
+func (e task11BeginRetry) RetryableSQLiteOperation() bool { return true }
+
+func TestSubmitRetriesImmediateBeginContention(t *testing.T) {
+	db, libraries := openCoordinatorTestDB(t, 1)
+	scanner := newBlockingScanner()
+	defer close(scanner.release)
+	c := newTestCoordinator(t, db, "submit-contention", scanner)
+	original := storeImmediateBeginTimeout
+	calls := 0
+	storeImmediateBeginTimeout = func(ctx context.Context, db *sql.DB, timeout time.Duration, fn func(store.ImmediateConnTx) error) (store.ImmediateOutcome, error) {
+		calls++
+		if calls == 1 {
+			return store.ImmediateOutcome{}, task11BeginRetry{cause: context.DeadlineExceeded}
+		}
+		return store.WithImmediateConnTxBeginTimeout(ctx, db, timeout, fn)
+	}
+	t.Cleanup(func() { storeImmediateBeginTimeout = original })
+	result, err := c.Submit(context.Background(), ScanRequest{LibraryID: libraries[0], Source: SourceManual, Roots: []string{"/contention"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Started || calls < 2 {
+		t.Fatalf("result=%+v calls=%d", result, calls)
+	}
+}
+
+func TestSubmitDoesNotRetrySlowTransactionBody(t *testing.T) {
+	db, libraries := openCoordinatorTestDB(t, 1)
+	scanner := newBlockingScanner()
+	defer close(scanner.release)
+	c := newTestCoordinator(t, db, "submit-slow-body", scanner)
+	original := storeImmediateBeginTimeout
+	calls := 0
+	storeImmediateBeginTimeout = func(ctx context.Context, db *sql.DB, timeout time.Duration, fn func(store.ImmediateConnTx) error) (store.ImmediateOutcome, error) {
+		calls++
+		return store.WithImmediateConnTxBeginTimeout(ctx, db, timeout, func(tx store.ImmediateConnTx) error {
+			time.Sleep(timeout + 20*time.Millisecond)
+			return fn(tx)
+		})
+	}
+	t.Cleanup(func() { storeImmediateBeginTimeout = original })
+	result, err := c.Submit(context.Background(), ScanRequest{LibraryID: libraries[0], Source: SourceManual, Roots: []string{"/slow-body"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Started || calls != 1 {
+		t.Fatalf("result=%+v calls=%d", result, calls)
+	}
+}
+
 func TestSubmitFailureIncludesLibraryDiagnostic(t *testing.T) {
 	db, libraries := openCoordinatorTestDB(t, 1)
 	c := newTestCoordinator(t, db, "submit-owner", &countingScanner{})

@@ -19,6 +19,7 @@ import (
 type Source string
 
 var ErrScanLeaseLost = errors.New("scan lease lost")
+var storeImmediateBeginTimeout = store.WithImmediateConnTxBeginTimeout
 
 type ErrScanTaskMissing struct{ TaskID int64 }
 type ErrCoordinatorShuttingDown struct{}
@@ -63,6 +64,7 @@ type Scanner interface {
 }
 
 type MediaAddedFunc func(context.Context, int64, int64, string, string) error
+type MediaDiscoveredFunc func(context.Context, int64, scanner.ScanDiscovery) error
 type MediaDiscoveredTxFunc func(context.Context, *sql.Tx, int64, scanner.ScanDiscovery) error
 
 type ScanCancelledFunc func(context.Context, int64) error
@@ -74,6 +76,7 @@ type Options struct {
 	OwnerInstanceID     string
 	Scanner             Scanner
 	OnMediaAdded        MediaAddedFunc
+	OnMediaDiscovered   MediaDiscoveredFunc
 	OnMediaDiscoveredTx MediaDiscoveredTxFunc
 	OnScanCancelled     ScanCancelledFunc
 	Metrics             *store.SQLiteMetrics
@@ -88,6 +91,7 @@ type Coordinator struct {
 	ownerInstanceID        string
 	scanner                Scanner
 	onMediaAdded           MediaAddedFunc
+	onMediaDiscovered      MediaDiscoveredFunc
 	onMediaDiscoveredTx    MediaDiscoveredTxFunc
 	onScanCancelled        ScanCancelledFunc
 	metrics                *store.SQLiteMetrics
@@ -162,6 +166,7 @@ func New(db *sql.DB, opts Options) (*Coordinator, error) {
 		ownerInstanceID:     opts.OwnerInstanceID,
 		scanner:             opts.Scanner,
 		onMediaAdded:        opts.OnMediaAdded,
+		onMediaDiscovered:   opts.OnMediaDiscovered,
 		onMediaDiscoveredTx: opts.OnMediaDiscoveredTx,
 		onScanCancelled:     opts.OnScanCancelled,
 		metrics:             opts.Metrics,
@@ -202,9 +207,11 @@ func (c *Coordinator) Submit(ctx context.Context, req ScanRequest) (SubmitResult
 		result = SubmitResult{}
 		owner = ""
 		initialLeaseDeadline = time.Time{}
-		withImmediateTx := c.withImmediateTx
-		if withImmediateTx == nil {
-			withImmediateTx = store.WithImmediateConnTx
+		withImmediateTx := func(ctx context.Context, db *sql.DB, fn func(store.ImmediateConnTx) error) (store.ImmediateOutcome, error) {
+			return storeImmediateBeginTimeout(ctx, db, 350*time.Millisecond, fn)
+		}
+		if c.withImmediateTx != nil {
+			withImmediateTx = c.withImmediateTx
 		}
 		_, txErr := withImmediateTx(attemptCtx, c.db, func(tx store.ImmediateConnTx) error {
 			var existingTaskID int64
@@ -287,8 +294,8 @@ func (c *Coordinator) Submit(ctx context.Context, req ScanRequest) (SubmitResult
 			}
 			return nil
 		})
+		var commitErr *store.ImmediateCommitError
 		if txErr != nil {
-			var commitErr *store.ImmediateCommitError
 			if !errors.As(txErr, &commitErr) || result.TaskID == 0 {
 				return txErr
 			}
@@ -389,6 +396,12 @@ func (c *Coordinator) run(ctx context.Context, taskID, libraryID int64, owner st
 			var enqueueErrors []error
 			callbacks := scanner.ScanCallbacks{
 				OnFile: progress.File,
+				OnMediaDiscovered: func(callbackCtx context.Context, discovery scanner.ScanDiscovery) error {
+					if c.onMediaDiscovered == nil {
+						return nil
+					}
+					return c.onMediaDiscovered(callbackCtx, taskID, discovery)
+				},
 				OnMediaDiscoveredTx: func(callbackCtx context.Context, tx *sql.Tx, discovery scanner.ScanDiscovery) error {
 					if c.onMediaDiscoveredTx == nil {
 						return nil

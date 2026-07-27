@@ -347,6 +347,14 @@ func main() {
 		OwnerInstanceID: "scancoord-" + processID, Scanner: sc, Metrics: sqliteMetrics,
 
 		OnMediaDiscoveredTx: scancoord.MediaDiscoveredTxFunc(postingest.NewScanMediaDiscoveredTxCallback(publicationPlanner)),
+		OnMediaDiscovered: func() scancoord.MediaDiscoveredFunc {
+			if !cfg.PrecapturePosterEnabled() {
+				return nil
+			}
+			return scancoord.MediaDiscoveredFunc(postingest.NewScanMediaDiscoveredFinalizer(postingest.PreCaptureConfig{
+				DB: db, Runner: posterRunner, Derived: derivedStore, UploadDir: cfg.Data.Upload, Timeout: cfg.PrecapturePosterTimeout(),
+			}))
+		}(),
 		OnScanCancelled: func(_ context.Context, taskID int64) error {
 			dispatcher.CancelScan(taskID)
 			return nil

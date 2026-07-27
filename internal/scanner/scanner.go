@@ -97,6 +97,7 @@ type ScanDiscovery struct {
 type ScanCallbacks struct {
 	OnFile              func(string, error)
 	OnMediaAdded        func(context.Context, int64, string, string) error
+	OnMediaDiscovered   func(context.Context, ScanDiscovery) error
 	OnMediaDiscoveredTx func(context.Context, *sql.Tx, ScanDiscovery) error
 }
 
@@ -418,9 +419,6 @@ func (s *Scanner) ScanLibraryFoldersWithContextAndCallbacks(ctx context.Context,
 				}
 				return nil
 			}
-			if existingMediaID == 0 {
-				added++
-			}
 			var mediaID = existingMediaID
 			if mediaID == 0 {
 				if mid, midErr := res.LastInsertId(); midErr == nil && mid > 0 {
@@ -433,21 +431,34 @@ func (s *Scanner) ScanLibraryFoldersWithContextAndCallbacks(ctx context.Context,
 						return e
 					}
 				}
+				discovery := ScanDiscovery{MediaID: mediaID, Title: title, FileType: ft, MetadataAttempt: metadataAttempt}
 				if existingMediaID == 0 && callbacks.OnMediaDiscoveredTx != nil {
-					if e = callbacks.OnMediaDiscoveredTx(ctx, tx, ScanDiscovery{MediaID: mediaID, Title: title, FileType: ft, MetadataAttempt: metadataAttempt}); e != nil {
+					if e = callbacks.OnMediaDiscoveredTx(ctx, tx, discovery); e != nil {
 						return e
 					}
 				}
 				if e = tx.Commit(); e != nil {
 					return e
 				}
+				if existingMediaID == 0 && callbacks.OnMediaDiscovered != nil {
+					if callbackErr := callbacks.OnMediaDiscovered(ctx, discovery); callbackErr != nil {
+						_, _ = s.DB.Exec(`DELETE FROM library_node WHERE library_id = ? AND node_path = ?`, libraryID, nodePath)
+						if callbacks.OnFile != nil {
+							callbacks.OnFile(path, callbackErr)
+						}
+						return nil
+					}
+				}
 				_ = s.upsertNode(libraryID, parentPath, nodePath, nodeName, "file", &mediaID)
 				if documentLibrary && ft == "document" && s.OnDocumentScanned != nil {
 					s.OnDocumentScanned(mediaID)
 				}
-				if existingMediaID == 0 && callbacks.OnMediaAdded != nil {
-					if callbackErr := callbacks.OnMediaAdded(ctx, mediaID, title, ft); callbackErr != nil && callbacks.OnFile != nil {
-						callbacks.OnFile(path, callbackErr)
+				if existingMediaID == 0 {
+					added++
+					if callbacks.OnMediaAdded != nil {
+						if callbackErr := callbacks.OnMediaAdded(ctx, mediaID, title, ft); callbackErr != nil && callbacks.OnFile != nil {
+							callbacks.OnFile(path, callbackErr)
+						}
 					}
 				}
 			}
