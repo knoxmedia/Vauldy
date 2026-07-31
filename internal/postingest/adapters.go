@@ -22,6 +22,14 @@ import (
 
 var encryptionSourceFingerprint = publication.SourceFingerprint
 
+// encryptionCommitHashPath hashes staged ciphertext. Tests replace it to assert
+// hashing stays outside BEGIN IMMEDIATE (multi-GB reads under the write lock
+// starve scan/claim workers with 2s busy budgets).
+var encryptionCommitHashPath = hashPath
+
+// encryptionCommitFileSHA256 hashes quarantined plaintext for the same reason.
+var encryptionCommitFileSHA256 = fileSHA256
+
 type Adapter interface {
 	Execute(context.Context, Task) error
 }
@@ -640,7 +648,26 @@ func commitEncryptionStage(ctx context.Context, db *sql.DB, task Task, s storage
 		}
 	}
 
-	_, err := seams.immediate(ctx, db, func(tx store.ImmediateConnTx) error {
+	// Hash multi-GB staged ciphertext (and quarantine plaintext) BEFORE taking
+	// BEGIN IMMEDIATE. Doing this under the write lock starves every other
+	// worker that only has a ~2s SQLite busy budget (scan_submit, claim, etc.).
+	encSize, encHash, err := encryptionCommitHashPath(s.EncPath)
+	if err != nil || encSize != s.Size || !strings.EqualFold(encHash, s.SHA256) || s.WrappedDEK == "" || s.IV == "" {
+		return errors.New("encrypt commit staged identity invalid")
+	}
+	quarantineHash := ""
+	if !alreadySelected {
+		quarantineHash, err = encryptionCommitFileSHA256(quarantinePath)
+		if err != nil {
+			return err
+		}
+		sourceHash := s.SourceFingerprint[strings.LastIndex(s.SourceFingerprint, "sha256:")+7:]
+		if !strings.EqualFold(quarantineHash, sourceHash) {
+			return errors.New("quarantine source hash mismatch")
+		}
+	}
+
+	_, err = seams.immediate(ctx, db, func(tx store.ImmediateConnTx) error {
 		var selected string
 		guard := `SELECT m.file_path FROM post_ingest_task p JOIN media_ingest_step step ON step.id=p.ingest_step_id JOIN media_ingest_run r ON r.id=p.ingest_run_id JOIN media m ON m.id=p.media_id WHERE p.id=? AND p.task_type='encrypt' AND p.media_id=? AND p.generation=? AND p.retry_round=? AND p.ingest_run_id=? AND p.ingest_step_id=? AND p.status='running' AND p.lease_owner=? AND p.attempts=? AND step.status='running' AND step.lease_owner=p.lease_owner AND step.attempts=p.attempts AND r.status='processing' AND r.superseded_at IS NULL AND COALESCE(r.superseded_by_generation,0)=0 AND m.ingest_generation=p.generation AND NOT EXISTS(SELECT 1 FROM media_ingest_step_dependency d JOIN media_ingest_step dep ON dep.id=d.depends_on_step_id WHERE d.step_id=step.id AND d.dependency_kind='step_done' AND dep.status NOT IN ('done','skipped'))`
 		if err := tx.QueryRowContext(ctx, guard, task.ID, task.MediaID, task.Generation, task.RetryRound, *task.RunID, *task.StepID, task.LeaseOwner, task.Attempts).Scan(&selected); err != nil {
@@ -650,10 +677,6 @@ func commitEncryptionStage(ctx context.Context, db *sql.DB, task Task, s storage
 			if err := verifyDurableQuarantine(ctx, tx, task, s, quarantinePath); err != nil {
 				return err
 			}
-		}
-		size, hash, err := hashPath(s.EncPath)
-		if err != nil || size != s.Size || !strings.EqualFold(hash, s.SHA256) || s.WrappedDEK == "" || s.IV == "" {
-			return errors.New("encrypt commit staged identity invalid")
 		}
 		if !alreadySelected {
 			if _, err = tx.ExecContext(ctx, `INSERT INTO media_encrypted_assets(media_id,enc_path,wrapped_dek,iv,plain_path,status,updated_at) VALUES(?,?,?,?,?,'encrypted',CURRENT_TIMESTAMP) ON CONFLICT(media_id) DO UPDATE SET enc_path=excluded.enc_path,wrapped_dek=excluded.wrapped_dek,iv=excluded.iv,plain_path=excluded.plain_path,status='encrypted',updated_at=CURRENT_TIMESTAMP`, task.MediaID, s.EncPath, s.WrappedDEK, s.IV, s.OriginalPath); err != nil {
