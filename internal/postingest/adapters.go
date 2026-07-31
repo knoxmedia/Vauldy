@@ -542,13 +542,14 @@ func (a *encryptAdapter) ExecuteWithResult(ctx context.Context, task Task) (Exec
 		return ordinary, classifyEncryptError(err)
 	}
 	rootProvider, ok := a.enc.(encryptionPrivateRootProvider)
-	quarantineRoot := ""
+	preferredRoot := ""
 	if ok {
-		quarantineRoot = rootProvider.EncryptionPrivateRoot()
+		preferredRoot = rootProvider.EncryptionPrivateRoot()
 	}
-	if strings.TrimSpace(quarantineRoot) == "" {
-		quarantineRoot = filepath.Join(filepath.Dir(staged.OriginalPath), ".quarantine", "encryption")
+	if strings.TrimSpace(preferredRoot) == "" {
+		preferredRoot = filepath.Join(filepath.Dir(staged.OriginalPath), ".quarantine", "encryption")
 	}
+	quarantineRoot := storage.QuarantineRootForSource(staged.OriginalPath, preferredRoot)
 
 	if err = commitEncryptionStage(ctx, db, task, staged, quarantineRoot, a.seams); err != nil {
 		var uncertain *store.ImmediateCommitError
