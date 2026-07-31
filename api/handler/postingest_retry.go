@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"knox-media/internal/postingest"
+	"knox-media/internal/taskalign"
 )
 
 var explicitPostIngestLocks [64]sync.Mutex
@@ -71,6 +72,9 @@ func enqueueExplicitPostIngest(ctx context.Context, db *sql.DB, mediaID int64, t
 		if e != nil {
 			return "", e
 		}
+		if e = taskalign.EnsureDomainWaiting(ctx, tx, string(typ), mediaID); e != nil {
+			return "", e
+		}
 		n, e := res.RowsAffected()
 		if e != nil {
 			return "", e
@@ -91,6 +95,12 @@ func enqueueExplicitPostIngest(ctx context.Context, db *sql.DB, mediaID int64, t
 	}
 	switch status {
 	case postingest.StatusWaiting:
+		if err = taskalign.EnsureDomainWaiting(ctx, tx, string(typ), mediaID); err != nil {
+			return "", err
+		}
+		if err = tx.Commit(); err != nil {
+			return "", err
+		}
 		return explicitPostIngestAlreadyQueued, nil
 	case postingest.StatusRunning:
 		return explicitPostIngestAlreadyRunning, nil
@@ -118,6 +128,9 @@ func enqueueExplicitPostIngest(ctx context.Context, db *sql.DB, mediaID int64, t
 	}
 	if n != 1 {
 		return "", fmt.Errorf("post-ingest task %d changed concurrently", id)
+	}
+	if err = taskalign.EnsureDomainWaiting(ctx, tx, string(typ), mediaID); err != nil {
+		return "", err
 	}
 	if err = tx.Commit(); err != nil {
 		return "", err
