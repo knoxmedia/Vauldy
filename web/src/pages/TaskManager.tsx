@@ -22,14 +22,17 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   cancelScanTask,
   cancelTranscodeTask,
+  cancelEncryptTask,
   cleanupFailedTranscodeTasks,
   cleanupFailedTranscodeTasksBefore,
   cleanupFailedSubtitleTasks,
   cleanupSubtitleTasksBefore,
   deleteSubtitleTask,
+  deleteEncryptTask,
   cleanupFailedLyricTasks,
   cleanupLyricTasksBefore,
   fetchAtrackTasks,
+  fetchEncryptTasks,
   fetchKeyframeTasks,
   fetchLyricTasks,
   fetchPreviewTasks,
@@ -38,6 +41,7 @@ import {
   fetchSubtitleTasks,
   fetchTranscodeTasks,
   resetSubtitleTask,
+  resetEncryptTask,
   retryAudioTrackExtraction,
   retryKeyframeExtraction,
   retryPreviewTask,
@@ -45,6 +49,7 @@ import {
   retryTranscodeTask,
   retrySubtitleTask,
   type AtrackTask,
+  type EncryptTask,
   type KeyframeTask,
   type LyricTask,
   type PreviewTask,
@@ -181,6 +186,12 @@ export default function TaskManagerPage() {
   const [retryingLyricId, setRetryingLyricId] = useState<number | null>(null);
   const [cleaningLyricFailed, setCleaningLyricFailed] = useState(false);
   const [cleaningLyricOld, setCleaningLyricOld] = useState(false);
+  const [encryptTasks, setEncryptTasks] = useState<EncryptTask[]>([]);
+  const [encryptLoading, setEncryptLoading] = useState(false);
+  const [encryptStatusFilter, setEncryptStatusFilter] = useState("all");
+  const [cancellingEncryptId, setCancellingEncryptId] = useState<number | null>(null);
+  const [resettingEncryptId, setResettingEncryptId] = useState<number | null>(null);
+  const [deletingEncryptId, setDeletingEncryptId] = useState<number | null>(null);
 
   const loadTranscode = async (silent = false) => {
     if (!silent) setTranscodeLoading(true);
@@ -269,6 +280,17 @@ export default function TaskManagerPage() {
     }
   };
 
+  const loadEncryptTasks = async (silent = false) => {
+    if (!silent) setEncryptLoading(true);
+    try {
+      setEncryptTasks(await fetchEncryptTasks(200));
+    } catch {
+      if (!silent) setEncryptTasks([]);
+    } finally {
+      if (!silent) setEncryptLoading(false);
+    }
+  };
+
   useEffect(() => {
     void loadTranscode();
     void loadPreview();
@@ -278,6 +300,7 @@ export default function TaskManagerPage() {
     void loadAtrackTasks();
     void loadKeyframeTasks();
     void loadLyricTasks();
+    void loadEncryptTasks();
   }, []);
 
   useEffect(() => {
@@ -291,6 +314,7 @@ export default function TaskManagerPage() {
       if (activeTab === "atrack") void loadAtrackTasks(true);
       if (activeTab === "keyframe") void loadKeyframeTasks(true);
       if (activeTab === "lyric") void loadLyricTasks(true);
+      if (activeTab === "encrypt") void loadEncryptTasks(true);
     }, 10000);
     return () => window.clearInterval(timer);
   }, [autoRefresh, activeTab]);
@@ -326,6 +350,10 @@ export default function TaskManagerPage() {
   const filteredLyric = useMemo(
     () => lyricTasks.filter((x) => (lyricStatusFilter === "all" ? true : x.status === lyricStatusFilter)),
     [lyricTasks, lyricStatusFilter]
+  );
+  const filteredEncrypt = useMemo(
+    () => encryptTasks.filter((x) => (encryptStatusFilter === "all" ? true : x.status === encryptStatusFilter)),
+    [encryptTasks, encryptStatusFilter]
   );
   const getStatusOptionsForTab = (tab: string) => {
     const commonAll = [{ value: "all", label: t("pages.task_manager.all_statuses") }];
@@ -364,6 +392,16 @@ export default function TaskManagerPage() {
         { value: "running", label: "running" },
         { value: "done", label: "done" },
         { value: "failed", label: "failed" },
+      ];
+    }
+    if (tab === "encrypt") {
+      return [
+        ...commonAll,
+        { value: "waiting", label: "waiting" },
+        { value: "running", label: "running" },
+        { value: "done", label: "done" },
+        { value: "failed", label: "failed" },
+        { value: "cancelled", label: "cancelled" },
       ];
     }
     return [
@@ -995,6 +1033,104 @@ export default function TaskManagerPage() {
                           }
                         }}
                       />
+                    ),
+                  },
+                ]}
+              />
+            </Card>
+          ),
+        },
+        {
+          key: "encrypt",
+          label: t("pages.task_manager.tab_encrypt"),
+          children: (
+            <Card
+              title={t("pages.task_manager.encrypt_card_title")}
+              extra={(
+                <Space>
+                  {renderListHeaderControls("encrypt", encryptStatusFilter, setEncryptStatusFilter, () => void loadEncryptTasks())}
+                </Space>
+              )}
+            >
+              <div style={{ marginBottom: 8, color: "#888", fontSize: 12 }}>
+                {t("pages.task_manager.encrypt_help")}
+              </div>
+              <Table
+                rowKey="id"
+                loading={encryptLoading}
+                dataSource={filteredEncrypt}
+                pagination={{ pageSize: 10 }}
+                columns={[
+                  { title: t("pages.task_manager.col_task_id"), dataIndex: "id", width: 80 },
+                  { title: t("pages.task_manager.col_media_id"), dataIndex: "media_id", width: 90 },
+                  { title: t("pages.task_manager.col_title"), dataIndex: "title", ellipsis: true },
+                  { title: t("pages.task_manager.col_status"), dataIndex: "status", width: 110 },
+                  { title: t("pages.task_manager.col_attempts"), dataIndex: "attempts", width: 90 },
+                  { title: t("pages.task_manager.col_started_at"), dataIndex: "started_at", width: 170, render: fmtTaskTs },
+                  { title: t("pages.task_manager.col_lease_until"), dataIndex: "lease_until", width: 170, render: fmtTaskTs },
+                  { title: t("pages.task_manager.col_error_message"), dataIndex: "last_error", ellipsis: true, render: (v?: string) => v || "-" },
+                  {
+                    title: t("pages.task_manager.col_actions"),
+                    key: "actions",
+                    width: 130,
+                    align: "center",
+                    render: (_: unknown, r: EncryptTask) => (
+                      <Space size={4}>
+                        {r.status === "running" || r.status === "waiting" ? (
+                          <ActionIconButton
+                            title={t("pages.task_manager.tooltip_cancel_encrypt")}
+                            icon={<StopOutlined />}
+                            loading={cancellingEncryptId === r.id}
+                            onClick={() => {
+                              setCancellingEncryptId(r.id);
+                              void cancelEncryptTask(r.id)
+                                .then(() => message.success(t("pages.task_manager.cancel_requested")))
+                                .catch(() => message.error(t("pages.task_manager.task_cancel_failed")))
+                                .finally(async () => {
+                                  setCancellingEncryptId(null);
+                                  await loadEncryptTasks();
+                                });
+                            }}
+                          />
+                        ) : null}
+                        {r.status === "failed" || r.status === "cancelled" || r.status === "running" ? (
+                          <ActionIconConfirmButton
+                            title={t("pages.task_manager.tooltip_reset")}
+                            confirmTitle={t("pages.task_manager.confirm_encrypt_reset")}
+                            icon={<RollbackOutlined />}
+                            loading={resettingEncryptId === r.id}
+                            onConfirm={() => {
+                              setResettingEncryptId(r.id);
+                              void resetEncryptTask(r.id)
+                                .then(() => message.success(t("pages.task_manager.reset_success")))
+                                .catch(() => message.error(t("pages.task_manager.reset_failed")))
+                                .finally(async () => {
+                                  setResettingEncryptId(null);
+                                  await loadEncryptTasks();
+                                });
+                            }}
+                          />
+                        ) : null}
+                        {r.status === "waiting" || r.status === "failed" || r.status === "cancelled" ? (
+                          <ActionIconConfirmButton
+                            title={t("pages.task_manager.tooltip_delete")}
+                            confirmTitle={t("pages.task_manager.confirm_encrypt_delete")}
+                            icon={<DeleteOutlined />}
+                            danger
+                            loading={deletingEncryptId === r.id}
+                            onConfirm={() => {
+                              setDeletingEncryptId(r.id);
+                              void deleteEncryptTask(r.id)
+                                .then(() => message.success(t("common.delete_success")))
+                                .catch(() => message.error(t("common.delete_failed")))
+                                .finally(async () => {
+                                  setDeletingEncryptId(null);
+                                  await loadEncryptTasks();
+                                });
+                            }}
+                          />
+                        ) : null}
+                      </Space>
                     ),
                   },
                 ]}

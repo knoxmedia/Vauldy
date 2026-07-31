@@ -26,7 +26,8 @@ import (
 	"knox-media/internal/store"
 )
 
-const adminOverviewTimeout = 3 * time.Second
+const adminOverviewTimeout = 8 * time.Second
+const listLibrariesTimeout = 8 * time.Second
 
 type AdminOverviewData map[string]any
 
@@ -134,12 +135,13 @@ func NewAdminOverviewBuilder(db *sql.DB, d budgetSnapshotter, m *store.SQLiteMet
 func sampleSystem(ctx context.Context, path string) (SystemSample, error) {
 	type result struct {
 		sample SystemSample
-		err    error
 	}
 	ch := make(chan result, 1)
 	go func() {
 		var r result
-		if vals, err := cpu.Percent(200*time.Millisecond, false); err == nil && len(vals) > 0 {
+		// Interval 0 is non-blocking (since last sample). A fixed 200ms sleep
+		// previously burned overview budget and failed the whole request on USB I/O stalls.
+		if vals, err := cpu.Percent(0, false); err == nil && len(vals) > 0 {
 			r.sample.CPUPercent = vals[0]
 		}
 		if vm, err := mem.VirtualMemory(); err == nil {
@@ -152,9 +154,10 @@ func sampleSystem(ctx context.Context, path string) (SystemSample, error) {
 	}()
 	select {
 	case <-ctx.Done():
-		return SystemSample{}, ctx.Err()
+		// Soft-fail: overview still returns queue/DB sections without system gauges.
+		return SystemSample{}, nil
 	case r := <-ch:
-		return r.sample, r.err
+		return r.sample, nil
 	}
 }
 
@@ -368,24 +371,32 @@ ORDER BY r.id`)
 		severity  int
 	}
 	candidates := make([]candidate, 0)
+	mediaIDs := make([]int64, 0)
 	for rows.Next() {
 		var c candidate
 		if err := rows.Scan(&c.row.RunID, &c.row.MediaID, &c.row.Generation, &c.row.PolicyVersion, &c.row.Status, &c.row.TerminalReason, &c.snapshot, &c.updatedAt,
 			&c.row.RequiredWaiting, &c.row.RequiredFailed, &c.row.OptionalWaiting, &c.row.OptionalFailed); err != nil {
 			return out, err
 		}
-		c.row.AdapterUnavailable = b.adapterUnavailableForRun(ctx, c.row.RunID, c.snapshot)
 		c.row.MetadataErrors = parseBoundedMetadataErrors(c.snapshot)
-		c.row.RecoveryError = loadLatestRecoveryError(ctx, b.DB, c.row.MediaID)
-		if !publicationPolicyActionable(c.row) {
-			continue
-		}
-		c.severity = publicationPolicySeverity(c.row.Status)
+		c.row.AdapterUnavailable = b.adapterUnavailableForRun(ctx, c.row.RunID, c.snapshot)
 		candidates = append(candidates, c)
+		mediaIDs = append(mediaIDs, c.row.MediaID)
 	}
 	if err := rows.Err(); err != nil {
 		return out, err
 	}
+	recoveryByMedia := loadLatestRecoveryErrorsByMedia(ctx, b.DB, mediaIDs)
+	filtered := make([]candidate, 0, len(candidates))
+	for _, c := range candidates {
+		c.row.RecoveryError = recoveryByMedia[c.row.MediaID]
+		if !publicationPolicyActionable(c.row) {
+			continue
+		}
+		c.severity = publicationPolicySeverity(c.row.Status)
+		filtered = append(filtered, c)
+	}
+	candidates = filtered
 	sort.SliceStable(candidates, func(i, j int) bool {
 		if candidates[i].severity != candidates[j].severity {
 			return candidates[i].severity < candidates[j].severity
@@ -523,6 +534,73 @@ func loadLatestRecoveryError(ctx context.Context, db *sql.DB, mediaID int64) str
 		return ""
 	}
 	return errs[0]
+}
+
+func loadLatestRecoveryErrorsByMedia(ctx context.Context, db *sql.DB, mediaIDs []int64) map[int64]string {
+	out := map[int64]string{}
+	if db == nil || len(mediaIDs) == 0 {
+		return out
+	}
+	seen := make(map[int64]struct{}, len(mediaIDs))
+	ids := make([]int64, 0, len(mediaIDs))
+	for _, id := range mediaIDs {
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		return out
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]any, 0, len(ids)*3)
+	for i := range ids {
+		placeholders[i] = "?"
+	}
+	inList := strings.Join(placeholders, ",")
+	for range 3 {
+		for _, id := range ids {
+			args = append(args, id)
+		}
+	}
+	query := `
+SELECT media_id, recovery_error, updated_at FROM (
+  SELECT media_id, recovery_error, updated_at FROM media_asset_stage_journal WHERE media_id IN (` + inList + `) AND TRIM(recovery_error)<>'' AND state<>'committed'
+  UNION ALL
+  SELECT media_id, recovery_error, updated_at FROM media_encryption_stage_journal WHERE media_id IN (` + inList + `) AND TRIM(recovery_error)<>'' AND state<>'committed'
+  UNION ALL
+  SELECT media_id, recovery_error, updated_at FROM poster_repair_stage WHERE media_id IN (` + inList + `) AND TRIM(recovery_error)<>'' AND state<>'committed'
+) ORDER BY updated_at DESC`
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		for _, id := range ids {
+			if msg := loadLatestRecoveryError(ctx, db, id); msg != "" {
+				out[id] = msg
+			}
+		}
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var mediaID int64
+		var msg string
+		var updatedAt string
+		if err := rows.Scan(&mediaID, &msg, &updatedAt); err != nil {
+			return out
+		}
+		if _, exists := out[mediaID]; exists {
+			continue
+		}
+		msg = truncateUTF8Bound(strings.TrimSpace(msg), maxPublicationDiagnosticMessage)
+		if msg != "" {
+			out[mediaID] = msg
+		}
+	}
+	return out
 }
 
 func truncateUTF8Bound(s string, max int) string {

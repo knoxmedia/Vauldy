@@ -53,11 +53,11 @@ func (e ClassifiedError) Unwrap() error { return e.Err }
 
 type BudgetSnapshot struct{ GlobalLimit, GlobalUsed, PosterLimit, PosterUsed, PreviewLimit, PreviewUsed int }
 type DispatcherOptions struct {
-	OwnerID                                        string
-	Global, Poster, Preview                        int
-	PollInterval, LeaseDuration, HeartbeatInterval time.Duration
-	ExecutorStopGrace                              time.Duration
-	Timeouts                                       map[TaskType]time.Duration
+	OwnerID                                                              string
+	Global, Poster, Preview                                              int
+	PollInterval, LeaseDuration, HeartbeatInterval, RecoverInterval      time.Duration
+	ExecutorStopGrace                                                    time.Duration
+	Timeouts                                                             map[TaskType]time.Duration
 }
 
 func DefaultDispatcherOptions() DispatcherOptions {
@@ -68,7 +68,7 @@ func DefaultDispatcherOptions() DispatcherOptions {
 	if global > 4 {
 		global = 4
 	}
-	return DispatcherOptions{Global: global, Poster: min(2, global), Preview: 1, PollInterval: 250 * time.Millisecond, LeaseDuration: leaseDuration, HeartbeatInterval: 30 * time.Second, ExecutorStopGrace: 10 * time.Second, Timeouts: map[TaskType]time.Duration{
+	return DispatcherOptions{Global: global, Poster: min(2, global), Preview: 1, PollInterval: 250 * time.Millisecond, LeaseDuration: leaseDuration, HeartbeatInterval: 30 * time.Second, RecoverInterval: 30 * time.Second, ExecutorStopGrace: 10 * time.Second, Timeouts: map[TaskType]time.Duration{
 		TaskPoster: 2 * time.Minute, TaskPosterRepair: 2 * time.Minute, TaskThumbnail: 2 * time.Minute, TaskPreview: 30 * time.Minute, TaskKeyframe: 30 * time.Minute, TaskSubtitle: 60 * time.Minute, TaskAtrack: 30 * time.Minute, TaskEncrypt: 120 * time.Minute,
 	}}
 }
@@ -102,6 +102,8 @@ type Dispatcher struct {
 	global, poster, preview             chan struct{}
 	mu                                  sync.Mutex
 	globalUsed, posterUsed, previewUsed int
+	highPriorityUsed                    int
+	bandNext                            []int
 	running                             map[int64]*workerState
 	sourceLookupBudget                  time.Duration
 	sourceSize                          func(context.Context, Task) int64
@@ -148,41 +150,71 @@ func NewDispatcher(q *Queue, executor Executor, opts DispatcherOptions) (*Dispat
 	if opts.HeartbeatInterval <= 0 || opts.HeartbeatInterval >= opts.LeaseDuration {
 		return nil, fmt.Errorf("Dispatcher.HeartbeatInterval must be positive and less than LeaseDuration")
 	}
+	if opts.RecoverInterval <= 0 {
+		return nil, fmt.Errorf("Dispatcher.RecoverInterval must be positive")
+	}
 	for _, typ := range taskTypes {
 		if timeout, ok := opts.Timeouts[typ]; !ok || timeout <= 0 {
 			return nil, fmt.Errorf("Dispatcher.Timeouts[%s] must be positive", typ)
 		}
 	}
-	d := &Dispatcher{q: q, executor: executor, opts: opts, global: make(chan struct{}, opts.Global), poster: make(chan struct{}, opts.Poster), preview: make(chan struct{}, opts.Preview), running: map[int64]*workerState{}, sourceLookupBudget: 2 * time.Second, sourceLookups: make(chan struct{}, opts.Global), scans: map[int64]map[int64]*workerState{}}
+	globalCap := opts.Global + priorityBurstSlots
+	d := &Dispatcher{q: q, executor: executor, opts: opts, global: make(chan struct{}, globalCap), poster: make(chan struct{}, opts.Poster), preview: make(chan struct{}, opts.Preview), bandNext: make([]int, len(priorityBands)), running: map[int64]*workerState{}, sourceLookupBudget: 2 * time.Second, sourceLookups: make(chan struct{}, globalCap), scans: map[int64]map[int64]*workerState{}}
 	d.sourceSize = d.posterSourceSize
 	return d, nil
 }
 
 var taskTypes = []TaskType{TaskPoster, TaskPosterRepair, TaskThumbnail, TaskPreview, TaskKeyframe, TaskSubtitle, TaskAtrack, TaskEncrypt}
 
+// priorityBands is highest-priority first. Types in the same band are equal and rotate.
+var priorityBands = [][]TaskType{
+	{TaskPoster, TaskPosterRepair},
+	{TaskEncrypt},
+	{TaskPreview, TaskThumbnail, TaskKeyframe, TaskAtrack},
+	{TaskSubtitle},
+}
+
+const priorityBurstSlots = 1
+
+func isHighPriorityTask(typ TaskType) bool {
+	return typ == TaskPoster || typ == TaskPosterRepair || typ == TaskEncrypt
+}
+
 const (
-	posterTimeoutPerGiB = time.Minute
-	posterTimeoutMax    = 30 * time.Minute
-	posterTimeoutGiB    = int64(1 << 30)
+	posterTimeoutPerGiB  = time.Minute
+	posterTimeoutMax     = 30 * time.Minute
+	encryptTimeoutPerGiB = 10 * time.Minute
+	encryptTimeoutMax    = 8 * time.Hour
+	sourceTimeoutGiB     = int64(1 << 30)
 )
 
+func sizedTaskTimeout(typ TaskType) bool {
+	return typ == TaskPoster || typ == TaskPosterRepair || typ == TaskEncrypt
+}
+
 func taskTimeoutForSource(typ TaskType, base time.Duration, size int64) time.Duration {
-	if (typ != TaskPoster && typ != TaskPosterRepair) || size <= 0 {
+	if !sizedTaskTimeout(typ) || size <= 0 {
 		return base
 	}
-	if base >= posterTimeoutMax {
-		return posterTimeoutMax
+	perGiB := posterTimeoutPerGiB
+	maxTimeout := posterTimeoutMax
+	if typ == TaskEncrypt {
+		perGiB = encryptTimeoutPerGiB
+		maxTimeout = encryptTimeoutMax
 	}
-	units := size / posterTimeoutGiB
-	if size%posterTimeoutGiB != 0 {
+	if base >= maxTimeout {
+		return maxTimeout
+	}
+	units := size / sourceTimeoutGiB
+	if size%sourceTimeoutGiB != 0 {
 		units++
 	}
-	if units > math.MaxInt64/int64(posterTimeoutPerGiB) {
-		return posterTimeoutMax
+	if units > math.MaxInt64/int64(perGiB) {
+		return maxTimeout
 	}
-	extra := time.Duration(units) * posterTimeoutPerGiB
-	if base > posterTimeoutMax-extra {
-		return posterTimeoutMax
+	extra := time.Duration(units) * perGiB
+	if base > maxTimeout-extra {
+		return maxTimeout
 	}
 	return base + extra
 }
@@ -203,7 +235,7 @@ func (d *Dispatcher) posterSourceSize(ctx context.Context, task Task) int64 {
 
 func (d *Dispatcher) timeoutForTask(ctx context.Context, task Task, heartbeat *time.Ticker, state *workerState) (time.Duration, bool) {
 	base := d.opts.Timeouts[task.Type]
-	if task.Type != TaskPoster && task.Type != TaskPosterRepair {
+	if !sizedTaskTimeout(task.Type) {
 		return base, ctx.Err() == nil
 	}
 	select {
@@ -274,7 +306,8 @@ func (d *Dispatcher) Start(ctx context.Context) error {
 	}
 	ticker := time.NewTicker(d.opts.PollInterval)
 	defer ticker.Stop()
-	next := 0
+	recoverTicker := time.NewTicker(d.opts.RecoverInterval)
+	defer recoverTicker.Stop()
 	for {
 		if ctx.Err() != nil {
 			d.cancelAll(FailureShutdown, ctx.Err())
@@ -282,7 +315,7 @@ func (d *Dispatcher) Start(ctx context.Context) error {
 			return nil
 		}
 		for {
-			allowed := d.allowedTaskTypes(next)
+			allowed := d.allowedTaskTypes()
 			if len(allowed) == 0 {
 				break
 			}
@@ -296,12 +329,7 @@ func (d *Dispatcher) Start(ctx context.Context) error {
 			if task == nil {
 				break
 			}
-			for index, typ := range taskTypes {
-				if typ == task.Type {
-					next = (index + 1) % len(taskTypes)
-					break
-				}
-			}
+			d.noteClaimed(task.Type)
 			if !d.tryAcquire(task.Type) {
 				return fmt.Errorf("postingest dispatcher claimed unavailable task type %s", task.Type)
 			}
@@ -312,34 +340,89 @@ func (d *Dispatcher) Start(ctx context.Context) error {
 			d.cancelAll(FailureShutdown, ctx.Err())
 			d.wg.Wait()
 			return nil
+		case <-recoverTicker.C:
+			if n, err := d.q.RecoverExpired(ctx); err != nil {
+				if ctx.Err() == nil {
+					log.Printf("postingest dispatcher recover expired: %v", err)
+				}
+			} else if n > 0 {
+				log.Printf("postingest dispatcher recovered %d expired lease(s)", n)
+			}
 		case <-ticker.C:
 		}
 	}
 }
 
-func (d *Dispatcher) allowedTaskTypes(next int) []TaskType {
+func (d *Dispatcher) allowedTaskTypes() []TaskType {
 	d.mu.Lock()
-	globalAvailable := d.globalUsed < d.opts.Global
+	globalUsed := d.globalUsed
+	highUsed := d.highPriorityUsed
 	posterAvailable := d.posterUsed < d.opts.Poster
 	previewAvailable := d.previewUsed < d.opts.Preview
+	bandNext := append([]int(nil), d.bandNext...)
 	d.mu.Unlock()
-	if !globalAvailable {
+
+	burstOnly := false
+	switch {
+	case globalUsed < d.opts.Global:
+	case globalUsed < d.opts.Global+priorityBurstSlots && highUsed == 0:
+		burstOnly = true
+	default:
 		return nil
 	}
+
 	allowed := make([]TaskType, 0, len(taskTypes))
-	for offset := 0; offset < len(taskTypes); offset++ {
-		typ := taskTypes[(next+offset)%len(taskTypes)]
-		if (typ == TaskPoster || typ == TaskPosterRepair) && !posterAvailable {
+	for band, types := range priorityBands {
+		if burstOnly && band > 1 {
 			continue
 		}
-		if typ == TaskPreview && !previewAvailable {
-			continue
+		n := len(types)
+		start := 0
+		if band < len(bandNext) && n > 0 {
+			start = bandNext[band] % n
 		}
-		allowed = append(allowed, typ)
+		for i := 0; i < n; i++ {
+			typ := types[(start+i)%n]
+			if (typ == TaskPoster || typ == TaskPosterRepair) && !posterAvailable {
+				continue
+			}
+			if typ == TaskPreview && !previewAvailable {
+				continue
+			}
+			allowed = append(allowed, typ)
+		}
 	}
 	return allowed
 }
+
+func (d *Dispatcher) noteClaimed(typ TaskType) {
+	for band, types := range priorityBands {
+		for i, candidate := range types {
+			if candidate != typ {
+				continue
+			}
+			d.mu.Lock()
+			if band < len(d.bandNext) && len(types) > 0 {
+				d.bandNext[band] = (i + 1) % len(types)
+			}
+			d.mu.Unlock()
+			return
+		}
+	}
+}
+
 func (d *Dispatcher) tryAcquire(typ TaskType) bool {
+	d.mu.Lock()
+	atSoftCap := d.globalUsed >= d.opts.Global
+	atHardCap := d.globalUsed >= d.opts.Global+priorityBurstSlots
+	highUsed := d.highPriorityUsed
+	d.mu.Unlock()
+	if atHardCap {
+		return false
+	}
+	if atSoftCap && (!isHighPriorityTask(typ) || highUsed > 0) {
+		return false
+	}
 	select {
 	case d.global <- struct{}{}:
 	default:
@@ -361,6 +444,9 @@ func (d *Dispatcher) tryAcquire(typ TaskType) bool {
 	}
 	d.mu.Lock()
 	d.globalUsed++
+	if isHighPriorityTask(typ) {
+		d.highPriorityUsed++
+	}
 	if typ == TaskPoster || typ == TaskPosterRepair {
 		d.posterUsed++
 	}
@@ -379,6 +465,9 @@ func (d *Dispatcher) release(typ TaskType) {
 	<-d.global
 	d.mu.Lock()
 	d.globalUsed--
+	if isHighPriorityTask(typ) {
+		d.highPriorityUsed--
+	}
 	if typ == TaskPoster || typ == TaskPosterRepair {
 		d.posterUsed--
 	}
@@ -394,7 +483,7 @@ func (d *Dispatcher) launch(parent context.Context, task Task) {
 	}
 	var lifecycleCtx context.Context
 	var cancel context.CancelFunc
-	if task.Type == TaskPoster || task.Type == TaskPosterRepair {
+	if sizedTaskTimeout(task.Type) {
 		lifecycleCtx, cancel = context.WithCancel(parent)
 	} else {
 		lifecycleCtx, cancel = context.WithTimeout(parent, d.opts.Timeouts[task.Type])
@@ -453,7 +542,7 @@ func (d *Dispatcher) runTask(parent, lifecycleCtx context.Context, task Task, st
 			return
 		}
 	}
-	if (task.Type == TaskPoster || task.Type == TaskPosterRepair) && !d.heartbeatTask(lifecycleCtx, task, state) {
+	if sizedTaskTimeout(task.Type) && !d.heartbeatTask(lifecycleCtx, task, state) {
 		d.failBeforeExecute(parent, task, state)
 		return
 	}
@@ -461,7 +550,7 @@ func (d *Dispatcher) runTask(parent, lifecycleCtx context.Context, task Task, st
 	defer heartbeat.Stop()
 	taskCtx := lifecycleCtx
 	taskCancel := func() {}
-	if task.Type == TaskPoster || task.Type == TaskPosterRepair {
+	if sizedTaskTimeout(task.Type) {
 		timeout, proceed := d.timeoutForTask(lifecycleCtx, task, heartbeat, state)
 		if !proceed {
 			d.failBeforeExecute(parent, task, state)
@@ -626,6 +715,40 @@ func (d *Dispatcher) CancelScan(scanTaskID int64) {
 		s.stop(FailureCancelled, errors.New("scan cancelled"))
 	}
 }
+
+// CancelTask cooperatively cancels a running task, then force-cancels in DB after grace
+// if the executor has not released the slot (admin abort soft→hard).
+func (d *Dispatcher) CancelTask(taskID int64) {
+	if taskID <= 0 {
+		return
+	}
+	d.mu.Lock()
+	state := d.running[taskID]
+	d.mu.Unlock()
+	if state != nil {
+		state.stop(FailureCancelled, errors.New("cancelled by admin"))
+	}
+	grace := d.opts.ExecutorStopGrace
+	if grace <= 0 {
+		grace = 10 * time.Second
+	}
+	go func() {
+		timer := time.NewTimer(grace)
+		defer timer.Stop()
+		<-timer.C
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = d.q.AdminCancelEncrypt(ctx, taskID)
+		d.mu.Lock()
+		still := d.running[taskID]
+		d.mu.Unlock()
+		if still != nil {
+			// Executor still holding the slot; stop again and wait briefly for cleanup.
+			still.stop(FailureCancelled, errors.New("cancelled by admin (forced)"))
+		}
+	}()
+}
+
 func (d *Dispatcher) Snapshot() BudgetSnapshot {
 	d.mu.Lock()
 	defer d.mu.Unlock()

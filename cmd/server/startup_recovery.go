@@ -51,7 +51,7 @@ func recoverStartupLeases(ctx context.Context, db *sql.DB, postIngest *postinges
 		return fmt.Errorf("startup recovery: database is required")
 	}
 	store.ResetInterruptedTasks(db)
-	if _, err := postIngest.RecoverExpired(ctx); err != nil {
+	if _, err := postIngest.RecoverAllInterrupted(ctx); err != nil {
 		return fmt.Errorf("startup recovery: post-ingest: %w", err)
 	}
 	return nil

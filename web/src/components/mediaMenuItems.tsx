@@ -384,8 +384,12 @@ export function buildMediaMenuItems(
             break;
           }
           encryptMediaAssets(r.id)
-            .then(() => {
-              message.success(t("components.media_menu.encrypt_asset_queued"));
+            .then((data) => {
+              if (data?.status === "already_queued") {
+                message.info(t("components.media_menu.encrypt_asset_already_queued"));
+              } else {
+                message.success(t("components.media_menu.encrypt_asset_queued"));
+              }
               void afterEncryptAsset?.();
               window.setTimeout(() => void afterEncryptAsset?.(), 8000);
               window.setTimeout(() => void afterEncryptAsset?.(), 25000);
