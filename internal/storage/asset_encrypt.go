@@ -159,23 +159,23 @@ func (s *AssetEncryptor) encryptMedia(ctx context.Context, mediaID int64, manual
 		return ErrAlreadyEncrypted
 	}
 
+	identity, err := QuickSourceIdentity(plainPath)
+	if err != nil {
+		return err
+	}
 	requireFaststart := cleanupPlain == 1 || encryptRequiresISOFaststart(ft, plainPath)
 	encryptSource, prepCleanup, remuxed, err := s.resolveEncryptSource(ctx, mediaID, plainPath, requireFaststart)
 	if err != nil {
 		return err
 	}
 	defer prepCleanup()
-	identity, err := QuickSourceIdentity(encryptSource)
-	if err != nil {
-		return err
-	}
 	sourceInfo, err := os.Stat(encryptSource)
 	if err != nil {
 		return err
 	}
 	backupPath := fmt.Sprintf("%s.orphan-resume-%d", encPath, generation)
 	output, err := s.encryptToPathResumable(
-		ctx, mediaID, generation, encryptSource, identity, sourceInfo.Size(), kek, encPath, backupPath,
+		ctx, mediaID, generation, plainPath, encryptSource, identity, sourceInfo.Size(), kek, encPath, backupPath,
 		func() (resumableEncryptTarget, error) {
 			if _, statErr := os.Stat(encPath); statErr == nil {
 				if _, backupErr := os.Stat(backupPath); backupErr == nil {

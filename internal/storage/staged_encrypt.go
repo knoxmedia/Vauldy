@@ -57,7 +57,7 @@ type resumableEncryptTarget struct {
 func (s *AssetEncryptor) encryptToPathResumable(
 	ctx context.Context,
 	mediaID, generation int64,
-	source, identity string,
+	source, encryptSource, identity string,
 	plainSize int64,
 	kek []byte,
 	intendedEncPath string,
@@ -123,7 +123,7 @@ func (s *AssetEncryptor) encryptToPathResumable(
 		out.IV = hex.EncodeToString(result.IV)
 	}
 
-	src, err := os.Open(source)
+	src, err := os.Open(encryptSource)
 	if err != nil {
 		return out, err
 	}
@@ -323,6 +323,10 @@ func (s *AssetEncryptor) StageMediaEncryption(ctx context.Context, mediaID int64
 	if err != nil {
 		return stage, fmt.Errorf("plain file missing: %w", err)
 	}
+	identity, err := QuickSourceIdentity(source)
+	if err != nil {
+		return stage, fmt.Errorf("plain file missing: %w", err)
+	}
 
 	encryptSource := source
 	prepCleanup := func() {}
@@ -334,10 +338,6 @@ func (s *AssetEncryptor) StageMediaEncryption(ctx context.Context, mediaID int64
 	}
 	defer prepCleanup()
 
-	identity, err := QuickSourceIdentity(encryptSource)
-	if err != nil {
-		return stage, fmt.Errorf("plain file missing: %w", err)
-	}
 	srcInfo, err := os.Stat(encryptSource)
 	if err != nil {
 		return stage, fmt.Errorf("plain file missing: %w", err)
@@ -381,7 +381,7 @@ func (s *AssetEncryptor) StageMediaEncryption(ctx context.Context, mediaID int64
 		}
 	}
 
-	output, err := s.encryptToPathResumable(ctx, mediaID, generation, encryptSource, identity, plainSize, kek, intendedEncPath, "", func() (resumableEncryptTarget, error) {
+	output, err := s.encryptToPathResumable(ctx, mediaID, generation, source, encryptSource, identity, plainSize, kek, intendedEncPath, "", func() (resumableEncryptTarget, error) {
 		if reusingResumeTarget {
 			stageID = uuid.NewString()
 			stageDir = filepath.Join(base, fileType, "stages", stageID)

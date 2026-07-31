@@ -5,9 +5,11 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
+	kcrypto "knox-media/internal/crypto"
 	"knox-media/internal/keystore"
 	"knox-media/internal/store"
 )
@@ -152,6 +154,86 @@ func TestStageMediaEncryptionPreparesVideoISO(t *testing.T) {
 	if _, err := enc.StageMediaEncryption(context.Background(), 21); err == nil || !strings.Contains(err.Error(), "ffmpeg path required") {
 		t.Fatalf("stage should require faststart preparation, got %v", err)
 	}
+}
+
+func TestStageMediaEncryptionRemuxUsesCatalogSourceIdentity(t *testing.T) {
+	db, err := store.OpenSQLite(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	vault, err := keystore.NewVault("test-main-key", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	plain := filepath.Join(dir, "moov-at-end.mp4")
+	original := append(writeBox("ftyp", []byte("mp42")), writeBox("mdat", []byte{0x03, 0x04})...)
+	original = append(original, writeBox("moov", []byte{0x01, 0x02})...)
+	if err := os.WriteFile(plain, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO library(id,name,type,path,encrypted_assets_enabled) VALUES(1,'videos','video',?,1)`, dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO media(id,library_id,file_id,file_path,file_type,status) VALUES(22,1,'clip-remux',?,'video','active')`, plain); err != nil {
+		t.Fatal(err)
+	}
+
+	remuxSuffix := []byte("remux-output-is-different")
+	enc := &AssetEncryptor{
+		DB: db, Vault: vault, BasePath: filepath.Join(dir, "encrypted"), DataDir: dir,
+		FFmpegPath: writeCopyAndAppendFFmpeg(t, plain, remuxSuffix),
+	}
+	stage, err := enc.StageMediaEncryption(context.Background(), 22)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantIdentity, err := QuickSourceIdentity(plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stage.SourceIdentity != wantIdentity {
+		t.Fatalf("SourceIdentity=%q want catalog source identity %q", stage.SourceIdentity, wantIdentity)
+	}
+	if stage.Size != int64(kcrypto.EncHeaderSize+len(original)+len(remuxSuffix)) {
+		t.Fatalf("encrypted size=%d want remux byte size %d", stage.Size, kcrypto.EncHeaderSize+len(original)+len(remuxSuffix))
+	}
+	resume, err := LoadEncryptResume(context.Background(), db, 22, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resume.SourcePath != plain || resume.SourceIdentity != wantIdentity {
+		t.Fatalf("resume source=(%q, %q) want (%q, %q)", resume.SourcePath, resume.SourceIdentity, plain, wantIdentity)
+	}
+}
+
+func writeCopyAndAppendFFmpeg(t *testing.T, source string, suffix []byte) string {
+	t.Helper()
+	dir := t.TempDir()
+	if runtime.GOOS == "windows" {
+		path := filepath.Join(dir, "ffmpeg-remux.bat")
+		suffixPath := filepath.Join(dir, "suffix.bin")
+		if err := os.WriteFile(suffixPath, suffix, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		script := "@echo off\r\nset \"out=\"\r\n:next\r\nif \"%~1\"==\"\" goto done\r\nset \"out=%~1\"\r\nshift\r\ngoto next\r\n:done\r\ncopy /B /Y \"" + source + "\"+\"" + suffixPath + "\" \"%out%\" >nul\r\n"
+		if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	path := filepath.Join(dir, "ffmpeg-remux.sh")
+	script := "#!/bin/sh\nout=\"\"\nfor arg in \"$@\"; do out=\"$arg\"; done\ncp " +
+		shellSingleQuote(source) + " \"$out\"\nprintf %s " + shellSingleQuote(string(suffix)) + " >> \"$out\"\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func shellSingleQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 // TestEnsureEncryptedISOPipePlaybackNoopForPlaintextWithoutEncAsset guards the regression
