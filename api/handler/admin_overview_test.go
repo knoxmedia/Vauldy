@@ -181,6 +181,66 @@ func TestAdminOverview_ResourceControlMatrixAndExactFields(t *testing.T) {
 	}
 }
 
+func TestAdminOverview_ReturnsCurrentGenerationTaskAlignment(t *testing.T) {
+	db, err := store.OpenSQLite(filepath.Join(t.TempDir(), "overview-alignment.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if _, err := db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1,'alignment','video','x')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO media(id,library_id,title,file_path,file_type,ingest_generation) VALUES(1,1,'aligned','aligned','video',2)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO post_ingest_task(media_id,generation,task_type,status) VALUES
+		(1,1,'subtitle','done'),
+		(1,2,'subtitle','done')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO subtitle_task(media_id,status) VALUES(1,'done')`); err != nil {
+		t.Fatal(err)
+	}
+
+	b := NewAdminOverviewBuilder(db, nil, nil)
+	b.SampleSystem = func(context.Context, string) (SystemSample, error) { return SystemSample{}, nil }
+	data, err := b.Build(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var decoded struct {
+		Queue struct {
+			ByType map[string]map[string]int64 `json:"by_type"`
+		} `json:"post_ingest_queue"`
+		Alignment struct {
+			ByType map[string]map[string]int64 `json:"by_type"`
+		} `json:"task_alignment"`
+	}
+	if err := json.Unmarshal(mustJSON(t, data), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if got := decoded.Queue.ByType["subtitle"]["done"]; got != 2 {
+		t.Fatalf("raw subtitle done rows = %d, want 2", got)
+	}
+	if got := decoded.Alignment.ByType["subtitle"]["done"]; got != 1 {
+		t.Fatalf("aligned subtitle done media = %d, want 1", got)
+	}
+	for _, taskType := range []string{"subtitle", "preview", "atrack", "keyframe", "encrypt"} {
+		counts, ok := decoded.Alignment.ByType[taskType]
+		if !ok {
+			t.Errorf("task_alignment.by_type missing %q", taskType)
+			continue
+		}
+		for _, status := range []string{"waiting", "running", "done", "failed", "cancelled"} {
+			if _, ok := counts[status]; !ok {
+				t.Errorf("task_alignment.by_type[%q] missing %q", taskType, status)
+			}
+		}
+	}
+}
+
 func TestAdminOverview_WrappedDeadlineMapsToTimeout(t *testing.T) {
 	w := callAdminOverview(t, overviewBuilderFunc(func(context.Context) (AdminOverviewData, error) {
 		return nil, fmt.Errorf("build query: %w", context.DeadlineExceeded)

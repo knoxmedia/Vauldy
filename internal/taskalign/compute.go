@@ -1,6 +1,9 @@
 package taskalign
 
-import "database/sql"
+import (
+	"context"
+	"database/sql"
+)
 
 type Counts map[string]int64
 
@@ -23,14 +26,14 @@ func emptyAlignment() Alignment {
 	return alignment
 }
 
-func Compute(db *sql.DB) (Alignment, error) {
+func Compute(ctx context.Context, db *sql.DB) (Alignment, error) {
 	alignment := emptyAlignment()
-	domainStatuses, err := loadDomainStatuses(db)
+	domainStatuses, err := loadDomainStatuses(ctx, db)
 	if err != nil {
 		return alignment, err
 	}
 
-	rows, err := db.Query(`
+	rows, err := db.QueryContext(ctx, `
 		SELECT q.media_id, q.task_type, q.status
 		FROM post_ingest_task q
 		JOIN media m ON m.id = q.media_id
@@ -65,9 +68,9 @@ func Compute(db *sql.DB) (Alignment, error) {
 	return alignment, nil
 }
 
-func loadDomainStatuses(db *sql.DB) (map[string]map[int64]string, error) {
+func loadDomainStatuses(ctx context.Context, db *sql.DB) (map[string]map[int64]string, error) {
 	statuses := make(map[string]map[int64]string, 4)
-	rows, err := db.Query(`
+	rows, err := db.QueryContext(ctx, `
 		SELECT 'subtitle', media_id, COALESCE(status, '') FROM subtitle_task
 		UNION ALL
 		SELECT 'preview', media_id, COALESCE(status, '') FROM preview_task
