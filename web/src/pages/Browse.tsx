@@ -259,6 +259,7 @@ export default function BrowsePage() {
 
   const [rows, setRows] = useState<MediaItem[]>([]);
   const [loading, setLoading] = useState(false);
+  const [encryptAssetsEnabled, setEncryptAssetsEnabled] = useState(true);
   const [viewMode, setViewMode] = useState<ViewMode>(() => readBrowseViewMode(libFromUrl));
   const [sortField, setSortField] = useState<SortField>(() => readBrowsePrefs()?.sortField ?? "added");
   const [sortOrder, setSortOrder] = useState<SortOrder>(() => readBrowsePrefs()?.sortOrder ?? "desc");
@@ -323,8 +324,14 @@ export default function BrowsePage() {
     const controller = new AbortController();
     setResolution({ status: "loading", type: "", name: "", libraryId: libFromUrl, generation });
     const request = libraryRequests
-      ? libraryRequests.load(controller.signal).then((result) => result.items)
-      : fetchLibraries(controller.signal);
+      ? libraryRequests.load(controller.signal).then((result) => {
+          setEncryptAssetsEnabled(result.encryptedAssetsConfig?.enabled !== false);
+          return result.items;
+        })
+      : fetchLibraries(controller.signal).then((items) => {
+          setEncryptAssetsEnabled(true);
+          return items;
+        });
     void request
       .then((libs) => {
         if (controller.signal.aborted || resolutionGenerationRef.current !== generation) return;
@@ -939,7 +946,7 @@ export default function BrowsePage() {
     return buildMediaMenuItems(r, nav, {
       ...extra,
       isWatched,
-      showEncryptAsset: r.file_type === "video",
+      showEncryptAsset: encryptAssetsEnabled && !r.encrypted_asset,
       encryptedAsset: !!r.encrypted_asset,
       afterEncryptAsset: () => load(menuRouteKey),
       afterToggleWatched: () => load(menuRouteKey),

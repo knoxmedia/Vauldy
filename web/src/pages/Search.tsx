@@ -15,7 +15,7 @@ import {
   addFavorite,
   addFavoriteFolderItem,
   addPlaylistItem,
-  fetchLibraries,
+  fetchLibrariesWithCapabilities,
   fetchMedia,
   mediaPosterSrc,
   normalizeListPosterUrl,
@@ -121,6 +121,7 @@ export default function SearchPage() {
   const [rows, setRows] = useState<MediaItem[]>([]);
   const [personRows, setPersonRows] = useState<CastPersonSummary[]>([]);
   const [libraries, setLibraries] = useState<Library[]>([]);
+  const [encryptAssetsEnabled, setEncryptAssetsEnabled] = useState(true);
   const [loading, setLoading] = useState(false);
   const [typeFilter, setTypeFilter] = useState<SearchFilter>("all");
   const [selectedIds, setSelectedIds] = useState<Set<number>>(() => new Set());
@@ -154,13 +155,14 @@ export default function SearchPage() {
     }
     setLoading(true);
     try {
-      const [items, libs, persons] = await Promise.all([
+      const [items, libResult, persons] = await Promise.all([
         fetchMedia(undefined, { q: qParam, limit: 500 }),
-        fetchLibraries(),
+        fetchLibrariesWithCapabilities(),
         searchCastPersons(qParam, 30),
       ]);
       setRows(items);
-      setLibraries(libs);
+      setLibraries(libResult.items);
+      setEncryptAssetsEnabled(libResult.encryptedAssetsConfig?.enabled !== false);
       setPersonRows(persons);
     } catch (e: unknown) {
       message.error((e as Error).message || t("pages.search.load_failed"));
@@ -234,7 +236,7 @@ export default function SearchPage() {
   function makeMenu(r: MediaItem): MenuProps {
     return buildMediaMenuItems(r, nav, {
       isWatched: r.completed === 1,
-      showEncryptAsset: r.file_type === "video",
+      showEncryptAsset: encryptAssetsEnabled && !r.encrypted_asset,
       encryptedAsset: !!r.encrypted_asset,
       afterEncryptAsset: () => load(),
       afterToggleWatched: () => load(),

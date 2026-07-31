@@ -351,6 +351,7 @@ export async function fetchLibraries(signal?: AbortSignal) {
 }
 
 export type EncryptedAssetsConfig = {
+  enabled?: boolean;
   data_dot_encrypted_dir?: string;
 };
 
@@ -2641,7 +2642,45 @@ export async function extractKeyframes(mediaId: number) {
 
 /** Queue Knox 9527 envelope encryption for a single media item. */
 export async function encryptMediaAssets(mediaId: number) {
-  await api.post(`/api/v1/media/${mediaId}/encrypt-assets`);
+  const { data } = await api.post<{ ok?: boolean; status?: string; task_id?: number }>(
+    `/api/v1/media/${mediaId}/encrypt-assets`,
+  );
+  return data;
+}
+
+export type EncryptTask = {
+  id: number;
+  media_id: number;
+  title: string;
+  status: string;
+  attempts: number;
+  max_attempts: number;
+  last_error?: string;
+  started_at?: string;
+  finished_at?: string;
+  available_at?: string;
+  lease_owner?: string;
+  lease_until?: string;
+  updated_at?: string;
+};
+
+export async function fetchEncryptTasks(limit = 200, status = "all") {
+  const { data } = await api.get<{ items: EncryptTask[] }>("/api/v1/encrypt/task", {
+    params: { limit, status },
+  });
+  return data.items ?? [];
+}
+
+export async function cancelEncryptTask(taskId: number) {
+  await api.post(`/api/v1/encrypt/task/${taskId}/cancel`);
+}
+
+export async function resetEncryptTask(taskId: number) {
+  await api.post(`/api/v1/encrypt/task/${taskId}/reset`);
+}
+
+export async function deleteEncryptTask(taskId: number) {
+  await api.delete(`/api/v1/encrypt/task/${taskId}`);
 }
 
 export async function retryKeyframeExtraction(mediaId: number) {

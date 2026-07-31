@@ -50,7 +50,7 @@ type libraryListRow struct {
 }
 
 func (h *Handler) ListLibraries(c *gin.Context) {
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), listLibrariesTimeout)
 	defer cancel()
 	widevineEnabled, powerdrmEnabled := h.drmCapabilities()
 	var profile userPermissionProfile
@@ -171,7 +171,11 @@ func (h *Handler) ListLibraries(c *gin.Context) {
 		}
 		list = append(list, item)
 	}
-	c.JSON(http.StatusOK, gin.H{"items": list, "drm_capabilities": gin.H{"widevine_enabled": widevineEnabled, "powerdrm_enabled": powerdrmEnabled}, "encrypted_assets_config": gin.H{"data_dot_encrypted_dir": h.dataEncryptedDotDir()}})
+	encEnabled := true
+	if h.App != nil && h.App.Config != nil {
+		encEnabled = h.App.Config.EncryptedAssetsEnabled()
+	}
+	c.JSON(http.StatusOK, gin.H{"items": list, "drm_capabilities": gin.H{"widevine_enabled": widevineEnabled, "powerdrm_enabled": powerdrmEnabled}, "encrypted_assets_config": gin.H{"enabled": encEnabled, "data_dot_encrypted_dir": h.dataEncryptedDotDir()}})
 }
 
 func sqlPlaceholders(n int) string {

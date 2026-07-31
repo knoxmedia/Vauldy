@@ -66,6 +66,9 @@ func TestDefaultDispatcherOptions(t *testing.T) {
 	if o.Global != wantGlobal || o.Poster != min(2, wantGlobal) || o.Preview != 1 {
 		t.Fatalf("budgets=%d/%d/%d", o.Global, o.Poster, o.Preview)
 	}
+	if o.RecoverInterval != 30*time.Second {
+		t.Fatalf("RecoverInterval=%v", o.RecoverInterval)
+	}
 	wants := map[TaskType]time.Duration{TaskPoster: 2 * time.Minute, TaskThumbnail: 2 * time.Minute, TaskPreview: 30 * time.Minute, TaskKeyframe: 30 * time.Minute, TaskAtrack: 30 * time.Minute, TaskSubtitle: 60 * time.Minute, TaskEncrypt: 120 * time.Minute}
 	for typ, want := range wants {
 		if o.Timeouts[typ] != want {
@@ -100,6 +103,10 @@ func TestPosterTaskTimeoutScalesAndCapsBySourceSize(t *testing.T) {
 		{"minimum duration scales without overflow", TaskPoster, time.Duration(-1 << 63), 1, time.Duration(-1<<63) + time.Minute},
 		{"nonposter unchanged", TaskPreview, base, 64 * gib, base},
 		{"nonposter above cap unchanged", TaskPreview, 31 * time.Minute, 64 * gib, 31 * time.Minute},
+		{"encrypt one GiB", TaskEncrypt, 120 * time.Minute, gib, 130 * time.Minute},
+		{"encrypt nineteen GiB", TaskEncrypt, 120 * time.Minute, 19 * gib, 310 * time.Minute},
+		{"encrypt caps at eight hours", TaskEncrypt, 120 * time.Minute, 64 * gib, 8 * time.Hour},
+		{"encrypt zero size uses base", TaskEncrypt, 120 * time.Minute, 0, 120 * time.Minute},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -487,7 +494,8 @@ func TestDispatcher_RejectsInvalidBudget(t *testing.T) {
 		{"preview zero", "Preview", func(o *DispatcherOptions) { o.Preview = 0 }}, {"preview high", "Preview", func(o *DispatcherOptions) { o.Preview = 3 }}, {"preview global", "Preview", func(o *DispatcherOptions) { o.Global = 1; o.Poster = 1; o.Preview = 2 }},
 		{"owner empty", "OwnerID", func(o *DispatcherOptions) { o.OwnerID = "" }}, {"owner slash", "OwnerID", func(o *DispatcherOptions) { o.OwnerID = "a/b" }},
 		{"poll", "PollInterval", func(o *DispatcherOptions) { o.PollInterval = 0 }}, {"lease", "LeaseDuration", func(o *DispatcherOptions) { o.LeaseDuration = time.Second }},
-		{"heartbeat", "HeartbeatInterval", func(o *DispatcherOptions) { o.HeartbeatInterval = o.LeaseDuration }}, {"timeouts missing", "Timeouts", func(o *DispatcherOptions) { delete(o.Timeouts, TaskPoster) }},
+		{"heartbeat", "HeartbeatInterval", func(o *DispatcherOptions) { o.HeartbeatInterval = o.LeaseDuration }}, {"recover", "RecoverInterval", func(o *DispatcherOptions) { o.RecoverInterval = 0 }},
+		{"timeouts missing", "Timeouts", func(o *DispatcherOptions) { delete(o.Timeouts, TaskPoster) }},
 		{"timeout zero", "Timeouts", func(o *DispatcherOptions) { o.Timeouts[TaskPoster] = 0 }},
 	}
 	for _, tc := range cases {
@@ -722,16 +730,56 @@ func dispatcherOptions(owner string) DispatcherOptions {
 	return o
 }
 
+func TestDispatcher_RecoversExpiredLeasesPeriodically(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	q := NewQueue(db, "owner", nil)
+	id := insertDispatcherTask(t, q, TaskPoster, nil, "periodic-recover")
+	if _, err := db.Exec(`UPDATE post_ingest_task SET status='running',attempts=1,max_attempts=3,lease_owner='dead-owner',lease_until=datetime(CURRENT_TIMESTAMP,'-1 second') WHERE id=?`, id); err != nil {
+		t.Fatal(err)
+	}
+	claimed := make(chan struct{}, 1)
+	exec := executorFunc(func(context.Context, Task) error {
+		select {
+		case claimed <- struct{}{}:
+		default:
+		}
+		return nil
+	})
+	o := dispatcherOptions("owner")
+	o.RecoverInterval = 20 * time.Millisecond
+	d, err := NewDispatcher(q, exec, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- d.Start(ctx) }()
+	select {
+	case <-claimed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("recovered task was not claimed")
+	}
+	waitUntil(t, time.Second, func() bool {
+		var status Status
+		_ = db.QueryRow(`SELECT status FROM post_ingest_task WHERE id=?`, id).Scan(&status)
+		return status == StatusDone
+	})
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDispatcher_RoundRobinPersistsAcrossSlots(t *testing.T) {
 	db, _ := openQueueTestDB(t)
 	q := NewQueue(db, "owner", nil)
-	for _, typ := range taskTypes {
-		for i := 0; i < 12; i++ {
-			insertDispatcherTask(t, q, typ, nil, fmt.Sprintf("fairness-%s-%d", typ, i))
-		}
+	// One task per type; priority order must prefer poster before encrypt before mid-band before subtitle.
+	for _, typ := range []TaskType{TaskSubtitle, TaskEncrypt, TaskKeyframe, TaskPoster, TaskThumbnail, TaskAtrack, TaskPreview} {
+		insertDispatcherTask(t, q, typ, nil, fmt.Sprintf("prio-%s", typ))
 	}
-	started := make(chan TaskType, 20)
-	release := make(chan struct{}, 20)
+	started := make(chan TaskType, 8)
+	release := make(chan struct{}, 8)
 	exec := executorFunc(func(ctx context.Context, task Task) error {
 		started <- task.Type
 		select {
@@ -752,21 +800,104 @@ func TestDispatcher_RoundRobinPersistsAcrossSlots(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- d.Start(ctx) }()
-	seen := map[TaskType]bool{}
-	for i := 0; i < len(taskTypes); i++ {
+	wantOrder := []TaskType{TaskPoster, TaskEncrypt}
+	for i, want := range wantOrder {
 		select {
 		case typ := <-started:
-			seen[typ] = true
+			if typ != want {
+				t.Fatalf("claim %d type=%s want %s", i, typ, want)
+			}
 			release <- struct{}{}
 		case <-time.After(time.Second):
 			t.Fatal("scheduler stalled")
 		}
 	}
-	for _, typ := range taskTypes {
-		if !seen[typ] {
-			t.Fatalf("first task cycle starts=%v missing %s", seen, typ)
+	// Mid-band types are equal; collect the next four without requiring a fixed order among them.
+	mid := map[TaskType]bool{}
+	for i := 0; i < 4; i++ {
+		select {
+		case typ := <-started:
+			switch typ {
+			case TaskPreview, TaskThumbnail, TaskKeyframe, TaskAtrack:
+				mid[typ] = true
+			default:
+				t.Fatalf("mid-band claim got %s", typ)
+			}
+			release <- struct{}{}
+		case <-time.After(time.Second):
+			t.Fatal("scheduler stalled in mid-band")
 		}
 	}
+	if len(mid) != 4 {
+		t.Fatalf("mid-band starts=%v", mid)
+	}
+	select {
+	case typ := <-started:
+		if typ != TaskSubtitle {
+			t.Fatalf("last claim=%s want subtitle", typ)
+		}
+		release <- struct{}{}
+	case <-time.After(time.Second):
+		t.Fatal("subtitle not claimed")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDispatcher_HighPriorityBurstWhenLowPrioritySaturated(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	q := NewQueue(db, "owner", nil)
+	for i := 0; i < 2; i++ {
+		insertDispatcherTask(t, q, TaskSubtitle, nil, fmt.Sprintf("low-%d", i))
+	}
+	started := make(chan TaskType, 4)
+	block := make(chan struct{})
+	exec := executorFunc(func(ctx context.Context, task Task) error {
+		started <- task.Type
+		select {
+		case <-block:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
+	o := dispatcherOptions("owner")
+	o.Global = 2
+	o.Poster = 2
+	o.Preview = 1
+	d, err := NewDispatcher(q, exec, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- d.Start(ctx) }()
+	for i := 0; i < 2; i++ {
+		select {
+		case typ := <-started:
+			if typ != TaskSubtitle {
+				t.Fatalf("warmup %d=%s", i, typ)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("low priority did not start")
+		}
+	}
+	waitUntil(t, time.Second, func() bool { return d.Snapshot().GlobalUsed == 2 })
+	insertDispatcherTask(t, q, TaskPoster, nil, "burst-poster")
+	select {
+	case typ := <-started:
+		if typ != TaskPoster {
+			t.Fatalf("burst claim=%s want poster", typ)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("high priority burst did not start")
+	}
+	if got := d.Snapshot().GlobalUsed; got != 3 {
+		t.Fatalf("GlobalUsed=%d want 3 (Global+1 burst)", got)
+	}
+	close(block)
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatal(err)
@@ -1370,5 +1501,39 @@ func TestDispatcher_InitialCancellationReadErrorSkipsExecutor(t *testing.T) {
 		t.Fatalf("executor calls=%d want 0", calls)
 	}
 	stop()
+	<-done
+}
+
+func TestDispatcher_CancelTaskSoftThenHard(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	q := NewQueue(db, "owner", nil)
+	id := insertDispatcherTask(t, q, TaskEncrypt, nil, "cancel-task")
+	started := make(chan struct{})
+	exec := executorFunc(func(ctx context.Context, task Task) error {
+		close(started)
+		<-ctx.Done()
+		return ClassifiedError{Kind: FailureCancelled, Err: ctx.Err()}
+	})
+	o := dispatcherOptions("owner")
+	o.ExecutorStopGrace = 20 * time.Millisecond
+	d, err := NewDispatcher(q, exec, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- d.Start(ctx) }()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("executor did not start")
+	}
+	d.CancelTask(id)
+	waitUntil(t, 2*time.Second, func() bool {
+		var s Status
+		_ = db.QueryRow(`SELECT status FROM post_ingest_task WHERE id=?`, id).Scan(&s)
+		return s == StatusCancelled && d.Snapshot().GlobalUsed == 0
+	})
+	cancel()
 	<-done
 }
