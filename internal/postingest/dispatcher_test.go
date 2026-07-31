@@ -31,7 +31,7 @@ func enqueueDispatcherTasks(t *testing.T, q *Queue, n int, types ...TaskType) []
 	for i := 0; i < n; i++ {
 		for _, typ := range types {
 			mid := insertQueueMedia(t, db, libraryID, fmt.Sprintf("dispatcher-%s-%d", typ, i))
-			res, err := db.Exec(`INSERT INTO post_ingest_task(media_id,task_type) VALUES (?,?)`, mid, typ)
+			res, err := db.Exec(`INSERT INTO post_ingest_task(media_id,task_type,max_attempts) VALUES (?,?,3)`, mid, typ)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -973,7 +973,7 @@ func insertDispatcherTask(t *testing.T, q *Queue, typ TaskType, scanID *int64, s
 		libraryID = mediaLibraryID(t, q.db, seed)
 	}
 	mid := insertQueueMedia(t, q.db, libraryID, "dispatcher-extra-"+suffix)
-	res, err := q.db.Exec(`INSERT INTO post_ingest_task(media_id,scan_task_id,task_type) VALUES (?,?,?)`, mid, nullableInt64(scanID), typ)
+	res, err := q.db.Exec(`INSERT INTO post_ingest_task(media_id,scan_task_id,task_type,max_attempts) VALUES (?,?,?,3)`, mid, nullableInt64(scanID), typ)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1146,7 +1146,7 @@ func TestDispatcher_StartRecoversBeforeExecutingAndReturnsRecoveryError(t *testi
 		db, _ := openQueueTestDB(t)
 		q := NewQueue(db, "owner", nil)
 		id := insertDispatcherTask(t, q, TaskAtrack, nil, "recover")
-		if _, err := db.Exec(`UPDATE post_ingest_task SET status='running',attempts=1,lease_owner='old/token',lease_until=datetime(CURRENT_TIMESTAMP,'-1 second') WHERE id=?`, id); err != nil {
+		if _, err := db.Exec(`UPDATE post_ingest_task SET status='running',attempts=1,max_attempts=3,lease_owner='old/token',lease_until=datetime(CURRENT_TIMESTAMP,'-1 second') WHERE id=?`, id); err != nil {
 			t.Fatal(err)
 		}
 		executed := make(chan struct{})

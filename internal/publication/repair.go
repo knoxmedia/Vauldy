@@ -515,10 +515,40 @@ func hasCompleteRepairEvidenceTx(ctx context.Context, tx *sql.Tx, mediaID int64,
 	return true, nil
 }
 
+// fingerprintIdentityKey returns path|size|mtime from a SourceFingerprint-style value.
+func fingerprintIdentityKey(fp string) (string, bool) {
+	fp = strings.TrimSpace(fp)
+	idx := strings.LastIndex(fp, "|sha256:")
+	if idx <= 0 {
+		return "", false
+	}
+	return fp[:idx], true
+}
+
+func isPrecapturePlaceholderFingerprint(fp string) bool {
+	return strings.HasSuffix(strings.TrimSpace(fp), "|sha256:"+strings.Repeat("0", 64))
+}
+
+func identitiesEqual(a, b string) bool {
+	return strings.EqualFold(filepath.Clean(a), filepath.Clean(b))
+}
+
 func exactRepairEvidenceTx(ctx context.Context, tx *sql.Tx, mediaID int64, step StepType, fingerprint string) (bool, error) {
 	if strings.TrimSpace(fingerprint) == "" {
 		return false, nil
 	}
+	ok, err := loadRepairEvidenceRefs(ctx, tx, mediaID, step, fingerprint)
+	if err != nil || ok || step != StepPoster {
+		return ok, err
+	}
+	// Scan precapture stores path|size|mtime|sha256:0… for speed. After encrypt
+	// cleanup the plaintext is gone and repair binds the journal's real hash;
+	// accept placeholder/precapture poster evidence when identity matches and
+	// artifact refs still validate.
+	return loadRepairPosterEvidenceByIdentity(ctx, tx, mediaID, fingerprint)
+}
+
+func loadRepairEvidenceRefs(ctx context.Context, tx *sql.Tx, mediaID int64, step StepType, fingerprint string) (bool, error) {
 	var refs string
 	err := tx.QueryRowContext(ctx, `SELECT e.artifact_refs_json FROM media_ingest_evidence e JOIN media m ON m.id=e.media_id JOIN media_ingest_run r ON r.id=e.run_id AND r.media_id=e.media_id AND r.generation=e.generation JOIN media_ingest_step s ON s.id=e.step_id AND s.run_id=e.run_id AND s.media_id=e.media_id AND s.generation=e.generation AND s.step_type=e.kind WHERE e.media_id=? AND e.generation=m.ingest_generation AND e.kind=? AND e.source_fingerprint=? AND r.status IN ('published','degraded') AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND s.status IN ('done','skipped') ORDER BY e.id DESC LIMIT 1`, mediaID, step, fingerprint).Scan(&refs)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -528,6 +558,36 @@ func exactRepairEvidenceTx(ctx context.Context, tx *sql.Tx, mediaID int64, step 
 		return false, err
 	}
 	return validateRepairEvidenceRefsTx(ctx, tx, mediaID, step, refs)
+}
+
+func loadRepairPosterEvidenceByIdentity(ctx context.Context, tx *sql.Tx, mediaID int64, fingerprint string) (bool, error) {
+	wantIdentity, ok := fingerprintIdentityKey(fingerprint)
+	if !ok {
+		return false, nil
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT e.source_fingerprint,e.artifact_refs_json,e.reason FROM media_ingest_evidence e JOIN media m ON m.id=e.media_id JOIN media_ingest_run r ON r.id=e.run_id AND r.media_id=e.media_id AND r.generation=e.generation JOIN media_ingest_step s ON s.id=e.step_id AND s.run_id=e.run_id AND s.media_id=e.media_id AND s.generation=e.generation AND s.step_type=e.kind WHERE e.media_id=? AND e.generation=m.ingest_generation AND e.kind='poster' AND r.status IN ('published','degraded') AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND s.status IN ('done','skipped') ORDER BY e.id DESC`, mediaID)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var evidenceFP, refs, reason string
+		if err = rows.Scan(&evidenceFP, &refs, &reason); err != nil {
+			return false, err
+		}
+		gotIdentity, ok := fingerprintIdentityKey(evidenceFP)
+		if !ok || !identitiesEqual(wantIdentity, gotIdentity) {
+			continue
+		}
+		if !isPrecapturePlaceholderFingerprint(evidenceFP) && !strings.EqualFold(strings.TrimSpace(reason), "precapture") {
+			continue
+		}
+		valid, err := validateRepairEvidenceRefsTx(ctx, tx, mediaID, StepPoster, refs)
+		if err != nil || valid {
+			return valid, err
+		}
+	}
+	return false, rows.Err()
 }
 
 func validateRepairEvidenceRefsTx(ctx context.Context, tx *sql.Tx, mediaID int64, step StepType, raw string) (bool, error) {

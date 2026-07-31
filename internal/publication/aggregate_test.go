@@ -169,6 +169,43 @@ func TestAggregateRequiredPendingRespectsRepairVisibility(t *testing.T) {
 		})
 	}
 }
+
+func TestAggregateRequiredFailureCancelsBlockedWaitingRequired(t *testing.T) {
+	db, runID, mediaID := aggregateFixture(t, "processing", 1, map[string]string{"poster": "failed", "encrypt": "waiting"})
+	if _, err := db.Exec(`UPDATE media_ingest_run SET preserve_visibility=1,reason='repair' WHERE id=?`, runID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE media SET publication_state='published',published_at='2026-07-01 02:03:04' WHERE id=?`, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE media_ingest_step SET attempts=max_attempts,last_error='poster exhausted' WHERE run_id=? AND step_type='poster'`, runID); err != nil {
+		t.Fatal(err)
+	}
+	var encryptStep int64
+	if err := db.QueryRow(`SELECT id FROM media_ingest_step WHERE run_id=? AND step_type='encrypt'`, runID).Scan(&encryptStep); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO post_ingest_task(media_id,ingest_run_id,ingest_step_id,generation,task_type,status,max_attempts) VALUES(?,?,?,1,'encrypt','waiting',3)`, mediaID, runID, encryptStep); err != nil {
+		t.Fatal(err)
+	}
+
+	aggregateCall(t, db, runID)
+
+	var runState, encryptStepStatus, encryptQueueStatus string
+	if err := db.QueryRow(`SELECT status FROM media_ingest_run WHERE id=?`, runID).Scan(&runState); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT status FROM media_ingest_step WHERE id=?`, encryptStep).Scan(&encryptStepStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT status FROM post_ingest_task WHERE ingest_step_id=?`, encryptStep).Scan(&encryptQueueStatus); err != nil {
+		t.Fatal(err)
+	}
+	state, publishedAt, _ := mediaState(t, db, mediaID)
+	if runState != "degraded" || state != "degraded" || !publishedAt.Valid || encryptStepStatus != "cancelled" || encryptQueueStatus != "cancelled" {
+		t.Fatalf("run=%s media=%s encrypt step/queue=%s/%s", runState, state, encryptStepStatus, encryptQueueStatus)
+	}
+}
 func TestAggregateExplicitCancellationIntentControlsVisibility(t *testing.T) {
 	for _, tc := range []struct {
 		name            string
@@ -327,7 +364,7 @@ func TestAggregateStaleGenerationCannotPublish(t *testing.T) {
 }
 func TestTerminalDegradedRunRemainsImmutableWithoutAdminReplacement(t *testing.T) {
 	db, runID, mediaID := aggregateFixture(t, "degraded", 1, map[string]string{"poster": "failed"})
-	if _, err := db.Exec(`UPDATE media SET publication_state='degraded',publication_error='poster exhausted' WHERE id=?; UPDATE media_ingest_run SET preserve_visibility=1 WHERE id=?; UPDATE media_ingest_step SET attempts=max_attempts,last_error='poster exhausted',finished_at='2026-07-01 01:02:03' WHERE run_id=?; INSERT INTO post_ingest_task(media_id,ingest_run_id,ingest_step_id,generation,task_type,status,attempts,max_attempts,last_error,finished_at) SELECT media_id,run_id,id,generation,'poster','failed',max_attempts,max_attempts,'poster exhausted','2026-07-01 01:02:03' FROM media_ingest_step WHERE run_id=?`, mediaID, runID, runID, runID); err != nil {
+	if _, err := db.Exec(`UPDATE media SET publication_state='degraded',publication_error='poster exhausted' WHERE id=?; UPDATE media_ingest_run SET preserve_visibility=1 WHERE id=?; UPDATE media_ingest_step SET max_attempts=3,attempts=3,last_error='poster exhausted',finished_at='2026-07-01 01:02:03' WHERE run_id=?; INSERT INTO post_ingest_task(media_id,ingest_run_id,ingest_step_id,generation,task_type,status,attempts,max_attempts,last_error,finished_at) SELECT media_id,run_id,id,generation,'poster','failed',3,3,'poster exhausted','2026-07-01 01:02:03' FROM media_ingest_step WHERE run_id=?`, mediaID, runID, runID, runID); err != nil {
 		t.Fatal(err)
 	}
 	aggregateCall(t, db, runID)

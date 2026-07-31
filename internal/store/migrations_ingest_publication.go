@@ -648,7 +648,10 @@ func (e *PostCommitMigrationValidationError) Error() string {
 func (e *PostCommitMigrationValidationError) Unwrap() error { return e.Cause }
 
 var publicationMigrationPostCommitValidation = validatePublicationForeignKeys
-var publicationMigrationCleanupTimeout = 2 * time.Second
+// publicationMigrationCleanupTimeout bounds work after COMMIT returns (FK restore,
+// rollback probe, post-commit validation). It must not include COMMIT duration —
+// large DBs often need longer than a few seconds to COMMIT a schema rewrite.
+var publicationMigrationCleanupTimeout = 30 * time.Second
 var publicationMigrationCommit = func(ctx context.Context, conn *sql.Conn) error { _, err := conn.ExecContext(ctx, `COMMIT`); return err }
 var publicationMigrationRollbackProbe = func(ctx context.Context, conn *sql.Conn) error {
 	_, err := conn.ExecContext(ctx, `ROLLBACK`)
@@ -930,9 +933,13 @@ func migratePublicationV2(ctx context.Context, db *sql.DB) (err error) {
 			return err
 		}
 	}
+	// COMMIT first, then start the cleanup timer. Starting the timer before COMMIT
+	// caused false PostCommitMigrationValidationError on large DBs when COMMIT
+	// alone exceeded publicationMigrationCleanupTimeout.
+	commitErr := publicationMigrationCommit(ctx, conn)
 	postCommitCtx, postCommitCancel := context.WithTimeout(context.WithoutCancel(ctx), publicationMigrationCleanupTimeout)
 	defer postCommitCancel()
-	if commitErr := publicationMigrationCommit(ctx, conn); commitErr != nil {
+	if commitErr != nil {
 		probeErr := publicationMigrationRollbackProbe(postCommitCtx, conn)
 		switch {
 		case probeErr == nil:

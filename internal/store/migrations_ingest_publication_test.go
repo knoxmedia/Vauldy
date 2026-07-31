@@ -2501,3 +2501,27 @@ func TestMigrationCommittedCleanupTimeoutReturnsFatalAndDiscards(t *testing.T) {
 		t.Fatalf("committed schema n=%d err=%v", n, err)
 	}
 }
+
+func TestMigrationSlowCommitDoesNotConsumeCleanupTimeout(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "slow-commit-cleanup.db")
+	db := openIngestPublicationMigrationTestDBPath(t, path)
+	db.SetMaxOpenConns(2)
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	installLegacyAssetStageJournal(t, db)
+	oldCommit, oldValidate, oldTimeout := publicationMigrationCommit, publicationMigrationPostCommitValidation, publicationMigrationCleanupTimeout
+	publicationMigrationCleanupTimeout = 40 * time.Millisecond
+	publicationMigrationCommit = func(ctx context.Context, conn *sql.Conn) error {
+		time.Sleep(80 * time.Millisecond) // longer than cleanup budget; must not starve post-commit work
+		_, err := conn.ExecContext(ctx, `COMMIT`)
+		return err
+	}
+	publicationMigrationPostCommitValidation = func(context.Context, *sql.Conn) error { return nil }
+	t.Cleanup(func() {
+		publicationMigrationCommit, publicationMigrationPostCommitValidation, publicationMigrationCleanupTimeout = oldCommit, oldValidate, oldTimeout
+	})
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatalf("slow COMMIT must not expire post-commit cleanup: %v", err)
+	}
+}

@@ -9,7 +9,8 @@ import (
 const (
 	restartResetMessage           = "服务重启，任务已复位"
 	scrapeRetriesExhaustedMessage = "服务重启，任务已耗尽重试次数"
-	maxScrapeTaskFailures         = 3
+	// Keep aligned with publication.DefaultNetworkMaxAttempts (store cannot import publication).
+	maxScrapeTaskFailures = 3
 )
 
 // ResetInterruptedTasks marks in-flight tasks as recoverable after process restart.

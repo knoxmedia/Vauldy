@@ -118,9 +118,9 @@ func (q *Queue) Enqueue(ctx context.Context, mediaID int64, scanTaskID *int64, t
 	var inserted bool
 	err := store.WithBusyRetry(ctx, q.metrics, func() error {
 		result, err := q.db.ExecContext(ctx, `
-			INSERT INTO post_ingest_task (media_id, scan_task_id, generation, task_type)
-			SELECT ?, ?, COALESCE(ingest_generation, 0), ? FROM media WHERE id=?
-			ON CONFLICT(media_id, generation, task_type) DO NOTHING`, mediaID, nullableInt64(scanTaskID), typ, mediaID)
+			INSERT INTO post_ingest_task (media_id, scan_task_id, generation, task_type, max_attempts)
+			SELECT ?, ?, COALESCE(ingest_generation, 0), ?, ? FROM media WHERE id=?
+			ON CONFLICT(media_id, generation, task_type) DO NOTHING`, mediaID, nullableInt64(scanTaskID), typ, publication.DefaultMaxAttempts(string(typ)), mediaID)
 		if err != nil {
 			return err
 		}
@@ -849,7 +849,7 @@ func (q *Queue) EnqueueEncryptManual(ctx context.Context, mediaID int64) (taskID
 				return fmt.Errorf("postingest queue: encrypt task %d in status %s", existingID, existingStatus)
 			}
 		}
-		result, err := tx.ExecContext(ctx, `INSERT INTO post_ingest_task(media_id,generation,task_type,status) VALUES(?,?,'encrypt','waiting')`, mediaID, generation)
+		result, err := tx.ExecContext(ctx, `INSERT INTO post_ingest_task(media_id,generation,task_type,status,max_attempts) VALUES(?,?,'encrypt','waiting',?)`, mediaID, generation, publication.DefaultMaxAttempts(string(TaskEncrypt)))
 		if err != nil {
 			return err
 		}
