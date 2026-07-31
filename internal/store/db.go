@@ -920,6 +920,22 @@ func OpenSQLiteContext(ctx context.Context, path string) (opened *sql.DB, return
 		)`)
 	_, _ = startupExecContext(ctx, db, `CREATE INDEX IF NOT EXISTS idx_media_encrypted_status ON media_encrypted_assets(status)`)
 	_, _ = startupExecContext(ctx, db, `
+		CREATE TABLE IF NOT EXISTS media_encrypt_resume (
+			media_id INTEGER NOT NULL,
+			generation INTEGER NOT NULL,
+			stage_id TEXT NOT NULL,
+			enc_path TEXT NOT NULL,
+			source_path TEXT NOT NULL,
+			source_identity TEXT NOT NULL,
+			wrapped_dek TEXT NOT NULL,
+			iv TEXT NOT NULL,
+			plain_offset INTEGER NOT NULL DEFAULT 0 CHECK(plain_offset>=0),
+			enc_bytes_written INTEGER NOT NULL DEFAULT 0 CHECK(enc_bytes_written>=0),
+			state TEXT NOT NULL CHECK(state IN ('encrypting','staged','abandoned')),
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY(media_id, generation)
+		)`)
+	_, _ = startupExecContext(ctx, db, `
 		CREATE TABLE IF NOT EXISTS media_derived_assets (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			media_id INTEGER NOT NULL,
