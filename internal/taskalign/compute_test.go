@@ -1,6 +1,7 @@
 package taskalign
 
 import (
+	"context"
 	"testing"
 
 	"knox-media/internal/store"
@@ -33,7 +34,7 @@ func TestComputeCurrentGenerationAlignment(t *testing.T) {
 		(1,'pending'),
 		(2,'pending')`)
 
-	got, err := Compute(db)
+	got, err := Compute(context.Background(), db)
 	if err != nil {
 		t.Fatalf("compute: %v", err)
 	}
