@@ -977,23 +977,21 @@ export default function HomePage() {
     }
   }
 
-  async function bulkTranscodeHomeSelected(ids: number[], mode: "analyze" | "optimize") {
+  async function bulkTranscodeHomeSelected(ids: number[]) {
     if (ids.length === 0) return;
     let ok = 0;
     let fail = 0;
     for (const id of ids) {
       try {
-        await transcodeAsync(id, mode);
+        await transcodeAsync(id, "analyze");
         ok++;
       } catch {
         fail++;
       }
     }
-    const successKey =
-      mode === "analyze" ? "components.media_menu.analyze_task_created" : "components.media_menu.optimize_task_created";
     if (ok > 0) {
       message.success(
-        fail > 0 ? t("pages.browse.analyze_with_skip", { ok, fail }) : t(successKey),
+        fail > 0 ? t("pages.browse.analyze_with_skip", { ok, fail }) : t("components.media_menu.analyze_task_created"),
       );
     } else {
       message.error(t("components.media_menu.operation_failed"));
@@ -1158,7 +1156,6 @@ export default function HomePage() {
       { type: "divider" },
       { key: "refreshMetadata", label: t("components.media_menu.refresh_metadata") },
       { key: "analyze", label: t("components.media_menu.analyze") },
-      { key: "optimize", label: t("components.media_menu.optimize") },
       { type: "divider" },
       { key: "recognizeSubtitles", label: t("components.media_menu.recognize_subtitles") },
       { key: "extractAudio", label: t("components.media_menu.extract_audio") },
@@ -1193,10 +1190,7 @@ export default function HomePage() {
         void bulkRefreshHomeSelectedMetadata(ids);
         break;
       case "analyze":
-        void bulkTranscodeHomeSelected(ids, "analyze");
-        break;
-      case "optimize":
-        void bulkTranscodeHomeSelected(ids, "optimize");
+        void bulkTranscodeHomeSelected(ids);
         break;
       case "recognizeSubtitles":
         void bulkRecognizeHomeSelectedSubtitles(ids);

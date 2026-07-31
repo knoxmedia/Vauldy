@@ -188,17 +188,17 @@ func TestEnqueuer_PreservesDomainTables(t *testing.T) {
 	if _, err := NewEnqueuer(db, cfg, nil).EnqueueMedia(context.Background(), mediaID, &scanID, "video"); err != nil {
 		t.Fatal(err)
 	}
-	var waitingDefaults, attemptsDefaults, maxAttemptsDefaults, availableDefaults int
+	var waitingDefaults, attemptsDefaults, maxAttemptsLocal, availableDefaults int
 	if err := db.QueryRow(`SELECT
 		SUM(CASE WHEN status='waiting' THEN 1 ELSE 0 END),
 		SUM(CASE WHEN attempts=0 THEN 1 ELSE 0 END),
-		SUM(CASE WHEN max_attempts=3 THEN 1 ELSE 0 END),
+		SUM(CASE WHEN max_attempts=1 THEN 1 ELSE 0 END),
 		SUM(CASE WHEN available_at IS NOT NULL THEN 1 ELSE 0 END)
-		FROM post_ingest_task WHERE media_id=?`, mediaID).Scan(&waitingDefaults, &attemptsDefaults, &maxAttemptsDefaults, &availableDefaults); err != nil {
+		FROM post_ingest_task WHERE media_id=?`, mediaID).Scan(&waitingDefaults, &attemptsDefaults, &maxAttemptsLocal, &availableDefaults); err != nil {
 		t.Fatal(err)
 	}
-	if waitingDefaults != 5 || attemptsDefaults != 5 || maxAttemptsDefaults != 5 || availableDefaults != 5 {
-		t.Fatalf("schema defaults waiting=%d attempts=%d max=%d available=%d", waitingDefaults, attemptsDefaults, maxAttemptsDefaults, availableDefaults)
+	if waitingDefaults != 5 || attemptsDefaults != 5 || maxAttemptsLocal != 5 || availableDefaults != 5 {
+		t.Fatalf("enqueue defaults waiting=%d attempts=%d max=%d available=%d", waitingDefaults, attemptsDefaults, maxAttemptsLocal, availableDefaults)
 	}
 	for table, want := range map[string]string{"preview_task": "done", "subtitle_task": "failed", "atrack_task": "done", "keyframe_task": "failed"} {
 		var got string

@@ -320,6 +320,9 @@ func TestQueue_ClaimStartedAtCoalesces(t *testing.T) {
 	if err != nil || !inserted {
 		t.Fatalf("enqueue = (%v, %v)", inserted, err)
 	}
+	if _, err := db.Exec(`UPDATE post_ingest_task SET max_attempts=3 WHERE media_id=? AND task_type=?`, mediaID, TaskPoster); err != nil {
+		t.Fatal(err)
+	}
 	first, err := q.Claim(context.Background(), TaskPoster)
 	if err != nil || first == nil {
 		t.Fatalf("first claim = (%+v, %v)", first, err)
@@ -770,6 +773,9 @@ func TestQueue_GenerationFencing(t *testing.T) {
 	if err != nil || !inserted {
 		t.Fatalf("enqueue=(%v,%v)", inserted, err)
 	}
+	if _, err := db.Exec(`UPDATE post_ingest_task SET max_attempts=3 WHERE media_id=? AND task_type=?`, mediaID, TaskPoster); err != nil {
+		t.Fatal(err)
+	}
 	oldTask, err := q.Claim(ctx, TaskPoster)
 	if err != nil || oldTask == nil || oldTask.Attempts != 1 {
 		t.Fatalf("first claim=(%+v,%v)", oldTask, err)
@@ -1075,6 +1081,9 @@ func TestLeaseExpiryAttemptLimitFailsOnThirdExpiredLeaseAndFencesOldOwners(t *te
 	q := NewQueue(db, "restart-owner", nil)
 	if inserted, err := q.Enqueue(context.Background(), mediaID, nil, TaskPreview); err != nil || !inserted {
 		t.Fatalf("Enqueue=(%v,%v)", inserted, err)
+	}
+	if _, err := db.Exec(`UPDATE post_ingest_task SET max_attempts=3 WHERE media_id=? AND task_type=?`, mediaID, TaskPreview); err != nil {
+		t.Fatal(err)
 	}
 	var generations []*Task
 	for attempt := 1; attempt <= 3; attempt++ {

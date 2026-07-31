@@ -14,7 +14,6 @@ import (
 	kcrypto "knox-media/internal/crypto"
 	"knox-media/internal/keystore"
 
-	"github.com/google/uuid"
 	"knox-media/pkg/hashutil"
 )
 
@@ -22,14 +21,18 @@ var ErrAlreadyEncrypted = errors.New("media already encrypted")
 
 // AssetEncryptor encrypts library media to Knox 9527 .enc files at rest.
 type AssetEncryptor struct {
-	DB             *sql.DB
-	Vault          *keystore.Vault
-	BasePath       string // legacy default; prefer ResolveEncBase per library
-	DataDir        string
-	FFmpegPath     string
-	FFprobePath    string
-	onFlightJoined func(mediaID int64)
-	syncStagedFile func(*os.File) error
+	DB          *sql.DB
+	Vault       *keystore.Vault
+	BasePath    string // legacy default; prefer ResolveEncBase per library
+	DataDir     string
+	FFmpegPath  string
+	FFprobePath string
+	// ResumeCheckpointBytes overrides EncryptResumeCheckpointBytes when > 0 (tests).
+	ResumeCheckpointBytes int64
+	onFlightJoined        func(mediaID int64)
+	syncStagedFile        func(*os.File) error
+	// onEncryptCheckpoint is invoked after each durable resume checkpoint (tests).
+	onEncryptCheckpoint func(ctx context.Context, plainOffset int64)
 }
 
 // IsMediaEncrypted reports whether the media item is already stored as an encrypted asset.
@@ -62,21 +65,32 @@ func (s *AssetEncryptor) encryptMedia(ctx context.Context, mediaID int64, manual
 		}
 		return nil
 	}
-	leader, flight := acquireEncryptFlight(mediaID)
+	leader, flight := acquireEncryptFlightFor(mediaID, "media")
 	if !leader {
 		if s.onFlightJoined != nil {
 			s.onFlightJoined(mediaID)
 		}
-		return waitEncryptFlight(ctx, flight)
+		if waitErr := waitEncryptFlight(ctx, flight); waitErr != nil {
+			return waitErr
+		}
+		if flight.operation == "stage" {
+			return s.encryptMedia(ctx, mediaID, manual)
+		}
+		return nil
 	}
 	defer func() { finishEncryptFlight(mediaID, flight, err) }()
 
+	if err := EnsureEncryptResumeSchema(s.DB); err != nil {
+		return err
+	}
+
 	var libraryID sql.NullInt64
+	var generation int64
 	var filePath, fileType, fileID string
 	if err := s.DB.QueryRowContext(ctx, `
-		SELECT library_id, file_path, COALESCE(file_type,''), COALESCE(file_id,'')
+		SELECT library_id, file_path, COALESCE(file_type,''), COALESCE(file_id,''), COALESCE(ingest_generation,0)
 		FROM media WHERE id = ?
-	`, mediaID).Scan(&libraryID, &filePath, &fileType, &fileID); err != nil {
+	`, mediaID).Scan(&libraryID, &filePath, &fileType, &fileID, &generation); err != nil {
 		return err
 	}
 	if !libraryID.Valid || libraryID.Int64 <= 0 {
@@ -145,59 +159,62 @@ func (s *AssetEncryptor) encryptMedia(ctx context.Context, mediaID int64, manual
 		return ErrAlreadyEncrypted
 	}
 
+	identity, err := QuickSourceIdentity(plainPath)
+	if err != nil {
+		return err
+	}
 	requireFaststart := cleanupPlain == 1 || encryptRequiresISOFaststart(ft, plainPath)
 	encryptSource, prepCleanup, remuxed, err := s.resolveEncryptSource(ctx, mediaID, plainPath, requireFaststart)
 	if err != nil {
 		return err
 	}
 	defer prepCleanup()
-
-	src, err := os.Open(encryptSource)
+	sourceInfo, err := os.Stat(encryptSource)
 	if err != nil {
 		return err
 	}
-	defer src.Close()
-
-	var backupPath string
-	if _, err := os.Stat(encPath); err == nil {
-		backupPath = encPath + ".orphan-" + uuid.NewString()
-		if err := os.Rename(encPath, backupPath); err != nil {
-			return err
-		}
-	} else if !os.IsNotExist(err) {
+	backupPath := fmt.Sprintf("%s.orphan-resume-%d", encPath, generation)
+	output, err := s.encryptToPathResumable(
+		ctx, mediaID, generation, plainPath, encryptSource, identity, sourceInfo.Size(), kek, encPath, backupPath,
+		func() (resumableEncryptTarget, error) {
+			if _, statErr := os.Stat(encPath); statErr == nil {
+				if _, backupErr := os.Stat(backupPath); backupErr == nil {
+					if removeErr := os.Remove(encPath); removeErr != nil {
+						return resumableEncryptTarget{}, removeErr
+					}
+				} else if os.IsNotExist(backupErr) {
+					if renameErr := os.Rename(encPath, backupPath); renameErr != nil {
+						return resumableEncryptTarget{}, renameErr
+					}
+				} else {
+					return resumableEncryptTarget{}, backupErr
+				}
+			} else if !os.IsNotExist(statErr) {
+				return resumableEncryptTarget{}, statErr
+			}
+			return resumableEncryptTarget{
+				StageID:    "manual-" + fmt.Sprint(generation),
+				EncPath:    encPath,
+				BackupPath: backupPath,
+			}, nil
+		},
+	)
+	if err != nil {
 		return err
 	}
 	published := false
 	defer func() {
 		if !published {
-			err = restoreEncryptedOutput(err, encPath, backupPath, os.Remove, os.Rename)
+			err = restoreEncryptedOutput(err, output.EncPath, output.BackupPath, os.Remove, os.Rename)
 		}
 	}()
-	dst, err := os.OpenFile(encPath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
-	if err != nil {
-		return err
-	}
-	result, err := kcrypto.EncryptFileContext(ctx, src, dst, kek)
-	closeErr := dst.Close()
-	if err != nil {
-		_ = os.Remove(encPath)
-		return err
-	}
-	if closeErr != nil {
-		_ = os.Remove(encPath)
-		return closeErr
-	}
 
-	wrappedHex := hex.EncodeToString(result.WrappedDEK)
-	ivHex := hex.EncodeToString(result.IV)
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
-		_ = os.Remove(encPath)
 		return err
 	}
 	defer tx.Rollback()
 	if err := runEncryptCommitGuard(ctx, tx); err != nil {
-		_ = os.Remove(encPath)
 		return err
 	}
 	_, err = tx.ExecContext(ctx, `
@@ -210,22 +227,26 @@ func (s *AssetEncryptor) encryptMedia(ctx context.Context, mediaID int64, manual
 		  plain_path = excluded.plain_path,
 		  status = 'encrypted',
 		  updated_at = CURRENT_TIMESTAMP
-	`, mediaID, encPath, wrappedHex, ivHex, plainPath)
+	`, mediaID, output.EncPath, output.WrappedDEK, output.IV, plainPath)
 	if err != nil {
-		_ = os.Remove(encPath)
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE media SET file_path = ? WHERE id = ?`, encPath, mediaID); err != nil {
-		_ = os.Remove(encPath)
+	if _, err := tx.ExecContext(ctx, `UPDATE media SET file_path = ? WHERE id = ?`, output.EncPath, mediaID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE media_encrypt_resume
+		SET state = 'abandoned', updated_at = CURRENT_TIMESTAMP
+		WHERE media_id = ? AND generation = ?
+	`, mediaID, generation); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
-		_ = os.Remove(encPath)
 		return err
 	}
 	published = true
-	if backupPath != "" {
-		_ = os.Remove(backupPath)
+	if output.BackupPath != "" {
+		_ = os.Remove(output.BackupPath)
 	}
 	persistPlainMD5AfterEncrypt(s.DB, mediaID, plainPath)
 	if cleanupPlain == 1 {

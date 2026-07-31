@@ -141,7 +141,9 @@ func claimEligibleAnyTx(ctx context.Context, tx store.ImmediateConnTx, req Claim
 	if err != nil || !present {
 		return nil, err
 	}
-	oldest, err := oldestEligibleRequired(ctx, tx, req.Registry)
+	// Restrict required HOL to types the caller can claim now (e.g. exclude poster
+	// when poster slots are full) so other required work can use remaining global slots.
+	oldest, err := oldestEligibleRequiredFor(ctx, tx, req.Registry, req.TaskTypes)
 	if err != nil {
 		return nil, err
 	}
@@ -262,7 +264,7 @@ func familyDueSQL(f QueueFamily, alias string) string {
 	case QueuePostIngest:
 		return fmt.Sprintf(`%s.status='waiting' AND %s.available_at<=CURRENT_TIMESTAMP AND %s.attempts<%s.max_attempts AND (%s.scan_task_id IS NULL OR EXISTS(SELECT 1 FROM scan_task sc WHERE sc.id=%s.scan_task_id AND sc.cancelled=0 AND sc.status<>'cancelled'))`, alias, alias, alias, alias, alias, alias)
 	case QueueScrape:
-		return fmt.Sprintf(`%s.status IN ('waiting','failed') AND COALESCE(%s.fail_count,0)<3 AND COALESCE(%s.available_at,CURRENT_TIMESTAMP)<=CURRENT_TIMESTAMP AND (%s.lease_until IS NULL OR %s.lease_until<CURRENT_TIMESTAMP)`, alias, alias, alias, alias, alias)
+		return fmt.Sprintf(`%s.status IN ('waiting','failed') AND COALESCE(%s.fail_count,0)<%d AND COALESCE(%s.available_at,CURRENT_TIMESTAMP)<=CURRENT_TIMESTAMP AND (%s.lease_until IS NULL OR %s.lease_until<CURRENT_TIMESTAMP)`, alias, alias, DefaultNetworkMaxAttempts, alias, alias, alias)
 	case QueuePrepare:
 		return fmt.Sprintf(`%s.status='waiting' AND COALESCE(%s.task_type,'batch')='pretranscode' AND (%s.lease_until IS NULL OR %s.lease_until<CURRENT_TIMESTAMP)`, alias, alias, alias, alias)
 	}
@@ -367,21 +369,21 @@ func oldestEligibleRequiredFor(ctx context.Context, tx store.SQLExecutor, regist
 			continue
 		}
 		typeFilter := ""
+		var queryArgs []any
 		if f == QueuePostIngest {
 			typeFilter = " AND st.step_type=q.task_type"
+			if len(postTypes) > 0 {
+				typeFilter += " AND q.task_type IN (" + sqlPlaceholders(len(postTypes)) + ")"
+				queryArgs = make([]any, len(postTypes))
+				for i, postType := range postTypes {
+					queryArgs[i] = postType
+				}
+			}
 		}
 		availableExpr := familyAvailableSQL(f, a)
 		query := fmt.Sprintf(`SELECT q.id,st.step_type,CAST(%s AS TEXT),CAST(q.created_at AS TEXT) FROM %s q JOIN media_ingest_step st ON st.id=q.ingest_step_id WHERE st.required=1 AND %s AND %s%s ORDER BY %s LIMIT 1`, availableExpr, table, familyDueSQL(f, a), linkedEligibilitySQL(a), typeFilter, familyOrderSQL(f, a))
 		var c requiredCandidate
 		c.family = f
-		queryArgs := make([]any, len(postTypes))
-		if f == QueuePostIngest {
-			for i, postType := range postTypes {
-				queryArgs[i] = postType
-			}
-		} else {
-			queryArgs = nil
-		}
 		err = tx.QueryRowContext(ctx, query, queryArgs...).Scan(&c.id, &c.taskType, &c.available, &c.created)
 		if errors.Is(err, sql.ErrNoRows) {
 			continue
@@ -452,12 +454,12 @@ func updateFamilyClaim(ctx context.Context, tx store.SQLExecutor, req ClaimReque
 	case QueueScrape:
 		err = tx.QueryRowContext(ctx, `SELECT media_id,ingest_run_id,ingest_step_id,generation,COALESCE(fail_count,0),retry_round,lease_until FROM scrape_task WHERE id=?`, id).Scan(&p.MediaID, &p.RunID, &p.StepID, &p.Generation, &p.Attempts, &p.RetryRound, &lease)
 		p.TaskType = "scrape"
-		p.MaxAttempts = 3
+		p.MaxAttempts = DefaultNetworkMaxAttempts
 	case QueuePrepare:
 		err = tx.QueryRowContext(ctx, `SELECT COALESCE(media_id,(SELECT m.id FROM media m WHERE m.file_id=transcode_task.file_id),0),ingest_run_id,ingest_step_id,generation,COALESCE(retry_round,0),lease_until FROM transcode_task WHERE id=?`, id).Scan(&p.MediaID, &p.RunID, &p.StepID, &p.Generation, &p.RetryRound, &lease)
 		p.TaskType = "prepare"
 		p.Attempts = 1
-		p.MaxAttempts = 1
+		p.MaxAttempts = DefaultLocalMaxAttempts
 	}
 	if err != nil {
 		return nil, err
@@ -491,12 +493,12 @@ func claimByOwner(ctx context.Context, db *sql.DB, f QueueFamily, owner string) 
 	case QueueScrape:
 		err = db.QueryRowContext(ctx, `SELECT q.id,q.media_id,q.ingest_run_id,q.ingest_step_id,q.generation,COALESCE(q.fail_count,0),q.retry_round,q.lease_until FROM scrape_task q LEFT JOIN media_ingest_step st ON st.id=q.ingest_step_id LEFT JOIN media_ingest_run r ON r.id=q.ingest_run_id LEFT JOIN media m ON m.id=q.media_id WHERE q.lease_owner=? AND q.status='running' AND ((q.ingest_run_id IS NULL AND q.ingest_step_id IS NULL AND q.generation IS NULL) OR (st.status='running' AND st.lease_owner=q.lease_owner AND st.run_id=q.ingest_run_id AND st.media_id=q.media_id AND st.generation=q.generation AND r.id=st.run_id AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND m.ingest_generation=q.generation))`, owner).Scan(&p.QueueID, &p.MediaID, &p.RunID, &p.StepID, &p.Generation, &p.Attempts, &p.RetryRound, &lease)
 		p.TaskType = "scrape"
-		p.MaxAttempts = 3
+		p.MaxAttempts = DefaultNetworkMaxAttempts
 	case QueuePrepare:
 		err = db.QueryRowContext(ctx, `SELECT q.id,COALESCE(q.media_id,(SELECT m2.id FROM media m2 WHERE m2.file_id=q.file_id),0),q.ingest_run_id,q.ingest_step_id,q.generation,COALESCE(q.retry_round,0),q.lease_until FROM transcode_task q LEFT JOIN media_ingest_step st ON st.id=q.ingest_step_id LEFT JOIN media_ingest_run r ON r.id=q.ingest_run_id LEFT JOIN media m ON m.id=q.media_id WHERE q.lease_owner=? AND q.status='running' AND ((q.ingest_run_id IS NULL AND q.ingest_step_id IS NULL AND q.generation IS NULL) OR (st.status='running' AND st.lease_owner=q.lease_owner AND st.run_id=q.ingest_run_id AND st.media_id=q.media_id AND st.generation=q.generation AND r.id=st.run_id AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND m.ingest_generation=q.generation))`, owner).Scan(&p.QueueID, &p.MediaID, &p.RunID, &p.StepID, &p.Generation, &p.RetryRound, &lease)
 		p.TaskType = "prepare"
 		p.Attempts = 1
-		p.MaxAttempts = 1
+		p.MaxAttempts = DefaultLocalMaxAttempts
 	default:
 		return nil, errors.New("publication claim reconciliation: invalid family")
 	}

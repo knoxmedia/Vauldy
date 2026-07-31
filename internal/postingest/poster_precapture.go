@@ -48,7 +48,10 @@ func quickSourceFingerprint(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("quick fingerprint: stat: %w", err)
 	}
-	return fmt.Sprintf("%s|%d|%d|sha256:%s", abs, info.Size(), info.ModTime().UnixNano(), strings.Repeat("0", 64)), nil
+	// Same path|size|mtime layout as publication.SourceFingerprint, with a zero
+	// content hash so scan stays fast. Repair accepts this placeholder when the
+	// encrypt journal later supplies the real hash after plaintext cleanup.
+	return fmt.Sprintf("%s|%d|%d|sha256:%s", filepath.Clean(abs), info.Size(), info.ModTime().UnixNano(), strings.Repeat("0", 64)), nil
 }
 
 // CapturePoster performs all filesystem, ffprobe, ffmpeg, sealing, and derived staging work without a writer transaction.

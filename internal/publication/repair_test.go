@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -247,6 +248,48 @@ func TestRepairLegacyMediaSkipsCompleteEvidence(t *testing.T) {
 	_, _ = seedCompliantEncryptedVideoEvidence(t, db)
 	if repaired, err := RepairLegacyMedia(context.Background(), db, allRepairPlanner(t), 4); err != nil || repaired != 0 {
 		t.Fatalf("repaired=%d err=%v", repaired, err)
+	}
+}
+
+func TestRepairLegacyAcceptsPrecaptureZeroHashPosterAfterPlaintextCleanup(t *testing.T) {
+	db := openRepairTestDB(t)
+	mediaID, source := seedCompliantEncryptedVideoEvidence(t, db)
+	fp, err := SourceFingerprint(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, ok := fingerprintIdentityKey(fp)
+	if !ok {
+		t.Fatalf("fingerprint identity: %q", fp)
+	}
+	placeholder := identity + "|sha256:" + strings.Repeat("0", 64)
+	var encPath string
+	if err = db.QueryRow(`SELECT enc_path FROM media_encrypted_assets WHERE media_id=?`, mediaID).Scan(&encPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`UPDATE media_ingest_evidence SET source_fingerprint=?,reason='precapture' WHERE media_id=? AND kind='poster'`, placeholder, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	var runID, encryptStepID, encryptTaskID int64
+	if err = db.QueryRow(`SELECT r.id,s.id FROM media_ingest_run r JOIN media_ingest_step s ON s.run_id=r.id AND s.step_type='encrypt' WHERE r.media_id=? AND r.generation=1`, mediaID).Scan(&runID, &encryptStepID); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.QueryRow(`SELECT id FROM post_ingest_task WHERE media_id=? AND task_type='encrypt' AND generation=1`, mediaID).Scan(&encryptTaskID); err != nil {
+		// seedCompliantEncryptedVideoEvidence does not always create queue rows; insert a stub task for FK.
+		res, e := db.Exec(`INSERT INTO post_ingest_task(media_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(?,?,?,1,'encrypt','done')`, mediaID, runID, encryptStepID)
+		if e != nil {
+			t.Fatal(e)
+		}
+		encryptTaskID, _ = res.LastInsertId()
+	}
+	if _, err = db.Exec(`INSERT INTO media_encryption_stage_journal(stage_id,task_id,attempt,media_id,run_id,step_id,generation,owner_token,source_path,source_fingerprint,enc_path,wrapped_dek,iv,enc_sha256,enc_size,state) VALUES('precapture-repair-stage',?,1,?,?,?,1,'owner',?,?,?,'wrapped','iv','encsha',16,'committed')`, encryptTaskID, mediaID, runID, encryptStepID, source, fp, encPath); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Remove(source); err != nil {
+		t.Fatal(err)
+	}
+	if repaired, err := RepairLegacyMedia(context.Background(), db, allRepairPlanner(t), 4); err != nil || repaired != 0 {
+		t.Fatalf("repaired=%d err=%v want 0 (precapture poster + journal encrypt must skip repair)", repaired, err)
 	}
 }
 

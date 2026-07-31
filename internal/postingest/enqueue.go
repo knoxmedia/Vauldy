@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"knox-media/internal/config"
+	"knox-media/internal/publication"
 	"knox-media/internal/store"
 )
 
@@ -99,9 +100,9 @@ WHERE s.id=?`, mediaID, *scanTaskID).Scan(&exists)
 		}
 		for _, typ := range planned {
 			if _, err := tx.ExecContext(ctx, `
-INSERT INTO post_ingest_task (media_id,scan_task_id,generation,task_type)
-SELECT ?,?,COALESCE(ingest_generation,0),? FROM media WHERE id=?
-ON CONFLICT(media_id,generation,task_type) DO NOTHING`, mediaID, scanTaskID, typ, mediaID); err != nil {
+INSERT INTO post_ingest_task (media_id,scan_task_id,generation,task_type,max_attempts)
+SELECT ?,?,COALESCE(ingest_generation,0),?,? FROM media WHERE id=?
+ON CONFLICT(media_id,generation,task_type) DO NOTHING`, mediaID, scanTaskID, typ, publication.DefaultMaxAttempts(string(typ)), mediaID); err != nil {
 				return err
 			}
 		}

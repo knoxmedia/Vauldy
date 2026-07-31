@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -111,6 +113,38 @@ func TestEncryptionStateMachineHooksEachPhase(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestQuarantinePlaintextRefusesCrossVolumeCopyOnEXDEV(t *testing.T) {
+	root, source := t.TempDir(), filepath.Join(t.TempDir(), "photo.jpg")
+	payload := []byte("plaintext-must-not-copy")
+	if err := os.WriteFile(source, payload, 0600); err != nil {
+		t.Fatal(err)
+	}
+	exdev := &os.LinkError{Op: "rename", Old: source, New: "target", Err: syscall.EXDEV}
+	ops := defaultEncryptionFileOps()
+	ops.rename = func(oldpath, newpath string) error { return exdev }
+	ops.syncFile = func(*os.File) error { t.Fatal("syncFile must not run during refused cross-volume copy"); return nil }
+	q, err := quarantinePlaintextWithOps(source, root, 1, 1, "00000000-0000-0000-0000-000000000099", ops)
+	if err == nil || !strings.Contains(err.Error(), "refuses cross-volume") {
+		t.Fatalf("want refuses cross-volume error, got path=%q err=%v", q, err)
+	}
+	if !errors.Is(err, syscall.EXDEV) {
+		t.Fatalf("want EXDEV wrapped: %v", err)
+	}
+	got, readErr := os.ReadFile(source)
+	if readErr != nil || string(got) != string(payload) {
+		t.Fatalf("source must remain unchanged: %q err=%v", got, readErr)
+	}
+	stageDir := filepath.Join(root, "1", "1", "00000000-0000-0000-0000-000000000099")
+	target := filepath.Join(stageDir, "source")
+	tmp := target + ".tmp"
+	if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
+		t.Fatalf("quarantine target must not exist after refused copy: %v", statErr)
+	}
+	if _, statErr := os.Stat(tmp); !os.IsNotExist(statErr) {
+		t.Fatalf("quarantine temp must not remain after refused copy: %v", statErr)
 	}
 }
 
