@@ -446,15 +446,17 @@ git commit -m "perf(storage): faststart before stage encrypt; skip when already 
 
 ### Task 11: Phase 2 verification + docs
 
-- [ ] **Step 1: Full relevant tests**
+- [x] **Step 1: Full relevant tests**
 
 ```bash
 go test ./internal/crypto/ ./internal/storage/ ./internal/postingest/ -count=1 -timeout 300s
 ```
 
-- [ ] **Step 2: Update spec status to implemented; short note in plan checkboxes**
+Verified PASS 2026-07-31 on feature branch.
 
-- [ ] **Step 3: Community sync note** — all paths under `internal/crypto`, `storage`, `postingest` are Vauldy-safe (no pretranscode)
+- [x] **Step 2: Update spec status to implemented; short note in plan checkboxes**
+
+- [x] **Step 3: Community sync note** — all paths under `internal/crypto`, `storage`, `postingest` are Vauldy-safe (no pretranscode)
 
 ---
 
