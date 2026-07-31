@@ -533,12 +533,15 @@ func (a *encryptAdapter) ExecuteWithResult(ctx context.Context, task Task) (Exec
 	}
 	staged, err := loadSelectedEncryptionStage(ctx, db, task)
 	if errors.Is(err, sql.ErrNoRows) {
-		if !canStage {
-			return ordinary, permanentAdapterError(TaskEncrypt, "staged encryption is not configured")
-		}
-		staged, err = stager.StageMediaEncryption(ctx, task.MediaID)
-		if err == nil {
-			err = insertEncryptionStageJournal(ctx, db, task, staged)
+		staged, err = loadJournalEncryptionStage(ctx, db, task)
+		if errors.Is(err, sql.ErrNoRows) {
+			if !canStage {
+				return ordinary, permanentAdapterError(TaskEncrypt, "staged encryption is not configured")
+			}
+			staged, err = stager.StageMediaEncryption(ctx, task.MediaID)
+			if err == nil {
+				err = insertEncryptionStageJournal(ctx, db, task, staged)
+			}
 		}
 	}
 	if err != nil {
@@ -576,7 +579,7 @@ func classifyEncryptError(err error) error {
 	return ClassifiedError{Kind: FailureRetryable, Err: err}
 }
 func insertEncryptionStageJournal(ctx context.Context, db *sql.DB, task Task, s storage.StagedMediaEncryption) error {
-	_, err := db.ExecContext(ctx, `INSERT INTO media_encryption_stage_journal(stage_id,task_id,attempt,media_id,run_id,step_id,generation,owner_token,source_path,source_fingerprint,enc_path,wrapped_dek,iv,enc_sha256,enc_size,cleanup_plaintext,state) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'staged')`, s.StageID, task.ID, task.Attempts, task.MediaID, *task.RunID, *task.StepID, task.Generation, task.LeaseOwner, s.OriginalPath, s.SourceFingerprint, s.EncPath, s.WrappedDEK, s.IV, s.SHA256, s.Size, boolInt(s.CleanupPlaintext))
+	_, err := db.ExecContext(ctx, `INSERT INTO media_encryption_stage_journal(stage_id,task_id,attempt,media_id,run_id,step_id,generation,owner_token,source_path,source_fingerprint,enc_path,wrapped_dek,iv,enc_sha256,enc_size,cleanup_plaintext,state) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'staged') ON CONFLICT(stage_id) DO NOTHING`, s.StageID, task.ID, task.Attempts, task.MediaID, *task.RunID, *task.StepID, task.Generation, task.LeaseOwner, s.OriginalPath, s.SourceFingerprint, s.EncPath, s.WrappedDEK, s.IV, s.SHA256, s.Size, boolInt(s.CleanupPlaintext))
 	return err
 }
 func boolInt(v bool) int {
@@ -584,6 +587,22 @@ func boolInt(v bool) int {
 		return 1
 	}
 	return 0
+}
+func loadJournalEncryptionStage(ctx context.Context, db *sql.DB, task Task) (storage.StagedMediaEncryption, error) {
+	var s storage.StagedMediaEncryption
+	var cleanup int
+	err := db.QueryRowContext(ctx, `SELECT stage_id,media_id,source_path,source_fingerprint,enc_path,wrapped_dek,iv,enc_sha256,enc_size,cleanup_plaintext FROM media_encryption_stage_journal WHERE task_id=? AND attempt=? AND media_id=? AND run_id=? AND step_id=? AND generation=? AND owner_token=? AND state IN ('staged','quarantining','quarantined')`, task.ID, task.Attempts, task.MediaID, *task.RunID, *task.StepID, task.Generation, task.LeaseOwner).Scan(&s.StageID, &s.MediaID, &s.OriginalPath, &s.SourceFingerprint, &s.EncPath, &s.WrappedDEK, &s.IV, &s.SHA256, &s.Size, &cleanup)
+	if err != nil {
+		return s, err
+	}
+	s.CleanupPlaintext = cleanup == 1
+	resume, resumeErr := storage.LoadEncryptResume(ctx, db, task.MediaID, task.Generation)
+	if resumeErr == nil && resume.StageID == s.StageID {
+		s.SourceIdentity = resume.SourceIdentity
+	} else if resumeErr != nil && !errors.Is(resumeErr, sql.ErrNoRows) {
+		return s, resumeErr
+	}
+	return s, nil
 }
 func loadSelectedEncryptionStage(ctx context.Context, db *sql.DB, task Task) (storage.StagedMediaEncryption, error) {
 	var s storage.StagedMediaEncryption
