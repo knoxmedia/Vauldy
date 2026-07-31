@@ -12,6 +12,12 @@ import (
 	"time"
 )
 
+func TestCTREncryptChunkIsAtLeastOneMiB(t *testing.T) {
+	if ctrEncryptChunk < 1<<20 {
+		t.Fatalf("ctrEncryptChunk=%d want at least %d", ctrEncryptChunk, 1<<20)
+	}
+}
+
 func TestCTRStreamingEncryptDecryptLargeFile(t *testing.T) {
 	kek := make([]byte, 32)
 	_, _ = rand.Read(kek)

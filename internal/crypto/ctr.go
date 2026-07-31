@@ -6,11 +6,12 @@ import (
 	"crypto/cipher"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 )
 
-const ctrEncryptChunk = 256 * 1024
+const ctrEncryptChunk = 1 << 20
 
 // ctrIV builds a 16-byte AES-CTR IV: nonce(12) || big-endian block counter(4).
 func ctrIV(nonce [IVSize]byte, blockNum uint32) []byte {
@@ -25,14 +26,33 @@ func encryptCTR(src io.Reader, dst io.Writer, block cipher.Block, nonce [IVSize]
 }
 
 func encryptCTRContext(ctx context.Context, src io.Reader, dst io.Writer, block cipher.Block, nonce [IVSize]byte) error {
-	stream := cipher.NewCTR(block, ctrIV(nonce, 0))
+	return encryptCTRRangeContext(ctx, src, dst, block, nonce, 0, -1, nil)
+}
+
+func encryptCTRRangeContext(ctx context.Context, src io.Reader, dst io.Writer, block cipher.Block, nonce [IVSize]byte, plainOffset, plainLen int64, hash io.Writer) error {
+	if plainOffset%aes.BlockSize != 0 {
+		return errors.New("enc: plainOffset must be block aligned")
+	}
+	if hash != nil {
+		dst = io.MultiWriter(dst, hash)
+	}
+	blockNum := uint32(plainOffset / aes.BlockSize)
+	stream := cipher.NewCTR(block, ctrIV(nonce, blockNum))
 	buf := make([]byte, ctrEncryptChunk)
 	out := make([]byte, ctrEncryptChunk)
+	remaining := plainLen
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		n, err := io.ReadFull(src, buf)
+		chunk := int64(len(buf))
+		if remaining >= 0 && chunk > remaining {
+			chunk = remaining
+		}
+		if chunk == 0 {
+			break
+		}
+		n, err := io.ReadFull(src, buf[:chunk])
 		if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
 			return err
 		}
@@ -49,9 +69,15 @@ func encryptCTRContext(ctx context.Context, src io.Reader, dst io.Writer, block 
 		if werr := writeExact(dst, out[:n]); werr != nil {
 			return werr
 		}
+		if remaining >= 0 {
+			remaining -= int64(n)
+		}
 		if err != nil {
 			break
 		}
+	}
+	if plainLen > 0 && remaining > 0 {
+		return fmt.Errorf("enc: short read: want %d bytes, got %d", plainLen, plainLen-remaining)
 	}
 	return ctx.Err()
 }

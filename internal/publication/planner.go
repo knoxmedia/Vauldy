@@ -238,7 +238,8 @@ VALUES(?,?,?,?, 'processing',?,?,?)`, plan.mediaID, generation, nullScanTask(pla
 				requiredFlag = 1
 			}
 		}
-		result, err = tx.ExecContext(ctx, `INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status) VALUES(?,?,?,?,?,'waiting')`, runID, plan.mediaID, generation, step, requiredFlag)
+		maxAttempts := DefaultMaxAttempts(string(step))
+		result, err = tx.ExecContext(ctx, `INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status,max_attempts) VALUES(?,?,?,?,?,'waiting',?)`, runID, plan.mediaID, generation, step, requiredFlag, maxAttempts)
 		if err != nil {
 			return Run{}, fmt.Errorf("publication planner: insert %s step: %w", step, err)
 		}
@@ -263,7 +264,7 @@ VALUES(?,?,?,?, 'processing',?,?,?)`, plan.mediaID, generation, nullScanTask(pla
 		if !queueBacked(step) {
 			continue
 		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO post_ingest_task(media_id,scan_task_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(?,?,?,?,?,?,'waiting')`, plan.mediaID, nullScanTask(plan.scanTaskID), runID, stepID, generation, step)
+		_, err = tx.ExecContext(ctx, `INSERT INTO post_ingest_task(media_id,scan_task_id,ingest_run_id,ingest_step_id,generation,task_type,status,max_attempts) VALUES(?,?,?,?,?,?,'waiting',?)`, plan.mediaID, nullScanTask(plan.scanTaskID), runID, stepID, generation, step, maxAttempts)
 		if err != nil {
 			return Run{}, fmt.Errorf("publication planner: enqueue %s step: %w", step, err)
 		}

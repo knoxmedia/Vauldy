@@ -141,7 +141,7 @@ func TestActiveV1ReplacementNewEncryptionHidesVideoAndPhoto(t *testing.T) {
 }
 
 func TestValidateCurrentV2RejectsEmptyAndMismatchedSnapshots(t *testing.T) {
-	for _, tc := range []struct{ name, mutation string }{{"empty", `UPDATE media_ingest_run SET config_snapshot_json='{}'`}, {"required", `UPDATE media_ingest_step SET required=0 WHERE step_type='poster'`}, {"queue", `DELETE FROM post_ingest_task`}, {"dependency", `DELETE FROM media_ingest_step_dependency`}} {
+	for _, tc := range []struct{ name, mutation string }{{"empty", `UPDATE media_ingest_run SET config_snapshot_json='{}'`}, {"required", `UPDATE media_ingest_step SET required=0 WHERE step_type='poster'`}, {"dependency", `DELETE FROM media_ingest_step_dependency`}} {
 		t.Run(tc.name, func(t *testing.T) {
 			db := openPlannerTestDB(t)
 			_, mid, scan := seedPlannerMedia(t, db, "video", 0, 0, 0)
@@ -157,10 +157,97 @@ func TestValidateCurrentV2RejectsEmptyAndMismatchedSnapshots(t *testing.T) {
 	}
 }
 
+func TestValidateAggregateCurrentV2RepairsMissingPostIngestQueues(t *testing.T) {
+	db := openPlannerTestDB(t)
+	_, mid, scan := seedPlannerMedia(t, db, "video", 0, 0, 0)
+	run := planAndCommit(t, db, NewPlanner(PlanOptions{}), NewMedia{MediaID: mid, ScanTaskID: scan, FileType: "video"})
+	if _, err := db.Exec(`UPDATE media_ingest_step SET status='done',attempts=1,finished_at=CURRENT_TIMESTAMP WHERE run_id=? AND step_type='poster'`, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DELETE FROM post_ingest_task WHERE ingest_run_id=?`, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateAggregateCurrentV2(context.Background(), db); err != nil {
+		t.Fatalf("validate after missing queues: %v", err)
+	}
+	var posterStatus string
+	var posterAttempts, queues, steps int
+	if err := db.QueryRow(`SELECT status,attempts FROM post_ingest_task WHERE ingest_run_id=? AND task_type='poster'`, run.ID).Scan(&posterStatus, &posterAttempts); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM post_ingest_task WHERE ingest_run_id=?`, run.ID).Scan(&queues); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM media_ingest_step WHERE run_id=? AND step_type IN ('poster','thumbnail','preview','keyframe','subtitle','atrack','encrypt')`, run.ID).Scan(&steps); err != nil {
+		t.Fatal(err)
+	}
+	if posterStatus != "done" || posterAttempts != 1 || queues != steps || steps < 1 {
+		t.Fatalf("repaired poster=%s/%d queues=%d steps=%d", posterStatus, posterAttempts, queues, steps)
+	}
+}
+
+func TestReconcileOrphanFailedQueueStateReopensFalseFailedAndCancelsOptionalOrphans(t *testing.T) {
+	db := openPlannerTestDB(t)
+	_, mid, scan := seedPlannerMedia(t, db, "video", 0, 1, 0)
+	if _, err := db.Exec(`UPDATE library SET encrypted_assets_enabled=1 WHERE id=(SELECT library_id FROM media WHERE id=?)`, mid); err != nil {
+		t.Fatal(err)
+	}
+	run := planAndCommit(t, db, NewPlanner(PlanOptions{EncryptGlobal: true}), NewMedia{MediaID: mid, ScanTaskID: scan, FileType: "video"})
+	if _, err := db.Exec(`UPDATE media_ingest_step SET status='done',finished_at=CURRENT_TIMESTAMP WHERE run_id=? AND step_type='poster';
+UPDATE post_ingest_task SET status='done',finished_at=CURRENT_TIMESTAMP WHERE ingest_run_id=? AND task_type='poster';
+UPDATE media_ingest_run SET status='failed',error_message='required step exhausted',finished_at=CURRENT_TIMESTAMP WHERE id=?;
+UPDATE media SET publication_state='failed',publication_error='required step exhausted',ingest_generation=? WHERE id=?`, run.ID, run.ID, run.ID, run.Generation, mid); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := ReconcileOrphanFailedQueueState(context.Background(), db)
+	if err != nil || n < 1 {
+		t.Fatalf("reopen n=%d err=%v", n, err)
+	}
+	var runState, mediaState, encryptStatus string
+	if err := db.QueryRow(`SELECT status FROM media_ingest_run WHERE id=?`, run.ID).Scan(&runState); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT publication_state FROM media WHERE id=?`, mid).Scan(&mediaState); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT status FROM post_ingest_task WHERE ingest_run_id=? AND task_type='encrypt'`, run.ID).Scan(&encryptStatus); err != nil {
+		t.Fatal(err)
+	}
+	if runState != "processing" || mediaState != "processing" || encryptStatus != "waiting" {
+		t.Fatalf("run=%s media=%s encrypt=%s", runState, mediaState, encryptStatus)
+	}
+
+	db2, run2, media2 := aggregateFixture(t, "failed", 1, map[string]string{"poster": "done", "encrypt": "failed"})
+	if _, err := db2.Exec(`UPDATE media_ingest_run SET policy_version=2,error_message='encrypt exhausted',finished_at=CURRENT_TIMESTAMP WHERE id=?`, run2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db2.Exec(`UPDATE media SET publication_state='failed',publication_error='encrypt exhausted' WHERE id=?`, media2); err != nil {
+		t.Fatal(err)
+	}
+	res, err := db2.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status) VALUES(?,?,1,'preview',0,'waiting')`, run2, media2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previewStep, _ := res.LastInsertId()
+	if _, err := db2.Exec(`INSERT INTO post_ingest_task(media_id,ingest_run_id,ingest_step_id,generation,task_type,status,max_attempts) VALUES(?,?,?,1,'preview','waiting',3)`, media2, run2, previewStep); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReconcileOrphanFailedQueueState(context.Background(), db2); err != nil {
+		t.Fatal(err)
+	}
+	var previewStatus string
+	if err := db2.QueryRow(`SELECT status FROM post_ingest_task WHERE ingest_step_id=?`, previewStep).Scan(&previewStatus); err != nil {
+		t.Fatal(err)
+	}
+	if previewStatus != "cancelled" {
+		t.Fatalf("orphan preview=%s want cancelled", previewStatus)
+	}
+}
+
 func TestValidateCurrentV2RejectsExactQueueSemanticMismatches(t *testing.T) {
 	cases := []struct{ name, mutation string }{
 		{"post task type", `UPDATE post_ingest_task SET task_type='encrypt' WHERE task_type='poster'`},
-		{"post missing", `DELETE FROM post_ingest_task WHERE task_type='poster'`},
 		{"post extra wrong execution", `INSERT INTO post_ingest_task(media_id,scan_task_id,ingest_run_id,ingest_step_id,generation,task_type,status) SELECT media_id,scan_task_id,ingest_run_id,ingest_step_id,generation,'poster_repair',status FROM post_ingest_task WHERE task_type='poster'`},
 		{"post status", `UPDATE post_ingest_task SET status='running' WHERE task_type='poster'`},
 		{"post generation", `UPDATE post_ingest_task SET generation=generation+1 WHERE task_type='poster'`},
@@ -195,7 +282,18 @@ func TestValidateCurrentV2RejectsPrepareWrongTypeAndIdentity(t *testing.T) {
 			db := openPlannerTestDB(t)
 			_, mid, scan := seedPlannerMedia(t, db, "video", 0, 0, 1)
 			planner := NewPlanner(PlanOptions{PreparePlanner: &recordingPreparePlanner{}, Capabilities: NewCapabilityMatrix([]string{"prepare"})})
-			planAndCommit(t, db, planner, NewMedia{MediaID: mid, ScanTaskID: scan, FileType: "video"})
+			run := planAndCommit(t, db, planner, NewMedia{MediaID: mid, ScanTaskID: scan, FileType: "video"})
+			var stepID int64
+			var fileID string
+			if err := db.QueryRow(`SELECT id FROM media_ingest_step WHERE run_id=? AND step_type='prepare'`, run.ID).Scan(&stepID); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.QueryRow(`SELECT file_id FROM media WHERE id=?`, mid).Scan(&fileID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`INSERT INTO transcode_task(file_id,media_id,status,task_type,ingest_run_id,ingest_step_id,generation) VALUES(?,?,'waiting','pretranscode',?,?,1)`, fileID, mid, run.ID, stepID); err != nil {
+				t.Fatal(err)
+			}
 			_, _ = db.Exec(`PRAGMA foreign_keys=OFF`)
 			if _, err := db.Exec(tc.mutation); err != nil {
 				t.Fatal(err)

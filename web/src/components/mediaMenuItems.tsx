@@ -208,7 +208,6 @@ export function buildMediaMenuItems(
       { type: "divider" as const },
       { key: "refreshMetadata", label: t("components.media_menu.refresh_metadata") },
       { key: "analyze", label: t("components.media_menu.analyze") },
-      { key: "optimize", label: t("components.media_menu.optimize") },
       { type: "divider" as const },
       { key: "recognizeSubtitles", label: t("components.media_menu.recognize_subtitles") },
       { key: "proofreadSubtitles", label: t("components.media_menu.proofread_subtitles") },
@@ -256,7 +255,6 @@ export function buildMediaMenuItems(
           { key: "unmatch", label: t("components.media_menu.unmatch") },
         ]
       : []),
-    { key: "optimize", label: t("components.media_menu.optimize") },
     { type: "divider" as const },
     { key: "viewHistory", label: t("components.media_menu.view_history") },
     { key: "getInfo", label: t("components.media_menu.get_info_view") },
@@ -351,11 +349,6 @@ export function buildMediaMenuItems(
         case "analyze":
           transcodeAsync(r.id, "analyze")
             .then(() => message.success(t("components.media_menu.analyze_task_created")))
-            .catch(() => message.error(t("components.media_menu.operation_failed")));
-          break;
-        case "optimize":
-          transcodeAsync(r.id, "optimize")
-            .then(() => message.success(t("components.media_menu.optimize_task_created")))
             .catch(() => message.error(t("components.media_menu.operation_failed")));
           break;
         case "recognizeSubtitles":

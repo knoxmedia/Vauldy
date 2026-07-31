@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"knox-media/internal/caststore"
 	"knox-media/internal/metadatalib"
+	"knox-media/internal/publication"
 	"knox-media/internal/scraper"
 	"knox-media/internal/store"
 	"sort"
@@ -63,7 +64,7 @@ func applyScrapeCompletionEffectsTx(ctx context.Context, tx store.SQLExecutor, c
 		}
 	}
 	if e.PosterFallback && c.Generation.Valid {
-		_, err := tx.ExecContext(ctx, `INSERT INTO post_ingest_task(media_id,ingest_run_id,ingest_step_id,generation,task_type,status,last_error) VALUES(?,?,NULL,?,'poster_repair','waiting','scrape_poster_repair') ON CONFLICT(media_id,generation,task_type) DO NOTHING`, c.MediaID, c.RunID.Int64, c.Generation.Int64)
+		_, err := tx.ExecContext(ctx, `INSERT INTO post_ingest_task(media_id,ingest_run_id,ingest_step_id,generation,task_type,status,max_attempts,last_error) VALUES(?,?,NULL,?,'poster_repair','waiting',?,'scrape_poster_repair') ON CONFLICT(media_id,generation,task_type) DO NOTHING`, c.MediaID, c.RunID.Int64, c.Generation.Int64, publication.DefaultMaxAttempts("poster_repair"))
 		if err != nil {
 			return "", err
 		}

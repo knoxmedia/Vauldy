@@ -6,18 +6,24 @@ import (
 )
 
 type encryptFlight struct {
-	done chan struct{}
-	err  error
+	done      chan struct{}
+	operation string
+	err       error
+	stage     StagedMediaEncryption
 }
 
 // encryptInFlight deduplicates concurrent EncryptMedia runs per media id.
 var encryptInFlight sync.Map
 
 func acquireEncryptFlight(mediaID int64) (bool, *encryptFlight) {
+	return acquireEncryptFlightFor(mediaID, "media")
+}
+
+func acquireEncryptFlightFor(mediaID int64, operation string) (bool, *encryptFlight) {
 	if mediaID <= 0 {
 		return false, nil
 	}
-	flight := &encryptFlight{done: make(chan struct{})}
+	flight := &encryptFlight{done: make(chan struct{}), operation: operation}
 	actual, loaded := encryptInFlight.LoadOrStore(mediaID, flight)
 	if loaded {
 		return false, actual.(*encryptFlight)

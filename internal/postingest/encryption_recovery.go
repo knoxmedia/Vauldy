@@ -8,8 +8,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-
 	"time"
+
+	"knox-media/internal/storage"
 )
 
 const (
@@ -20,6 +21,11 @@ const (
 var reconcileRestoreQuarantinedPlaintext = restoreQuarantinedPlaintextWithOps
 var reconcileRestoreAfterMove = func() error { return nil }
 var reconcileRestoreAfterSync = func() error { return nil }
+var resolveEncryptionQuarantineRoot = encryptionQuarantineRoot
+
+func encryptionQuarantineRoot(source, preferred string) string {
+	return storage.QuarantineRootForSource(source, preferred)
+}
 
 func ReconcileEncryptionStages(ctx context.Context, db *sql.DB, roots EncryptionRecoveryRoots, limit int) (checked, cleaned int, retErr error) {
 	if db == nil {
@@ -68,7 +74,8 @@ func ReconcileEncryptionStages(ctx context.Context, db *sql.DB, roots Encryption
 		if resolveErr != nil {
 			return checked, cleaned, resolveErr
 		}
-		if !managedEncryptionPath(stageRoot, r.enc) || r.quarantine != "" && !managedEncryptionPath(roots.Quarantine, r.quarantine) {
+		quarantineRoot := resolveEncryptionQuarantineRoot(r.source, roots.Quarantine)
+		if !managedEncryptionPath(stageRoot, r.enc) || r.quarantine != "" && !managedEncryptionPath(quarantineRoot, r.quarantine) {
 			if _, err = db.ExecContext(ctx, `UPDATE media SET publication_state='failed',last_error='unsafe encryption recovery path' WHERE id=?`, r.media); err != nil {
 				return checked, cleaned, err
 			}
@@ -95,7 +102,7 @@ func ReconcileEncryptionStages(ctx context.Context, db *sql.DB, roots Encryption
 				retErr = errors.Join(retErr, errors.New("committed encryption recovery mismatch"))
 				continue
 			}
-			outcome, cleanupErr := cleanupCommittedEncryptionPlaintext(roots.Quarantine, r.media, r.generation, r.stage, r.quarantine, defaultEncryptionFileOps())
+			outcome, cleanupErr := cleanupCommittedEncryptionPlaintext(quarantineRoot, r.media, r.generation, r.stage, r.quarantine, defaultEncryptionFileOps())
 			if err = recordCommittedCleanupOutcome(ctx, db, r.stage, outcome, cleanupErr); err != nil {
 				return checked, cleaned, err
 			}
@@ -113,7 +120,7 @@ func ReconcileEncryptionStages(ctx context.Context, db *sql.DB, roots Encryption
 			quarantineInfo, quarantineErr := os.Stat(r.quarantine)
 			switch {
 			case sourceErr == nil && os.IsNotExist(quarantineErr):
-				actual, moveErr := quarantinePlaintext(r.source, roots.Quarantine, r.media, r.generation, r.stage)
+				actual, moveErr := quarantinePlaintext(r.source, quarantineRoot, r.media, r.generation, r.stage)
 				if moveErr != nil {
 					return checked, cleaned, moveErr
 				}
@@ -150,7 +157,7 @@ func ReconcileEncryptionStages(ctx context.Context, db *sql.DB, roots Encryption
 			}
 		}
 		if r.quarantine != "" {
-			outcome, restoreErr := reconcilePlaintextRestore(r.quarantine, r.source, roots.Quarantine, r.fp, r.media, r.generation, r.stage, defaultEncryptionFileOps())
+			outcome, restoreErr := reconcilePlaintextRestore(r.quarantine, r.source, quarantineRoot, r.fp, r.media, r.generation, r.stage, defaultEncryptionFileOps())
 			if restoreErr != nil {
 				if outcome == plaintextRestoreConflict || outcome == plaintextRestoreMissing || errors.Is(restoreErr, errUnsafeEncryptionQuarantinePath) {
 					marker := "restore_conflict"

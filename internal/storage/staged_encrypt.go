@@ -14,12 +14,14 @@ import (
 
 	"github.com/google/uuid"
 	kcrypto "knox-media/internal/crypto"
+	"knox-media/internal/publication"
 )
 
 type StagedMediaEncryption struct {
 	MediaID           int64
 	StageID           string
 	OriginalPath      string
+	SourceIdentity    string
 	SourceFingerprint string
 	EncPath           string
 	WrappedDEK        string
@@ -29,14 +31,287 @@ type StagedMediaEncryption struct {
 	CleanupPlaintext  bool
 }
 
+func (s *AssetEncryptor) resumeCheckpointBytes() int64 {
+	if s != nil && s.ResumeCheckpointBytes > 0 {
+		return s.ResumeCheckpointBytes
+	}
+	return EncryptResumeCheckpointBytes
+}
+
+type resumableEncryptOutput struct {
+	StageID    string
+	EncPath    string
+	WrappedDEK string
+	IV         string
+	BackupPath string
+	SHA256     string
+	Size       int64
+}
+
+type resumableEncryptTarget struct {
+	StageID    string
+	EncPath    string
+	BackupPath string
+}
+
+func (s *AssetEncryptor) encryptToPathResumable(
+	ctx context.Context,
+	mediaID, generation int64,
+	source, encryptSource, identity string,
+	plainSize int64,
+	kek []byte,
+	intendedEncPath string,
+	backupPath string,
+	freshTarget func() (resumableEncryptTarget, error),
+) (out resumableEncryptOutput, err error) {
+	out.BackupPath = backupPath
+	var (
+		plainOffset   int64
+		session       *kcrypto.EncryptResumeSession
+		resuming      bool
+		hadCheckpoint bool
+	)
+
+	prev, loadErr := LoadEncryptResume(ctx, s.DB, mediaID, generation)
+	if loadErr == nil &&
+		(prev.State == "encrypting" || prev.State == "staged") &&
+		prev.SourceIdentity == identity &&
+		prev.EncPath != "" &&
+		sameEncryptedPath(prev.EncPath, intendedEncPath) {
+		resumeOffset := prev.PlainOffset
+		if resumeOffset < 0 || resumeOffset > plainSize {
+			resumeOffset = 0
+		}
+		wantEnc := int64(kcrypto.EncHeaderSize) + resumeOffset
+		if st, stErr := os.Stat(prev.EncPath); stErr == nil && st.Size() >= wantEnc {
+			wrappedRaw, wErr := hex.DecodeString(prev.WrappedDEK)
+			ivRaw, iErr := hex.DecodeString(prev.IV)
+			if wErr == nil && iErr == nil {
+				session, err = kcrypto.RestoreEncryptResume(kek, wrappedRaw, ivRaw)
+				if err == nil {
+					out.StageID = prev.StageID
+					out.EncPath = prev.EncPath
+					out.WrappedDEK = prev.WrappedDEK
+					out.IV = prev.IV
+					plainOffset = resumeOffset
+					resuming = true
+					hadCheckpoint = prev.PlainOffset > 0 || prev.EncBytesWritten > 0 || prev.State == "staged"
+				}
+			}
+		}
+	}
+	if loadErr == nil && !resuming && prev.State != "abandoned" {
+		_ = AbandonEncryptResume(ctx, s.DB, mediaID, generation)
+	}
+
+	if !resuming {
+		session, err = kcrypto.BeginEncryptResume(kek)
+		if err != nil {
+			return out, err
+		}
+		target, targetErr := freshTarget()
+		if targetErr != nil {
+			return out, targetErr
+		}
+		out.StageID = target.StageID
+		out.EncPath = target.EncPath
+		if target.BackupPath != "" {
+			out.BackupPath = target.BackupPath
+		}
+		result := session.Result()
+		out.WrappedDEK = hex.EncodeToString(result.WrappedDEK)
+		out.IV = hex.EncodeToString(result.IV)
+	}
+
+	src, err := os.Open(encryptSource)
+	if err != nil {
+		return out, err
+	}
+	defer src.Close()
+
+	var dst *os.File
+	if resuming {
+		dst, err = os.OpenFile(out.EncPath, os.O_RDWR, 0o600)
+		if err != nil {
+			return out, err
+		}
+		wantEnc := int64(kcrypto.EncHeaderSize) + plainOffset
+		st, stErr := dst.Stat()
+		if stErr != nil {
+			_ = dst.Close()
+			return out, stErr
+		}
+		if st.Size() > wantEnc {
+			if err = dst.Truncate(wantEnc); err != nil {
+				_ = dst.Close()
+				return out, err
+			}
+		}
+		if _, err = dst.Seek(0, io.SeekStart); err != nil {
+			_ = dst.Close()
+			return out, err
+		}
+		if err = session.HashPrefix(dst, wantEnc); err != nil {
+			_ = dst.Close()
+			return out, err
+		}
+		if _, err = dst.Seek(wantEnc, io.SeekStart); err != nil {
+			_ = dst.Close()
+			return out, err
+		}
+	} else {
+		dst, err = os.OpenFile(out.EncPath, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+		if err != nil {
+			if out.BackupPath != "" {
+				_ = os.Rename(out.BackupPath, out.EncPath)
+			}
+			return out, err
+		}
+		if err = session.WriteHeader(dst); err != nil {
+			_ = dst.Close()
+			_ = os.Remove(out.EncPath)
+			if out.BackupPath != "" {
+				_ = os.Rename(out.BackupPath, out.EncPath)
+			}
+			return out, err
+		}
+	}
+
+	discardUndurable := func() {
+		if hadCheckpoint {
+			return
+		}
+		_ = os.Remove(out.EncPath)
+		if out.BackupPath != "" {
+			_ = os.Rename(out.BackupPath, out.EncPath)
+		}
+	}
+	syncDst := func() error {
+		if s.syncStagedFile != nil {
+			return s.syncStagedFile(dst)
+		}
+		return dst.Sync()
+	}
+	upsertProgress := func(offset int64, state string) error {
+		return UpsertEncryptResume(context.WithoutCancel(ctx), s.DB, EncryptResumeRow{
+			MediaID: mediaID, Generation: generation, StageID: out.StageID,
+			EncPath: out.EncPath, SourcePath: source, SourceIdentity: identity,
+			WrappedDEK: out.WrappedDEK, IV: out.IV, PlainOffset: offset,
+			EncBytesWritten: offset, State: state,
+		})
+	}
+	checkpointAndUpsert := func(offset int64, state string) error {
+		if err := syncDst(); err != nil {
+			return err
+		}
+		return upsertProgress(offset, state)
+	}
+
+	if _, err = src.Seek(plainOffset, io.SeekStart); err != nil {
+		_ = dst.Close()
+		discardUndurable()
+		return out, err
+	}
+
+	dirty := false
+	checkpoint := s.resumeCheckpointBytes()
+	for plainOffset < plainSize {
+		if err := ctx.Err(); err != nil {
+			if dirty {
+				_ = syncDst()
+			}
+			_ = upsertProgress(plainOffset, "encrypting")
+			_ = dst.Close()
+			discardUndurable()
+			return out, err
+		}
+		chunk := checkpoint
+		if remaining := plainSize - plainOffset; chunk > remaining {
+			chunk = remaining
+		}
+		if err = session.EncryptRange(ctx, src, dst, plainOffset, chunk); err != nil {
+			_ = syncDst()
+			_ = upsertProgress(plainOffset, "encrypting")
+			_ = dst.Close()
+			discardUndurable()
+			return out, err
+		}
+		dirty = true
+		plainOffset += chunk
+		if plainOffset == plainSize {
+			break
+		}
+		if err = checkpointAndUpsert(plainOffset, "encrypting"); err != nil {
+			_ = dst.Close()
+			discardUndurable()
+			return out, err
+		}
+		dirty = false
+		hadCheckpoint = true
+		if s.onEncryptCheckpoint != nil {
+			s.onEncryptCheckpoint(ctx, plainOffset)
+		}
+	}
+
+	syncErr := syncDst()
+	closeErr := dst.Close()
+	if syncErr != nil || closeErr != nil {
+		_ = os.Remove(out.EncPath)
+		if out.BackupPath != "" {
+			_ = os.Rename(out.BackupPath, out.EncPath)
+		}
+		return out, errors.Join(syncErr, closeErr)
+	}
+	if err := upsertProgress(plainOffset, "staged"); err != nil {
+		_ = os.Remove(out.EncPath)
+		if out.BackupPath != "" {
+			_ = os.Rename(out.BackupPath, out.EncPath)
+		}
+		return out, err
+	}
+	if out.BackupPath != "" {
+		if _, statErr := os.Stat(out.BackupPath); os.IsNotExist(statErr) {
+			out.BackupPath = ""
+		}
+	}
+	out.Size = int64(kcrypto.EncHeaderSize) + plainSize
+	out.SHA256 = hex.EncodeToString(session.Sum())
+	return out, nil
+}
+
 func (s *AssetEncryptor) StageMediaEncryption(ctx context.Context, mediaID int64) (stage StagedMediaEncryption, err error) {
 	if s == nil || s.DB == nil || s.Vault == nil {
 		return stage, errors.New("encrypted assets not configured")
 	}
-	var libraryID int64
+	leader, flight := acquireEncryptFlightFor(mediaID, "stage")
+	if !leader {
+		if s.onFlightJoined != nil {
+			s.onFlightJoined(mediaID)
+		}
+		if waitErr := waitEncryptFlight(ctx, flight); waitErr != nil {
+			return stage, waitErr
+		}
+		if flight.operation == "stage" {
+			return flight.stage, nil
+		}
+		if IsMediaEncrypted(s.DB, mediaID, "") {
+			return stage, ErrAlreadyEncrypted
+		}
+		return s.StageMediaEncryption(ctx, mediaID)
+	}
+	defer func() {
+		flight.stage = stage
+		finishEncryptFlight(mediaID, flight, err)
+	}()
+
+	if err := EnsureEncryptResumeSchema(s.DB); err != nil {
+		return stage, err
+	}
+
+	var libraryID, generation int64
 	var source, fileType, fileID string
 	var cleanup int
-	err = s.DB.QueryRowContext(ctx, `SELECT m.library_id,m.file_path,COALESCE(m.file_type,''),COALESCE(m.file_id,''),COALESCE(l.encrypted_assets_cleanup_plaintext,0) FROM media m JOIN library l ON l.id=m.library_id WHERE m.id=?`, mediaID).Scan(&libraryID, &source, &fileType, &fileID, &cleanup)
+	err = s.DB.QueryRowContext(ctx, `SELECT m.library_id,m.file_path,COALESCE(m.file_type,''),COALESCE(m.file_id,''),COALESCE(l.encrypted_assets_cleanup_plaintext,0),COALESCE(m.ingest_generation,0) FROM media m JOIN library l ON l.id=m.library_id WHERE m.id=?`, mediaID).Scan(&libraryID, &source, &fileType, &fileID, &cleanup, &generation)
 	if err != nil {
 		return stage, err
 	}
@@ -44,10 +319,31 @@ func (s *AssetEncryptor) StageMediaEncryption(ctx context.Context, mediaID int64
 	if source == "" {
 		return stage, errors.New("empty file path")
 	}
-	fp, err := EncryptionSourceFingerprint(source)
+	fp, err := publication.SourceFingerprintContext(ctx, source)
 	if err != nil {
 		return stage, fmt.Errorf("plain file missing: %w", err)
 	}
+	identity, err := QuickSourceIdentity(source)
+	if err != nil {
+		return stage, fmt.Errorf("plain file missing: %w", err)
+	}
+
+	encryptSource := source
+	prepCleanup := func() {}
+	if encryptRequiresISOFaststart(fileType, source) {
+		encryptSource, prepCleanup, _, err = s.resolveEncryptSource(ctx, mediaID, source, true)
+		if err != nil {
+			return stage, err
+		}
+	}
+	defer prepCleanup()
+
+	srcInfo, err := os.Stat(encryptSource)
+	if err != nil {
+		return stage, fmt.Errorf("plain file missing: %w", err)
+	}
+	plainSize := srcInfo.Size()
+
 	kek, err := s.Vault.GetKEK(ctx)
 	if err != nil {
 		return stage, err
@@ -67,45 +363,51 @@ func (s *AssetEncryptor) StageMediaEncryption(ctx context.Context, mediaID int64
 	if err != nil {
 		return stage, err
 	}
+
 	stageID := uuid.NewString()
-	dir := filepath.Join(base, fileType, "stages", stageID)
-	if err = os.MkdirAll(dir, 0700); err != nil {
-		return stage, err
-	}
-	encPath := filepath.Join(dir, fileID+".enc")
-	src, err := os.Open(source)
-	if err != nil {
-		return stage, err
-	}
-	defer src.Close()
-	dst, err := os.OpenFile(encPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-	if err != nil {
-		return stage, err
-	}
-	result, cryptErr := kcrypto.EncryptFileContext(ctx, src, dst, kek)
-	var syncErr error
-	if cryptErr == nil {
-		if s.syncStagedFile != nil {
-			syncErr = s.syncStagedFile(dst)
-		} else {
-			syncErr = dst.Sync()
+	stageDir := filepath.Join(base, fileType, "stages", stageID)
+	intendedEncPath := filepath.Join(stageDir, fileID+".enc")
+	reusingResumeTarget := false
+	if prev, loadErr := LoadEncryptResume(ctx, s.DB, mediaID, generation); loadErr == nil {
+		if _, parseErr := uuid.Parse(prev.StageID); parseErr == nil {
+			prevDir := filepath.Join(base, fileType, "stages", prev.StageID)
+			prevIntendedPath := filepath.Join(prevDir, fileID+".enc")
+			if sameEncryptedPath(prev.EncPath, prevIntendedPath) {
+				stageID = prev.StageID
+				stageDir = prevDir
+				intendedEncPath = prevIntendedPath
+				reusingResumeTarget = true
+			}
 		}
 	}
-	closeErr := dst.Close()
-	if cryptErr != nil {
-		_ = os.Remove(encPath)
-		return stage, cryptErr
-	}
-	if syncErr != nil || closeErr != nil {
-		_ = os.Remove(encPath)
-		return stage, errors.Join(syncErr, closeErr)
-	}
-	size, hash, err := EncryptionPathHash(encPath)
+
+	output, err := s.encryptToPathResumable(ctx, mediaID, generation, source, encryptSource, identity, plainSize, kek, intendedEncPath, "", func() (resumableEncryptTarget, error) {
+		if reusingResumeTarget {
+			stageID = uuid.NewString()
+			stageDir = filepath.Join(base, fileType, "stages", stageID)
+			intendedEncPath = filepath.Join(stageDir, fileID+".enc")
+		}
+		if err := os.MkdirAll(stageDir, 0o700); err != nil {
+			return resumableEncryptTarget{}, err
+		}
+		return resumableEncryptTarget{StageID: stageID, EncPath: intendedEncPath}, nil
+	})
 	if err != nil {
-		_ = os.Remove(encPath)
 		return stage, err
 	}
-	return StagedMediaEncryption{MediaID: mediaID, StageID: stageID, OriginalPath: source, SourceFingerprint: fp, EncPath: encPath, WrappedDEK: hex.EncodeToString(result.WrappedDEK), IV: hex.EncodeToString(result.IV), SHA256: hash, Size: size, CleanupPlaintext: cleanup == 1}, nil
+	return StagedMediaEncryption{
+		MediaID:           mediaID,
+		StageID:           output.StageID,
+		OriginalPath:      source,
+		SourceIdentity:    identity,
+		SourceFingerprint: fp,
+		EncPath:           output.EncPath,
+		WrappedDEK:        output.WrappedDEK,
+		IV:                output.IV,
+		SHA256:            output.SHA256,
+		Size:              output.Size,
+		CleanupPlaintext:  cleanup == 1,
+	}, nil
 }
 
 func EncryptionSourceFingerprint(path string) (string, error) {

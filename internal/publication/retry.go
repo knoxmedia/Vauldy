@@ -123,7 +123,7 @@ func RetryOptionalScrape(ctx context.Context, db *sql.DB, req OptionalScrapeRetr
 			var runID, generation int64
 			var mediaState, runState, stepType, stepStatus, queueStatus, queueError, stepError string
 			var attempts, queueAttempts, queueMaxAttempts, queueRound int
-			err := tx.QueryRowContext(attempt, `SELECT r.id,r.generation,m.publication_state,r.status,s.step_type,s.status,s.attempts,s.last_error,q.status,q.fail_count,3,q.message,q.retry_round FROM media m JOIN media_ingest_run r ON r.media_id=m.id AND r.generation=m.ingest_generation JOIN media_ingest_step s ON s.run_id=r.id AND s.media_id=m.id AND s.generation=r.generation JOIN scrape_task q ON q.ingest_step_id=s.id AND q.ingest_run_id=r.id AND q.media_id=m.id AND q.generation=r.generation WHERE m.id=? AND s.id=? AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL`, req.MediaID, req.StepID).Scan(&runID, &generation, &mediaState, &runState, &stepType, &stepStatus, &attempts, &stepError, &queueStatus, &queueAttempts, &queueMaxAttempts, &queueError, &queueRound)
+			err := tx.QueryRowContext(attempt, `SELECT r.id,r.generation,m.publication_state,r.status,s.step_type,s.status,s.attempts,s.last_error,q.status,q.fail_count,?,q.message,q.retry_round FROM media m JOIN media_ingest_run r ON r.media_id=m.id AND r.generation=m.ingest_generation JOIN media_ingest_step s ON s.run_id=r.id AND s.media_id=m.id AND s.generation=r.generation JOIN scrape_task q ON q.ingest_step_id=s.id AND q.ingest_run_id=r.id AND q.media_id=m.id AND q.generation=r.generation WHERE m.id=? AND s.id=? AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL`, DefaultNetworkMaxAttempts, req.MediaID, req.StepID).Scan(&runID, &generation, &mediaState, &runState, &stepType, &stepStatus, &attempts, &stepError, &queueStatus, &queueAttempts, &queueMaxAttempts, &queueError, &queueRound)
 			if errors.Is(err, sql.ErrNoRows) {
 				return ErrNoRetryableWork
 			}
@@ -138,7 +138,7 @@ func RetryOptionalScrape(ctx context.Context, db *sql.DB, req OptionalScrapeRetr
 			if _, err = tx.ExecContext(attempt, `INSERT INTO media_ingest_optional_retry_audit(media_id,run_id,step_id,generation,task_family,task_type,actor_id,reason,previous_queue_status,previous_step_status,previous_attempts,previous_queue_error,previous_step_error,retry_round) VALUES(?,?,?,?, 'scrape',?,?,?,?,?,?,?,?,?)`, req.MediaID, runID, req.StepID, generation, stepType, req.ActorID, req.Reason, queueStatus, stepStatus, attempts, queueError, stepError, nextRound); err != nil {
 				return err
 			}
-			r, err := tx.ExecContext(attempt, `UPDATE scrape_task SET status='waiting',fail_count=0,retry_round=?,progress=0,message='',lease_owner=NULL,lease_until=NULL,started_at=NULL,finished_at=NULL,available_at=CURRENT_TIMESTAMP WHERE ingest_step_id=? AND ingest_run_id=? AND generation=? AND status IN ('failed','cancelled') AND fail_count>=3 AND retry_round=?`, nextRound, req.StepID, runID, generation, queueRound)
+			r, err := tx.ExecContext(attempt, `UPDATE scrape_task SET status='waiting',fail_count=0,retry_round=?,progress=0,message='',lease_owner=NULL,lease_until=NULL,started_at=NULL,finished_at=NULL,available_at=CURRENT_TIMESTAMP WHERE ingest_step_id=? AND ingest_run_id=? AND generation=? AND status IN ('failed','cancelled') AND fail_count>=? AND retry_round=?`, nextRound, req.StepID, runID, generation, DefaultNetworkMaxAttempts, queueRound)
 			if err != nil {
 				return err
 			}

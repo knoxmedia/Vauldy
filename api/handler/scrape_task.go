@@ -40,7 +40,7 @@ var scrapeBeforeFailUpdate func() error
 var withImmediateScrapeTx = store.WithImmediateConnTx
 
 const (
-	maxScrapeTaskFailures = 3
+	maxScrapeTaskFailures = publication.DefaultNetworkMaxAttempts
 	scrapeWorkerInterval  = 20 * time.Second
 	scrapeWorkerBatchMin  = 5
 	scrapeWorkerBatchMax  = 20

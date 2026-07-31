@@ -120,6 +120,43 @@ func TestRequiredFirstAcrossPostIngestScrapePrepareRace(t *testing.T) {
 	}
 }
 
+func TestClaimEligibleAnySkipsUnclaimableOldestRequiredPoster(t *testing.T) {
+	db := openEligibilityDB(t)
+	_, err := db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l');
+INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state) VALUES
+ (10,1,'f10','video',1,'processing'),
+ (11,1,'f11','video',1,'processing');
+INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES
+ (20,10,1,'scan','processing','{}',2),
+ (21,11,1,'scan','processing','{}',2);
+INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES
+ (30,20,10,1,'poster',1,'waiting'),
+ (31,21,11,1,'encrypt',1,'waiting');
+INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status,available_at,created_at) VALUES
+ (40,10,20,30,1,'poster','waiting','2020-01-01','2020-01-01'),
+ (41,11,21,31,1,'encrypt','waiting','2020-01-02','2020-01-02')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := NewCapabilityMatrix([]string{"poster", "encrypt"})
+	got, err := ClaimEligibleAny(context.Background(), db, ClaimRequest{
+		Family: QueuePostIngest, TaskTypes: []string{"encrypt"}, Owner: "worker", Registry: registry,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.QueueID != 41 || got.TaskType != "encrypt" {
+		t.Fatalf("want encrypt queue 41, got=%+v", got)
+	}
+	var posterStatus string
+	if err := db.QueryRow(`SELECT status FROM post_ingest_task WHERE id=40`).Scan(&posterStatus); err != nil {
+		t.Fatal(err)
+	}
+	if posterStatus != "waiting" {
+		t.Fatalf("unclaimable oldest poster status=%s want waiting", posterStatus)
+	}
+}
+
 func TestPrepareClaimsParentOnceBeforeRenditions(t *testing.T) {
 	skipIfEnterprisePrepareUnavailable(t)
 	db := openEligibilityDB(t)

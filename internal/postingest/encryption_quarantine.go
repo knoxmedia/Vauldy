@@ -38,11 +38,42 @@ type encryptionFileOps struct {
 	syncFile  func(*os.File) error
 	syncDir   func(string) error
 	remove    func(string) error
+	rename    func(oldpath, newpath string) error
 	afterMove func() error
 }
 
 func defaultEncryptionFileOps() encryptionFileOps {
-	return encryptionFileOps{syncFile: func(f *os.File) error { return f.Sync() }, syncDir: syncEncryptionDir, remove: os.Remove}
+	return encryptionFileOps{syncFile: func(f *os.File) error { return f.Sync() }, syncDir: syncEncryptionDir, remove: os.Remove, rename: os.Rename}
+}
+
+func encryptionRename(ops encryptionFileOps, oldpath, newpath string) error {
+	if ops.rename != nil {
+		return ops.rename(oldpath, newpath)
+	}
+	return os.Rename(oldpath, newpath)
+}
+
+func isCrossDeviceRename(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.EXDEV) {
+		return true
+	}
+	var linkErr *os.LinkError
+	if errors.As(err, &linkErr) {
+		if errors.Is(linkErr.Err, syscall.EXDEV) {
+			return true
+		}
+		// Windows ERROR_NOT_SAME_DEVICE == 17 (same numeric value as EXDEV).
+		if runtime.GOOS == "windows" && errors.Is(linkErr.Err, syscall.Errno(17)) {
+			return true
+		}
+	}
+	if runtime.GOOS == "windows" && errors.Is(err, syscall.Errno(17)) {
+		return true
+	}
+	return false
 }
 func syncEncryptionDir(path string) error {
 	f, err := os.Open(path)
@@ -82,7 +113,7 @@ func quarantinePlaintextWithOps(source, root string, mediaID, generation int64, 
 		return "", errors.New("unsafe encryption quarantine source")
 	}
 	_ = os.Chmod(filepath.Dir(target), 0700)
-	if err = os.Rename(source, target); err == nil {
+	if err = encryptionRename(ops, source, target); err == nil {
 		_ = os.Chmod(target, 0600)
 		f, e := os.OpenFile(target, os.O_RDWR, 0)
 		if e == nil {
@@ -96,6 +127,9 @@ func quarantinePlaintextWithOps(source, root string, mediaID, generation int64, 
 			return target, e
 		}
 		return target, nil
+	}
+	if isCrossDeviceRename(err) {
+		return "", fmt.Errorf("encryption quarantine refuses cross-volume plaintext copy: %w", err)
 	}
 	tmp := target + ".tmp"
 	src, e := os.Open(source)
@@ -153,7 +187,7 @@ func restoreQuarantinedPlaintextWithOps(quarantine, source, root string, mediaID
 	if err = os.MkdirAll(filepath.Dir(source), 0755); err != nil {
 		return err
 	}
-	if err = os.Rename(qAbs, source); err == nil {
+	if err = encryptionRename(ops, qAbs, source); err == nil {
 		if ops.afterMove != nil {
 			if err = ops.afterMove(); err != nil {
 				return err

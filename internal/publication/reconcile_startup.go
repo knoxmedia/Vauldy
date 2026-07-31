@@ -81,6 +81,12 @@ func encryptionSelectionCompliantTx(ctx context.Context, q store.SQLExecutor, me
 	return samePath(selected, encPath) && wrapped != "" && iv != "", nil
 }
 func ValidateAggregateCurrentV2(ctx context.Context, db *sql.DB) error {
+	if _, err := RepairMissingQueueExecutions(ctx, db); err != nil {
+		return fmt.Errorf("publication v2 startup repair missing queues: %w", err)
+	}
+	if _, err := ReconcileOrphanFailedQueueState(ctx, db); err != nil {
+		return fmt.Errorf("publication v2 startup reconcile orphan failed queues: %w", err)
+	}
 	rows, err := db.QueryContext(ctx, `SELECT r.id FROM media_ingest_run r JOIN media m ON m.id=r.media_id AND m.ingest_generation=r.generation WHERE r.policy_version=2 AND r.superseded_at IS NULL ORDER BY r.id`)
 	if err != nil {
 		return err
@@ -109,6 +115,233 @@ func ValidateAggregateCurrentV2(ctx context.Context, db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+// RepairMissingQueueExecutions recreates 1:1 queue rows for current policy-v2 steps
+// that lost their post_ingest/scrape/transcode execution rows. Step status/attempts
+// are copied so terminal outcomes stay authoritative for aggregation.
+func RepairMissingQueueExecutions(ctx context.Context, db *sql.DB) (int, error) {
+	if db == nil {
+		return 0, errors.New("publication queue repair: database is required")
+	}
+	repaired := 0
+	_, err := store.WithImmediateConnTx(ctx, db, func(tx store.ImmediateConnTx) error {
+		n, e := repairMissingQueueExecutionsTx(ctx, tx)
+		repaired = n
+		return e
+	})
+	return repaired, err
+}
+
+func repairMissingQueueExecutionsTx(ctx context.Context, tx store.SQLExecutor) (int, error) {
+	prepareMissing := "0"
+	hasPrepareLink, err := publicationColumnExistsTx(ctx, tx, "transcode_task", "ingest_step_id")
+	if err != nil {
+		return 0, err
+	}
+	if hasPrepareLink {
+		prepareMissing = `(s.step_type='prepare' AND NOT EXISTS(SELECT 1 FROM transcode_task q WHERE q.ingest_step_id=s.id))`
+	}
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`SELECT s.id,s.run_id,s.media_id,s.generation,s.step_type,s.status,s.attempts,s.max_attempts,s.last_error,COALESCE(s.available_at,CURRENT_TIMESTAMP),s.started_at,s.finished_at,s.created_at,s.updated_at,r.scan_task_id
+FROM media_ingest_step s
+JOIN media_ingest_run r ON r.id=s.run_id
+JOIN media m ON m.id=s.media_id AND m.ingest_generation=s.generation
+WHERE r.policy_version=2 AND r.superseded_at IS NULL
+AND (
+  (s.step_type IN ('poster','thumbnail','preview','keyframe','subtitle','atrack','encrypt') AND NOT EXISTS(SELECT 1 FROM post_ingest_task p WHERE p.ingest_step_id=s.id))
+  OR (s.step_type='scrape' AND NOT EXISTS(SELECT 1 FROM scrape_task q WHERE q.ingest_step_id=s.id))
+  OR %s
+)
+ORDER BY s.id`, prepareMissing))
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	type missing struct {
+		stepID, runID, mediaID, generation          int64
+		stepType, status                            string
+		attempts, maxAttempts                       int
+		lastError                                   string
+		availableAt                                 string
+		startedAt, finishedAt, createdAt, updatedAt sql.NullString
+		scanTaskID                                  sql.NullInt64
+	}
+	var items []missing
+	for rows.Next() {
+		var item missing
+		if err = rows.Scan(&item.stepID, &item.runID, &item.mediaID, &item.generation, &item.stepType, &item.status, &item.attempts, &item.maxAttempts, &item.lastError, &item.availableAt, &item.startedAt, &item.finishedAt, &item.createdAt, &item.updatedAt, &item.scanTaskID); err != nil {
+			return 0, err
+		}
+		items = append(items, item)
+	}
+	if err = rows.Err(); err != nil {
+		return 0, err
+	}
+	repaired := 0
+	for _, item := range items {
+		switch StepType(item.stepType) {
+		case StepScrape:
+			res, e := tx.ExecContext(ctx, `INSERT INTO scrape_task(media_id,source,status,progress,fail_count,message,ingest_run_id,ingest_step_id,generation,available_at,started_at,finished_at,created_at)
+VALUES(?,'auto-scan',?,CASE WHEN ? IN ('done','failed','cancelled') THEN 100 ELSE 0 END,?,?,?,?,?,?,?,?,COALESCE(?,CURRENT_TIMESTAMP))
+ON CONFLICT(ingest_run_id,ingest_step_id,generation) DO NOTHING`, item.mediaID, item.status, item.status, item.attempts, item.lastError, item.runID, item.stepID, item.generation, item.availableAt, nullString(item.startedAt), nullString(item.finishedAt), nullString(item.createdAt))
+			if e != nil {
+				return repaired, fmt.Errorf("repair scrape step %d: %w", item.stepID, e)
+			}
+			n, _ := res.RowsAffected()
+			repaired += int(n)
+		case StepPrepare:
+			hasTaskType, e := publicationColumnExistsTx(ctx, tx, "transcode_task", "task_type")
+			if e != nil {
+				return repaired, e
+			}
+			if !hasTaskType {
+				// Community transcode_task has no prepare execution surface.
+				continue
+			}
+			var fileID string
+			if e := tx.QueryRowContext(ctx, `SELECT file_id FROM media WHERE id=?`, item.mediaID).Scan(&fileID); e != nil {
+				return repaired, fmt.Errorf("repair prepare step %d: %w", item.stepID, e)
+			}
+			res, e := tx.ExecContext(ctx, `INSERT INTO transcode_task(file_id,media_id,status,progress,error_message,task_type,ingest_run_id,ingest_step_id,generation,created_at,started_at,completed_at)
+VALUES(?,?,?,CASE WHEN ? IN ('done','failed','cancelled') THEN 100 ELSE 0 END,?,'pretranscode',?,?,?,COALESCE(?,CURRENT_TIMESTAMP),?,?)`, fileID, item.mediaID, item.status, item.status, item.lastError, item.runID, item.stepID, item.generation, nullString(item.createdAt), nullString(item.startedAt), nullString(item.finishedAt))
+			if e != nil {
+				return repaired, fmt.Errorf("repair prepare step %d: %w", item.stepID, e)
+			}
+			n, _ := res.RowsAffected()
+			repaired += int(n)
+		case StepPoster, StepThumbnail, StepPreview, StepKeyframe, StepSubtitle, StepAtrack, StepEncrypt:
+			// Rebind an orphaned same-(media,generation,type) row if present; else insert.
+			res, e := tx.ExecContext(ctx, `UPDATE post_ingest_task SET ingest_run_id=?,ingest_step_id=?,scan_task_id=COALESCE(scan_task_id,?),status=?,attempts=?,max_attempts=?,last_error=?,available_at=?,started_at=?,finished_at=?,updated_at=COALESCE(?,CURRENT_TIMESTAMP)
+WHERE media_id=? AND generation=? AND task_type=? AND (ingest_step_id IS NULL OR ingest_step_id<>?)`,
+				item.runID, item.stepID, nullInt64(item.scanTaskID), item.status, item.attempts, item.maxAttempts, item.lastError, item.availableAt, nullString(item.startedAt), nullString(item.finishedAt), nullString(item.updatedAt),
+				item.mediaID, item.generation, item.stepType, item.stepID)
+			if e != nil {
+				return repaired, fmt.Errorf("rebind %s step %d: %w", item.stepType, item.stepID, e)
+			}
+			if n, _ := res.RowsAffected(); n > 0 {
+				repaired += int(n)
+				continue
+			}
+			res, e = tx.ExecContext(ctx, `INSERT INTO post_ingest_task(media_id,scan_task_id,ingest_run_id,ingest_step_id,generation,task_type,status,attempts,max_attempts,last_error,available_at,started_at,finished_at,created_at,updated_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,COALESCE(?,CURRENT_TIMESTAMP),COALESCE(?,CURRENT_TIMESTAMP))`,
+				item.mediaID, nullInt64(item.scanTaskID), item.runID, item.stepID, item.generation, item.stepType, item.status, item.attempts, item.maxAttempts, item.lastError, item.availableAt, nullString(item.startedAt), nullString(item.finishedAt), nullString(item.createdAt), nullString(item.updatedAt))
+			if e != nil {
+				return repaired, fmt.Errorf("repair %s step %d: %w", item.stepType, item.stepID, e)
+			}
+			n, _ := res.RowsAffected()
+			repaired += int(n)
+		default:
+			return repaired, fmt.Errorf("repair unsupported step %s", item.stepType)
+		}
+	}
+	return repaired, nil
+}
+
+func nullString(v sql.NullString) any {
+	if !v.Valid {
+		return nil
+	}
+	return v.String
+}
+
+func nullInt64(v sql.NullInt64) any {
+	if !v.Valid {
+		return nil
+	}
+	return v.Int64
+}
+
+// ReconcileOrphanFailedQueueState fixes current generations that were marked failed
+// while required work is still waiting (reopen), and cancels optional waiting queues
+// left on genuinely terminal failed/cancelled generations.
+func ReconcileOrphanFailedQueueState(ctx context.Context, db *sql.DB) (int, error) {
+	if db == nil {
+		return 0, errors.New("publication orphan reconcile: database is required")
+	}
+	changed := 0
+	_, err := store.WithImmediateConnTx(ctx, db, func(tx store.ImmediateConnTx) error {
+		n, e := reconcileOrphanFailedQueueStateTx(ctx, tx)
+		changed = n
+		return e
+	})
+	return changed, err
+}
+
+func reconcileOrphanFailedQueueStateTx(ctx context.Context, tx store.SQLExecutor) (int, error) {
+	changed := 0
+	res, err := tx.ExecContext(ctx, `UPDATE media_ingest_run SET status='processing',error_message='',finished_at=NULL,updated_at=CURRENT_TIMESTAMP
+WHERE policy_version=2 AND superseded_at IS NULL AND status='failed'
+AND EXISTS(SELECT 1 FROM media m WHERE m.id=media_ingest_run.media_id AND m.ingest_generation=media_ingest_run.generation)
+AND EXISTS(SELECT 1 FROM media_ingest_step s WHERE s.run_id=media_ingest_run.id AND s.required=1 AND s.status='waiting')
+AND NOT EXISTS(SELECT 1 FROM media_ingest_step s WHERE s.run_id=media_ingest_run.id AND s.required=1 AND s.status IN ('failed','cancelled'))`)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	changed += int(n)
+	if n > 0 {
+		if _, err = tx.ExecContext(ctx, `UPDATE media SET publication_state='processing',publication_error=''
+WHERE publication_state='failed' AND id IN (
+  SELECT r.media_id FROM media_ingest_run r
+  WHERE r.policy_version=2 AND r.superseded_at IS NULL AND r.status='processing' AND r.finished_at IS NULL
+  AND media.ingest_generation=r.generation
+  AND EXISTS(SELECT 1 FROM media_ingest_step s WHERE s.run_id=r.id AND s.required=1 AND s.status='waiting')
+  AND NOT EXISTS(SELECT 1 FROM media_ingest_step s WHERE s.run_id=r.id AND s.required=1 AND s.status IN ('failed','cancelled'))
+)`); err != nil {
+			return changed, err
+		}
+	}
+
+	const orphanOptionalCancel = "cancelled: orphaned on failed generation"
+	res, err = tx.ExecContext(ctx, `UPDATE media_ingest_step SET status='cancelled',lease_owner=NULL,lease_until=NULL,
+last_error=CASE WHEN TRIM(COALESCE(last_error,''))='' THEN ? ELSE last_error END,
+finished_at=COALESCE(finished_at,CURRENT_TIMESTAMP),updated_at=CURRENT_TIMESTAMP
+WHERE required=0 AND status='waiting' AND run_id IN (
+  SELECT r.id FROM media_ingest_run r
+  JOIN media m ON m.id=r.media_id AND m.ingest_generation=r.generation
+  WHERE r.policy_version=2 AND r.superseded_at IS NULL AND r.status IN ('failed','cancelled')
+  AND NOT EXISTS(SELECT 1 FROM media_ingest_step s WHERE s.run_id=r.id AND s.required=1 AND s.status='waiting')
+  AND EXISTS(SELECT 1 FROM media_ingest_step s WHERE s.run_id=r.id AND s.required=1 AND s.status IN ('failed','cancelled'))
+)`, orphanOptionalCancel)
+	if err != nil {
+		return changed, err
+	}
+	if n, _ = res.RowsAffected(); n > 0 {
+		changed += int(n)
+	}
+	res, err = tx.ExecContext(ctx, `UPDATE post_ingest_task SET status='cancelled',lease_owner=NULL,lease_until=NULL,
+last_error=CASE WHEN TRIM(COALESCE(last_error,''))='' THEN ? ELSE last_error END,
+finished_at=COALESCE(finished_at,CURRENT_TIMESTAMP),updated_at=CURRENT_TIMESTAMP
+WHERE status='waiting' AND ingest_step_id IN (
+  SELECT s.id FROM media_ingest_step s
+  JOIN media_ingest_run r ON r.id=s.run_id
+  JOIN media m ON m.id=r.media_id AND m.ingest_generation=r.generation
+  WHERE s.required=0 AND s.status='cancelled' AND s.last_error=?
+  AND r.policy_version=2 AND r.superseded_at IS NULL AND r.status IN ('failed','cancelled')
+)`, orphanOptionalCancel, orphanOptionalCancel)
+	if err != nil {
+		return changed, err
+	}
+	if n, _ = res.RowsAffected(); n > 0 {
+		changed += int(n)
+	}
+	res, err = tx.ExecContext(ctx, `UPDATE scrape_task SET status='cancelled',lease_owner=NULL,lease_until=NULL,
+message=CASE WHEN TRIM(COALESCE(message,''))='' THEN ? ELSE message END,
+progress=100,finished_at=COALESCE(finished_at,CURRENT_TIMESTAMP)
+WHERE status IN ('waiting','failed') AND ingest_step_id IN (
+  SELECT s.id FROM media_ingest_step s
+  JOIN media_ingest_run r ON r.id=s.run_id
+  JOIN media m ON m.id=r.media_id AND m.ingest_generation=r.generation
+  WHERE s.required=0 AND s.step_type='scrape' AND s.status='cancelled' AND s.last_error=?
+  AND r.policy_version=2 AND r.superseded_at IS NULL AND r.status IN ('failed','cancelled')
+)`, orphanOptionalCancel, orphanOptionalCancel)
+	if err != nil {
+		return changed, err
+	}
+	if n, _ = res.RowsAffected(); n > 0 {
+		changed += int(n)
+	}
+	return changed, nil
 }
 
 type stepValidationRow struct {
