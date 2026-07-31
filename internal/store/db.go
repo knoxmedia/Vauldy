@@ -826,8 +826,10 @@ func OpenSQLiteContext(ctx context.Context, path string) (opened *sql.DB, return
 		db.SetMaxIdleConns(1)
 	} else {
 		// WAL allows concurrent readers while bounding lock contention.
-		db.SetMaxOpenConns(8)
-		db.SetMaxIdleConns(4)
+		// Encrypt / post-ingest workers + API share this pool; 8 saturated easily
+		// under USB SQLite write load and surfaces as context deadline exceeded.
+		db.SetMaxOpenConns(24)
+		db.SetMaxIdleConns(8)
 	}
 	db.SetConnMaxLifetime(0)
 	if err := db.PingContext(ctx); err != nil {

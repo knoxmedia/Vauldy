@@ -67,12 +67,15 @@ func handleScanCancelled(ctx context.Context, taskID int64, persist cancelScanPe
 	return err
 }
 func main() {
+	// 初始化全局 zap 日志，进程退出时刷盘。
 	zlog := zapglobal.MustReplaceGlobals()
 	defer func() { _ = zlog.Sync() }()
 
+	// 监听 SIGINT/SIGTERM，作为整机优雅关停的根 context。
 	serverCtx, serverCancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer serverCancel()
 
+	// 解析配置路径 → 确保配置文件存在 → 加载并校验配置 → 解析可执行文件路径 → 创建数据目录。
 	cfgPath := config.ResolveConfigPath()
 	cfgPath, err := config.EnsureConfigFile(cfgPath)
 	if err != nil {
@@ -86,7 +89,8 @@ func main() {
 	if err := cfg.EnsureDirs(); err != nil {
 		log.Fatalf("dirs: %v", err)
 	}
-	// (1) Database, metrics, and validated configuration. Configuration is validated above; OpenSQLite lives here rather than app.New.
+
+	// (1) 打开 SQLite、记录构建/库身份信息，并写入默认用户。
 	db, err := store.OpenSQLiteContext(serverCtx, cfg.Data.DB)
 	if err != nil {
 		log.Fatalf("db: %v", err)
@@ -104,10 +108,12 @@ func main() {
 	log.Printf("build marker: no_audio_master_patch=v1")
 	sqliteMetrics := &store.SQLiteMetrics{}
 
+	// 空库时创建默认 admin/viewer；旧库补齐 viewer。
 	if err := seedUsers(db); err != nil {
 		log.Fatalf("seed: %v", err)
 	}
 
+	// 组装应用上下文，探测可用硬件加速并写入系统默认值。
 	application := &app.App{Config: cfg, ConfigPath: cfgPath, DB: db}
 	application.AvailableHardwareAcceleration = hwenc.ListAvailableHardwareAcceleration(cfg.FFmpeg.FFmpegPath)
 	if err := handler.EnsureHardwareAccelDefaults(db, cfg.FFmpeg.FFmpegPath, application.AvailableHardwareAcceleration); err != nil {
@@ -121,13 +127,15 @@ func main() {
 			hwenc.DetectHWAccel(cfg.FFmpeg.FFmpegPath),
 		)
 	}
-	// (2) Vault, derived storage, and domain workers.
-	transcodeSettings := loadSystemOptionsTranscodeSettings(db)
-	keyVault, assetEnc := storage.NewAssetEncryptorFromConfig(cfg, db)
-	derivedStore := storage.NewDerivedAssetStoreFromConfig(cfg, db, keyVault)
-	worker := transcode.NewWorker(db, cfg.FFmpeg.FFmpegPath, cfg.Data.Transcode)
-	packageWorker := transcode.NewPackageWorker(db, cfg, keyVault)
+
+	// (2) 密钥库/派生资产存储，以及转码、预览、字幕等域内 Worker。
+	transcodeSettings := loadSystemOptionsTranscodeSettings(db)                   // 从 system_options 读取转码/硬编设置
+	keyVault, assetEnc := storage.NewAssetEncryptorFromConfig(cfg, db)            // 媒体加密密钥库与资产加密器
+	derivedStore := storage.NewDerivedAssetStoreFromConfig(cfg, db, keyVault)     // 派生资产（封面/预览等）存储
+	worker := transcode.NewWorker(db, cfg.FFmpeg.FFmpegPath, cfg.Data.Transcode)  // 常规转码 Worker
+	packageWorker := transcode.NewPackageWorker(db, cfg, keyVault)                // DRM/打包 Worker
 	go func() {
+		// 启动时修复历史损坏的 DRM init 文件。
 		scanned, fixed, err := packageWorker.HealLegacyInitFiles()
 		if err != nil {
 			log.Printf("drm startup self-check failed: %v", err)
@@ -139,13 +147,14 @@ func main() {
 			log.Printf("drm startup self-check complete: scanned=%d fixed=0", scanned)
 		}
 	}()
-	previewWorker := preview.NewWorker(db, keyVault, derivedStore, cfg.FFmpeg.FFmpegPath, cfg.Data.Preview)
+	previewWorker := preview.NewWorker(db, keyVault, derivedStore, cfg.FFmpeg.FFmpegPath, cfg.Data.Preview) // 视频预览图提取
 	ocrScript := strings.TrimSpace(cfg.Subtitle.GraphicalOCR.ScriptPath)
 	if ocrScript == "" {
 		if abs, err := filepath.Abs(filepath.Join(filepath.Dir(cfgPath), "tools", "subtitle_ocr", "bitmap_subtitle_ocr.py")); err == nil {
 			ocrScript = abs
 		}
 	}
+	// 字幕服务：提取/ASR/OCR/校对等。
 	subSvc := subtitle.NewService(db, keyVault, derivedStore, filepath.Dir(cfgPath), cfg.FFmpeg.FFmpegPath, cfg.FFmpeg.FFprobePath, cfg.Data.Subtitle, subtitle.ASRConfig{
 		Provider:    cfg.Subtitle.ASR.Provider,
 		WhisperPath: cfg.Subtitle.ASR.WhisperPath,
@@ -163,36 +172,39 @@ func main() {
 		MkvmergePath:   cfg.Subtitle.GraphicalOCR.MkvmergePath,
 	})
 	subSvc.AIProofread = cfg.SubtitleAIProofreadEnabled()
-	up := &upload.Service{UploadDir: cfg.Data.Upload, ChunksDir: cfg.Data.Chunks}
-	atrackWorker := atrack.NewWorker(db, keyVault, derivedStore, cfg.FFmpeg.FFmpegPath, cfg.FFmpeg.FFprobePath, cfg.Data.ATracks)
-	keyframeWorker := keyframe.NewWorker(db, keyVault, derivedStore, cfg.FFmpeg.FFprobePath, cfg.Data.Keyframes)
+	up := &upload.Service{UploadDir: cfg.Data.Upload, ChunksDir: cfg.Data.Chunks} // 分片上传服务
+	atrackWorker := atrack.NewWorker(db, keyVault, derivedStore, cfg.FFmpeg.FFmpegPath, cfg.FFmpeg.FFprobePath, cfg.Data.ATracks) // 音轨提取
+	keyframeWorker := keyframe.NewWorker(db, keyVault, derivedStore, cfg.FFmpeg.FFprobePath, cfg.Data.Keyframes)                 // 关键帧索引
 	lyricWorkDir := filepath.Join(cfg.Data.Dir, "lyrics")
-	lyricWorker := lyrictask.NewWorker(db, derivedStore, lyricWorkDir, cfg.FFmpeg.FFprobePath, subSvc)
+	lyricWorker := lyrictask.NewWorker(db, derivedStore, lyricWorkDir, cfg.FFmpeg.FFprobePath, subSvc) // 歌词任务
 	photoClassifyWorker := photoclass.NewWorker(db, keyVault, filepath.Dir(cfgPath), cfg.FFmpeg.FFmpegPath, cfg.Data.Preview, func() config.PhotoClassifyConfig {
 		return cfg.PhotoClassify
-	})
+	}) // 照片分类
+
+	// JIT 即时转码：Redis 调度器 + 无 Redis 的 session 管理器（后者为当前主路径）。
 	redisAddr := strings.TrimSpace(os.Getenv("KNOX_MEDIA_REDIS_ADDR"))
 	if redisAddr == "" {
 		redisAddr = "127.0.0.1:6379"
 	}
 	instantStorage := cfg.Data.Transcode
 	instantRedis := redis.NewClient(&redis.Options{Addr: redisAddr})
-	jitmetrics.StartJITMetricsWriters(context.Background(), instantRedis, 12*time.Second)
+	jitmetrics.StartJITMetricsWriters(context.Background(), instantRedis, 12*time.Second) // 周期性写入 JIT 指标
 	instantScheduler := scheduler.NewScheduler(
 		instantRedis,
 		scheduler.NewLocalStorage(instantStorage),
-	)
+	) // 基于 Redis 的即时转码任务调度
 	instantScheduler.SetHLSMultiAudioEnabled(cfg.HLSMultiAudioEnabled())
 	instantScheduler.SetHLSContinuous(cfg.JITContinuousHLSEnabled())
 
-	// New Redis-free session manager (clears dataDir/jit from previous runs).
+	// 无 Redis 的 JIT session 管理器（清理上次残留的 dataDir/jit）。
 	sessionMgr, err := jitsession.NewManager(cfg.FFmpeg.FFmpegPath, cfg.FFmpeg.FFprobePath, cfg.Data.Dir, cfg.Data.Keyframes, db, keyVault)
 	if err != nil {
 		log.Fatalf("jit session manager: %v", err)
 	}
-	storage.SetMediaPlaintextBusy(sessionMgr.HasActiveMedia)
-	go storage.KickPendingPlaintextCleanups(db)
+	storage.SetMediaPlaintextBusy(sessionMgr.HasActiveMedia) // 有活跃 JIT session 时禁止清理明文
+	go storage.KickPendingPlaintextCleanups(db)              // 后台清理待删除明文
 
+	// 旧版 Redis 切片/转码 Worker；仅在 Redis 可达时启动。
 	instantSliceWorker := sliceworker.NewSliceWorker(&sliceworker.Config{
 		RedisAddr:   redisAddr,
 		StoragePath: instantStorage,
@@ -210,7 +222,6 @@ func main() {
 		HLSContinuousEnabled: cfg.JITContinuousHLSEnabled(),
 		VideoEncoder:         string(transcodeSettings.EffectiveHWEncoderID()),
 	})
-	// Redis-free session JIT replaces these; only start old workers if Redis is available.
 	redisAvailable := false
 	if _, err := instantRedis.Ping(context.Background()).Result(); err == nil {
 		redisAvailable = true
@@ -224,10 +235,10 @@ func main() {
 
 	var ffprobeExtra []string
 	if cfg.LibraryScanFastFFprobe() {
-		ffprobeExtra = ffprobe.ScanProbeExtraFast()
+		ffprobeExtra = ffprobe.ScanProbeExtraFast() // 扫描时使用更快的 ffprobe 参数
 	}
 	mediaRoot := filepath.Dir(cfgPath)
-	docCoverWorker := doccover.NewWorker(doccover.WorkerConfig{
+	docCoverWorker := doccover.NewWorker(doccover.WorkerConfig{ // 文档封面生成
 		DB:         db,
 		Vault:      keyVault,
 		Derived:    derivedStore,
@@ -237,23 +248,24 @@ func main() {
 		DocTrans:   cfg.DocTrans,
 		TimeoutSec: cfg.DocTransTimeoutSeconds,
 	})
-	// (3) Shared post-ingest queue, enqueuer, seven adapters, and dispatcher.
+
+	// (3) 入库后处理：能力矩阵、队列、入队器、七类适配器、分发器；企业模块与 Publication V2 启动编排。
 	publicationSteps := []string{"poster", "poster_repair", "thumbnail", "preview", "keyframe", "subtitle", "atrack", "encrypt", "scrape"}
 	if coreiface.IngestPreparePlannerHandle() != nil {
 		publicationSteps = append(publicationSteps, "prepare")
 	}
-	publicationCapabilities := publication.NewCapabilityMatrix(publicationSteps)
+	publicationCapabilities := publication.NewCapabilityMatrix(publicationSteps) // 本进程支持的发布阶段
 	hostname, err := os.Hostname()
 	if err != nil || strings.TrimSpace(hostname) == "" {
 		hostname = "unknown-host"
 	}
 	processID := fmt.Sprintf("%s-%d-%s", hostname, os.Getpid(), uuid.NewString())
 	queueOwner := "postingest-" + processID
-	postIngestQueue := postingest.NewQueue(db, queueOwner, sqliteMetrics, publicationCapabilities)
-	postIngestEnqueuer := postingest.NewEnqueuer(db, cfg, sqliteMetrics)
+	postIngestQueue := postingest.NewQueue(db, queueOwner, sqliteMetrics, publicationCapabilities) // 入库后任务队列（租约归属本进程）
+	postIngestEnqueuer := postingest.NewEnqueuer(db, cfg, sqliteMetrics)                           // API/扫描侧入队入口
 	thumbnailWorker := &postingest.LocalThumbnailWorker{DB: db, Vault: keyVault, Derived: derivedStore, FFmpegPath: cfg.FFmpeg.FFmpegPath, PreviewDir: cfg.Data.Preview}
 	posterRunner := &postingest.LocalPosterRunner{DB: db, Vault: keyVault, Derived: derivedStore, FFmpegPath: cfg.FFmpeg.FFmpegPath, FFprobePath: cfg.FFmpeg.FFprobePath, UploadDir: cfg.Data.Upload}
-	adapters := postingest.AdapterSet{
+	adapters := postingest.AdapterSet{ // 将队列任务路由到各域 Worker
 		Thumbnail: postingest.NewThumbnailAdapter(db, thumbnailWorker),
 		Poster:    postingest.NewPosterAdapter(db, cfg.Data.Upload, derivedStore, posterRunner),
 		Preview:   postingest.NewPreviewAdapter(db, previewWorker),
@@ -263,31 +275,33 @@ func main() {
 		Encrypt:   postingest.NewEncryptAdapter(assetEnc),
 	}
 	dispatcherOptions := buildDispatcherOptions(cfg, queueOwner)
-	dispatcher, err := postingest.NewDispatcher(postIngestQueue, adapters, dispatcherOptions)
+	dispatcher, err := postingest.NewDispatcher(postIngestQueue, adapters, dispatcherOptions) // 按并发上限认领并执行队列任务
 	if err != nil {
 		log.Fatalf("post-ingest dispatcher: %v", err)
 	}
 	dispatcherDone := make(chan error, 1)
 
-	preparePlanner := coreiface.IngestPreparePlannerHandle()
+	preparePlanner := coreiface.IngestPreparePlannerHandle() // 企业版 prepare 阶段规划器（社区版可为 nil）
 
 	publicationPlanner := publication.NewPlanner(publication.PlanOptions{
 		SubtitleAuto: cfg.SubtitleAutoOnScan(), ATrackAuto: cfg.ATrackAutoOnScan(),
 		EncryptGlobal: cfg.EncryptedAssetsEnabled(), PreparePlanner: preparePlanner, Capabilities: publicationCapabilities,
-	})
+	}) // 决定新媒体应排队哪些发布阶段
 
-	startupReady := make(chan struct{})
+	startupReady := make(chan struct{}) // 关闭后表示可接受扫描/监控等提交源
 	startupRoots := StartupRecoveryRoots{Encryption: postingest.EncryptionRecoveryRoots{Quarantine: assetEnc.EncryptionPrivateRoot(), Resolver: assetEnc}, Thumbnail: postingest.ThumbnailRecoveryRoots{Preview: filepath.Join(cfg.Data.Preview, "photos"), Derived: filepath.Join(cfg.Data.Dir, ".derived")}, Poster: postingest.PosterRecoveryRoots{Upload: cfg.Data.Upload, Derived: filepath.Join(cfg.Data.Dir, ".derived")}, ScrapeArtwork: cfg.Data.MetadataLibrary}
 	enterpriseCtx, enterpriseCancel := context.WithCancel(serverCtx)
 	defer enterpriseCancel()
 	for _, mod := range coreiface.EnterpriseModules {
+		// 初始化企业模块（license/pretranscode 等经 blank import 注册）。
 		if err := mod.Init(enterpriseCtx, coreiface.ModuleDeps{DB: db, Config: cfg, Vault: keyVault, TranscodeDir: cfg.Data.Transcode, FFmpegPath: cfg.FFmpeg.FFmpegPath, FFprobePath: cfg.FFmpeg.FFprobePath, Capabilities: publicationCapabilities}); err != nil {
 			log.Fatalf("enterprise module %s init failed: %v", mod.Name(), err)
 		}
 	}
-	preparePlanner = coreiface.IngestPreparePlannerHandle()
+	preparePlanner = coreiface.IngestPreparePlannerHandle() // Init 后重新获取 prepare 句柄
 	publicationResources := serverPublicationResources{Vault: keyVault, Encryptor: assetEnc, Derived: derivedStore, PosterRoot: cfg.Data.Upload, ThumbnailRoot: filepath.Join(cfg.Data.Preview, "photos")}
 	publicationPlanner = publication.NewPlanner(publication.PlanOptions{SubtitleAuto: cfg.SubtitleAutoOnScan(), ATrackAuto: cfg.ATrackAutoOnScan(), EncryptGlobal: cfg.EncryptedAssetsEnabled(), PreparePlanner: preparePlanner, Capabilities: publicationCapabilities, EncryptionValidator: publicationResources})
+	// Publication V2 启动：预检 → 恢复产物/租约 → 迁移 V1 → 校验 → 启动分发器/企业 Worker → 放开提交源。
 	warnings, err := PreparePublicationV2Startup(serverCtx, publicationV2StartupHooks{
 		Preflight: func(ctx context.Context) ([]string, error) {
 			return publication.PreflightPublicationV2(ctx, db, publicationPlanner, publicationCapabilities, publicationResources)
@@ -301,7 +315,7 @@ func main() {
 		ValidateAggregateV2: func(ctx context.Context) error { return publication.ValidateAggregateCurrentV2(ctx, db) },
 		StartClaimers: func() {
 			go func() {
-				err := dispatcher.Start(serverCtx)
+				err := dispatcher.Start(serverCtx) // 开始认领并执行入库后任务
 				dispatcherDone <- err
 				if err != nil && serverCtx.Err() == nil {
 					log.Printf("post-ingest dispatcher stopped: %v", err)
@@ -310,11 +324,11 @@ func main() {
 			}()
 			for _, mod := range coreiface.EnterpriseModules {
 				if starter, ok := mod.(interface{ StartWorkers(context.Context) }); ok {
-					starter.StartWorkers(enterpriseCtx)
+					starter.StartWorkers(enterpriseCtx) // 启动企业模块后台 Worker
 				}
 			}
 		},
-		StartSubmissionSources: func() { close(startupReady) },
+		StartSubmissionSources: func() { close(startupReady) }, // 允许 Handler/监控开始提交任务
 	})
 	if err != nil {
 		log.Fatalf("publication v2 startup: %v", err)
@@ -324,6 +338,7 @@ func main() {
 	}
 	if cfg.EncryptedAssetsEnabled() {
 		go func() {
+			// 将仍待加密的媒体补入加密队列。
 			if err := postingest.EnqueuePendingMediaEncryption(serverCtx, db, func(ctx context.Context, mediaID int64, scanTaskID *int64, _ postingest.TaskType) (bool, error) {
 				return postIngestQueue.Enqueue(ctx, mediaID, scanTaskID, postingest.TaskEncrypt)
 			}); err != nil && serverCtx.Err() == nil {
@@ -331,7 +346,8 @@ func main() {
 			}
 		}()
 	}
-	// (4) Scanner dependencies and the process-wide scan coordinator.
+
+	// (4) 媒体库扫描器与进程级扫描协调器（租约、心跳、发现回调）。
 	sc := &scanner.Scanner{
 		DB:            db,
 		Vault:         keyVault,
@@ -341,22 +357,22 @@ func main() {
 		CleanupRoots:  []string{cfg.Data.Dir, cfg.Data.Preview},
 		FFprobeExtra:  ffprobeExtra,
 	}
-	sc.OnDocumentScanned = func(mediaID int64) { docCoverWorker.Enqueue(mediaID) }
+	sc.OnDocumentScanned = func(mediaID int64) { docCoverWorker.Enqueue(mediaID) } // 扫到文档时排队生成封面
 	coordinator, err := scancoord.New(db, scancoord.Options{
 		LeaseDuration: 60 * time.Second, HeartbeatInterval: 20 * time.Second,
 		OwnerInstanceID: "scancoord-" + processID, Scanner: sc, Metrics: sqliteMetrics,
 
-		OnMediaDiscoveredTx: scancoord.MediaDiscoveredTxFunc(postingest.NewScanMediaDiscoveredTxCallback(publicationPlanner)),
+		OnMediaDiscoveredTx: scancoord.MediaDiscoveredTxFunc(postingest.NewScanMediaDiscoveredTxCallback(publicationPlanner)), // 事务内规划发布阶段
 		OnMediaDiscovered: func() scancoord.MediaDiscoveredFunc {
 			if !cfg.PrecapturePosterEnabled() {
 				return nil
 			}
 			return scancoord.MediaDiscoveredFunc(postingest.NewScanMediaDiscoveredFinalizer(postingest.PreCaptureConfig{
 				DB: db, Runner: posterRunner, Derived: derivedStore, UploadDir: cfg.Data.Upload, Timeout: cfg.PrecapturePosterTimeout(),
-			}))
+			})) // 可选：扫描发现时预抓封面
 		}(),
 		OnScanCancelled: func(_ context.Context, taskID int64) error {
-			dispatcher.CancelScan(taskID)
+			dispatcher.CancelScan(taskID) // 取消扫描时同步取消关联的入库后任务
 			return nil
 		},
 
@@ -367,6 +383,7 @@ func main() {
 	}
 	finalizeRecoveryDone := make(chan struct{})
 	go func() {
+		// 周期性恢复卡在 finalize 阶段的扫描任务。
 		defer close(finalizeRecoveryDone)
 		recoverPending := func() {
 			if _, err := scancoord.RecoverPendingFinalizations(serverCtx, db, 16); err != nil && serverCtx.Err() == nil {
@@ -386,20 +403,20 @@ func main() {
 		}
 	}()
 
-	// (5) Admin overview uses the shared resource-control instances.
+	// (5) 后台阶段对账协程，并组装 Handler 依赖注入包。
 	background := &handler.BackgroundGroup{}
 	background.Go(serverCtx, func(ctx context.Context) {
 		metadatalib.RunScrapeArtworkStageReconciler(ctx, db, cfg.Data.MetadataLibrary, time.Minute, 100, func(err error) { log.Printf("scrape artwork stage reconcile: %v", err) })
-	})
+	}) // 刮削封面阶段状态对账
 	background.Go(serverCtx, func(ctx context.Context) {
 		postingest.RunEncryptionStageReconciler(ctx, db, postingest.EncryptionRecoveryRoots{Quarantine: assetEnc.EncryptionPrivateRoot(), Resolver: assetEnc}, time.Minute, 100, func(err error) { log.Printf("encryption stage reconcile: %v", err) })
-	})
+	}) // 加密阶段状态对账
 	background.Go(serverCtx, func(ctx context.Context) {
 		postingest.RunThumbnailStageReconciler(ctx, db, postingest.ThumbnailRecoveryRoots{Preview: filepath.Join(cfg.Data.Preview, "photos"), Derived: filepath.Join(cfg.Data.Dir, ".derived")}, time.Minute, 100, func(err error) { log.Printf("thumbnail stage reconcile: %v", err) })
-	})
+	}) // 缩略图阶段状态对账
 	background.Go(serverCtx, func(ctx context.Context) {
 		postingest.RunPosterStageReconciler(ctx, db, postingest.PosterRecoveryRoots{Upload: cfg.Data.Upload, Derived: filepath.Join(cfg.Data.Dir, ".derived")}, time.Minute, 100, func(err error) { log.Printf("poster stage reconcile: %v", err) })
-	})
+	}) // 封面阶段状态对账
 	deps := handler.Dependencies{
 		ServerContext: serverCtx, Background: background, StartupReady: startupReady,
 		Coordinator: coordinator, Queue: postIngestQueue, PostIngest: postIngestEnqueuer, Dispatcher: dispatcher, AdminOverviewBuilder: func() handler.OverviewBuilder {
@@ -413,11 +430,10 @@ func main() {
 		KeyVault: keyVault, AssetEncryptor: assetEnc, DerivedStore: derivedStore, PublicationPlanner: publicationPlanner, PublicationCapabilities: publicationCapabilities,
 	}
 
-	// (6) Handler dependencies are injected into the API router.
+	// (6) 注入依赖并创建 HTTP API 路由引擎。
 	engine := api.NewEngine(cfg, application, deps)
 
-	// Repair runs only after post-ingest, scrape/API, and enterprise prepare workers exist.
-	// ResetInterruptedTasks already ran, so a restarted current repair suppresses duplicates.
+	// 修复遗留媒体发布状态（需在分发器/企业 prepare Worker 就绪后运行）。
 	repairPlanner := publicationPlanner
 	background.Go(serverCtx, func(repairCtx context.Context) {
 		repaired, repairErr := publication.RepairLegacyMedia(repairCtx, db, repairPlanner, 64)
@@ -430,7 +446,7 @@ func main() {
 		}
 	})
 
-	// (7) Monitor submits through the same coordinator and starts last.
+	// (7) 目录监控：通过同一扫描协调器提交增量扫描（放在最后启动）。
 	mon := monitor.NewService(db, coordinator, 15*time.Second)
 	monitorDone := make(chan struct{})
 	go func() {
@@ -438,7 +454,7 @@ func main() {
 		mon.Start(serverCtx)
 	}()
 
-	// (8) Root cancellation stops monitor, scans, and dispatcher.
+	// (8) 启动 HTTP 服务；根 context 取消后按序关停各子系统。
 	httpServer := &http.Server{Addr: cfg.Addr(), Handler: engine}
 	serverDone := make(chan error, 1)
 	go func() {
@@ -454,6 +470,7 @@ func main() {
 	case <-serverCtx.Done():
 	}
 
+	// 优雅关停：HTTP → 扫描 finalize 恢复 → 监控 → 后台协程 → 扫描协调器 → 入库后分发器。
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
@@ -465,7 +482,7 @@ func main() {
 	case <-shutdownCtx.Done():
 		log.Printf("scan finalize recovery shutdown: %v", shutdownCtx.Err())
 	}
-	// Wait for monitor submission to stop before waiting on the Coordinator WaitGroup.
+	// 先等监控停止再关协调器，避免其 WaitGroup 上仍有新提交。
 	select {
 	case <-monitorDone:
 	case <-shutdownCtx.Done():

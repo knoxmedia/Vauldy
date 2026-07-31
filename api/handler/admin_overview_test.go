@@ -50,8 +50,10 @@ func TestAdminOverview_TimesOut(t *testing.T) {
 	if w.Code != http.StatusGatewayTimeout || !strings.Contains(w.Body.String(), `"code":"admin_overview_timeout"`) {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
-	if elapsed := time.Since(started); elapsed < 2900*time.Millisecond || elapsed > 4*time.Second {
-		t.Fatalf("elapsed=%s want about 3s", elapsed)
+	lo := adminOverviewTimeout - 200*time.Millisecond
+	hi := adminOverviewTimeout + time.Second
+	if elapsed := time.Since(started); elapsed < lo || elapsed > hi {
+		t.Fatalf("elapsed=%s want about %s", elapsed, adminOverviewTimeout)
 	}
 }
 

@@ -166,6 +166,10 @@ func (h *Handler) ListLibraries(c *gin.Context) {
 		}
 		list = append(list, item)
 	}
+	encEnabled := true
+	if h.App != nil && h.App.Config != nil {
+		encEnabled = h.App.Config.EncryptedAssetsEnabled()
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"items": list,
 		"drm_capabilities": gin.H{
@@ -173,6 +177,7 @@ func (h *Handler) ListLibraries(c *gin.Context) {
 			"powerdrm_enabled": powerdrmEnabled,
 		},
 		"encrypted_assets_config": gin.H{
+			"enabled":                encEnabled,
 			"data_dot_encrypted_dir": h.dataEncryptedDotDir(),
 		},
 	})

@@ -567,10 +567,43 @@ func (q *Queue) ownerWriteError(ctx context.Context, taskID int64, leaseToken st
 	return fmt.Errorf("postingest queue: cannot %s task %d: ownership token mismatch, current %q, supplied %q", operation, taskID, owner.String, leaseToken)
 }
 
+// RecoverExpired resets running tasks whose leases have expired so they can be reclaimed.
 func (q *Queue) RecoverExpired(ctx context.Context) (int64, error) {
+	return q.recoverRunning(ctx, true)
+}
+
+// RecoverInterrupted resets every running post-ingest task (startup / process takeover).
+// Unlike RecoverExpired, it does not wait for lease expiry—safe because a new process
+// owner never inherits in-memory executors from the previous process.
+func (q *Queue) RecoverInterrupted(ctx context.Context) (int64, error) {
+	return q.recoverRunning(ctx, false)
+}
+
+// RecoverAllInterrupted drains RecoverInterrupted until a batch returns zero rows.
+func (q *Queue) RecoverAllInterrupted(ctx context.Context) (int64, error) {
+	var total int64
+	for {
+		n, err := q.RecoverInterrupted(ctx)
+		total += n
+		if err != nil || n == 0 {
+			return total, err
+		}
+	}
+}
+
+func (q *Queue) recoverRunning(ctx context.Context, onlyExpired bool) (int64, error) {
 	if err := q.validate(false); err != nil {
 		return 0, err
 	}
+	selectSQL := `SELECT id FROM post_ingest_task WHERE status='running'`
+	updateSQL := `UPDATE post_ingest_task SET status=CASE WHEN scan_task_id IS NOT NULL AND EXISTS(SELECT 1 FROM scan_task s WHERE s.id=post_ingest_task.scan_task_id AND (s.cancelled=1 OR s.status='cancelled')) THEN 'cancelled' WHEN attempts>=max_attempts THEN 'failed' ELSE 'waiting' END,last_error=CASE WHEN attempts>=max_attempts THEN ? ELSE last_error END,available_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL,finished_at=CASE WHEN attempts>=max_attempts OR (scan_task_id IS NOT NULL AND EXISTS(SELECT 1 FROM scan_task s WHERE s.id=post_ingest_task.scan_task_id AND (s.cancelled=1 OR s.status='cancelled'))) THEN CURRENT_TIMESTAMP ELSE NULL END,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='running'`
+	exhaustedMsg := "interrupted and attempts exhausted"
+	if onlyExpired {
+		selectSQL += ` AND lease_until<CURRENT_TIMESTAMP`
+		updateSQL += ` AND lease_until<CURRENT_TIMESTAMP`
+		exhaustedMsg = "lease expired and attempts exhausted"
+	}
+	selectSQL += ` ORDER BY id LIMIT ?`
 	var n int64
 	err := store.WithBusyRetry(ctx, q.metrics, func() error {
 		tx, err := q.db.BeginTx(ctx, nil)
@@ -583,7 +616,7 @@ func (q *Queue) RecoverExpired(ctx context.Context) (int64, error) {
 				_ = tx.Rollback()
 			}
 		}()
-		rows, err := tx.QueryContext(ctx, `SELECT id FROM post_ingest_task WHERE status='running' AND lease_until<CURRENT_TIMESTAMP ORDER BY id LIMIT ?`, recoverExpiredLimit)
+		rows, err := tx.QueryContext(ctx, selectSQL, recoverExpiredLimit)
 		if err != nil {
 			return err
 		}
@@ -604,7 +637,7 @@ func (q *Queue) RecoverExpired(ctx context.Context) (int64, error) {
 			return err
 		}
 		for _, id := range ids {
-			result, err := tx.ExecContext(ctx, `UPDATE post_ingest_task SET status=CASE WHEN scan_task_id IS NOT NULL AND EXISTS(SELECT 1 FROM scan_task s WHERE s.id=post_ingest_task.scan_task_id AND (s.cancelled=1 OR s.status='cancelled')) THEN 'cancelled' WHEN attempts>=max_attempts THEN 'failed' ELSE 'waiting' END,last_error=CASE WHEN attempts>=max_attempts THEN 'lease expired and attempts exhausted' ELSE last_error END,available_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL,finished_at=CASE WHEN attempts>=max_attempts OR (scan_task_id IS NOT NULL AND EXISTS(SELECT 1 FROM scan_task s WHERE s.id=post_ingest_task.scan_task_id AND (s.cancelled=1 OR s.status='cancelled'))) THEN CURRENT_TIMESTAMP ELSE NULL END,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='running' AND lease_until<CURRENT_TIMESTAMP`, id)
+			result, err := tx.ExecContext(ctx, updateSQL, exhaustedMsg, id)
 			if err != nil {
 				return err
 			}
@@ -689,4 +722,290 @@ func (q *Queue) IsScanCancelled(ctx context.Context, scanTaskID int64) (bool, er
 		return false, err
 	}
 	return cancelled || status == "cancelled", nil
+}
+
+// EncryptTaskRow is an admin list projection for encrypt queue rows.
+type EncryptTaskRow struct {
+	ID          int64
+	MediaID     int64
+	Title       string
+	Status      Status
+	Attempts    int
+	MaxAttempts int
+	LastError   string
+	StartedAt   sql.NullString
+	FinishedAt  sql.NullString
+	AvailableAt sql.NullString
+	LeaseOwner  sql.NullString
+	LeaseUntil  sql.NullString
+	UpdatedAt   sql.NullString
+}
+
+// ListEncrypt returns encrypt tasks newest-first, optionally filtered by status.
+func (q *Queue) ListEncrypt(ctx context.Context, status string, limit int) ([]EncryptTaskRow, error) {
+	if err := q.validate(false); err != nil {
+		return nil, err
+	}
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	status = strings.TrimSpace(status)
+	query := `
+SELECT p.id,p.media_id,COALESCE(m.title,''),p.status,p.attempts,p.max_attempts,COALESCE(p.last_error,''),
+       CAST(p.started_at AS TEXT),CAST(p.finished_at AS TEXT),CAST(p.available_at AS TEXT),
+       p.lease_owner,CAST(p.lease_until AS TEXT),CAST(p.updated_at AS TEXT)
+FROM post_ingest_task p
+LEFT JOIN media m ON m.id=p.media_id
+WHERE p.task_type='encrypt'`
+	args := []any{}
+	if status != "" && status != "all" {
+		query += ` AND p.status=?`
+		args = append(args, status)
+	}
+	query += ` ORDER BY p.id DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := q.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]EncryptTaskRow, 0)
+	for rows.Next() {
+		var r EncryptTaskRow
+		if err := rows.Scan(&r.ID, &r.MediaID, &r.Title, &r.Status, &r.Attempts, &r.MaxAttempts, &r.LastError,
+			&r.StartedAt, &r.FinishedAt, &r.AvailableAt, &r.LeaseOwner, &r.LeaseUntil, &r.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// EnqueueEncryptManual inserts or reopens an encrypt task for on-demand encryption.
+// Returns (taskID, alreadyActive, error). alreadyActive is true when waiting/running existed.
+func (q *Queue) EnqueueEncryptManual(ctx context.Context, mediaID int64) (taskID int64, alreadyActive bool, err error) {
+	if err := q.validate(false); err != nil {
+		return 0, false, err
+	}
+	if mediaID <= 0 {
+		return 0, false, fmt.Errorf("postingest queue: media id must be positive: %d", mediaID)
+	}
+	err = store.WithBusyRetry(ctx, q.metrics, func() error {
+		taskID, alreadyActive = 0, false
+		tx, err := q.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				_ = tx.Rollback()
+			}
+		}()
+		var generation int64
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(ingest_generation,0) FROM media WHERE id=?`, mediaID).Scan(&generation); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("postingest queue: media %d not found", mediaID)
+			}
+			return err
+		}
+		var existingID int64
+		var existingStatus Status
+		err = tx.QueryRowContext(ctx, `SELECT id,status FROM post_ingest_task WHERE media_id=? AND generation=? AND task_type='encrypt'`, mediaID, generation).Scan(&existingID, &existingStatus)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if err == nil {
+			switch existingStatus {
+			case StatusWaiting, StatusRunning:
+				taskID, alreadyActive = existingID, true
+				if err := tx.Commit(); err != nil {
+					return err
+				}
+				committed = true
+				return nil
+			case StatusFailed, StatusCancelled, StatusDone:
+				result, e := tx.ExecContext(ctx, `UPDATE post_ingest_task SET status='waiting',last_error='',lease_owner=NULL,lease_until=NULL,started_at=NULL,finished_at=NULL,attempts=0,available_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND task_type='encrypt' AND status=?`, existingID, existingStatus)
+				if e != nil {
+					return e
+				}
+				n, e := result.RowsAffected()
+				if e != nil {
+					return e
+				}
+				if n != 1 {
+					return fmt.Errorf("postingest queue: encrypt task %d reset raced", existingID)
+				}
+				if e := syncLinkedStepTx(ctx, tx, existingID); e != nil {
+					return e
+				}
+				taskID = existingID
+				if err := tx.Commit(); err != nil {
+					return err
+				}
+				committed = true
+				return nil
+			default:
+				return fmt.Errorf("postingest queue: encrypt task %d in status %s", existingID, existingStatus)
+			}
+		}
+		result, err := tx.ExecContext(ctx, `INSERT INTO post_ingest_task(media_id,generation,task_type,status) VALUES(?,?,'encrypt','waiting')`, mediaID, generation)
+		if err != nil {
+			return err
+		}
+		id, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
+		taskID = id
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		committed = true
+		return nil
+	})
+	return taskID, alreadyActive, err
+}
+
+// AdminCancelEncrypt marks an encrypt task cancelled (waiting or running).
+func (q *Queue) AdminCancelEncrypt(ctx context.Context, id int64) error {
+	return q.adminMutateEncrypt(ctx, id, `UPDATE post_ingest_task SET status='cancelled',lease_owner=NULL,lease_until=NULL,last_error='cancelled by admin',finished_at=COALESCE(finished_at,CURRENT_TIMESTAMP),updated_at=CURRENT_TIMESTAMP WHERE id=? AND task_type='encrypt' AND status IN ('waiting','running')`, "cancel")
+}
+
+// AdminResetEncrypt requeues failed/cancelled/done or stranded (expired-lease) running encrypt tasks.
+func (q *Queue) AdminResetEncrypt(ctx context.Context, id int64) error {
+	return q.adminMutateEncrypt(ctx, id, `UPDATE post_ingest_task SET status='waiting',last_error='',lease_owner=NULL,lease_until=NULL,started_at=NULL,finished_at=NULL,attempts=0,available_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND task_type='encrypt' AND (status IN ('failed','cancelled','done') OR (status='running' AND (lease_until IS NULL OR lease_until<CURRENT_TIMESTAMP)))`, "reset")
+}
+
+// AdminRemoveEncrypt deletes a non-running encrypt queue row.
+func (q *Queue) AdminRemoveEncrypt(ctx context.Context, id int64) error {
+	if err := q.validate(false); err != nil {
+		return err
+	}
+	if id <= 0 {
+		return fmt.Errorf("postingest queue: task id must be positive: %d", id)
+	}
+	var updated bool
+	err := store.WithBusyRetry(ctx, q.metrics, func() error {
+		updated = false
+		tx, err := q.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				_ = tx.Rollback()
+			}
+		}()
+		var status Status
+		var stepID sql.NullInt64
+		var runID sql.NullInt64
+		if err := tx.QueryRowContext(ctx, `SELECT status,ingest_step_id,ingest_run_id FROM post_ingest_task WHERE id=? AND task_type='encrypt'`, id).Scan(&status, &stepID, &runID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("postingest queue: encrypt task %d not found", id)
+			}
+			return err
+		}
+		if status == StatusRunning {
+			return fmt.Errorf("postingest queue: encrypt task %d is running", id)
+		}
+		if status != StatusWaiting && status != StatusFailed && status != StatusCancelled {
+			return fmt.Errorf("postingest queue: encrypt task %d in status %s cannot be removed", id, status)
+		}
+		if stepID.Valid {
+			if _, err := tx.ExecContext(ctx, `UPDATE media_ingest_step SET status='cancelled',lease_owner=NULL,lease_until=NULL,last_error='encrypt task removed',finished_at=COALESCE(finished_at,CURRENT_TIMESTAMP),updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('waiting','running','failed')`, stepID.Int64); err != nil {
+				return err
+			}
+		}
+		result, err := tx.ExecContext(ctx, `DELETE FROM post_ingest_task WHERE id=? AND task_type='encrypt' AND status IN ('waiting','failed','cancelled')`, id)
+		if err != nil {
+			return err
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n != 1 {
+			return fmt.Errorf("postingest queue: encrypt task %d remove raced", id)
+		}
+		if runID.Valid {
+			if err := publication.AggregateTx(ctx, tx, runID.Int64); err != nil {
+				return err
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		committed = true
+		updated = true
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if !updated {
+		return fmt.Errorf("postingest queue: encrypt task %d not removed", id)
+	}
+	return nil
+}
+
+func (q *Queue) adminMutateEncrypt(ctx context.Context, id int64, updateSQL, op string) error {
+	if err := q.validate(false); err != nil {
+		return err
+	}
+	if id <= 0 {
+		return fmt.Errorf("postingest queue: task id must be positive: %d", id)
+	}
+	var updated bool
+	err := store.WithBusyRetry(ctx, q.metrics, func() error {
+		updated = false
+		tx, err := q.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				_ = tx.Rollback()
+			}
+		}()
+		result, err := tx.ExecContext(ctx, updateSQL, id)
+		if err != nil {
+			return err
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 1 {
+			if err := syncLinkedStepTx(ctx, tx, id); err != nil {
+				return err
+			}
+			updated = true
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		committed = true
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if updated {
+		return nil
+	}
+	var status Status
+	var typ TaskType
+	if err := q.db.QueryRowContext(ctx, `SELECT status,task_type FROM post_ingest_task WHERE id=?`, id).Scan(&status, &typ); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("postingest queue: task %d not found", id)
+		}
+		return err
+	}
+	if typ != TaskEncrypt {
+		return fmt.Errorf("postingest queue: task %d is not encrypt", id)
+	}
+	return fmt.Errorf("postingest queue: encrypt task %d in status %s cannot be %sed", id, status, op)
 }

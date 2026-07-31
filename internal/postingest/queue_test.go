@@ -645,6 +645,46 @@ func TestQueue_RecoverExpired(t *testing.T) {
 	}
 }
 
+func TestQueue_RecoverInterruptedResetsUnexpired(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	seedMedia, _, _ := seedQueueTest(t, db)
+	libraryID := mediaLibraryID(t, db, seedMedia)
+	mid := insertQueueMedia(t, db, libraryID, "interrupt-unexpired")
+	res, err := db.Exec(`INSERT INTO post_ingest_task(media_id,task_type,status,attempts,max_attempts,lease_owner,lease_until) VALUES (?,'encrypt','running',1,3,'dead-owner',datetime(CURRENT_TIMESTAMP,'+1 hour'))`, mid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := res.LastInsertId()
+	n, err := NewQueue(db, "recovery", nil).RecoverInterrupted(context.Background())
+	if err != nil || n != 1 {
+		t.Fatalf("RecoverInterrupted=(%d,%v) want (1,nil)", n, err)
+	}
+	status, _, _, owner, lease, _, finished, _ := readTaskState(t, db, id)
+	if status != StatusWaiting || owner.Valid || lease.Valid || finished.Valid {
+		t.Fatalf("status=%s owner=%v lease=%v finished=%v", status, owner, lease, finished)
+	}
+}
+
+func TestQueue_RecoverAllInterruptedDrainsBatches(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	seedMedia, _, _ := seedQueueTest(t, db)
+	libraryID := mediaLibraryID(t, db, seedMedia)
+	for i := 0; i < 2; i++ {
+		mid := insertQueueMedia(t, db, libraryID, fmt.Sprintf("drain-%d", i))
+		if _, err := db.Exec(`INSERT INTO post_ingest_task(media_id,task_type,status,attempts,max_attempts,lease_owner,lease_until) VALUES (?,'encrypt','running',1,3,'dead',datetime(CURRENT_TIMESTAMP,'+1 hour'))`, mid); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n, err := NewQueue(db, "recovery", nil).RecoverAllInterrupted(context.Background())
+	if err != nil || n != 2 {
+		t.Fatalf("RecoverAllInterrupted=(%d,%v) want (2,nil)", n, err)
+	}
+	var waiting int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM post_ingest_task WHERE status='waiting'`).Scan(&waiting); err != nil || waiting != 2 {
+		t.Fatalf("waiting=%d err=%v", waiting, err)
+	}
+}
+
 func TestQueue_CancelScanRace(t *testing.T) {
 	for iteration := 0; iteration < 20; iteration++ {
 		db1, path := openQueueTestDB(t)
@@ -1740,4 +1780,71 @@ func TestQueueRetryRoundFencesStaleClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = runID
+}
+
+func TestQueue_EncryptAdminListEnqueueResetRemoveCancel(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	mediaID, _, _ := seedQueueTest(t, db)
+	q := NewQueue(db, "owner", nil)
+	ctx := context.Background()
+
+	id1, already, err := q.EnqueueEncryptManual(ctx, mediaID)
+	if err != nil || already || id1 <= 0 {
+		t.Fatalf("first enqueue id=%d already=%v err=%v", id1, already, err)
+	}
+	id2, already, err := q.EnqueueEncryptManual(ctx, mediaID)
+	if err != nil || !already || id2 != id1 {
+		t.Fatalf("second enqueue id=%d already=%v err=%v", id2, already, err)
+	}
+	rows, err := q.ListEncrypt(ctx, "waiting", 10)
+	if err != nil || len(rows) != 1 || rows[0].ID != id1 {
+		t.Fatalf("list waiting len=%d err=%v", len(rows), err)
+	}
+	if err := q.AdminCancelEncrypt(ctx, id1); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	if err := db.QueryRow(`SELECT status FROM post_ingest_task WHERE id=?`, id1).Scan(&status); err != nil || status != string(StatusCancelled) {
+		t.Fatalf("status=%q err=%v", status, err)
+	}
+	if err := q.AdminResetEncrypt(ctx, id1); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT status FROM post_ingest_task WHERE id=?`, id1).Scan(&status); err != nil || status != string(StatusWaiting) {
+		t.Fatalf("reset status=%q err=%v", status, err)
+	}
+	if _, err := db.Exec(`UPDATE post_ingest_task SET status='failed' WHERE id=?`, id1); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.AdminRemoveEncrypt(ctx, id1); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM post_ingest_task WHERE id=?`, id1).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("count=%d err=%v", n, err)
+	}
+
+	id3, _, err := q.EnqueueEncryptManual(ctx, mediaID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE post_ingest_task SET status='running',lease_until=datetime('now','+1 hour') WHERE id=?`, id3); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.AdminRemoveEncrypt(ctx, id3); err == nil || !strings.Contains(err.Error(), "running") {
+		t.Fatalf("remove running err=%v", err)
+	}
+	if _, err := db.Exec(`UPDATE post_ingest_task SET lease_until=datetime('now','-1 hour') WHERE id=?`, id3); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.AdminResetEncrypt(ctx, id3); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT status FROM post_ingest_task WHERE id=?`, id3).Scan(&status); err != nil || status != string(StatusWaiting) {
+		t.Fatalf("stranded reset status=%q err=%v", status, err)
+	}
+	reopenID, already, err := q.EnqueueEncryptManual(ctx, mediaID)
+	if err != nil || !already || reopenID != id3 {
+		t.Fatalf("waiting reopen id=%d already=%v err=%v", reopenID, already, err)
+	}
 }

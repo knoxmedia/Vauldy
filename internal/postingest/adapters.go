@@ -471,6 +471,18 @@ func (a *encryptAdapter) Execute(ctx context.Context, task Task) error {
 	_, err := a.ExecuteWithResult(ctx, task)
 	return err
 }
+// mediaManualEncryptor encrypts on demand even when library encrypted_assets_enabled is off.
+type mediaManualEncryptor interface {
+	EncryptMediaManual(context.Context, int64) error
+}
+
+func (a *encryptAdapter) encryptUnlinked(ctx context.Context, mediaID int64) error {
+	if manual, ok := a.enc.(mediaManualEncryptor); ok {
+		return manual.EncryptMediaManual(ctx, mediaID)
+	}
+	return a.enc.EncryptMedia(ctx, mediaID)
+}
+
 func (a *encryptAdapter) ExecuteWithResult(ctx context.Context, task Task) (ExecutionResult, error) {
 	ordinary := ExecutionResult{Completion: CompleteThroughQueue}
 	if err := validateBasicAdapterTask(task, TaskEncrypt); err != nil {
@@ -482,7 +494,7 @@ func (a *encryptAdapter) ExecuteWithResult(ctx context.Context, task Task) (Exec
 	dbp, hasDB := a.enc.(encryptionDBProvider)
 	stager, canStage := a.enc.(mediaEncryptionStager)
 	if !hasDB || dbp.EncryptionDB() == nil {
-		err := a.enc.EncryptMedia(ctx, task.MediaID)
+		err := a.encryptUnlinked(ctx, task.MediaID)
 		if errors.Is(err, storage.ErrAlreadyEncrypted) {
 			return ordinary, nil
 		}
@@ -507,7 +519,7 @@ func (a *encryptAdapter) ExecuteWithResult(ctx context.Context, task Task) (Exec
 		if ready {
 			return ordinary, nil
 		}
-		err = a.enc.EncryptMedia(ctx, task.MediaID)
+		err = a.encryptUnlinked(ctx, task.MediaID)
 		if errors.Is(err, storage.ErrAlreadyEncrypted) {
 			return ordinary, nil
 		}

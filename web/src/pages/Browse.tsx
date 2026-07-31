@@ -37,7 +37,7 @@ import {
   addPlaylistItem,
   createScrapeTasks,
   deleteMedia,
-  fetchLibraries,
+  fetchLibrariesWithCapabilities,
   fetchMedia,
   isTVLibraryType,
   isMusicLibraryType,
@@ -231,6 +231,7 @@ export default function BrowsePage() {
 
   const [rows, setRows] = useState<MediaItem[]>([]);
   const [loading, setLoading] = useState(false);
+  const [encryptAssetsEnabled, setEncryptAssetsEnabled] = useState(true);
   const [viewMode, setViewMode] = useState<ViewMode>(() => readBrowseViewMode(libFromUrl));
   const [sortField, setSortField] = useState<SortField>(() => readBrowsePrefs()?.sortField ?? "added");
   const [sortOrder, setSortOrder] = useState<SortOrder>(() => readBrowsePrefs()?.sortOrder ?? "desc");
@@ -272,10 +273,11 @@ export default function BrowsePage() {
     }
     let cancelled = false;
     setLibraryResolved(false);
-    void fetchLibraries()
-      .then((libs) => {
+    void fetchLibrariesWithCapabilities()
+      .then((result) => {
         if (cancelled) return;
-        const lib = libs.find((l) => l.id === libFromUrl);
+        setEncryptAssetsEnabled(result.encryptedAssetsConfig?.enabled !== false);
+        const lib = result.items.find((l) => l.id === libFromUrl);
         setLibraryType(lib?.type || "");
         setLibraryName(lib?.name || "");
       })
@@ -850,7 +852,7 @@ export default function BrowsePage() {
     return buildMediaMenuItems(r, nav, {
       ...extra,
       isWatched,
-      showEncryptAsset: r.file_type === "video",
+      showEncryptAsset: encryptAssetsEnabled && !r.encrypted_asset,
       encryptedAsset: !!r.encrypted_asset,
       afterEncryptAsset: () => load(),
       afterToggleWatched: () => load(),
