@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"knox-media/internal/store"
+	"knox-media/internal/taskalign"
 )
 
 // Planner creates immutable ingest plans using fixed process capabilities and
@@ -267,6 +268,9 @@ VALUES(?,?,?,?, 'processing',?,?,?)`, plan.mediaID, generation, nullScanTask(pla
 		_, err = tx.ExecContext(ctx, `INSERT INTO post_ingest_task(media_id,scan_task_id,ingest_run_id,ingest_step_id,generation,task_type,status,max_attempts) VALUES(?,?,?,?,?,?,'waiting',?)`, plan.mediaID, nullScanTask(plan.scanTaskID), runID, stepID, generation, step, maxAttempts)
 		if err != nil {
 			return Run{}, fmt.Errorf("publication planner: enqueue %s step: %w", step, err)
+		}
+		if err = taskalign.EnsureDomainWaiting(ctx, tx, string(step), plan.mediaID); err != nil {
+			return Run{}, fmt.Errorf("publication planner: initialize %s domain task: %w", step, err)
 		}
 	}
 	if err := insertDependenciesTx(ctx, tx, plan.dependencies, stepIDs, plan.mediaID, generation, runID); err != nil {

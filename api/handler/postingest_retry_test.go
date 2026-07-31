@@ -124,6 +124,61 @@ func TestEnqueueExplicitPostIngestCreatesMissingRow(t *testing.T) {
 	}
 }
 
+func TestEnqueueExplicitPostIngestCreatesMissingAlignedDomainRow(t *testing.T) {
+	for _, tc := range []struct {
+		typ   postingest.TaskType
+		table string
+		want  string
+	}{
+		{postingest.TaskPreview, "preview_task", "waiting"},
+		{postingest.TaskSubtitle, "subtitle_task", "pending"},
+		{postingest.TaskAtrack, "atrack_task", "waiting"},
+		{postingest.TaskKeyframe, "keyframe_task", "waiting"},
+	} {
+		t.Run(string(tc.typ), func(t *testing.T) {
+			db, mid, _ := explicitPostIngestDB(t)
+			if _, err := db.Exec(`DELETE FROM `+tc.table+` WHERE media_id=?`, mid); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := enqueueExplicitPostIngest(context.Background(), db, mid, tc.typ, false, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+
+			var got string
+			if err := db.QueryRow(`SELECT status FROM `+tc.table+` WHERE media_id=?`, mid).Scan(&got); err != nil {
+				t.Fatalf("domain row: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("status=%q want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestEnqueueExplicitPostIngestRepairsMissingDomainRowWhenAlreadyWaiting(t *testing.T) {
+	db, mid, sid := explicitPostIngestDB(t)
+	if _, err := db.Exec(`DELETE FROM preview_task WHERE media_id=?`, mid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO post_ingest_task(media_id,scan_task_id,task_type,status) VALUES(?,?,'preview','waiting')`, mid, sid); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := enqueueExplicitPostIngest(context.Background(), db, mid, postingest.TaskPreview, false, nil, nil)
+	if err != nil || got != explicitPostIngestAlreadyQueued {
+		t.Fatalf("result=%q err=%v", got, err)
+	}
+
+	var status string
+	if err := db.QueryRow(`SELECT status FROM preview_task WHERE media_id=?`, mid).Scan(&status); err != nil {
+		t.Fatalf("domain row: %v", err)
+	}
+	if status != "waiting" {
+		t.Fatalf("status=%q want waiting", status)
+	}
+}
+
 func TestEnqueueExplicitPostIngestDoesNotQueueWhenDomainResetFails(t *testing.T) {
 	db, mid, sid := explicitPostIngestDB(t)
 	_, err := db.Exec(`INSERT INTO post_ingest_task(media_id,scan_task_id,task_type,status,attempts) VALUES(?,?,'preview','failed',2)`, mid, sid)

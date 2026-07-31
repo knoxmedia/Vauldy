@@ -117,6 +117,35 @@ func TestEnqueuer_UsesLoadedConfigDefaults(t *testing.T) {
 	}
 }
 
+func TestEnqueuer_CreatesMissingAlignedDomainRows(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	mediaID, scanID := seedEnqueueMedia(t, db, "video", 1, 1)
+	cfg := &config.Config{
+		Subtitle:        config.SubtitleProcessingConfig{AutoOnScan: boolPtr(true)},
+		ATrack:          config.ATrackConfig{AutoOnScan: boolPtr(true)},
+		EncryptedAssets: config.EncryptedAssetsConfig{Enabled: boolPtr(true)},
+	}
+
+	if _, err := NewEnqueuer(db, cfg, nil).EnqueueMedia(context.Background(), mediaID, &scanID, "video"); err != nil {
+		t.Fatal(err)
+	}
+
+	for table, want := range map[string]string{
+		"preview_task":  "waiting",
+		"subtitle_task": "pending",
+		"atrack_task":   "waiting",
+		"keyframe_task": "waiting",
+	} {
+		var got string
+		if err := db.QueryRow(`SELECT status FROM `+table+` WHERE media_id=?`, mediaID).Scan(&got); err != nil {
+			t.Fatalf("%s row: %v", table, err)
+		}
+		if got != want {
+			t.Fatalf("%s status=%q want %q", table, got, want)
+		}
+	}
+}
+
 func TestEnqueuer_KeepsOriginalScanOwnership(t *testing.T) {
 	db, _ := openQueueTestDB(t)
 	mediaID, scanOne := seedEnqueueMedia(t, db, "video", 1, 1)

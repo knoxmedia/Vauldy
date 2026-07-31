@@ -137,6 +137,26 @@ func TestPlannerQueueRowsLinkExactStepsAndGeneration(t *testing.T) {
 	}
 }
 
+func TestPlannerCreatesMissingDomainRowsForAlignedQueueSteps(t *testing.T) {
+	db := openPlannerTestDB(t)
+	_, mediaID, scanID := seedPlannerMedia(t, db, "video", 1, 0, 0)
+
+	planAndCommit(t, db, NewPlanner(PlanOptions{SubtitleAuto: true}), NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
+
+	for table, want := range map[string]string{
+		"preview_task":  "waiting",
+		"subtitle_task": "pending",
+	} {
+		var got string
+		if err := db.QueryRow(`SELECT status FROM `+table+` WHERE media_id=?`, mediaID).Scan(&got); err != nil {
+			t.Fatalf("%s row: %v", table, err)
+		}
+		if got != want {
+			t.Fatalf("%s status=%q want %q", table, got, want)
+		}
+	}
+}
+
 func TestPlannerNonVideoLeavesPublishedWithoutPlan(t *testing.T) {
 	db := openPlannerTestDB(t)
 	_, mediaID, scanID := seedPlannerMedia(t, db, "image", 1, 1, 1)
