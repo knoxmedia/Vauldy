@@ -26,12 +26,15 @@ func encryptCTR(src io.Reader, dst io.Writer, block cipher.Block, nonce [IVSize]
 }
 
 func encryptCTRContext(ctx context.Context, src io.Reader, dst io.Writer, block cipher.Block, nonce [IVSize]byte) error {
-	return encryptCTRRangeContext(ctx, src, dst, block, nonce, 0, -1)
+	return encryptCTRRangeContext(ctx, src, dst, block, nonce, 0, -1, nil)
 }
 
-func encryptCTRRangeContext(ctx context.Context, src io.Reader, dst io.Writer, block cipher.Block, nonce [IVSize]byte, plainOffset, plainLen int64) error {
+func encryptCTRRangeContext(ctx context.Context, src io.Reader, dst io.Writer, block cipher.Block, nonce [IVSize]byte, plainOffset, plainLen int64, hash io.Writer) error {
 	if plainOffset%aes.BlockSize != 0 {
 		return errors.New("enc: plainOffset must be block aligned")
+	}
+	if hash != nil {
+		dst = io.MultiWriter(dst, hash)
 	}
 	blockNum := uint32(plainOffset / aes.BlockSize)
 	stream := cipher.NewCTR(block, ctrIV(nonce, blockNum))

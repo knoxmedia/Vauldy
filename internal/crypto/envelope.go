@@ -6,9 +6,11 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"os"
 )
@@ -81,9 +83,10 @@ func EncryptFile(src io.Reader, dst io.Writer, kek []byte) (*EnvelopeResult, err
 
 // EncryptResumeSession holds resumable AES-CTR encryption state.
 type EncryptResumeSession struct {
-	dek, wrapped []byte
-	nonce        [IVSize]byte
-	block        cipher.Block
+	dek, wrapped   []byte
+	nonce          [IVSize]byte
+	block          cipher.Block
+	ciphertextHash hash.Hash
 }
 
 // BeginEncryptResume starts a resumable CTR encryption session.
@@ -104,7 +107,13 @@ func BeginEncryptResume(kek []byte) (*EncryptResumeSession, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &EncryptResumeSession{dek: dek, wrapped: wrapped, nonce: nonce, block: block}, nil
+	return &EncryptResumeSession{
+		dek:            dek,
+		wrapped:        wrapped,
+		nonce:          nonce,
+		block:          block,
+		ciphertextHash: sha256.New(),
+	}, nil
 }
 
 // RestoreEncryptResume rebuilds a session from persisted wrapped DEK and IV.
@@ -123,15 +132,16 @@ func RestoreEncryptResume(kek, wrappedDEK, iv []byte) (*EncryptResumeSession, er
 	var nonce [IVSize]byte
 	copy(nonce[:], iv)
 	return &EncryptResumeSession{
-		dek:     dek,
-		wrapped: append([]byte(nil), wrappedDEK...),
-		nonce:   nonce,
-		block:   block,
+		dek:            dek,
+		wrapped:        append([]byte(nil), wrappedDEK...),
+		nonce:          nonce,
+		block:          block,
+		ciphertextHash: sha256.New(),
 	}, nil
 }
 
 func (s *EncryptResumeSession) WriteHeader(dst io.Writer) error {
-	return writeHeader(dst, ModeCTR, s.nonce[:])
+	return writeHeader(io.MultiWriter(dst, s.ciphertextHash), ModeCTR, s.nonce[:])
 }
 
 // EncryptRange encrypts plainLen bytes from src starting at plainOffset (CTR counter = plainOffset/16).
@@ -141,7 +151,21 @@ func (s *EncryptResumeSession) EncryptRange(ctx context.Context, src io.Reader, 
 	if plainLen < 0 {
 		return errors.New("enc: plainLen must be non-negative")
 	}
-	return encryptCTRRangeContext(ctx, src, dst, s.block, s.nonce, plainOffset, plainLen)
+	return encryptCTRRangeContext(ctx, src, dst, s.block, s.nonce, plainOffset, plainLen, s.ciphertextHash)
+}
+
+// HashPrefix restores the ciphertext hash state from an existing envelope prefix.
+func (s *EncryptResumeSession) HashPrefix(src io.Reader, size int64) error {
+	if size < 0 {
+		return errors.New("enc: hash prefix size must be non-negative")
+	}
+	_, err := io.CopyN(s.ciphertextHash, src, size)
+	return err
+}
+
+// Sum returns the SHA-256 digest of all envelope bytes written or restored so far.
+func (s *EncryptResumeSession) Sum() []byte {
+	return s.ciphertextHash.Sum(nil)
 }
 
 func (s *EncryptResumeSession) Result() *EnvelopeResult {

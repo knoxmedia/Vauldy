@@ -44,6 +44,8 @@ type resumableEncryptOutput struct {
 	WrappedDEK string
 	IV         string
 	BackupPath string
+	SHA256     string
+	Size       int64
 }
 
 type resumableEncryptTarget struct {
@@ -144,6 +146,14 @@ func (s *AssetEncryptor) encryptToPathResumable(
 				_ = dst.Close()
 				return out, err
 			}
+		}
+		if _, err = dst.Seek(0, io.SeekStart); err != nil {
+			_ = dst.Close()
+			return out, err
+		}
+		if err = session.HashPrefix(dst, wantEnc); err != nil {
+			_ = dst.Close()
+			return out, err
 		}
 		if _, err = dst.Seek(wantEnc, io.SeekStart); err != nil {
 			_ = dst.Close()
@@ -261,6 +271,8 @@ func (s *AssetEncryptor) encryptToPathResumable(
 			out.BackupPath = ""
 		}
 	}
+	out.Size = int64(kcrypto.EncHeaderSize) + plainSize
+	out.SHA256 = hex.EncodeToString(session.Sum())
 	return out, nil
 }
 
@@ -369,11 +381,6 @@ func (s *AssetEncryptor) StageMediaEncryption(ctx context.Context, mediaID int64
 	if err != nil {
 		return stage, err
 	}
-	size, hash, err := EncryptionPathHash(output.EncPath)
-	if err != nil {
-		_ = os.Remove(output.EncPath)
-		return stage, err
-	}
 	return StagedMediaEncryption{
 		MediaID:           mediaID,
 		StageID:           output.StageID,
@@ -383,8 +390,8 @@ func (s *AssetEncryptor) StageMediaEncryption(ctx context.Context, mediaID int64
 		EncPath:           output.EncPath,
 		WrappedDEK:        output.WrappedDEK,
 		IV:                output.IV,
-		SHA256:            hash,
-		Size:              size,
+		SHA256:            output.SHA256,
+		Size:              output.Size,
 		CleanupPlaintext:  cleanup == 1,
 	}, nil
 }
