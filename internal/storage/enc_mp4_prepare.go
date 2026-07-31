@@ -126,6 +126,9 @@ func (s *AssetEncryptor) resolveEncryptSource(ctx context.Context, mediaID int64
 	if !isISOBaseMedia(plainPath) {
 		return plainPath, func() {}, false, nil
 	}
+	if moovFirst, err := isoBMFFMoovBeforeMDATFile(plainPath); err == nil && moovFirst {
+		return plainPath, func() {}, false, nil
+	}
 	prepared, cleanup, err := prepareMP4ForEncPipe(ctx, s.FFmpegPath, s.DataDir, mediaID, plainPath)
 	if err == nil && prepared != plainPath {
 		return prepared, cleanup, true, nil

@@ -323,11 +323,22 @@ func (s *AssetEncryptor) StageMediaEncryption(ctx context.Context, mediaID int64
 	if err != nil {
 		return stage, fmt.Errorf("plain file missing: %w", err)
 	}
-	identity, err := QuickSourceIdentity(source)
+
+	encryptSource := source
+	prepCleanup := func() {}
+	if encryptRequiresISOFaststart(fileType, source) {
+		encryptSource, prepCleanup, _, err = s.resolveEncryptSource(ctx, mediaID, source, true)
+		if err != nil {
+			return stage, err
+		}
+	}
+	defer prepCleanup()
+
+	identity, err := QuickSourceIdentity(encryptSource)
 	if err != nil {
 		return stage, fmt.Errorf("plain file missing: %w", err)
 	}
-	srcInfo, err := os.Stat(source)
+	srcInfo, err := os.Stat(encryptSource)
 	if err != nil {
 		return stage, fmt.Errorf("plain file missing: %w", err)
 	}
@@ -370,7 +381,7 @@ func (s *AssetEncryptor) StageMediaEncryption(ctx context.Context, mediaID int64
 		}
 	}
 
-	output, err := s.encryptToPathResumable(ctx, mediaID, generation, source, identity, plainSize, kek, intendedEncPath, "", func() (resumableEncryptTarget, error) {
+	output, err := s.encryptToPathResumable(ctx, mediaID, generation, encryptSource, identity, plainSize, kek, intendedEncPath, "", func() (resumableEncryptTarget, error) {
 		if reusingResumeTarget {
 			stageID = uuid.NewString()
 			stageDir = filepath.Join(base, fileType, "stages", stageID)

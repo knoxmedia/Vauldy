@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"knox-media/internal/keystore"
@@ -93,6 +94,63 @@ func TestResolveEncryptSourceSkipsInvalidMP4WhenPlainKept(t *testing.T) {
 	}
 	if src != plain {
 		t.Fatalf("src=%q want plain", src)
+	}
+}
+
+func TestResolveEncryptSourceSkipsFFmpegForMoovFirstMP4(t *testing.T) {
+	dir := t.TempDir()
+	plain := filepath.Join(dir, "faststart.mp4")
+	var fixture bytes.Buffer
+	fixture.Write(writeBox("ftyp", []byte("mp42")))
+	fixture.Write(writeBox("moov", []byte{0x01, 0x02}))
+	fixture.Write(writeBox("mdat", []byte{0x03, 0x04}))
+	if err := os.WriteFile(plain, fixture.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	enc := &AssetEncryptor{DataDir: dir}
+	src, cleanup, remuxed, err := enc.resolveEncryptSource(context.Background(), 1, plain, true)
+	if err != nil {
+		t.Fatalf("moov-first source should not require ffmpeg: %v", err)
+	}
+	defer cleanup()
+	if remuxed {
+		t.Fatal("moov-first source should not be remuxed")
+	}
+	if src != plain {
+		t.Fatalf("src=%q want %q", src, plain)
+	}
+}
+
+func TestStageMediaEncryptionPreparesVideoISO(t *testing.T) {
+	db, err := store.OpenSQLite(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	vault, err := keystore.NewVault("test-main-key", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	plain := filepath.Join(dir, "moov-at-end.mp4")
+	var fixture bytes.Buffer
+	fixture.Write(writeBox("ftyp", []byte("mp42")))
+	fixture.Write(writeBox("mdat", []byte{0x03, 0x04}))
+	fixture.Write(writeBox("moov", []byte{0x01, 0x02}))
+	if err := os.WriteFile(plain, fixture.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO library(id,name,type,path,encrypted_assets_enabled) VALUES(1,'videos','video',?,1)`, dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO media(id,library_id,file_id,file_path,file_type,status) VALUES(21,1,'clip',?,'video','active')`, plain); err != nil {
+		t.Fatal(err)
+	}
+
+	enc := &AssetEncryptor{DB: db, Vault: vault, BasePath: filepath.Join(dir, "encrypted"), DataDir: dir}
+	if _, err := enc.StageMediaEncryption(context.Background(), 21); err == nil || !strings.Contains(err.Error(), "ffmpeg path required") {
+		t.Fatalf("stage should require faststart preparation, got %v", err)
 	}
 }
 
