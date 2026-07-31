@@ -139,6 +139,85 @@ func TestReconcileEncryptionStagesRestoresValidLibrarySource(t *testing.T) {
 	}
 }
 
+func TestReconcileEncryptionStagesRestoresFromLocalQuarantineRoot(t *testing.T) {
+	root := t.TempDir()
+	preferredQuarantineRoot := t.TempDir()
+	stage := "00000000-0000-0000-0000-000000000102"
+	source := filepath.Join(root, "Movies", "local.mp4")
+	localQuarantineRoot := filepath.Join(filepath.Dir(source), ".quarantine", "encryption")
+	db, _ := seedRestoreDestinationJournal(t, root, source, "", source, localQuarantineRoot, stage)
+	original := resolveEncryptionQuarantineRoot
+	resolveEncryptionQuarantineRoot = func(gotSource, gotPreferred string) string {
+		if !samePathForEvidence(gotSource, source) || !samePathForEvidence(gotPreferred, preferredQuarantineRoot) {
+			t.Fatalf("resolver source=%q preferred=%q", gotSource, gotPreferred)
+		}
+		return localQuarantineRoot
+	}
+	t.Cleanup(func() { resolveEncryptionQuarantineRoot = original })
+
+	_, cleaned, err := ReconcileEncryptionStages(context.Background(), db, EncryptionRecoveryRoots{
+		Quarantine: preferredQuarantineRoot,
+		Resolver:   fixedStageRoot(filepath.Join(root, ".encrypted", "video", "stages")),
+	}, 100)
+	if err != nil || cleaned != 1 {
+		t.Fatalf("cleaned=%d err=%v", cleaned, err)
+	}
+	if got, err := os.ReadFile(source); err != nil || string(got) != "plain" {
+		t.Fatalf("restored=%q err=%v", got, err)
+	}
+	state, marker := restoreJournalState(t, db, stage)
+	if state != "restored" || marker == "unsafe_path" {
+		t.Fatalf("state=%s marker=%q", state, marker)
+	}
+}
+
+func TestReconcileEncryptionStagesResumesQuarantiningAtLocalRoot(t *testing.T) {
+	root := t.TempDir()
+	preferredQuarantineRoot := t.TempDir()
+	stage := "00000000-0000-0000-0000-000000000103"
+	source := filepath.Join(root, "Movies", "interrupted.mp4")
+	localQuarantineRoot := filepath.Join(filepath.Dir(source), ".quarantine", "encryption")
+	db, quarantine := seedRestoreDestinationJournal(t, root, source, "", source, localQuarantineRoot, stage)
+	if err := os.Remove(quarantine); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(source), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("plain"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE media_encryption_stage_journal SET state='quarantining' WHERE stage_id=?`, stage); err != nil {
+		t.Fatal(err)
+	}
+	original := resolveEncryptionQuarantineRoot
+	resolveEncryptionQuarantineRoot = func(gotSource, gotPreferred string) string {
+		if !samePathForEvidence(gotSource, source) || !samePathForEvidence(gotPreferred, preferredQuarantineRoot) {
+			t.Fatalf("resolver source=%q preferred=%q", gotSource, gotPreferred)
+		}
+		return localQuarantineRoot
+	}
+	t.Cleanup(func() { resolveEncryptionQuarantineRoot = original })
+
+	_, cleaned, err := ReconcileEncryptionStages(context.Background(), db, EncryptionRecoveryRoots{
+		Quarantine: preferredQuarantineRoot,
+		Resolver:   fixedStageRoot(filepath.Join(root, ".encrypted", "video", "stages")),
+	}, 100)
+	if err != nil || cleaned != 0 {
+		t.Fatalf("cleaned=%d err=%v", cleaned, err)
+	}
+	if _, err := os.Stat(source); !os.IsNotExist(err) {
+		t.Fatalf("source still present: %v", err)
+	}
+	if got, err := os.ReadFile(quarantine); err != nil || string(got) != "plain" {
+		t.Fatalf("quarantine=%q err=%v", got, err)
+	}
+	state, marker := restoreJournalState(t, db, stage)
+	if state != "quarantined" || marker == "unsafe_path" {
+		t.Fatalf("state=%s marker=%q", state, marker)
+	}
+}
+
 func TestReconcileEncryptionStagesUsesEncryptedAssetPlainPathExactly(t *testing.T) {
 	root, quarantineRoot := t.TempDir(), t.TempDir()
 	plain := filepath.Join(root, "Movies", "authoritative.mp4")
