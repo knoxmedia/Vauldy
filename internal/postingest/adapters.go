@@ -20,6 +20,8 @@ import (
 	"knox-media/internal/subtitle"
 )
 
+var encryptionSourceFingerprint = publication.SourceFingerprint
+
 type Adapter interface {
 	Execute(context.Context, Task) error
 }
@@ -471,6 +473,7 @@ func (a *encryptAdapter) Execute(ctx context.Context, task Task) error {
 	_, err := a.ExecuteWithResult(ctx, task)
 	return err
 }
+
 // mediaManualEncryptor encrypts on demand even when library encrypted_assets_enabled is off.
 type mediaManualEncryptor interface {
 	EncryptMediaManual(context.Context, int64) error
@@ -706,7 +709,17 @@ func selectedEncryptionStage(ctx context.Context, db *sql.DB, task Task, s stora
 	if !samePathForEvidence(selected, s.OriginalPath) {
 		return false, errors.New("encrypt source selection changed")
 	}
-	fp, err := publication.SourceFingerprint(selected)
+	if s.SourceIdentity != "" {
+		identity, err := storage.QuickSourceIdentity(selected)
+		if err != nil {
+			return false, err
+		}
+		if identity != s.SourceIdentity {
+			return false, errors.New("encrypt source identity changed")
+		}
+		return false, nil
+	}
+	fp, err := encryptionSourceFingerprint(selected)
 	return false, errOrMismatch(err, fp, s.SourceFingerprint)
 }
 func errOrMismatch(err error, got, want string) error {

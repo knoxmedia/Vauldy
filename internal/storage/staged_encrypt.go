@@ -14,12 +14,14 @@ import (
 
 	"github.com/google/uuid"
 	kcrypto "knox-media/internal/crypto"
+	"knox-media/internal/publication"
 )
 
 type StagedMediaEncryption struct {
 	MediaID           int64
 	StageID           string
 	OriginalPath      string
+	SourceIdentity    string
 	SourceFingerprint string
 	EncPath           string
 	WrappedDEK        string
@@ -55,7 +57,7 @@ func (s *AssetEncryptor) StageMediaEncryption(ctx context.Context, mediaID int64
 	if source == "" {
 		return stage, errors.New("empty file path")
 	}
-	fp, err := EncryptionSourceFingerprint(source)
+	fp, err := publication.SourceFingerprintContext(ctx, source)
 	if err != nil {
 		return stage, fmt.Errorf("plain file missing: %w", err)
 	}
@@ -90,13 +92,13 @@ func (s *AssetEncryptor) StageMediaEncryption(ctx context.Context, mediaID int64
 	}
 
 	var (
-		stageID                   string
-		encPath                   string
-		plainOffset               int64
-		session                   *kcrypto.EncryptResumeSession
-		resuming                  bool
-		hadCheckpoint             bool
-		wrappedHex, ivHex         string
+		stageID           string
+		encPath           string
+		plainOffset       int64
+		session           *kcrypto.EncryptResumeSession
+		resuming          bool
+		hadCheckpoint     bool
+		wrappedHex, ivHex string
 	)
 
 	prev, loadErr := LoadEncryptResume(ctx, s.DB, mediaID, generation)
@@ -302,6 +304,7 @@ func (s *AssetEncryptor) StageMediaEncryption(ctx context.Context, mediaID int64
 		MediaID:           mediaID,
 		StageID:           stageID,
 		OriginalPath:      source,
+		SourceIdentity:    identity,
 		SourceFingerprint: fp,
 		EncPath:           encPath,
 		WrappedDEK:        wrappedHex,
