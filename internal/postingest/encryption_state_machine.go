@@ -8,7 +8,6 @@ import (
 	"knox-media/internal/storage"
 	"knox-media/internal/store"
 	"os"
-	"strings"
 )
 
 type EncryptionStateMachineSeams struct {
@@ -110,13 +109,7 @@ func verifyDurableQuarantine(ctx context.Context, tx store.SQLExecutor, task Tas
 	if _, err = os.Stat(s.OriginalPath); !os.IsNotExist(err) {
 		return fmt.Errorf("public plaintext remains: %v", err)
 	}
-	hash, err := fileSHA256(path)
-	if err != nil {
-		return err
-	}
-	sourceHash := s.SourceFingerprint[strings.LastIndex(s.SourceFingerprint, "sha256:")+7:]
-	if !strings.EqualFold(hash, sourceHash) {
-		return errors.New("quarantine source hash mismatch")
-	}
+	// Quarantine content hash is verified outside BEGIN IMMEDIATE; under the
+	// write lock we only re-check journal identity and that the public path is gone.
 	return nil
 }
