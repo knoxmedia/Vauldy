@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -169,4 +170,194 @@ func TestStageMediaEncryption_ResumeDecryptRoundTripSmall(t *testing.T) {
 	if !bytes.Equal(got, plain) {
 		t.Fatalf("got %q want %q", got, plain)
 	}
+}
+
+func TestStageMediaEncryption_ResumeShortEncAbandonsAndRestarts(t *testing.T) {
+	db, vault, kek, dir, _, plain, mediaID := arrangeResumePlain(t, 2<<20)
+	enc := &AssetEncryptor{
+		DB: db, Vault: vault, BasePath: filepath.Join(dir, "encrypted"),
+		ResumeCheckpointBytes: 1 << 20,
+	}
+	row := stagePartialThenCancel(t, enc, db, mediaID)
+
+	// Corrupt: truncate enc below EncHeaderSize+PlainOffset.
+	wantSize := int64(crypto.EncHeaderSize) + row.PlainOffset
+	if err := os.Truncate(row.EncPath, wantSize/2); err != nil {
+		t.Fatal(err)
+	}
+	oldPath := row.EncPath
+
+	stage, err := enc.StageMediaEncryption(context.Background(), mediaID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stage.EncPath == oldPath {
+		t.Fatalf("expected fresh enc path after short file, got same %q", stage.EncPath)
+	}
+	wrapped, err := hex.DecodeString(stage.WrappedDEK)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := crypto.DecryptFile(stage.EncPath, wrapped, kek)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, plain) {
+		t.Fatalf("decrypt mismatch after short-enc restart")
+	}
+}
+
+func TestStageMediaEncryption_ResumeLongEncTruncatesAndSucceeds(t *testing.T) {
+	db, vault, kek, dir, _, plain, mediaID := arrangeResumePlain(t, 2<<20)
+	enc := &AssetEncryptor{
+		DB: db, Vault: vault, BasePath: filepath.Join(dir, "encrypted"),
+		ResumeCheckpointBytes: 1 << 20,
+	}
+	row := stagePartialThenCancel(t, enc, db, mediaID)
+	wantCheckpointSize := int64(crypto.EncHeaderSize) + row.PlainOffset
+
+	// Pad well past the eventual final enc size so trailing garbage remains unless truncated.
+	pad := bytes.Repeat([]byte{0xFF}, 3<<20)
+	f, err := os.OpenFile(row.EncPath, os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.Write(pad); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	st, err := os.Stat(row.EncPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Size() <= wantCheckpointSize {
+		t.Fatalf("setup: enc size %d want > %d", st.Size(), wantCheckpointSize)
+	}
+
+	stage, err := enc.StageMediaEncryption(context.Background(), mediaID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stage.EncPath != row.EncPath {
+		t.Fatalf("expected same enc path after truncate-resume, got %q want %q", stage.EncPath, row.EncPath)
+	}
+	finalInfo, err := os.Stat(stage.EncPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantFinal := int64(crypto.EncHeaderSize) + int64(len(plain))
+	if finalInfo.Size() != wantFinal {
+		t.Fatalf("final enc size=%d want %d (truncate missing?)", finalInfo.Size(), wantFinal)
+	}
+	wrapped, err := hex.DecodeString(stage.WrappedDEK)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := crypto.DecryptFile(stage.EncPath, wrapped, kek)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, plain) {
+		t.Fatalf("decrypt mismatch after long-enc truncate resume")
+	}
+}
+
+func TestStageMediaEncryption_CheckpointSyncsBeforeUpsert(t *testing.T) {
+	db, vault, _, dir, _, _, mediaID := arrangeResumePlain(t, 2<<20)
+	var syncCount, upsertSeenAtSync int
+	var mu sync.Mutex
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	enc := &AssetEncryptor{
+		DB: db, Vault: vault, BasePath: filepath.Join(dir, "encrypted"),
+		ResumeCheckpointBytes: 1 << 20,
+		syncStagedFile: func(f *os.File) error {
+			mu.Lock()
+			defer mu.Unlock()
+			syncCount++
+			row, err := LoadEncryptResume(context.Background(), db, mediaID, 0)
+			if err == nil && row.PlainOffset >= 1<<20 {
+				upsertSeenAtSync++
+			}
+			return f.Sync()
+		},
+		onEncryptCheckpoint: func(c context.Context, offset int64) {
+			if offset >= 1<<20 {
+				mu.Lock()
+				// After first checkpoint upsert, resume row must already reflect offset,
+				// and sync must have run at least once for that checkpoint.
+				if syncCount < 1 {
+					t.Errorf("expected dst.Sync before checkpoint upsert, syncCount=%d", syncCount)
+				}
+				mu.Unlock()
+				cancel()
+				<-c.Done()
+			}
+		},
+	}
+	_, _ = enc.StageMediaEncryption(ctx, mediaID)
+	mu.Lock()
+	defer mu.Unlock()
+	if syncCount < 1 {
+		t.Fatalf("expected at least one sync before checkpoint, got %d", syncCount)
+	}
+	_ = upsertSeenAtSync
+}
+
+func arrangeResumePlain(t *testing.T, size int) (*sql.DB, *keystore.Vault, []byte, string, string, []byte, int64) {
+	t.Helper()
+	db, err := store.OpenSQLite(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	vault, err := keystore.NewVault(string(bytes.Repeat([]byte{0x42}, 32)), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	kek, err := vault.GetKEK(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	plainPath := filepath.Join(dir, "large.bin")
+	plain := bytes.Repeat([]byte{0xAB}, size)
+	if err := os.WriteFile(plainPath, plain, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	const mediaID int64 = 77
+	_, _ = db.Exec(`INSERT INTO library(id,name,type,path,encrypted_assets_enabled) VALUES(1,'lib','video',?,1)`, dir)
+	_, _ = db.Exec(`INSERT INTO media(id,library_id,file_id,title,file_path,file_type,status) VALUES(?,1,'fid-dur','t',?,'video','active')`, mediaID, plainPath)
+	return db, vault, kek, dir, plainPath, plain, mediaID
+}
+
+func stagePartialThenCancel(t *testing.T, enc *AssetEncryptor, db *sql.DB, mediaID int64) EncryptResumeRow {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	prevHook := enc.onEncryptCheckpoint
+	enc.onEncryptCheckpoint = func(c context.Context, offset int64) {
+		if offset >= 1<<20 {
+			cancel()
+			<-c.Done()
+		}
+	}
+	t.Cleanup(func() { enc.onEncryptCheckpoint = prevHook })
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := enc.StageMediaEncryption(ctx, mediaID)
+		errCh <- err
+	}()
+	waitUntilResumeOffset(t, db, mediaID, 1<<20)
+	if err := <-errCh; err == nil {
+		t.Fatal("expected cancel error")
+	}
+	enc.onEncryptCheckpoint = nil
+	row, err := LoadEncryptResume(context.Background(), db, mediaID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return row
 }

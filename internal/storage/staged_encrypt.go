@@ -40,7 +40,9 @@ func (s *AssetEncryptor) StageMediaEncryption(ctx context.Context, mediaID int64
 	if s == nil || s.DB == nil || s.Vault == nil {
 		return stage, errors.New("encrypted assets not configured")
 	}
-	_ = EnsureEncryptResumeSchema(s.DB)
+	if err := EnsureEncryptResumeSchema(s.DB); err != nil {
+		return stage, err
+	}
 
 	var libraryID, generation int64
 	var source, fileType, fileID string
@@ -88,13 +90,13 @@ func (s *AssetEncryptor) StageMediaEncryption(ctx context.Context, mediaID int64
 	}
 
 	var (
-		stageID                                           string
-		encPath                                           string
-		plainOffset                                       int64
-		session                                           *kcrypto.EncryptResumeSession
-		resuming                                          bool
-		hadCheckpoint                                     bool
-		wrappedHex, ivHex                                 string
+		stageID                   string
+		encPath                   string
+		plainOffset               int64
+		session                   *kcrypto.EncryptResumeSession
+		resuming                  bool
+		hadCheckpoint             bool
+		wrappedHex, ivHex         string
 	)
 
 	prev, loadErr := LoadEncryptResume(ctx, s.DB, mediaID, generation)
@@ -102,7 +104,15 @@ func (s *AssetEncryptor) StageMediaEncryption(ctx context.Context, mediaID int64
 		(prev.State == "encrypting" || prev.State == "staged") &&
 		prev.SourceIdentity == identity &&
 		prev.EncPath != "" {
-		if st, stErr := os.Stat(prev.EncPath); stErr == nil && st.Size() >= int64(kcrypto.EncHeaderSize) {
+		resumeOffset := prev.PlainOffset
+		if resumeOffset < 0 {
+			resumeOffset = 0
+		}
+		if resumeOffset > plainSize {
+			resumeOffset = 0
+		}
+		wantEnc := int64(kcrypto.EncHeaderSize) + resumeOffset
+		if st, stErr := os.Stat(prev.EncPath); stErr == nil && st.Size() >= wantEnc {
 			wrappedRaw, wErr := hex.DecodeString(prev.WrappedDEK)
 			ivRaw, iErr := hex.DecodeString(prev.IV)
 			if wErr == nil && iErr == nil {
@@ -110,13 +120,7 @@ func (s *AssetEncryptor) StageMediaEncryption(ctx context.Context, mediaID int64
 				if err == nil {
 					stageID = prev.StageID
 					encPath = prev.EncPath
-					plainOffset = prev.PlainOffset
-					if plainOffset < 0 {
-						plainOffset = 0
-					}
-					if plainOffset > plainSize {
-						plainOffset = 0
-					}
+					plainOffset = resumeOffset
 					wrappedHex = prev.WrappedDEK
 					ivHex = prev.IV
 					resuming = true
@@ -158,7 +162,19 @@ func (s *AssetEncryptor) StageMediaEncryption(ctx context.Context, mediaID int64
 		if err != nil {
 			return stage, err
 		}
-		if _, err = dst.Seek(int64(kcrypto.EncHeaderSize)+plainOffset, io.SeekStart); err != nil {
+		wantEnc := int64(kcrypto.EncHeaderSize) + plainOffset
+		st, stErr := dst.Stat()
+		if stErr != nil {
+			_ = dst.Close()
+			return stage, stErr
+		}
+		if st.Size() > wantEnc {
+			if err = dst.Truncate(wantEnc); err != nil {
+				_ = dst.Close()
+				return stage, err
+			}
+		}
+		if _, err = dst.Seek(wantEnc, io.SeekStart); err != nil {
 			_ = dst.Close()
 			return stage, err
 		}
@@ -180,6 +196,13 @@ func (s *AssetEncryptor) StageMediaEncryption(ctx context.Context, mediaID int64
 		}
 	}
 
+	syncDst := func() error {
+		if s.syncStagedFile != nil {
+			return s.syncStagedFile(dst)
+		}
+		return dst.Sync()
+	}
+
 	upsertProgress := func(offset int64, state string) error {
 		// Resume checkpoints must persist even when the encrypt ctx is canceled.
 		return UpsertEncryptResume(context.WithoutCancel(ctx), s.DB, EncryptResumeRow{
@@ -197,15 +220,26 @@ func (s *AssetEncryptor) StageMediaEncryption(ctx context.Context, mediaID int64
 		})
 	}
 
+	checkpointAndUpsert := func(offset int64, state string) error {
+		if err := syncDst(); err != nil {
+			return err
+		}
+		return upsertProgress(offset, state)
+	}
+
 	if _, err = src.Seek(plainOffset, io.SeekStart); err != nil {
 		_ = dst.Close()
 		removeOnFail()
 		return stage, err
 	}
 
+	dirty := false
 	checkpoint := s.resumeCheckpointBytes()
 	for plainOffset < plainSize {
 		if err := ctx.Err(); err != nil {
+			if dirty {
+				_ = syncDst()
+			}
 			_ = upsertProgress(plainOffset, "encrypting")
 			_ = dst.Close()
 			if hadCheckpoint {
@@ -221,6 +255,8 @@ func (s *AssetEncryptor) StageMediaEncryption(ctx context.Context, mediaID int64
 		}
 		cryptErr := session.EncryptRange(ctx, src, dst, plainOffset, chunk)
 		if cryptErr != nil {
+			// EncryptRange may have written past the last durable offset.
+			_ = syncDst()
 			_ = upsertProgress(plainOffset, "encrypting")
 			_ = dst.Close()
 			if hadCheckpoint {
@@ -229,12 +265,14 @@ func (s *AssetEncryptor) StageMediaEncryption(ctx context.Context, mediaID int64
 			removeOnFail()
 			return stage, cryptErr
 		}
+		dirty = true
 		plainOffset += chunk
-		if err := upsertProgress(plainOffset, "encrypting"); err != nil {
+		if err := checkpointAndUpsert(plainOffset, "encrypting"); err != nil {
 			_ = dst.Close()
 			removeOnFail()
 			return stage, err
 		}
+		dirty = false
 		hadCheckpoint = true
 		if s.onEncryptCheckpoint != nil {
 			s.onEncryptCheckpoint(ctx, plainOffset)
@@ -242,11 +280,8 @@ func (s *AssetEncryptor) StageMediaEncryption(ctx context.Context, mediaID int64
 	}
 
 	var syncErr error
-	if s.syncStagedFile != nil {
-		syncErr = s.syncStagedFile(dst)
-	} else {
-		syncErr = dst.Sync()
-	}
+	// Final durable sync before declaring staged (covers empty plaintext and last chunk).
+	syncErr = syncDst()
 	closeErr := dst.Close()
 	if syncErr != nil || closeErr != nil {
 		_ = os.Remove(encPath)
