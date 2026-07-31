@@ -79,11 +79,15 @@ func EncryptFile(src io.Reader, dst io.Writer, kek []byte) (*EnvelopeResult, err
 	return EncryptFileContext(context.Background(), src, dst, kek)
 }
 
-// EncryptFileContext encrypts plaintext and observes cancellation between chunks.
-func EncryptFileContext(ctx context.Context, src io.Reader, dst io.Writer, kek []byte) (*EnvelopeResult, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
+// EncryptResumeSession holds resumable AES-CTR encryption state.
+type EncryptResumeSession struct {
+	dek, wrapped []byte
+	nonce        [IVSize]byte
+	block        cipher.Block
+}
+
+// BeginEncryptResume starts a resumable CTR encryption session.
+func BeginEncryptResume(kek []byte) (*EncryptResumeSession, error) {
 	dek := make([]byte, DEKSize)
 	var nonce [IVSize]byte
 	if _, err := io.ReadFull(rand.Reader, dek); err != nil {
@@ -92,34 +96,78 @@ func EncryptFileContext(ctx context.Context, src io.Reader, dst io.Writer, kek [
 	if _, err := io.ReadFull(rand.Reader, nonce[:]); err != nil {
 		return nil, fmt.Errorf("generate IV: %w", err)
 	}
-
 	block, err := aes.NewCipher(dek)
 	if err != nil {
 		return nil, err
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if err := writeHeader(dst, ModeCTR, nonce[:]); err != nil {
-		return nil, err
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if err := encryptCTRContext(ctx, src, dst, block, nonce); err != nil {
-		return nil, err
-	}
-
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	wrappedDEK, err := AESKeyWrap(kek, dek)
+	wrapped, err := AESKeyWrap(kek, dek)
 	if err != nil {
 		return nil, err
 	}
-	subtle.ConstantTimeCopy(1, dek, make([]byte, DEKSize))
+	return &EncryptResumeSession{dek: dek, wrapped: wrapped, nonce: nonce, block: block}, nil
+}
 
-	return &EnvelopeResult{WrappedDEK: wrappedDEK, IV: append([]byte(nil), nonce[:]...)}, nil
+// RestoreEncryptResume rebuilds a session from persisted wrapped DEK and IV.
+func RestoreEncryptResume(kek, wrappedDEK, iv []byte) (*EncryptResumeSession, error) {
+	if len(iv) != IVSize {
+		return nil, fmt.Errorf("enc: invalid IV length %d", len(iv))
+	}
+	dek, err := AESKeyUnwrap(kek, wrappedDEK)
+	if err != nil {
+		return nil, err
+	}
+	block, err := aes.NewCipher(dek)
+	if err != nil {
+		return nil, err
+	}
+	var nonce [IVSize]byte
+	copy(nonce[:], iv)
+	return &EncryptResumeSession{
+		dek:     dek,
+		wrapped: append([]byte(nil), wrappedDEK...),
+		nonce:   nonce,
+		block:   block,
+	}, nil
+}
+
+func (s *EncryptResumeSession) WriteHeader(dst io.Writer) error {
+	return writeHeader(dst, ModeCTR, s.nonce[:])
+}
+
+// EncryptRange encrypts plainLen bytes from src starting at plainOffset (CTR counter = plainOffset/16).
+// plainOffset must be AES-block aligned.
+func (s *EncryptResumeSession) EncryptRange(ctx context.Context, src io.Reader, dst io.Writer, plainOffset, plainLen int64) error {
+	return encryptCTRRangeContext(ctx, src, dst, s.block, s.nonce, plainOffset, plainLen)
+}
+
+func (s *EncryptResumeSession) Result() *EnvelopeResult {
+	return &EnvelopeResult{
+		WrappedDEK: append([]byte(nil), s.wrapped...),
+		IV:         append([]byte(nil), s.nonce[:]...),
+	}
+}
+
+// EncryptFileContext encrypts plaintext and observes cancellation between chunks.
+func EncryptFileContext(ctx context.Context, src io.Reader, dst io.Writer, kek []byte) (*EnvelopeResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	st, err := BeginEncryptResume(kek)
+	if err != nil {
+		return nil, err
+	}
+	if err := st.WriteHeader(dst); err != nil {
+		return nil, err
+	}
+	if err := encryptCTRContext(ctx, src, dst, st.block, st.nonce); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	res := st.Result()
+	subtle.ConstantTimeCopy(1, st.dek, make([]byte, DEKSize))
+	return res, nil
 }
 
 // OpenDecryptSeeker opens an .enc file and returns a streaming seekable plaintext reader.
