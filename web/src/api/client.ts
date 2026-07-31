@@ -2092,6 +2092,9 @@ export type AdminOverview = {
     oldest_waiting_seconds: number;
     expired_lease_count: number;
   };
+  task_alignment: {
+    by_type: Record<string, Record<string, number>>;
+  };
   running_post_ingest_tasks: Array<{
     id: number;
     media_id: number;

@@ -82,9 +82,18 @@ const overview = (cpu: number, message: string): AdminOverview => ({
   activities: [{ id: cpu, username: "admin", action: "scan", media_id: 1, message, created_at: "2026-07-17T00:00:00Z" }],
   post_ingest_queue: {
     by_status: { failed: 2, running: 1, waiting: 3 },
-    by_type: { poster: { failed: 2, running: 1 }, preview: { waiting: 3 } },
+    by_type: { poster: { failed: 2, running: 1 }, preview: { waiting: 99 } },
     oldest_waiting_seconds: 127,
     expired_lease_count: 4,
+  },
+  task_alignment: {
+    by_type: {
+      subtitle: { waiting: 0, running: 0, done: 0, failed: 0, cancelled: 0 },
+      preview: { waiting: 3, running: 0, done: 0, failed: 0, cancelled: 0 },
+      atrack: { waiting: 0, running: 0, done: 0, failed: 0, cancelled: 0 },
+      keyframe: { waiting: 0, running: 0, done: 0, failed: 0, cancelled: 0 },
+      encrypt: { waiting: 0, running: 0, done: 0, failed: 0, cancelled: 0 },
+    },
   },
   running_post_ingest_tasks: [{ id: 901, media_id: 44, task_type: "poster", type: "poster", scan_task_id: 71, attempts: 2, attempt: 2, max_attempts: 5, run_seconds: 33, started_at: "2026-07-17T00:00:00Z", lease_owner: "poster-worker-a", lease_until: "2026-07-17T00:01:00Z", lease_expires: "2026-07-17T00:01:00Z" }],
   scan_leases: [{ library_id: 12, scan_task_id: 71, owner_id: "scanner-a", lease_until: "2026-07-17T00:02:00Z", expired: true }],
@@ -175,6 +184,7 @@ describe("AdminConsolePage", () => {
     for (const value of ["failed: 2", "running: 1", "waiting: 3", "poster / failed: 2", "preview / waiting: 3", "127pages.admin_console.seconds", "901", "poster-worker-a", "scanner-a", "5 / 8", "2 / 3", "3 / 4", "11", "13", "17", "7"]) {
       expect(screen.getByText(value)).toBeInTheDocument();
     }
+    expect(screen.queryByText("preview / waiting: 99")).not.toBeInTheDocument();
     for (const key of ["expired_lease_count", "busy_retries", "busy_exhausted", "progress_batches", "log_batches", "log_failures", "dropped_logs", "sqlite_process_scope", "expired"]) {
       expect(screen.getByText(`pages.admin_console.${key}`)).toBeInTheDocument();
     }

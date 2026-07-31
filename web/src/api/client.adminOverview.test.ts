@@ -7,6 +7,7 @@ const baseOverview = (): AdminOverview => ({
   system: { cpu_count: 4, memory_total: 8, os: "test", database: "sqlite", software_version: "dev" },
   activities: [{ id: 1, username: "a", action: "scan", media_id: 1, message: "m", created_at: "2026-07-22T00:00:00Z" }],
   post_ingest_queue: { by_status: { waiting: 1 }, by_type: { poster: { waiting: 1 } }, oldest_waiting_seconds: 1, expired_lease_count: 0 },
+  task_alignment: { by_type: { subtitle: { waiting: 0, running: 0, done: 0, failed: 0, cancelled: 0 }, preview: { waiting: 0, running: 0, done: 0, failed: 0, cancelled: 0 }, atrack: { waiting: 0, running: 0, done: 0, failed: 0, cancelled: 0 }, keyframe: { waiting: 0, running: 0, done: 0, failed: 0, cancelled: 0 }, encrypt: { waiting: 0, running: 0, done: 0, failed: 0, cancelled: 0 } } },
   running_post_ingest_tasks: [],
   scan_leases: [],
   resource_budget: { global_limit: 1, global_used: 0, poster_limit: 1, poster_used: 0, preview_limit: 1, preview_used: 0 },
