@@ -58,6 +58,7 @@ func (s *AssetEncryptor) encryptToPathResumable(
 	source, identity string,
 	plainSize int64,
 	kek []byte,
+	intendedEncPath string,
 	backupPath string,
 	freshTarget func() (resumableEncryptTarget, error),
 ) (out resumableEncryptOutput, err error) {
@@ -73,7 +74,8 @@ func (s *AssetEncryptor) encryptToPathResumable(
 	if loadErr == nil &&
 		(prev.State == "encrypting" || prev.State == "staged") &&
 		prev.SourceIdentity == identity &&
-		prev.EncPath != "" {
+		prev.EncPath != "" &&
+		sameEncryptedPath(prev.EncPath, intendedEncPath) {
 		resumeOffset := prev.PlainOffset
 		if resumeOffset < 0 || resumeOffset > plainSize {
 			resumeOffset = 0
@@ -266,6 +268,27 @@ func (s *AssetEncryptor) StageMediaEncryption(ctx context.Context, mediaID int64
 	if s == nil || s.DB == nil || s.Vault == nil {
 		return stage, errors.New("encrypted assets not configured")
 	}
+	leader, flight := acquireEncryptFlightFor(mediaID, "stage")
+	if !leader {
+		if s.onFlightJoined != nil {
+			s.onFlightJoined(mediaID)
+		}
+		if waitErr := waitEncryptFlight(ctx, flight); waitErr != nil {
+			return stage, waitErr
+		}
+		if flight.operation == "stage" {
+			return flight.stage, nil
+		}
+		if IsMediaEncrypted(s.DB, mediaID, "") {
+			return stage, ErrAlreadyEncrypted
+		}
+		return s.StageMediaEncryption(ctx, mediaID)
+	}
+	defer func() {
+		flight.stage = stage
+		finishEncryptFlight(mediaID, flight, err)
+	}()
+
 	if err := EnsureEncryptResumeSchema(s.DB); err != nil {
 		return stage, err
 	}
@@ -315,13 +338,33 @@ func (s *AssetEncryptor) StageMediaEncryption(ctx context.Context, mediaID int64
 		return stage, err
 	}
 
-	output, err := s.encryptToPathResumable(ctx, mediaID, generation, source, identity, plainSize, kek, "", func() (resumableEncryptTarget, error) {
-		stageID := uuid.NewString()
-		dir := filepath.Join(base, fileType, "stages", stageID)
-		if err := os.MkdirAll(dir, 0o700); err != nil {
+	stageID := uuid.NewString()
+	stageDir := filepath.Join(base, fileType, "stages", stageID)
+	intendedEncPath := filepath.Join(stageDir, fileID+".enc")
+	reusingResumeTarget := false
+	if prev, loadErr := LoadEncryptResume(ctx, s.DB, mediaID, generation); loadErr == nil {
+		if _, parseErr := uuid.Parse(prev.StageID); parseErr == nil {
+			prevDir := filepath.Join(base, fileType, "stages", prev.StageID)
+			prevIntendedPath := filepath.Join(prevDir, fileID+".enc")
+			if sameEncryptedPath(prev.EncPath, prevIntendedPath) {
+				stageID = prev.StageID
+				stageDir = prevDir
+				intendedEncPath = prevIntendedPath
+				reusingResumeTarget = true
+			}
+		}
+	}
+
+	output, err := s.encryptToPathResumable(ctx, mediaID, generation, source, identity, plainSize, kek, intendedEncPath, "", func() (resumableEncryptTarget, error) {
+		if reusingResumeTarget {
+			stageID = uuid.NewString()
+			stageDir = filepath.Join(base, fileType, "stages", stageID)
+			intendedEncPath = filepath.Join(stageDir, fileID+".enc")
+		}
+		if err := os.MkdirAll(stageDir, 0o700); err != nil {
 			return resumableEncryptTarget{}, err
 		}
-		return resumableEncryptTarget{StageID: stageID, EncPath: filepath.Join(dir, fileID+".enc")}, nil
+		return resumableEncryptTarget{StageID: stageID, EncPath: intendedEncPath}, nil
 	})
 	if err != nil {
 		return stage, err

@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -169,6 +170,42 @@ func TestStageMediaEncryption_ResumeDecryptRoundTripSmall(t *testing.T) {
 	}
 	if !bytes.Equal(got, plain) {
 		t.Fatalf("got %q want %q", got, plain)
+	}
+}
+
+func TestStageMediaEncryption_DoesNotResumeManualCanonicalPath(t *testing.T) {
+	db, vault, _, dir, _, _, mediaID := arrangeResumePlain(t, 2<<20)
+	enc := &AssetEncryptor{
+		DB: db, Vault: vault, BasePath: filepath.Join(dir, "encrypted"),
+		ResumeCheckpointBytes: 1 << 20,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	enc.onEncryptCheckpoint = func(c context.Context, offset int64) {
+		if offset >= 1<<20 {
+			cancel()
+			<-c.Done()
+		}
+	}
+	if err := enc.EncryptMediaManual(ctx, mediaID); !errors.Is(err, context.Canceled) {
+		t.Fatalf("manual cancel err=%v want context.Canceled", err)
+	}
+	enc.onEncryptCheckpoint = nil
+
+	manualResume, err := LoadEncryptResume(context.Background(), db, mediaID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manualResume.StageID != "manual-0" {
+		t.Fatalf("setup stage_id=%q want manual-0", manualResume.StageID)
+	}
+
+	stage, err := enc.StageMediaEncryption(context.Background(), mediaID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sameEncryptedPath(stage.EncPath, manualResume.EncPath) {
+		t.Fatalf("stage resumed manual canonical path %q", stage.EncPath)
 	}
 }
 

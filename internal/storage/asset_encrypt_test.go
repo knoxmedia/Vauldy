@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"knox-media/internal/crypto"
 	"knox-media/internal/keystore"
@@ -96,6 +97,47 @@ func TestEncryptMediaRoundTrip(t *testing.T) {
 	}
 	if string(got) != "fake-video-bytes" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestEncryptMediaManual_DoesNotResumeStagedPath(t *testing.T) {
+	db, enc, _, canonicalPath := newAssetEncryptCase(t, 511)
+
+	stage, err := enc.StageMediaEncryption(context.Background(), 511)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sameEncryptedPath(stage.EncPath, canonicalPath) {
+		t.Fatalf("setup: staged path %q unexpectedly equals canonical path %q", stage.EncPath, canonicalPath)
+	}
+
+	if err := enc.EncryptMediaManual(context.Background(), 511); err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	if err := db.QueryRow(`SELECT enc_path FROM media_encrypted_assets WHERE media_id=511`).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if !sameEncryptedPath(got, canonicalPath) {
+		t.Fatalf("manual enc_path=%q want canonical %q (staged resume was hijacked)", got, canonicalPath)
+	}
+}
+
+func TestEncryptMediaManual_SuccessAbandonsResume(t *testing.T) {
+	db, enc, _, _ := newAssetEncryptCase(t, 512)
+
+	if err := enc.EncryptMediaManual(context.Background(), 512); err != nil {
+		t.Fatal(err)
+	}
+	row, err := LoadEncryptResume(context.Background(), db, 512, 0)
+	if errors.Is(err, sql.ErrNoRows) {
+		return
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.State != "abandoned" {
+		t.Fatalf("resume state=%q want abandoned or absent", row.State)
 	}
 }
 
@@ -469,6 +511,50 @@ func TestEncryptMedia_WaiterSuccessLeavesValidAsset(t *testing.T) {
 	valid, err := IsEncryptedAssetRecordValid(context.Background(), db, 509)
 	if err != nil || !valid || !crypto.IsEncFile(out) {
 		t.Fatalf("valid=%v err=%v", valid, err)
+	}
+}
+
+func TestStageMediaEncryption_WaitsForManualEncryptFlight(t *testing.T) {
+	_, enc, _, _ := newAssetEncryptCase(t, 510)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	ctx := WithEncryptCommitGuard(context.Background(), func(context.Context) error {
+		close(entered)
+		<-release
+		return nil
+	})
+	manualDone := make(chan error, 1)
+	go func() { manualDone <- enc.EncryptMediaManual(ctx, 510) }()
+	<-entered
+
+	joined := make(chan struct{})
+	enc.onFlightJoined = func(mediaID int64) {
+		if mediaID == 510 {
+			close(joined)
+		}
+	}
+	stageDone := make(chan error, 1)
+	go func() {
+		_, err := enc.StageMediaEncryption(context.Background(), 510)
+		stageDone <- err
+	}()
+	select {
+	case <-joined:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stage did not join the manual encrypt flight")
+	}
+	select {
+	case err := <-stageDone:
+		t.Fatalf("stage returned while manual encrypt was in flight: %v", err)
+	default:
+	}
+
+	close(release)
+	if err := <-manualDone; err != nil {
+		t.Fatalf("manual err=%v", err)
+	}
+	if err := <-stageDone; err != nil && !errors.Is(err, ErrAlreadyEncrypted) {
+		t.Fatalf("stage err=%v", err)
 	}
 }
 

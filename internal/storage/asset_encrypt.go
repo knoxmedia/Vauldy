@@ -65,12 +65,18 @@ func (s *AssetEncryptor) encryptMedia(ctx context.Context, mediaID int64, manual
 		}
 		return nil
 	}
-	leader, flight := acquireEncryptFlight(mediaID)
+	leader, flight := acquireEncryptFlightFor(mediaID, "media")
 	if !leader {
 		if s.onFlightJoined != nil {
 			s.onFlightJoined(mediaID)
 		}
-		return waitEncryptFlight(ctx, flight)
+		if waitErr := waitEncryptFlight(ctx, flight); waitErr != nil {
+			return waitErr
+		}
+		if flight.operation == "stage" {
+			return s.encryptMedia(ctx, mediaID, manual)
+		}
+		return nil
 	}
 	defer func() { finishEncryptFlight(mediaID, flight, err) }()
 
@@ -159,7 +165,7 @@ func (s *AssetEncryptor) encryptMedia(ctx context.Context, mediaID int64, manual
 		return err
 	}
 	defer prepCleanup()
-	identity, err := QuickSourceIdentity(plainPath)
+	identity, err := QuickSourceIdentity(encryptSource)
 	if err != nil {
 		return err
 	}
@@ -169,7 +175,7 @@ func (s *AssetEncryptor) encryptMedia(ctx context.Context, mediaID int64, manual
 	}
 	backupPath := fmt.Sprintf("%s.orphan-resume-%d", encPath, generation)
 	output, err := s.encryptToPathResumable(
-		ctx, mediaID, generation, encryptSource, identity, sourceInfo.Size(), kek, backupPath,
+		ctx, mediaID, generation, encryptSource, identity, sourceInfo.Size(), kek, encPath, backupPath,
 		func() (resumableEncryptTarget, error) {
 			if _, statErr := os.Stat(encPath); statErr == nil {
 				if _, backupErr := os.Stat(backupPath); backupErr == nil {
@@ -226,6 +232,13 @@ func (s *AssetEncryptor) encryptMedia(ctx context.Context, mediaID int64, manual
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE media SET file_path = ? WHERE id = ?`, output.EncPath, mediaID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE media_encrypt_resume
+		SET state = 'abandoned', updated_at = CURRENT_TIMESTAMP
+		WHERE media_id = ? AND generation = ?
+	`, mediaID, generation); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
