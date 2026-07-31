@@ -68,19 +68,19 @@ func TestMapDomainStatus(t *testing.T) {
 }
 
 func TestSynthesizePriority(t *testing.T) {
-	if got := Synthesize("waiting", "running"); got != "running" {
+	if got := Synthesize("waiting", "running", "subtitle"); got != "running" {
 		t.Fatalf("got %q", got)
 	}
-	if got := Synthesize("failed", "pending"); got != "failed" {
+	if got := Synthesize("failed", "pending", "subtitle"); got != "failed" {
 		t.Fatalf("failed+pending → %q want failed", got)
 	}
-	if got := Synthesize("cancelled", "waiting"); got != "cancelled" {
+	if got := Synthesize("cancelled", "waiting", "subtitle"); got != "cancelled" {
 		t.Fatalf("cancelled+waiting → %q", got)
 	}
-	if got := Synthesize("", "pending"); got != "waiting" {
+	if got := Synthesize("", "pending", "subtitle"); got != "waiting" {
 		t.Fatalf("domain-only pending → %q", got)
 	}
-	if got := Synthesize("done", ""); got != "done" {
+	if got := Synthesize("done", "", "subtitle"); got != "done" {
 		t.Fatalf("queue-only done → %q", got)
 	}
 }
