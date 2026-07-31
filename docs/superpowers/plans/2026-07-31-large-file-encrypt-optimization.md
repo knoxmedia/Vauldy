@@ -370,21 +370,21 @@ git commit -m "feat(storage): resumable manual EncryptMedia path"
 
 ### Task 7: Phase 1 verification
 
-- [ ] **Step 1: Run focused suites**
+- [x] **Step 1: Run focused suites**
 
 ```bash
 go test ./internal/crypto/ ./internal/storage/ ./internal/postingest/ -count=1 -timeout 300s -run "Resume|Encrypt|Quarantine|StageMedia"
 go test ./api/handler/ -count=1 -run EncryptTaskAdmin
 ```
 
-Expected: PASS
+Expected: PASS (verified 2026-07-31 on feature branch)
 
 - [ ] **Step 2: Manual checklist (document in PR)**
 
 - Kill mid-encrypt ≥8 GiB fixture → restart → completes without rewriting first half  
 - Cross-vol config: no second plaintext on data disk  
 
-- [ ] **Step 3: Commit any fixes; mark Phase 1 done in spec status note**
+- [x] **Step 3: Commit any fixes; mark Phase 1 done in spec status note**
 
 ---
 

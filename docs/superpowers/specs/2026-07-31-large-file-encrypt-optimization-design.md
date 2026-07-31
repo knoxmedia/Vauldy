@@ -1,7 +1,7 @@
 # Large-file encryption optimization (resume + throughput)
 
 Date: 2026-07-31  
-Status: approved for implementation (user confirmed 2026-07-31)
+Status: Phase 1 implemented on `feature/large-file-encrypt-optimization` (automated suites green 2026-07-31); Phase 2 pending. Manual checklist (kill mid-encrypt ≥8 GiB; cross-vol no second plaintext) for PR.
 
 ## Goals
 
