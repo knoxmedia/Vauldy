@@ -135,8 +135,12 @@ func (s *EncryptResumeSession) WriteHeader(dst io.Writer) error {
 }
 
 // EncryptRange encrypts plainLen bytes from src starting at plainOffset (CTR counter = plainOffset/16).
-// plainOffset must be AES-block aligned.
+// plainOffset must be AES-block aligned. When appending into an existing .enc file, callers must
+// seek dst to EncHeaderSize+plainOffset before writing this range.
 func (s *EncryptResumeSession) EncryptRange(ctx context.Context, src io.Reader, dst io.Writer, plainOffset, plainLen int64) error {
+	if plainLen < 0 {
+		return errors.New("enc: plainLen must be non-negative")
+	}
 	return encryptCTRRangeContext(ctx, src, dst, s.block, s.nonce, plainOffset, plainLen)
 }
 

@@ -3,7 +3,9 @@ package crypto
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
+	"strings"
 	"testing"
 )
 
@@ -72,5 +74,54 @@ func TestRestoreEncryptResume_ContinuesAfterRestart(t *testing.T) {
 	body, _ := io.ReadAll(dec)
 	if !bytes.Equal(body, plain) {
 		t.Fatalf("restore resume decrypt mismatch len=%d", len(body))
+	}
+}
+
+func TestEncryptRange_ShortReadReturnsError(t *testing.T) {
+	kek := bytes.Repeat([]byte{0x44}, 32)
+	st, err := BeginEncryptResume(kek)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	src := bytes.NewReader(make([]byte, 32))
+	err = st.EncryptRange(context.Background(), src, &out, 0, 64)
+	if err == nil {
+		t.Fatal("expected error for short read")
+	}
+	if !errors.Is(err, io.ErrUnexpectedEOF) && !strings.Contains(err.Error(), "short read") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestEncryptRange_NegativePlainLenRejected(t *testing.T) {
+	kek := bytes.Repeat([]byte{0x55}, 32)
+	st, err := BeginEncryptResume(kek)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err = st.EncryptRange(context.Background(), bytes.NewReader([]byte{0x01}), &out, 0, -1)
+	if err == nil {
+		t.Fatal("expected error for negative plainLen")
+	}
+	if !strings.Contains(err.Error(), "plainLen") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestEncryptRange_MisalignedOffsetRejected(t *testing.T) {
+	kek := bytes.Repeat([]byte{0x66}, 32)
+	st, err := BeginEncryptResume(kek)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err = st.EncryptRange(context.Background(), bytes.NewReader(make([]byte, 32)), &out, 1, 32)
+	if err == nil {
+		t.Fatal("expected error for misaligned plainOffset")
+	}
+	if !strings.Contains(err.Error(), "block aligned") {
+		t.Fatalf("err=%v", err)
 	}
 }

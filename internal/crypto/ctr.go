@@ -6,6 +6,7 @@ import (
 	"crypto/cipher"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 )
@@ -71,6 +72,9 @@ func encryptCTRRangeContext(ctx context.Context, src io.Reader, dst io.Writer, b
 		if err != nil {
 			break
 		}
+	}
+	if plainLen > 0 && remaining > 0 {
+		return fmt.Errorf("enc: short read: want %d bytes, got %d", plainLen, plainLen-remaining)
 	}
 	return ctx.Err()
 }
