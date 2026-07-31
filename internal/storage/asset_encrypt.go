@@ -28,8 +28,12 @@ type AssetEncryptor struct {
 	DataDir        string
 	FFmpegPath     string
 	FFprobePath    string
-	onFlightJoined func(mediaID int64)
-	syncStagedFile func(*os.File) error
+	// ResumeCheckpointBytes overrides EncryptResumeCheckpointBytes when > 0 (tests).
+	ResumeCheckpointBytes int64
+	onFlightJoined        func(mediaID int64)
+	syncStagedFile        func(*os.File) error
+	// onEncryptCheckpoint is invoked after each durable resume checkpoint (tests).
+	onEncryptCheckpoint func(ctx context.Context, plainOffset int64)
 }
 
 // IsMediaEncrypted reports whether the media item is already stored as an encrypted asset.

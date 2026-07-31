@@ -29,14 +29,23 @@ type StagedMediaEncryption struct {
 	CleanupPlaintext  bool
 }
 
+func (s *AssetEncryptor) resumeCheckpointBytes() int64 {
+	if s != nil && s.ResumeCheckpointBytes > 0 {
+		return s.ResumeCheckpointBytes
+	}
+	return EncryptResumeCheckpointBytes
+}
+
 func (s *AssetEncryptor) StageMediaEncryption(ctx context.Context, mediaID int64) (stage StagedMediaEncryption, err error) {
 	if s == nil || s.DB == nil || s.Vault == nil {
 		return stage, errors.New("encrypted assets not configured")
 	}
-	var libraryID int64
+	_ = EnsureEncryptResumeSchema(s.DB)
+
+	var libraryID, generation int64
 	var source, fileType, fileID string
 	var cleanup int
-	err = s.DB.QueryRowContext(ctx, `SELECT m.library_id,m.file_path,COALESCE(m.file_type,''),COALESCE(m.file_id,''),COALESCE(l.encrypted_assets_cleanup_plaintext,0) FROM media m JOIN library l ON l.id=m.library_id WHERE m.id=?`, mediaID).Scan(&libraryID, &source, &fileType, &fileID, &cleanup)
+	err = s.DB.QueryRowContext(ctx, `SELECT m.library_id,m.file_path,COALESCE(m.file_type,''),COALESCE(m.file_id,''),COALESCE(l.encrypted_assets_cleanup_plaintext,0),COALESCE(m.ingest_generation,0) FROM media m JOIN library l ON l.id=m.library_id WHERE m.id=?`, mediaID).Scan(&libraryID, &source, &fileType, &fileID, &cleanup, &generation)
 	if err != nil {
 		return stage, err
 	}
@@ -48,6 +57,16 @@ func (s *AssetEncryptor) StageMediaEncryption(ctx context.Context, mediaID int64
 	if err != nil {
 		return stage, fmt.Errorf("plain file missing: %w", err)
 	}
+	identity, err := QuickSourceIdentity(source)
+	if err != nil {
+		return stage, fmt.Errorf("plain file missing: %w", err)
+	}
+	srcInfo, err := os.Stat(source)
+	if err != nil {
+		return stage, fmt.Errorf("plain file missing: %w", err)
+	}
+	plainSize := srcInfo.Size()
+
 	kek, err := s.Vault.GetKEK(ctx)
 	if err != nil {
 		return stage, err
@@ -67,45 +86,195 @@ func (s *AssetEncryptor) StageMediaEncryption(ctx context.Context, mediaID int64
 	if err != nil {
 		return stage, err
 	}
-	stageID := uuid.NewString()
-	dir := filepath.Join(base, fileType, "stages", stageID)
-	if err = os.MkdirAll(dir, 0700); err != nil {
-		return stage, err
+
+	var (
+		stageID                                           string
+		encPath                                           string
+		plainOffset                                       int64
+		session                                           *kcrypto.EncryptResumeSession
+		resuming                                          bool
+		hadCheckpoint                                     bool
+		wrappedHex, ivHex                                 string
+	)
+
+	prev, loadErr := LoadEncryptResume(ctx, s.DB, mediaID, generation)
+	if loadErr == nil &&
+		(prev.State == "encrypting" || prev.State == "staged") &&
+		prev.SourceIdentity == identity &&
+		prev.EncPath != "" {
+		if st, stErr := os.Stat(prev.EncPath); stErr == nil && st.Size() >= int64(kcrypto.EncHeaderSize) {
+			wrappedRaw, wErr := hex.DecodeString(prev.WrappedDEK)
+			ivRaw, iErr := hex.DecodeString(prev.IV)
+			if wErr == nil && iErr == nil {
+				session, err = kcrypto.RestoreEncryptResume(kek, wrappedRaw, ivRaw)
+				if err == nil {
+					stageID = prev.StageID
+					encPath = prev.EncPath
+					plainOffset = prev.PlainOffset
+					if plainOffset < 0 {
+						plainOffset = 0
+					}
+					if plainOffset > plainSize {
+						plainOffset = 0
+					}
+					wrappedHex = prev.WrappedDEK
+					ivHex = prev.IV
+					resuming = true
+					hadCheckpoint = prev.PlainOffset > 0 || prev.EncBytesWritten > 0 || prev.State == "staged"
+				}
+			}
+		}
 	}
-	encPath := filepath.Join(dir, fileID+".enc")
+	if loadErr == nil && !resuming && prev.State != "abandoned" {
+		_ = AbandonEncryptResume(ctx, s.DB, mediaID, generation)
+	}
+
+	if !resuming {
+		session, err = kcrypto.BeginEncryptResume(kek)
+		if err != nil {
+			return stage, err
+		}
+		stageID = uuid.NewString()
+		dir := filepath.Join(base, fileType, "stages", stageID)
+		if err = os.MkdirAll(dir, 0700); err != nil {
+			return stage, err
+		}
+		encPath = filepath.Join(dir, fileID+".enc")
+		plainOffset = 0
+		result := session.Result()
+		wrappedHex = hex.EncodeToString(result.WrappedDEK)
+		ivHex = hex.EncodeToString(result.IV)
+	}
+
 	src, err := os.Open(source)
 	if err != nil {
 		return stage, err
 	}
 	defer src.Close()
-	dst, err := os.OpenFile(encPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-	if err != nil {
-		return stage, err
-	}
-	result, cryptErr := kcrypto.EncryptFileContext(ctx, src, dst, kek)
-	var syncErr error
-	if cryptErr == nil {
-		if s.syncStagedFile != nil {
-			syncErr = s.syncStagedFile(dst)
-		} else {
-			syncErr = dst.Sync()
+
+	var dst *os.File
+	if resuming {
+		dst, err = os.OpenFile(encPath, os.O_RDWR, 0600)
+		if err != nil {
+			return stage, err
+		}
+		if _, err = dst.Seek(int64(kcrypto.EncHeaderSize)+plainOffset, io.SeekStart); err != nil {
+			_ = dst.Close()
+			return stage, err
+		}
+	} else {
+		dst, err = os.OpenFile(encPath, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
+		if err != nil {
+			return stage, err
+		}
+		if err = session.WriteHeader(dst); err != nil {
+			_ = dst.Close()
+			_ = os.Remove(encPath)
+			return stage, err
 		}
 	}
-	closeErr := dst.Close()
-	if cryptErr != nil {
-		_ = os.Remove(encPath)
-		return stage, cryptErr
+
+	removeOnFail := func() {
+		if !hadCheckpoint {
+			_ = os.Remove(encPath)
+		}
 	}
+
+	upsertProgress := func(offset int64, state string) error {
+		// Resume checkpoints must persist even when the encrypt ctx is canceled.
+		return UpsertEncryptResume(context.WithoutCancel(ctx), s.DB, EncryptResumeRow{
+			MediaID:         mediaID,
+			Generation:      generation,
+			StageID:         stageID,
+			EncPath:         encPath,
+			SourcePath:      source,
+			SourceIdentity:  identity,
+			WrappedDEK:      wrappedHex,
+			IV:              ivHex,
+			PlainOffset:     offset,
+			EncBytesWritten: offset,
+			State:           state,
+		})
+	}
+
+	if _, err = src.Seek(plainOffset, io.SeekStart); err != nil {
+		_ = dst.Close()
+		removeOnFail()
+		return stage, err
+	}
+
+	checkpoint := s.resumeCheckpointBytes()
+	for plainOffset < plainSize {
+		if err := ctx.Err(); err != nil {
+			_ = upsertProgress(plainOffset, "encrypting")
+			_ = dst.Close()
+			if hadCheckpoint {
+				return stage, err
+			}
+			removeOnFail()
+			return stage, err
+		}
+		chunk := checkpoint
+		remaining := plainSize - plainOffset
+		if chunk > remaining {
+			chunk = remaining
+		}
+		cryptErr := session.EncryptRange(ctx, src, dst, plainOffset, chunk)
+		if cryptErr != nil {
+			_ = upsertProgress(plainOffset, "encrypting")
+			_ = dst.Close()
+			if hadCheckpoint {
+				return stage, cryptErr
+			}
+			removeOnFail()
+			return stage, cryptErr
+		}
+		plainOffset += chunk
+		if err := upsertProgress(plainOffset, "encrypting"); err != nil {
+			_ = dst.Close()
+			removeOnFail()
+			return stage, err
+		}
+		hadCheckpoint = true
+		if s.onEncryptCheckpoint != nil {
+			s.onEncryptCheckpoint(ctx, plainOffset)
+		}
+	}
+
+	var syncErr error
+	if s.syncStagedFile != nil {
+		syncErr = s.syncStagedFile(dst)
+	} else {
+		syncErr = dst.Sync()
+	}
+	closeErr := dst.Close()
 	if syncErr != nil || closeErr != nil {
 		_ = os.Remove(encPath)
 		return stage, errors.Join(syncErr, closeErr)
 	}
+
+	if err := upsertProgress(plainOffset, "staged"); err != nil {
+		_ = os.Remove(encPath)
+		return stage, err
+	}
+
 	size, hash, err := EncryptionPathHash(encPath)
 	if err != nil {
 		_ = os.Remove(encPath)
 		return stage, err
 	}
-	return StagedMediaEncryption{MediaID: mediaID, StageID: stageID, OriginalPath: source, SourceFingerprint: fp, EncPath: encPath, WrappedDEK: hex.EncodeToString(result.WrappedDEK), IV: hex.EncodeToString(result.IV), SHA256: hash, Size: size, CleanupPlaintext: cleanup == 1}, nil
+	return StagedMediaEncryption{
+		MediaID:           mediaID,
+		StageID:           stageID,
+		OriginalPath:      source,
+		SourceFingerprint: fp,
+		EncPath:           encPath,
+		WrappedDEK:        wrappedHex,
+		IV:                ivHex,
+		SHA256:            hash,
+		Size:              size,
+		CleanupPlaintext:  cleanup == 1,
+	}, nil
 }
 
 func EncryptionSourceFingerprint(path string) (string, error) {
