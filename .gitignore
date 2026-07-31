@@ -11,3 +11,5 @@ internal/webembed/dist/
 tools/doctran/LibreOfficePortable/
 tools/doctran/fixtures/
 
+
+.worktrees/
