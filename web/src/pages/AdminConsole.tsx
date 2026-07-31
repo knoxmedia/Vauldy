@@ -8,8 +8,30 @@ import { useAuthStore } from "../store/auth";
 
 type EffectGeneration = { id: number; active: boolean; hasFirstData: boolean };
 
+const ALIGNED_QUEUE_TYPES = new Set(["subtitle", "preview", "atrack", "keyframe", "encrypt"]);
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isStatusCountMap(value: unknown): value is Record<string, number> {
+  return isRecord(value) && Object.values(value).every((count) => typeof count === "number");
+}
+
+function isTypeStatusCountMap(value: unknown): value is Record<string, Record<string, number>> {
+  return isRecord(value) && Object.values(value).every((item) => isStatusCountMap(item));
+}
+
+/** Prefer synthesized alignment counts for dual-table types; keep raw queue for other types. */
+export function displayQueueByType(overview: AdminOverview): Record<string, Record<string, number>> {
+  const merged: Record<string, Record<string, number>> = { ...overview.post_ingest_queue.by_type };
+  for (const type of ALIGNED_QUEUE_TYPES) {
+    const aligned = overview.task_alignment.by_type[type];
+    if (aligned) {
+      merged[type] = aligned;
+    }
+  }
+  return merged;
 }
 
 export function isAdminOverview(value: unknown): value is AdminOverview {
@@ -30,12 +52,12 @@ export function isAdminOverview(value: unknown): value is AdminOverview {
     && activityNumbers.every((key) => typeof activity[key] === "number")
     && activityStrings.every((key) => typeof activity[key] === "string"))) return false;
   const queue = value.post_ingest_queue;
+  const alignment = value.task_alignment;
   const budget = value.resource_budget;
   const metrics = value.sqlite_metrics;
-  if (!isRecord(queue) || !isRecord(queue.by_status) || !isRecord(queue.by_type)
-    || typeof queue.oldest_waiting_seconds !== "number" || typeof queue.expired_lease_count !== "number"
-    || !Object.values(queue.by_status).every((item) => typeof item === "number")
-    || !Object.values(queue.by_type).every((item) => isRecord(item) && Object.values(item).every((count) => typeof count === "number"))) return false;
+  if (!isRecord(queue) || !isStatusCountMap(queue.by_status) || !isTypeStatusCountMap(queue.by_type)
+    || typeof queue.oldest_waiting_seconds !== "number" || typeof queue.expired_lease_count !== "number") return false;
+  if (!isRecord(alignment) || !isTypeStatusCountMap(alignment.by_type)) return false;
   if (!Array.isArray(value.running_post_ingest_tasks) || !Array.isArray(value.scan_leases) || !isRecord(budget) || !isRecord(metrics)) return false;
   const runningNumbers = ["id", "media_id", "attempts", "attempt", "max_attempts", "run_seconds"];
   const runningStrings = ["task_type", "type", "started_at", "lease_owner", "lease_until", "lease_expires"];
@@ -207,8 +229,8 @@ export default function AdminConsolePage() {
             </Col>
             <Col xs={24} lg={12}>
               <Card size="small" title={t("pages.admin_console.queue_by_type")}>
-                {overview && Object.keys(overview.post_ingest_queue.by_type).length ? (
-                  <Space wrap>{Object.entries(overview.post_ingest_queue.by_type).sort(([a], [b]) => a.localeCompare(b)).flatMap(([type, statuses]) => Object.entries(statuses).sort(([a], [b]) => a.localeCompare(b)).map(([status, count]) => <Tag key={`${type}-${status}`}>{type} / {status}: {count}</Tag>))}</Space>
+                {overview && Object.keys(displayQueueByType(overview)).length ? (
+                  <Space wrap>{Object.entries(displayQueueByType(overview)).sort(([a], [b]) => a.localeCompare(b)).flatMap(([type, statuses]) => Object.entries(statuses).sort(([a], [b]) => a.localeCompare(b)).map(([status, count]) => <Tag key={`${type}-${status}`}>{type} / {status}: {count}</Tag>))}</Space>
                 ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />}
               </Card>
             </Col>

@@ -55,3 +55,27 @@ func TestRecoverStartupTasksCleansScrapeStagesBeforeQueueReset(t *testing.T) {
 		t.Fatalf("stale retained: %v", e)
 	}
 }
+
+func TestRecoverStartupTasksBackfillsMissingDomainTasks(t *testing.T) {
+	db, err := store.OpenSQLite(filepath.Join(t.TempDir(), "domain-backfill.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(`
+		INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l');
+		INSERT INTO media(id,library_id,file_id,file_type,ingest_generation) VALUES(1,1,'f','video',1);
+		INSERT INTO post_ingest_task(media_id,generation,task_type,status,max_attempts) VALUES(1,1,'subtitle','waiting',3)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := recoverStartupTasks(context.Background(), db, postingest.NewQueue(db, "r", nil), startupRecoveryRoots(t, "")); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	if err := db.QueryRow(`SELECT status FROM subtitle_task WHERE media_id=1`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "pending" {
+		t.Fatalf("status=%q, want pending", status)
+	}
+}

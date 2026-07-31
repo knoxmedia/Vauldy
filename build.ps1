@@ -5,6 +5,29 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $root
 
+function Resolve-GoExe {
+  $cmd = Get-Command go -ErrorAction SilentlyContinue
+  if ($cmd -and $cmd.Source) { return $cmd.Source }
+  $candidates = [System.Collections.Generic.List[string]]::new()
+  if (-not [string]::IsNullOrWhiteSpace($env:GOROOT)) {
+    $candidates.Add((Join-Path $env:GOROOT "bin\go.exe"))
+  }
+  $candidates.Add("D:\program files\Go\bin\go.exe")
+  $candidates.Add("C:\Program Files\Go\bin\go.exe")
+  if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+    $candidates.Add((Join-Path $env:LOCALAPPDATA "Programs\Go\bin\go.exe"))
+  }
+  $found = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+  if ($found) { return $found }
+  throw "go not found on PATH; install Go or add its bin directory to PATH (e.g. D:\program files\Go\bin)"
+}
+
+$GoExe = Resolve-GoExe
+$goDir = Split-Path -Parent $GoExe
+if ($env:PATH -notlike "*$goDir*") {
+  $env:PATH = "$goDir;$env:PATH"
+}
+
 Push-Location web
 npm run build
 Pop-Location
@@ -32,7 +55,7 @@ function Invoke-GoBuild {
   )
   $env:GOOS = $GoOS
   $env:GOARCH = $GoArch
-  & go build -tags embedweb "-ldflags=-s -w" -o $Output ./cmd/server
+  & $GoExe build -tags embedweb "-ldflags=-s -w" -o $Output ./cmd/server
   if ($LASTEXITCODE -ne 0) {
     throw "go build failed for $Output"
   }

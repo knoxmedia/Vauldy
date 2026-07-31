@@ -59,6 +59,7 @@ import {
   type TranscodeTask,
 } from "../api/client";
 import { formatServerDateTime } from "../lib/datetime";
+import { matchesDisplayStatus, toDisplayStatus } from "../lib/taskDisplayStatus";
 import { useT } from "../i18n";
 
 function fmtTaskTs(v?: string) {
@@ -328,7 +329,7 @@ export default function TaskManagerPage() {
     [scrapeTasks, scrapeStatusFilter]
   );
   const filteredPreview = useMemo(
-    () => previewTasks.filter((x) => (previewStatusFilter === "all" ? true : x.status === previewStatusFilter)),
+    () => previewTasks.filter((x) => matchesDisplayStatus("preview", x.status, previewStatusFilter)),
     [previewTasks, previewStatusFilter]
   );
   const filteredScan = useMemo(
@@ -336,15 +337,15 @@ export default function TaskManagerPage() {
     [scanTasks, scanStatusFilter]
   );
   const filteredSubtitle = useMemo(
-    () => subtitleTasks.filter((x) => (subtitleStatusFilter === "all" ? true : x.status === subtitleStatusFilter)),
+    () => subtitleTasks.filter((x) => matchesDisplayStatus("subtitle", x.status, subtitleStatusFilter)),
     [subtitleTasks, subtitleStatusFilter]
   );
   const filteredAtrack = useMemo(
-    () => atrackTasks.filter((x) => (atrackStatusFilter === "all" ? true : x.status === atrackStatusFilter)),
+    () => atrackTasks.filter((x) => matchesDisplayStatus("atrack", x.status, atrackStatusFilter)),
     [atrackTasks, atrackStatusFilter]
   );
   const filteredKeyframe = useMemo(
-    () => keyframeTasks.filter((x) => (keyframeStatusFilter === "all" ? true : x.status === keyframeStatusFilter)),
+    () => keyframeTasks.filter((x) => matchesDisplayStatus("keyframe", x.status, keyframeStatusFilter)),
     [keyframeTasks, keyframeStatusFilter]
   );
   const filteredLyric = useMemo(
@@ -385,7 +386,17 @@ export default function TaskManagerPage() {
         { value: "cancelled", label: "cancelled" },
       ];
     }
-    if (tab === "subtitle" || tab === "lyric") {
+    if (tab === "subtitle") {
+      return [
+        ...commonAll,
+        { value: "waiting", label: "waiting" },
+        { value: "running", label: "running" },
+        { value: "done", label: "done" },
+        { value: "failed", label: "failed" },
+        { value: "cancelled", label: "cancelled" },
+      ];
+    }
+    if (tab === "lyric") {
       return [
         ...commonAll,
         { value: "pending", label: "pending" },
@@ -404,11 +415,21 @@ export default function TaskManagerPage() {
         { value: "cancelled", label: "cancelled" },
       ];
     }
+    if (tab === "preview" || tab === "atrack" || tab === "keyframe") {
+      return [
+        ...commonAll,
+        { value: "waiting", label: "waiting" },
+        { value: "running", label: "running" },
+        { value: "done", label: "done" },
+        { value: "failed", label: "failed" },
+        { value: "cancelled", label: "cancelled" },
+      ];
+    }
     return [
       ...commonAll,
       { value: "waiting", label: "waiting" },
       { value: "running", label: "running" },
-      { value: "ready", label: "ready" },
+      { value: "done", label: "done" },
       { value: "failed", label: "failed" },
     ];
   };
@@ -712,8 +733,9 @@ export default function TaskManagerPage() {
                   { title: t("pages.task_manager.col_media_id"), dataIndex: "media_id", width: 90 },
                   { title: t("pages.task_manager.col_video_title"), dataIndex: "title", ellipsis: true },
                   { title: t("pages.task_manager.col_status"), dataIndex: "status", width: 100, render: (v: string) => {
-                    const c = v === "done" ? "green" : v === "failed" ? "red" : v === "running" ? "processing" : "default";
-                    return <Tag color={c}>{v}</Tag>;
+                    const display = toDisplayStatus("subtitle", v);
+                    const c = display === "done" ? "green" : display === "failed" ? "red" : display === "running" ? "processing" : "default";
+                    return <Tag color={c}>{display}</Tag>;
                   } },
                   { title: t("pages.task_manager.col_note"), dataIndex: "message", ellipsis: true, render: (v?: string) => v || "-" },
                   { title: t("pages.task_manager.col_created_at"), dataIndex: "created_at", width: 170, render: fmtTaskTs },
@@ -903,7 +925,7 @@ export default function TaskManagerPage() {
                 columns={[
                   { title: t("pages.task_manager.col_media_id"), dataIndex: "media_id", width: 90 },
                   { title: t("pages.task_manager.col_title"), dataIndex: "title", ellipsis: true },
-                  { title: t("pages.task_manager.col_status"), dataIndex: "status", width: 110 },
+                  { title: t("pages.task_manager.col_status"), dataIndex: "status", width: 110, render: (v: string) => toDisplayStatus("preview", v) },
                   { title: t("pages.task_manager.col_interval_s"), dataIndex: "interval_sec", width: 90 },
                   { title: t("pages.task_manager.col_thumb_count"), dataIndex: "thumb_count", width: 100 },
                   { title: t("pages.task_manager.col_size"), key: "size", width: 120, render: (_: unknown, r: PreviewTask) => `${r.thumb_width}x${r.thumb_height}` },

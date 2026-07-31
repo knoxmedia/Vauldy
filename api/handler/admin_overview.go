@@ -24,6 +24,7 @@ import (
 	"knox-media/internal/postingest"
 	"knox-media/internal/publication"
 	"knox-media/internal/store"
+	"knox-media/internal/taskalign"
 )
 
 const adminOverviewTimeout = 8 * time.Second
@@ -193,6 +194,10 @@ func (b *AdminOverviewBuilder) Build(ctx context.Context) (AdminOverviewData, er
 	if err != nil {
 		return nil, err
 	}
+	align, err := taskalign.Compute(ctx, b.DB)
+	if err != nil {
+		return nil, err
+	}
 	running, err := b.loadRunning(ctx)
 	if err != nil {
 		return nil, err
@@ -213,7 +218,7 @@ func (b *AdminOverviewBuilder) Build(ctx context.Context) (AdminOverviewData, er
 	return AdminOverviewData{
 		"monitor":    map[string]any{"cpu_percent": sample.CPUPercent, "memory_percent": sample.MemoryPercent, "disk_percent": sample.DiskPercent, "transcode_task_count": transcodeTasks, "media_total": mediaTotal},
 		"system":     map[string]any{"cpu_count": runtime.NumCPU(), "memory_total": sample.MemoryTotal, "os": runtime.GOOS + "/" + runtime.GOARCH, "database": "sqlite " + dbVersion.String, "software_version": softwareBuild.Version, "software_commit": softwareBuild.Commit, "software_build_time": softwareBuild.BuildTime, "software_dirty": softwareBuild.Dirty, "software_dirty_known": softwareBuild.DirtyKnown, "software_vcs_revision": softwareBuild.VCS.Revision, "software_vcs_time": softwareBuild.VCS.Time, "software_vcs_modified": softwareBuild.VCS.Modified, "software_vcs_modified_known": softwareBuild.VCS.ModifiedKnown},
-		"activities": activities, "post_ingest_queue": queue, "running_post_ingest_tasks": running, "scan_leases": leases, "resource_budget": b.budget(), "sqlite_metrics": b.sqliteMetrics(),
+		"activities": activities, "post_ingest_queue": queue, "task_alignment": align, "running_post_ingest_tasks": running, "scan_leases": leases, "resource_budget": b.budget(), "sqlite_metrics": b.sqliteMetrics(),
 		"publication_policy": publicationPolicy,
 	}, nil
 }

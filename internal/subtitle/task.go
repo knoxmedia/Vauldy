@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"knox-media/internal/taskalign"
 )
 
 // EnsurePendingSubtitleTask inserts a pending row when none exists for media_id (INSERT OR IGNORE).
@@ -105,22 +107,69 @@ func (s *Service) DeleteSubtitleTask(mediaID int64) error {
 		return fmt.Errorf("task is running")
 	}
 	_, err = s.DB.Exec(`DELETE FROM subtitle_task WHERE media_id = ?`, mediaID)
-	return err
+	if err != nil {
+		return err
+	}
+	return taskalign.DeleteCurrentGenQueueTasks(context.Background(), s.DB, "subtitle", mediaID)
 }
 
 // CleanupSubtitleTasksFailed removes failed task rows (optional: keep media_subtitle).
 func (s *Service) CleanupSubtitleTasksFailed() (int64, error) {
+	rows, err := s.DB.Query(`SELECT media_id FROM subtitle_task WHERE status = 'failed'`)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	var mediaIDs []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return 0, err
+		}
+		mediaIDs = append(mediaIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
 	res, err := s.DB.Exec(`DELETE FROM subtitle_task WHERE status = 'failed'`)
 	if err != nil {
 		return 0, err
 	}
-	return res.RowsAffected()
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if err := taskalign.DeleteCurrentGenQueueTasks(context.Background(), s.DB, "subtitle", mediaIDs...); err != nil {
+		return n, err
+	}
+	return n, nil
 }
 
 // CleanupSubtitleTasksBefore deletes done/failed tasks whose finished_at is older than days.
 func (s *Service) CleanupSubtitleTasksBefore(days int) (int64, error) {
 	if days <= 0 {
 		days = 30
+	}
+	rows, err := s.DB.Query(`
+		SELECT media_id FROM subtitle_task
+		WHERE status IN ('done', 'failed')
+		  AND finished_at IS NOT NULL
+		  AND datetime(finished_at) < datetime('now', '-' || ? || ' days')
+	`, days)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	var mediaIDs []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return 0, err
+		}
+		mediaIDs = append(mediaIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
 	}
 	res, err := s.DB.Exec(`
 		DELETE FROM subtitle_task
@@ -131,5 +180,12 @@ func (s *Service) CleanupSubtitleTasksBefore(days int) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	return res.RowsAffected()
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if err := taskalign.DeleteCurrentGenQueueTasks(context.Background(), s.DB, "subtitle", mediaIDs...); err != nil {
+		return n, err
+	}
+	return n, nil
 }

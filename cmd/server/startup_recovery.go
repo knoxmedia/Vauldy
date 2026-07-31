@@ -4,11 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"time"
 
 	"knox-media/internal/metadatalib"
 	"knox-media/internal/postingest"
 	"knox-media/internal/store"
+	"knox-media/internal/taskalign"
 )
 
 // recoverStartupTasks performs durable queue recovery before workers claim work.
@@ -57,9 +59,26 @@ func recoverStartupLeases(ctx context.Context, db *sql.DB, postIngest *postinges
 	return nil
 }
 
+func recoverStartupDomainAlignment(ctx context.Context, db *sql.DB) error {
+	if db == nil {
+		return fmt.Errorf("startup recovery: database is required")
+	}
+	result, err := taskalign.BackfillMissingDomainTasks(ctx, db)
+	if err != nil {
+		return fmt.Errorf("startup recovery: domain task backfill: %w", err)
+	}
+	if result.Created > 0 {
+		log.Printf("startup recovery: domain task backfill created=%d by_type=%v", result.Created, result.ByType)
+	}
+	return nil
+}
+
 func recoverStartupTasks(ctx context.Context, db *sql.DB, postIngest *postingest.Queue, roots StartupRecoveryRoots) error {
 	if err := recoverStartupArtifacts(ctx, db, roots); err != nil {
 		return err
 	}
-	return recoverStartupLeases(ctx, db, postIngest)
+	if err := recoverStartupLeases(ctx, db, postIngest); err != nil {
+		return err
+	}
+	return recoverStartupDomainAlignment(ctx, db)
 }
