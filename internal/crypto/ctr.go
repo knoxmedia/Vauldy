@@ -11,7 +11,7 @@ import (
 	"os"
 )
 
-const ctrEncryptChunk = 256 * 1024
+const ctrEncryptChunk = 1 << 20
 
 // ctrIV builds a 16-byte AES-CTR IV: nonce(12) || big-endian block counter(4).
 func ctrIV(nonce [IVSize]byte, blockNum uint32) []byte {

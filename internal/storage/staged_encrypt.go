@@ -238,6 +238,9 @@ func (s *AssetEncryptor) encryptToPathResumable(
 		}
 		dirty = true
 		plainOffset += chunk
+		if plainOffset == plainSize {
+			break
+		}
 		if err = checkpointAndUpsert(plainOffset, "encrypting"); err != nil {
 			_ = dst.Close()
 			discardUndurable()

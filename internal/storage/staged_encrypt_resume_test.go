@@ -342,6 +342,26 @@ func TestStageMediaEncryption_CheckpointSyncsBeforeUpsert(t *testing.T) {
 	_ = upsertSeenAtSync
 }
 
+func TestStageMediaEncryption_SyncsAtCheckpointsAndCompletionOnly(t *testing.T) {
+	db, vault, _, dir, _, _, mediaID := arrangeResumePlain(t, 2<<20)
+	syncCount := 0
+	enc := &AssetEncryptor{
+		DB: db, Vault: vault, BasePath: filepath.Join(dir, "encrypted"),
+		ResumeCheckpointBytes: 1 << 20,
+		syncStagedFile: func(f *os.File) error {
+			syncCount++
+			return f.Sync()
+		},
+	}
+
+	if _, err := enc.StageMediaEncryption(context.Background(), mediaID); err != nil {
+		t.Fatal(err)
+	}
+	if syncCount != 2 {
+		t.Fatalf("syncCount=%d want 2 (one checkpoint and one completion)", syncCount)
+	}
+}
+
 func arrangeResumePlain(t *testing.T, size int) (*sql.DB, *keystore.Vault, []byte, string, string, []byte, int64) {
 	t.Helper()
 	db, err := store.OpenSQLite(":memory:")
