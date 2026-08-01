@@ -55,6 +55,7 @@ import (
 	"knox-media/internal/upload"
 	"knox-media/internal/zapglobal"
 	"knox-media/pkg/ffprobe"
+	"knox-media/pkg/fileutil"
 )
 
 type cancelScanPersistence func(context.Context, int64) (int64, error)
@@ -84,6 +85,14 @@ func main() {
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		log.Fatalf("config: %v", err)
+	}
+	if cfg.Scan.FileExtensions != nil {
+		fe := cfg.Scan.FileExtensions
+		if err := fileutil.Configure(fileutil.ExtensionConfig{
+			Video: fe.Video, Audio: fe.Audio, Image: fe.Image, Document: fe.Document,
+		}); err != nil {
+			log.Fatalf("config file_extensions: %v", err)
+		}
 	}
 	cfg.ResolveExecutablePaths(filepath.Dir(cfgPath))
 	if err := cfg.EnsureDirs(); err != nil {
