@@ -363,7 +363,9 @@ func TestClaimEligibilityStatusDependencyMatrixAllFamilies(t *testing.T) {
 		want               bool
 	}{
 		{"required processing", "processing", "processing", false, true, "", "", true}, {"required failed", "failed", "processing", false, true, "", "", false}, {"required cancelled", "cancelled", "processing", false, true, "", "", false},
-		{"optional published independent", "published", "published", true, false, "media_visible", "", true}, {"optional degraded independent", "degraded", "degraded", true, false, "media_visible", "", true}, {"optional failed", "failed", "published", true, false, "media_visible", "", false}, {"optional cancelled", "cancelled", "published", true, false, "media_visible", "", false},
+		{"optional published independent", "published", "published", true, false, "media_visible", "", true}, {"optional degraded independent", "degraded", "degraded", true, false, "media_visible", "", true},
+		{"optional processing preserve visibility", "processing", "published", true, false, "media_visible", "", true}, {"optional processing degraded visibility", "processing", "degraded", true, false, "media_visible", "", true}, {"optional processing not yet visible", "processing", "processing", false, false, "media_visible", "", false},
+		{"optional failed", "failed", "published", true, false, "media_visible", "", false}, {"optional cancelled", "cancelled", "published", true, false, "media_visible", "", false},
 		{"optional degraded explicit failed dep", "degraded", "degraded", true, false, "step_done", "failed", false}, {"optional degraded explicit done dep", "degraded", "degraded", true, false, "step_done", "done", true},
 	}
 	for _, family := range []QueueFamily{QueuePostIngest, QueueScrape, QueuePrepare} {

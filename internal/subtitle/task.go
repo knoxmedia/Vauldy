@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"knox-media/internal/publication"
 	"knox-media/internal/taskalign"
 )
 
@@ -90,36 +91,105 @@ func (s *Service) ResetSubtitleJob(mediaID int64) error {
 	return err
 }
 
-// DeleteSubtitleTask removes one subtitle_task row (does not delete generated subtitle files).
+const subtitleDeletedByAdminMarker = "deleted by admin"
+
+// DeleteSubtitleTask atomically retires the current queue execution and removes
+// the domain task row. The queue row remains so startup repair cannot recreate it.
 func (s *Service) DeleteSubtitleTask(mediaID int64) error {
 	if s == nil || s.DB == nil || mediaID <= 0 {
 		return fmt.Errorf("invalid media id")
 	}
-	var status string
-	err := s.DB.QueryRow(`SELECT status FROM subtitle_task WHERE media_id = ?`, mediaID).Scan(&status)
-	if err == sql.ErrNoRows {
+	ctx := context.Background()
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var domainStatus string
+	domainExists := true
+	if err = tx.QueryRowContext(ctx, `SELECT status FROM subtitle_task WHERE media_id=?`, mediaID).Scan(&domainStatus); err != nil {
+		if err != sql.ErrNoRows {
+			return err
+		}
+		domainExists = false
+	}
+	var queueID int64
+	var queueStatus string
+	var stepID, runID sql.NullInt64
+	queueExists := true
+	err = tx.QueryRowContext(ctx, `
+		SELECT q.id,q.status,q.ingest_step_id,q.ingest_run_id
+		FROM post_ingest_task q JOIN media m ON m.id=q.media_id
+		WHERE q.media_id=? AND q.task_type='subtitle'
+		  AND q.generation=COALESCE(m.ingest_generation,0)
+		ORDER BY q.id DESC LIMIT 1`, mediaID).Scan(&queueID, &queueStatus, &stepID, &runID)
+	if err != nil {
+		if err != sql.ErrNoRows {
+			return err
+		}
+		queueExists = false
+	}
+	if !domainExists && !queueExists {
 		return fmt.Errorf("task not found")
 	}
-	if err != nil {
-		return err
+	if queueExists && strings.EqualFold(strings.TrimSpace(queueStatus), "running") {
+		return fmt.Errorf("task is running")
 	}
-	if strings.EqualFold(strings.TrimSpace(status), "running") {
-		// Allow delete when queue already cancelled/failed but domain row stuck in running.
-		var qStatus string
-		_ = s.DB.QueryRow(`
-SELECT COALESCE(status,'') FROM post_ingest_task
-WHERE media_id=? AND task_type='subtitle'
-  AND generation=(SELECT COALESCE(ingest_generation,0) FROM media WHERE id=?)
-ORDER BY id DESC LIMIT 1`, mediaID, mediaID).Scan(&qStatus)
-		if qStatus == "running" || qStatus == "" {
-			return fmt.Errorf("task is running")
+	if domainExists && strings.EqualFold(strings.TrimSpace(domainStatus), "running") && (!queueExists || !isTerminalSubtitleQueueStatus(queueStatus)) {
+		return fmt.Errorf("task is running")
+	}
+	if queueExists {
+		res, err := tx.ExecContext(ctx, `UPDATE post_ingest_task SET status='cancelled',lease_owner=NULL,lease_until=NULL,last_error=?,finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status<>'running'`, subtitleDeletedByAdminMarker, queueID)
+		if err != nil {
+			return err
+		}
+		if n, err := res.RowsAffected(); err != nil || n != 1 {
+			if err != nil {
+				return err
+			}
+			return fmt.Errorf("subtitle queue delete raced")
+		}
+		if stepID.Valid {
+			res, err = tx.ExecContext(ctx, `UPDATE media_ingest_step SET status='cancelled',lease_owner=NULL,lease_until=NULL,last_error=?,finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?`, subtitleDeletedByAdminMarker, stepID.Int64)
+			if err != nil {
+				return err
+			}
+			if n, err := res.RowsAffected(); err != nil || n != 1 {
+				if err != nil {
+					return err
+				}
+				return fmt.Errorf("linked subtitle ingest step not found")
+			}
+		}
+		if runID.Valid {
+			if err := publication.AggregateTx(ctx, tx, runID.Int64); err != nil {
+				return err
+			}
 		}
 	}
-	_, err = s.DB.Exec(`DELETE FROM subtitle_task WHERE media_id = ?`, mediaID)
-	if err != nil {
-		return err
+	if domainExists {
+		res, err := tx.ExecContext(ctx, `DELETE FROM subtitle_task WHERE media_id=?`, mediaID)
+		if err != nil {
+			return err
+		}
+		if n, err := res.RowsAffected(); err != nil || n != 1 {
+			if err != nil {
+				return err
+			}
+			return fmt.Errorf("subtitle task delete raced")
+		}
 	}
-	return taskalign.DeleteCurrentGenQueueTasks(context.Background(), s.DB, "subtitle", mediaID)
+	return tx.Commit()
+}
+
+func isTerminalSubtitleQueueStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "failed", "cancelled", "done":
+		return true
+	default:
+		return false
+	}
 }
 
 // CleanupSubtitleTasksFailed removes failed task rows (optional: keep media_subtitle).

@@ -64,7 +64,7 @@ type mediaListRow struct {
 	MusicAlbumTitle, MusicArtist, SortKey                                                                                          sql.NullString
 	Duration, Width, Height, Bitrate, ReleaseYear, Scraped, EncryptedAsset, OptimizationAssetRecorded, MusicAlbumID, PlayCompleted sql.NullInt64
 	PhotoTags, PhotoTagIDs                                                                                                         []string
-	PublicationState, PublishedAt, PublicationError                                                                                sql.NullString
+	PublicationState, PublishedAt, PublicationError, IngestRunStatus                                                               sql.NullString
 	IngestGeneration                                                                                                               sql.NullInt64
 }
 
@@ -223,7 +223,7 @@ NULLIF(json_extract(m.meta_json,'$.photo.taken_at'),''),COALESCE(json_extract(m.
 mt.album_id,COALESCE(NULLIF(TRIM(ma.title),''),''),COALESCE(NULLIF(TRIM(mt.artist_display),''),NULLIF(TRIM(ar.name),''),''),
 CASE WHEN COALESCE(json_extract(m.meta_json,'$.scrape.source'),'') NOT IN ('','aggregated-stub') AND COALESCE(json_extract(m.meta_json,'$.scrape.extra.note'),'')!='stub' AND (NULLIF(TRIM(json_extract(m.meta_json,'$.scrape.overview')),'') IS NOT NULL OR NULLIF(TRIM(json_extract(m.meta_json,'$.scrape.poster')),'') IS NOT NULL OR NULLIF(TRIM(json_extract(m.meta_json,'$.scrape.extra.poster')),'') IS NOT NULL OR CAST(NULLIF(json_extract(m.meta_json,'$.scrape.rating'),'') AS REAL)>0 OR NULLIF(TRIM(json_extract(m.meta_json,'$.scrape.release_date')),'') IS NOT NULL OR NULLIF(TRIM(json_extract(m.meta_json,'$.scrape.extra.tmdb_id')),'') IS NOT NULL OR NULLIF(TRIM(json_extract(m.meta_json,'$.scrape.extra.imdb_id')),'') IS NOT NULL) THEN 1 ELSE 0 END,
 CASE WHEN mea.status='encrypted' OR lower(m.file_path) LIKE '%.enc' THEN 1 ELSE 0 END,
-` + optimizationAssetRecordedSQL + `,` + keyExpr + `,m.publication_state,m.published_at,m.publication_error,m.ingest_generation
+` + optimizationAssetRecordedSQL + `,` + keyExpr + `,m.publication_state,m.published_at,m.publication_error,m.ingest_generation,` + ingestRunStatusSelect(spec.IncludeUnpublished) + `
 FROM candidates m
 LEFT JOIN pmax ON pmax.file_id=m.file_id
 LEFT JOIN pu ON pu.file_id=m.file_id
@@ -233,7 +233,7 @@ LEFT JOIN music_album ma ON ma.id=mt.album_id
 LEFT JOIN music_artist ar ON ar.id=ma.album_artist_id
 LEFT JOIN media_encrypted_assets mea ON mea.media_id=m.id
 LEFT JOIN library l ON l.id=m.library_id
-ORDER BY ` + orderBy
+` + ingestRunStatusJoin(spec.IncludeUnpublished) + `ORDER BY ` + orderBy
 	needs := false
 	for _, folders := range spec.FolderScope {
 		if len(folders) > 0 {
@@ -245,6 +245,20 @@ ORDER BY ` + orderBy
 		needs = true
 	}
 	return mediaQuery{SQL: q, Args: args, NeedsGoFilter: needs}, nil
+}
+
+func ingestRunStatusSelect(includeUnpublished bool) string {
+	if includeUnpublished {
+		return "COALESCE(mir.status,'')"
+	}
+	return "''"
+}
+
+func ingestRunStatusJoin(includeUnpublished bool) string {
+	if includeUnpublished {
+		return "LEFT JOIN media_ingest_run mir ON mir.media_id=m.id AND mir.generation=m.ingest_generation\n"
+	}
+	return ""
 }
 
 func (h *Handler) queryMediaBatch(ctx context.Context, q mediaQuery) ([]mediaListRow, error) {
@@ -260,7 +274,7 @@ func (h *Handler) queryMediaBatch(ctx context.Context, q mediaQuery) ([]mediaLis
 	out := make([]mediaListRow, 0)
 	for rows.Next() {
 		var r mediaListRow
-		if err := rows.Scan(&r.ID, &r.LibraryID, &r.FileID, &r.Title, &r.OriginalTitle, &r.FilePath, &r.FileType, &r.Duration, &r.Width, &r.Height, &r.Bitrate, &r.Format, &r.Status, &r.CreatedAt, &r.LastPlayAt, &r.PlayCompleted, &r.ReleaseDate, &r.ReleaseYear, &r.PosterURL, &r.BackdropURL, &r.PhotoTakenAt, &r.PhotoTagsRaw, &r.MusicAlbumID, &r.MusicAlbumTitle, &r.MusicArtist, &r.Scraped, &r.EncryptedAsset, &r.OptimizationAssetRecorded, &r.SortKey, &r.PublicationState, &r.PublishedAt, &r.PublicationError, &r.IngestGeneration); err != nil {
+		if err := rows.Scan(&r.ID, &r.LibraryID, &r.FileID, &r.Title, &r.OriginalTitle, &r.FilePath, &r.FileType, &r.Duration, &r.Width, &r.Height, &r.Bitrate, &r.Format, &r.Status, &r.CreatedAt, &r.LastPlayAt, &r.PlayCompleted, &r.ReleaseDate, &r.ReleaseYear, &r.PosterURL, &r.BackdropURL, &r.PhotoTakenAt, &r.PhotoTagsRaw, &r.MusicAlbumID, &r.MusicAlbumTitle, &r.MusicArtist, &r.Scraped, &r.EncryptedAsset, &r.OptimizationAssetRecorded, &r.SortKey, &r.PublicationState, &r.PublishedAt, &r.PublicationError, &r.IngestGeneration, &r.IngestRunStatus); err != nil {
 			return nil, err
 		}
 		r.PhotoTags = parseJSONStringArray(r.PhotoTagsRaw.String)

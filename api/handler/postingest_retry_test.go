@@ -299,6 +299,65 @@ func TestEnqueueExplicitPostIngestAllowsDoneOnlyForRetry(t *testing.T) {
 	}
 }
 
+func TestEnqueueExplicitPostIngestRetriesCurrentGenerationNotStaleWaiting(t *testing.T) {
+	db, mid, _ := explicitPostIngestDB(t)
+	if _, err := db.Exec(`UPDATE media SET ingest_generation=1,publication_state='published',published_at=CURRENT_TIMESTAMP,file_type='video' WHERE id=?`, mid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(10,?,1,'scan','published','{}',2)`, mid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status,attempts,max_attempts,last_error) VALUES(20,10,?,1,'subtitle',0,'failed',1,1,'asr failed')`, mid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO post_ingest_task(media_id,generation,task_type,status) VALUES(?,0,'subtitle','waiting')`, mid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO post_ingest_task(media_id,ingest_run_id,ingest_step_id,generation,task_type,status,attempts,max_attempts,last_error) VALUES(?,10,20,1,'subtitle','failed',1,1,'asr failed')`, mid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO subtitle_task(media_id,status,message) VALUES(?,'pending',NULL)
+		ON CONFLICT(media_id) DO UPDATE SET status='pending',message=NULL`, mid); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := enqueueExplicitPostIngest(context.Background(), db, mid, postingest.TaskSubtitle, true, subtitleResetTx(mid), nil)
+	if err != nil || got != explicitPostIngestQueued {
+		t.Fatalf("got=%q err=%v want queued", got, err)
+	}
+
+	var curStatus postingest.Status
+	var curAttempts int
+	var curErr string
+	if err := db.QueryRow(`SELECT status,attempts,last_error FROM post_ingest_task WHERE media_id=? AND generation=1 AND task_type='subtitle'`, mid).Scan(&curStatus, &curAttempts, &curErr); err != nil {
+		t.Fatal(err)
+	}
+	if curStatus != postingest.StatusWaiting || curAttempts != 0 || curErr != "" {
+		t.Fatalf("current gen queue status=%s attempts=%d err=%q", curStatus, curAttempts, curErr)
+	}
+	var staleStatus postingest.Status
+	if err := db.QueryRow(`SELECT status FROM post_ingest_task WHERE media_id=? AND generation=0 AND task_type='subtitle'`, mid).Scan(&staleStatus); err != nil {
+		t.Fatal(err)
+	}
+	if staleStatus != postingest.StatusWaiting {
+		t.Fatalf("stale gen0 status=%s", staleStatus)
+	}
+	var stepStatus string
+	if err := db.QueryRow(`SELECT status FROM media_ingest_step WHERE id=20`).Scan(&stepStatus); err != nil {
+		t.Fatal(err)
+	}
+	if stepStatus != "waiting" {
+		t.Fatalf("step status=%s want waiting", stepStatus)
+	}
+	var domain string
+	if err := db.QueryRow(`SELECT status FROM subtitle_task WHERE media_id=?`, mid).Scan(&domain); err != nil {
+		t.Fatal(err)
+	}
+	if domain != "pending" {
+		t.Fatalf("domain=%s want pending", domain)
+	}
+}
+
 func TestScheduledSubtitleAndAtrackOnlyEnqueue(t *testing.T) {
 	src, err := os.ReadFile("schedule_task.go")
 	if err != nil {

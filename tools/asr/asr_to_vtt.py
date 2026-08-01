@@ -179,7 +179,16 @@ def run_whisper(
         os.environ.setdefault("PYTHONIOENCODING", "utf-8")
     import whisper
 
-    model = whisper.load_model(model_name, device=device or None)
+    try:
+        model = whisper.load_model(model_name, device=device or None)
+    except Exception as e:
+        msg = str(e).lower()
+        if not (device or "").startswith("cuda") or not any(
+            token in msg for token in ("cublas", "cuda", "cudnn", "gpu", "dll", "cannot be loaded", "not found")
+        ):
+            raise
+        print(f"warning: CUDA ASR unavailable ({e}); falling back to CPU", file=sys.stderr)
+        model = whisper.load_model(model_name, device="cpu")
     kwargs: dict = {"verbose": False}
     if language:
         kwargs["language"] = language
@@ -206,7 +215,16 @@ def run_faster_whisper(
 
     dev = (device or "cpu").strip() or "cpu"
     compute_type = "float16" if dev.startswith("cuda") else "int8"
-    model = WhisperModel(model_name, device=dev, compute_type=compute_type)
+    try:
+        model = WhisperModel(model_name, device=dev, compute_type=compute_type)
+    except Exception as e:
+        msg = str(e).lower()
+        if not dev.startswith("cuda") or not any(
+            token in msg for token in ("cublas", "cuda", "cudnn", "gpu", "dll", "cannot be loaded", "not found")
+        ):
+            raise
+        print(f"warning: CUDA ASR unavailable ({e}); falling back to CPU", file=sys.stderr)
+        model = WhisperModel(model_name, device="cpu", compute_type="int8")
     segments, _info = model.transcribe(
         str(wav_path),
         language=language,

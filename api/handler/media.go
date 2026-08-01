@@ -101,6 +101,7 @@ func (h *Handler) listMediaObserved(c *gin.Context, afterBatch func(mediaListSta
 			item["published_at"] = row.PublishedAt.String
 			item["publication_error"] = row.PublicationError.String
 			item["ingest_generation"] = row.IngestGeneration.Int64
+			item["ingest_run_status"] = row.IngestRunStatus.String
 		}
 		items = append(items, item)
 	}

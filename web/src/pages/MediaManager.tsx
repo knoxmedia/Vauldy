@@ -435,7 +435,7 @@ export default function MediaManagerPage() {
     });
   }
 
-  async function loadMediaPage(libId: number, cursor: string | undefined, append: boolean) {
+  async function loadMediaPage(libId: number, cursor: string | undefined, append: boolean, preserveDuringLoad = false) {
     const sequence = append ? mediaRequestSequenceRef.current : ++mediaRequestSequenceRef.current;
     mediaControllerRef.current?.abort();
     const controller = new AbortController();
@@ -443,7 +443,7 @@ export default function MediaManagerPage() {
     if (append) {
       setMediaLoadMoreLoading(true);
       setMediaLoadMoreError(false);
-    } else {
+    } else if (!preserveDuringLoad) {
       detailControllerRef.current?.abort();
       detailRequestSequenceRef.current++;
       setRows([]);
@@ -467,7 +467,14 @@ export default function MediaManagerPage() {
         const base = append ? previous : [];
         const seen = new Set(base.map((item) => item.id));
         merged = [...base];
-        for (const item of page.items) if (!seen.has(item.id)) { seen.add(item.id); merged.push(item); }
+        for (const item of page.items) {
+          if (seen.has(item.id)) continue;
+          const current = previous.find((existing) => existing.id === item.id);
+          const keepNewerProcessing = current?.ingest_run_status === "processing"
+            && (current.ingest_generation ?? 0) > (item.ingest_generation ?? 0);
+          seen.add(item.id);
+          merged.push(keepNewerProcessing ? current : item);
+        }
         return merged;
       });
       const nextCursor = page.next_cursor?.trim();
@@ -760,14 +767,24 @@ export default function MediaManagerPage() {
     }
   };
 
+  const effectivePublicationState = (item: AdminMediaItem): AdminMediaItem["publication_state"] =>
+    item.ingest_run_status === "processing" ? "processing" : item.publication_state;
+
   const actionablePublication = (state: AdminMediaItem["publication_state"]) =>
     state === "failed" || state === "degraded";
 
   async function onRetryIngest(mediaId: number) {
     try {
-      await retryAdminMediaIngest(mediaId);
+      const response = await retryAdminMediaIngest(mediaId);
+      setRows((previous) => previous.map((item) => item.id === mediaId ? {
+        ...item,
+        publication_state: response.media.publication_state,
+        publication_error: response.media.publication_error,
+        ingest_generation: response.media.ingest_generation,
+        ingest_run_status: response.run.status,
+      } : item));
       message.success(t("pages.media_manager.ingest_retry_success"));
-      if (libraryId !== undefined) await loadMediaPage(libraryId, undefined, false);
+      if (libraryId !== undefined) await loadMediaPage(libraryId, undefined, false, true);
     } catch (e: unknown) {
       message.error((e as Error).message || t("pages.media_manager.ingest_retry_failed"));
     }
@@ -830,10 +847,11 @@ export default function MediaManagerPage() {
         <div style={{ maxHeight: 320, overflowY: "auto" }}>
           <List
             size="small"
-            dataSource={rows.filter((item) => item.publication_state !== "published")}
+            dataSource={rows.filter((item) => effectivePublicationState(item) !== "published")}
             locale={{ emptyText: t("pages.media_manager.ingest_status_empty") }}
             renderItem={(item) => {
-              const showActions = actionablePublication(item.publication_state);
+              const effectiveState = effectivePublicationState(item);
+              const showActions = effectiveState !== "processing" && actionablePublication(item.publication_state);
               const reason = (item.publication_error || "").trim();
               return (
                 <List.Item
@@ -864,11 +882,11 @@ export default function MediaManagerPage() {
                     }
                   />
                   <Tag
-                    color={item.publication_state === "processing" ? "processing" : item.publication_state === "degraded" ? "warning" : "error"}
+                    color={effectiveState === "processing" ? "processing" : effectiveState === "degraded" ? "warning" : "error"}
                     role="status"
-                    aria-label={t(`pages.media_manager.publication_${item.publication_state}`)}
+                    aria-label={t(`pages.media_manager.publication_${effectiveState}`)}
                   >
-                    {t(`pages.media_manager.publication_${item.publication_state}`)}
+                    {t(`pages.media_manager.publication_${effectiveState}`)}
                   </Tag>
                 </List.Item>
               );
