@@ -150,9 +150,9 @@ func TestGracefulShutdownAssemblyUsesSignalsAndHTTPServer(t *testing.T) {
 }
 
 func TestBuildDispatcherOptionsMapsPostIngestConfig(t *testing.T) {
-	cfg := &config.Config{PostIngest: config.PostIngestConfig{MaxConcurrent: 3, PosterMaxConcurrent: 1, PreviewMaxConcurrent: 2}}
+	cfg := &config.Config{PostIngest: config.PostIngestConfig{MaxConcurrent: 3, PosterMaxConcurrent: 1, PreviewMaxConcurrent: 2, SubtitleMaxConcurrent: 1, SubtitleTimeoutRealtimeFactor: 1.5}}
 	got := buildDispatcherOptions(cfg, "owner")
-	if got.OwnerID != "owner" || got.Global != 3 || got.Poster != 1 || got.Preview != 2 {
+	if got.OwnerID != "owner" || got.Global != 3 || got.Poster != 1 || got.Preview != 2 || got.Subtitle != 1 || got.SubtitleTimeoutRealtimeFactor != 1.5 {
 		t.Fatalf("options=%+v", got)
 	}
 }

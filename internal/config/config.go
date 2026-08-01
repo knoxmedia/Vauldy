@@ -191,10 +191,16 @@ func defaultPostIngestGlobalForCPU(cpu int) int {
 }
 
 type PostIngestConfig struct {
-	MaxConcurrent                                                     int `yaml:"max_concurrent"`
-	PosterMaxConcurrent                                               int `yaml:"poster_max_concurrent"`
-	PreviewMaxConcurrent                                              int `yaml:"preview_max_concurrent"`
-	maxConcurrentSet, posterMaxConcurrentSet, previewMaxConcurrentSet bool
+	MaxConcurrent                     int     `yaml:"max_concurrent"`
+	PosterMaxConcurrent               int     `yaml:"poster_max_concurrent"`
+	PreviewMaxConcurrent              int     `yaml:"preview_max_concurrent"`
+	SubtitleMaxConcurrent             int     `yaml:"subtitle_max_concurrent"`
+	SubtitleTimeoutRealtimeFactor     float64 `yaml:"subtitle_timeout_realtime_factor"`
+	maxConcurrentSet                  bool
+	posterMaxConcurrentSet            bool
+	previewMaxConcurrentSet           bool
+	subtitleMaxConcurrentSet          bool
+	subtitleTimeoutRealtimeFactorSet  bool
 }
 
 func (c *PostIngestConfig) UnmarshalYAML(node *yaml.Node) error {
@@ -213,6 +219,10 @@ func (c *PostIngestConfig) UnmarshalYAML(node *yaml.Node) error {
 				c.posterMaxConcurrentSet = true
 			case "preview_max_concurrent":
 				c.previewMaxConcurrentSet = true
+			case "subtitle_max_concurrent":
+				c.subtitleMaxConcurrentSet = true
+			case "subtitle_timeout_realtime_factor":
+				c.subtitleTimeoutRealtimeFactorSet = true
 			}
 		}
 	}
@@ -229,6 +239,12 @@ func (c PostIngestConfig) Validate() error {
 	if c.PreviewMaxConcurrent < 1 || c.PreviewMaxConcurrent > 2 || c.PreviewMaxConcurrent > c.MaxConcurrent {
 		return fmt.Errorf("PostIngest.PreviewMaxConcurrent must be in [1,2] and <= MaxConcurrent")
 	}
+	if c.SubtitleMaxConcurrent < 1 || c.SubtitleMaxConcurrent > c.MaxConcurrent {
+		return fmt.Errorf("PostIngest.SubtitleMaxConcurrent must be in [1,MaxConcurrent]")
+	}
+	if c.SubtitleTimeoutRealtimeFactor <= 0 || c.SubtitleTimeoutRealtimeFactor > 10 {
+		return fmt.Errorf("PostIngest.SubtitleTimeoutRealtimeFactor must be in (0,10]")
+	}
 	return nil
 }
 
@@ -241,6 +257,12 @@ func (c *Config) normalizePostIngest() {
 	}
 	if c.PostIngest.PreviewMaxConcurrent == 0 && !c.PostIngest.previewMaxConcurrentSet {
 		c.PostIngest.PreviewMaxConcurrent = 1
+	}
+	if c.PostIngest.SubtitleMaxConcurrent == 0 && !c.PostIngest.subtitleMaxConcurrentSet {
+		c.PostIngest.SubtitleMaxConcurrent = 1
+	}
+	if !c.PostIngest.subtitleTimeoutRealtimeFactorSet {
+		c.PostIngest.SubtitleTimeoutRealtimeFactor = 2.0
 	}
 }
 
@@ -454,6 +476,10 @@ type GraphicalOCRConfig struct {
 // ASRConfig optional speech-to-text when no subtitles are present.
 type ASRConfig struct {
 	Provider    string   `yaml:"provider"`
+	Engine      string   `yaml:"engine"` // whisper | faster-whisper | paraformer
+	Model       string   `yaml:"model"`
+	Language    string   `yaml:"language"`
+	Device      string   `yaml:"device"`
 	WhisperPath string   `yaml:"whisper_path"`
 	ExtraArgs   []string `yaml:"extra_args"`
 	Shell       string   `yaml:"shell"`

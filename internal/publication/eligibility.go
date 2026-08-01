@@ -268,7 +268,7 @@ func familyAvailableSQL(f QueueFamily, alias string) string {
 	return "COALESCE(" + alias + ".available_at," + alias + ".created_at)"
 }
 func familyOrderSQL(f QueueFamily, alias string) string {
-	return familyAvailableSQL(f, alias) + "," + alias + ".created_at," + alias + ".id"
+	return alias + ".priority DESC," + familyAvailableSQL(f, alias) + "," + alias + ".created_at," + alias + ".id"
 }
 
 func familyLegacySQL(f QueueFamily, alias string) string {
@@ -305,6 +305,7 @@ type requiredCandidate struct {
 	family             QueueFamily
 	id                 int64
 	taskType           string
+	priority           int64
 	available, created string
 }
 
@@ -361,10 +362,10 @@ func oldestEligibleRequiredFor(ctx context.Context, tx store.SQLExecutor, regist
 			}
 		}
 		availableExpr := familyAvailableSQL(f, a)
-		query := fmt.Sprintf(`SELECT q.id,st.step_type,CAST(%s AS TEXT),CAST(q.created_at AS TEXT) FROM %s q JOIN media_ingest_step st ON st.id=q.ingest_step_id WHERE st.required=1 AND %s AND %s%s ORDER BY %s LIMIT 1`, availableExpr, table, familyDueSQL(f, a), linkedEligibilitySQL(a), typeFilter, familyOrderSQL(f, a))
+		query := fmt.Sprintf(`SELECT q.id,st.step_type,COALESCE(q.priority,0),CAST(%s AS TEXT),CAST(q.created_at AS TEXT) FROM %s q JOIN media_ingest_step st ON st.id=q.ingest_step_id WHERE st.required=1 AND %s AND %s%s ORDER BY %s LIMIT 1`, availableExpr, table, familyDueSQL(f, a), linkedEligibilitySQL(a), typeFilter, familyOrderSQL(f, a))
 		var c requiredCandidate
 		c.family = f
-		err = tx.QueryRowContext(ctx, query, queryArgs...).Scan(&c.id, &c.taskType, &c.available, &c.created)
+		err = tx.QueryRowContext(ctx, query, queryArgs...).Scan(&c.id, &c.taskType, &c.priority, &c.available, &c.created)
 		if errors.Is(err, sql.ErrNoRows) {
 			continue
 		}
@@ -382,6 +383,9 @@ func oldestEligibleRequiredFor(ctx context.Context, tx store.SQLExecutor, regist
 	return best, nil
 }
 func requiredLess(a, b requiredCandidate) bool {
+	if a.priority != b.priority {
+		return a.priority > b.priority
+	}
 	if a.available != b.available {
 		return a.available < b.available
 	}

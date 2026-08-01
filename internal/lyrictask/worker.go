@@ -117,7 +117,7 @@ func (w *Worker) RunBatch(ctx context.Context, limit int) (done, failed int) {
 	rows, err := w.DB.Query(`
 		SELECT media_id FROM lyric_task
 		WHERE status = 'pending'
-		ORDER BY updated_at ASC
+		ORDER BY COALESCE(priority,0) DESC, updated_at ASC, id ASC
 		LIMIT ?
 	`, limit)
 	if err != nil {

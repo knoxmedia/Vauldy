@@ -75,12 +75,11 @@ encrypted_assets:
 # Optional post-ingest concurrency overrides; omitted values use CPU-based defaults.
 
 # post_ingest:
-
 #   max_concurrent: 4
-
 #   poster_max_concurrent: 2
-
 #   preview_max_concurrent: 1
+#   subtitle_max_concurrent: 1
+#   subtitle_timeout_realtime_factor: 2.0
 scan:
   file_hash_on_scan: false
   fast_ffprobe: true
@@ -98,9 +97,13 @@ subtitle:
   auto_on_scan: true
   asr:
     provider: shell
+    engine: faster-whisper
+    model: base
+    language: zh
+    device: ""
     whisper_path: tools/recognition/.venv/Scripts/whisper.exe
     extra_args: []
-    shell: cd /d "{output_dir}" && "tools/recognition/.venv/Scripts/python.exe" "tools/asr/asr_to_vtt.py" --engine whisper --input "{input}" --output-vtt "{output_vtt}" --whisper-model base --whisper-language zh
+    shell: cd /d "{output_dir}" && "tools/recognition/.venv/Scripts/python.exe" "tools/asr/asr_to_vtt.py" --input "{input}" --output-vtt "{output_vtt}"
   graphical_ocr:
     enabled: true
     tesseract_path: tesseract

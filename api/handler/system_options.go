@@ -40,6 +40,10 @@ type SystemOptionsRecognition struct {
 type SystemOptionsASR struct {
 	AutoOnScan  bool     `json:"auto_on_scan"`
 	Provider    string   `json:"provider"`
+	Engine      string   `json:"engine"`
+	Model       string   `json:"model"`
+	Language    string   `json:"language"`
+	Device      string   `json:"device"`
 	WhisperPath string   `json:"whisper_path"`
 	ExtraArgs   []string `json:"extra_args"`
 	Shell       string   `json:"shell"`
@@ -122,6 +126,10 @@ func defaultRecognitionOptions() SystemOptionsRecognition {
 		ASR: SystemOptionsASR{
 			AutoOnScan:  true,
 			Provider:    "none",
+			Engine:      "faster-whisper",
+			Model:       "base",
+			Language:    "zh",
+			Device:      "",
 			WhisperPath: "whisper",
 			ExtraArgs:   nil,
 			Shell:       "",
@@ -184,6 +192,12 @@ func fillRecognitionDefaults(o *SystemOptionsRecognition, def SystemOptionsRecog
 	}
 	if strings.TrimSpace(o.ASR.Provider) == "" {
 		o.ASR.Provider = def.ASR.Provider
+	}
+	if strings.TrimSpace(o.ASR.Engine) == "" {
+		o.ASR.Engine = def.ASR.Engine
+	}
+	if strings.TrimSpace(o.ASR.Model) == "" {
+		o.ASR.Model = def.ASR.Model
 	}
 	if strings.TrimSpace(o.ASR.WhisperPath) == "" {
 		o.ASR.WhisperPath = def.ASR.WhisperPath
@@ -406,6 +420,10 @@ func recognitionFromConfig(cfg *config.Config) SystemOptionsRecognition {
 		ASR: SystemOptionsASR{
 			AutoOnScan:  cfg.SubtitleAutoOnScan(),
 			Provider:    cfg.Subtitle.ASR.Provider,
+			Engine:      cfg.Subtitle.ASR.Engine,
+			Model:       cfg.Subtitle.ASR.Model,
+			Language:    cfg.Subtitle.ASR.Language,
+			Device:      cfg.Subtitle.ASR.Device,
 			WhisperPath: cfg.Subtitle.ASR.WhisperPath,
 			ExtraArgs:   append([]string(nil), cfg.Subtitle.ASR.ExtraArgs...),
 			Shell:       cfg.Subtitle.ASR.Shell,
@@ -429,6 +447,10 @@ func recognitionToConfig(r SystemOptionsRecognition) (config.ASRConfig, config.G
 	r = normalizeRecognitionOptions(r)
 	asr := config.ASRConfig{
 		Provider:    r.ASR.Provider,
+		Engine:      r.ASR.Engine,
+		Model:       r.ASR.Model,
+		Language:    r.ASR.Language,
+		Device:      r.ASR.Device,
 		WhisperPath: r.ASR.WhisperPath,
 		ExtraArgs:   append([]string(nil), r.ASR.ExtraArgs...),
 		Shell:       r.ASR.Shell,
@@ -468,6 +490,10 @@ func (h *Handler) applyRecognitionConfig(r SystemOptionsRecognition) error {
 	if h.Subtitle != nil {
 		h.Subtitle.ApplyRecognition(subtitle.ASRConfig{
 			Provider:    asr.Provider,
+			Engine:      asr.Engine,
+			Model:       asr.Model,
+			Language:    asr.Language,
+			Device:      asr.Device,
 			WhisperPath: asr.WhisperPath,
 			ExtraArgs:   append([]string(nil), asr.ExtraArgs...),
 			Shell:       asr.Shell,
@@ -589,6 +615,10 @@ func (h *Handler) resolveASRForTest(body *recognitionTestBody) subtitle.ASRConfi
 		r := normalizeRecognitionOptions(SystemOptionsRecognition{ASR: *body.ASR})
 		return subtitle.ASRConfig{
 			Provider:    r.ASR.Provider,
+			Engine:      r.ASR.Engine,
+			Model:       r.ASR.Model,
+			Language:    r.ASR.Language,
+			Device:      r.ASR.Device,
 			WhisperPath: r.ASR.WhisperPath,
 			ExtraArgs:   append([]string(nil), r.ASR.ExtraArgs...),
 			Shell:       r.ASR.Shell,
@@ -598,6 +628,10 @@ func (h *Handler) resolveASRForTest(body *recognitionTestBody) subtitle.ASRConfi
 		a := h.App.Config.Subtitle.ASR
 		return subtitle.ASRConfig{
 			Provider:    a.Provider,
+			Engine:      a.Engine,
+			Model:       a.Model,
+			Language:    a.Language,
+			Device:      a.Device,
 			WhisperPath: a.WhisperPath,
 			ExtraArgs:   append([]string(nil), a.ExtraArgs...),
 			Shell:       a.Shell,
@@ -642,7 +676,11 @@ func (h *Handler) resolveOCRForTest(body *recognitionTestBody) subtitle.OCRConfi
 func (h *Handler) TestSystemOptionsASR(c *gin.Context) {
 	var body recognitionTestBody
 	_ = c.ShouldBindJSON(&body)
-	result := subtitle.CheckASRConfig(c.Request.Context(), h.resolveASRForTest(&body))
+	mediaRoot := ""
+	if root, err := h.mediaRoot(); err == nil {
+		mediaRoot = root
+	}
+	result := subtitle.CheckASRConfig(c.Request.Context(), mediaRoot, h.resolveASRForTest(&body))
 	c.JSON(http.StatusOK, result)
 }
 

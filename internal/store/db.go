@@ -322,6 +322,7 @@ CREATE TABLE IF NOT EXISTS post_ingest_task (
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     started_at TIMESTAMP,
     finished_at TIMESTAMP,
+    priority INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE,
     FOREIGN KEY (scan_task_id) REFERENCES scan_task(id) ON DELETE SET NULL,
     FOREIGN KEY (ingest_run_id) REFERENCES media_ingest_run(id) ON DELETE CASCADE,
@@ -588,6 +589,7 @@ CREATE TABLE IF NOT EXISTS lyric_task (
     message TEXT,
     vtt_path TEXT,
     lrc_path TEXT,
+    priority INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     started_at TIMESTAMP,
     finished_at TIMESTAMP,
@@ -879,6 +881,15 @@ func OpenSQLiteContext(ctx context.Context, path string) (opened *sql.DB, return
 			return nil, ctx.Err()
 		}
 		return nil, fmt.Errorf("migrate: %w", err)
+	}
+	// priority at end of publication DDL so ALTER ADD matches exactPublicationTable.
+	for _, tbl := range []string{"post_ingest_task", "scrape_task", "transcode_task", "lyric_task"} {
+		if err := ensureColumnContext(ctx, db, tbl, "priority", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+			if !strings.Contains(err.Error(), "no such table") {
+				_ = db.Close()
+				return nil, fmt.Errorf("migrate %s.priority: %w", tbl, err)
+			}
+		}
 	}
 	if err := withStartupBusyRetry(ctx, func() error { return migrateIngestPublication(ctx, db) }); err != nil {
 		_ = db.Close()

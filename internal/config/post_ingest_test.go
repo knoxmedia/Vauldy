@@ -12,8 +12,8 @@ func TestLoadPostIngestDefaultsAndExplicitValues(t *testing.T) {
 		name, yaml string
 		want       PostIngestConfig
 	}{
-		{"defaults", "server: {}\n", PostIngestConfig{MaxConcurrent: defaultPostIngestGlobal(), PosterMaxConcurrent: 2, PreviewMaxConcurrent: 1}},
-		{"explicit", "post_ingest:\n  max_concurrent: 3\n  poster_max_concurrent: 2\n  preview_max_concurrent: 2\n", PostIngestConfig{MaxConcurrent: 3, PosterMaxConcurrent: 2, PreviewMaxConcurrent: 2}},
+		{"defaults", "server: {}\n", PostIngestConfig{MaxConcurrent: defaultPostIngestGlobal(), PosterMaxConcurrent: 2, PreviewMaxConcurrent: 1, SubtitleMaxConcurrent: 1, SubtitleTimeoutRealtimeFactor: 2.0}},
+		{"explicit", "post_ingest:\n  max_concurrent: 3\n  poster_max_concurrent: 2\n  preview_max_concurrent: 2\n  subtitle_max_concurrent: 2\n  subtitle_timeout_realtime_factor: 1.5\n", PostIngestConfig{MaxConcurrent: 3, PosterMaxConcurrent: 2, PreviewMaxConcurrent: 2, SubtitleMaxConcurrent: 2, SubtitleTimeoutRealtimeFactor: 1.5}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "config.yml")
@@ -24,7 +24,7 @@ func TestLoadPostIngestDefaultsAndExplicitValues(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if c.PostIngest.MaxConcurrent != tc.want.MaxConcurrent || c.PostIngest.PosterMaxConcurrent != tc.want.PosterMaxConcurrent || c.PostIngest.PreviewMaxConcurrent != tc.want.PreviewMaxConcurrent {
+			if c.PostIngest.MaxConcurrent != tc.want.MaxConcurrent || c.PostIngest.PosterMaxConcurrent != tc.want.PosterMaxConcurrent || c.PostIngest.PreviewMaxConcurrent != tc.want.PreviewMaxConcurrent || c.PostIngest.SubtitleMaxConcurrent != tc.want.SubtitleMaxConcurrent || c.PostIngest.SubtitleTimeoutRealtimeFactor != tc.want.SubtitleTimeoutRealtimeFactor {
 				t.Fatalf("PostIngest=%+v want %+v", c.PostIngest, tc.want)
 			}
 		})
@@ -32,7 +32,7 @@ func TestLoadPostIngestDefaultsAndExplicitValues(t *testing.T) {
 }
 
 func TestPostIngestConfigValidate(t *testing.T) {
-	valid := PostIngestConfig{MaxConcurrent: 4, PosterMaxConcurrent: 2, PreviewMaxConcurrent: 1}
+	valid := PostIngestConfig{MaxConcurrent: 4, PosterMaxConcurrent: 2, PreviewMaxConcurrent: 1, SubtitleMaxConcurrent: 1, SubtitleTimeoutRealtimeFactor: 2.0}
 	if err := valid.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -40,9 +40,11 @@ func TestPostIngestConfigValidate(t *testing.T) {
 		field string
 		value PostIngestConfig
 	}{
-		{"MaxConcurrent", PostIngestConfig{MaxConcurrent: 0, PosterMaxConcurrent: 1, PreviewMaxConcurrent: 1}}, {"MaxConcurrent", PostIngestConfig{MaxConcurrent: 33, PosterMaxConcurrent: 1, PreviewMaxConcurrent: 1}},
-		{"PosterMaxConcurrent", PostIngestConfig{MaxConcurrent: 4, PosterMaxConcurrent: 0, PreviewMaxConcurrent: 1}}, {"PosterMaxConcurrent", PostIngestConfig{MaxConcurrent: 4, PosterMaxConcurrent: 3, PreviewMaxConcurrent: 1}}, {"PosterMaxConcurrent", PostIngestConfig{MaxConcurrent: 1, PosterMaxConcurrent: 2, PreviewMaxConcurrent: 1}},
-		{"PreviewMaxConcurrent", PostIngestConfig{MaxConcurrent: 4, PosterMaxConcurrent: 1, PreviewMaxConcurrent: 0}}, {"PreviewMaxConcurrent", PostIngestConfig{MaxConcurrent: 4, PosterMaxConcurrent: 1, PreviewMaxConcurrent: 3}}, {"PreviewMaxConcurrent", PostIngestConfig{MaxConcurrent: 1, PosterMaxConcurrent: 1, PreviewMaxConcurrent: 2}},
+		{"MaxConcurrent", PostIngestConfig{MaxConcurrent: 0, PosterMaxConcurrent: 1, PreviewMaxConcurrent: 1, SubtitleMaxConcurrent: 1, SubtitleTimeoutRealtimeFactor: 2}}, {"MaxConcurrent", PostIngestConfig{MaxConcurrent: 33, PosterMaxConcurrent: 1, PreviewMaxConcurrent: 1, SubtitleMaxConcurrent: 1, SubtitleTimeoutRealtimeFactor: 2}},
+		{"PosterMaxConcurrent", PostIngestConfig{MaxConcurrent: 4, PosterMaxConcurrent: 0, PreviewMaxConcurrent: 1, SubtitleMaxConcurrent: 1, SubtitleTimeoutRealtimeFactor: 2}}, {"PosterMaxConcurrent", PostIngestConfig{MaxConcurrent: 4, PosterMaxConcurrent: 3, PreviewMaxConcurrent: 1, SubtitleMaxConcurrent: 1, SubtitleTimeoutRealtimeFactor: 2}}, {"PosterMaxConcurrent", PostIngestConfig{MaxConcurrent: 1, PosterMaxConcurrent: 2, PreviewMaxConcurrent: 1, SubtitleMaxConcurrent: 1, SubtitleTimeoutRealtimeFactor: 2}},
+		{"PreviewMaxConcurrent", PostIngestConfig{MaxConcurrent: 4, PosterMaxConcurrent: 1, PreviewMaxConcurrent: 0, SubtitleMaxConcurrent: 1, SubtitleTimeoutRealtimeFactor: 2}}, {"PreviewMaxConcurrent", PostIngestConfig{MaxConcurrent: 4, PosterMaxConcurrent: 1, PreviewMaxConcurrent: 3, SubtitleMaxConcurrent: 1, SubtitleTimeoutRealtimeFactor: 2}}, {"PreviewMaxConcurrent", PostIngestConfig{MaxConcurrent: 1, PosterMaxConcurrent: 1, PreviewMaxConcurrent: 2, SubtitleMaxConcurrent: 1, SubtitleTimeoutRealtimeFactor: 2}},
+		{"SubtitleMaxConcurrent", PostIngestConfig{MaxConcurrent: 4, PosterMaxConcurrent: 1, PreviewMaxConcurrent: 1, SubtitleMaxConcurrent: 0, SubtitleTimeoutRealtimeFactor: 2}}, {"SubtitleMaxConcurrent", PostIngestConfig{MaxConcurrent: 2, PosterMaxConcurrent: 1, PreviewMaxConcurrent: 1, SubtitleMaxConcurrent: 3, SubtitleTimeoutRealtimeFactor: 2}},
+		{"SubtitleTimeoutRealtimeFactor", PostIngestConfig{MaxConcurrent: 4, PosterMaxConcurrent: 1, PreviewMaxConcurrent: 1, SubtitleMaxConcurrent: 1, SubtitleTimeoutRealtimeFactor: 0}}, {"SubtitleTimeoutRealtimeFactor", PostIngestConfig{MaxConcurrent: 4, PosterMaxConcurrent: 1, PreviewMaxConcurrent: 1, SubtitleMaxConcurrent: 1, SubtitleTimeoutRealtimeFactor: 11}},
 	}
 	for _, tc := range cases {
 		if err := tc.value.Validate(); err == nil || !strings.Contains(err.Error(), tc.field) {
@@ -80,8 +82,8 @@ func TestLoadPostIngestDefaultsOnlyMissingFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := PostIngestConfig{MaxConcurrent: 3, PosterMaxConcurrent: 2, PreviewMaxConcurrent: 1}
-	if c.PostIngest.MaxConcurrent != want.MaxConcurrent || c.PostIngest.PosterMaxConcurrent != want.PosterMaxConcurrent || c.PostIngest.PreviewMaxConcurrent != want.PreviewMaxConcurrent {
+	want := PostIngestConfig{MaxConcurrent: 3, PosterMaxConcurrent: 2, PreviewMaxConcurrent: 1, SubtitleMaxConcurrent: 1, SubtitleTimeoutRealtimeFactor: 2.0}
+	if c.PostIngest.MaxConcurrent != want.MaxConcurrent || c.PostIngest.PosterMaxConcurrent != want.PosterMaxConcurrent || c.PostIngest.PreviewMaxConcurrent != want.PreviewMaxConcurrent || c.PostIngest.SubtitleMaxConcurrent != want.SubtitleMaxConcurrent || c.PostIngest.SubtitleTimeoutRealtimeFactor != want.SubtitleTimeoutRealtimeFactor {
 		t.Fatalf("PostIngest=%+v", c.PostIngest)
 	}
 }

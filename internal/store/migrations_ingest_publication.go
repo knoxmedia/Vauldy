@@ -83,6 +83,7 @@ const scrapeTaskPublicationSchema = `CREATE TABLE scrape_task_new (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     started_at TIMESTAMP,
     finished_at TIMESTAMP,
+    priority INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE,
     FOREIGN KEY (ingest_run_id) REFERENCES media_ingest_run(id) ON DELETE CASCADE,
     FOREIGN KEY (ingest_step_id) REFERENCES media_ingest_step(id) ON DELETE CASCADE,
@@ -111,6 +112,7 @@ const postIngestTaskPublicationSchema = `CREATE TABLE post_ingest_task_new (
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     started_at TIMESTAMP,
     finished_at TIMESTAMP,
+    priority INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE,
     FOREIGN KEY (scan_task_id) REFERENCES scan_task(id) ON DELETE SET NULL,
     FOREIGN KEY (ingest_run_id) REFERENCES media_ingest_run(id) ON DELETE CASCADE,
@@ -480,7 +482,7 @@ SELECT id,media_id,scan_task_id,%s,%s,%s,task_type,status,attempts,max_attempts,
 }
 
 func scrapeTaskPublicationSchemaCurrent(ctx context.Context, tx *sql.Tx, columns map[string]bool) (bool, error) {
-	for _, name := range []string{"ingest_run_id", "ingest_step_id", "generation", "retry_round", "lease_owner", "lease_until"} {
+	for _, name := range []string{"ingest_run_id", "ingest_step_id", "generation", "retry_round", "priority", "lease_owner", "lease_until"} {
 		if !columns[name] {
 			return false, nil
 		}
@@ -1209,9 +1211,11 @@ func slicesWithout(values []string, unwanted string) []string {
 }
 func publicationIdentity(ctx context.Context, q SQLExecutor, table string, count *int64, sum *string) error {
 	cols, pk, err := publicationDigestColumns(ctx, q, table)
-	if strings.Contains(table, "scrape_task") || strings.Contains(table, "pretranscode_rendition_job") || strings.Contains(table, "transcode_task") {
+	if strings.Contains(table, "scrape_task") || strings.Contains(table, "pretranscode_rendition_job") || strings.Contains(table, "transcode_task") || strings.Contains(table, "post_ingest_task") {
 		cols = slicesWithout(cols, "retry_round")
 		pk = slicesWithout(pk, "retry_round")
+		cols = slicesWithout(cols, "priority")
+		pk = slicesWithout(pk, "priority")
 	}
 	if strings.Contains(table, "media_asset_stage_journal") {
 		for _, claimColumn := range []string{"scrape_task_id", "scrape_attempt", "scrape_retry_round"} {
@@ -1887,7 +1891,7 @@ func publicationManagedChildrenCurrent(ctx context.Context, q SQLExecutor) (bool
 		if e != nil {
 			return false, e
 		}
-		for _, n := range []string{"ingest_run_id", "ingest_step_id", "generation", "retry_round"} {
+		for _, n := range []string{"ingest_run_id", "ingest_step_id", "generation", "retry_round", "priority"} {
 			if !cols[n] {
 				return false, nil
 			}
@@ -1905,6 +1909,13 @@ func publicationManagedChildrenCurrent(ctx context.Context, q SQLExecutor) (bool
 		}
 	}
 	if tableExists(ctx, q, "scrape_task") {
+		scrapeCols, se := publicationColumns(ctx, q, "scrape_task")
+		if se != nil {
+			return false, se
+		}
+		if !scrapeCols["priority"] {
+			return false, nil
+		}
 		for name, want := range map[string]string{"idx_scrape_task_claim": "status,lease_until,created_at", "idx_scrape_task_ingest": "ingest_run_id,ingest_step_id,generation", "idx_scrape_task_media": "media_id,created_at"} {
 			rows, e := q.QueryContext(ctx, fmt.Sprintf(`PRAGMA index_info(%q)`, name))
 			if e != nil {

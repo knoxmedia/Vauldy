@@ -1,6 +1,7 @@
 import {
   Button,
   Card,
+  Collapse,
   Divider,
   Flex,
   Input,
@@ -19,7 +20,9 @@ import {
   useMemo,
   useState,
   type CSSProperties,
+  type Dispatch,
   type ReactNode,
+  type SetStateAction,
 } from "react";
 import {
   fetchSystemOptions,
@@ -77,6 +80,10 @@ function defaultSystemOptions(): SystemOptions {
       asr: {
         auto_on_scan: true,
         provider: "none",
+        engine: "faster-whisper",
+        model: "base",
+        language: "zh",
+        device: "",
         whisper_path: "whisper",
         extra_args: [],
         shell: "",
@@ -285,6 +292,48 @@ function buildPhotoClassifyEngineOptions(t: TranslateFn): { value: string; label
   ];
 }
 
+function buildAsrEngineOptions(t: TranslateFn): { value: string; label: string }[] {
+  return [
+    { value: "faster-whisper", label: t("system_options.asr.engine_faster_whisper") },
+    { value: "whisper", label: t("system_options.asr.engine_openai_whisper") },
+  ];
+}
+
+function buildAsrModelOptions(): { value: string; label: string }[] {
+  return [
+    { value: "tiny", label: "tiny" },
+    { value: "base", label: "base" },
+    { value: "small", label: "small" },
+    { value: "medium", label: "medium" },
+  ];
+}
+
+function buildAsrLanguageOptions(t: TranslateFn): { value: string; label: string }[] {
+  return [
+    { value: "zh", label: t("system_options.asr.language_zh") },
+    { value: "en", label: t("system_options.asr.language_en") },
+    { value: "", label: t("system_options.asr.language_auto") },
+  ];
+}
+
+function buildAsrDeviceOptions(t: TranslateFn): { value: string; label: string }[] {
+  return [
+    { value: "", label: t("system_options.asr.device_auto") },
+    { value: "cpu", label: "CPU" },
+    { value: "cuda", label: "CUDA" },
+  ];
+}
+
+function patchAsr(
+  setOpts: Dispatch<SetStateAction<SystemOptions>>,
+  patch: Partial<SystemOptions["recognition"]["asr"]>,
+) {
+  setOpts((p) => ({
+    ...p,
+    recognition: { ...p.recognition, asr: { ...p.recognition.asr, ...patch } },
+  }));
+}
+
 export default function SystemOptionsPage() {
   const t = useT();
   const uiLocale = useAuthStore((s) => s.uiLocale);
@@ -302,6 +351,10 @@ export default function SystemOptionsPage() {
   );
   const cpuConcurrentOptions = useMemo(() => buildCpuConcurrentOptions(t), [t]);
   const asrProviderOptions = useMemo(() => buildAsrProviderOptions(t), [t]);
+  const asrEngineOptions = useMemo(() => buildAsrEngineOptions(t), [t]);
+  const asrModelOptions = useMemo(() => buildAsrModelOptions(), []);
+  const asrLanguageOptions = useMemo(() => buildAsrLanguageOptions(t), [t]);
+  const asrDeviceOptions = useMemo(() => buildAsrDeviceOptions(t), [t]);
   const photoClassifyEngineOptions = useMemo(() => buildPhotoClassifyEngineOptions(t), [t]);
   const screenOrientationOptions = useMemo(
     () => [
@@ -441,7 +494,8 @@ export default function SystemOptionsPage() {
     setAsrInstalling(true);
     setAsrTestResult(null);
     try {
-      const result = await installSystemOptionsASR();
+      const { engine, model, language, device } = opts.recognition.asr;
+      const result = await installSystemOptionsASR({ engine, model, language, device });
       if (result.recognition) {
         applyInstalledRecognition(result.recognition);
       }
@@ -1025,12 +1079,7 @@ export default function SystemOptionsPage() {
       >
         <Switch
           checked={opts.recognition.asr.auto_on_scan}
-          onChange={(v) =>
-            setOpts((p) => ({
-              ...p,
-              recognition: { ...p.recognition, asr: { ...p.recognition.asr, auto_on_scan: v } },
-            }))
-          }
+          onChange={(v) => patchAsr(setOpts, { auto_on_scan: v })}
         />
       </SettingRow>
       <SettingRow
@@ -1047,64 +1096,87 @@ export default function SystemOptionsPage() {
           }
         />
       </SettingRow>
-      <SettingRow title={t("system_options.asr.provider")} description={t("system_options.asr.provider_desc")}>
+      <SettingRow title={t("system_options.asr.engine")} description={t("system_options.asr.engine_desc")}>
         <Select
-          style={{ minWidth: 220 }}
-          options={asrProviderOptions}
-          value={opts.recognition.asr.provider}
-          onChange={(v) =>
-            setOpts((p) => ({
-              ...p,
-              recognition: { ...p.recognition, asr: { ...p.recognition.asr, provider: v } },
-            }))
-          }
+          style={{ minWidth: 260 }}
+          options={asrEngineOptions}
+          value={opts.recognition.asr.engine || "faster-whisper"}
+          onChange={(v) => patchAsr(setOpts, { engine: v, provider: v ? "shell" : opts.recognition.asr.provider })}
         />
       </SettingRow>
-      <SettingRow title={t("system_options.asr.whisper_path")} description={t("system_options.asr.whisper_path_desc")}>
-        <Input
-          style={{ width: 480, maxWidth: "100%" }}
-          value={opts.recognition.asr.whisper_path}
-          onChange={(e) =>
-            setOpts((p) => ({
-              ...p,
-              recognition: { ...p.recognition, asr: { ...p.recognition.asr, whisper_path: e.target.value } },
-            }))
-          }
-          placeholder="whisper"
+      <SettingRow title={t("system_options.asr.model")} description={t("system_options.asr.model_desc")}>
+        <Select
+          style={{ minWidth: 180 }}
+          options={asrModelOptions}
+          value={opts.recognition.asr.model || "base"}
+          onChange={(v) => patchAsr(setOpts, { model: v })}
         />
       </SettingRow>
-      <SettingRow title={t("system_options.asr.extra_args")} description={t("system_options.asr.extra_args_desc")}>
-        <Input
-          style={{ width: 480, maxWidth: "100%" }}
-          value={(opts.recognition.asr.extra_args ?? []).join(" ")}
-          onChange={(e) =>
-            setOpts((p) => ({
-              ...p,
-              recognition: {
-                ...p.recognition,
-                asr: {
-                  ...p.recognition.asr,
-                  extra_args: e.target.value.trim() ? e.target.value.trim().split(/\s+/) : [],
-                },
-              },
-            }))
-          }
-          placeholder="--model small --language zh"
+      <SettingRow title={t("system_options.asr.language")} description={t("system_options.asr.language_desc")}>
+        <Select
+          style={{ minWidth: 180 }}
+          options={asrLanguageOptions}
+          value={opts.recognition.asr.language ?? "zh"}
+          onChange={(v) => patchAsr(setOpts, { language: v })}
         />
       </SettingRow>
-      <SettingRow title={t("system_options.asr.shell_cmd")} description={t("system_options.asr.shell_cmd_desc")} controlLayout="full">
-        <Input.TextArea
-          rows={4}
-          value={opts.recognition.asr.shell}
-          onChange={(e) =>
-            setOpts((p) => ({
-              ...p,
-              recognition: { ...p.recognition, asr: { ...p.recognition.asr, shell: e.target.value } },
-            }))
-          }
-          placeholder={'cd /d "{output_dir}" && python tools/asr/asr_to_vtt.py --engine whisper --input "{input}" --output-vtt "{output_vtt}"'}
+      <SettingRow title={t("system_options.asr.device")} description={t("system_options.asr.device_desc")}>
+        <Select
+          style={{ minWidth: 180 }}
+          options={asrDeviceOptions}
+          value={opts.recognition.asr.device ?? ""}
+          onChange={(v) => patchAsr(setOpts, { device: v })}
         />
       </SettingRow>
+      <Collapse
+        ghost
+        items={[
+          {
+            key: "asr-advanced",
+            label: t("system_options.asr.advanced"),
+            children: (
+              <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+                <SettingRow title={t("system_options.asr.provider")} description={t("system_options.asr.provider_desc")}>
+                  <Select
+                    style={{ minWidth: 220 }}
+                    options={asrProviderOptions}
+                    value={opts.recognition.asr.provider}
+                    onChange={(v) => patchAsr(setOpts, { provider: v })}
+                  />
+                </SettingRow>
+                <SettingRow title={t("system_options.asr.whisper_path")} description={t("system_options.asr.whisper_path_desc")}>
+                  <Input
+                    style={{ width: 480, maxWidth: "100%" }}
+                    value={opts.recognition.asr.whisper_path}
+                    onChange={(e) => patchAsr(setOpts, { whisper_path: e.target.value })}
+                    placeholder="whisper"
+                  />
+                </SettingRow>
+                <SettingRow title={t("system_options.asr.extra_args")} description={t("system_options.asr.extra_args_desc")}>
+                  <Input
+                    style={{ width: 480, maxWidth: "100%" }}
+                    value={(opts.recognition.asr.extra_args ?? []).join(" ")}
+                    onChange={(e) =>
+                      patchAsr(setOpts, {
+                        extra_args: e.target.value.trim() ? e.target.value.trim().split(/\s+/) : [],
+                      })
+                    }
+                    placeholder="--model small --language zh"
+                  />
+                </SettingRow>
+                <SettingRow title={t("system_options.asr.shell_cmd")} description={t("system_options.asr.shell_cmd_desc")} controlLayout="full">
+                  <Input.TextArea
+                    rows={4}
+                    value={opts.recognition.asr.shell}
+                    onChange={(e) => patchAsr(setOpts, { shell: e.target.value })}
+                    placeholder={'"tools/recognition/.venv/Scripts/python.exe" "tools/asr/asr_to_vtt.py" --input "{input}" --output-vtt "{output_vtt}"'}
+                  />
+                </SettingRow>
+              </Space>
+            ),
+          },
+        ]}
+      />
     </Space>
   );
 

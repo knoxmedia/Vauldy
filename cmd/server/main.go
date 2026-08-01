@@ -168,6 +168,10 @@ func main() {
 	// 字幕服务：提取/ASR/OCR/校对等。
 	subSvc := subtitle.NewService(db, keyVault, derivedStore, filepath.Dir(cfgPath), cfg.FFmpeg.FFmpegPath, cfg.FFmpeg.FFprobePath, cfg.Data.Subtitle, subtitle.ASRConfig{
 		Provider:    cfg.Subtitle.ASR.Provider,
+		Engine:      cfg.Subtitle.ASR.Engine,
+		Model:       cfg.Subtitle.ASR.Model,
+		Language:    cfg.Subtitle.ASR.Language,
+		Device:      cfg.Subtitle.ASR.Device,
 		WhisperPath: cfg.Subtitle.ASR.WhisperPath,
 		ExtraArgs:   cfg.Subtitle.ASR.ExtraArgs,
 		Shell:       cfg.Subtitle.ASR.Shell,
@@ -521,6 +525,8 @@ func buildDispatcherOptions(cfg *config.Config, owner string) postingest.Dispatc
 	opts.Global = cfg.PostIngest.MaxConcurrent
 	opts.Poster = cfg.PostIngest.PosterMaxConcurrent
 	opts.Preview = cfg.PostIngest.PreviewMaxConcurrent
+	opts.Subtitle = cfg.PostIngest.SubtitleMaxConcurrent
+	opts.SubtitleTimeoutRealtimeFactor = cfg.PostIngest.SubtitleTimeoutRealtimeFactor
 	return opts
 }
 
