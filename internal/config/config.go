@@ -155,6 +155,14 @@ func (c *Config) EncryptedAssetsKEKSaltPath() string {
 	return filepath.Join(dir, "kek.salt")
 }
 
+// FileExtensionsConfig holds optional per-category file extension overrides for scan/upload.
+type FileExtensionsConfig struct {
+	Video    *[]string `yaml:"video"`
+	Audio    *[]string `yaml:"audio"`
+	Image    *[]string `yaml:"image"`
+	Document *[]string `yaml:"document"`
+}
+
 // ScanConfig tunes library scan performance (ffprobe / optional file hashing).
 type ScanConfig struct {
 	// FileHashOnScan computes MD5 of each media file during scan for deduplication. Very slow on large files; default off.
@@ -163,6 +171,8 @@ type ScanConfig struct {
 	FastFFprobe *bool `yaml:"fast_ffprobe"`
 	// PrecapturePosterTimeoutSeconds limits after-commit poster capture. Default: 120 seconds; zero disables it.
 	PrecapturePosterTimeoutSeconds *int `yaml:"precapture_poster_timeout_seconds"`
+	// FileExtensions optionally replaces built-in extension maps per category (nil = defaults).
+	FileExtensions *FileExtensionsConfig `yaml:"file_extensions"`
 }
 
 func defaultPostIngestGlobal() int {
