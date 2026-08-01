@@ -266,19 +266,73 @@ func TestRetryIngestDegradedReplacementTerminalOutcome(t *testing.T) {
 	}
 }
 
-func TestRetryIngestRequiresMatchingDegradedMediaAndRun(t *testing.T) {
-	for _, tc := range []struct{ media, run string }{{"degraded", "failed"}, {"failed", "degraded"}} {
-		t.Run(tc.media+"_"+tc.run, func(t *testing.T) {
-			db := openRetryTestDB(t)
-			mediaID, runID, _ := seedTerminalRetry(t, db, tc.media)
-			if _, err := db.Exec(`UPDATE media_ingest_run SET status=? WHERE id=?`, tc.run, runID); err != nil {
-				t.Fatal(err)
-			}
-			if err := RetryIngest(context.Background(), db, mediaID, currentRetryPlanner(&retryPreparePlanner{})); !errors.Is(err, ErrNoRetryableWork) {
-				t.Fatalf("err=%v", err)
-			}
-		})
-	}
+func TestRetryIngestAllowsMismatchedRunAndIdempotentProcessing(t *testing.T) {
+	t.Run("degraded_failed_run_plans", func(t *testing.T) {
+		db := openRetryTestDB(t)
+		mediaID, runID, _ := seedTerminalRetry(t, db, "degraded")
+		if _, err := db.Exec(`UPDATE media_ingest_run SET status='failed' WHERE id=?`, runID); err != nil {
+			t.Fatal(err)
+		}
+		if err := RetryIngest(context.Background(), db, mediaID, currentRetryPlanner(&retryPreparePlanner{})); err != nil {
+			t.Fatalf("err=%v", err)
+		}
+		var generation, preserve int
+		var mediaState, reason, runState string
+		_ = db.QueryRow(`SELECT ingest_generation,publication_state FROM media WHERE id=?`, mediaID).Scan(&generation, &mediaState)
+		_ = db.QueryRow(`SELECT reason,status,preserve_visibility FROM media_ingest_run WHERE media_id=? AND generation=?`, mediaID, generation).Scan(&reason, &runState, &preserve)
+		if generation != 2 || mediaState != "degraded" || reason != "manual_retry" || runState != "processing" || preserve != 1 {
+			t.Fatalf("generation=%d media=%s run=%s/%s preserve=%d", generation, mediaState, reason, runState, preserve)
+		}
+	})
+	t.Run("failed_degraded_run_plans", func(t *testing.T) {
+		db := openRetryTestDB(t)
+		mediaID, runID, _ := seedTerminalRetry(t, db, "failed")
+		if _, err := db.Exec(`UPDATE media_ingest_run SET status='degraded' WHERE id=?`, runID); err != nil {
+			t.Fatal(err)
+		}
+		if err := RetryIngest(context.Background(), db, mediaID, currentRetryPlanner(&retryPreparePlanner{})); err != nil {
+			t.Fatalf("err=%v", err)
+		}
+		var generation, preserve int
+		var mediaState, reason, runState string
+		_ = db.QueryRow(`SELECT ingest_generation,publication_state FROM media WHERE id=?`, mediaID).Scan(&generation, &mediaState)
+		_ = db.QueryRow(`SELECT reason,status,preserve_visibility FROM media_ingest_run WHERE media_id=? AND generation=?`, mediaID, generation).Scan(&reason, &runState, &preserve)
+		if generation != 2 || mediaState != "processing" || reason != "manual_retry" || runState != "processing" || preserve != 0 {
+			t.Fatalf("generation=%d media=%s run=%s/%s preserve=%d", generation, mediaState, reason, runState, preserve)
+		}
+	})
+	t.Run("degraded_processing_is_idempotent", func(t *testing.T) {
+		db := openRetryTestDB(t)
+		mediaID, runID, _ := seedTerminalRetry(t, db, "degraded")
+		if _, err := db.Exec(`UPDATE media_ingest_run SET status='processing',reason='manual_retry' WHERE id=?`, runID); err != nil {
+			t.Fatal(err)
+		}
+		if err := RetryIngest(context.Background(), db, mediaID, currentRetryPlanner(&retryPreparePlanner{})); err != nil {
+			t.Fatalf("err=%v", err)
+		}
+		var generation, runs int
+		_ = db.QueryRow(`SELECT ingest_generation FROM media WHERE id=?`, mediaID).Scan(&generation)
+		_ = db.QueryRow(`SELECT COUNT(*) FROM media_ingest_run WHERE media_id=?`, mediaID).Scan(&runs)
+		if generation != 1 || runs != 1 {
+			t.Fatalf("idempotent retry mutated state generation=%d runs=%d", generation, runs)
+		}
+	})
+	t.Run("failed_processing_is_idempotent", func(t *testing.T) {
+		db := openRetryTestDB(t)
+		mediaID, runID, _ := seedTerminalRetry(t, db, "failed")
+		if _, err := db.Exec(`UPDATE media_ingest_run SET status='processing',reason='manual_retry' WHERE id=?`, runID); err != nil {
+			t.Fatal(err)
+		}
+		if err := RetryIngest(context.Background(), db, mediaID, currentRetryPlanner(&retryPreparePlanner{})); err != nil {
+			t.Fatalf("err=%v", err)
+		}
+		var generation, runs int
+		_ = db.QueryRow(`SELECT ingest_generation FROM media WHERE id=?`, mediaID).Scan(&generation)
+		_ = db.QueryRow(`SELECT COUNT(*) FROM media_ingest_run WHERE media_id=?`, mediaID).Scan(&runs)
+		if generation != 1 || runs != 1 {
+			t.Fatalf("idempotent retry mutated state generation=%d runs=%d", generation, runs)
+		}
+	})
 }
 
 func TestRetryIngestDegradedRequiresPlanner(t *testing.T) {
@@ -485,7 +539,7 @@ func TestRetryIngestConcurrentOneGeneration(t *testing.T) {
 	var generation, runs int
 	_ = db.QueryRow(`SELECT ingest_generation FROM media WHERE id=?`, mediaID).Scan(&generation)
 	_ = db.QueryRow(`SELECT COUNT(*) FROM media_ingest_run WHERE media_id=? AND generation=2`, mediaID).Scan(&runs)
-	if successes != 1 || conflicts != 1 || generation != 2 || runs != 1 {
+	if successes < 1 || successes+conflicts != 2 || generation != 2 || runs != 1 {
 		t.Fatalf("success=%d conflict=%d generation=%d runs=%d", successes, conflicts, generation, runs)
 	}
 }

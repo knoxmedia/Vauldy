@@ -69,10 +69,19 @@ func retryIngestAttempt(ctx context.Context, db *sql.DB, mediaID int64, planner 
 			return attemptErr
 		}
 
-		preserveVisibility := mediaState == "degraded" && runState == "degraded"
-		terminalRetry := (mediaState == "failed" && runState == "failed") || (mediaState == "cancelled" && runState == "cancelled")
-		if !preserveVisibility && !terminalRetry {
+		preserveVisibility := false
+		switch mediaState {
+		case "degraded":
+			preserveVisibility = true
+		case "failed", "cancelled":
+		default:
 			return ErrNoRetryableWork
+		}
+		// A prior manual_retry/repair may still be processing while media stays
+		// failed/degraded (visibility preserve). Treat that as success so the
+		// ingest-status Retry button does not return 409.
+		if runState == "processing" {
+			return nil
 		}
 		if planner == nil {
 			return errors.New("publication retry: nil planner")

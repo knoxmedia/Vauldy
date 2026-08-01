@@ -192,7 +192,7 @@ func isHighPriorityTask(typ TaskType) bool {
 }
 
 const (
-	posterTimeoutPerGiB  = time.Minute
+	posterTimeoutPerGiB  = 2 * time.Minute
 	posterTimeoutMax     = 30 * time.Minute
 	encryptTimeoutPerGiB = 10 * time.Minute
 	encryptTimeoutMax    = 8 * time.Hour
@@ -327,6 +327,11 @@ func (d *Dispatcher) timeoutForTask(ctx context.Context, task Task, heartbeat *t
 }
 
 func (d *Dispatcher) heartbeatTask(ctx context.Context, task Task, state *workerState) bool {
+	// Task budget already gone: do not renew or attribute FailureRetryable to lease I/O.
+	// The run loop's taskCtx.Done() path owns timeout/cancel reporting.
+	if err := ctx.Err(); err != nil {
+		return false
+	}
 	if task.ScanTaskID != nil {
 		cancelled, err := d.q.IsScanCancelled(ctx, *task.ScanTaskID)
 		if err != nil {
@@ -338,7 +343,11 @@ func (d *Dispatcher) heartbeatTask(ctx context.Context, task Task, state *worker
 			return false
 		}
 	}
-	ok, err := d.q.Renew(ctx, task)
+	// Renew on a short independent budget so a nearly-expired task deadline (or USB
+	// SQLite busy retries) is not misreported as "renew lease: context deadline exceeded".
+	renewCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	ok, err := d.q.Renew(renewCtx, task)
 	if err != nil {
 		state.stop(FailureRetryable, fmt.Errorf("renew lease: %w", err))
 		return false
