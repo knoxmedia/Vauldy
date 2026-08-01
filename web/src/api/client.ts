@@ -2947,6 +2947,7 @@ export type PublicationState = "processing" | "published" | "degraded" | "failed
 
 export type AdminMediaItem = MediaItem & {
   publication_state: PublicationState;
+  publication_error?: string;
   ingest_generation: number;
 };
 

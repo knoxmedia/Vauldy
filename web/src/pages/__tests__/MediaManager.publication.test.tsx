@@ -10,7 +10,11 @@ const mocks = vi.hoisted(() => ({
   fetchAdminMedia: vi.fn(),
   fetchMediaDetail: vi.fn(),
   fetchMediaPersons: vi.fn(),
+  retryAdminMediaIngest: vi.fn(),
+  deleteMedia: vi.fn(),
+  fetchMediaDeletionPlan: vi.fn(),
   messageError: vi.fn(),
+  messageSuccess: vi.fn(),
 }));
 
 vi.mock("../../api/client", async (importOriginal) => {
@@ -19,17 +23,24 @@ vi.mock("../../api/client", async (importOriginal) => {
 });
 vi.mock("antd", async (importOriginal) => {
   const actual = await importOriginal<typeof import("antd")>();
-  return { ...actual, message: { ...actual.message, error: mocks.messageError } };
+  return { ...actual, message: { ...actual.message, error: mocks.messageError, success: mocks.messageSuccess } };
 });
 vi.mock("../../components/MediaImagePickerDialog", () => ({ default: () => null, autoFrameForMedia: () => "" }));
 
 import MediaManagerPage from "../MediaManager";
 
 const library = (id: number, name: string): Library => ({ id, name, type: "movie", path: "", auto_scan: 0, scraper: "", created_at: "" });
-function adminMedia(id: number, state: AdminMediaItem["publication_state"], title: string = state, libraryId = 1): AdminMediaItem {
+function adminMedia(
+  id: number,
+  state: AdminMediaItem["publication_state"],
+  title: string = state,
+  libraryId = 1,
+  publication_error = "",
+): AdminMediaItem {
   return {
     id, library_id: libraryId, file_id: `f${id}`, title, file_path: `${title}.mkv`, file_type: "video",
-    duration: 0, width: 0, height: 0, format: "", status: "active", publication_state: state, ingest_generation: 1,
+    duration: 0, width: 0, height: 0, format: "", status: "active",
+    publication_state: state, publication_error, ingest_generation: 1,
   };
 }
 function deferred<T>() {
@@ -47,10 +58,17 @@ beforeEach(() => {
   mocks.fetchAdminMedia.mockReset();
   mocks.fetchMediaDetail.mockReset();
   mocks.fetchMediaPersons.mockReset();
+  mocks.retryAdminMediaIngest.mockReset();
+  mocks.deleteMedia.mockReset();
+  mocks.fetchMediaDeletionPlan.mockReset();
   mocks.messageError.mockReset();
+  mocks.messageSuccess.mockReset();
   mocks.fetchLibraries.mockResolvedValue([library(1, "Library A")]);
   mocks.fetchAdminMedia.mockResolvedValue({ items: [], has_more: false });
   mocks.fetchMedia.mockResolvedValue([]);
+  mocks.retryAdminMediaIngest.mockResolvedValue({});
+  mocks.deleteMedia.mockResolvedValue(undefined);
+  mocks.fetchMediaDeletionPlan.mockResolvedValue(["/tmp/a.mkv"]);
   mocks.fetchMediaDetail.mockImplementation(async (id: number) => ({ ...adminMedia(id, "published", `Detail ${id}`), meta_json: "{}" }) as MediaDetail);
   mocks.fetchMediaPersons.mockResolvedValue({ items: [], resolved: [] });
 });
@@ -150,4 +168,53 @@ describe("MediaManager publication diagnostics", () => {
     await act(async () => slowA.resolve({ ...alpha, title: "Alpha stale", meta_json: "{}" } as MediaDetail));
     expect(ui.getByLabelText("Title")).toHaveValue("Beta detail");
   }, 15_000);
+
+  it("shows publication_error for failed and degraded rows", async () => {
+    mocks.fetchAdminMedia.mockResolvedValue({
+      items: [
+        adminMedia(1, "failed", "Fail Film", 1, "prepare exhausted"),
+        adminMedia(2, "degraded", "Degraded Film", 1, "preview skipped"),
+        adminMedia(3, "processing", "Busy Film"),
+      ],
+      has_more: false,
+    });
+    const view = render(<I18nProvider locale="en"><MemoryRouter><MediaManagerPage /></MemoryRouter></I18nProvider>);
+    await waitFor(() => expect(view.container).toHaveTextContent("Fail Film"));
+    expect(view.container).toHaveTextContent("prepare exhausted");
+    expect(view.container).toHaveTextContent("preview skipped");
+    expect(within(view.container).getAllByRole("button", { name: /^retry$/i }).length).toBe(2);
+    // processing row: no retry near "Busy Film"
+    const busy = within(view.container).getByText("Busy Film").closest(".ant-list-item");
+    expect(busy).toBeTruthy();
+    expect(within(busy as HTMLElement).queryByRole("button", { name: /^retry$/i })).not.toBeInTheDocument();
+    expect(within(busy as HTMLElement).queryByRole("button", { name: /^remove$/i })).not.toBeInTheDocument();
+  });
+
+  it("retries ingest for a failed row", async () => {
+    mocks.fetchAdminMedia.mockResolvedValue({
+      items: [adminMedia(9, "failed", "Retry Me", 1, "boom")],
+      has_more: false,
+    });
+    const view = render(<I18nProvider locale="en"><MemoryRouter><MediaManagerPage /></MemoryRouter></I18nProvider>);
+    await waitFor(() => expect(view.container).toHaveTextContent("Retry Me"));
+    fireEvent.click(within(view.container).getByRole("button", { name: /^retry$/i }));
+    await waitFor(() => expect(mocks.retryAdminMediaIngest).toHaveBeenCalledWith(9));
+  });
+
+  it("removes media after confirm", async () => {
+    mocks.fetchAdminMedia.mockResolvedValue({
+      items: [adminMedia(8, "degraded", "Remove Me", 1, "optional failed")],
+      has_more: false,
+    });
+    const view = render(<I18nProvider locale="en"><MemoryRouter><MediaManagerPage /></MemoryRouter></I18nProvider>);
+    await waitFor(() => expect(view.container).toHaveTextContent("Remove Me"));
+    fireEvent.click(within(view.container).getByRole("button", { name: /^remove$/i }));
+    // Modal.confirm OK — look for Delete / confirm button in document
+    await waitFor(() => expect(document.body).toHaveTextContent(/cannot be undone|Delete media/i));
+    const ok = [...document.body.querySelectorAll("button")].find((b) => /delete/i.test(b.textContent || ""));
+    expect(ok).toBeTruthy();
+    fireEvent.click(ok!);
+    await waitFor(() => expect(mocks.deleteMedia).toHaveBeenCalledWith(8));
+    await waitFor(() => expect(view.container).not.toHaveTextContent("Remove Me"));
+  });
 });

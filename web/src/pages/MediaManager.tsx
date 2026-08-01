@@ -3,6 +3,7 @@ import {
   Avatar,
   Button,
   Card,
+  Modal,
   Col,
   Collapse,
   Descriptions,
@@ -26,11 +27,14 @@ import { useSearchParams } from "react-router-dom";
 import { EditOutlined } from "@ant-design/icons";
 import {
   addMediaPerson,
+  deleteMedia,
   deleteMediaPersonLink,
   fetchLibraries,
   fetchAdminMedia,
   fetchMediaDetail,
+  fetchMediaDeletionPlan,
   fetchMediaPersons,
+  retryAdminMediaIngest,
   type AdminMediaItem,
   type Library,
   type MediaDetail,
@@ -756,6 +760,66 @@ export default function MediaManagerPage() {
     }
   };
 
+  const actionablePublication = (state: AdminMediaItem["publication_state"]) =>
+    state === "failed" || state === "degraded";
+
+  async function onRetryIngest(mediaId: number) {
+    try {
+      await retryAdminMediaIngest(mediaId);
+      message.success(t("pages.media_manager.ingest_retry_success"));
+      if (libraryId !== undefined) await loadMediaPage(libraryId, undefined, false);
+    } catch (e: unknown) {
+      message.error((e as Error).message || t("pages.media_manager.ingest_retry_failed"));
+    }
+  }
+
+  function onRemoveIngest(item: AdminMediaItem) {
+    void (async () => {
+      let files: string[] = [];
+      try {
+        files = await fetchMediaDeletionPlan(item.id);
+      } catch {
+        files = [item.file_path].filter(Boolean) as string[];
+      }
+      if (files.length === 0 && item.file_path) {
+        files = [item.file_path];
+      }
+      Modal.confirm({
+        title: t("pages.media_manager.ingest_remove_confirm_title"),
+        okText: t("pages.media_manager.ingest_remove_confirm_ok"),
+        okButtonProps: { danger: true },
+        content: (
+          <div>
+            <p style={{ marginBottom: 8 }}>{t("pages.media_manager.ingest_remove_warning")}</p>
+            {files.length > 0 ? (
+              <ul style={{ margin: "0 0 12px", paddingLeft: 20, wordBreak: "break-all" }}>
+                {files.map((f) => <li key={f}>{f}</li>)}
+              </ul>
+            ) : null}
+          </div>
+        ),
+        onOk: async () => {
+          try {
+            await deleteMedia(item.id);
+            message.success(t("pages.media_manager.ingest_remove_success"));
+            setRows((prev) => prev.filter((r) => r.id !== item.id));
+            if (selectedId === item.id) {
+              detailControllerRef.current?.abort();
+              detailRequestSequenceRef.current++;
+              setSelectedNode(null);
+              setDetail(null);
+              setGenreOptions([]);
+              form.resetFields();
+            }
+          } catch (e: unknown) {
+            message.error((e as Error).message || t("pages.media_manager.ingest_remove_failed"));
+            throw e;
+          }
+        },
+      });
+    })();
+  }
+
   return (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
       <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
@@ -763,26 +827,58 @@ export default function MediaManagerPage() {
       </Typography.Paragraph>
 
       <Card title={t("pages.media_manager.ingest_status_title")} loading={mediaLoading}>
-        <List
-          size="small"
-          dataSource={rows.filter((item) => item.publication_state !== "published")}
-          locale={{ emptyText: t("pages.media_manager.ingest_status_empty") }}
-          renderItem={(item) => (
-            <List.Item>
-              <List.Item.Meta title={item.title || item.file_id} description={item.file_path} />
-              <Tag
-                color={item.publication_state === "processing" ? "processing" : item.publication_state === "degraded" ? "warning" : "error"}
-                role="status"
-                aria-label={t(`pages.media_manager.publication_${item.publication_state}`)}
-              >
-                {t(`pages.media_manager.publication_${item.publication_state}`)}
-              </Tag>
-            </List.Item>
-          )}
-        />
+        <div style={{ maxHeight: 320, overflowY: "auto" }}>
+          <List
+            size="small"
+            dataSource={rows.filter((item) => item.publication_state !== "published")}
+            locale={{ emptyText: t("pages.media_manager.ingest_status_empty") }}
+            renderItem={(item) => {
+              const showActions = actionablePublication(item.publication_state);
+              const reason = (item.publication_error || "").trim();
+              return (
+                <List.Item
+                  actions={
+                    showActions
+                      ? [
+                          <Button key="retry" type="link" size="small" aria-label={t("pages.media_manager.ingest_retry")} onClick={() => void onRetryIngest(item.id)}>
+                            {t("pages.media_manager.ingest_retry")}
+                          </Button>,
+                          <Button key="remove" type="link" size="small" danger aria-label={t("pages.media_manager.ingest_remove")} onClick={() => onRemoveIngest(item)}>
+                            {t("pages.media_manager.ingest_remove")}
+                          </Button>,
+                        ]
+                      : undefined
+                  }
+                >
+                  <List.Item.Meta
+                    title={item.title || item.file_id}
+                    description={
+                      <Space direction="vertical" size={0} style={{ width: "100%" }}>
+                        <Typography.Text type="secondary" style={{ fontSize: 12 }}>{item.file_path}</Typography.Text>
+                        {showActions ? (
+                          <Typography.Text type="danger" style={{ fontSize: 12 }}>
+                            {reason || t("pages.media_manager.ingest_no_reason")}
+                          </Typography.Text>
+                        ) : null}
+                      </Space>
+                    }
+                  />
+                  <Tag
+                    color={item.publication_state === "processing" ? "processing" : item.publication_state === "degraded" ? "warning" : "error"}
+                    role="status"
+                    aria-label={t(`pages.media_manager.publication_${item.publication_state}`)}
+                  >
+                    {t(`pages.media_manager.publication_${item.publication_state}`)}
+                  </Tag>
+                </List.Item>
+              );
+            }}
+          />
+        </div>
         {mediaHasMore || mediaLoadMoreError ? (
           <Button
             block
+            style={{ marginTop: 8 }}
             loading={mediaLoadMoreLoading}
             aria-label={mediaLoadMoreLoading
               ? t("pages.media_manager.ingest_load_more_loading")
