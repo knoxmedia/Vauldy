@@ -204,6 +204,8 @@ func GuessDocumentFormat(name string) string {
 }
 
 // GuessDocumentMIME returns MIME type for known document extensions.
+// It uses a static built-in MIME table and does not follow Configure() document
+// overrides; newly added document extensions may return "".
 func GuessDocumentMIME(name string) string {
 	ext := strings.ToLower(filepath.Ext(name))
 	if m, ok := docMIME[ext]; ok {
