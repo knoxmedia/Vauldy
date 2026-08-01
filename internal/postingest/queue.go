@@ -101,6 +101,11 @@ func syncLinkedStepTx(ctx context.Context, tx *sql.Tx, taskID int64) error {
 	return nil
 }
 
+// SyncLinkedStepTx mirrors queue/step status for a post_ingest_task row inside an open transaction.
+func SyncLinkedStepTx(ctx context.Context, tx *sql.Tx, taskID int64) error {
+	return syncLinkedStepTx(ctx, tx, taskID)
+}
+
 func (q *Queue) Enqueue(ctx context.Context, mediaID int64, scanTaskID *int64, typ TaskType) (bool, error) {
 	if err := q.validate(false); err != nil {
 		return false, err

@@ -429,18 +429,29 @@ func (d *Dispatcher) allowedTaskTypes() []TaskType {
 	bandNext := append([]int(nil), d.bandNext...)
 	d.mu.Unlock()
 
-	burstOnly := false
+	// Soft-cap oversubscribe (Global+1): prefer high-priority burst; otherwise allow one
+	// subtitle so ASR is not starved behind a full poster/preview mid-band backlog.
+	burstHigh := false
+	burstSubtitleOnly := false
 	switch {
 	case globalUsed < d.opts.Global:
 	case globalUsed < d.opts.Global+priorityBurstSlots && highUsed == 0:
-		burstOnly = true
+		burstHigh = true
+	case globalUsed < d.opts.Global+priorityBurstSlots && subtitleAvailable:
+		burstSubtitleOnly = true
 	default:
 		return nil
 	}
 
 	allowed := make([]TaskType, 0, len(taskTypes))
 	for band, types := range priorityBands {
-		if burstOnly && band > 1 {
+		if burstSubtitleOnly {
+			if len(types) != 1 || types[0] != TaskSubtitle {
+				continue
+			}
+		} else if burstHigh && band > 1 && !(len(types) == 1 && types[0] == TaskSubtitle) {
+			// High-priority bands only, plus subtitle so ClaimAny can fall through when
+			// no high-priority work is eligible.
 			continue
 		}
 		n := len(types)
@@ -490,8 +501,12 @@ func (d *Dispatcher) tryAcquire(typ TaskType) bool {
 	if atHardCap {
 		return false
 	}
-	if atSoftCap && (!isHighPriorityTask(typ) || highUsed > 0) {
-		return false
+	if atSoftCap {
+		highBurstOK := isHighPriorityTask(typ) && highUsed == 0
+		subtitleBurstOK := typ == TaskSubtitle
+		if !highBurstOK && !subtitleBurstOK {
+			return false
+		}
 	}
 	select {
 	case d.global <- struct{}{}:

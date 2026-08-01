@@ -78,18 +78,47 @@ func (h *Handler) ListSubtitleTasks(c *gin.Context) {
 		}
 	}
 	rows, err := h.App.DB.Query(`
-		SELECT t.id, t.media_id, COALESCE(m.title,''), t.status, COALESCE(t.message,''),
-		       COALESCE(t.created_at,''), COALESCE(t.started_at,''), COALESCE(t.finished_at,''), COALESCE(t.updated_at,''),
-		       COALESCE(q.id, 0), COALESCE(q.status, '')
-		FROM subtitle_task t
-		LEFT JOIN media m ON m.id = t.media_id
-		LEFT JOIN post_ingest_task q ON q.id = (
-			SELECT q2.id FROM post_ingest_task q2
-			WHERE q2.media_id = t.media_id AND q2.task_type = 'subtitle'
-			  AND q2.generation = COALESCE(m.ingest_generation, 0)
-			ORDER BY q2.id DESC LIMIT 1
+		WITH current_queue AS (
+			SELECT q.*
+			FROM post_ingest_task q
+			JOIN media m ON m.id = q.media_id
+			WHERE q.task_type = 'subtitle'
+			  AND q.generation = COALESCE(m.ingest_generation, 0)
+			  AND NOT (q.status = 'cancelled' AND q.last_error = 'deleted by admin')
+			  AND q.id = (
+				SELECT q2.id
+				FROM post_ingest_task q2
+				WHERE q2.media_id = q.media_id
+				  AND q2.task_type = 'subtitle'
+				  AND q2.generation = COALESCE(m.ingest_generation, 0)
+				ORDER BY q2.id DESC
+				LIMIT 1
+			  )
+		), task_media AS (
+			SELECT media_id FROM subtitle_task
+			UNION
+			SELECT media_id FROM current_queue
 		)
-		ORDER BY t.updated_at DESC
+		SELECT x.media_id, COALESCE(m.title, ''),
+		       COALESCE(t.status, ''), COALESCE(t.message, ''),
+		       COALESCE(t.created_at, ''), COALESCE(t.started_at, ''),
+		       COALESCE(t.finished_at, ''), COALESCE(t.updated_at, ''),
+		       COALESCE(q.id, 0), COALESCE(q.status, ''), COALESCE(q.last_error, ''),
+		       COALESCE(q.created_at, ''), COALESCE(q.started_at, ''),
+		       COALESCE(q.finished_at, ''), COALESCE(q.updated_at, '')
+		FROM task_media x
+		LEFT JOIN media m ON m.id = x.media_id
+		LEFT JOIN subtitle_task t ON t.media_id = x.media_id
+		LEFT JOIN current_queue q ON q.media_id = x.media_id
+		ORDER BY CASE
+			WHEN q.status = 'running' OR t.status = 'running' THEN 0
+			WHEN q.status = 'waiting'
+			  OR (t.status IN ('pending', 'waiting') AND COALESCE(q.status, '') NOT IN ('failed', 'cancelled')) THEN 1
+			WHEN q.status = 'failed' OR t.status = 'failed' THEN 2
+			ELSE 3
+		END,
+		COALESCE(q.updated_at, t.updated_at) DESC,
+		x.media_id ASC
 		LIMIT ?
 	`, limit)
 	if err != nil {
@@ -99,17 +128,32 @@ func (h *Handler) ListSubtitleTasks(c *gin.Context) {
 	defer rows.Close()
 	var items []gin.H
 	for rows.Next() {
-		var id, mediaID, queueID sql.NullInt64
-		var title, status, msg, createdAt, startedAt, finishedAt, updatedAt, queueStatus sql.NullString
-		if rows.Scan(&id, &mediaID, &title, &status, &msg, &createdAt, &startedAt, &finishedAt, &updatedAt, &queueID, &queueStatus) != nil {
+		var mediaID, queueID sql.NullInt64
+		var title, status, msg, createdAt, startedAt, finishedAt, updatedAt, queueStatus, queueMsg, queueCreatedAt, queueStartedAt, queueFinishedAt, queueUpdatedAt sql.NullString
+		if rows.Scan(&mediaID, &title, &status, &msg, &createdAt, &startedAt, &finishedAt, &updatedAt, &queueID, &queueStatus, &queueMsg, &queueCreatedAt, &queueStartedAt, &queueFinishedAt, &queueUpdatedAt) != nil {
 			continue
 		}
 		display := taskalign.Synthesize(queueStatus.String, status.String, "subtitle")
 		if display == "" {
 			display = status.String
 		}
+		if msg.String == "" {
+			msg = queueMsg
+		}
+		if createdAt.String == "" {
+			createdAt = queueCreatedAt
+		}
+		if startedAt.String == "" {
+			startedAt = queueStartedAt
+		}
+		if finishedAt.String == "" {
+			finishedAt = queueFinishedAt
+		}
+		if updatedAt.String == "" {
+			updatedAt = queueUpdatedAt
+		}
 		items = append(items, gin.H{
-			"id":            id.Int64,
+			"id":            mediaID.Int64,
 			"media_id":      mediaID.Int64,
 			"title":         title.String,
 			"status":        display,

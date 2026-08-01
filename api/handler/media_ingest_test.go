@@ -405,3 +405,54 @@ func TestAdminRetryDegradedUsesFreshCurrentPolicyExecutions(t *testing.T) {
 		t.Fatalf("steps=%d executions=%d legacy=%d", steps, executions, legacy)
 	}
 }
+
+func TestAdminListMediaIncludesCurrentIngestRunStatusOnly(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := setupMediaIngestTestHandler(t)
+	if _, err := h.App.DB.Exec(`UPDATE media_ingest_run SET status='processing' WHERE media_id=102 AND generation=1;
+INSERT INTO media(id,library_id,file_id,title,file_path,file_type,status,publication_state,publication_error,ingest_generation)
+VALUES(104,1,'no-run','No Run','E:/movies/no-run.mkv','video','active','degraded','legacy degraded',1)`); err != nil {
+		t.Fatal(err)
+	}
+	adminContext, adminRecorder := adminIngestContext(http.MethodGet, "/api/v1/admin/media?limit=20", "")
+	h.AdminListMedia(adminContext)
+	if adminRecorder.Code != http.StatusOK {
+		t.Fatalf("admin status=%d body=%s", adminRecorder.Code, adminRecorder.Body.String())
+	}
+	var adminPayload struct {
+		Items []struct {
+			ID               int64  `json:"id"`
+			PublicationState string `json:"publication_state"`
+			IngestRunStatus  string `json:"ingest_run_status"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(adminRecorder.Body.Bytes(), &adminPayload); err != nil {
+		t.Fatal(err)
+	}
+	items := make(map[int64]struct{ publicationState, ingestRunStatus string }, len(adminPayload.Items))
+	for _, item := range adminPayload.Items {
+		items[item.ID] = struct{ publicationState, ingestRunStatus string }{item.PublicationState, item.IngestRunStatus}
+	}
+	if got := items[102]; got.publicationState != "degraded" || got.ingestRunStatus != "processing" {
+		t.Fatalf("degraded retry item=%+v body=%s", got, adminRecorder.Body.String())
+	}
+	if got := items[104]; got.publicationState != "degraded" || got.ingestRunStatus != "" {
+		t.Fatalf("no-run item=%+v body=%s", got, adminRecorder.Body.String())
+	}
+	ordinaryContext, ordinaryRecorder := listMediaTestContext("/api/v1/media?library_id=1&limit=20", 2)
+	h.ListMedia(ordinaryContext)
+	if ordinaryRecorder.Code != http.StatusOK {
+		t.Fatalf("ordinary status=%d body=%s", ordinaryRecorder.Code, ordinaryRecorder.Body.String())
+	}
+	var ordinaryPayload struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(ordinaryRecorder.Body.Bytes(), &ordinaryPayload); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range ordinaryPayload.Items {
+		if _, exists := item["ingest_run_status"]; exists {
+			t.Fatalf("ordinary list exposed ingest_run_status: %s", ordinaryRecorder.Body.String())
+		}
+	}
+}

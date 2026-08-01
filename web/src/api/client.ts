@@ -3023,6 +3023,7 @@ export type AdminMediaItem = MediaItem & {
   publication_state: PublicationState;
   publication_error?: string;
   ingest_generation: number;
+  ingest_run_status?: PublicationState;
 };
 
 export type MediaIngestStep = {

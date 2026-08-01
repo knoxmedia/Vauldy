@@ -36,11 +36,12 @@ function adminMedia(
   title: string = state,
   libraryId = 1,
   publication_error = "",
+  ingest_run_status?: AdminMediaItem["ingest_run_status"],
 ): AdminMediaItem {
   return {
     id, library_id: libraryId, file_id: `f${id}`, title, file_path: `${title}.mkv`, file_type: "video",
     duration: 0, width: 0, height: 0, format: "", status: "active",
-    publication_state: state, publication_error, ingest_generation: 1,
+    publication_state: state, publication_error, ingest_generation: 1, ingest_run_status,
   };
 }
 function deferred<T>() {
@@ -66,7 +67,11 @@ beforeEach(() => {
   mocks.fetchLibraries.mockResolvedValue([library(1, "Library A")]);
   mocks.fetchAdminMedia.mockResolvedValue({ items: [], has_more: false });
   mocks.fetchMedia.mockResolvedValue([]);
-  mocks.retryAdminMediaIngest.mockResolvedValue({});
+  mocks.retryAdminMediaIngest.mockResolvedValue({
+    media: { id: 0, publication_state: "processing", publication_error: "", published_at: "", ingest_generation: 1 },
+    run: { id: 0, generation: 1, status: "processing", reason: "manual_retry", preserve_visibility: false, error: "", created_at: "", updated_at: "", finished_at: "" },
+    steps: [],
+  });
   mocks.deleteMedia.mockResolvedValue(undefined);
   mocks.fetchMediaDeletionPlan.mockResolvedValue(["/tmp/a.mkv"]);
   mocks.fetchMediaDetail.mockImplementation(async (id: number) => ({ ...adminMedia(id, "published", `Detail ${id}`), meta_json: "{}" }) as MediaDetail);
@@ -188,6 +193,42 @@ describe("MediaManager publication diagnostics", () => {
     expect(busy).toBeTruthy();
     expect(within(busy as HTMLElement).queryByRole("button", { name: /^retry$/i })).not.toBeInTheDocument();
     expect(within(busy as HTMLElement).queryByRole("button", { name: /^remove$/i })).not.toBeInTheDocument();
+  });
+
+  it("uses a processing current run as the effective state and hides terminal actions", async () => {
+    mocks.fetchAdminMedia.mockResolvedValue({ items: [adminMedia(6, "degraded", "Retry Running", 1, "old failure", "processing")], has_more: false });
+    const view = render(<I18nProvider locale="en"><MemoryRouter><MediaManagerPage /></MemoryRouter></I18nProvider>);
+    await waitFor(() => expect(view.container).toHaveTextContent("Retry Running"));
+    const row = within(view.container).getByText("Retry Running").closest(".ant-list-item");
+    expect(row).toBeTruthy();
+    expect(within(row as HTMLElement).getByRole("status", { name: /processing/i })).toBeInTheDocument();
+    expect(within(row as HTMLElement).queryByRole("button", { name: /^retry$/i })).not.toBeInTheDocument();
+    expect(within(row as HTMLElement).queryByRole("button", { name: /^remove$/i })).not.toBeInTheDocument();
+  });
+
+  it("includes a published preserve-visibility retry while its current run is processing", async () => {
+    mocks.fetchAdminMedia.mockResolvedValue({ items: [adminMedia(7, "published", "Published Retry", 1, "", "processing")], has_more: false });
+    const view = render(<I18nProvider locale="en"><MemoryRouter><MediaManagerPage /></MemoryRouter></I18nProvider>);
+    await waitFor(() => expect(view.container).toHaveTextContent("Published Retry"));
+    const row = within(view.container).getByText("Published Retry").closest(".ant-list-item");
+    expect(row).toBeTruthy();
+    expect(within(row as HTMLElement).getByRole("status", { name: /processing/i })).toBeInTheDocument();
+  });
+
+  it("shows processing immediately from a successful retry response", async () => {
+    const staleReload = deferred<AdminMediaPage>();
+    mocks.fetchAdminMedia.mockResolvedValueOnce({ items: [adminMedia(9, "degraded", "Retry Response", 1, "boom")], has_more: false }).mockImplementationOnce(() => staleReload.promise);
+    mocks.retryAdminMediaIngest.mockResolvedValue({ media: { id: 9, publication_state: "degraded", publication_error: "boom", published_at: "", ingest_generation: 2 }, run: { id: 99, generation: 2, status: "processing", reason: "manual_retry", preserve_visibility: true, error: "", created_at: "", updated_at: "", finished_at: "" }, steps: [] });
+    const view = render(<I18nProvider locale="en"><MemoryRouter><MediaManagerPage /></MemoryRouter></I18nProvider>);
+    await waitFor(() => expect(view.container).toHaveTextContent("Retry Response"));
+    fireEvent.click(within(view.container).getByRole("button", { name: /^retry$/i }));
+    await waitFor(() => expect(mocks.retryAdminMediaIngest).toHaveBeenCalledWith(9));
+    const row = within(view.container).getByText("Retry Response").closest(".ant-list-item");
+    expect(row).toBeTruthy();
+    await waitFor(() => expect(within(row as HTMLElement).getByRole("status", { name: /processing/i })).toBeInTheDocument());
+    expect(within(row as HTMLElement).queryByRole("button", { name: /^retry$/i })).not.toBeInTheDocument();
+    await act(async () => staleReload.resolve({ items: [adminMedia(9, "degraded", "Retry Response", 1, "boom")], has_more: false }));
+    await waitFor(() => expect(within(row as HTMLElement).getByRole("status", { name: /processing/i })).toBeInTheDocument());
   });
 
   it("retries ingest for a failed row", async () => {

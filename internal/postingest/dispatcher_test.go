@@ -1054,6 +1054,58 @@ func TestDispatcher_HighPriorityBurstWhenLowPrioritySaturated(t *testing.T) {
 	}
 }
 
+func TestDispatcher_SubtitleBurstWhenHighPrioritySaturatesGlobal(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	q := NewQueue(db, "sub-burst", nil)
+	insertDispatcherTask(t, q, TaskPoster, nil, "poster-a")
+	insertDispatcherTask(t, q, TaskPoster, nil, "poster-b")
+	insertDispatcherTask(t, q, TaskPreview, nil, "preview-fill")
+	insertDispatcherTask(t, q, TaskSubtitle, nil, "subtitle-waiting")
+	started := make(chan TaskType, 4)
+	block := make(chan struct{})
+	exec := executorFunc(func(ctx context.Context, task Task) error {
+		started <- task.Type
+		select {
+		case <-block:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
+	o := dispatcherOptions("sub-burst")
+	o.Global = 3
+	o.Poster = 2
+	o.Preview = 1
+	o.Subtitle = 1
+	d, err := NewDispatcher(q, exec, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- d.Start(ctx) }()
+	seen := map[TaskType]int{}
+	for i := 0; i < 4; i++ {
+		select {
+		case typ := <-started:
+			seen[typ]++
+		case <-time.After(2 * time.Second):
+			t.Fatalf("missing start after %d; seen=%v", i, seen)
+		}
+	}
+	if seen[TaskPoster] != 2 || seen[TaskPreview] != 1 || seen[TaskSubtitle] != 1 {
+		t.Fatalf("starts=%v want 2 poster + 1 preview + 1 subtitle burst", seen)
+	}
+	if snap := d.Snapshot(); snap.GlobalUsed != 4 || snap.SubtitleUsed != 1 {
+		t.Fatalf("snapshot=%+v want GlobalUsed=4 SubtitleUsed=1", snap)
+	}
+	close(block)
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDispatcher_AllTypeTimeoutDeadlines(t *testing.T) {
 	db, _ := openQueueTestDB(t)
 	q := NewQueue(db, "owner", nil)
