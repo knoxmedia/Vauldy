@@ -226,6 +226,42 @@ func TestSyncSidecarsMatchAndGenerate(t *testing.T) {
 	}
 }
 
+func writeMockFFmpegTouchOutput(t *testing.T, dir string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		path := filepath.Join(dir, "ffmpeg-mock.bat")
+		content := `@echo off
+setlocal EnableDelayedExpansion
+set "out="
+:next
+if "%~1"=="" goto done
+set "out=%~1"
+shift
+goto next
+:done
+if "%out%"=="" exit /b 2
+echo mock-asr-audio>"%out%"
+exit /b 0
+`
+		if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+			t.Fatalf("write mock ffmpeg: %v", err)
+		}
+		return path
+	}
+	path := filepath.Join(dir, "ffmpeg-mock")
+	content := `#!/bin/sh
+out=""
+for a in "$@"; do out="$a"; done
+if [ -z "$out" ]; then exit 2; fi
+: > "$out"
+printf 'mock-asr-audio' > "$out"
+`
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatalf("write mock ffmpeg: %v", err)
+	}
+	return path
+}
+
 func TestRunASRShellGeneratesVTT(t *testing.T) {
 	t.Parallel()
 
@@ -243,6 +279,7 @@ func TestRunASRShellGeneratesVTT(t *testing.T) {
 	s := &Service{
 		DB:          db,
 		SubtitleDir: outDir,
+		FFmpegPath:  writeMockFFmpegTouchOutput(t, t.TempDir()),
 		ASR: ASRConfig{
 			Provider: "shell",
 			Shell:    shellCmd,

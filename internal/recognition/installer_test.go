@@ -38,12 +38,26 @@ func TestDefaultASRShellHasPlaceholders(t *testing.T) {
 			t.Fatalf("missing %s in %q", ph, sh)
 		}
 	}
+	if strings.Contains(sh, "--engine") {
+		t.Fatalf("shell should not hardcode engine: %q", sh)
+	}
+}
+
+func TestNormalizeInstallASROptions(t *testing.T) {
+	t.Parallel()
+	eng, model, lang, dev, err := normalizeInstallASROptions(InstallASROptions{Engine: "openai-whisper"})
+	if err != nil || eng != "whisper" || model != "base" || lang != "zh" || dev != "" {
+		t.Fatalf("got %q %q %q %q err=%v", eng, model, lang, dev, err)
+	}
+	if _, _, _, _, err := normalizeInstallASROptions(InstallASROptions{Engine: "paraformer"}); err == nil {
+		t.Fatal("expected unsupported engine")
+	}
 }
 
 func TestInstallASRRequiresScript(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	_, err := InstallASR(context.Background(), dir)
+	_, err := InstallASR(context.Background(), dir, InstallASROptions{Engine: "faster-whisper"})
 	if err == nil {
 		t.Fatal("expected error without repo scripts")
 	}

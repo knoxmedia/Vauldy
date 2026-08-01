@@ -2170,6 +2170,9 @@ export type SubtitleTask = {
   media_id: number;
   title: string;
   status: string;
+  domain_status?: string;
+  queue_task_id?: number;
+  queue_status?: string;
   message?: string;
   created_at: string;
   started_at?: string;
@@ -2190,8 +2193,68 @@ export async function retrySubtitleTask(mediaId: number) {
   await api.post(`/api/v1/subtitle/task/${mediaId}/retry`);
 }
 
+export async function cancelSubtitleTask(mediaId: number) {
+  await api.post(`/api/v1/subtitle/task/${mediaId}/cancel`);
+}
+
+export async function runNowSubtitleTask(mediaId: number) {
+  await api.post(`/api/v1/subtitle/task/${mediaId}/run-now`);
+}
+
 export async function deleteSubtitleTask(mediaId: number) {
   await api.delete(`/api/v1/subtitle/task/${mediaId}`);
+}
+
+export type BatchTaskAction = "retry" | "delete" | "cancel" | "run_now";
+
+export type BatchTaskResult = {
+  id?: number;
+  media_id?: number;
+  ok: boolean;
+  error?: string;
+};
+
+export type BatchTaskResponse = {
+  ok: number;
+  failed: number;
+  results: BatchTaskResult[];
+};
+
+async function postBatchTask(
+  path: string,
+  action: BatchTaskAction,
+  body: { ids?: number[]; media_ids?: number[] },
+): Promise<BatchTaskResponse> {
+  const { data } = await api.post<BatchTaskResponse>(path, { action, ...body });
+  return data;
+}
+
+export function batchSubtitleTasks(action: BatchTaskAction, mediaIds: number[]) {
+  return postBatchTask("/api/v1/subtitle/task/batch", action, { media_ids: mediaIds });
+}
+
+export function batchEncryptTasks(action: BatchTaskAction, ids: number[]) {
+  return postBatchTask("/api/v1/encrypt/task/batch", action, { ids });
+}
+
+export function batchTranscodeTasks(action: BatchTaskAction, ids: number[]) {
+  return postBatchTask("/api/v1/transcode/task/batch", action, { ids });
+}
+
+export function batchLyricTasks(action: BatchTaskAction, mediaIds: number[]) {
+  return postBatchTask("/api/v1/lyric/task/batch", action, { media_ids: mediaIds });
+}
+
+export function batchPreviewTasks(action: BatchTaskAction, mediaIds: number[]) {
+  return postBatchTask("/api/v1/preview/task/batch", action, { media_ids: mediaIds });
+}
+
+export function batchAtrackTasks(action: BatchTaskAction, mediaIds: number[]) {
+  return postBatchTask("/api/v1/atrack/task/batch", action, { media_ids: mediaIds });
+}
+
+export function batchKeyframeTasks(action: BatchTaskAction, mediaIds: number[]) {
+  return postBatchTask("/api/v1/keyframe/task/batch", action, { media_ids: mediaIds });
 }
 
 /** Reset subtitle output and re-run sidecar / embedded / ASR / OCR processing. */
@@ -2727,6 +2790,10 @@ export type SystemOptionsTranscoder = {
 export type SystemOptionsASR = {
   auto_on_scan: boolean;
   provider: string;
+  engine: string;
+  model: string;
+  language: string;
+  device: string;
   whisper_path: string;
   extra_args: string[];
   shell: string;
@@ -2844,10 +2911,17 @@ export type RecognitionInstallResult = {
   recognition?: SystemOptionsRecognition;
 };
 
-export async function installSystemOptionsASR() {
+export async function installSystemOptionsASR(asr?: Pick<SystemOptionsASR, "engine" | "model" | "language" | "device">) {
   const { data } = await api.post<RecognitionInstallResult>(
     "/api/v1/admin/system-options/install/asr",
-    {},
+    asr
+      ? {
+          engine: asr.engine,
+          model: asr.model,
+          language: asr.language,
+          device: asr.device,
+        }
+      : {},
     { timeout: 45 * 60 * 1000 },
   );
   return data;
@@ -2947,6 +3021,7 @@ export type PublicationState = "processing" | "published" | "degraded" | "failed
 
 export type AdminMediaItem = MediaItem & {
   publication_state: PublicationState;
+  publication_error?: string;
   ingest_generation: number;
 };
 

@@ -10,6 +10,9 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	"knox-media/internal/postingest"
+	"knox-media/internal/taskalign"
 )
 
 const (
@@ -17,7 +20,9 @@ const (
 	subtitleWorkerBatchMax = 3
 )
 
-// StartSubtitleTaskLoop drains pending subtitle tasks in the background.
+// StartSubtitleTaskLoop drains pending subtitle_task rows outside post_ingest.
+// Deprecated: not started by the router. Long ASR is unreliable here (20m reset,
+// overlapping RunBatch). Use post_ingest enqueue APIs instead.
 func (h *Handler) StartSubtitleTaskLoop(ctx context.Context) {
 	go h.runSubtitleWorkerOnce()
 	tk := time.NewTicker(subtitleWorkerInterval)
@@ -74,9 +79,16 @@ func (h *Handler) ListSubtitleTasks(c *gin.Context) {
 	}
 	rows, err := h.App.DB.Query(`
 		SELECT t.id, t.media_id, COALESCE(m.title,''), t.status, COALESCE(t.message,''),
-		       COALESCE(t.created_at,''), COALESCE(t.started_at,''), COALESCE(t.finished_at,''), COALESCE(t.updated_at,'')
+		       COALESCE(t.created_at,''), COALESCE(t.started_at,''), COALESCE(t.finished_at,''), COALESCE(t.updated_at,''),
+		       COALESCE(q.id, 0), COALESCE(q.status, '')
 		FROM subtitle_task t
 		LEFT JOIN media m ON m.id = t.media_id
+		LEFT JOIN post_ingest_task q ON q.id = (
+			SELECT q2.id FROM post_ingest_task q2
+			WHERE q2.media_id = t.media_id AND q2.task_type = 'subtitle'
+			  AND q2.generation = COALESCE(m.ingest_generation, 0)
+			ORDER BY q2.id DESC LIMIT 1
+		)
 		ORDER BY t.updated_at DESC
 		LIMIT ?
 	`, limit)
@@ -87,21 +99,28 @@ func (h *Handler) ListSubtitleTasks(c *gin.Context) {
 	defer rows.Close()
 	var items []gin.H
 	for rows.Next() {
-		var id, mediaID sql.NullInt64
-		var title, status, msg, createdAt, startedAt, finishedAt, updatedAt sql.NullString
-		if rows.Scan(&id, &mediaID, &title, &status, &msg, &createdAt, &startedAt, &finishedAt, &updatedAt) != nil {
+		var id, mediaID, queueID sql.NullInt64
+		var title, status, msg, createdAt, startedAt, finishedAt, updatedAt, queueStatus sql.NullString
+		if rows.Scan(&id, &mediaID, &title, &status, &msg, &createdAt, &startedAt, &finishedAt, &updatedAt, &queueID, &queueStatus) != nil {
 			continue
 		}
+		display := taskalign.Synthesize(queueStatus.String, status.String, "subtitle")
+		if display == "" {
+			display = status.String
+		}
 		items = append(items, gin.H{
-			"id":          id.Int64,
-			"media_id":    mediaID.Int64,
-			"title":       title.String,
-			"status":      status.String,
-			"message":     msg.String,
-			"created_at":  createdAt.String,
-			"started_at":  startedAt.String,
-			"finished_at": finishedAt.String,
-			"updated_at":  updatedAt.String,
+			"id":            id.Int64,
+			"media_id":      mediaID.Int64,
+			"title":         title.String,
+			"status":        display,
+			"domain_status": status.String,
+			"queue_task_id": queueID.Int64,
+			"queue_status":  queueStatus.String,
+			"message":       msg.String,
+			"created_at":    createdAt.String,
+			"started_at":    startedAt.String,
+			"finished_at":   finishedAt.String,
+			"updated_at":    updatedAt.String,
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"items": items})
@@ -117,11 +136,13 @@ func (h *Handler) ResetSubtitleTask(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid media id"})
 		return
 	}
-	if err := h.Subtitle.ResetSubtitleJob(mediaID); err != nil {
+	reset := subtitleResetTx(mediaID)
+	result, err := enqueueExplicitPostIngest(c.Request.Context(), h.App.DB, mediaID, postingest.TaskSubtitle, true, reset, nil)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	c.JSON(http.StatusAccepted, gin.H{"ok": true, "queued": result.Queued(), "action": result})
 }
 
 func (h *Handler) RetrySubtitleTask(c *gin.Context) {
@@ -134,16 +155,111 @@ func (h *Handler) RetrySubtitleTask(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid media id"})
 		return
 	}
-	go func() {
-		ctx := context.Background()
-		if err := h.Subtitle.ResetSubtitleJob(mediaID); err != nil {
+	reset := subtitleResetTx(mediaID)
+	result, err := enqueueExplicitPostIngest(c.Request.Context(), h.App.DB, mediaID, postingest.TaskSubtitle, true, reset, nil)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"ok": true, "queued": result.Queued(), "action": result})
+}
+
+func (h *Handler) CancelSubtitleTask(c *gin.Context) {
+	if h.Subtitle == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "subtitle service disabled"})
+		return
+	}
+	if h.Queue == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "post-ingest queue not configured"})
+		return
+	}
+	mediaID, err := strconv.ParseInt(c.Param("mediaId"), 10, 64)
+	if err != nil || mediaID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid media id"})
+		return
+	}
+	taskID, status, err := h.Queue.FindCurrentTask(c.Request.Context(), mediaID, postingest.TaskSubtitle)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+	if status != postingest.StatusWaiting && status != postingest.StatusRunning {
+		c.JSON(http.StatusConflict, gin.H{"error": "subtitle task is not waiting or running"})
+		return
+	}
+	if h.Dispatcher != nil {
+		h.Dispatcher.CancelTask(taskID)
+	}
+	if err := h.Queue.AdminCancelTask(c.Request.Context(), taskID); err != nil {
+		if strings.Contains(err.Error(), "cannot be cancel") {
+			var cur postingest.Status
+			if qerr := h.App.DB.QueryRowContext(c.Request.Context(), `SELECT status FROM post_ingest_task WHERE id=?`, taskID).Scan(&cur); qerr == nil {
+				if cur == postingest.StatusCancelled || cur == postingest.StatusFailed || cur == postingest.StatusDone {
+					_, _ = h.App.DB.ExecContext(c.Request.Context(), `
+UPDATE subtitle_task SET status='pending',started_at=NULL,finished_at=NULL,message='cancelled by admin',updated_at=CURRENT_TIMESTAMP WHERE media_id=?`, mediaID)
+					c.JSON(http.StatusOK, gin.H{"ok": true, "status": string(cur)})
+					return
+				}
+			}
+		}
+		if strings.Contains(err.Error(), "not found") {
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 			return
 		}
-		if err := h.Subtitle.ProcessMedia(ctx, mediaID); err != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		return
+	}
+	_, _ = h.App.DB.ExecContext(c.Request.Context(), `
+UPDATE subtitle_task SET status='pending',started_at=NULL,finished_at=NULL,message='cancelled by admin',updated_at=CURRENT_TIMESTAMP WHERE media_id=?`, mediaID)
+	c.JSON(http.StatusOK, gin.H{"ok": true, "status": "cancelled"})
+}
+
+func (h *Handler) RunNowSubtitleTask(c *gin.Context) {
+	if h.Subtitle == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "subtitle service disabled"})
+		return
+	}
+	if h.Queue == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "post-ingest queue not configured"})
+		return
+	}
+	mediaID, err := strconv.ParseInt(c.Param("mediaId"), 10, 64)
+	if err != nil || mediaID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid media id"})
+		return
+	}
+	taskID, status, err := h.Queue.FindCurrentTask(c.Request.Context(), mediaID, postingest.TaskSubtitle)
+	if err != nil {
+		// No queue row: ensure pending domain + enqueue
+		reset := subtitleEnsureTx(mediaID)
+		result, qerr := enqueueExplicitPostIngest(c.Request.Context(), h.App.DB, mediaID, postingest.TaskSubtitle, false, reset, nil)
+		if qerr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": qerr.Error()})
 			return
 		}
-	}()
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+		c.JSON(http.StatusAccepted, gin.H{"ok": true, "queued": result.Queued(), "action": result})
+		return
+	}
+	switch status {
+	case postingest.StatusWaiting:
+		if err := h.Queue.AdminBumpWaiting(c.Request.Context(), taskID); err != nil {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			return
+		}
+		_, _ = h.App.DB.ExecContext(c.Request.Context(), `
+UPDATE subtitle_task SET status='pending',message=NULL,updated_at=CURRENT_TIMESTAMP WHERE media_id=?`, mediaID)
+		c.JSON(http.StatusOK, gin.H{"ok": true, "status": "waiting", "bumped": true})
+	case postingest.StatusRunning:
+		c.JSON(http.StatusConflict, gin.H{"error": "subtitle task is already running"})
+	default:
+		reset := subtitleResetTx(mediaID)
+		result, qerr := enqueueExplicitPostIngest(c.Request.Context(), h.App.DB, mediaID, postingest.TaskSubtitle, true, reset, nil)
+		if qerr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": qerr.Error()})
+			return
+		}
+		c.JSON(http.StatusAccepted, gin.H{"ok": true, "queued": result.Queued(), "action": result})
+	}
 }
 
 func (h *Handler) DeleteSubtitleTask(c *gin.Context) {
@@ -227,14 +343,11 @@ func (h *Handler) EnqueueSubtitleProcessing(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "not a video"})
 		return
 	}
-	go func(id int64) {
-		if err := h.Subtitle.ResetSubtitleJob(id); err != nil {
-			log.Printf("subtitle enqueue media=%d reset err=%v", id, err)
-			return
-		}
-		if err := h.Subtitle.ProcessMedia(context.Background(), id); err != nil {
-			log.Printf("subtitle enqueue media=%d process err=%v", id, err)
-		}
-	}(mediaID)
-	c.JSON(http.StatusAccepted, gin.H{"ok": true, "queued": true})
+	reset := subtitleResetTx(mediaID)
+	result, err := enqueueExplicitPostIngest(c.Request.Context(), h.App.DB, mediaID, postingest.TaskSubtitle, true, reset, nil)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"ok": true, "queued": result.Queued(), "action": result})
 }

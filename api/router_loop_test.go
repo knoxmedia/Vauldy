@@ -12,7 +12,7 @@ func TestNewEngineDoesNotStartLegacyPreviewOrKeyframeLoops(t *testing.T) {
 		t.Fatal(err)
 	}
 	source := string(raw)
-	for _, call := range []string{"go h.StartPreviewTaskLoop(", "go h.StartKeyframeTaskLoop("} {
+	for _, call := range []string{"go h.StartPreviewTaskLoop(", "go h.StartKeyframeTaskLoop(", "h.StartSubtitleTaskLoop("} {
 		if strings.Contains(source, call) {
 			t.Fatalf("NewEngine still starts legacy loop %q", call)
 		}

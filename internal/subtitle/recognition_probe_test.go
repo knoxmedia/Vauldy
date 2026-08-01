@@ -8,7 +8,7 @@ import (
 
 func TestCheckASRConfigNone(t *testing.T) {
 	t.Parallel()
-	r := CheckASRConfig(context.Background(), ASRConfig{Provider: "none"})
+	r := CheckASRConfig(context.Background(), "", ASRConfig{Provider: "none"})
 	if !r.OK {
 		t.Fatalf("expected ok for none, got %+v", r)
 	}
@@ -16,7 +16,7 @@ func TestCheckASRConfigNone(t *testing.T) {
 
 func TestCheckASRConfigShellMissingPlaceholders(t *testing.T) {
 	t.Parallel()
-	r := CheckASRConfig(context.Background(), ASRConfig{
+	r := CheckASRConfig(context.Background(), "", ASRConfig{
 		Provider: "shell",
 		Shell:    `echo {input}`,
 	})
@@ -27,12 +27,22 @@ func TestCheckASRConfigShellMissingPlaceholders(t *testing.T) {
 
 func TestCheckASRConfigShellValid(t *testing.T) {
 	t.Parallel()
-	r := CheckASRConfig(context.Background(), ASRConfig{
+	r := CheckASRConfig(context.Background(), "", ASRConfig{
 		Provider: "shell",
 		Shell:    `tool --in "{input}" --out "{output_vtt}"`,
 	})
 	if !r.OK {
 		t.Fatalf("expected ok, got %+v", r)
+	}
+}
+
+func TestAsrImportModule(t *testing.T) {
+	t.Parallel()
+	if mod, ok := asrImportModule("faster-whisper"); !ok || mod != "faster_whisper" {
+		t.Fatalf("faster-whisper -> %q %v", mod, ok)
+	}
+	if mod, ok := asrImportModule("whisper"); !ok || mod != "whisper" {
+		t.Fatalf("whisper -> %q %v", mod, ok)
 	}
 }
 

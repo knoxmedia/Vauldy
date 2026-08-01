@@ -128,7 +128,7 @@ func (w *Worker) StartWaiting(ctx context.Context, limit int) int {
 		LEFT JOIN media m ON m.file_id = t.file_id
 		WHERE t.status = 'waiting' AND COALESCE(m.file_path,'') != ''
 		  AND COALESCE(t.task_type,'batch') = 'batch'
-		ORDER BY t.id ASC
+		ORDER BY COALESCE(t.priority,0) DESC, t.id ASC
 		LIMIT ?
 	`, limit)
 	if err != nil {
