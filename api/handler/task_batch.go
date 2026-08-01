@@ -311,8 +311,9 @@ func (h *Handler) batchTranscodeCancel(id int64) error {
 func (h *Handler) batchTranscodeRetry(id int64) error {
 	var taskType string
 	if err := h.App.DB.QueryRow(`SELECT COALESCE(task_type,'batch') FROM transcode_task WHERE id=?`, id).Scan(&taskType); err == nil && taskType == "pretranscode" {
+		// Commercial builds inject a real handle; community always gets nil.
 		mod := pretranscodeModule()
-		if mod == nil {
+		if mod == nil || mod.Task == nil {
 			return fmt.Errorf("pretranscode module not available")
 		}
 		return mod.Task.RetryTask(id)
