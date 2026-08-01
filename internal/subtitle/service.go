@@ -27,6 +27,10 @@ var sidecarExts = map[string]struct{}{
 // ASRConfig selects optional speech-to-text backends when no subtitles exist.
 type ASRConfig struct {
 	Provider    string // none | whisper_cli | shell
+	Engine      string // whisper | faster-whisper | paraformer
+	Model       string
+	Language    string
+	Device      string
 	WhisperPath string
 	// ExtraArgs are appended after input path (e.g. "--model small").
 	ExtraArgs []string
@@ -429,7 +433,7 @@ func nullStr(s string) any {
 
 func (s *Service) extractEmbedded(ctx context.Context, mediaID int64, videoPath string, streamIndex int, outPath string) error {
 	mapArg := fmt.Sprintf("0:%d", streamIndex)
-	post := []string{"-map", mapArg, "-c:s", "webvtt", outPath}
+	post := []string{"-map", mapArg, "-vn", "-an", "-c:s", "webvtt", outPath}
 	if _, err := storage.RunFFmpeg(ctx, s.DB, s.Vault, s.FFmpegPath, mediaID, videoPath, 0, 0, nil, post, ""); err != nil {
 		return err
 	}
@@ -695,26 +699,11 @@ func (s *Service) runASR(ctx context.Context, mediaID int64, videoPath, outDir s
 		if sh == "" {
 			return fmt.Errorf("asr.shell empty")
 		}
-		shellInput := asrInput
-		shellCleanup := func() {}
-		if storage.InputNeedsPipe(s.DB, mediaID, videoPath) {
-			// Custom shell may expect a video path; provide decrypted temp when input was pipe-derived WAV only.
-			var matErr error
-			shellInput, shellCleanup, matErr = storage.MaterializePlaintextTemp(s.DB, s.Vault, mediaID, videoPath)
-			if matErr != nil {
-				if guardErr := validateCommitGuard(ctx); guardErr != nil {
-					return guardErr
-				}
-				if _, dbErr := s.DB.ExecContext(ctx, `UPDATE media_subtitle SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`, trimErr(matErr), mediaID, dedupe); dbErr != nil {
-					return dbErr
-				}
-				return matErr
-			}
-		}
-		defer shellCleanup()
-		sh = strings.ReplaceAll(sh, "{input}", shellInput)
+		// asrInput is compact audio prepared by asrInputPath; do not MaterializePlaintextTemp the movie.
+		sh = strings.ReplaceAll(sh, "{input}", asrInput)
 		sh = strings.ReplaceAll(sh, "{output_dir}", outDir)
 		sh = strings.ReplaceAll(sh, "{output_vtt}", outPath)
+		sh = appendASRShellFlags(sh, s.ASR)
 		sh = resolveShellMediaPaths(sh, s.MediaRoot)
 		out, err := s.runShellCommand(ctx, sh)
 		if err != nil {

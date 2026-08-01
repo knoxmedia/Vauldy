@@ -4,19 +4,22 @@ import {
   Popconfirm,
   Select,
   Space,
-  Switch,
   Table,
   Tabs,
   Tag,
   Tooltip,
   message,
 } from "antd";
+import type { Key } from "react";
 import {
+  ClearOutlined,
+  ClockCircleOutlined,
   DeleteOutlined,
   RedoOutlined,
+  ReloadOutlined,
   RollbackOutlined,
   StopOutlined,
-  SyncOutlined,
+  ThunderboltOutlined,
 } from "@ant-design/icons";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
@@ -24,11 +27,12 @@ import {
   cancelTranscodeTask,
   cancelEncryptTask,
   cleanupFailedTranscodeTasks,
-  cleanupFailedTranscodeTasksBefore,
+  cancelSubtitleTask,
   cleanupFailedSubtitleTasks,
   cleanupSubtitleTasksBefore,
   deleteSubtitleTask,
   deleteEncryptTask,
+  runNowSubtitleTask,
   cleanupFailedLyricTasks,
   cleanupLyricTasksBefore,
   fetchAtrackTasks,
@@ -40,7 +44,6 @@ import {
   fetchScrapeTasks,
   fetchSubtitleTasks,
   fetchTranscodeTasks,
-  resetSubtitleTask,
   resetEncryptTask,
   retryAudioTrackExtraction,
   retryKeyframeExtraction,
@@ -48,6 +51,14 @@ import {
   retryLyricTask,
   retryTranscodeTask,
   retrySubtitleTask,
+  batchSubtitleTasks,
+  batchEncryptTasks,
+  batchTranscodeTasks,
+  batchLyricTasks,
+  batchPreviewTasks,
+  batchAtrackTasks,
+  batchKeyframeTasks,
+  type BatchTaskAction,
   type AtrackTask,
   type EncryptTask,
   type KeyframeTask,
@@ -110,6 +121,7 @@ function ActionIconConfirmButton({
   loading,
   danger,
   disabled,
+  type = "text",
 }: {
   title: string;
   confirmTitle: string;
@@ -118,10 +130,11 @@ function ActionIconConfirmButton({
   loading?: boolean;
   danger?: boolean;
   disabled?: boolean;
+  type?: "primary" | "text" | "link" | "default";
 }) {
   const button = (
     <Button
-      type="text"
+      type={type}
       size="small"
       icon={icon}
       loading={loading}
@@ -151,7 +164,6 @@ export default function TaskManagerPage() {
   const [transcodeTasks, setTranscodeTasks] = useState<TranscodeTask[]>([]);
   const [transcodeLoading, setTranscodeLoading] = useState(false);
   const [cleaning, setCleaning] = useState(false);
-  const [cleaningOld, setCleaningOld] = useState(false);
   const [previewTasks, setPreviewTasks] = useState<PreviewTask[]>([]);
   const [retryingPreview, setRetryingPreview] = useState<number | null>(null);
   const [scrapeTasks, setScrapeTasks] = useState<ScrapeTask[]>([]);
@@ -159,7 +171,7 @@ export default function TaskManagerPage() {
   const [scanTasks, setScanTasks] = useState<ScanTask[]>([]);
   const [scanLoading, setScanLoading] = useState(false);
   const [cancellingScanId, setCancellingScanId] = useState<number | null>(null);
-  const [autoRefresh, setAutoRefresh] = useState(true);
+  const autoRefresh = true;
   const [activeTab, setActiveTab] = useState("transcode");
   const [transcodeStatusFilter, setTranscodeStatusFilter] = useState("all");
   const [scrapeStatusFilter, setScrapeStatusFilter] = useState("all");
@@ -168,8 +180,9 @@ export default function TaskManagerPage() {
   const [subtitleTasks, setSubtitleTasks] = useState<SubtitleTask[]>([]);
   const [subtitleLoading, setSubtitleLoading] = useState(false);
   const [subtitleStatusFilter, setSubtitleStatusFilter] = useState("all");
-  const [resettingSubtitleId, setResettingSubtitleId] = useState<number | null>(null);
   const [retryingSubtitleId, setRetryingSubtitleId] = useState<number | null>(null);
+  const [cancellingSubtitleId, setCancellingSubtitleId] = useState<number | null>(null);
+  const [runNowSubtitleId, setRunNowSubtitleId] = useState<number | null>(null);
   const [deletingSubtitleId, setDeletingSubtitleId] = useState<number | null>(null);
   const [cleaningSubtitleFailed, setCleaningSubtitleFailed] = useState(false);
   const [cleaningSubtitleOld, setCleaningSubtitleOld] = useState(false);
@@ -193,6 +206,14 @@ export default function TaskManagerPage() {
   const [cancellingEncryptId, setCancellingEncryptId] = useState<number | null>(null);
   const [resettingEncryptId, setResettingEncryptId] = useState<number | null>(null);
   const [deletingEncryptId, setDeletingEncryptId] = useState<number | null>(null);
+  const [selectedTranscodeKeys, setSelectedTranscodeKeys] = useState<Key[]>([]);
+  const [selectedSubtitleKeys, setSelectedSubtitleKeys] = useState<Key[]>([]);
+  const [selectedLyricKeys, setSelectedLyricKeys] = useState<Key[]>([]);
+  const [selectedEncryptKeys, setSelectedEncryptKeys] = useState<Key[]>([]);
+  const [selectedPreviewKeys, setSelectedPreviewKeys] = useState<Key[]>([]);
+  const [selectedAtrackKeys, setSelectedAtrackKeys] = useState<Key[]>([]);
+  const [selectedKeyframeKeys, setSelectedKeyframeKeys] = useState<Key[]>([]);
+  const [batchLoading, setBatchLoading] = useState(false);
 
   const loadTranscode = async (silent = false) => {
     if (!silent) setTranscodeLoading(true);
@@ -444,18 +465,107 @@ export default function TaskManagerPage() {
       <Select
         size="small"
         value={statusValue}
-        style={{ width: 140 }}
+        style={{ width: 120 }}
         onChange={onStatusChange}
         options={getStatusOptionsForTab(tab)}
       />
-      <Space size={4}>
-        <span style={{ color: "#999" }}>{t("pages.task_manager.auto_refresh")}</span>
-        <Switch size="small" checked={autoRefresh} onChange={setAutoRefresh} />
-      </Space>
-      <Button disabled={autoRefresh} onClick={() => void onRefresh()}>
-        {t("pages.task_manager.refresh")}
-      </Button>
+      <ActionIconButton
+        title={t("pages.task_manager.refresh")}
+        icon={<ReloadOutlined />}
+        type="default"
+        onClick={() => void onRefresh()}
+      />
     </>
+  );
+
+  const runBatch = async (
+    action: BatchTaskAction,
+    selected: Key[],
+    idOf: (key: Key) => number,
+    runner: (action: BatchTaskAction, ids: number[]) => Promise<{ ok: number; failed: number }>,
+    reload: () => Promise<void>,
+    clear: () => void,
+  ) => {
+    const ids = selected.map(idOf).filter((n) => n > 0);
+    if (ids.length === 0) {
+      message.warning(t("pages.task_manager.batch_select_required"));
+      return;
+    }
+    setBatchLoading(true);
+    try {
+      const res = await runner(action, ids);
+      if (res.failed > 0) {
+        message.warning(t("pages.task_manager.batch_partial", { ok: res.ok, failed: res.failed }));
+      } else {
+        message.success(t("pages.task_manager.batch_done", { n: res.ok }));
+      }
+      clear();
+      await reload();
+    } catch {
+      message.error(t("pages.task_manager.batch_failed"));
+    } finally {
+      setBatchLoading(false);
+    }
+  };
+
+  const renderBatchToolbar = (
+    selected: Key[],
+    onAction: (action: BatchTaskAction) => void,
+  ) => (
+    <>
+      {selected.length > 0 ? (
+        <Tag style={{ marginInlineEnd: 0 }}>
+          {t("pages.task_manager.batch_selected", { n: selected.length })}
+        </Tag>
+      ) : null}
+      <ActionIconButton
+        title={t("pages.task_manager.batch_run_now")}
+        icon={<ThunderboltOutlined />}
+        type="default"
+        disabled={selected.length === 0}
+        loading={batchLoading}
+        onClick={() => onAction("run_now")}
+      />
+      <ActionIconButton
+        title={t("pages.task_manager.batch_retry")}
+        icon={<RedoOutlined />}
+        type="default"
+        disabled={selected.length === 0}
+        loading={batchLoading}
+        onClick={() => onAction("retry")}
+      />
+      <ActionIconButton
+        title={t("pages.task_manager.batch_stop")}
+        icon={<StopOutlined />}
+        type="default"
+        disabled={selected.length === 0}
+        loading={batchLoading}
+        onClick={() => onAction("cancel")}
+      />
+      <ActionIconConfirmButton
+        title={t("pages.task_manager.batch_delete")}
+        confirmTitle={t("pages.task_manager.confirm_batch_delete")}
+        icon={<DeleteOutlined />}
+        type="default"
+        danger
+        disabled={selected.length === 0}
+        loading={batchLoading}
+        onConfirm={() => onAction("delete")}
+      />
+    </>
+  );
+
+  const toolbarDivider = (
+    <div
+      aria-hidden
+      style={{
+        width: 1,
+        alignSelf: "stretch",
+        minHeight: 22,
+        marginInline: 4,
+        background: "rgba(127,127,127,0.35)",
+      }}
+    />
   );
 
   return (
@@ -471,26 +581,34 @@ export default function TaskManagerPage() {
             <Card
               title={t("pages.task_manager.transcode_card_title")}
               extra={
-                <Space>
-                  <Popconfirm title={t("pages.task_manager.confirm_cleanup_7d")} onConfirm={() => {
-                    setCleaningOld(true);
-                    void cleanupFailedTranscodeTasksBefore(7).then((n) => message.success(t("pages.task_manager.cleanup_done", { n }))).catch(() => message.error(t("pages.task_manager.cleanup_failed"))).finally(async () => {
-                      setCleaningOld(false);
-                      await loadTranscode();
-                    });
-                  }}>
-                    <Button loading={cleaningOld}>{t("pages.task_manager.btn_cleanup_7d")}</Button>
-                  </Popconfirm>
-                  <Popconfirm title={t("pages.task_manager.confirm_cleanup_all_failed")} onConfirm={() => {
-                    setCleaning(true);
-                    void cleanupFailedTranscodeTasks().then((n) => message.success(t("pages.task_manager.cleanup_done", { n }))).catch(() => message.error(t("pages.task_manager.cleanup_failed"))).finally(async () => {
-                      setCleaning(false);
-                      await loadTranscode();
-                    });
-                  }}>
-                    <Button danger loading={cleaning}>{t("pages.task_manager.btn_cleanup_all_failed")}</Button>
-                  </Popconfirm>
+                <Space size={4} wrap={false}>
                   {renderListHeaderControls("transcode", transcodeStatusFilter, setTranscodeStatusFilter, () => void loadTranscode())}
+                  {toolbarDivider}
+                  {renderBatchToolbar(selectedTranscodeKeys, (action) => {
+                    void runBatch(
+                      action,
+                      selectedTranscodeKeys,
+                      (k) => Number(k),
+                      batchTranscodeTasks,
+                      async () => { await loadTranscode(); },
+                      () => setSelectedTranscodeKeys([]),
+                    );
+                  })}
+                  <ActionIconConfirmButton
+                    title={t("pages.task_manager.btn_cleanup_all_failed")}
+                    confirmTitle={t("pages.task_manager.confirm_cleanup_all_failed")}
+                    icon={<ClearOutlined />}
+                    type="default"
+                    danger
+                    loading={cleaning}
+                    onConfirm={() => {
+                      setCleaning(true);
+                      void cleanupFailedTranscodeTasks().then((n) => message.success(t("pages.task_manager.cleanup_done", { n }))).catch(() => message.error(t("pages.task_manager.cleanup_failed"))).finally(async () => {
+                        setCleaning(false);
+                        await loadTranscode();
+                      });
+                    }}
+                  />
                 </Space>
               }
             >
@@ -498,6 +616,10 @@ export default function TaskManagerPage() {
                 rowKey="id"
                 loading={transcodeLoading}
                 dataSource={filteredTranscode}
+                rowSelection={{
+                  selectedRowKeys: selectedTranscodeKeys,
+                  onChange: setSelectedTranscodeKeys,
+                }}
                 pagination={{ pageSize: 15 }}
                 columns={[
                   { title: "ID", dataIndex: "id", width: 70 },
@@ -558,7 +680,7 @@ export default function TaskManagerPage() {
               loading={scrapeLoading}
               title={t("pages.task_manager.scrape_card_title")}
               extra={(
-                <Space>
+                <Space size={4} wrap={false}>
                   {renderListHeaderControls("scrape", scrapeStatusFilter, setScrapeStatusFilter, () => void loadScrape())}
                 </Space>
               )}
@@ -626,7 +748,7 @@ export default function TaskManagerPage() {
             <Card
               title={t("pages.task_manager.scan_card_title")}
               extra={(
-                <Space>
+                <Space size={4} wrap={false}>
                   {renderListHeaderControls("scan", scanStatusFilter, setScanStatusFilter, () => void loadScanTasks())}
                 </Space>
               )}
@@ -684,10 +806,26 @@ export default function TaskManagerPage() {
             <Card
               title={t("pages.task_manager.subtitle_card_title")}
               extra={(
-                <Space>
+                <Space size={4} wrap={false}>
                   {renderListHeaderControls("subtitle", subtitleStatusFilter, setSubtitleStatusFilter, () => void loadSubtitleTasks())}
-                  <Popconfirm
-                    title={t("pages.task_manager.confirm_subtitle_cleanup_failed")}
+                  {toolbarDivider}
+                  {renderBatchToolbar(selectedSubtitleKeys, (action) => {
+                    void runBatch(
+                      action,
+                      selectedSubtitleKeys,
+                      (k) => subtitleTasks.find((r) => r.id === Number(k))?.media_id ?? 0,
+                      batchSubtitleTasks,
+                      async () => { await loadSubtitleTasks(); },
+                      () => setSelectedSubtitleKeys([]),
+                    );
+                  })}
+                  <ActionIconConfirmButton
+                    title={t("pages.task_manager.btn_cleanup_failed_records")}
+                    confirmTitle={t("pages.task_manager.confirm_subtitle_cleanup_failed")}
+                    icon={<ClearOutlined />}
+                    type="default"
+                    danger
+                    loading={cleaningSubtitleFailed}
                     onConfirm={() => {
                       setCleaningSubtitleFailed(true);
                       void cleanupFailedSubtitleTasks()
@@ -698,11 +836,13 @@ export default function TaskManagerPage() {
                           await loadSubtitleTasks();
                         });
                     }}
-                  >
-                    <Button loading={cleaningSubtitleFailed}>{t("pages.task_manager.btn_cleanup_failed_records")}</Button>
-                  </Popconfirm>
-                  <Popconfirm
-                    title={t("pages.task_manager.confirm_subtitle_cleanup_old")}
+                  />
+                  <ActionIconConfirmButton
+                    title={t("pages.task_manager.btn_cleanup_30d_records")}
+                    confirmTitle={t("pages.task_manager.confirm_subtitle_cleanup_old")}
+                    icon={<ClockCircleOutlined />}
+                    type="default"
+                    loading={cleaningSubtitleOld}
                     onConfirm={() => {
                       setCleaningSubtitleOld(true);
                       void cleanupSubtitleTasksBefore(30)
@@ -713,9 +853,7 @@ export default function TaskManagerPage() {
                           await loadSubtitleTasks();
                         });
                     }}
-                  >
-                    <Button loading={cleaningSubtitleOld}>{t("pages.task_manager.btn_cleanup_30d_records")}</Button>
-                  </Popconfirm>
+                  />
                 </Space>
               )}
             >
@@ -726,6 +864,10 @@ export default function TaskManagerPage() {
                 rowKey="id"
                 loading={subtitleLoading}
                 dataSource={filteredSubtitle}
+                rowSelection={{
+                  selectedRowKeys: selectedSubtitleKeys,
+                  onChange: setSelectedSubtitleKeys,
+                }}
                 pagination={{ pageSize: 12 }}
                 scroll={{ x: 1200 }}
                 columns={[
@@ -744,66 +886,91 @@ export default function TaskManagerPage() {
                   {
                     title: t("pages.task_manager.col_actions"),
                     key: "subactions",
-                    width: 120,
+                    width: 130,
                     align: "center",
                     fixed: "right",
-                    render: (_: unknown, r: SubtitleTask) => (
-                      <Space size={4}>
-                        <ActionIconConfirmButton
-                          title={t("pages.task_manager.tooltip_reset")}
-                          confirmTitle={t("pages.task_manager.confirm_subtitle_reset")}
-                          icon={<RollbackOutlined />}
-                          loading={resettingSubtitleId === r.media_id}
-                          onConfirm={() => {
-                            setResettingSubtitleId(r.media_id);
-                            void resetSubtitleTask(r.media_id)
-                              .then(() => message.success(t("pages.task_manager.reset_success")))
-                              .catch(() => message.error(t("pages.task_manager.reset_failed")))
-                              .finally(async () => {
-                                setResettingSubtitleId(null);
-                                await loadSubtitleTasks();
-                              });
-                          }}
-                        />
-                        <ActionIconButton
-                          title={t("pages.task_manager.tooltip_reprocess")}
-                          icon={<SyncOutlined />}
-                          type="primary"
-                          loading={retryingSubtitleId === r.media_id}
-                          onClick={() => {
-                            setRetryingSubtitleId(r.media_id);
-                            void retrySubtitleTask(r.media_id)
-                              .then(() => message.success(t("pages.task_manager.retry_submitted")))
-                              .catch(() => message.error(t("pages.task_manager.retry_failed")))
-                              .finally(async () => {
-                                setRetryingSubtitleId(null);
-                                await loadSubtitleTasks();
-                              });
-                          }}
-                        />
-                        <ActionIconConfirmButton
-                          title={t("pages.task_manager.tooltip_delete")}
-                          confirmTitle={t("pages.task_manager.confirm_subtitle_delete")}
-                          icon={<DeleteOutlined />}
-                          danger
-                          disabled={r.status === "running"}
-                          loading={deletingSubtitleId === r.media_id}
-                          onConfirm={() => {
-                            setDeletingSubtitleId(r.media_id);
-                            void deleteSubtitleTask(r.media_id)
-                              .then(() => message.success(t("common.delete_success")))
-                              .catch((err: unknown) => {
-                                const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error;
-                                message.error(msg || t("common.delete_failed"));
-                              })
-                              .finally(async () => {
-                                setDeletingSubtitleId(null);
-                                await loadSubtitleTasks();
-                              });
-                          }}
-                        />
-                      </Space>
-                    ),
+                    render: (_: unknown, r: SubtitleTask) => {
+                      const s = toDisplayStatus("subtitle", r.status);
+                      return (
+                        <Space size={4}>
+                          {s === "running" ? (
+                            <ActionIconButton
+                              title={t("pages.task_manager.tooltip_cancel_subtitle")}
+                              icon={<StopOutlined />}
+                              loading={cancellingSubtitleId === r.media_id}
+                              onClick={() => {
+                                setCancellingSubtitleId(r.media_id);
+                                void cancelSubtitleTask(r.media_id)
+                                  .then(() => message.success(t("pages.task_manager.cancel_requested")))
+                                  .catch(() => message.error(t("pages.task_manager.task_cancel_failed")))
+                                  .finally(async () => {
+                                    setCancellingSubtitleId(null);
+                                    await loadSubtitleTasks();
+                                  });
+                              }}
+                            />
+                          ) : null}
+                          {s === "waiting" ? (
+                            <ActionIconButton
+                              title={t("pages.task_manager.tooltip_run_now_subtitle")}
+                              icon={<ThunderboltOutlined />}
+                              type="primary"
+                              loading={runNowSubtitleId === r.media_id}
+                              onClick={() => {
+                                setRunNowSubtitleId(r.media_id);
+                                void runNowSubtitleTask(r.media_id)
+                                  .then(() => message.success(t("pages.task_manager.run_now_submitted")))
+                                  .catch(() => message.error(t("pages.task_manager.run_now_failed")))
+                                  .finally(async () => {
+                                    setRunNowSubtitleId(null);
+                                    await loadSubtitleTasks();
+                                  });
+                              }}
+                            />
+                          ) : null}
+                          {s === "failed" || s === "cancelled" ? (
+                            <ActionIconButton
+                              title={t("pages.task_manager.tooltip_reprocess")}
+                              icon={<RedoOutlined />}
+                              type="primary"
+                              loading={retryingSubtitleId === r.media_id}
+                              onClick={() => {
+                                setRetryingSubtitleId(r.media_id);
+                                void retrySubtitleTask(r.media_id)
+                                  .then(() => message.success(t("pages.task_manager.retry_submitted")))
+                                  .catch(() => message.error(t("pages.task_manager.retry_failed")))
+                                  .finally(async () => {
+                                    setRetryingSubtitleId(null);
+                                    await loadSubtitleTasks();
+                                  });
+                              }}
+                            />
+                          ) : null}
+                          {s === "waiting" || s === "failed" || s === "cancelled" ? (
+                            <ActionIconConfirmButton
+                              title={t("pages.task_manager.tooltip_delete")}
+                              confirmTitle={t("pages.task_manager.confirm_subtitle_delete")}
+                              icon={<DeleteOutlined />}
+                              danger
+                              loading={deletingSubtitleId === r.media_id}
+                              onConfirm={() => {
+                                setDeletingSubtitleId(r.media_id);
+                                void deleteSubtitleTask(r.media_id)
+                                  .then(() => message.success(t("common.delete_success")))
+                                  .catch((err: unknown) => {
+                                    const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error;
+                                    message.error(msg || t("common.delete_failed"));
+                                  })
+                                  .finally(async () => {
+                                    setDeletingSubtitleId(null);
+                                    await loadSubtitleTasks();
+                                  });
+                              }}
+                            />
+                          ) : null}
+                        </Space>
+                      );
+                    },
                   },
                 ]}
               />
@@ -817,10 +984,26 @@ export default function TaskManagerPage() {
             <Card
               title={t("pages.task_manager.lyric_card_title")}
               extra={(
-                <Space>
+                <Space size={4} wrap={false}>
                   {renderListHeaderControls("lyric", lyricStatusFilter, setLyricStatusFilter, () => void loadLyricTasks())}
-                  <Popconfirm
-                    title={t("pages.task_manager.confirm_lyric_cleanup_failed")}
+                  {toolbarDivider}
+                  {renderBatchToolbar(selectedLyricKeys, (action) => {
+                    void runBatch(
+                      action,
+                      selectedLyricKeys,
+                      (k) => lyricTasks.find((r) => r.id === Number(k))?.media_id ?? 0,
+                      batchLyricTasks,
+                      async () => { await loadLyricTasks(); },
+                      () => setSelectedLyricKeys([]),
+                    );
+                  })}
+                  <ActionIconConfirmButton
+                    title={t("pages.task_manager.btn_cleanup_failed_records")}
+                    confirmTitle={t("pages.task_manager.confirm_lyric_cleanup_failed")}
+                    icon={<ClearOutlined />}
+                    type="default"
+                    danger
+                    loading={cleaningLyricFailed}
                     onConfirm={() => {
                       setCleaningLyricFailed(true);
                       void cleanupFailedLyricTasks()
@@ -831,11 +1014,13 @@ export default function TaskManagerPage() {
                           await loadLyricTasks();
                         });
                     }}
-                  >
-                    <Button loading={cleaningLyricFailed}>{t("pages.task_manager.btn_cleanup_failed_records")}</Button>
-                  </Popconfirm>
-                  <Popconfirm
-                    title={t("pages.task_manager.confirm_subtitle_cleanup_old")}
+                  />
+                  <ActionIconConfirmButton
+                    title={t("pages.task_manager.btn_cleanup_30d_records")}
+                    confirmTitle={t("pages.task_manager.confirm_subtitle_cleanup_old")}
+                    icon={<ClockCircleOutlined />}
+                    type="default"
+                    loading={cleaningLyricOld}
                     onConfirm={() => {
                       setCleaningLyricOld(true);
                       void cleanupLyricTasksBefore(30)
@@ -846,9 +1031,7 @@ export default function TaskManagerPage() {
                           await loadLyricTasks();
                         });
                     }}
-                  >
-                    <Button loading={cleaningLyricOld}>{t("pages.task_manager.btn_cleanup_30d_records")}</Button>
-                  </Popconfirm>
+                  />
                 </Space>
               )}
             >
@@ -859,6 +1042,10 @@ export default function TaskManagerPage() {
                 rowKey="id"
                 loading={lyricLoading}
                 dataSource={filteredLyric}
+                rowSelection={{
+                  selectedRowKeys: selectedLyricKeys,
+                  onChange: setSelectedLyricKeys,
+                }}
                 pagination={{ pageSize: 12 }}
                 scroll={{ x: 1200 }}
                 columns={[
@@ -913,14 +1100,29 @@ export default function TaskManagerPage() {
             <Card
               title={t("pages.task_manager.preview_card_title")}
               extra={(
-                <Space>
+                <Space size={4} wrap={false}>
                   {renderListHeaderControls("preview", previewStatusFilter, setPreviewStatusFilter, () => void loadPreview())}
+                  {toolbarDivider}
+                  {renderBatchToolbar(selectedPreviewKeys, (action) => {
+                    void runBatch(
+                      action,
+                      selectedPreviewKeys,
+                      (k) => Number(k),
+                      batchPreviewTasks,
+                      async () => { await loadPreview(); },
+                      () => setSelectedPreviewKeys([]),
+                    );
+                  })}
                 </Space>
               )}
             >
               <Table
                 rowKey="media_id"
                 dataSource={filteredPreview}
+                rowSelection={{
+                  selectedRowKeys: selectedPreviewKeys,
+                  onChange: setSelectedPreviewKeys,
+                }}
                 pagination={{ pageSize: 10 }}
                 columns={[
                   { title: t("pages.task_manager.col_media_id"), dataIndex: "media_id", width: 90 },
@@ -960,8 +1162,19 @@ export default function TaskManagerPage() {
             <Card
               title={t("pages.task_manager.atrack_card_title")}
               extra={(
-                <Space>
+                <Space size={4} wrap={false}>
                   {renderListHeaderControls("atrack", atrackStatusFilter, setAtrackStatusFilter, () => void loadAtrackTasks())}
+                  {toolbarDivider}
+                  {renderBatchToolbar(selectedAtrackKeys, (action) => {
+                    void runBatch(
+                      action,
+                      selectedAtrackKeys,
+                      (k) => Number(k),
+                      batchAtrackTasks,
+                      async () => { await loadAtrackTasks(); },
+                      () => setSelectedAtrackKeys([]),
+                    );
+                  })}
                 </Space>
               )}
             >
@@ -969,6 +1182,10 @@ export default function TaskManagerPage() {
                 rowKey="media_id"
                 loading={atrackLoading}
                 dataSource={filteredAtrack}
+                rowSelection={{
+                  selectedRowKeys: selectedAtrackKeys,
+                  onChange: setSelectedAtrackKeys,
+                }}
                 pagination={{ pageSize: 10 }}
                 columns={[
                   { title: t("pages.task_manager.col_media_id"), dataIndex: "media_id", width: 90 },
@@ -1014,8 +1231,19 @@ export default function TaskManagerPage() {
             <Card
               title={t("pages.task_manager.keyframe_card_title")}
               extra={(
-                <Space>
+                <Space size={4} wrap={false}>
                   {renderListHeaderControls("keyframe", keyframeStatusFilter, setKeyframeStatusFilter, () => void loadKeyframeTasks())}
+                  {toolbarDivider}
+                  {renderBatchToolbar(selectedKeyframeKeys, (action) => {
+                    void runBatch(
+                      action,
+                      selectedKeyframeKeys,
+                      (k) => Number(k),
+                      batchKeyframeTasks,
+                      async () => { await loadKeyframeTasks(); },
+                      () => setSelectedKeyframeKeys([]),
+                    );
+                  })}
                 </Space>
               )}
             >
@@ -1023,6 +1251,10 @@ export default function TaskManagerPage() {
                 rowKey="media_id"
                 loading={keyframeLoading}
                 dataSource={filteredKeyframe}
+                rowSelection={{
+                  selectedRowKeys: selectedKeyframeKeys,
+                  onChange: setSelectedKeyframeKeys,
+                }}
                 pagination={{ pageSize: 10 }}
                 columns={[
                   { title: t("pages.task_manager.col_media_id"), dataIndex: "media_id", width: 90 },
@@ -1069,8 +1301,19 @@ export default function TaskManagerPage() {
             <Card
               title={t("pages.task_manager.encrypt_card_title")}
               extra={(
-                <Space>
+                <Space size={4} wrap={false}>
                   {renderListHeaderControls("encrypt", encryptStatusFilter, setEncryptStatusFilter, () => void loadEncryptTasks())}
+                  {toolbarDivider}
+                  {renderBatchToolbar(selectedEncryptKeys, (action) => {
+                    void runBatch(
+                      action,
+                      selectedEncryptKeys,
+                      (k) => Number(k),
+                      batchEncryptTasks,
+                      async () => { await loadEncryptTasks(); },
+                      () => setSelectedEncryptKeys([]),
+                    );
+                  })}
                 </Space>
               )}
             >
@@ -1081,6 +1324,10 @@ export default function TaskManagerPage() {
                 rowKey="id"
                 loading={encryptLoading}
                 dataSource={filteredEncrypt}
+                rowSelection={{
+                  selectedRowKeys: selectedEncryptKeys,
+                  onChange: setSelectedEncryptKeys,
+                }}
                 pagination={{ pageSize: 10 }}
                 columns={[
                   { title: t("pages.task_manager.col_task_id"), dataIndex: "id", width: 80 },

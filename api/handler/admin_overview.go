@@ -110,12 +110,14 @@ type ScanLeaseOverview struct {
 }
 
 type ResourceBudgetOverview struct {
-	GlobalLimit  int `json:"global_limit"`
-	GlobalUsed   int `json:"global_used"`
-	PosterLimit  int `json:"poster_limit"`
-	PosterUsed   int `json:"poster_used"`
-	PreviewLimit int `json:"preview_limit"`
-	PreviewUsed  int `json:"preview_used"`
+	GlobalLimit   int `json:"global_limit"`
+	GlobalUsed    int `json:"global_used"`
+	PosterLimit   int `json:"poster_limit"`
+	PosterUsed    int `json:"poster_used"`
+	PreviewLimit  int `json:"preview_limit"`
+	PreviewUsed   int `json:"preview_used"`
+	SubtitleLimit int `json:"subtitle_limit"`
+	SubtitleUsed  int `json:"subtitle_used"`
 }
 
 type SQLiteMetricsOverview struct {
@@ -335,7 +337,7 @@ func (b *AdminOverviewBuilder) budget() ResourceBudgetOverview {
 	if b.Dispatcher != nil {
 		s = b.Dispatcher.Snapshot()
 	}
-	return ResourceBudgetOverview{s.GlobalLimit, s.GlobalUsed, s.PosterLimit, s.PosterUsed, s.PreviewLimit, s.PreviewUsed}
+	return ResourceBudgetOverview{s.GlobalLimit, s.GlobalUsed, s.PosterLimit, s.PosterUsed, s.PreviewLimit, s.PreviewUsed, s.SubtitleLimit, s.SubtitleUsed}
 }
 func (b *AdminOverviewBuilder) sqliteMetrics() SQLiteMetricsOverview {
 	o := SQLiteMetricsOverview{Scope: "process_since_start", Persistent: false}

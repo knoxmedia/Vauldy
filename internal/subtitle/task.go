@@ -103,8 +103,17 @@ func (s *Service) DeleteSubtitleTask(mediaID int64) error {
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(status) == "running" {
-		return fmt.Errorf("task is running")
+	if strings.EqualFold(strings.TrimSpace(status), "running") {
+		// Allow delete when queue already cancelled/failed but domain row stuck in running.
+		var qStatus string
+		_ = s.DB.QueryRow(`
+SELECT COALESCE(status,'') FROM post_ingest_task
+WHERE media_id=? AND task_type='subtitle'
+  AND generation=(SELECT COALESCE(ingest_generation,0) FROM media WHERE id=?)
+ORDER BY id DESC LIMIT 1`, mediaID, mediaID).Scan(&qStatus)
+		if qStatus == "running" || qStatus == "" {
+			return fmt.Errorf("task is running")
+		}
 	}
 	_, err = s.DB.Exec(`DELETE FROM subtitle_task WHERE media_id = ?`, mediaID)
 	if err != nil {

@@ -22,9 +22,21 @@ const (
 	tessdataBaseURL  = "https://github.com/tesseract-ocr/tessdata/raw/main"
 )
 
+// InstallASROptions selects which ASR engine stack to install and default config.
+type InstallASROptions struct {
+	Engine   string // faster-whisper | whisper (openai-whisper)
+	Model    string // tiny | base | small | medium
+	Language string
+	Device   string // empty | cpu | cuda
+}
+
 // ASRDeploy holds recommended config paths after ASR tool installation.
 type ASRDeploy struct {
 	Provider    string
+	Engine      string
+	Model       string
+	Language    string
+	Device      string
 	WhisperPath string
 	Shell       string
 	ExtraArgs   []string
@@ -46,18 +58,23 @@ func MediaRoot(configPath string) string {
 	return filepath.Clean(filepath.Dir(strings.TrimSpace(configPath)))
 }
 
-// InstallASR creates a shared Python venv, installs openai-whisper, and returns deploy settings.
-func InstallASR(ctx context.Context, mediaRoot string) (ASRDeploy, error) {
+// InstallASR creates a shared Python venv, installs the selected engine package, and returns deploy settings.
+func InstallASR(ctx context.Context, mediaRoot string, opts InstallASROptions) (ASRDeploy, error) {
 	mediaRoot = filepath.Clean(mediaRoot)
 	if err := ensureRepoScript(mediaRoot, asrScriptRel); err != nil {
+		return ASRDeploy{}, err
+	}
+	engine, model, language, device, err := normalizeInstallASROptions(opts)
+	if err != nil {
 		return ASRDeploy{}, err
 	}
 	py, err := EnsureVenv(ctx, mediaRoot)
 	if err != nil {
 		return ASRDeploy{}, err
 	}
-	if err := pipInstall(ctx, py, mediaRoot, []string{"openai-whisper>=20231117"}); err != nil {
-		return ASRDeploy{}, fmt.Errorf("pip install whisper: %w", err)
+	pkgs, pipLabel := asrPipPackages(engine)
+	if err := pipInstall(ctx, py, mediaRoot, pkgs); err != nil {
+		return ASRDeploy{}, fmt.Errorf("pip install %s: %w", pipLabel, err)
 	}
 	whisperBin := venvWhisperBin(mediaRoot)
 	asrScript := relIfUnder(mediaRoot, filepath.Join(mediaRoot, asrScriptRel))
@@ -69,20 +86,66 @@ func InstallASR(ctx context.Context, mediaRoot string) (ASRDeploy, error) {
 	}
 	return ASRDeploy{
 		Provider:    "shell",
+		Engine:      engine,
+		Model:       model,
+		Language:    language,
+		Device:      device,
 		WhisperPath: whisperPath,
 		Shell:       shell,
 		ExtraArgs:   []string{},
 	}, nil
 }
 
-// DefaultASRShell returns the recommended shell template with all Knox placeholders.
+func normalizeInstallASROptions(opts InstallASROptions) (engine, model, language, device string, err error) {
+	engine = strings.ToLower(strings.TrimSpace(opts.Engine))
+	if engine == "" || engine == "openai-whisper" {
+		engine = "whisper"
+	}
+	switch engine {
+	case "faster-whisper", "whisper":
+	default:
+		return "", "", "", "", fmt.Errorf("unsupported ASR engine %q (use faster-whisper or whisper)", opts.Engine)
+	}
+	model = strings.ToLower(strings.TrimSpace(opts.Model))
+	if model == "" {
+		model = "base"
+	}
+	switch model {
+	case "tiny", "base", "small", "medium", "large", "large-v2", "large-v3":
+	default:
+		return "", "", "", "", fmt.Errorf("unsupported ASR model %q", opts.Model)
+	}
+	language = strings.TrimSpace(opts.Language)
+	if language == "" {
+		language = "zh"
+	}
+	device = strings.ToLower(strings.TrimSpace(opts.Device))
+	switch device {
+	case "", "cpu", "cuda":
+	default:
+		return "", "", "", "", fmt.Errorf("unsupported ASR device %q", opts.Device)
+	}
+	return engine, model, language, device, nil
+}
+
+func asrPipPackages(engine string) (pkgs []string, label string) {
+	switch engine {
+	case "faster-whisper":
+		return []string{"faster-whisper"}, "faster-whisper"
+	default:
+		return []string{"openai-whisper>=20231117"}, "openai-whisper"
+	}
+}
+
+// DefaultASRShell returns the recommended shell template with Knox placeholders.
+// Engine/model/language are configured via first-class ASR fields (injected at runtime).
 func DefaultASRShell(pythonPath, scriptPath string) string {
 	return defaultASRShell(pythonPath, scriptPath)
 }
 
 func defaultASRShell(pythonPath, scriptPath string) string {
 	return fmt.Sprintf(
-		`"%s" "%s" --engine whisper --input "{input}" --output-vtt "{output_vtt}" --whisper-model base --whisper-language zh`,
+		`"%s" "%s" --input "{input}" --output-vtt "{output_vtt}"`,
 		pythonPath, scriptPath,
 	)
 }

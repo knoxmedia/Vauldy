@@ -52,7 +52,8 @@ type RecognitionTestResult struct {
 }
 
 // CheckASRConfig verifies ASR settings without running full transcription.
-func CheckASRConfig(ctx context.Context, asr ASRConfig) RecognitionTestResult {
+// mediaRoot resolves relative python/shell paths (may be empty).
+func CheckASRConfig(ctx context.Context, mediaRoot string, asr ASRConfig) RecognitionTestResult {
 	provider := strings.ToLower(strings.TrimSpace(asr.Provider))
 	switch provider {
 	case "", "none":
@@ -62,6 +63,7 @@ func CheckASRConfig(ctx context.Context, asr ASRConfig) RecognitionTestResult {
 		if wp == "" {
 			wp = "whisper"
 		}
+		wp = resolveToolPath(mediaRoot, wp)
 		if err := runProbe(ctx, wp, "--help"); err != nil {
 			if err2 := runProbe(ctx, wp, "-h"); err2 != nil {
 				return RecognitionTestResult{OK: false, Message: fmt.Sprintf("Whisper 不可用: %v", err)}
@@ -78,10 +80,90 @@ func CheckASRConfig(ctx context.Context, asr ASRConfig) RecognitionTestResult {
 				return RecognitionTestResult{OK: false, Message: fmt.Sprintf("Shell 命令缺少占位符 %s", ph)}
 			}
 		}
-		return RecognitionTestResult{OK: true, Message: "Shell 命令格式正确"}
+		engine := strings.ToLower(strings.TrimSpace(asr.Engine))
+		if engine == "" {
+			engine = shellFlagValue(sh, "--engine")
+		}
+		if engine == "" {
+			engine = "whisper"
+		}
+		mod, ok := asrImportModule(engine)
+		if !ok {
+			return RecognitionTestResult{OK: true, Message: fmt.Sprintf("Shell 命令格式正确（引擎 %s 未做依赖探测）", engine)}
+		}
+		py := resolveASRPython(mediaRoot, sh)
+		if py == "" {
+			return RecognitionTestResult{OK: true, Message: "Shell 命令格式正确（未找到 Python，跳过依赖探测）"}
+		}
+		if err := runProbe(ctx, py, "-c", "import "+mod); err != nil {
+			return RecognitionTestResult{OK: false, Message: fmt.Sprintf("引擎 %s 依赖不可用 (%s): %v", engine, mod, err)}
+		}
+		return RecognitionTestResult{OK: true, Message: fmt.Sprintf("Shell 可用；引擎 %s（%s）已安装", engine, mod)}
 	default:
 		return RecognitionTestResult{OK: false, Message: fmt.Sprintf("未知 ASR provider: %s", provider)}
 	}
+}
+
+func asrImportModule(engine string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(engine)) {
+	case "whisper", "openai-whisper":
+		return "whisper", true
+	case "faster-whisper":
+		return "faster_whisper", true
+	default:
+		return "", false
+	}
+}
+
+func resolveASRPython(mediaRoot, shell string) string {
+	if candidate := firstQuotedPath(shell); looksLikePython(candidate) {
+		return resolveToolPath(mediaRoot, candidate)
+	}
+	return defaultVenvPython(mediaRoot)
+}
+
+func looksLikePython(path string) bool {
+	base := strings.ToLower(filepath.Base(strings.TrimSpace(path)))
+	return strings.Contains(base, "python")
+}
+
+func firstQuotedPath(shell string) string {
+	s := strings.TrimSpace(shell)
+	if s == "" {
+		return ""
+	}
+	if s[0] == '"' {
+		if end := strings.Index(s[1:], `"`); end >= 0 {
+			return s[1 : 1+end]
+		}
+	}
+	if s[0] == '\'' {
+		if end := strings.Index(s[1:], `'`); end >= 0 {
+			return s[1 : 1+end]
+		}
+	}
+	fields := strings.Fields(s)
+	if len(fields) == 0 {
+		return ""
+	}
+	return strings.Trim(fields[0], `"'`)
+}
+
+func defaultVenvPython(mediaRoot string) string {
+	mediaRoot = strings.TrimSpace(mediaRoot)
+	if mediaRoot == "" {
+		return ""
+	}
+	candidates := []string{
+		filepath.Join(mediaRoot, "tools", "recognition", ".venv", "Scripts", "python.exe"),
+		filepath.Join(mediaRoot, "tools", "recognition", ".venv", "bin", "python"),
+	}
+	for _, p := range candidates {
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			return p
+		}
+	}
+	return ""
 }
 
 // CheckOCRConfig verifies OCR tool paths and helper script.

@@ -63,8 +63,11 @@ func TestDefaultDispatcherOptions(t *testing.T) {
 	if wantGlobal > 4 {
 		wantGlobal = 4
 	}
-	if o.Global != wantGlobal || o.Poster != min(2, wantGlobal) || o.Preview != 1 {
-		t.Fatalf("budgets=%d/%d/%d", o.Global, o.Poster, o.Preview)
+	if o.Global != wantGlobal || o.Poster != min(2, wantGlobal) || o.Preview != 1 || o.Subtitle != 1 {
+		t.Fatalf("budgets=%d/%d/%d/%d", o.Global, o.Poster, o.Preview, o.Subtitle)
+	}
+	if o.SubtitleTimeoutRealtimeFactor != 2.0 {
+		t.Fatalf("SubtitleTimeoutRealtimeFactor=%v", o.SubtitleTimeoutRealtimeFactor)
 	}
 	if o.RecoverInterval != 30*time.Second {
 		t.Fatalf("RecoverInterval=%v", o.RecoverInterval)
@@ -74,6 +77,31 @@ func TestDefaultDispatcherOptions(t *testing.T) {
 		if o.Timeouts[typ] != want {
 			t.Fatalf("timeout %s=%v", typ, o.Timeouts[typ])
 		}
+	}
+}
+
+func TestSubtitleTaskTimeoutScalesByDuration(t *testing.T) {
+	base := 60 * time.Minute
+	cases := []struct {
+		name         string
+		durationSec  int64
+		factor       float64
+		want         time.Duration
+	}{
+		{"zero duration uses base", 0, 2.0, base},
+		{"negative duration uses base", -1, 2.0, base},
+		{"45m scales to 90m", 45 * 60, 2.0, 90 * time.Minute},
+		{"2h scales to 4h", 2 * 3600, 2.0, 4 * time.Hour},
+		{"5h caps at 8h", 5 * 3600, 2.0, 8 * time.Hour},
+		{"short stays at base floor", 10 * 60, 2.0, base},
+		{"invalid factor defaults to 2.0", 3600, 0, 2 * time.Hour},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := subtitleTaskTimeout(base, tc.durationSec, tc.factor); got != tc.want {
+				t.Fatalf("timeout=%v want %v", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -492,6 +520,8 @@ func TestDispatcher_RejectsInvalidBudget(t *testing.T) {
 		{"global zero", "Global", func(o *DispatcherOptions) { o.Global = 0 }}, {"global high", "Global", func(o *DispatcherOptions) { o.Global = 33 }},
 		{"poster zero", "Poster", func(o *DispatcherOptions) { o.Poster = 0 }}, {"poster high", "Poster", func(o *DispatcherOptions) { o.Poster = 3 }}, {"poster global", "Poster", func(o *DispatcherOptions) { o.Global = 1; o.Poster = 2 }},
 		{"preview zero", "Preview", func(o *DispatcherOptions) { o.Preview = 0 }}, {"preview high", "Preview", func(o *DispatcherOptions) { o.Preview = 3 }}, {"preview global", "Preview", func(o *DispatcherOptions) { o.Global = 1; o.Poster = 1; o.Preview = 2 }},
+		{"subtitle zero", "Subtitle", func(o *DispatcherOptions) { o.Subtitle = 0 }}, {"subtitle global", "Subtitle", func(o *DispatcherOptions) { o.Global = 1; o.Poster = 1; o.Preview = 1; o.Subtitle = 2 }},
+		{"subtitle factor", "SubtitleTimeoutRealtimeFactor", func(o *DispatcherOptions) { o.SubtitleTimeoutRealtimeFactor = 0 }},
 		{"owner empty", "OwnerID", func(o *DispatcherOptions) { o.OwnerID = "" }}, {"owner slash", "OwnerID", func(o *DispatcherOptions) { o.OwnerID = "a/b" }},
 		{"poll", "PollInterval", func(o *DispatcherOptions) { o.PollInterval = 0 }}, {"lease", "LeaseDuration", func(o *DispatcherOptions) { o.LeaseDuration = time.Second }},
 		{"heartbeat", "HeartbeatInterval", func(o *DispatcherOptions) { o.HeartbeatInterval = o.LeaseDuration }}, {"recover", "RecoverInterval", func(o *DispatcherOptions) { o.RecoverInterval = 0 }},
@@ -730,6 +760,81 @@ func dispatcherOptions(owner string) DispatcherOptions {
 	return o
 }
 
+func TestDispatcher_SubtitleSlotCapsConcurrency(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	q := NewQueue(db, "sub-slot", nil)
+	o := dispatcherOptions("sub-slot")
+	o.Global = 4
+	o.Subtitle = 1
+	d, err := NewDispatcher(q, executorFunc(func(context.Context, Task) error { return nil }), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !d.tryAcquire(TaskSubtitle) {
+		t.Fatal("first subtitle acquire failed")
+	}
+	if d.tryAcquire(TaskSubtitle) {
+		t.Fatal("second subtitle acquire should fail when Subtitle=1")
+	}
+	if snap := d.Snapshot(); snap.SubtitleUsed != 1 || snap.SubtitleLimit != 1 {
+		t.Fatalf("snapshot=%+v", snap)
+	}
+	d.release(TaskSubtitle)
+	if !d.tryAcquire(TaskSubtitle) {
+		t.Fatal("acquire after release failed")
+	}
+	d.release(TaskSubtitle)
+}
+
+func TestDispatcher_SubtitleSlotDoesNotFatalOnBacklog(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	q := NewQueue(db, "sub-backlog", nil)
+	for i := 0; i < 3; i++ {
+		insertDispatcherTask(t, q, TaskSubtitle, nil, fmt.Sprintf("sub-%d", i))
+	}
+	started := make(chan struct{}, 3)
+	block := make(chan struct{})
+	exec := executorFunc(func(ctx context.Context, task Task) error {
+		started <- struct{}{}
+		select {
+		case <-block:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
+	o := dispatcherOptions("sub-backlog")
+	o.Global = 4
+	o.Subtitle = 1
+	d, err := NewDispatcher(q, exec, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- d.Start(ctx) }()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first subtitle did not start")
+	}
+	select {
+	case <-started:
+		t.Fatal("second subtitle started while Subtitle=1")
+	case err := <-done:
+		t.Fatalf("dispatcher exited early: %v", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+	if snap := d.Snapshot(); snap.SubtitleUsed != 1 || snap.GlobalUsed != 1 {
+		t.Fatalf("snapshot=%+v", snap)
+	}
+	close(block)
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("dispatcher exited with error: %v", err)
+	}
+}
+
 func TestDispatcher_RecoversExpiredLeasesPeriodically(t *testing.T) {
 	db, _ := openQueueTestDB(t)
 	q := NewQueue(db, "owner", nil)
@@ -867,6 +972,7 @@ func TestDispatcher_HighPriorityBurstWhenLowPrioritySaturated(t *testing.T) {
 	o.Global = 2
 	o.Poster = 2
 	o.Preview = 1
+	o.Subtitle = 2 // saturate global with concurrent subtitles for burst coverage
 	d, err := NewDispatcher(q, exec, o)
 	if err != nil {
 		t.Fatal(err)

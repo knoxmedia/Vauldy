@@ -22,7 +22,7 @@ function isTypeStatusCountMap(value: unknown): value is Record<string, Record<st
   return isRecord(value) && Object.values(value).every((item) => isStatusCountMap(item));
 }
 
-/** Prefer synthesized alignment counts for dual-table types; keep raw queue for other types. */
+/** Prefer synthesized alignment counts for dual-table types; keep raw queue for other types. Omit types whose statuses are all zero. */
 export function displayQueueByType(overview: AdminOverview): Record<string, Record<string, number>> {
   const merged: Record<string, Record<string, number>> = { ...overview.post_ingest_queue.by_type };
   for (const type of ALIGNED_QUEUE_TYPES) {
@@ -31,7 +31,9 @@ export function displayQueueByType(overview: AdminOverview): Record<string, Reco
       merged[type] = aligned;
     }
   }
-  return merged;
+  return Object.fromEntries(
+    Object.entries(merged).filter(([, statuses]) => Object.values(statuses).some((count) => count > 0)),
+  );
 }
 
 export function isAdminOverview(value: unknown): value is AdminOverview {
@@ -228,7 +230,7 @@ export default function AdminConsolePage() {
               </Card>
             </Col>
             <Col xs={24} lg={12}>
-              <Card size="small" title={t("pages.admin_console.queue_by_type")}>
+              <Card size="small" title={t("pages.admin_console.queue_by_type")} styles={{ body: { maxHeight: 72, overflowY: "auto" } }}>
                 {overview && Object.keys(displayQueueByType(overview)).length ? (
                   <Space wrap>{Object.entries(displayQueueByType(overview)).sort(([a], [b]) => a.localeCompare(b)).flatMap(([type, statuses]) => Object.entries(statuses).sort(([a], [b]) => a.localeCompare(b)).map(([status, count]) => <Tag key={`${type}-${status}`}>{type} / {status}: {count}</Tag>))}</Space>
                 ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />}
@@ -270,28 +272,6 @@ export default function AdminConsolePage() {
             </Row>
           </Card>
         </Space>
-      </Card>
-      <Card title={t("pages.admin_console.publication_policy")} loading={overviewLoading}>
-        <Table
-          rowKey="run_id"
-          size="small"
-          pagination={false}
-          scroll={{ x: 1400 }}
-          dataSource={(overview?.publication_policy ?? []).slice(0, 100)}
-          locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
-          columns={[
-            { title: t("pages.admin_console.col_media_id"), dataIndex: "media_id" },
-            { title: t("pages.admin_console.col_policy_version"), dataIndex: "policy_version" },
-            { title: t("pages.admin_console.col_generation"), dataIndex: "generation" },
-            { title: t("pages.admin_console.col_status"), dataIndex: "status" },
-            { title: t("pages.admin_console.col_terminal_reason"), dataIndex: "terminal_reason", render: (value: string) => value || "-" },
-            { title: t("pages.admin_console.col_required_counts"), render: (_, row) => `${row.required_waiting} / ${row.required_failed}` },
-            { title: t("pages.admin_console.col_optional_counts"), render: (_, row) => `${row.optional_waiting} / ${row.optional_failed}` },
-            { title: t("pages.admin_console.col_adapter_unavailable"), dataIndex: "adapter_unavailable", render: (value: string[]) => (value?.length ? value.join(", ") : "-") },
-            { title: t("pages.admin_console.col_metadata_errors"), dataIndex: "metadata_errors", render: (value: string[]) => (value?.length ? value.join("; ") : "-"), ellipsis: true },
-            { title: t("pages.admin_console.col_recovery_error"), dataIndex: "recovery_error", render: (value: string) => value || "-", ellipsis: true },
-          ]}
-        />
       </Card>
       <Card title={t("pages.admin_console.current_activities")} loading={overviewLoading}>
         <Table rowKey="id" pagination={{ pageSize: 10 }} dataSource={overview?.activities ?? []} columns={[

@@ -7,8 +7,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-
-	"knox-media/internal/storage"
 )
 
 // TranscribeToVTT runs configured ASR on an audio/video file and writes WebVTT to outputVTT.
@@ -66,19 +64,11 @@ func (s *Service) TranscribeToVTT(ctx context.Context, mediaID int64, inputPath,
 		if sh == "" {
 			return fmt.Errorf("asr.shell empty")
 		}
-		shellInput := asrInput
-		shellCleanup := func() {}
-		if storage.InputNeedsPipe(s.DB, mediaID, inputPath) {
-			var matErr error
-			shellInput, shellCleanup, matErr = storage.MaterializePlaintextTemp(s.DB, s.Vault, mediaID, inputPath)
-			if matErr != nil {
-				return matErr
-			}
-		}
-		defer shellCleanup()
-		sh = strings.ReplaceAll(sh, "{input}", shellInput)
+		// asrInput is already compact audio (or a plain audio sidecar). Never rematerialize the full video.
+		sh = strings.ReplaceAll(sh, "{input}", asrInput)
 		sh = strings.ReplaceAll(sh, "{output_dir}", outDir)
 		sh = strings.ReplaceAll(sh, "{output_vtt}", outputVTT)
+		sh = appendASRShellFlags(sh, s.ASR)
 		sh = resolveShellMediaPaths(sh, s.MediaRoot)
 		if _, err := s.runShellCommand(ctx, sh); err != nil {
 			return err

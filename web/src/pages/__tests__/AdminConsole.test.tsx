@@ -367,7 +367,7 @@ describe("AdminConsolePage", () => {
     expect(screen.getByText("pages.admin_console.polling_mode")).toBeInTheDocument();
   });
 
-  it("renders publication policy diagnostics with policy generation status and error counts", async () => {
+  it("does not render publication policy diagnostics on the console", async () => {
     const data = overview(70, "publication-policy-overview");
     data.publication_policy = [{
       media_id: 10,
@@ -387,23 +387,9 @@ describe("AdminConsolePage", () => {
     fetchAdminOverviewMock.mockResolvedValueOnce(data);
     render(<AdminConsolePage />);
 
-    expect(await screen.findByText("pages.admin_console.publication_policy")).toBeInTheDocument();
-    const table = screen.getByTestId("publication-policy-table");
-    expect(table).toBeInTheDocument();
-    expect(table).toHaveTextContent("10");
-    expect(table).toHaveTextContent("failed");
-    expect(table).toHaveTextContent("required_failed");
-    expect(table).toHaveTextContent("0 / 1");
-    expect(table).toHaveTextContent("1 / 0");
-    expect(table).toHaveTextContent("scrape, prepare");
-    expect(table).toHaveTextContent("ffprobe: duration unavailable");
-    expect(table).toHaveTextContent("asset recovery failed");
-    expect(table.textContent).toMatch(/2.*2/);
-    for (const key of ["col_policy_version", "col_generation", "col_terminal_reason", "col_required_counts", "col_optional_counts", "col_adapter_unavailable", "col_metadata_errors", "col_recovery_error"] as const) {
-      expect(en.pages.admin_console[key]).not.toMatch(/[?\uFFFD]/);
-      expect(zhCN.pages.admin_console[key]).not.toMatch(/[?\uFFFD]/);
-      expect(zhTW.pages.admin_console[key]).not.toMatch(/[?\uFFFD]/);
-    }
+    expect(await screen.findByText("publication-policy-overview")).toBeInTheDocument();
+    expect(screen.queryByText("pages.admin_console.publication_policy")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("publication-policy-table")).not.toBeInTheDocument();
   });
 
   it("rejects SSE overviews with malformed publication_policy payloads while loading continues", async () => {

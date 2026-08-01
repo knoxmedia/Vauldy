@@ -872,6 +872,132 @@ func (q *Queue) AdminCancelEncrypt(ctx context.Context, id int64) error {
 	return q.adminMutateEncrypt(ctx, id, `UPDATE post_ingest_task SET status='cancelled',lease_owner=NULL,lease_until=NULL,last_error='cancelled by admin',finished_at=COALESCE(finished_at,CURRENT_TIMESTAMP),updated_at=CURRENT_TIMESTAMP WHERE id=? AND task_type='encrypt' AND status IN ('waiting','running')`, "cancel")
 }
 
+// AdminCancelTask marks any post_ingest task cancelled (waiting or running).
+func (q *Queue) AdminCancelTask(ctx context.Context, id int64) error {
+	return q.adminMutateAny(ctx, id, `UPDATE post_ingest_task SET status='cancelled',lease_owner=NULL,lease_until=NULL,last_error='cancelled by admin',finished_at=COALESCE(finished_at,CURRENT_TIMESTAMP),updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('waiting','running')`, "cancel")
+}
+
+// FindCurrentTask returns the current-generation queue row for media+type, if any.
+func (q *Queue) FindCurrentTask(ctx context.Context, mediaID int64, typ TaskType) (id int64, status Status, err error) {
+	if err := q.validate(false); err != nil {
+		return 0, "", err
+	}
+	if mediaID <= 0 {
+		return 0, "", fmt.Errorf("postingest queue: media id must be positive")
+	}
+	err = q.db.QueryRowContext(ctx, `
+SELECT q.id, q.status FROM post_ingest_task q
+WHERE q.media_id=? AND q.task_type=?
+  AND q.generation=(SELECT COALESCE(ingest_generation,0) FROM media WHERE id=?)
+ORDER BY q.id DESC LIMIT 1`, mediaID, typ, mediaID).Scan(&id, &status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, "", fmt.Errorf("postingest queue: %s task for media %d not found", typ, mediaID)
+	}
+	return id, status, err
+}
+
+// AdminBumpWaiting raises priority and makes a waiting task eligible immediately.
+// Priority becomes MAX(priority)+1 so run-now jumps ahead of FIFO peers of the same type.
+func (q *Queue) AdminBumpWaiting(ctx context.Context, id int64) error {
+	if err := q.validate(false); err != nil {
+		return err
+	}
+	if id <= 0 {
+		return fmt.Errorf("postingest queue: task id must be positive: %d", id)
+	}
+	var updated bool
+	err := store.WithBusyRetry(ctx, q.metrics, func() error {
+		updated = false
+		var next int64
+		if err := q.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(priority),0)+1 FROM post_ingest_task`).Scan(&next); err != nil {
+			return err
+		}
+		res, err := q.db.ExecContext(ctx, `
+UPDATE post_ingest_task
+SET priority=?, available_at=datetime('now','-100 years'), updated_at=CURRENT_TIMESTAMP
+WHERE id=? AND status='waiting'`, next, id)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		updated = n == 1
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if !updated {
+		var status Status
+		if qerr := q.db.QueryRowContext(ctx, `SELECT status FROM post_ingest_task WHERE id=?`, id).Scan(&status); qerr != nil {
+			if errors.Is(qerr, sql.ErrNoRows) {
+				return fmt.Errorf("postingest queue: task %d not found", id)
+			}
+			return qerr
+		}
+		return fmt.Errorf("postingest queue: task %d in status %s cannot be bumped", id, status)
+	}
+	return nil
+}
+
+func (q *Queue) adminMutateAny(ctx context.Context, id int64, updateSQL, op string) error {
+	if err := q.validate(false); err != nil {
+		return err
+	}
+	if id <= 0 {
+		return fmt.Errorf("postingest queue: task id must be positive: %d", id)
+	}
+	var updated bool
+	err := store.WithBusyRetry(ctx, q.metrics, func() error {
+		updated = false
+		tx, err := q.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				_ = tx.Rollback()
+			}
+		}()
+		result, err := tx.ExecContext(ctx, updateSQL, id)
+		if err != nil {
+			return err
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 1 {
+			if err := syncLinkedStepTx(ctx, tx, id); err != nil {
+				return err
+			}
+			updated = true
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		committed = true
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if updated {
+		return nil
+	}
+	var status Status
+	if err := q.db.QueryRowContext(ctx, `SELECT status FROM post_ingest_task WHERE id=?`, id).Scan(&status); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("postingest queue: task %d not found", id)
+		}
+		return err
+	}
+	return fmt.Errorf("postingest queue: task %d in status %s cannot be %sed", id, status, op)
+}
+
 // AdminResetEncrypt requeues failed/cancelled/done or stranded (expired-lease) running encrypt tasks.
 func (q *Queue) AdminResetEncrypt(ctx context.Context, id int64) error {
 	return q.adminMutateEncrypt(ctx, id, `UPDATE post_ingest_task SET status='waiting',last_error='',lease_owner=NULL,lease_until=NULL,started_at=NULL,finished_at=NULL,attempts=0,available_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND task_type='encrypt' AND (status IN ('failed','cancelled','done') OR (status='running' AND (lease_until IS NULL OR lease_until<CURRENT_TIMESTAMP)))`, "reset")
