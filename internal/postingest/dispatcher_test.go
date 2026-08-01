@@ -117,18 +117,18 @@ func TestPosterTaskTimeoutScalesAndCapsBySourceSize(t *testing.T) {
 	}{
 		{"negative size uses base", TaskPoster, base, -1, base},
 		{"zero size uses base", TaskPoster, base, 0, base},
-		{"one byte adds one unit", TaskPoster, base, 1, 3 * time.Minute},
-		{"exact GiB adds one unit", TaskPoster, base, gib, 3 * time.Minute},
-		{"GiB plus one rounds up", TaskPoster, base, gib + 1, 4 * time.Minute},
-		{"sixteen GiB", TaskPoster, base, 16 * gib, 18 * time.Minute},
-		{"repair two GiB plus one", TaskPosterRepair, base, 2*gib + 1, 5 * time.Minute},
+		{"one byte adds one unit", TaskPoster, base, 1, 4 * time.Minute},
+		{"exact GiB adds one unit", TaskPoster, base, gib, 4 * time.Minute},
+		{"GiB plus one rounds up", TaskPoster, base, gib + 1, 6 * time.Minute},
+		{"sixteen GiB", TaskPoster, base, 16 * gib, 30 * time.Minute},
+		{"repair two GiB plus one", TaskPosterRepair, base, 2*gib + 1, 8 * time.Minute},
 		{"large source caps", TaskPoster, base, 64 * gib, 30 * time.Minute},
 		{"MaxInt64 size caps without overflow", TaskPosterRepair, base, int64(^uint64(0) >> 1), 30 * time.Minute},
 		{"base at cap remains capped", TaskPoster, 30 * time.Minute, 1, 30 * time.Minute},
 		{"base above cap is reduced to cap", TaskPosterRepair, 31 * time.Minute, 1, 30 * time.Minute},
-		{"zero base scales safely", TaskPoster, 0, 1, time.Minute},
-		{"negative base scales safely", TaskPosterRepair, -2 * time.Minute, 1, -time.Minute},
-		{"minimum duration scales without overflow", TaskPoster, time.Duration(-1 << 63), 1, time.Duration(-1<<63) + time.Minute},
+		{"zero base scales safely", TaskPoster, 0, 1, 2 * time.Minute},
+		{"negative base scales safely", TaskPosterRepair, -2 * time.Minute, 1, 0},
+		{"minimum duration scales without overflow", TaskPoster, time.Duration(-1 << 63), 1, time.Duration(-1<<63) + 2*time.Minute},
 		{"nonposter unchanged", TaskPreview, base, 64 * gib, base},
 		{"nonposter above cap unchanged", TaskPreview, 31 * time.Minute, 64 * gib, 31 * time.Minute},
 		{"encrypt one GiB", TaskEncrypt, 120 * time.Minute, gib, 130 * time.Minute},
@@ -227,8 +227,8 @@ func TestDispatcher_PosterDeadlinesUsePreferredSourceSize(t *testing.T) {
 	})
 
 	wants := map[TaskType][]time.Duration{
-		TaskPoster:       {3 * time.Minute, 2 * time.Minute},
-		TaskPosterRepair: {5 * time.Minute},
+		TaskPoster:       {4 * time.Minute, 2 * time.Minute},
+		TaskPosterRepair: {8 * time.Minute},
 		TaskPreview:      {2 * time.Minute},
 	}
 	for range fixtures {
@@ -258,6 +258,50 @@ func TestDispatcher_PosterDeadlinesUsePreferredSourceSize(t *testing.T) {
 		}
 	}
 	cancel()
+}
+
+func TestDispatcher_PosterDeadlineDoesNotReportRenewLeaseDeadline(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	q := NewQueue(db, "deadline-renew-owner", nil)
+	id := insertDispatcherTask(t, q, TaskPoster, nil, "deadline-not-renew")
+	started := make(chan struct{})
+	var startOnce sync.Once
+	o := dispatcherOptions("deadline-renew-owner")
+	o.HeartbeatInterval = 15 * time.Millisecond
+	o.Timeouts[TaskPoster] = 60 * time.Millisecond
+	o.ExecutorStopGrace = 200 * time.Millisecond
+	d, err := NewDispatcher(q, executorFunc(func(ctx context.Context, _ Task) error {
+		startOnce.Do(func() { close(started) })
+		<-ctx.Done()
+		return ctx.Err()
+	}), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.sourceSize = func(context.Context, Task) int64 { return 0 }
+	d.sourceLookupBudget = 20 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- d.Start(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("executor did not start")
+	}
+	waitUntil(t, 5*time.Second, func() bool {
+		var lastError string
+		if db.QueryRow(`SELECT COALESCE(last_error,'') FROM post_ingest_task WHERE id=?`, id).Scan(&lastError) != nil {
+			return false
+		}
+		if lastError == "" {
+			return false
+		}
+		if strings.Contains(lastError, "renew lease") {
+			t.Fatalf("poster deadline misattributed to lease renew: %q", lastError)
+		}
+		return true
+	})
 }
 
 func TestDispatcher_PosterHeartbeatRunsBeforeSourceLookup(t *testing.T) {
