@@ -55,8 +55,8 @@ scan:
   file_hash_on_scan: false
   fast_ffprobe: true
   # file_extensions:           # optional; omit category = built-in defaults; listed category = full replace
-  #   video: [.mp4, .mkv, .avi, .mov, .wmv, .flv, .webm, .m4v, .mpeg, .mpg]
-  #   audio: [.mp3, .flac, .wav, .aac, .ogg, .m4a, .wma, .aiff, .aif, .ape]
+  #   video: [.mp4, .m4v, .mkv, .webm, .avi, .mov, .wmv, .flv, .f4v, .mpeg, .mpg, .mpe, .m2v, .mpv, .ts, .m2ts, .mts, .tp, .trp, .vob, .mod, .tod, .3gp, .3g2, .ogv, .divx, .xvid, .asf, .rm, .rmvb, .mxf, .wtv, .dvr-ms]
+  #   audio: [.mp3, .flac, .wav, .aac, .ogg, .oga, .opus, .m4a, .wma, .aiff, .aif, .ape, .wv, .mka, .ac3, .eac3, .dts, .dtshd, .mp2, .amr, .ra, .tak, .tta, .caf, .dsf, .dff]
   #   image: [.jpg, .jpeg, .png, .gif, .webp, .bmp, .heic, .heif, .tif, .tiff, .svg, .cr2, .nef, .arw, .dng, .raf, .orf, .rw2]
   #   document: [.pdf, .doc, .docx, .xls, .xlsx, .ppt, .pptx, .txt, .md, .mdx, .html, .htm, .csv, .rtf, .epub, .mobi, .azw, .azw3]
   # Synchronous poster capture during scan (seconds). Default 120. Set 0 to disable.
