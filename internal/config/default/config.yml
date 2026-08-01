@@ -54,6 +54,11 @@ encrypted_assets:
 scan:
   file_hash_on_scan: false
   fast_ffprobe: true
+  # file_extensions:           # optional; omit category = built-in defaults; listed category = full replace
+  #   video: [.mp4, .mkv, .avi, .mov, .wmv, .flv, .webm, .m4v, .mpeg, .mpg]
+  #   audio: [.mp3, .flac, .wav, .aac, .ogg, .m4a, .wma, .aiff, .aif, .ape]
+  #   image: [.jpg, .jpeg, .png, .gif, .webp, .bmp, .heic, .heif, .tif, .tiff, .svg, .cr2, .nef, .arw, .dng, .raf, .orf, .rw2]
+  #   document: [.pdf, .doc, .docx, .xls, .xlsx, .ppt, .pptx, .txt, .md, .mdx, .html, .htm, .csv, .rtf, .epub, .mobi, .azw, .azw3]
   # Synchronous poster capture during scan (seconds). Default 120. Set 0 to disable.
   precapture_poster_timeout_seconds: 120
 subtitle:
