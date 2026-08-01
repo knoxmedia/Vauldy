@@ -50,6 +50,21 @@ func TestConfigureDuplicatePrefersVideo(t *testing.T) {
 	}
 }
 
+func TestDefaultExtsIncludeCommonVideoAndAudio(t *testing.T) {
+	t.Cleanup(ResetForTest)
+	ResetForTest()
+	for _, name := range []string{"a.ts", "a.m2ts", "a.vob", "a.3gp", "a.ogv", "a.rmvb"} {
+		if GuessFileType(name) != "video" {
+			t.Fatalf("%s: got %q want video", name, GuessFileType(name))
+		}
+	}
+	for _, name := range []string{"a.opus", "a.mka", "a.ac3", "a.dts", "a.wv", "a.dsf"} {
+		if GuessFileType(name) != "audio" {
+			t.Fatalf("%s: got %q want audio", name, GuessFileType(name))
+		}
+	}
+}
+
 func TestConfigureDocumentAffectsIsDocumentExtension(t *testing.T) {
 	t.Cleanup(ResetForTest)
 	docs := []string{".odt"}

@@ -9,12 +9,22 @@ import (
 )
 
 var defaultVideoExts = map[string]struct{}{
-	".mp4": {}, ".mkv": {}, ".avi": {}, ".mov": {}, ".wmv": {}, ".flv": {}, ".webm": {}, ".m4v": {}, ".mpeg": {}, ".mpg": {},
+	// Common containers / progressive
+	".mp4": {}, ".m4v": {}, ".mkv": {}, ".webm": {}, ".avi": {}, ".mov": {}, ".wmv": {}, ".flv": {}, ".f4v": {},
+	".mpeg": {}, ".mpg": {}, ".mpe": {}, ".m2v": {}, ".mpv": {},
+	// Broadcast / optical / camcorder
+	".ts": {}, ".m2ts": {}, ".mts": {}, ".tp": {}, ".trp": {}, ".vob": {}, ".mod": {}, ".tod": {},
+	".3gp": {}, ".3g2": {}, ".ogv": {}, ".divx": {}, ".xvid": {}, ".asf": {},
+	".rm": {}, ".rmvb": {}, ".mxf": {}, ".wtv": {}, ".dvr-ms": {},
 }
 
 var defaultAudioExts = map[string]struct{}{
-	".mp3": {}, ".flac": {}, ".wav": {}, ".aac": {}, ".ogg": {}, ".m4a": {}, ".wma": {},
-	".aiff": {}, ".aif": {}, ".ape": {},
+	// Lossy / lossless common
+	".mp3": {}, ".flac": {}, ".wav": {}, ".aac": {}, ".ogg": {}, ".oga": {}, ".opus": {},
+	".m4a": {}, ".wma": {}, ".aiff": {}, ".aif": {}, ".ape": {}, ".wv": {}, ".mka": {},
+	// Broadcast / high-res / niche
+	".ac3": {}, ".eac3": {}, ".dts": {}, ".dtshd": {}, ".mp2": {}, ".amr": {},
+	".ra": {}, ".tak": {}, ".tta": {}, ".caf": {}, ".dsf": {}, ".dff": {},
 }
 
 var defaultImageExts = map[string]struct{}{
