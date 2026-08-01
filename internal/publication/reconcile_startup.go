@@ -187,14 +187,34 @@ WHERE id IN (
 	if n, _ := res.RowsAffected(); n > 0 {
 		changed += int(n)
 	}
-	res, err = tx.ExecContext(ctx, `
+	hasPrepareLink, err := publicationColumnExistsTx(ctx, tx, "transcode_task", "task_type")
+	if err != nil {
+		return changed, err
+	}
+	if hasPrepareLink {
+		setSQL := `
 UPDATE media_ingest_step SET
   status=(SELECT q.status FROM transcode_task q WHERE q.ingest_step_id=media_ingest_step.id),
   last_error=(SELECT COALESCE(q.error_message,'') FROM transcode_task q WHERE q.ingest_step_id=media_ingest_step.id),
   lease_owner=(SELECT q.lease_owner FROM transcode_task q WHERE q.ingest_step_id=media_ingest_step.id),
-  lease_until=(SELECT q.lease_until FROM transcode_task q WHERE q.ingest_step_id=media_ingest_step.id),
-  started_at=(SELECT q.started_at FROM transcode_task q WHERE q.ingest_step_id=media_ingest_step.id),
-  finished_at=(SELECT q.completed_at FROM transcode_task q WHERE q.ingest_step_id=media_ingest_step.id),
+  lease_until=(SELECT q.lease_until FROM transcode_task q WHERE q.ingest_step_id=media_ingest_step.id)`
+		hasStarted, err := publicationColumnExistsTx(ctx, tx, "transcode_task", "started_at")
+		if err != nil {
+			return changed, err
+		}
+		hasCompleted, err := publicationColumnExistsTx(ctx, tx, "transcode_task", "completed_at")
+		if err != nil {
+			return changed, err
+		}
+		if hasStarted {
+			setSQL += `,
+  started_at=(SELECT q.started_at FROM transcode_task q WHERE q.ingest_step_id=media_ingest_step.id)`
+		}
+		if hasCompleted {
+			setSQL += `,
+  finished_at=(SELECT q.completed_at FROM transcode_task q WHERE q.ingest_step_id=media_ingest_step.id)`
+		}
+		setSQL += `,
   updated_at=CURRENT_TIMESTAMP
 WHERE id IN (
   SELECT s.id FROM media_ingest_step s
@@ -202,12 +222,14 @@ WHERE id IN (
   JOIN media m ON m.id=s.media_id AND m.ingest_generation=s.generation
   JOIN transcode_task q ON q.ingest_step_id=s.id AND q.ingest_run_id=s.run_id AND q.media_id=s.media_id AND q.generation=s.generation AND q.task_type='pretranscode'
   WHERE r.policy_version=2 AND r.superseded_at IS NULL AND s.step_type='prepare' AND q.status<>s.status
-)`)
-	if err != nil {
-		return 0, err
-	}
-	if n, _ := res.RowsAffected(); n > 0 {
-		changed += int(n)
+)`
+		res, err = tx.ExecContext(ctx, setSQL)
+		if err != nil {
+			return changed, err
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			changed += int(n)
+		}
 	}
 	return changed, nil
 }
@@ -281,8 +303,24 @@ ON CONFLICT(ingest_run_id,ingest_step_id,generation) DO NOTHING`, item.mediaID, 
 			if e := tx.QueryRowContext(ctx, `SELECT file_id FROM media WHERE id=?`, item.mediaID).Scan(&fileID); e != nil {
 				return repaired, fmt.Errorf("repair prepare step %d: %w", item.stepID, e)
 			}
-			res, e := tx.ExecContext(ctx, `INSERT INTO transcode_task(file_id,media_id,status,progress,error_message,task_type,ingest_run_id,ingest_step_id,generation,created_at,started_at,completed_at)
-VALUES(?,?,?,CASE WHEN ? IN ('done','failed','cancelled') THEN 100 ELSE 0 END,?,'pretranscode',?,?,?,COALESCE(?,CURRENT_TIMESTAMP),?,?)`, fileID, item.mediaID, item.status, item.status, item.lastError, item.runID, item.stepID, item.generation, nullString(item.createdAt), nullString(item.startedAt), nullString(item.finishedAt))
+			cols := "file_id,media_id,status,progress,error_message,task_type,ingest_run_id,ingest_step_id,generation,created_at"
+			vals := "?,?,?,CASE WHEN ? IN ('done','failed','cancelled') THEN 100 ELSE 0 END,?,'pretranscode',?,?,?,COALESCE(?,CURRENT_TIMESTAMP)"
+			args := []any{fileID, item.mediaID, item.status, item.status, item.lastError, item.runID, item.stepID, item.generation, nullString(item.createdAt)}
+			if hasStarted, e := publicationColumnExistsTx(ctx, tx, "transcode_task", "started_at"); e != nil {
+				return repaired, e
+			} else if hasStarted {
+				cols += ",started_at"
+				vals += ",?"
+				args = append(args, nullString(item.startedAt))
+			}
+			if hasCompleted, e := publicationColumnExistsTx(ctx, tx, "transcode_task", "completed_at"); e != nil {
+				return repaired, e
+			} else if hasCompleted {
+				cols += ",completed_at"
+				vals += ",?"
+				args = append(args, nullString(item.finishedAt))
+			}
+			res, e := tx.ExecContext(ctx, `INSERT INTO transcode_task(`+cols+`) VALUES(`+vals+`)`, args...)
 			if e != nil {
 				return repaired, fmt.Errorf("repair prepare step %d: %w", item.stepID, e)
 			}
