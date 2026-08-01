@@ -49,3 +49,20 @@ func TestConfigureDuplicatePrefersVideo(t *testing.T) {
 		t.Fatalf("got %q", GuessFileType("x.dat"))
 	}
 }
+
+func TestConfigureDocumentAffectsIsDocumentExtension(t *testing.T) {
+	t.Cleanup(ResetForTest)
+	docs := []string{".odt"}
+	if err := Configure(ExtensionConfig{Document: &docs}); err != nil {
+		t.Fatal(err)
+	}
+	if !IsDocumentExtension("x.odt") {
+		t.Fatal("expected .odt to be a document extension")
+	}
+	if IsDocumentExtension("x.pdf") {
+		t.Fatal("pdf should not match after document list replace")
+	}
+	if GuessFileType("x.odt") != "document" {
+		t.Fatalf("got %q", GuessFileType("x.odt"))
+	}
+}
