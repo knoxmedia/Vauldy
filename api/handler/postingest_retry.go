@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"knox-media/internal/postingest"
+	"knox-media/internal/publication"
 	"knox-media/internal/taskalign"
 )
 
@@ -61,14 +62,23 @@ func enqueueExplicitPostIngest(ctx context.Context, db *sql.DB, mediaID int64, t
 	defer tx.Rollback()
 	var id int64
 	var status postingest.Status
-	err = tx.QueryRowContext(ctx, `SELECT id,status FROM post_ingest_task WHERE media_id=? AND task_type=?`, mediaID, typ).Scan(&id, &status)
+	// Always target the media's current ingest generation so a stale gen-0
+	// waiting row cannot mask a failed/cancelled current-generation task.
+	err = tx.QueryRowContext(ctx, `
+SELECT q.id, q.status FROM post_ingest_task q
+WHERE q.media_id=? AND q.task_type=?
+  AND q.generation=(SELECT COALESCE(ingest_generation,0) FROM media WHERE id=?)
+ORDER BY q.id DESC LIMIT 1`, mediaID, typ, mediaID).Scan(&id, &status)
 	if errors.Is(err, sql.ErrNoRows) {
 		if resetTx != nil {
 			if err = resetTx(ctx, tx); err != nil {
 				return "", err
 			}
 		}
-		res, e := tx.ExecContext(ctx, `INSERT INTO post_ingest_task(media_id,scan_task_id,task_type) VALUES(?,NULL,?) ON CONFLICT(media_id,generation,task_type) DO NOTHING`, mediaID, typ)
+		res, e := tx.ExecContext(ctx, `
+INSERT INTO post_ingest_task(media_id,scan_task_id,generation,task_type,max_attempts)
+SELECT ?, NULL, COALESCE(ingest_generation,0), ?, ? FROM media WHERE id=?
+ON CONFLICT(media_id,generation,task_type) DO NOTHING`, mediaID, typ, publication.DefaultMaxAttempts(string(typ)), mediaID)
 		if e != nil {
 			return "", e
 		}
@@ -128,6 +138,9 @@ func enqueueExplicitPostIngest(ctx context.Context, db *sql.DB, mediaID int64, t
 	}
 	if n != 1 {
 		return "", fmt.Errorf("post-ingest task %d changed concurrently", id)
+	}
+	if err = postingest.SyncLinkedStepTx(ctx, tx, id); err != nil {
+		return "", err
 	}
 	if err = taskalign.EnsureDomainWaiting(ctx, tx, string(typ), mediaID); err != nil {
 		return "", err

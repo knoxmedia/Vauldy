@@ -249,12 +249,10 @@ func TestValidateCurrentV2RejectsExactQueueSemanticMismatches(t *testing.T) {
 	cases := []struct{ name, mutation string }{
 		{"post task type", `UPDATE post_ingest_task SET task_type='encrypt' WHERE task_type='poster'`},
 		{"post extra wrong execution", `INSERT INTO post_ingest_task(media_id,scan_task_id,ingest_run_id,ingest_step_id,generation,task_type,status) SELECT media_id,scan_task_id,ingest_run_id,ingest_step_id,generation,'poster_repair',status FROM post_ingest_task WHERE task_type='poster'`},
-		{"post status", `UPDATE post_ingest_task SET status='running' WHERE task_type='poster'`},
 		{"post generation", `UPDATE post_ingest_task SET generation=generation+1 WHERE task_type='poster'`},
 		{"post media", `UPDATE post_ingest_task SET media_id=media_id+100 WHERE task_type='poster'`},
 		{"post run", `UPDATE post_ingest_task SET ingest_run_id=ingest_run_id+100 WHERE task_type='poster'`},
 		{"scrape source", `UPDATE scrape_task SET source='manual'`},
-		{"scrape status", `UPDATE scrape_task SET status='running'`},
 		{"scrape generation", `UPDATE scrape_task SET generation=generation+1`},
 		{"scrape media", `UPDATE scrape_task SET media_id=media_id+100`},
 		{"scrape run", `UPDATE scrape_task SET ingest_run_id=ingest_run_id+100`},
@@ -272,6 +270,25 @@ func TestValidateCurrentV2RejectsExactQueueSemanticMismatches(t *testing.T) {
 				t.Fatal("accepted invalid queue semantics")
 			}
 		})
+	}
+}
+
+func TestValidateAggregateCurrentV2RepairsDesyncedPostIngestStatus(t *testing.T) {
+	db := openPlannerTestDB(t)
+	_, mid, scan := seedPlannerMedia(t, db, "video", 0, 0, 0)
+	planAndCommit(t, db, NewPlanner(PlanOptions{SubtitleAuto: true}), NewMedia{MediaID: mid, ScanTaskID: scan, FileType: "video"})
+	if _, err := db.Exec(`UPDATE post_ingest_task SET status='waiting',attempts=0,last_error='' WHERE task_type='subtitle'; UPDATE media_ingest_step SET status='failed',attempts=1,last_error='stale' WHERE step_type='subtitle'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateAggregateCurrentV2(context.Background(), db); err != nil {
+		t.Fatalf("validate after status desync: %v", err)
+	}
+	var stepStatus, queueStatus string
+	if err := db.QueryRow(`SELECT s.status,p.status FROM media_ingest_step s JOIN post_ingest_task p ON p.ingest_step_id=s.id WHERE s.step_type='subtitle' AND s.media_id=?`, mid).Scan(&stepStatus, &queueStatus); err != nil {
+		t.Fatal(err)
+	}
+	if stepStatus != "waiting" || queueStatus != "waiting" {
+		t.Fatalf("step=%s queue=%s want both waiting", stepStatus, queueStatus)
 	}
 }
 

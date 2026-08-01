@@ -84,6 +84,9 @@ func ValidateAggregateCurrentV2(ctx context.Context, db *sql.DB) error {
 	if _, err := RepairMissingQueueExecutions(ctx, db); err != nil {
 		return fmt.Errorf("publication v2 startup repair missing queues: %w", err)
 	}
+	if _, err := RepairDesyncedQueueStepStatus(ctx, db); err != nil {
+		return fmt.Errorf("publication v2 startup repair desynced queue/step status: %w", err)
+	}
 	if _, err := ReconcileOrphanFailedQueueState(ctx, db); err != nil {
 		return fmt.Errorf("publication v2 startup reconcile orphan failed queues: %w", err)
 	}
@@ -115,6 +118,120 @@ func ValidateAggregateCurrentV2(ctx context.Context, db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+// RepairDesyncedQueueStepStatus copies linked queue execution status onto the
+// matching media_ingest_step when they diverge (e.g. admin retry updated the
+// queue but failed to sync the step). Queue rows remain the execution authority.
+func RepairDesyncedQueueStepStatus(ctx context.Context, db *sql.DB) (int, error) {
+	if db == nil {
+		return 0, errors.New("publication queue status repair: database is required")
+	}
+	repaired := 0
+	_, err := store.WithImmediateConnTx(ctx, db, func(tx store.ImmediateConnTx) error {
+		n, e := repairDesyncedQueueStepStatusTx(ctx, tx)
+		repaired = n
+		return e
+	})
+	return repaired, err
+}
+
+func repairDesyncedQueueStepStatusTx(ctx context.Context, tx store.SQLExecutor) (int, error) {
+	changed := 0
+	res, err := tx.ExecContext(ctx, `
+UPDATE media_ingest_step SET
+  status=(SELECT p.status FROM post_ingest_task p WHERE p.ingest_step_id=media_ingest_step.id),
+  attempts=(SELECT p.attempts FROM post_ingest_task p WHERE p.ingest_step_id=media_ingest_step.id),
+  max_attempts=(SELECT p.max_attempts FROM post_ingest_task p WHERE p.ingest_step_id=media_ingest_step.id),
+  last_error=(SELECT p.last_error FROM post_ingest_task p WHERE p.ingest_step_id=media_ingest_step.id),
+  available_at=(SELECT p.available_at FROM post_ingest_task p WHERE p.ingest_step_id=media_ingest_step.id),
+  lease_owner=(SELECT p.lease_owner FROM post_ingest_task p WHERE p.ingest_step_id=media_ingest_step.id),
+  lease_until=(SELECT p.lease_until FROM post_ingest_task p WHERE p.ingest_step_id=media_ingest_step.id),
+  started_at=(SELECT p.started_at FROM post_ingest_task p WHERE p.ingest_step_id=media_ingest_step.id),
+  finished_at=(SELECT p.finished_at FROM post_ingest_task p WHERE p.ingest_step_id=media_ingest_step.id),
+  updated_at=CURRENT_TIMESTAMP
+WHERE id IN (
+  SELECT s.id FROM media_ingest_step s
+  JOIN media_ingest_run r ON r.id=s.run_id
+  JOIN media m ON m.id=s.media_id AND m.ingest_generation=s.generation
+  JOIN post_ingest_task p ON p.ingest_step_id=s.id AND p.ingest_run_id=s.run_id AND p.media_id=s.media_id AND p.generation=s.generation AND p.task_type=s.step_type
+  WHERE r.policy_version=2 AND r.superseded_at IS NULL AND p.status<>s.status
+)`)
+	if err != nil {
+		return 0, err
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		changed += int(n)
+	}
+	res, err = tx.ExecContext(ctx, `
+UPDATE media_ingest_step SET
+  status=(SELECT q.status FROM scrape_task q WHERE q.ingest_step_id=media_ingest_step.id),
+  attempts=(SELECT COALESCE(q.fail_count,0) FROM scrape_task q WHERE q.ingest_step_id=media_ingest_step.id),
+  last_error=(SELECT COALESCE(q.message,'') FROM scrape_task q WHERE q.ingest_step_id=media_ingest_step.id),
+  available_at=(SELECT COALESCE(q.available_at,CURRENT_TIMESTAMP) FROM scrape_task q WHERE q.ingest_step_id=media_ingest_step.id),
+  lease_owner=(SELECT q.lease_owner FROM scrape_task q WHERE q.ingest_step_id=media_ingest_step.id),
+  lease_until=(SELECT q.lease_until FROM scrape_task q WHERE q.ingest_step_id=media_ingest_step.id),
+  started_at=(SELECT q.started_at FROM scrape_task q WHERE q.ingest_step_id=media_ingest_step.id),
+  finished_at=(SELECT q.finished_at FROM scrape_task q WHERE q.ingest_step_id=media_ingest_step.id),
+  updated_at=CURRENT_TIMESTAMP
+WHERE id IN (
+  SELECT s.id FROM media_ingest_step s
+  JOIN media_ingest_run r ON r.id=s.run_id
+  JOIN media m ON m.id=s.media_id AND m.ingest_generation=s.generation
+  JOIN scrape_task q ON q.ingest_step_id=s.id AND q.ingest_run_id=s.run_id AND q.media_id=s.media_id AND q.generation=s.generation
+  WHERE r.policy_version=2 AND r.superseded_at IS NULL AND s.step_type='scrape' AND q.status<>s.status
+)`)
+	if err != nil {
+		return 0, err
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		changed += int(n)
+	}
+	hasPrepareLink, err := publicationColumnExistsTx(ctx, tx, "transcode_task", "task_type")
+	if err != nil {
+		return changed, err
+	}
+	if hasPrepareLink {
+		setSQL := `
+UPDATE media_ingest_step SET
+  status=(SELECT q.status FROM transcode_task q WHERE q.ingest_step_id=media_ingest_step.id),
+  last_error=(SELECT COALESCE(q.error_message,'') FROM transcode_task q WHERE q.ingest_step_id=media_ingest_step.id),
+  lease_owner=(SELECT q.lease_owner FROM transcode_task q WHERE q.ingest_step_id=media_ingest_step.id),
+  lease_until=(SELECT q.lease_until FROM transcode_task q WHERE q.ingest_step_id=media_ingest_step.id)`
+		hasStarted, err := publicationColumnExistsTx(ctx, tx, "transcode_task", "started_at")
+		if err != nil {
+			return changed, err
+		}
+		hasCompleted, err := publicationColumnExistsTx(ctx, tx, "transcode_task", "completed_at")
+		if err != nil {
+			return changed, err
+		}
+		if hasStarted {
+			setSQL += `,
+  started_at=(SELECT q.started_at FROM transcode_task q WHERE q.ingest_step_id=media_ingest_step.id)`
+		}
+		if hasCompleted {
+			setSQL += `,
+  finished_at=(SELECT q.completed_at FROM transcode_task q WHERE q.ingest_step_id=media_ingest_step.id)`
+		}
+		setSQL += `,
+  updated_at=CURRENT_TIMESTAMP
+WHERE id IN (
+  SELECT s.id FROM media_ingest_step s
+  JOIN media_ingest_run r ON r.id=s.run_id
+  JOIN media m ON m.id=s.media_id AND m.ingest_generation=s.generation
+  JOIN transcode_task q ON q.ingest_step_id=s.id AND q.ingest_run_id=s.run_id AND q.media_id=s.media_id AND q.generation=s.generation AND q.task_type='pretranscode'
+  WHERE r.policy_version=2 AND r.superseded_at IS NULL AND s.step_type='prepare' AND q.status<>s.status
+)`
+		res, err = tx.ExecContext(ctx, setSQL)
+		if err != nil {
+			return changed, err
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			changed += int(n)
+		}
+	}
+	return changed, nil
 }
 
 // RepairMissingQueueExecutions recreates 1:1 queue rows for current policy-v2 steps
@@ -202,8 +319,24 @@ ON CONFLICT(ingest_run_id,ingest_step_id,generation) DO NOTHING`, item.mediaID, 
 			if e := tx.QueryRowContext(ctx, `SELECT file_id FROM media WHERE id=?`, item.mediaID).Scan(&fileID); e != nil {
 				return repaired, fmt.Errorf("repair prepare step %d: %w", item.stepID, e)
 			}
-			res, e := tx.ExecContext(ctx, `INSERT INTO transcode_task(file_id,media_id,status,progress,error_message,task_type,ingest_run_id,ingest_step_id,generation,created_at,started_at,completed_at)
-VALUES(?,?,?,CASE WHEN ? IN ('done','failed','cancelled') THEN 100 ELSE 0 END,?,'pretranscode',?,?,?,COALESCE(?,CURRENT_TIMESTAMP),?,?)`, fileID, item.mediaID, item.status, item.status, item.lastError, item.runID, item.stepID, item.generation, nullString(item.createdAt), nullString(item.startedAt), nullString(item.finishedAt))
+			cols := "file_id,media_id,status,progress,error_message,task_type,ingest_run_id,ingest_step_id,generation,created_at"
+			vals := "?,?,?,CASE WHEN ? IN ('done','failed','cancelled') THEN 100 ELSE 0 END,?,'pretranscode',?,?,?,COALESCE(?,CURRENT_TIMESTAMP)"
+			args := []any{fileID, item.mediaID, item.status, item.status, item.lastError, item.runID, item.stepID, item.generation, nullString(item.createdAt)}
+			if hasStarted, e := publicationColumnExistsTx(ctx, tx, "transcode_task", "started_at"); e != nil {
+				return repaired, e
+			} else if hasStarted {
+				cols += ",started_at"
+				vals += ",?"
+				args = append(args, nullString(item.startedAt))
+			}
+			if hasCompleted, e := publicationColumnExistsTx(ctx, tx, "transcode_task", "completed_at"); e != nil {
+				return repaired, e
+			} else if hasCompleted {
+				cols += ",completed_at"
+				vals += ",?"
+				args = append(args, nullString(item.finishedAt))
+			}
+			res, e := tx.ExecContext(ctx, `INSERT INTO transcode_task(`+cols+`) VALUES(`+vals+`)`, args...)
 			if e != nil {
 				return repaired, fmt.Errorf("repair prepare step %d: %w", item.stepID, e)
 			}
