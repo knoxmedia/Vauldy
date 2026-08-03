@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -277,5 +278,436 @@ func TestDispatcherScheduler_FallbackRejectsInvalidRequest(t *testing.T) {
 		Resources:   ResourceRequest{ResourceKind("bogus"): 1},
 	}); err == nil {
 		t.Fatal("invalid resource kind should error")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Runtime override and control-plane tests (Task 9)
+// ---------------------------------------------------------------------------
+
+// newRuntimeOverrideService seeds an active policy revision and a service that
+// treats base as the YAML-effective policy layer (defaults + YAML). It returns
+// the service, database, and the active revision id used as expected_revision.
+func newRuntimeOverrideService(t *testing.T, base Policy) (*Service, *sql.DB, int64) {
+	t.Helper()
+	db, _ := openAdmissionTestDB(t)
+	revID := seedActivePolicy(t, db, base)
+	svc := NewService(db)
+	svc.SetBasePolicy(base)
+	svc.SetPolicy(base)
+	return svc, db, revID
+}
+
+func TestSchedulerServiceRuntimeOverrideActivatesNewRevision(t *testing.T) {
+	base := PolicyDefaults()
+	base.TypeConcurrency["poster"] = 5 // simulates a YAML override
+	svc, db, revID := newRuntimeOverrideService(t, base)
+	ctx := context.Background()
+
+	res, err := svc.ApplyRuntimeOverride(ctx, RuntimeOverrideRequest{
+		ExpectedRevision: revID,
+		Concurrency:      map[string]int{"poster": 2},
+		Author:           "admin",
+		Reason:           "reduce poster load",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.RevisionID == 0 {
+		t.Fatal("no new revision id returned")
+	}
+	if res.Policy.TypeConcurrency["poster"] != 2 {
+		t.Fatalf("effective poster=%d want 2", res.Policy.TypeConcurrency["poster"])
+	}
+	if res.Policy.Provenance["concurrency.poster"] != "override" {
+		t.Fatalf("provenance=%q want override", res.Policy.Provenance["concurrency.poster"])
+	}
+	// In-memory effective policy is updated synchronously (durable activation,
+	// not merely accepted work).
+	if got := svc.CurrentPolicy().TypeConcurrency["poster"]; got != 2 {
+		t.Fatalf("service effective poster=%d want 2", got)
+	}
+	// Durable activation: the active DB revision is the new one.
+	st := NewStore(db)
+	active, err := st.GetActivePolicyRevision(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active.ID != res.RevisionID {
+		t.Fatalf("active revision=%d want %d", active.ID, res.RevisionID)
+	}
+	// Audit recorded with actor/reason.
+	entries, err := st.ListAudit(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("audit entries=%d want 1", len(entries))
+	}
+	if entries[0].Actor != "admin" {
+		t.Fatalf("audit actor=%q want admin", entries[0].Actor)
+	}
+}
+
+func TestSchedulerServicePolicyRevisionConflict(t *testing.T) {
+	base := PolicyDefaults()
+	svc, db, revID := newRuntimeOverrideService(t, base)
+	ctx := context.Background()
+
+	res, err := svc.ApplyRuntimeOverride(ctx, RuntimeOverrideRequest{
+		ExpectedRevision: revID,
+		Concurrency:      map[string]int{"poster": 2},
+		Author:           "admin",
+		Reason:           "first",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = svc.ApplyRuntimeOverride(ctx, RuntimeOverrideRequest{
+		ExpectedRevision: revID, // stale
+		Concurrency:      map[string]int{"poster": 3},
+		Author:           "admin",
+		Reason:           "stale",
+	})
+	var conflict RevisionConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("err=%v want RevisionConflictError", err)
+	}
+	if conflict.Current != res.RevisionID {
+		t.Fatalf("conflict current=%d want %d", conflict.Current, res.RevisionID)
+	}
+	// No new revision created and no audit written on conflict.
+	st := NewStore(db)
+	revs, err := st.ListPolicyRevisions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(revs) != 2 {
+		t.Fatalf("policy revisions=%d want 2", len(revs))
+	}
+	entries, _ := st.ListAudit(ctx, 10)
+	if len(entries) != 1 {
+		t.Fatalf("audit entries=%d want 1 (no audit on conflict)", len(entries))
+	}
+}
+
+func TestSchedulerServiceRuntimeOverrideInvalidUpdateNoActivation(t *testing.T) {
+	base := PolicyDefaults()
+	svc, db, revID := newRuntimeOverrideService(t, base)
+	ctx := context.Background()
+	st := NewStore(db)
+	before, err := st.GetActivePolicyRevision(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = svc.ApplyRuntimeOverride(ctx, RuntimeOverrideRequest{
+		ExpectedRevision: revID,
+		Concurrency:      map[string]int{"poster": -1},
+		Author:           "admin",
+		Reason:           "bad update",
+	})
+	var ve ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("err=%v want ValidationError", err)
+	}
+	if len(ve.Errors) == 0 {
+		t.Fatal("validation errors must be populated")
+	}
+	// Active revision is unchanged.
+	after, err := st.GetActivePolicyRevision(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.ID != before.ID {
+		t.Fatalf("active revision changed from %d to %d", before.ID, after.ID)
+	}
+	// No audit on invalid update.
+	entries, _ := st.ListAudit(ctx, 10)
+	if len(entries) != 0 {
+		t.Fatalf("audit entries=%d want 0 (no audit on invalid update)", len(entries))
+	}
+	// Effective policy still reflects the base.
+	if got := svc.CurrentPolicy().TypeConcurrency["poster"]; got != 3 {
+		t.Fatalf("effective poster=%d want 3", got)
+	}
+}
+
+func TestSchedulerServiceRuntimeOverrideRestartPersistence(t *testing.T) {
+	base := PolicyDefaults()
+	base.TypeConcurrency["poster"] = 5
+	svc, db, revID := newRuntimeOverrideService(t, base)
+	ctx := context.Background()
+	if _, err := svc.ApplyRuntimeOverride(ctx, RuntimeOverrideRequest{
+		ExpectedRevision: revID,
+		Concurrency:      map[string]int{"poster": 1},
+		Author:           "admin",
+		Reason:           "persist across restart",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate restart: a fresh service on the same database reloads the
+	// committed revision.
+	fresh := NewService(db)
+	fresh.SetBasePolicy(base)
+	if err := fresh.Reload(ctx); err != nil {
+		t.Fatal(err)
+	}
+	p := fresh.CurrentPolicy()
+	if p.TypeConcurrency["poster"] != 1 {
+		t.Fatalf("poster=%d want 1 after restart", p.TypeConcurrency["poster"])
+	}
+	if p.Provenance["concurrency.poster"] != "override" {
+		t.Fatalf("provenance=%q want override after restart", p.Provenance["concurrency.poster"])
+	}
+}
+
+func TestSchedulerServiceRuntimeOverrideYAMLHiddenThenCleared(t *testing.T) {
+	base := PolicyDefaults()
+	base.MergeYAML(SchedulerYAMLConfig{TypeConcurrency: map[string]int{"poster": 5}})
+	svc, db, revID := newRuntimeOverrideService(t, base)
+	ctx := context.Background()
+
+	res, err := svc.ApplyRuntimeOverride(ctx, RuntimeOverrideRequest{
+		ExpectedRevision: revID,
+		Concurrency:      map[string]int{"poster": 2},
+		Author:           "admin",
+		Reason:           "override",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Policy.TypeConcurrency["poster"] != 2 {
+		t.Fatalf("poster=%d want 2", res.Policy.TypeConcurrency["poster"])
+	}
+
+	// A later YAML change (config.yml edited) must be hidden by the DB override
+	// after restart.
+	changedBase := PolicyDefaults()
+	changedBase.MergeYAML(SchedulerYAMLConfig{TypeConcurrency: map[string]int{"poster": 9}})
+	fresh := NewService(db)
+	fresh.SetBasePolicy(changedBase)
+	if err := fresh.Reload(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := fresh.CurrentPolicy().TypeConcurrency["poster"]; got != 2 {
+		t.Fatalf("poster=%d want 2 (DB override hides YAML change)", got)
+	}
+
+	// Clearing the override falls back to the current YAML value.
+	cleared, err := fresh.ApplyRuntimeOverride(ctx, RuntimeOverrideRequest{
+		ExpectedRevision: res.RevisionID,
+		ClearConcurrency: []string{"poster"},
+		Author:           "admin",
+		Reason:           "clear",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared.Policy.TypeConcurrency["poster"] != 9 {
+		t.Fatalf("poster=%d want 9 (cleared override falls back to YAML)", cleared.Policy.TypeConcurrency["poster"])
+	}
+	if cleared.Policy.Provenance["concurrency.poster"] != "yaml" {
+		t.Fatalf("provenance=%q want yaml", cleared.Policy.Provenance["concurrency.poster"])
+	}
+}
+
+func TestSchedulerServiceRuntimeOverrideLoweringPreservesRunningReservations(t *testing.T) {
+	base := PolicyDefaults()
+	svc, db, revID := newRuntimeOverrideService(t, base)
+	ctx := context.Background()
+	insertServiceReservation(t, db, "owner/run-1", "poster")
+	insertServiceReservation(t, db, "owner/run-2", "poster")
+
+	if _, err := svc.ApplyRuntimeOverride(ctx, RuntimeOverrideRequest{
+		ExpectedRevision: revID,
+		Concurrency:      map[string]int{"poster": 1},
+		Author:           "admin",
+		Reason:           "lower poster limit",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Running reservations are preserved by the lowering.
+	st := NewStore(db)
+	active, err := st.ListActiveReservations(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != 2 {
+		t.Fatalf("active reservations=%d want 2 preserved", len(active))
+	}
+
+	// New admission for poster is now blocked (2 active >= limit 1).
+	blocker, err := CheckTypeConcurrency(ctx, db, "poster", svc.CurrentPolicy(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if blocker == nil {
+		t.Fatal("poster admission should be blocked after lowering limit")
+	}
+}
+
+func TestSchedulerServiceControlPause(t *testing.T) {
+	base := PolicyDefaults()
+	svc, db, _ := newRuntimeOverrideService(t, base)
+	ctx := context.Background()
+
+	res, err := svc.Control(ctx, "poster", "pause", -1, "admin", "maintenance")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.State != "paused" {
+		t.Fatalf("state=%q want paused", res.State)
+	}
+	if res.Actor != "admin" || res.Reason != "maintenance" {
+		t.Fatalf("result=%+v", res)
+	}
+	// Paused admits no new work.
+	blockers, err := CheckAllBudgets(ctx, db, "poster", svc.CurrentPolicy(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blockers) == 0 {
+		t.Fatal("paused type must block admission")
+	}
+	// Repeated pause is idempotent and does not bump the control revision.
+	again, err := svc.Control(ctx, "poster", "pause", res.Revision, "admin", "again")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.State != "paused" || again.Revision != res.Revision {
+		t.Fatalf("repeat=%+v want state=paused revision=%d", again, res.Revision)
+	}
+}
+
+func TestSchedulerServiceControlResume(t *testing.T) {
+	base := PolicyDefaults()
+	svc, db, _ := newRuntimeOverrideService(t, base)
+	ctx := context.Background()
+	if _, err := svc.Control(ctx, "poster", "pause", -1, "admin", "pause"); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := svc.Control(ctx, "poster", "resume", -1, "admin", "resume")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.State != "running" {
+		t.Fatalf("state=%q want running", res.State)
+	}
+	blockers, err := CheckAllBudgets(ctx, db, "poster", svc.CurrentPolicy(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blockers) != 0 {
+		t.Fatalf("resumed type should admit, blockers=%v", blockers)
+	}
+	// Repeated resume is idempotent.
+	again, err := svc.Control(ctx, "poster", "resume", res.Revision, "admin", "again")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Revision != res.Revision {
+		t.Fatalf("idempotent resume changed revision %d -> %d", res.Revision, again.Revision)
+	}
+}
+
+func TestSchedulerServiceControlDrainConverges(t *testing.T) {
+	base := PolicyDefaults()
+	svc, db, _ := newRuntimeOverrideService(t, base)
+	ctx := context.Background()
+	insertServiceReservation(t, db, "owner/run-1", "poster")
+
+	res, err := svc.Control(ctx, "poster", "drain", -1, "admin", "drain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.State != "draining" {
+		t.Fatalf("state=%q want draining", res.State)
+	}
+	if res.LiveReservations != 1 {
+		t.Fatalf("live_reservations=%d want 1", res.LiveReservations)
+	}
+	if res.Drained {
+		t.Fatal("drained must be false while live reservations remain")
+	}
+	// Draining admits no new work.
+	blockers, err := CheckAllBudgets(ctx, db, "poster", svc.CurrentPolicy(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blockers) == 0 {
+		t.Fatal("draining type must block admission")
+	}
+
+	// Release the running reservation; repeated drain converges to paused.
+	st := NewStore(db)
+	if err := st.ReleaseReservation(ctx, "owner/run-1", "complete", "owner"); err != nil {
+		t.Fatal(err)
+	}
+	conv, err := svc.Control(ctx, "poster", "drain", res.Revision, "admin", "converge")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conv.State != "paused" {
+		t.Fatalf("state=%q want paused after convergence", conv.State)
+	}
+	if conv.LiveReservations != 0 {
+		t.Fatalf("live_reservations=%d want 0", conv.LiveReservations)
+	}
+	if !conv.Drained {
+		t.Fatal("drained must be true when converged")
+	}
+}
+
+func TestSchedulerServiceControlDrainDurableAcrossRestart(t *testing.T) {
+	base := PolicyDefaults()
+	svc, db, _ := newRuntimeOverrideService(t, base)
+	ctx := context.Background()
+	insertServiceReservation(t, db, "owner/run-1", "poster")
+	if _, err := svc.Control(ctx, "poster", "drain", -1, "admin", "drain"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Restart: admission still reads the durable control state from the DB.
+	fresh := NewService(db)
+	fresh.SetBasePolicy(base)
+	fresh.SetPolicy(base)
+	blockers, err := CheckAllBudgets(ctx, db, "poster", fresh.CurrentPolicy(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blockers) == 0 {
+		t.Fatal("drain must survive restart and keep blocking admission")
+	}
+	st := NewStore(db)
+	cs, err := st.GetControlState(ctx, "poster")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cs.State != "draining" {
+		t.Fatalf("control state=%q want draining", cs.State)
+	}
+}
+
+func TestSchedulerServiceControlRevisionConflict(t *testing.T) {
+	base := PolicyDefaults()
+	svc, _, _ := newRuntimeOverrideService(t, base)
+	ctx := context.Background()
+	res, err := svc.Control(ctx, "poster", "pause", -1, "admin", "pause")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = svc.Control(ctx, "poster", "resume", res.Revision+5, "admin", "stale")
+	var cc ControlConflictError
+	if !errors.As(err, &cc) {
+		t.Fatalf("err=%v want ControlConflictError", err)
+	}
+	if cc.Current != res.Revision {
+		t.Fatalf("conflict current=%d want %d", cc.Current, res.Revision)
 	}
 }

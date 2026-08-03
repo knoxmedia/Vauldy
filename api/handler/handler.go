@@ -31,6 +31,7 @@ import (
 	"knox-media/internal/subtitle"
 	"knox-media/internal/transcode"
 	"knox-media/internal/upload"
+	taskscheduler "knox-media/internal/scheduler"
 )
 
 type ScanCoordinator interface {
@@ -68,6 +69,7 @@ type Dependencies struct {
 	DerivedStore            *storage.DerivedAssetStore
 	PublicationPlanner      *publication.Planner
 	PublicationCapabilities coreiface.CapabilityRegistry
+	SchedulerAdmin          *taskscheduler.Service
 }
 
 type Handler struct {
@@ -92,6 +94,7 @@ type Handler struct {
 	DerivedStore            *storage.DerivedAssetStore
 	PublicationPlanner      *publication.Planner
 	PublicationCapabilities coreiface.CapabilityRegistry
+	SchedulerAdmin          *taskscheduler.Service
 	Queue                   *postingest.Queue
 	PostIngestEnqueuer      PostIngestEnqueuer
 	Dispatcher              *postingest.Dispatcher
@@ -121,7 +124,8 @@ func New(a *app.App, deps Dependencies) *Handler {
 		PhotoClassifyWorker: deps.PhotoClassifyWorker, DocCoverWorker: deps.DocCoverWorker, KeyVault: deps.KeyVault,
 		AssetEncryptor: deps.AssetEncryptor, DerivedStore: deps.DerivedStore, PublicationPlanner: deps.PublicationPlanner, PublicationCapabilities: deps.PublicationCapabilities, Queue: deps.Queue,
 		PostIngestEnqueuer: deps.PostIngest, Dispatcher: deps.Dispatcher, AdminOverviewBuilder: deps.AdminOverviewBuilder, ScanCoordinator: deps.Coordinator,
-		runningScans: map[int64]scanRuntime{}, Background: deps.Background, ServerContext: deps.ServerContext,
+		SchedulerAdmin: deps.SchedulerAdmin,
+		runningScans:   map[int64]scanRuntime{}, Background: deps.Background, ServerContext: deps.ServerContext,
 	}
 	if deps.ServerContext != nil && deps.Background != nil {
 		h.libraryPreviewScheduler = newLibraryPreviewScheduler(deps.ServerContext, deps.Background, libraryPreviewMaxConcurrent, libraryPreviewMaxPending, h.runLibraryPreviewRefresh)

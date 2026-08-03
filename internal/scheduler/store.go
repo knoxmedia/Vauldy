@@ -127,6 +127,80 @@ func (s *Store) ActivatePolicyRevision(ctx context.Context, revisionID int64, ex
 	return tx.Commit()
 }
 
+// ApplyPolicyRevisionParams carries all inputs for one atomic policy apply.
+type ApplyPolicyRevisionParams struct {
+	SchemaVersion    int
+	ParentRevisionID *int64
+	PolicyJSON       string
+	Author           string
+	Reason           string
+	ValidationHash   string
+	ExpectedRevision int64 // -1 means no active revision may exist
+	AuditEventType   string
+	AuditDetailJSON  string
+}
+
+// ApplyPolicyRevision atomically creates a new policy revision, deactivates
+// the current active revision, activates the new one, and records an audit
+// entry in a single transaction. expectedRevision is the id of the currently
+// active revision (or -1 when none may be active); any mismatch returns a
+// RevisionConflictError and nothing is written.
+func (s *Store) ApplyPolicyRevision(ctx context.Context, p ApplyPolicyRevisionParams) (*PolicyRevision, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("apply policy revision: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var currentActive sql.NullInt64
+	if err := tx.QueryRowContext(ctx,
+		`SELECT id FROM scheduler_policy_revision WHERE is_active=1`).Scan(&currentActive); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("apply policy revision: query active: %w", err)
+	}
+	current := int64(0)
+	if currentActive.Valid {
+		current = currentActive.Int64
+	}
+	if p.ExpectedRevision == -1 {
+		if currentActive.Valid {
+			return nil, RevisionConflictError{Expected: p.ExpectedRevision, Current: current}
+		}
+	} else if !currentActive.Valid || currentActive.Int64 != p.ExpectedRevision {
+		return nil, RevisionConflictError{Expected: p.ExpectedRevision, Current: current}
+	}
+
+	var parentID interface{}
+	if p.ParentRevisionID != nil {
+		parentID = *p.ParentRevisionID
+	}
+	result, err := tx.ExecContext(ctx,
+		`INSERT INTO scheduler_policy_revision(schema_version,parent_revision_id,policy_json,author,reason,validation_hash) VALUES(?,?,?,?,?,?)`,
+		p.SchemaVersion, parentID, p.PolicyJSON, p.Author, p.Reason, p.ValidationHash)
+	if err != nil {
+		return nil, fmt.Errorf("apply policy revision: create: %w", err)
+	}
+	newID, err := result.LastInsertId()
+	if err != nil {
+		return nil, fmt.Errorf("apply policy revision: last insert id: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE scheduler_policy_revision SET is_active=0 WHERE is_active=1`); err != nil {
+		return nil, fmt.Errorf("apply policy revision: deactivate current: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE scheduler_policy_revision SET is_active=1, activated_at=CURRENT_TIMESTAMP WHERE id=?`, newID); err != nil {
+		return nil, fmt.Errorf("apply policy revision: activate: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO scheduler_audit(event_type,actor,detail_json) VALUES(?,?,?)`,
+		p.AuditEventType, p.Author, p.AuditDetailJSON); err != nil {
+		return nil, fmt.Errorf("apply policy revision: audit: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("apply policy revision: commit: %w", err)
+	}
+	return s.GetPolicyRevision(ctx, newID)
+}
+
 // GetActivePolicyRevision returns the currently active policy revision.
 func (s *Store) GetActivePolicyRevision(ctx context.Context) (*PolicyRevision, error) {
 	return scanPolicyRevision(s.db.QueryRowContext(ctx,

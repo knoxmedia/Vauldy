@@ -1,6 +1,9 @@
 package scheduler
 
-import "fmt"
+import (
+	"fmt"
+	"maps"
+)
 
 // Policy holds the validated, effective scheduler configuration.
 // It merges compiled defaults, YAML configuration, and optional database overrides.
@@ -21,6 +24,25 @@ type Policy struct {
 	RunNowTTLSec int
 	// Provenance tracks the source of each value: "default", "yaml", or "override".
 	Provenance map[string]string
+	// YAMLConcurrency records the concurrency values supplied by YAML so a
+	// cleared database override can fall back to the YAML value instead of the
+	// compiled default.
+	YAMLConcurrency map[string]int
+	// Overrides records the active database override concurrency values. A key
+	// present here wins over YAML and compiled defaults.
+	Overrides map[string]int
+}
+
+// clone returns a deep copy of the policy's mutable maps.
+func (p Policy) clone() Policy {
+	cp := p
+	cp.TypeConcurrency = maps.Clone(p.TypeConcurrency)
+	cp.ResourceCapacity = maps.Clone(p.ResourceCapacity)
+	cp.ProviderCapacity = maps.Clone(p.ProviderCapacity)
+	cp.Provenance = maps.Clone(p.Provenance)
+	cp.YAMLConcurrency = maps.Clone(p.YAMLConcurrency)
+	cp.Overrides = maps.Clone(p.Overrides)
+	return cp
 }
 
 // PolicyDefaults returns a Policy populated entirely from compiled defaults.
@@ -53,10 +75,14 @@ func (p *Policy) MergeYAML(cfg SchedulerYAMLConfig) {
 	if p.Provenance == nil {
 		p.Provenance = make(map[string]string)
 	}
+	if p.YAMLConcurrency == nil {
+		p.YAMLConcurrency = make(map[string]int)
+	}
 	// Type concurrency overrides.
 	if cfg.TypeConcurrency != nil {
 		for typ, n := range cfg.TypeConcurrency {
 			p.TypeConcurrency[typ] = n
+			p.YAMLConcurrency[typ] = n
 			p.Provenance["concurrency."+typ] = "yaml"
 		}
 	}
@@ -111,10 +137,36 @@ func (p *Policy) MergeOverrides(overrides map[string]int) {
 	if p.Provenance == nil {
 		p.Provenance = make(map[string]string)
 	}
+	if p.Overrides == nil {
+		p.Overrides = make(map[string]int)
+	}
 	for key, val := range overrides {
 		p.TypeConcurrency[key] = val
+		p.Overrides[key] = val
 		p.Provenance["concurrency."+key] = "override"
 	}
+}
+
+// ClearOverride removes a database override for taskType. The effective value
+// falls back to the YAML value when one was supplied, otherwise to the compiled
+// default.
+func (p *Policy) ClearOverride(taskType string) {
+	if p.Overrides == nil {
+		p.Overrides = make(map[string]int)
+	}
+	delete(p.Overrides, taskType)
+	if yamlVal, ok := p.YAMLConcurrency[taskType]; ok {
+		p.TypeConcurrency[taskType] = yamlVal
+		p.Provenance["concurrency."+taskType] = "yaml"
+		return
+	}
+	if def, ok := DefaultConcurrency(taskType); ok {
+		p.TypeConcurrency[taskType] = def
+		p.Provenance["concurrency."+taskType] = "default"
+		return
+	}
+	delete(p.TypeConcurrency, taskType)
+	delete(p.Provenance, "concurrency."+taskType)
 }
 
 // Validate checks the complete effective policy for correctness.

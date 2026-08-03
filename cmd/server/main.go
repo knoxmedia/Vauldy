@@ -303,6 +303,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("scheduler policy: %v", err)
 	}
+	// The YAML-effective policy is the base layer that persisted runtime
+	// overrides are applied on top of at reload.
+	schedulerService.SetBasePolicy(*schedulerPolicy)
 	if err := activateSchedulerPolicy(serverCtx, db, schedulerPolicy); err != nil {
 		log.Fatalf("activate scheduler policy: %v", err)
 	}
@@ -496,6 +499,7 @@ func main() {
 		Instant: instantScheduler, SessionManager: sessionMgr, AtrackWorker: atrackWorker, KeyframeWorker: keyframeWorker,
 		LyricWorker: lyricWorker, PhotoClassifyWorker: photoClassifyWorker, DocCoverWorker: docCoverWorker,
 		KeyVault: keyVault, AssetEncryptor: assetEnc, DerivedStore: derivedStore, PublicationPlanner: publicationPlanner, PublicationCapabilities: publicationCapabilities,
+		SchedulerAdmin: schedulerService,
 	}
 
 	// (6) 注入依赖并创建 HTTP API 路由引擎。

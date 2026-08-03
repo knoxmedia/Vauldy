@@ -395,6 +395,12 @@ func NewEngine(cfg *config.Config, application *app.App, deps handler.Dependenci
 			adm.DELETE("/admin/users/:id", h.DeleteUserAdmin)
 			adm.POST("/admin/users/:id/reset-password", h.ResetUserPasswordAdmin)
 
+			// --- Scheduler runtime overrides and controls ---
+			adm.GET("/admin/scheduler/policy", h.SchedulerAdminGetPolicy)
+			adm.PUT("/admin/scheduler/policy", h.SchedulerAdminPutPolicy)
+			adm.PATCH("/admin/scheduler/policy", h.SchedulerAdminPatchPolicy)
+			adm.POST("/admin/scheduler/control", h.SchedulerAdminControl)
+
 			// --- Enterprise modules (commercial) ---
 			// Register routes from enterprise modules (e.g., license status).
 			// The community build leaves EnterpriseModules empty, so this is a no-op.

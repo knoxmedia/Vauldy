@@ -273,3 +273,50 @@ func TestSchedulerYAMLConfigPointerPresence(t *testing.T) {
 		t.Fatal("pointer should be set to 60")
 	}
 }
+
+func TestPolicyRuntimeOverrideClearFallsBackToYAML(t *testing.T) {
+	p := PolicyDefaults()
+	p.MergeYAML(SchedulerYAMLConfig{TypeConcurrency: map[string]int{"poster": 5}})
+	p.MergeOverrides(map[string]int{"poster": 2})
+	if p.TypeConcurrency["poster"] != 2 {
+		t.Fatalf("poster=%d want 2", p.TypeConcurrency["poster"])
+	}
+	if p.Provenance["concurrency.poster"] != "override" {
+		t.Fatalf("provenance=%q want override", p.Provenance["concurrency.poster"])
+	}
+	p.ClearOverride("poster")
+	if p.TypeConcurrency["poster"] != 5 {
+		t.Fatalf("poster=%d want 5 (YAML fallback)", p.TypeConcurrency["poster"])
+	}
+	if p.Provenance["concurrency.poster"] != "yaml" {
+		t.Fatalf("provenance=%q want yaml", p.Provenance["concurrency.poster"])
+	}
+}
+
+func TestPolicyRuntimeOverrideClearFallsBackToDefault(t *testing.T) {
+	p := PolicyDefaults()
+	p.MergeOverrides(map[string]int{"poster": 7})
+	p.ClearOverride("poster")
+	def, _ := DefaultConcurrency("poster")
+	if p.TypeConcurrency["poster"] != def {
+		t.Fatalf("poster=%d want default %d", p.TypeConcurrency["poster"], def)
+	}
+	if p.Provenance["concurrency.poster"] != "default" {
+		t.Fatalf("provenance=%q want default", p.Provenance["concurrency.poster"])
+	}
+}
+
+func TestPolicyRuntimeOverrideTracksLayerInputs(t *testing.T) {
+	p := PolicyDefaults()
+	p.MergeYAML(SchedulerYAMLConfig{TypeConcurrency: map[string]int{"ingest": 7, "poster": 5}})
+	p.MergeOverrides(map[string]int{"ingest": 10})
+	if p.YAMLConcurrency["ingest"] != 7 || p.YAMLConcurrency["poster"] != 5 {
+		t.Fatalf("YAML layer=%v", p.YAMLConcurrency)
+	}
+	if p.Overrides["ingest"] != 10 {
+		t.Fatalf("override layer=%v", p.Overrides)
+	}
+	if _, ok := p.Overrides["poster"]; ok {
+		t.Fatalf("poster must not be in override layer: %v", p.Overrides)
+	}
+}
