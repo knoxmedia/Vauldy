@@ -15,6 +15,7 @@ import (
 	"knox-media/internal/keyframe"
 	"knox-media/internal/preview"
 	"knox-media/internal/publication"
+	"knox-media/internal/scheduler"
 	"knox-media/internal/storage"
 	"knox-media/internal/store"
 	"knox-media/internal/subtitle"
@@ -32,6 +33,17 @@ var encryptionCommitFileSHA256 = fileSHA256
 
 type Adapter interface {
 	Execute(context.Context, Task) error
+}
+
+// SchedulerProfile returns the scheduler Descriptor for the given task type,
+// or an error if the type is not supported by this adapter set.
+func (s AdapterSet) SchedulerProfile(taskType TaskType) (scheduler.Descriptor, error) {
+	name := string(taskType)
+	desc, ok := scheduler.Registry[name]
+	if !ok {
+		return scheduler.Descriptor{}, fmt.Errorf("no scheduler profile for task type %q", taskType)
+	}
+	return desc, nil
 }
 
 type AdapterSet struct {
