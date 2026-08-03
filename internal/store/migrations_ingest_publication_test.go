@@ -57,6 +57,9 @@ INSERT INTO post_ingest_task(id,media_id,scan_task_id,task_type,status) VALUES(3
 	if err != nil {
 		t.Fatalf("create legacy schema: %v", err)
 	}
+	if err := migrateIngestEntry(context.Background(), db); err != nil {
+		t.Fatalf("create entry schema: %v", err)
+	}
 	return db
 }
 
@@ -3035,5 +3038,107 @@ func TestMigrationSlowCommitDoesNotConsumeCleanupTimeout(t *testing.T) {
 	})
 	if err := migrateIngestPublication(context.Background(), db); err != nil {
 		t.Fatalf("slow COMMIT must not expire post-commit cleanup: %v", err)
+	}
+}
+
+func TestMigrateIngestPublicationAcceptsEntryReasons(t *testing.T) {
+	db, err := OpenSQLite(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err = db.Exec(`INSERT INTO library(id,name,type,path) VALUES(910,'l','movie','/l'); INSERT INTO media(id,library_id,file_id) VALUES(911,910,'f'); INSERT INTO ingest_item(id,submission_key,source,library_id,canonical_path,path_key,state,lease_owner,lease_until) VALUES(912,'s','upload',910,'/l/f','/l/f','running','worker','2099-01-01')`); err != nil {
+		t.Fatal(err)
+	}
+	for i, reason := range []string{"event", "upload", "source_replaced"} {
+		if _, err := db.Exec(`INSERT INTO media_ingest_run(media_id,generation,ingest_item_id,reason,status,config_snapshot_json) VALUES(?,?,?,?,?,?)`, 911, i+1, 912, reason, "processing", "{}"); err != nil {
+			t.Fatalf("reason %s: %v", reason, err)
+		}
+	}
+}
+
+func TestMigrateIngestPublicationUpgradesExactPhase1RunPreservingData(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if err := migrateIngestPublicationV1(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,error_message) VALUES(940,20,1,'repair','processing','{"phase":1}','keep')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migratePublicationV2(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	var reason, message string
+	var linkage sql.NullInt64
+	if err := db.QueryRow(`SELECT reason,error_message,ingest_item_id FROM media_ingest_run WHERE id=940`).Scan(&reason, &message, &linkage); err != nil {
+		t.Fatal(err)
+	}
+	if reason != "repair" || message != "keep" || linkage.Valid {
+		t.Fatalf("upgrade changed run reason=%q error=%q link=%v", reason, message, linkage)
+	}
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := exactPublicationTable(context.Background(), conn, "media_ingest_run", canonicalMediaIngestRunV2Schema()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMigrateIngestPublicationRebuildPreservesIngestItemLinkage(t *testing.T) {
+	db, err := OpenSQLite(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err = db.Exec(`INSERT INTO library(id,name,type,path) VALUES(950,'l','movie','/l'); INSERT INTO media(id,library_id,file_id) VALUES(951,950,'rebuild'); INSERT INTO ingest_item(id,submission_key,source,library_id,canonical_path,path_key,state) VALUES(952,'rebuild','upload',950,'/l/f','/l/f','done'); INSERT INTO media_ingest_run(id,media_id,generation,ingest_item_id,reason,status,config_snapshot_json) VALUES(953,951,1,952,'upload','published','{}')`); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err = conn.ExecContext(context.Background(), `PRAGMA foreign_keys=OFF`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = conn.ExecContext(context.Background(), `BEGIN IMMEDIATE`); err != nil {
+		t.Fatal(err)
+	}
+	graph, err := backupPublicationGraph(context.Background(), conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = dropPublicationGraph(context.Background(), conn, graph); err != nil {
+		t.Fatal(err)
+	}
+	if err = createPublicationParents(context.Background(), conn, graph); err != nil {
+		t.Fatal(err)
+	}
+	if err = createPublicationChildren(context.Background(), conn, graph); err != nil {
+		t.Fatal(err)
+	}
+	if err = restorePublicationIndexes(context.Background(), conn, graph); err != nil {
+		t.Fatal(err)
+	}
+	if err = copyPublicationGraph(context.Background(), conn, graph); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = conn.ExecContext(context.Background(), `COMMIT`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = conn.ExecContext(context.Background(), `PRAGMA foreign_keys=ON`); err != nil {
+		t.Fatal(err)
+	}
+	var link sql.NullInt64
+	if err := conn.QueryRowContext(context.Background(), `SELECT ingest_item_id FROM media_ingest_run WHERE id=953`).Scan(&link); err != nil || !link.Valid || link.Int64 != 952 {
+		t.Fatalf("rebuild link=%v err=%v", link, err)
+	}
+	if _, err := conn.ExecContext(context.Background(), `DELETE FROM ingest_item WHERE id=952`); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.QueryRowContext(context.Background(), `SELECT ingest_item_id FROM media_ingest_run WHERE id=953`).Scan(&link); err != nil || link.Valid {
+		t.Fatalf("post-delete link=%v err=%v", link, err)
 	}
 }

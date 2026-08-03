@@ -5,9 +5,12 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -704,5 +707,430 @@ func TestEnsureLibraryProcessingColumnAlterFailureRecheck(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestSQLiteStartupLockIdentityAliases(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "Alias.sqlite")
+	absolute, err := filepath.Abs(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := sqliteStartupLockIdentity(filepath.Join(filepath.Dir(base), ".", filepath.Base(base))), sqliteStartupLockIdentity(absolute); got != want {
+		t.Fatalf("clean alias %q != %q", got, want)
+	}
+	if runtime.GOOS == "windows" {
+		lower := strings.ToLower(absolute)
+		upper := strings.ToUpper(absolute)
+		if sqliteStartupLockIdentity(lower) != sqliteStartupLockIdentity(upper) {
+			t.Fatal("Windows case aliases use different startup locks")
+		}
+	}
+}
+
+func TestSQLiteStartupLocksDifferentDatabasesIndependently(t *testing.T) {
+	a := filepath.Join(t.TempDir(), "a.sqlite")
+	b := filepath.Join(t.TempDir(), "b.sqlite")
+	releaseA, err := acquireSQLiteStartupLock(context.Background(), a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer releaseA()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	releaseB, err := acquireSQLiteStartupLock(ctx, b)
+	if err != nil {
+		t.Fatalf("different database blocked: %v", err)
+	}
+	releaseB()
+}
+
+func TestSQLiteStartupLockWaiterHonorsContextAndCleansUp(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "same.sqlite")
+	release, err := acquireSQLiteStartupLock(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { _, err := acquireSQLiteStartupLock(ctx, path); result <- err }()
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("wait error=%v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("canceled startup waiter did not return promptly")
+	}
+	release()
+	if got := sqliteStartupLockEntryCount(); got != 0 {
+		t.Fatalf("startup lock entries leaked: %d", got)
+	}
+}
+
+func TestSQLiteStartupLockSamePathSerializes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "same.sqlite")
+	release, err := acquireSQLiteStartupLock(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acquired := make(chan func(), 1)
+	go func() {
+		r, err := acquireSQLiteStartupLock(context.Background(), path)
+		if err == nil {
+			acquired <- r
+		}
+	}()
+	select {
+	case r := <-acquired:
+		r()
+		t.Fatal("same path did not serialize")
+	case <-time.After(50 * time.Millisecond):
+	}
+	release()
+	select {
+	case r := <-acquired:
+		r()
+	case <-time.After(2 * time.Second):
+		t.Fatal("same-path waiter never acquired")
+	}
+	if got := sqliteStartupLockEntryCount(); got != 0 {
+		t.Fatalf("startup lock entries leaked: %d", got)
+	}
+}
+
+func TestOpenSQLiteDifferentDatabaseNotBlockedBySlowStartup(t *testing.T) {
+	a := filepath.Join(t.TempDir(), "a.sqlite")
+	b := filepath.Join(t.TempDir(), "b.sqlite")
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	old := sqliteStartupLockAcquiredHook
+	sqliteStartupLockAcquiredHook = func(ctx context.Context, path string) error {
+		if sqliteStartupLockIdentity(path) == sqliteStartupLockIdentity(a) {
+			select {
+			case <-entered:
+			default:
+				close(entered)
+			}
+			select {
+			case <-release:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		return nil
+	}
+	t.Cleanup(func() { sqliteStartupLockAcquiredHook = old })
+	aDone := make(chan error, 1)
+	go func() {
+		db, err := OpenSQLiteContext(context.Background(), a)
+		if db != nil {
+			db.Close()
+		}
+		aDone <- err
+	}()
+	<-entered
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	dbB, err := OpenSQLiteContext(ctx, b)
+	if err != nil {
+		close(release)
+		t.Fatalf("database B blocked by A: %v", err)
+	}
+	dbB.Close()
+	close(release)
+	if err := <-aDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenSQLiteSameDatabaseWaiterCancellationBeforeStartup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "same.sqlite")
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var hookCalls int
+	var hookMu sync.Mutex
+	old := sqliteStartupLockAcquiredHook
+	sqliteStartupLockAcquiredHook = func(ctx context.Context, got string) error {
+		hookMu.Lock()
+		hookCalls++
+		call := hookCalls
+		hookMu.Unlock()
+		if call == 1 {
+			close(entered)
+			select {
+			case <-release:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		return nil
+	}
+	t.Cleanup(func() { sqliteStartupLockAcquiredHook = old })
+	firstDone := make(chan error, 1)
+	go func() {
+		db, err := OpenSQLiteContext(context.Background(), path)
+		if db != nil {
+			db.Close()
+		}
+		firstDone <- err
+	}()
+	<-entered
+	ctx, cancel := context.WithCancel(context.Background())
+	waitDone := make(chan error, 1)
+	go func() {
+		db, err := OpenSQLiteContext(ctx, path)
+		if db != nil {
+			db.Close()
+		}
+		waitDone <- err
+	}()
+	cancel()
+	select {
+	case err := <-waitDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("waiter error=%v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("canceled OpenSQLite waiter did not return")
+	}
+	hookMu.Lock()
+	calls := hookCalls
+	hookMu.Unlock()
+	if calls != 1 {
+		t.Fatalf("canceled waiter entered startup hook: calls=%d", calls)
+	}
+	close(release)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	if got := sqliteStartupLockEntryCount(); got != 0 {
+		t.Fatalf("lock entries leaked: %d", got)
+	}
+}
+
+func TestSQLiteStartupLockIdentityFileURIAliases(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "My Library.sqlite")
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uriPath := filepath.ToSlash(abs)
+	if runtime.GOOS == "windows" && !strings.HasPrefix(uriPath, "/") {
+		uriPath = "/" + uriPath
+	}
+	escaped := (&url.URL{Scheme: "file", Path: uriPath}).String()
+	aliases := []string{
+		abs,
+		"file:" + filepath.ToSlash(abs) + "?mode=rwc",
+		escaped + "?cache=private&mode=rwc",
+		escaped + "?mode=rwc&cache=shared&_pragma=busy_timeout%2830000%29",
+	}
+	want := sqliteStartupLockIdentity(abs)
+	for _, alias := range aliases {
+		if got := sqliteStartupLockIdentity(alias); got != want {
+			t.Errorf("identity(%q)=%q want %q", alias, got, want)
+		}
+	}
+}
+
+func TestSQLiteStartupLockIdentityRelativeFileURI(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := "relative-startup-identity.sqlite"
+	want := sqliteStartupLockIdentity(filepath.Join(cwd, name))
+	for _, alias := range []string{name, "file:" + name + "?mode=rwc", "file:" + name + "?cache=private&mode=rwc"} {
+		if got := sqliteStartupLockIdentity(alias); got != want {
+			t.Errorf("identity(%q)=%q want %q", alias, got, want)
+		}
+	}
+}
+
+func TestSQLiteStartupLockIdentityMemoryPolicy(t *testing.T) {
+	unnamed1 := sqliteStartupLockIdentity(":memory:")
+	unnamed2 := sqliteStartupLockIdentity(":memory:")
+	if unnamed1 == unnamed2 {
+		t.Fatal("connection-local :memory: opens share startup lock")
+	}
+	a := sqliteStartupLockIdentity("file:queue?mode=memory&cache=shared")
+	a2 := sqliteStartupLockIdentity("file:queue?cache=private&mode=memory")
+	b := sqliteStartupLockIdentity("file:other?mode=memory&cache=shared")
+	if a != a2 {
+		t.Fatalf("equivalent named memory identities differ: %q %q", a, a2)
+	}
+	if a == b {
+		t.Fatal("different named memory databases share identity")
+	}
+}
+
+func TestOpenSQLiteNativeHolderBlocksEquivalentURIWaiter(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "alias.sqlite")
+	uri := "file:" + filepath.ToSlash(path) + "?cache=private&mode=rwc"
+	release, err := acquireSQLiteStartupLock(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	wait := make(chan error, 1)
+	go func() { _, err := acquireSQLiteStartupLock(ctx, uri); wait <- err }()
+	cancel()
+	select {
+	case err := <-wait:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("alias waiter error=%v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("URI alias bypassed or ignored cancellation")
+	}
+	release()
+}
+
+func TestSQLiteStartupLockCancellationConcurrentWithRelease(t *testing.T) {
+	for i := 0; i < 100; i++ {
+		path := filepath.Join(t.TempDir(), fmt.Sprintf("race-%d.sqlite", i))
+		holder, err := acquireSQLiteStartupLock(context.Background(), path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		gateReached := make(chan struct{})
+		continueCheck := make(chan struct{})
+		oldGate := sqliteStartupGateAcquiredHook
+		sqliteStartupGateAcquiredHook = func(got context.Context, key string) {
+			if got == ctx {
+				close(gateReached)
+				<-continueCheck
+			}
+		}
+		result := make(chan error, 1)
+		go func() {
+			release, err := acquireSQLiteStartupLock(ctx, path)
+			if release != nil {
+				release()
+			}
+			result <- err
+		}()
+		holder()
+		<-gateReached
+		cancel()
+		close(continueCheck)
+		err = <-result
+		sqliteStartupGateAcquiredHook = oldGate
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("iteration %d error=%v", i, err)
+		}
+		if got := sqliteStartupLockEntryCount(); got != 0 {
+			t.Fatalf("iteration %d lock entries=%d", i, got)
+		}
+	}
+}
+
+func TestOpenSQLiteCanceledAfterGateNeverRunsStartupHook(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "race.sqlite")
+	holder, err := acquireSQLiteStartupLock(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	gateReached := make(chan struct{})
+	continueCheck := make(chan struct{})
+	oldGate, oldStartup := sqliteStartupGateAcquiredHook, sqliteStartupLockAcquiredHook
+	sqliteStartupGateAcquiredHook = func(got context.Context, key string) {
+		if got == ctx {
+			close(gateReached)
+			<-continueCheck
+		}
+	}
+	var startupCalls int
+	sqliteStartupLockAcquiredHook = func(context.Context, string) error { startupCalls++; return nil }
+	t.Cleanup(func() { sqliteStartupGateAcquiredHook = oldGate; sqliteStartupLockAcquiredHook = oldStartup })
+	done := make(chan error, 1)
+	go func() {
+		db, err := OpenSQLiteContext(ctx, path)
+		if db != nil {
+			db.Close()
+		}
+		done <- err
+	}()
+	holder()
+	<-gateReached
+	cancel()
+	close(continueCheck)
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("error=%v", err)
+	}
+	if startupCalls != 0 {
+		t.Fatalf("startup hook ran %d times", startupCalls)
+	}
+	if got := sqliteStartupLockEntryCount(); got != 0 {
+		t.Fatalf("lock entries leaked: %d", got)
+	}
+}
+
+func TestOpenSQLiteNativeHolderBlocksEquivalentURIStartup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "integrated-alias.sqlite")
+	uri := "file:" + filepath.ToSlash(path) + "?cache=private&mode=rwc"
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	old := sqliteStartupLockAcquiredHook
+	sqliteStartupLockAcquiredHook = func(ctx context.Context, got string) error {
+		if got == path {
+			close(entered)
+			select {
+			case <-release:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		return nil
+	}
+	t.Cleanup(func() { sqliteStartupLockAcquiredHook = old })
+	first := make(chan error, 1)
+	go func() {
+		db, err := OpenSQLiteContext(context.Background(), path)
+		if db != nil {
+			db.Close()
+		}
+		first <- err
+	}()
+	<-entered
+	ctx, cancel := context.WithCancel(context.Background())
+	wait := make(chan error, 1)
+	go func() {
+		db, err := OpenSQLiteContext(ctx, uri)
+		if db != nil {
+			db.Close()
+		}
+		wait <- err
+	}()
+	cancel()
+	select {
+	case err := <-wait:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("URI waiter=%v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("URI waiter did not cancel promptly")
+	}
+	close(release)
+	if err := <-first; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSQLiteStartupLockIdentityMalformedURIConservative(t *testing.T) {
+	for _, pair := range [][2]string{
+		{`file:C:/data/media.db?mode=rwc&bad=%zz`, `file:C:/data/media.db?bad=%zz&mode=rwc`},
+		{`file://SERVER/share/media.db?mode=rwc`, `file://server/share/media.db?cache=private`},
+	} {
+		if a, b := sqliteStartupLockIdentity(pair[0]), sqliteStartupLockIdentity(pair[1]); a != b {
+			t.Errorf("obvious malformed/authority aliases differ: %q != %q", a, b)
+		}
 	}
 }

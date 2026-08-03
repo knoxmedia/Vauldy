@@ -5,7 +5,11 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
+	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	_ "modernc.org/sqlite"
 
@@ -267,7 +271,8 @@ CREATE TABLE IF NOT EXISTS media_ingest_run (
     media_id INTEGER NOT NULL,
     generation INTEGER NOT NULL CHECK (generation > 0),
     scan_task_id INTEGER,
-    reason TEXT NOT NULL CHECK (reason IN ('scan','repair','manual_retry')),
+    ingest_item_id INTEGER,
+    reason TEXT NOT NULL CHECK (reason IN ('scan','repair','manual_retry','event','upload','source_replaced')),
     status TEXT NOT NULL CHECK (status IN ('processing','published','degraded','failed','cancelled')),
     preserve_visibility INTEGER NOT NULL DEFAULT 0 CHECK (preserve_visibility IN (0,1)),
     config_snapshot_json TEXT NOT NULL CHECK (json_valid(config_snapshot_json)),
@@ -281,6 +286,7 @@ CREATE TABLE IF NOT EXISTS media_ingest_run (
     superseded_at TIMESTAMP,
     FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE,
     FOREIGN KEY (scan_task_id) REFERENCES scan_task(id) ON DELETE SET NULL,
+    FOREIGN KEY (ingest_item_id) REFERENCES ingest_item(id) ON DELETE SET NULL,
     UNIQUE(media_id,generation),
     UNIQUE(id,media_id,generation)
 );
@@ -982,9 +988,148 @@ WHERE status='failed'
 	return err
 }
 
+type sqliteStartupLockEntry struct {
+	gate chan struct{}
+	refs int
+}
+
+var sqliteStartupLocks = struct {
+	sync.Mutex
+	entries map[string]*sqliteStartupLockEntry
+}{entries: make(map[string]*sqliteStartupLockEntry)}
+
+var sqliteStartupPrivateMemorySequence atomic.Uint64
+
+func sqliteStartupLockIdentity(dsn string) string {
+	raw := strings.TrimSpace(dsn)
+	if strings.EqualFold(raw, ":memory:") {
+		// A plain :memory: database belongs to one connection/open. Giving each
+		// open a private key avoids serializing unrelated in-memory bootstraps.
+		return fmt.Sprintf("memory:private:%d", sqliteStartupPrivateMemorySequence.Add(1))
+	}
+	if strings.HasPrefix(strings.ToLower(raw), "file:") {
+		if sqliteURIUsesMemoryMode(raw) {
+			return "memory:named:" + canonicalSQLiteMemoryName(raw)
+		}
+		// For file-backed URIs, SQLite query options configure a connection, not
+		// the physical file. Reuse the diagnostics URI parser so escaped paths,
+		// relative paths, localhost, and UNC authorities resolve consistently.
+		return canonicalSQLiteFileLockKey(normalizeSQLiteIdentityPath(raw))
+	}
+	return canonicalSQLiteFileLockKey(raw)
+}
+
+func sqliteURIUsesMemoryMode(raw string) bool {
+	parts := strings.SplitN(raw, "?", 2)
+	if len(parts) != 2 {
+		return strings.EqualFold(parts[0], "file::memory:")
+	}
+	values, err := url.ParseQuery(parts[1])
+	if err != nil {
+		return strings.EqualFold(parts[0], "file::memory:")
+	}
+	for key, entries := range values {
+		if !strings.EqualFold(key, "mode") {
+			continue
+		}
+		for _, value := range entries {
+			if strings.EqualFold(strings.TrimSpace(value), "memory") {
+				return true
+			}
+		}
+	}
+	return strings.EqualFold(parts[0], "file::memory:")
+}
+
+func canonicalSQLiteMemoryName(raw string) string {
+	name := strings.SplitN(strings.TrimSpace(raw), "?", 2)[0]
+	name = name[len("file:"):]
+	if decoded, err := url.PathUnescape(name); err == nil {
+		name = decoded
+	}
+	name = strings.TrimSpace(name)
+	if runtime.GOOS == "windows" {
+		name = strings.ToLower(strings.ReplaceAll(name, `\`, "/"))
+	}
+	return name
+}
+
+func canonicalSQLiteFileLockKey(path string) string {
+	absolute, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		absolute = filepath.Clean(path)
+	}
+	absolute = filepath.Clean(absolute)
+	if runtime.GOOS == "windows" {
+		absolute = strings.ToLower(filepath.ToSlash(absolute))
+	}
+	return "file:" + absolute
+}
+func acquireSQLiteStartupLock(ctx context.Context, path string) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	key := sqliteStartupLockIdentity(path)
+	sqliteStartupLocks.Lock()
+	entry := sqliteStartupLocks.entries[key]
+	if entry == nil {
+		entry = &sqliteStartupLockEntry{gate: make(chan struct{}, 1)}
+		entry.gate <- struct{}{}
+		sqliteStartupLocks.entries[key] = entry
+	}
+	entry.refs++
+	sqliteStartupLocks.Unlock()
+	select {
+	case <-ctx.Done():
+		sqliteStartupLocks.Lock()
+		entry.refs--
+		if entry.refs == 0 {
+			delete(sqliteStartupLocks.entries, key)
+		}
+		sqliteStartupLocks.Unlock()
+		return nil, ctx.Err()
+	case <-entry.gate:
+	}
+	var once sync.Once
+	release := func() {
+		once.Do(func() {
+			entry.gate <- struct{}{}
+			sqliteStartupLocks.Lock()
+			entry.refs--
+			if entry.refs == 0 {
+				delete(sqliteStartupLocks.entries, key)
+			}
+			sqliteStartupLocks.Unlock()
+		})
+	}
+	sqliteStartupGateAcquiredHook(ctx, key)
+	if err := ctx.Err(); err != nil {
+		release()
+		return nil, err
+	}
+	return release, nil
+}
+
+func sqliteStartupLockEntryCount() int {
+	sqliteStartupLocks.Lock()
+	defer sqliteStartupLocks.Unlock()
+	return len(sqliteStartupLocks.entries)
+}
+
+var sqliteStartupLockAcquiredHook = func(context.Context, string) error { return nil }
+var sqliteStartupGateAcquiredHook = func(context.Context, string) {}
+
 func OpenSQLite(path string) (*sql.DB, error) { return OpenSQLiteContext(context.Background(), path) }
 
 func OpenSQLiteContext(ctx context.Context, path string) (opened *sql.DB, returnErr error) {
+	releaseStartup, err := acquireSQLiteStartupLock(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseStartup()
+	if err := sqliteStartupLockAcquiredHook(ctx, path); err != nil {
+		return nil, err
+	}
 	defer func() {
 		if returnErr != nil && ctx.Err() != nil {
 			if opened != nil {
@@ -1061,6 +1206,10 @@ func OpenSQLiteContext(ctx context.Context, path string) (opened *sql.DB, return
 	if err := ensureEncryptAdminAuditSchema(ctx, db); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("migrate media_encrypt_admin_audit: %w", err)
+	}
+	if err := withStartupBusyRetry(ctx, func() error { return migrateIngestEntry(ctx, db) }); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("ingest entry migration: %w", err)
 	}
 	if err := withStartupBusyRetry(ctx, func() error { return migrateIngestPublication(ctx, db) }); err != nil {
 		_ = db.Close()
@@ -1419,6 +1568,10 @@ func OpenSQLiteContext(ctx context.Context, path string) (opened *sql.DB, return
 		}
 	}
 	if len(enterpriseMigrations) > 0 {
+		if err := withStartupBusyRetry(ctx, func() error { return migrateIngestEntry(ctx, db) }); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("ingest entry migration: %w", err)
+		}
 		if err := withStartupBusyRetry(ctx, func() error { return migrateIngestPublication(ctx, db) }); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("enterprise publication migration: %w", err)

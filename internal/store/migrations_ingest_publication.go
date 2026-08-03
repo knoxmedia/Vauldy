@@ -414,9 +414,12 @@ func validateMediaIngestRunSchema(ctx context.Context, tx *sql.Tx) error {
 	if err != nil {
 		return err
 	}
+	validReason := strings.Contains(normalized, "check(reasonin('scan','repair','manual_retry'))") || strings.Contains(normalized, "check(reasonin('scan','repair','manual_retry','event','upload','source_replaced'))")
+	if !validReason {
+		return fmt.Errorf("required reason constraint missing")
+	}
 	for _, required := range []string{
 		"generationintegernotnullcheck(generation>0)",
-		"check(reasonin('scan','repair','manual_retry'))",
 		"check(statusin('processing','published','degraded','failed','cancelled'))",
 		"check(preserve_visibilityin(0,1))",
 		"check(json_valid(config_snapshot_json))",
@@ -823,17 +826,17 @@ func publicationV2CurrentDB(ctx context.Context, db *sql.DB) (bool, error) {
 	if exactPublicationTable(ctx, conn, "media_encryption_stage_journal", canonicalEncryptionStageJournalSchema) != nil || requirePublicationFKSet(ctx, conn, "media_encryption_stage_journal", "post_ingest_task:task_id:id:restrict", "media_ingest_run:run_id,media_id,generation:id,media_id,generation:cascade", "media_ingest_step:step_id,media_id,generation:id,media_id,generation:cascade") != nil {
 		return false, nil
 	}
-	if err = validatePublicationV2Schema(ctx, conn); err != nil {
-		return false, err
-	}
 	cols, err := publicationColumns(ctx, conn, "media_ingest_run")
 	if err != nil {
 		return false, err
 	}
-	for _, n := range []string{"policy_version", "terminal_reason", "superseded_by_generation", "superseded_at"} {
+	for _, n := range []string{"ingest_item_id", "policy_version", "terminal_reason", "superseded_by_generation", "superseded_at"} {
 		if !cols[n] {
 			return false, nil
 		}
+	}
+	if err = validatePublicationV2Schema(ctx, conn); err != nil {
+		return false, err
 	}
 	if tableExists(ctx, conn, "transcode_task") && !publicationTranscodeSchemaCurrent(ctx, conn) {
 		return false, nil
@@ -966,7 +969,7 @@ func migratePublicationV2(ctx context.Context, db *sql.DB) (err error) {
 			}
 		}
 	}
-	for _, alter := range []string{`ALTER TABLE media_ingest_run ADD COLUMN policy_version INTEGER NOT NULL DEFAULT 1 CHECK(policy_version IN (1,2,3))`, `ALTER TABLE media_ingest_run ADD COLUMN terminal_reason TEXT NOT NULL DEFAULT ''`, `ALTER TABLE media_ingest_run ADD COLUMN superseded_by_generation INTEGER`, `ALTER TABLE media_ingest_run ADD COLUMN superseded_at TIMESTAMP`} {
+	for _, alter := range []string{`ALTER TABLE media_ingest_run ADD COLUMN ingest_item_id INTEGER REFERENCES ingest_item(id) ON DELETE SET NULL`, `ALTER TABLE media_ingest_run ADD COLUMN policy_version INTEGER NOT NULL DEFAULT 1 CHECK(policy_version IN (1,2,3))`, `ALTER TABLE media_ingest_run ADD COLUMN terminal_reason TEXT NOT NULL DEFAULT ''`, `ALTER TABLE media_ingest_run ADD COLUMN superseded_by_generation INTEGER`, `ALTER TABLE media_ingest_run ADD COLUMN superseded_at TIMESTAMP`} {
 		if _, e := conn.ExecContext(ctx, alter); e != nil && !strings.Contains(strings.ToLower(e.Error()), "duplicate column") {
 			return e
 		}
@@ -1376,7 +1379,7 @@ func publicationIdentity(ctx context.Context, q SQLExecutor, table string, count
 		pk = slicesWithout(pk, "priority")
 	}
 	if strings.Contains(table, "media_ingest_run") {
-		for _, c := range []string{"policy_version", "terminal_reason", "superseded_by_generation", "superseded_at"} {
+		for _, c := range []string{"ingest_item_id", "policy_version", "terminal_reason", "superseded_by_generation", "superseded_at"} {
 			cols = slicesWithout(cols, c)
 			pk = slicesWithout(pk, c)
 		}
@@ -3531,12 +3534,15 @@ func validatePublicationParentChildren(ctx context.Context, q SQLExecutor) error
 	return nil
 }
 func canonicalMediaIngestRunV2Schema() string {
-	return strings.Replace(strings.Replace(mediaIngestRunSchema,
+	base := strings.Replace(mediaIngestRunSchema, "reason TEXT NOT NULL CHECK (reason IN ('scan','repair','manual_retry'))", "reason TEXT NOT NULL CHECK (reason IN ('scan','repair','manual_retry','event','upload','source_replaced'))", 1)
+	return strings.Replace(strings.Replace(base,
 		`    FOREIGN KEY (media_id)`,
-		`    policy_version INTEGER NOT NULL DEFAULT 1 CHECK(policy_version IN (1,2,3)),
+		`    ingest_item_id INTEGER,
+    policy_version INTEGER NOT NULL DEFAULT 1 CHECK(policy_version IN (1,2,3)),
     terminal_reason TEXT NOT NULL DEFAULT '',
     superseded_by_generation INTEGER,
     superseded_at TIMESTAMP,
+    FOREIGN KEY (ingest_item_id) REFERENCES ingest_item(id) ON DELETE SET NULL,
     FOREIGN KEY (media_id)`, 1),
 		"CREATE TABLE IF NOT EXISTS", "CREATE TABLE", 1)
 }
@@ -3545,7 +3551,7 @@ func validatePublicationRunV2(ctx context.Context, q SQLExecutor) error {
 	if err := exactPublicationTable(ctx, q, "media_ingest_run", canonicalMediaIngestRunV2Schema()); err != nil {
 		return err
 	}
-	if err := requirePublicationFKSet(ctx, q, "media_ingest_run", "media:media_id:id:cascade", "scan_task:scan_task_id:id:set null"); err != nil {
+	if err := requirePublicationFKSet(ctx, q, "media_ingest_run", "ingest_item:ingest_item_id:id:set null", "media:media_id:id:cascade", "scan_task:scan_task_id:id:set null"); err != nil {
 		return err
 	}
 	for name, ddl := range map[string]string{"idx_media_ingest_run_status_updated": `CREATE INDEX idx_media_ingest_run_status_updated ON media_ingest_run(status,updated_at)`, "idx_media_ingest_run_scan_status": `CREATE INDEX idx_media_ingest_run_scan_status ON media_ingest_run(scan_task_id,status)`} {
