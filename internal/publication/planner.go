@@ -342,7 +342,14 @@ VALUES(?,?,?,?,?,?, ?,?,?)`, plan.mediaID, generation, nullScanTask(plan.scanTas
 		if !queueBacked(step) {
 			continue
 		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO post_ingest_task(media_id,scan_task_id,ingest_run_id,ingest_step_id,generation,task_type,status,max_attempts) VALUES(?,?,?,?,?,?,'waiting',?)`, plan.mediaID, nullScanTask(plan.scanTaskID), runID, stepID, generation, taskType, maxAttempts)
+		sc := SourceClassFromReason(plan.reason, plan.ingestItemID)
+		bp := sc.BasePriority()
+		profile := ResourceProfile{PolicyVersion: CurrentPolicyVersion, LibraryID: plan.policy.libraryID}
+		profileJSON, err := json.Marshal(profile)
+		if err != nil {
+			return Run{}, fmt.Errorf("publication planner: encode resource profile: %w", err)
+		}
+		_, err = tx.ExecContext(ctx, `INSERT INTO post_ingest_task(media_id,scan_task_id,ingest_run_id,ingest_step_id,generation,task_type,status,max_attempts,source_class,base_priority,library_id,resource_profile_version,resource_profile_json) VALUES(?,?,?,?,?,?,'waiting',?,?,?,?,?,?)`, plan.mediaID, nullScanTask(plan.scanTaskID), runID, stepID, generation, taskType, maxAttempts, int(sc), bp, plan.policy.libraryID, CurrentPolicyVersion, string(profileJSON))
 		if err != nil {
 			return Run{}, fmt.Errorf("publication planner: enqueue %s step: %w", step, err)
 		}

@@ -3142,3 +3142,363 @@ func TestMigrateIngestPublicationRebuildPreservesIngestItemLinkage(t *testing.T)
 		t.Fatalf("post-delete link=%v err=%v", link, err)
 	}
 }
+
+// --- Scheduler migration tests ---
+
+func openSchedulerMigrationTestDB(t *testing.T) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err = db.Exec(`PRAGMA foreign_keys=ON`); err != nil {
+		t.Fatal(err)
+	}
+	return db
+}
+
+func TestSchedulerMigrationCreatesCanonicalTables(t *testing.T) {
+	db := openSchedulerMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateSchedulerSchema(ctx, db); err != nil {
+		t.Fatalf("migrateSchedulerSchema: %v", err)
+	}
+	for _, table := range []string{
+		"scheduler_policy_revision",
+		"scheduler_control",
+		"scheduler_fairness",
+		"scheduler_reservation",
+		"scheduler_audit",
+	} {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&count); err != nil {
+			t.Fatalf("check table %s: %v", table, err)
+		}
+		if count != 1 {
+			t.Fatalf("table %s missing: count=%d", table, count)
+		}
+	}
+}
+
+func TestSchedulerMigrationExactPolicyRevisionSchema(t *testing.T) {
+	db := openSchedulerMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateSchedulerSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	expected := map[string]string{
+		"id":                 "INTEGER",
+		"schema_version":     "INTEGER",
+		"parent_revision_id": "INTEGER",
+		"policy_json":        "TEXT",
+		"author":             "TEXT",
+		"reason":             "TEXT",
+		"validation_hash":    "TEXT",
+		"is_active":          "INTEGER",
+		"created_at":         "TIMESTAMP",
+		"activated_at":       "TIMESTAMP",
+	}
+	rows, err := db.Query(`PRAGMA table_info("scheduler_policy_revision")`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	got := map[string]bool{}
+	for rows.Next() {
+		var cid, nn, pk int
+		var name, typ string
+		var d sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &nn, &d, &pk); err != nil {
+			t.Fatal(err)
+		}
+		got[strings.ToLower(name)] = true
+		if wantTyp, ok := expected[strings.ToLower(name)]; ok {
+			if !strings.Contains(strings.ToUpper(typ), wantTyp) {
+				t.Errorf("column %s type=%s want=%s", name, typ, wantTyp)
+			}
+		} else {
+			t.Errorf("unexpected column %s", name)
+		}
+	}
+	for col := range expected {
+		if !got[strings.ToLower(col)] {
+			t.Errorf("scheduler_policy_revision missing column %s", col)
+		}
+	}
+	assertNoForeignKeyViolations(t, db)
+}
+
+func TestSchedulerMigrationReservationSchema(t *testing.T) {
+	db := openSchedulerMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateSchedulerSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	expected := map[string]string{
+		"id":                 "INTEGER",
+		"execution_id":       "TEXT",
+		"task_type":          "TEXT",
+		"reserved_units":     "INTEGER",
+		"policy_revision_id": "INTEGER",
+		"status":             "TEXT",
+		"lease_until":        "TIMESTAMP",
+		"released_at":        "TIMESTAMP",
+		"release_reason":     "TEXT",
+		"released_by":        "TEXT",
+		"created_at":         "TIMESTAMP",
+		"updated_at":         "TIMESTAMP",
+	}
+	rows, err := db.Query(`PRAGMA table_info("scheduler_reservation")`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	got := map[string]bool{}
+	for rows.Next() {
+		var cid, nn, pk int
+		var name, typ string
+		var d sql.NullString
+		rows.Scan(&cid, &name, &typ, &nn, &d, &pk)
+		got[strings.ToLower(name)] = true
+		if wantTyp, ok := expected[strings.ToLower(name)]; ok {
+			if !strings.Contains(strings.ToUpper(typ), wantTyp) {
+				t.Errorf("column %s type=%s want=%s", name, typ, wantTyp)
+			}
+		}
+	}
+	for col := range expected {
+		if !got[strings.ToLower(col)] {
+			t.Errorf("scheduler_reservation missing column %s", col)
+		}
+	}
+}
+
+func TestSchedulerMigrationIndexesExist(t *testing.T) {
+	db := openSchedulerMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateSchedulerSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	indexes := []string{
+		"idx_scheduler_active_policy",
+		"idx_scheduler_reservation_status",
+		"idx_scheduler_reservation_task_type",
+		"idx_scheduler_audit_created",
+	}
+	for _, idx := range indexes {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?`, idx).Scan(&count); err != nil {
+			t.Fatalf("check index %s: %v", idx, err)
+		}
+		if count != 1 {
+			t.Fatalf("index %s missing", idx)
+		}
+	}
+}
+
+func TestSchedulerMigrationActivePolicySingleton(t *testing.T) {
+	db := openSchedulerMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateSchedulerSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	// Insert two policy revisions
+	if _, err := db.ExecContext(ctx, `INSERT INTO scheduler_policy_revision(schema_version,policy_json,author,reason,validation_hash,is_active) VALUES(1,'{}','a','r1','h1',0)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO scheduler_policy_revision(schema_version,policy_json,author,reason,validation_hash,is_active) VALUES(2,'{}','a','r2','h2',1)`); err != nil {
+		t.Fatal(err)
+	}
+	// Second active should fail (singleton constraint)
+	if _, err := db.ExecContext(ctx, `INSERT INTO scheduler_policy_revision(schema_version,policy_json,author,reason,validation_hash,is_active) VALUES(3,'{}','a','r3','h3',1)`); err == nil {
+		t.Fatal("inserted second active policy revision")
+	}
+}
+
+func TestSchedulerMigrationControlStateModes(t *testing.T) {
+	db := openSchedulerMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateSchedulerSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range []string{"paused", "draining", "running"} {
+		if _, err := db.ExecContext(ctx, `INSERT OR REPLACE INTO scheduler_control(task_type,state) VALUES(?,?)`, "test", state); err != nil {
+			t.Fatalf("insert control state %q: %v", state, err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `INSERT OR REPLACE INTO scheduler_control(task_type,state) VALUES('test','invalid')`); err == nil {
+		t.Fatal("invalid control state accepted")
+	}
+}
+
+func TestSchedulerMigrationReservationPositiveUnits(t *testing.T) {
+	db := openSchedulerMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateSchedulerSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO scheduler_policy_revision(schema_version,policy_json,author,reason,validation_hash) VALUES(1,'{}','a','r','h')`); err != nil {
+		t.Fatal(err)
+	}
+	// zero units
+	if _, err := db.ExecContext(ctx, `INSERT INTO scheduler_reservation(execution_id,task_type,reserved_units,policy_revision_id,status) VALUES('z','t',0,1,'active')`); err == nil {
+		t.Fatal("zero reserved_units accepted")
+	}
+	// negative units
+	if _, err := db.ExecContext(ctx, `INSERT INTO scheduler_reservation(execution_id,task_type,reserved_units,policy_revision_id,status) VALUES('n','t',-1,1,'active')`); err == nil {
+		t.Fatal("negative reserved_units accepted")
+	}
+}
+
+func TestSchedulerMigrationReservationReleaseEvidence(t *testing.T) {
+	db := openSchedulerMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateSchedulerSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO scheduler_policy_revision(schema_version,policy_json,author,reason,validation_hash) VALUES(1,'{}','a','r','h')`); err != nil {
+		t.Fatal(err)
+	}
+	// Released reservation without release evidence should fail
+	if _, err := db.ExecContext(ctx, `INSERT INTO scheduler_reservation(execution_id,task_type,reserved_units,policy_revision_id,status,released_at) VALUES('r1','t',1,1,'released',CURRENT_TIMESTAMP)`); err == nil {
+		t.Fatal("released reservation without release evidence accepted")
+	}
+	// Active reservation with release evidence should fail
+	if _, err := db.ExecContext(ctx, `INSERT INTO scheduler_reservation(execution_id,task_type,reserved_units,policy_revision_id,status,release_reason,released_by) VALUES('a1','t',1,1,'active','done','w')`); err == nil {
+		t.Fatal("active reservation with release evidence accepted")
+	}
+}
+
+func TestSchedulerMigrationUniqueExecutionID(t *testing.T) {
+	db := openSchedulerMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateSchedulerSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO scheduler_policy_revision(schema_version,policy_json,author,reason,validation_hash) VALUES(1,'{}','a','r','h')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO scheduler_reservation(execution_id,task_type,reserved_units,policy_revision_id,status) VALUES('dup','t',1,1,'active')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO scheduler_reservation(execution_id,task_type,reserved_units,policy_revision_id,status) VALUES('dup','t',2,1,'active')`); err == nil {
+		t.Fatal("duplicate execution_id accepted")
+	}
+}
+
+func TestSchedulerMigrationForeignKeyRecovery(t *testing.T) {
+	db := openSchedulerMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateSchedulerSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO scheduler_policy_revision(schema_version,policy_json,author,reason,validation_hash) VALUES(1,'{}','a','r','h')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO scheduler_reservation(execution_id,task_type,reserved_units,policy_revision_id,status) VALUES('fk1','t',1,1,'active')`); err != nil {
+		t.Fatal(err)
+	}
+	// Deleting policy revision with active reservation should fail
+	if _, err := db.ExecContext(ctx, `DELETE FROM scheduler_policy_revision WHERE id=1`); err == nil {
+		t.Fatal("deleted policy revision with active reservations")
+	}
+	assertNoForeignKeyViolations(t, db)
+}
+
+func TestSchedulerMigrationIdempotent(t *testing.T) {
+	db := openSchedulerMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateSchedulerSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	// Second run should succeed (idempotent)
+	if err := migrateSchedulerSchema(ctx, db); err != nil {
+		t.Fatalf("repeat migration: %v", err)
+	}
+	// Verify tables still exist
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='scheduler_reservation'`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("repeat migration lost tables: count=%d err=%v", count, err)
+	}
+}
+
+func TestSchedulerMigrationOldQueueRowSurvival(t *testing.T) {
+	db := openSchedulerMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateSchedulerSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	// Insert data and verify it survives repeated migration
+	if _, err := db.ExecContext(ctx, `INSERT INTO scheduler_policy_revision(schema_version,policy_json,author,reason,validation_hash) VALUES(1,'{}','a','r','h')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateSchedulerSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	var author string
+	if err := db.QueryRow(`SELECT author FROM scheduler_policy_revision WHERE id=1`).Scan(&author); err != nil || author != "a" {
+		t.Fatalf("old data lost: author=%q err=%v", author, err)
+	}
+}
+
+func TestSchedulerMigrationFaultRollback(t *testing.T) {
+	db := openSchedulerMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateSchedulerSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO scheduler_policy_revision(schema_version,policy_json,author,reason,validation_hash) VALUES(1,'{}','a','r','h')`); err != nil {
+		tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM scheduler_policy_revision`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("rolled-back data persisted: rows=%d", count)
+	}
+}
+
+func TestSchedulerMigrationExactSchemaValidation(t *testing.T) {
+	db := openSchedulerMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateSchedulerSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := exactPublicationTable(ctx, conn, "scheduler_policy_revision", strings.Replace(SchedulerPolicyRevisionSchema, "CREATE TABLE IF NOT EXISTS", "CREATE TABLE", 1)); err != nil {
+		conn.Close()
+		t.Fatalf("exact policy revision schema: %v", err)
+	}
+	if err := exactPublicationTable(ctx, conn, "scheduler_control", strings.Replace(SchedulerControlSchema, "CREATE TABLE IF NOT EXISTS", "CREATE TABLE", 1)); err != nil {
+		conn.Close()
+		t.Fatalf("exact control schema: %v", err)
+	}
+	if err := exactPublicationTable(ctx, conn, "scheduler_fairness", strings.Replace(SchedulerFairnessSchema, "CREATE TABLE IF NOT EXISTS", "CREATE TABLE", 1)); err != nil {
+		conn.Close()
+		t.Fatalf("exact fairness schema: %v", err)
+	}
+	if err := exactPublicationTable(ctx, conn, "scheduler_reservation", strings.Replace(SchedulerReservationSchema, "CREATE TABLE IF NOT EXISTS", "CREATE TABLE", 1)); err != nil {
+		conn.Close()
+		t.Fatalf("exact reservation schema: %v", err)
+	}
+	if err := exactPublicationTable(ctx, conn, "scheduler_audit", strings.Replace(SchedulerAuditSchema, "CREATE TABLE IF NOT EXISTS", "CREATE TABLE", 1)); err != nil {
+		conn.Close()
+		t.Fatalf("exact audit schema: %v", err)
+	}
+	conn.Close()
+	assertNoForeignKeyViolations(t, db)
+}

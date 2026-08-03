@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"knox-media/internal/publication"
+	"knox-media/internal/scheduler"
 	"knox-media/internal/store"
 	"os"
 	"path/filepath"
@@ -2377,4 +2378,223 @@ func TestQueue_FailureShutdownUsesLightLinkedSync(t *testing.T) {
 	if stepErr != "stopping" {
 		t.Fatalf("linked step last_error=%q", stepErr)
 	}
+}
+
+// TestLibraryFairnessCursorPersistence verifies that the last-served library
+// cursor is updated after each claim.
+func TestLibraryFairnessCursorPersistence(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	seedQueueAdmissionPolicy(t, db)
+	q := NewQueue(db, "worker", nil)
+	policy := scheduler.PolicyDefaults()
+	policy.TypeConcurrency["encrypt"] = 5
+	q.SetSchedulerPolicy(&policy)
+
+	// Seed: library 1 and 2; two tasks with different libraries.
+	_, err := db.Exec(`
+		INSERT INTO library(id,name,type,path) VALUES(1,'lib1','video','/lib1'),(2,'lib2','video','/lib2');
+		INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state)
+			VALUES(10,1,'f10','video',1,'processing'),(11,2,'f11','video',1,'processing');
+		INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version)
+			VALUES(20,10,1,'scan','processing','{}',2),(21,11,1,'scan','processing','{}',2);
+		INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status)
+			VALUES(30,20,10,1,'encrypt',1,'waiting'),(31,21,11,1,'encrypt',1,'waiting');
+		INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status,
+			available_at,created_at,priority,library_id)
+			VALUES
+			 (40,10,20,30,1,'encrypt','waiting',datetime(CURRENT_TIMESTAMP),datetime(CURRENT_TIMESTAMP),0,1),
+			 (41,11,21,31,1,'encrypt','waiting',datetime(CURRENT_TIMESTAMP,'-10 seconds'),datetime(CURRENT_TIMESTAMP,'-10 seconds'),0,2);
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := publication.NewCapabilityMatrix([]string{"encrypt"})
+	q.registry = registry
+
+	// Claim first task.
+	task, err := q.Claim(context.Background(), TaskEncrypt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task == nil {
+		t.Fatal("expected a claim")
+	}
+	// Verify cursor was updated with the claimed library.
+	cursor := q.fairnessCursors["encrypt"]
+	if cursor == nil {
+		t.Fatal("expected fairness cursor for encrypt")
+	}
+	if cursor.LastServedLibrary == nil {
+		t.Fatal("expected last-served library to be set")
+	}
+	if task.LibraryID == nil || *cursor.LastServedLibrary != *task.LibraryID {
+		t.Fatalf("cursor last-served=%v, want=%v", cursor.LastServedLibrary, task.LibraryID)
+	}
+	_ = cursor
+
+	// Complete the first task.
+	if err := q.Complete(context.Background(), *task); err != nil {
+		t.Fatal(err)
+	}
+
+	// Claim second task.
+	task2, err := q.Claim(context.Background(), TaskEncrypt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task2 == nil {
+		t.Fatal("expected a second claim")
+	}
+	// Verify cursor was updated again.
+	cursor2 := q.fairnessCursors["encrypt"]
+	if cursor2 == nil || cursor2.LastServedLibrary == nil {
+		t.Fatal("expected updated cursor")
+	}
+	if task2.LibraryID == nil || *cursor2.LastServedLibrary != *task2.LibraryID {
+		t.Fatalf("cursor last-served=%v, want=%v", cursor2.LastServedLibrary, task2.LibraryID)
+	}
+}
+
+// ============================================================================
+// Admission Queue tests - RED phase
+// These should FAIL because the queue's Claim does not go through admission
+// ============================================================================
+
+func seedQueueAdmissionPolicy(t *testing.T, db *sql.DB) {
+	t.Helper()
+	concurrencyJSON := `{"poster":5,"thumbnail":5,"encrypt":5}`
+	resourcesJSON := `{"cpu":10,"disk_read":10,"disk_write":10,"external_process":10}`
+	policyJSON := fmt.Sprintf(`{"type_concurrency":%s,"resource_capacity":%s,"provider_capacity":{},"aging_interval_sec":300,"aging_step":1,"run_now_amount":100,"run_now_ttl_sec":600}`, concurrencyJSON, resourcesJSON)
+	if _, err := db.Exec(`INSERT INTO scheduler_policy_revision(schema_version,policy_json,author,reason,validation_hash,is_active,activated_at) VALUES(1,?,'test','admission','hash',1,CURRENT_TIMESTAMP)`, policyJSON); err != nil {
+		t.Fatalf("insert policy: %v", err)
+	}
+	if _, err := db.Exec(`INSERT OR IGNORE INTO scheduler_control(task_type,state) VALUES('poster','running'),('thumbnail','running'),('encrypt','running')`); err != nil {
+		t.Fatalf("insert control: %v", err)
+	}
+}
+
+func TestQueueAdmissionClaimCreatesReservation(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	seedQueueAdmissionPolicy(t, db)
+	mediaID, scanOne, _ := seedQueueTest(t, db)
+	q := NewQueue(db, "owner", nil)
+	policy := scheduler.PolicyDefaults()
+	q.SetSchedulerPolicy(&policy)
+
+	if _, err := q.Enqueue(context.Background(), mediaID, &scanOne, TaskPoster); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	task, err := q.Claim(context.Background(), TaskPoster)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if task == nil {
+		t.Fatal("expected claimed task")
+	}
+
+	// Verify reservation was created - THIS SHOULD FAIL RED
+	var resCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM scheduler_reservation WHERE task_type='poster' AND status='active'`).Scan(&resCount); err != nil {
+		t.Fatal(err)
+	}
+	if resCount != 1 {
+		t.Fatalf("RED: expected 1 active reservation after claim, got %d. Queue claims commit before dispatcher admits.", resCount)
+	}
+}
+
+func TestQueueAdmissionTypeLimitBlocksClaim(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	seedQueueAdmissionPolicy(t, db)
+	mediaID, scanOne, _ := seedQueueTest(t, db)
+	q := NewQueue(db, "owner", nil)
+	policy := scheduler.PolicyDefaults()
+	policy.TypeConcurrency["poster"] = 1
+	q.SetSchedulerPolicy(&policy)
+
+	if _, err := q.Enqueue(context.Background(), mediaID, &scanOne, TaskPoster); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	media2 := insertQueueMedia(t, db, mediaLibraryID(t, db, mediaID), "poster2")
+	if _, err := db.Exec(`INSERT INTO post_ingest_task(media_id,task_type,status,max_attempts,source_class,base_priority) VALUES(?,'poster','waiting',4,100,100)`, media2); err != nil {
+		t.Fatal(err)
+	}
+
+	task1, err := q.Claim(context.Background(), TaskPoster)
+	if err != nil || task1 == nil {
+		t.Fatalf("first claim: err=%v task=%+v", err, task1)
+	}
+
+	task2, err := q.Claim(context.Background(), TaskPoster)
+	if err != nil {
+		t.Fatalf("second claim: %v", err)
+	}
+	if task2 != nil {
+		t.Fatalf("RED: second claim should be nil (type limit), got %+v", task2)
+	}
+}
+
+func TestQueueAdmissionResourceBudgetBlocksClaim(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	concurrencyJSON := `{"encrypt":5}`
+	resourcesJSON := `{"cpu":1}`
+	policyJSON := fmt.Sprintf(`{"type_concurrency":%s,"resource_capacity":%s,"provider_capacity":{},"aging_interval_sec":300,"aging_step":1,"run_now_amount":100,"run_now_ttl_sec":600}`, concurrencyJSON, resourcesJSON)
+	if _, err := db.Exec(`INSERT INTO scheduler_policy_revision(schema_version,policy_json,author,reason,validation_hash,is_active,activated_at) VALUES(1,?,'test','admission','hash',1,CURRENT_TIMESTAMP)`, policyJSON); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT OR IGNORE INTO scheduler_control(task_type,state) VALUES('encrypt','running')`); err != nil {
+		t.Fatal(err)
+	}
+
+	mediaID, scanOne, _ := seedQueueTest(t, db)
+	q := NewQueue(db, "owner", nil)
+	policy := scheduler.PolicyDefaults()
+	policy.TypeConcurrency["encrypt"] = 5
+	policy.ResourceCapacity[scheduler.CPU] = 1
+	q.SetSchedulerPolicy(&policy)
+
+	if _, err := q.Enqueue(context.Background(), mediaID, &scanOne, TaskEncrypt); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	media2 := insertQueueMedia(t, db, mediaLibraryID(t, db, mediaID), "encrypt2")
+	if _, err := db.Exec(`INSERT INTO post_ingest_task(media_id,task_type,status,max_attempts,source_class,base_priority) VALUES(?,'encrypt','waiting',4,100,100)`, media2); err != nil {
+		t.Fatal(err)
+	}
+
+	task1, err := q.Claim(context.Background(), TaskEncrypt)
+	if err != nil || task1 == nil {
+		t.Fatalf("first encrypt claim: err=%v task=%+v", err, task1)
+	}
+
+	task2, err := q.Claim(context.Background(), TaskEncrypt)
+	if err != nil {
+		t.Fatalf("second encrypt claim: %v", err)
+	}
+	if task2 != nil {
+		t.Fatalf("RED: second encrypt claim should be nil (resource budget), got %+v", task2)
+	}
+}
+
+func TestQueueAdmissionProviderLimitBlocksClaim(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	concurrencyJSON := `{"ai_analysis":5}`
+	resourcesJSON := `{"cpu":10}`
+	policyJSON := fmt.Sprintf(`{"type_concurrency":%s,"resource_capacity":%s,"provider_capacity":{"openai":1},"aging_interval_sec":300,"aging_step":1,"run_now_amount":100,"run_now_ttl_sec":600}`, concurrencyJSON, resourcesJSON)
+	if _, err := db.Exec(`INSERT INTO scheduler_policy_revision(schema_version,policy_json,author,reason,validation_hash,is_active,activated_at) VALUES(1,?,'test','admission','hash',1,CURRENT_TIMESTAMP)`, policyJSON); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT OR IGNORE INTO scheduler_control(task_type,state) VALUES('ai_analysis','running')`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create an active reservation for a type that uses the "openai" provider.
+	// Since no compiled type has a provider, we create a raw reservation and test
+	// that the admission check blocks due to provider capacity.
+	revID := db.QueryRow(`SELECT id FROM scheduler_policy_revision WHERE is_active=1`)
+
+	// Instead of testing provider at queue level (no types have providers),
+	// verify that the type concurrency + resource budget admission works.
+	// Provider budget is already unit-tested in scheduler/admission_test.go.
+	_ = revID
+	t.Skip("provider limits require types with provider descriptors; tested at scheduler unit level")
 }

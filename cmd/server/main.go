@@ -54,6 +54,7 @@ import (
 	"knox-media/internal/storage"
 	"knox-media/internal/store"
 	"knox-media/internal/subtitle"
+	taskscheduler "knox-media/internal/scheduler"
 	"knox-media/internal/transcode"
 	"knox-media/internal/upload"
 	"knox-media/internal/zapglobal"
@@ -297,8 +298,26 @@ func main() {
 		Atrack:            postingest.NewAtrackAdapter(db, atrackWorker),
 		Encrypt:           postingest.NewEncryptAdapter(assetEnc),
 	}
-	dispatcherOptions := buildDispatcherOptions(cfg, queueOwner)
-	dispatcher, err := postingest.NewDispatcher(postIngestQueue, adapters, dispatcherOptions) // 按并发上限认领并执行队列任务
+	schedulerService := taskscheduler.NewService(db)
+	schedulerPolicy, err := buildSchedulerPolicy(cfg)
+	if err != nil {
+		log.Fatalf("scheduler policy: %v", err)
+	}
+	// The YAML-effective policy is the base layer that persisted runtime
+	// overrides are applied on top of at reload.
+	schedulerService.SetBasePolicy(*schedulerPolicy)
+	if err := activateSchedulerPolicy(serverCtx, db, schedulerPolicy); err != nil {
+		log.Fatalf("activate scheduler policy: %v", err)
+	}
+	if err := schedulerService.Reload(serverCtx); err != nil {
+		log.Fatalf("scheduler policy reload: %v", err)
+	}
+	effectivePolicy := schedulerService.CurrentPolicy()
+	postIngestQueue.SetSchedulerPolicy(&effectivePolicy)
+	dispatcherOpts := postingest.DefaultDispatcherOptions()
+	dispatcherOpts.OwnerID = queueOwner
+	dispatcherOpts.SubtitleTimeoutRealtimeFactor = cfg.PostIngest.SubtitleTimeoutRealtimeFactor
+	dispatcher, err := postingest.NewDispatcher(postIngestQueue, adapters, dispatcherOpts, schedulerService) // 按调度器准入认领并执行已入住的保留任务
 	if err != nil {
 		log.Fatalf("post-ingest dispatcher: %v", err)
 	}
@@ -352,7 +371,11 @@ func main() {
 			}
 			return nil
 		},
-		RecoverLeases: func(ctx context.Context) error { return recoverStartupLeases(ctx, db, postIngestQueue) },
+		RecoverLeases:       func(ctx context.Context) error { return recoverStartupLeases(ctx, db, postIngestQueue) },
+		RecoverReservations: func(ctx context.Context) error {
+			_, err := ReconcileStartupReservations(ctx, db, "startup-recovery-"+processID)
+			return err
+		},
 		ReplaceActiveV1: func(ctx context.Context) error {
 			_, reconcileErr := publication.ReplaceActiveV1Runs(ctx, db, publicationPlanner)
 			return reconcileErr
@@ -460,6 +483,9 @@ func main() {
 
 	// (5) 后台阶段对账协程，并组装 Handler 依赖注入包。
 	background.Go(serverCtx, func(ctx context.Context) {
+		StartReservationExpiryReconciler(ctx, db, time.Minute)
+	}) // 调度器预留过期对账
+	background.Go(serverCtx, func(ctx context.Context) {
 		metadatalib.RunScrapeArtworkStageReconciler(ctx, db, cfg.Data.MetadataLibrary, time.Minute, 100, func(err error) { log.Printf("scrape artwork stage reconcile: %v", err) })
 	}) // 刮削封面阶段状态对账
 	background.Go(serverCtx, func(ctx context.Context) {
@@ -474,7 +500,7 @@ func main() {
 	deps := handler.Dependencies{
 		ServerContext: serverCtx, Background: background, StartupReady: startupReady,
 		Coordinator: coordinator, Queue: postIngestQueue, PostIngest: postIngestEnqueuer, Dispatcher: dispatcher, AdminOverviewBuilder: func() handler.OverviewBuilder {
-			b := handler.NewAdminOverviewBuilder(db, dispatcher, sqliteMetrics)
+			b := handler.NewAdminOverviewBuilder(db, schedulerService, sqliteMetrics)
 			b.Capabilities = publicationCapabilities
 			return b
 		}(),
@@ -482,6 +508,7 @@ func main() {
 		Instant: instantScheduler, SessionManager: sessionMgr, AtrackWorker: atrackWorker, KeyframeWorker: keyframeWorker,
 		LyricWorker: lyricWorker, PhotoClassifyWorker: photoClassifyWorker, DocCoverWorker: docCoverWorker,
 		KeyVault: keyVault, AssetEncryptor: assetEnc, DerivedStore: derivedStore, PublicationPlanner: publicationPlanner, PublicationCapabilities: publicationCapabilities,
+		SchedulerAdmin: schedulerService,
 	}
 
 	// (6) 注入依赖并创建 HTTP API 路由引擎。
@@ -558,15 +585,44 @@ func main() {
 	}
 }
 
-func buildDispatcherOptions(cfg *config.Config, owner string) postingest.DispatcherOptions {
-	opts := postingest.DefaultDispatcherOptions()
-	opts.OwnerID = owner
-	opts.Global = cfg.PostIngest.MaxConcurrent
-	opts.Poster = cfg.PostIngest.PosterMaxConcurrent
-	opts.Preview = cfg.PostIngest.PreviewMaxConcurrent
-	opts.Subtitle = cfg.PostIngest.SubtitleMaxConcurrent
-	opts.SubtitleTimeoutRealtimeFactor = cfg.PostIngest.SubtitleTimeoutRealtimeFactor
-	return opts
+// buildSchedulerPolicy derives the effective scheduler policy from compiled
+// defaults merged with the validated config scheduler section.
+func buildSchedulerPolicy(cfg *config.Config) (*taskscheduler.Policy, error) {
+	p := taskscheduler.PolicyDefaults()
+	p.MergeYAML(taskscheduler.SchedulerYAMLConfig{
+		TypeConcurrency:  cfg.Scheduler.Concurrency,
+		ResourceCapacity: cfg.Scheduler.Resources,
+		ProviderCapacity: cfg.Scheduler.Providers,
+		AgingIntervalSec: cfg.Scheduler.Priority.AgingIntervalSec,
+		AgingStep:        cfg.Scheduler.Priority.AgingStep,
+		RunNowAmount:     cfg.Scheduler.Priority.RunNowAmount,
+		RunNowTTLSec:     cfg.Scheduler.Priority.RunNowTTLSec,
+	})
+	if err := p.Validate(); err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+// activateSchedulerPolicy persists the policy as the active DB revision when no
+// active revision exists yet, so scheduler admission claims have a durable
+// revision to reference. An existing active revision is preserved.
+func activateSchedulerPolicy(ctx context.Context, db *sql.DB, p *taskscheduler.Policy) error {
+	st := taskscheduler.NewStore(db)
+	if active, err := st.GetActivePolicyRevision(ctx); err == nil && active != nil {
+		return nil
+	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	raw, err := taskscheduler.EncodePolicyJSON(*p)
+	if err != nil {
+		return err
+	}
+	rev, err := st.CreatePolicyRevision(ctx, 1, nil, raw, "system", "startup defaults", "startup")
+	if err != nil {
+		return err
+	}
+	return st.ActivatePolicyRevision(ctx, rev.ID, -1)
 }
 
 // seedUsers creates default admin + demo viewer when DB is empty; ensures viewer exists on old DBs.

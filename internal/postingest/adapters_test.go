@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"knox-media/internal/scheduler"
 	"knox-media/internal/storage"
 
 	_ "modernc.org/sqlite"
@@ -808,5 +809,107 @@ func TestEncryptAdapter_EncryptedRecordQueryErrorPropagates(t *testing.T) {
 	err := NewEncryptAdapter(e).Execute(context.Background(), Task{ID: 7, MediaID: 41, Type: TaskEncrypt})
 	if err == nil || e.calls != 0 {
 		t.Fatalf("err=%v calls=%d", err, e.calls)
+	}
+}
+
+// TestAdapterRegistrySchedulerProfiles asserts that every task type handled by
+// AdapterSet.pick has a corresponding scheduler registry entry with valid
+// resource requests and exactly one profile version.
+func TestAdapterRegistrySchedulerProfiles(t *testing.T) {
+	set := AdapterSet{}
+	types := []TaskType{TaskPoster, TaskPosterRepair, TaskThumbnail, TaskPreview, TaskKeyframe, TaskSubtitle, TaskSubtitleRecognize, TaskAIAnalysis, TaskAtrack, TaskEncrypt}
+	for _, typ := range types {
+		t.Run(string(typ), func(t *testing.T) {
+			desc, err := set.SchedulerProfile(typ)
+			if err != nil {
+				t.Fatalf("SchedulerProfile(%q): %v", typ, err)
+			}
+			if desc.TaskType != string(typ) {
+				t.Fatalf("TaskType=%q want %q", desc.TaskType, typ)
+			}
+			if desc.Family == "" {
+				t.Fatal("empty family")
+			}
+			if desc.ProfileVersion < 1 {
+				t.Fatalf("ProfileVersion=%d want >=1", desc.ProfileVersion)
+			}
+			if len(desc.Resources) == 0 {
+				t.Fatal("no resource requests")
+			}
+			for rk, count := range desc.Resources {
+				if count < 0 {
+					t.Fatalf("resource %q count=%d want >=0", rk, count)
+				}
+			}
+		})
+	}
+}
+
+// TestAdapterSchedulerProfileUnknownType asserts that an unsupported task type
+// returns an error from SchedulerProfile.
+func TestAdapterSchedulerProfileUnknownType(t *testing.T) {
+	set := AdapterSet{}
+	_, err := set.SchedulerProfile(TaskType("nonexistent_task_xyz"))
+	if err == nil {
+		t.Fatal("expected error for unknown task type")
+	}
+}
+
+// TestAdapterSchedulerFallbackProfile asserts that a GPU-capable task type
+// declares a CPU-heavy fallback profile: strictly more CPU than the primary
+// profile and no GPU request.
+func TestAdapterSchedulerFallbackProfile(t *testing.T) {
+	set := AdapterSet{}
+	primary, err := set.SchedulerProfile(TaskSubtitleRecognize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fallback, err := set.SchedulerFallbackProfile(TaskSubtitleRecognize)
+	if err != nil {
+		t.Fatalf("SchedulerFallbackProfile(%q): %v", TaskSubtitleRecognize, err)
+	}
+	if len(fallback) == 0 {
+		t.Fatal("fallback profile has no resource requests")
+	}
+	if fallback[scheduler.CPU] <= primary.Resources[scheduler.CPU] {
+		t.Fatalf("fallback CPU=%d want strictly more than primary CPU=%d", fallback[scheduler.CPU], primary.Resources[scheduler.CPU])
+	}
+	if _, hasGPU := fallback[scheduler.GPU]; hasGPU {
+		t.Fatal("fallback profile must not request GPU")
+	}
+	if err := scheduler.ValidateResourceRequest(fallback); err != nil {
+		t.Fatalf("fallback profile invalid: %v", err)
+	}
+}
+
+// TestAdapterSchedulerFallbackProfileUnsupported asserts that task types whose
+// primary adapter is not GPU-capable have no CPU fallback profile.
+func TestAdapterSchedulerFallbackProfileUnsupported(t *testing.T) {
+	set := AdapterSet{}
+	types := []TaskType{TaskPoster, TaskPosterRepair, TaskThumbnail, TaskPreview, TaskKeyframe, TaskSubtitle, TaskAIAnalysis, TaskAtrack, TaskEncrypt}
+	for _, typ := range types {
+		if _, err := set.SchedulerFallbackProfile(typ); err == nil {
+			t.Fatalf("SchedulerFallbackProfile(%q): expected error for non-GPU type", typ)
+		}
+	}
+}
+
+// TestAdapterSchedulerProfileResourceKindsValid asserts that all resource kinds
+// in adapter profiles are from the known set.
+func TestAdapterSchedulerProfileResourceKindsValid(t *testing.T) {
+	set := AdapterSet{}
+	types := []TaskType{TaskPoster, TaskPreview, TaskKeyframe, TaskSubtitle, TaskSubtitleRecognize, TaskAIAnalysis, TaskAtrack, TaskEncrypt}
+	for _, typ := range types {
+		desc, err := set.SchedulerProfile(typ)
+		if err != nil {
+			t.Fatalf("SchedulerProfile(%q): %v", typ, err)
+		}
+		for rk := range desc.Resources {
+			switch rk {
+			case "cpu", "gpu", "disk_read", "disk_write", "network", "external_process":
+			default:
+				t.Fatalf("type %q has unknown resource kind %q", typ, rk)
+			}
+		}
 	}
 }

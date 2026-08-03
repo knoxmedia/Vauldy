@@ -15,6 +15,7 @@ import (
 	"knox-media/internal/keyframe"
 	"knox-media/internal/preview"
 	"knox-media/internal/publication"
+	"knox-media/internal/scheduler"
 	"knox-media/internal/storage"
 	"knox-media/internal/store"
 	"knox-media/internal/subtitle"
@@ -32,6 +33,31 @@ var encryptionCommitFileSHA256 = fileSHA256
 
 type Adapter interface {
 	Execute(context.Context, Task) error
+}
+
+// SchedulerProfile returns the scheduler Descriptor for the given task type,
+// or an error if the type is not supported by this adapter set.
+func (s AdapterSet) SchedulerProfile(taskType TaskType) (scheduler.Descriptor, error) {
+	name := string(taskType)
+	desc, ok := scheduler.Registry[name]
+	if !ok {
+		return scheduler.Descriptor{}, fmt.Errorf("no scheduler profile for task type %q", taskType)
+	}
+	return desc, nil
+}
+
+// SchedulerFallbackProfile returns the CPU-heavy fallback resource request for
+// a task type whose primary adapter may request GPU capacity. GPU initialization
+// failure fences the original reservation and re-admits with this profile; the
+// fallback is a fresh admission and never mutates tokens under a running
+// reservation. Types without a GPU-capable adapter return an error.
+func (s AdapterSet) SchedulerFallbackProfile(taskType TaskType) (scheduler.ResourceRequest, error) {
+	switch taskType {
+	case TaskSubtitleRecognize:
+		return scheduler.ResourceRequest{scheduler.CPU: 2, scheduler.DiskRead: 1, scheduler.DiskWrite: 1}, nil
+	default:
+		return nil, fmt.Errorf("no CPU fallback profile for task type %q", taskType)
+	}
 }
 
 type AdapterSet struct {

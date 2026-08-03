@@ -11,6 +11,7 @@ import (
 	"knox-media/internal/buildinfo"
 	"knox-media/internal/config"
 	"knox-media/internal/postingest"
+	taskscheduler "knox-media/internal/scheduler"
 	"knox-media/internal/store"
 )
 
@@ -227,11 +228,88 @@ func TestGracefulShutdownAssemblyUsesSignalsAndHTTPServer(t *testing.T) {
 	}
 }
 
-func TestBuildDispatcherOptionsMapsPostIngestConfig(t *testing.T) {
-	cfg := &config.Config{PostIngest: config.PostIngestConfig{MaxConcurrent: 3, PosterMaxConcurrent: 1, PreviewMaxConcurrent: 2, SubtitleMaxConcurrent: 1, SubtitleTimeoutRealtimeFactor: 1.5}}
-	got := buildDispatcherOptions(cfg, "owner")
-	if got.OwnerID != "owner" || got.Global != 3 || got.Poster != 1 || got.Preview != 2 || got.Subtitle != 1 || got.SubtitleTimeoutRealtimeFactor != 1.5 {
-		t.Fatalf("options=%+v", got)
+func TestMainInlinesDispatcherOptionsWiring(t *testing.T) {
+	data, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(data)
+	// After migration, dispatcher options are inlined rather than calling buildDispatcherOptions.
+	if strings.Contains(src, "buildDispatcherOptions") {
+		t.Fatal("buildDispatcherOptions must be removed after scheduler migration")
+	}
+	for _, required := range []string{
+		"postingest.DefaultDispatcherOptions()",
+		"OwnerID =",
+		"SubtitleTimeoutRealtimeFactor",
+	} {
+		if !strings.Contains(src, required) {
+			t.Fatalf("main missing inline dispatcher wiring %q", required)
+		}
+	}
+}
+
+func TestBuildSchedulerPolicyMergesConfig(t *testing.T) {
+	cfg := &config.Config{Scheduler: config.SchedulerConfig{
+		Concurrency: map[string]int{"poster": 4, "preview": 3},
+		Resources:   map[string]int{"cpu": 8, "gpu": 2},
+	}}
+	p, err := buildSchedulerPolicy(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.TypeConcurrency["poster"] != 4 {
+		t.Fatalf("poster=%d want 4", p.TypeConcurrency["poster"])
+	}
+	if p.TypeConcurrency["preview"] != 3 {
+		t.Fatalf("preview=%d want 3", p.TypeConcurrency["preview"])
+	}
+	if p.ResourceCapacity["cpu"] != 8 {
+		t.Fatalf("cpu=%d want 8", p.ResourceCapacity["cpu"])
+	}
+	if _, ok := p.ResourceCapacity["gpu"]; !ok || p.ResourceCapacity["gpu"] != 2 {
+		t.Fatalf("gpu=%v want 2", p.ResourceCapacity["gpu"])
+	}
+	if p.AgingIntervalSec <= 0 || p.AgingStep <= 0 || p.RunNowAmount <= 0 || p.RunNowTTLSec <= 0 {
+		t.Fatalf("default priority tuning not applied: %+v", p)
+	}
+}
+
+func TestActivateSchedulerPolicyCreatesActiveRevision(t *testing.T) {
+	db, err := store.OpenSQLite(filepath.Join(t.TempDir(), "sched.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := &config.Config{Scheduler: config.SchedulerConfig{
+		Concurrency: map[string]int{"poster": 2},
+		Resources:   map[string]int{"cpu": 4},
+	}}
+	p, err := buildSchedulerPolicy(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := activateSchedulerPolicy(context.Background(), db, p); err != nil {
+		t.Fatal(err)
+	}
+	st := taskscheduler.NewStore(db)
+	rev, err := st.GetActivePolicyRevision(context.Background())
+	if err != nil {
+		t.Fatalf("get active revision: %v", err)
+	}
+	if rev == nil {
+		t.Fatal("no active revision after activation")
+	}
+	// Re-activation preserves the existing active revision.
+	if err := activateSchedulerPolicy(context.Background(), db, p); err != nil {
+		t.Fatal(err)
+	}
+	rev2, err := st.GetActivePolicyRevision(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rev2 == nil || rev2.ID != rev.ID {
+		t.Fatalf("re-activation changed revision: %d -> %v", rev.ID, rev2)
 	}
 }
 

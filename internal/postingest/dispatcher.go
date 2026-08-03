@@ -7,11 +7,11 @@ import (
 	"log"
 	"math"
 	"os"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
 
+	"knox-media/internal/scheduler"
 	"knox-media/internal/storage"
 )
 
@@ -51,27 +51,16 @@ func (e ClassifiedError) Error() string {
 }
 func (e ClassifiedError) Unwrap() error { return e.Err }
 
-type BudgetSnapshot struct {
-	GlobalLimit, GlobalUsed, PosterLimit, PosterUsed, PreviewLimit, PreviewUsed, SubtitleLimit, SubtitleUsed int
-}
 type DispatcherOptions struct {
-	OwnerID                                                         string
-	Global, Poster, Preview, Subtitle                               int
-	SubtitleTimeoutRealtimeFactor                                   float64
+	OwnerID                         string
+	SubtitleTimeoutRealtimeFactor   float64
 	PollInterval, LeaseDuration, HeartbeatInterval, RecoverInterval time.Duration
-	ExecutorStopGrace                                               time.Duration
-	Timeouts                                                        map[TaskType]time.Duration
+	ExecutorStopGrace               time.Duration
+	Timeouts                        map[TaskType]time.Duration
 }
 
 func DefaultDispatcherOptions() DispatcherOptions {
-	global := runtime.NumCPU() / 2
-	if global < 2 {
-		global = 2
-	}
-	if global > 4 {
-		global = 4
-	}
-	return DispatcherOptions{Global: global, Poster: min(2, global), Preview: 1, Subtitle: 1, SubtitleTimeoutRealtimeFactor: 2.0, PollInterval: 250 * time.Millisecond, LeaseDuration: leaseDuration, HeartbeatInterval: 30 * time.Second, RecoverInterval: 30 * time.Second, ExecutorStopGrace: 10 * time.Second, Timeouts: map[TaskType]time.Duration{
+	return DispatcherOptions{SubtitleTimeoutRealtimeFactor: 2.0, PollInterval: 250 * time.Millisecond, LeaseDuration: leaseDuration, HeartbeatInterval: 30 * time.Second, RecoverInterval: 30 * time.Second, ExecutorStopGrace: 10 * time.Second, Timeouts: map[TaskType]time.Duration{
 		TaskPoster: 2 * time.Minute, TaskPosterRepair: 2 * time.Minute, TaskThumbnail: 2 * time.Minute, TaskPreview: 30 * time.Minute, TaskKeyframe: 30 * time.Minute, TaskSubtitle: 60 * time.Minute, TaskSubtitleRecognize: 60 * time.Minute, TaskAIAnalysis: 15 * time.Minute, TaskAtrack: 30 * time.Minute, TaskEncrypt: 120 * time.Minute,
 	}}
 }
@@ -102,11 +91,8 @@ type Dispatcher struct {
 	q                                                 *Queue
 	executor                                          Executor
 	opts                                              DispatcherOptions
-	global, poster, preview, subtitle                 chan struct{}
+	svc                                               *scheduler.Service
 	mu                                                sync.Mutex
-	globalUsed, posterUsed, previewUsed, subtitleUsed int
-	highPriorityUsed                                  int
-	bandNext                                          []int
 	running                                           map[int64]*workerState
 	sourceLookupBudget                                time.Duration
 	sourceSize                                        func(context.Context, Task) int64
@@ -120,30 +106,21 @@ type Dispatcher struct {
 	beforeRun                                         func(Task)
 }
 
-func NewDispatcher(q *Queue, executor Executor, opts DispatcherOptions) (*Dispatcher, error) {
+func NewDispatcher(q *Queue, executor Executor, opts DispatcherOptions, svc *scheduler.Service) (*Dispatcher, error) {
 	if q == nil {
 		return nil, errors.New("Dispatcher.Queue is required")
 	}
 	if executor == nil {
 		return nil, errors.New("Dispatcher.Executor is required")
 	}
+	if svc == nil {
+		return nil, errors.New("Dispatcher.SchedulerService is required")
+	}
 	if strings.TrimSpace(opts.OwnerID) == "" || opts.OwnerID != strings.TrimSpace(opts.OwnerID) || strings.Contains(opts.OwnerID, "/") {
 		return nil, fmt.Errorf("Dispatcher.OwnerID is invalid")
 	}
 	if q.owner != opts.OwnerID {
 		return nil, fmt.Errorf("Dispatcher.OwnerID must match Queue owner")
-	}
-	if opts.Global < 1 || opts.Global > 32 {
-		return nil, fmt.Errorf("Dispatcher.Global must be in [1,32]")
-	}
-	if opts.Poster < 1 || opts.Poster > 2 || opts.Poster > opts.Global {
-		return nil, fmt.Errorf("Dispatcher.Poster must be in [1,2] and <= Global")
-	}
-	if opts.Preview < 1 || opts.Preview > 2 || opts.Preview > opts.Global {
-		return nil, fmt.Errorf("Dispatcher.Preview must be in [1,2] and <= Global")
-	}
-	if opts.Subtitle < 1 || opts.Subtitle > opts.Global {
-		return nil, fmt.Errorf("Dispatcher.Subtitle must be in [1,Global]")
 	}
 	if opts.SubtitleTimeoutRealtimeFactor <= 0 || opts.SubtitleTimeoutRealtimeFactor > 10 {
 		return nil, fmt.Errorf("Dispatcher.SubtitleTimeoutRealtimeFactor must be in (0,10]")
@@ -168,27 +145,21 @@ func NewDispatcher(q *Queue, executor Executor, opts DispatcherOptions) (*Dispat
 			return nil, fmt.Errorf("Dispatcher.Timeouts[%s] must be positive", typ)
 		}
 	}
-	globalCap := opts.Global + priorityBurstSlots
-	d := &Dispatcher{q: q, executor: executor, opts: opts, global: make(chan struct{}, globalCap), poster: make(chan struct{}, opts.Poster), preview: make(chan struct{}, opts.Preview), subtitle: make(chan struct{}, opts.Subtitle), bandNext: make([]int, len(priorityBands)), running: map[int64]*workerState{}, sourceLookupBudget: 2 * time.Second, sourceLookups: make(chan struct{}, globalCap), scans: map[int64]map[int64]*workerState{}}
+	d := &Dispatcher{q: q, executor: executor, opts: opts, svc: svc, running: map[int64]*workerState{}, sourceLookupBudget: 2 * time.Second, sourceLookups: make(chan struct{}, 16), scans: map[int64]map[int64]*workerState{}}
 	d.sourceSize = d.posterSourceSize
 	d.mediaDuration = d.mediaDurationSec
+	svc.SetClaimer(d.schedulerClaim)
 	return d, nil
 }
 
 var taskTypes = []TaskType{TaskPoster, TaskPosterRepair, TaskThumbnail, TaskPreview, TaskKeyframe, TaskSubtitle, TaskSubtitleRecognize, TaskAIAnalysis, TaskAtrack, TaskEncrypt}
 
-// priorityBands is highest-priority first. Types in the same band are equal and rotate.
-var priorityBands = [][]TaskType{
-	{TaskPoster, TaskPosterRepair},
-	{TaskEncrypt},
-	{TaskPreview, TaskThumbnail, TaskKeyframe, TaskAtrack},
-	{TaskSubtitle, TaskSubtitleRecognize, TaskAIAnalysis},
-}
-
-const priorityBurstSlots = 1
-
-func isHighPriorityTask(typ TaskType) bool {
-	return typ == TaskPoster || typ == TaskPosterRepair || typ == TaskEncrypt
+func taskTypeNames() []string {
+	out := make([]string, 0, len(taskTypes))
+	for _, typ := range taskTypes {
+		out = append(out, string(typ))
+	}
+	return out
 }
 
 const (
@@ -206,10 +177,6 @@ func sizedTaskTimeout(typ TaskType) bool {
 
 func deferredTaskTimeout(typ TaskType) bool {
 	return sizedTaskTimeout(typ) || typ == TaskSubtitle || typ == TaskSubtitleRecognize
-}
-
-func usesSubtitleSlot(typ TaskType) bool {
-	return typ == TaskSubtitle || typ == TaskSubtitleRecognize
 }
 
 // subtitleTaskTimeout returns min(8h, max(base, durationSec*factor seconds)).
@@ -385,25 +352,22 @@ func (d *Dispatcher) Start(ctx context.Context) error {
 			return nil
 		}
 		for {
-			allowed := d.allowedTaskTypes()
-			if len(allowed) == 0 {
-				break
-			}
-			task, err := d.q.ClaimAny(ctx, allowed)
+			claim, err := d.svc.Claim(ctx, d.opts.OwnerID, taskTypeNames())
 			if err != nil {
 				if ctx.Err() == nil {
-					log.Printf("postingest dispatcher claim sweep: %v", err)
+					log.Printf("postingest dispatcher claim: %v", err)
 				}
 				break
 			}
-			if task == nil {
+			if claim == nil {
 				break
 			}
-			d.noteClaimed(task.Type)
-			if !d.tryAcquire(task.Type) {
-				return fmt.Errorf("postingest dispatcher claimed unavailable task type %s", task.Type)
+			task, ok := claim.Payload.(Task)
+			if !ok {
+				log.Printf("postingest dispatcher: scheduler returned unsupported claim payload %T", claim.Payload)
+				break
 			}
-			d.launch(ctx, *task)
+			d.launch(ctx, task)
 		}
 		select {
 		case <-ctx.Done():
@@ -423,180 +387,31 @@ func (d *Dispatcher) Start(ctx context.Context) error {
 	}
 }
 
-func (d *Dispatcher) allowedTaskTypes() []TaskType {
-	d.mu.Lock()
-	globalUsed := d.globalUsed
-	highUsed := d.highPriorityUsed
-	posterAvailable := d.posterUsed < d.opts.Poster
-	previewAvailable := d.previewUsed < d.opts.Preview
-	subtitleAvailable := d.subtitleUsed < d.opts.Subtitle
-	bandNext := append([]int(nil), d.bandNext...)
-	d.mu.Unlock()
-
-	// Soft-cap oversubscribe (Global+1): prefer high-priority burst; otherwise allow one
-	// subtitle so ASR is not starved behind a full poster/preview mid-band backlog.
-	burstHigh := false
-	burstSubtitleOnly := false
-	switch {
-	case globalUsed < d.opts.Global:
-	case d.opts.Global == 1:
-		// Preserve strict priority for a single configured slot. The burst slot is a
-		// starvation escape hatch for concurrent pools, not a second worker lane.
-		return nil
-	case globalUsed < d.opts.Global+priorityBurstSlots && highUsed == 0:
-		burstHigh = true
-	case globalUsed < d.opts.Global+priorityBurstSlots && subtitleAvailable:
-		burstSubtitleOnly = true
-	default:
-		return nil
+// schedulerClaim is the scheduler service claimer. It asks the queue for the
+// next eligible post-ingest unit; the queue performs scheduler admission and
+// only returns tasks with a durable reservation, which become the sole units
+// the dispatcher launches.
+func (d *Dispatcher) schedulerClaim(ctx context.Context, owner string, taskTypeNames []string) (*scheduler.ClaimResult, error) {
+	types := make([]TaskType, 0, len(taskTypeNames))
+	for _, name := range taskTypeNames {
+		types = append(types, TaskType(name))
 	}
-
-	allowed := make([]TaskType, 0, len(taskTypes))
-	for band, types := range priorityBands {
-		if burstSubtitleOnly {
-			hasSubtitle := false
-			for _, typ := range types {
-				if usesSubtitleSlot(typ) {
-					hasSubtitle = true
-					break
-				}
-			}
-			if !hasSubtitle {
-				continue
-			}
-		} else if burstHigh && band > 1 {
-			hasSubtitle := false
-			for _, typ := range types {
-				if usesSubtitleSlot(typ) {
-					hasSubtitle = true
-					break
-				}
-			}
-			if !hasSubtitle {
-				// High-priority bands only, plus subtitle family so ClaimAny can fall through when
-				// no high-priority work is eligible.
-				continue
-			}
-		}
-		n := len(types)
-		start := 0
-		if band < len(bandNext) && n > 0 {
-			start = bandNext[band] % n
-		}
-		for i := 0; i < n; i++ {
-			typ := types[(start+i)%n]
-			if (typ == TaskPoster || typ == TaskPosterRepair) && !posterAvailable {
-				continue
-			}
-			if typ == TaskPreview && !previewAvailable {
-				continue
-			}
-			if usesSubtitleSlot(typ) && !subtitleAvailable {
-				continue
-			}
-			if burstSubtitleOnly && !usesSubtitleSlot(typ) {
-				continue
-			}
-			allowed = append(allowed, typ)
-		}
+	task, err := d.q.ClaimAny(ctx, types)
+	if err != nil {
+		return nil, err
 	}
-	return allowed
-}
-
-func (d *Dispatcher) noteClaimed(typ TaskType) {
-	for band, types := range priorityBands {
-		for i, candidate := range types {
-			if candidate != typ {
-				continue
-			}
-			d.mu.Lock()
-			if band < len(d.bandNext) && len(types) > 0 {
-				d.bandNext[band] = (i + 1) % len(types)
-			}
-			d.mu.Unlock()
-			return
-		}
+	if task == nil {
+		return nil, nil
 	}
-}
-
-func (d *Dispatcher) tryAcquire(typ TaskType) bool {
-	d.mu.Lock()
-	atSoftCap := d.globalUsed >= d.opts.Global
-	atHardCap := d.globalUsed >= d.opts.Global+priorityBurstSlots
-	highUsed := d.highPriorityUsed
-	d.mu.Unlock()
-	if atHardCap {
-		return false
-	}
-	if atSoftCap {
-		highBurstOK := isHighPriorityTask(typ) && highUsed == 0
-		subtitleBurstOK := usesSubtitleSlot(typ)
-		if !highBurstOK && !subtitleBurstOK {
-			return false
-		}
-	}
-	select {
-	case d.global <- struct{}{}:
-	default:
-		return false
-	}
-	var sub chan struct{}
-	if typ == TaskPoster || typ == TaskPosterRepair {
-		sub = d.poster
-	} else if typ == TaskPreview {
-		sub = d.preview
-	} else if usesSubtitleSlot(typ) {
-		sub = d.subtitle
-	}
-	if sub != nil {
-		select {
-		case sub <- struct{}{}:
-		default:
-			<-d.global
-			return false
-		}
-	}
-	d.mu.Lock()
-	d.globalUsed++
-	if isHighPriorityTask(typ) {
-		d.highPriorityUsed++
-	}
-	if typ == TaskPoster || typ == TaskPosterRepair {
-		d.posterUsed++
-	}
-	if typ == TaskPreview {
-		d.previewUsed++
-	}
-	if usesSubtitleSlot(typ) {
-		d.subtitleUsed++
-	}
-	d.mu.Unlock()
-	return true
-}
-func (d *Dispatcher) release(typ TaskType) {
-	if typ == TaskPoster || typ == TaskPosterRepair {
-		<-d.poster
-	} else if typ == TaskPreview {
-		<-d.preview
-	} else if usesSubtitleSlot(typ) {
-		<-d.subtitle
-	}
-	<-d.global
-	d.mu.Lock()
-	d.globalUsed--
-	if isHighPriorityTask(typ) {
-		d.highPriorityUsed--
-	}
-	if typ == TaskPoster || typ == TaskPosterRepair {
-		d.posterUsed--
-	}
-	if typ == TaskPreview {
-		d.previewUsed--
-	}
-	if usesSubtitleSlot(typ) {
-		d.subtitleUsed--
-	}
-	d.mu.Unlock()
+	return &scheduler.ClaimResult{
+		ExecutionID: task.ExecutionID,
+		TaskType:    string(task.Type),
+		Owner:       owner,
+		QueueID:     task.ID,
+		MediaID:     task.MediaID,
+		LeaseUntil:  task.LeaseUntil,
+		Payload:     *task,
+	}, nil
 }
 
 func (d *Dispatcher) launch(parent context.Context, task Task) {
@@ -633,7 +448,7 @@ func (d *Dispatcher) runTask(parent, lifecycleCtx context.Context, task Task, st
 	}
 	defer state.cancel()
 	var cleanupOnce sync.Once
-	cleanup := func() { cleanupOnce.Do(func() { d.unregister(task, state); d.release(task.Type) }) }
+	cleanup := func() { cleanupOnce.Do(func() { d.unregister(task, state); d.releaseReservation(task) }) }
 	handedOff := false
 	defer func() {
 		if !handedOff {
@@ -815,6 +630,21 @@ func (d *Dispatcher) unregister(task Task, state *workerState) {
 		}
 	}
 }
+
+// releaseReservation frees the task's scheduler reservation when its execution
+// unit finally ends. Normal complete/fail paths already released it (the
+// compare-and-set makes a duplicate release a no-op); the shutdown-unresponsive
+// path retains budget while the executor is unresponsive and releases here.
+func (d *Dispatcher) releaseReservation(task Task) {
+	if task.ExecutionID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := releaseReservationDirect(ctx, d.q.db, task, "execution_end"); err != nil {
+		log.Printf("postingest dispatcher release reservation %s: %v", task.ExecutionID, err)
+	}
+}
 func (d *Dispatcher) cancelAll(kind FailureKind, cause error) {
 	d.mu.Lock()
 	states := make([]*workerState, 0, len(d.running))
@@ -871,8 +701,12 @@ func (d *Dispatcher) CancelTask(taskID int64) {
 	}()
 }
 
-func (d *Dispatcher) Snapshot() BudgetSnapshot {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return BudgetSnapshot{d.opts.Global, d.globalUsed, d.opts.Poster, d.posterUsed, d.opts.Preview, d.previewUsed, d.opts.Subtitle, d.subtitleUsed}
+// Snapshot reports scheduler usage and limits for the compatibility overview.
+// Usage is derived from durable reservations; limits come from the effective
+// scheduler policy.
+func (d *Dispatcher) Snapshot(ctx context.Context) (scheduler.BudgetSnapshot, error) {
+	if d == nil || d.svc == nil {
+		return scheduler.BudgetSnapshot{}, nil
+	}
+	return d.svc.Snapshot(ctx)
 }

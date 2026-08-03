@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"knox-media/internal/publication"
+	"knox-media/internal/scheduler"
 	"knox-media/internal/storage"
 
 	"knox-media/internal/store"
@@ -145,9 +146,9 @@ func (q *Queue) Enqueue(ctx context.Context, mediaID int64, scanTaskID *int64, t
 	var inserted bool
 	err := store.WithBusyRetry(ctx, q.metrics, func() error {
 		result, err := q.db.ExecContext(ctx, `
-			INSERT INTO post_ingest_task (media_id, scan_task_id, generation, task_type, max_attempts)
-			SELECT ?, ?, COALESCE(ingest_generation, 0), ?, ? FROM media WHERE id=?
-			ON CONFLICT(media_id, generation, task_type) DO NOTHING`, mediaID, nullableInt64(scanTaskID), typ, publication.DefaultMaxAttempts(string(typ)), mediaID)
+			INSERT INTO post_ingest_task (media_id, scan_task_id, generation, task_type, max_attempts, source_class, base_priority, library_id, resource_profile_version, resource_profile_json)
+			SELECT ?, ?, COALESCE(ingest_generation, 0), ?, ?, 200, 200, library_id, ?, '{}' FROM media WHERE id=?
+			ON CONFLICT(media_id, generation, task_type) DO NOTHING`, mediaID, nullableInt64(scanTaskID), typ, publication.DefaultMaxAttempts(string(typ)), publication.CurrentPolicyVersion, mediaID)
 		if err != nil {
 			return err
 		}
@@ -245,11 +246,34 @@ func (q *Queue) ClaimAny(ctx context.Context, types []TaskType) (*Task, error) {
 		}
 		requested = append(requested, string(typ))
 	}
-	payload, err := publication.ClaimEligibleAny(ctx, q.db, publication.ClaimRequest{Family: publication.QueuePostIngest, TaskTypes: requested, Owner: q.owner, Registry: q.registry, Metrics: q.metrics})
+	var payload *publication.ClaimPayload
+	var admitResult *scheduler.AdmissionResult
+	var err error
+	if q.schedulerPolicy != nil {
+		// Cheap read-only fast path: skip write-lock admission transactions when
+		// no candidate is eligible, so idle claim polls do not contend with the
+		// write transactions executors use to complete or fail tasks.
+		if ok, hintErr := publication.PostIngestCandidateHint(ctx, q.db, publication.ClaimRequest{Family: publication.QueuePostIngest, TaskTypes: requested, Owner: q.owner, Registry: q.registry, Metrics: q.metrics, SchedulerPolicy: q.schedulerPolicy}); hintErr != nil || !ok {
+			return nil, hintErr
+		}
+		for _, typ := range requested {
+			payload, admitResult, _, err = publication.ClaimWithAdmission(ctx, q.db, publication.ClaimRequest{Family: publication.QueuePostIngest, TaskType: typ, Owner: q.owner, Registry: q.registry, Metrics: q.metrics, SchedulerPolicy: q.schedulerPolicy})
+			if err != nil || payload != nil {
+				break
+			}
+		}
+	} else {
+		payload, err = publication.ClaimEligibleAny(ctx, q.db, publication.ClaimRequest{Family: publication.QueuePostIngest, TaskTypes: requested, Owner: q.owner, Registry: q.registry, Metrics: q.metrics, SchedulerPolicy: q.schedulerPolicy})
+	}
 	if err != nil || payload == nil {
 		return nil, err
 	}
-	return q.taskFromClaimPayload(ctx, payload)
+	task, err := q.taskFromClaimPayload(ctx, payload, admitResult)
+	if err != nil || task == nil {
+		return nil, err
+	}
+	q.fairnessCommit(string(task.Type), task)
+	return task, nil
 }
 func (q *Queue) Claim(ctx context.Context, typ TaskType) (*Task, error) {
 	if err := q.validate(true); err != nil {
@@ -258,14 +282,27 @@ func (q *Queue) Claim(ctx context.Context, typ TaskType) (*Task, error) {
 	if err := validateTaskType(typ); err != nil {
 		return nil, err
 	}
-	payload, err := publication.ClaimEligible(ctx, q.db, publication.ClaimRequest{Family: publication.QueuePostIngest, TaskType: string(typ), Owner: q.owner, Registry: q.registry, Metrics: q.metrics})
+	req := publication.ClaimRequest{Family: publication.QueuePostIngest, TaskType: string(typ), Owner: q.owner, Registry: q.registry, Metrics: q.metrics, SchedulerPolicy: q.schedulerPolicy}
+	var payload *publication.ClaimPayload
+	var admitResult *scheduler.AdmissionResult
+	var err error
+	if q.schedulerPolicy != nil {
+		payload, admitResult, _, err = publication.ClaimWithAdmission(ctx, q.db, req)
+	} else {
+		payload, err = publication.ClaimEligible(ctx, q.db, req)
+	}
 	if err != nil || payload == nil {
 		return nil, err
 	}
-	return q.taskFromClaimPayload(ctx, payload)
+	task, err := q.taskFromClaimPayload(ctx, payload, admitResult)
+	if err != nil || task == nil {
+		return nil, err
+	}
+	q.fairnessCommit(string(typ), task)
+	return task, nil
 }
 
-func (q *Queue) taskFromClaimPayload(ctx context.Context, payload *publication.ClaimPayload) (*Task, error) {
+func (q *Queue) taskFromClaimPayload(ctx context.Context, payload *publication.ClaimPayload, admitResult *scheduler.AdmissionResult) (*Task, error) {
 	var stillOwned int
 	if err := q.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM post_ingest_task WHERE id=? AND status='running' AND lease_owner=? AND ((ingest_run_id IS NULL AND ingest_step_id IS NULL AND ? IS NULL AND ? IS NULL) OR (ingest_run_id=? AND ingest_step_id=? AND generation=? AND retry_round=? AND media_id=? AND EXISTS(SELECT 1 FROM media_ingest_step st JOIN media_ingest_run r ON r.id=st.run_id JOIN media m ON m.id=st.media_id WHERE st.id=post_ingest_task.ingest_step_id AND st.status='running' AND st.lease_owner=post_ingest_task.lease_owner AND st.run_id=post_ingest_task.ingest_run_id AND st.media_id=post_ingest_task.media_id AND st.generation=post_ingest_task.generation AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND m.ingest_generation=post_ingest_task.generation)))`, payload.QueueID, payload.Owner, nullableNullInt(payload.RunID), nullableNullInt(payload.StepID), nullableNullInt(payload.RunID), nullableNullInt(payload.StepID), payload.Generation.Int64, payload.RetryRound, payload.MediaID).Scan(&stillOwned); err != nil {
 		return nil, err
@@ -279,7 +316,14 @@ func (q *Queue) taskFromClaimPayload(ctx context.Context, payload *publication.C
 	if stillOwned != 1 {
 		return nil, nil
 	}
-	task := &Task{ID: payload.QueueID, MediaID: payload.MediaID, Type: TaskType(payload.TaskType), Status: StatusRunning, Attempts: payload.Attempts, MaxAttempts: payload.MaxAttempts, RetryRound: payload.RetryRound, LeaseOwner: payload.Owner, LeaseUntil: payload.LeaseUntil}
+	task := &Task{ID: payload.QueueID, MediaID: payload.MediaID, Type: TaskType(payload.TaskType), Status: StatusRunning, Attempts: payload.Attempts, MaxAttempts: payload.MaxAttempts, RetryRound: payload.RetryRound, LeaseOwner: payload.Owner, LeaseUntil: payload.LeaseUntil, SourceClass: payload.SourceClass, BasePriority: payload.BasePriority, ResourceProfileVersion: payload.ResourceProfileVersion, ResourceProfileJSON: payload.ResourceProfileJSON}
+	if admitResult != nil {
+		task.ExecutionID = admitResult.ExecutionID
+	}
+	if payload.LibraryID.Valid {
+		v := payload.LibraryID.Int64
+		task.LibraryID = &v
+	}
 	if payload.ScanTaskID.Valid {
 		v := payload.ScanTaskID.Int64
 		task.ScanTaskID = &v
@@ -295,6 +339,10 @@ func (q *Queue) taskFromClaimPayload(ctx context.Context, payload *publication.C
 	if payload.Generation.Valid {
 		v := payload.Generation.Int64
 		task.Generation = v
+	}
+	if payload.LibraryID.Valid {
+		v := payload.LibraryID.Int64
+		task.LibraryID = &v
 	}
 	return task, nil
 }
@@ -410,6 +458,7 @@ func (q *Queue) Complete(ctx context.Context, task Task) error {
 			return q.ownerWriteError(ctx, task.ID, task.LeaseOwner, "complete")
 		}
 		releaseTaskPlaintextTemp(task)
+		_ = releaseReservationDirect(ctx, q.db, task, "complete")
 		return nil
 	}
 	var updated bool
@@ -434,6 +483,9 @@ func (q *Queue) Complete(ctx context.Context, task Task) error {
 		}
 		updated = n == 1
 		if updated {
+			if err := releaseReservationIfNeeded(ctx, tx, task, "complete"); err != nil {
+				return err
+			}
 			if err := syncLinkedStepTx(ctx, tx, task.ID); err != nil {
 				return err
 			}
@@ -472,6 +524,21 @@ func failureText(cause error) string {
 	return truncateUTF8(cause.Error(), 4096)
 }
 
+func failReservationReason(kind FailureKind) string {
+	switch kind {
+	case FailureRetryable:
+		return "retryable_fail"
+	case FailurePermanent:
+		return "permanent_fail"
+	case FailureCancelled:
+		return "cancelled"
+	case FailureShutdown:
+		return "shutdown"
+	default:
+		return "failed"
+	}
+}
+
 func (q *Queue) Fail(ctx context.Context, task *Task, kind FailureKind, cause error) error {
 	if err := q.validate(true); err != nil {
 		return err
@@ -505,6 +572,7 @@ func (q *Queue) Fail(ctx context.Context, task *Task, kind FailureKind, cause er
 		if kind != FailureShutdown {
 			releaseTaskPlaintextTemp(*task)
 		}
+		_ = releaseReservationDirect(ctx, q.db, *task, failReservationReason(kind))
 		return nil
 	}
 	requestedKind := kind
@@ -568,6 +636,11 @@ func (q *Queue) Fail(ctx context.Context, task *Task, kind FailureKind, cause er
 		}
 		updated = n == 1
 		if updated {
+			if kind != FailureShutdown {
+				if err := releaseReservationIfNeeded(ctx, tx, *task, failReservationReason(kind)); err != nil {
+					return err
+				}
+			}
 			sync := syncLinkedStepTx
 			if kind == FailureShutdown {
 				sync = syncLinkedStepLeaseTx
@@ -596,6 +669,44 @@ func (q *Queue) Fail(ctx context.Context, task *Task, kind FailureKind, cause er
 
 func releaseTaskPlaintextTemp(task Task) {
 	_ = storage.ReleaseBoundForTask(storage.BoundFromPostIngestTask(task.MediaID, task.Generation, task.ID, string(task.Type), task.LeaseOwner))
+}
+
+// releaseReservationIfNeeded releases a scheduler reservation in the open
+// transaction if the task has a non-empty execution ID. Returns nil on success
+// or if no reservation exists (caller should not treat a missing reservation as
+// fatal - a claim may not have produced one). An already-released reservation
+// is a successful no-op: exactly-once release makes a duplicate a normal
+// outcome (e.g. after a GPU fallback fence).
+func releaseReservationIfNeeded(ctx context.Context, tx store.SQLExecutor, task Task, reason string) error {
+	if task.ExecutionID == "" {
+		return nil
+	}
+	err := scheduler.ReleaseReservationTx(ctx, tx, task.ExecutionID, reason, task.LeaseOwner)
+	if err == nil || errors.Is(err, scheduler.ErrReservationNotActive) {
+		return nil
+	}
+	return err
+}
+
+// releaseReservationDirect releases a scheduler reservation outside a
+// transaction using the database connection directly. Already-released
+// reservations are a successful no-op.
+func releaseReservationDirect(ctx context.Context, db *sql.DB, task Task, reason string) error {
+	if task.ExecutionID == "" {
+		return nil
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := scheduler.ReleaseReservationTx(ctx, tx, task.ExecutionID, reason, task.LeaseOwner); err != nil {
+		if errors.Is(err, scheduler.ErrReservationNotActive) {
+			return nil
+		}
+		return err
+	}
+	return tx.Commit()
 }
 
 func (q *Queue) ownerWriteError(ctx context.Context, taskID int64, leaseToken string, operation string) error {
@@ -646,11 +757,16 @@ func (q *Queue) recoverRunning(ctx context.Context, onlyExpired bool) (int64, er
 	// the next claim must materialize a fresh bound under the same task id.
 	selectSQL := `SELECT id, media_id, generation FROM post_ingest_task WHERE status='running'`
 	updateSQL := `UPDATE post_ingest_task SET status=CASE WHEN scan_task_id IS NOT NULL AND EXISTS(SELECT 1 FROM scan_task s WHERE s.id=post_ingest_task.scan_task_id AND (s.cancelled=1 OR s.status='cancelled')) THEN 'cancelled' WHEN attempts>=max_attempts THEN 'failed' ELSE 'waiting' END,last_error=CASE WHEN attempts>=max_attempts THEN ? ELSE last_error END,available_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL,finished_at=CASE WHEN attempts>=max_attempts OR (scan_task_id IS NOT NULL AND EXISTS(SELECT 1 FROM scan_task s WHERE s.id=post_ingest_task.scan_task_id AND (s.cancelled=1 OR s.status='cancelled'))) THEN CURRENT_TIMESTAMP ELSE NULL END,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='running'`
+	reservationSelectSQL := `SELECT execution_id FROM scheduler_reservation WHERE status='active'`
+	reservationReleaseSQL := `UPDATE scheduler_reservation SET status='released', released_at=CURRENT_TIMESTAMP, release_reason=?, released_by=?, updated_at=CURRENT_TIMESTAMP WHERE execution_id=? AND status='active'`
 	exhaustedMsg := "interrupted and attempts exhausted"
+	recoveryReason := "startup_interruption"
 	if onlyExpired {
 		selectSQL += ` AND lease_until<CURRENT_TIMESTAMP`
 		updateSQL += ` AND lease_until<CURRENT_TIMESTAMP`
+		reservationSelectSQL += ` AND (lease_until IS NULL OR lease_until<CURRENT_TIMESTAMP)`
 		exhaustedMsg = "lease expired and attempts exhausted"
+		recoveryReason = "expired_recovery"
 	}
 	selectSQL += ` ORDER BY id LIMIT ?`
 	type recoverAttempt struct{ taskID, mediaID, generation int64 }
@@ -669,6 +785,33 @@ func (q *Queue) recoverRunning(ctx context.Context, onlyExpired bool) (int64, er
 				_ = tx.Rollback()
 			}
 		}()
+		// Release orphaned reservations alongside queue rows.
+		resRows, err := tx.QueryContext(ctx, reservationSelectSQL)
+		if err != nil {
+			return err
+		}
+		var resEIDs []string
+		for resRows.Next() {
+			var eid string
+			if err := resRows.Scan(&eid); err != nil {
+				_ = resRows.Close()
+				return err
+			}
+			resEIDs = append(resEIDs, eid)
+		}
+		if err := resRows.Err(); err != nil {
+			_ = resRows.Close()
+			return err
+		}
+		if err := resRows.Close(); err != nil {
+			return err
+		}
+		for _, eid := range resEIDs {
+			if _, err := tx.ExecContext(ctx, reservationReleaseSQL, recoveryReason, "recovery", eid); err != nil {
+				return err
+			}
+		}
+
 		rows, err := tx.QueryContext(ctx, selectSQL, recoverExpiredLimit)
 		if err != nil {
 			return err
@@ -941,7 +1084,7 @@ func (q *Queue) EnqueueEncryptManual(ctx context.Context, mediaID int64) (taskID
 				taskID = existingID
 				return nil
 			}
-			result, err := tx.ExecContext(ctx, `INSERT INTO post_ingest_task(media_id,generation,task_type,status,max_attempts) VALUES(?,?,'encrypt','waiting',?)`, mediaID, generation, publication.DefaultMaxAttempts(string(TaskEncrypt)))
+			result, err := tx.ExecContext(ctx, `INSERT INTO post_ingest_task(media_id,generation,task_type,status,max_attempts,source_class,base_priority,library_id,resource_profile_version,resource_profile_json) VALUES(?,?,'encrypt','waiting',?,400,400,(SELECT library_id FROM media WHERE id=?),?,'{}')`, mediaID, generation, publication.DefaultMaxAttempts(string(TaskEncrypt)), mediaID, publication.CurrentPolicyVersion)
 			if err != nil {
 				return err
 			}
@@ -1424,4 +1567,25 @@ func (q *Queue) adminMutateEncrypt(ctx context.Context, id int64, updateSQL, op 
 		return fmt.Errorf("postingest queue: task %d is not encrypt", id)
 	}
 	return fmt.Errorf("postingest queue: encrypt task %d in status %s cannot be %sed", id, status, op)
+}
+
+// fairnessCommit records the library of the claimed task so that subsequent
+// claims rotate through libraries fairly.
+func (q *Queue) fairnessCommit(taskType string, task *Task) {
+	if q.schedulerPolicy == nil || task == nil {
+		return
+	}
+	q.fairnessMu.Lock()
+	defer q.fairnessMu.Unlock()
+	if q.fairnessCursors == nil {
+		q.fairnessCursors = make(map[string]*scheduler.LibraryFairnessCursor)
+	}
+	cursor, ok := q.fairnessCursors[taskType]
+	if !ok {
+		cursor = &scheduler.LibraryFairnessCursor{TaskType: taskType}
+		q.fairnessCursors[taskType] = cursor
+	}
+	scheduler.LibraryFairnessCommit(cursor, scheduler.LibraryCandidate{
+		LibraryID: task.LibraryID,
+	})
 }
