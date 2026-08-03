@@ -58,6 +58,12 @@ type Task struct {
 	LeaseOwner  string
 	LeaseUntil  time.Time
 	LastError   string
+	// Scheduler admission metadata frozen at enqueue.
+	SourceClass            int
+	BasePriority           int
+	LibraryID              *int64
+	ResourceProfileVersion int
+	ResourceProfileJSON    string
 }
 
 type Queue struct {

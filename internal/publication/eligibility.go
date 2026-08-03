@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"knox-media/internal/coreiface"
+	"knox-media/internal/scheduler"
 	"knox-media/internal/store"
 )
 
@@ -28,6 +29,10 @@ type ClaimPayload struct {
 	TaskType, Owner                       string
 	Attempts, MaxAttempts, RetryRound     int
 	LeaseUntil                            time.Time
+	SourceClass, BasePriority             int
+	LibraryID                             sql.NullInt64
+	ResourceProfileVersion                int
+	ResourceProfileJSON                   string
 }
 
 type ClaimRequest struct {
@@ -37,6 +42,7 @@ type ClaimRequest struct {
 	QueueID         *int64
 	Registry        coreiface.CapabilityRegistry
 	Metrics         *store.SQLiteMetrics
+	SchedulerPolicy *scheduler.Policy
 	afterCommit     func() error
 }
 
@@ -143,7 +149,7 @@ func claimEligibleAnyTx(ctx context.Context, tx store.ImmediateConnTx, req Claim
 	}
 	// Restrict required HOL to types the caller can claim now (e.g. exclude poster
 	// when poster slots are full) so other required work can use remaining global slots.
-	oldest, err := oldestEligibleRequiredFor(ctx, tx, req.Registry, req.TaskTypes)
+	oldest, err := oldestEligibleRequiredFor(ctx, tx, req.Registry, req.TaskTypes, req.SchedulerPolicy)
 	if err != nil {
 		return nil, err
 	}
@@ -164,7 +170,7 @@ func claimEligibleAnyTx(ctx context.Context, tx store.ImmediateConnTx, req Claim
 		args = append(args, typ)
 	}
 	caseOrder += fmt.Sprintf("ELSE %d END", len(req.TaskTypes))
-	query := fmt.Sprintf(`SELECT q.id,q.task_type FROM post_ingest_task q LEFT JOIN media_ingest_step st ON st.id=q.ingest_step_id WHERE %s AND q.task_type IN (%s) AND COALESCE(st.required,0)=0 AND (%s OR (%s) OR (q.task_type='poster_repair' AND q.ingest_run_id IS NOT NULL AND q.ingest_step_id IS NULL AND q.generation>0 AND EXISTS(SELECT 1 FROM media m JOIN media_ingest_run r ON r.id=q.ingest_run_id WHERE m.id=q.media_id AND m.ingest_generation=q.generation AND m.publication_state IN ('published','degraded') AND m.published_at IS NOT NULL AND r.media_id=q.media_id AND r.generation=q.generation AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL))) ORDER BY %s,%s LIMIT 1`, familyDueSQL(QueuePostIngest, "q"), sqlPlaceholders(len(req.TaskTypes)), familyLegacySQL(QueuePostIngest, "q"), linkedEligibilitySQL("q"), caseOrder, familyOrderSQL(QueuePostIngest, "q"))
+	query := fmt.Sprintf(`SELECT q.id,q.task_type FROM post_ingest_task q LEFT JOIN media_ingest_step st ON st.id=q.ingest_step_id WHERE %s AND q.task_type IN (%s) AND COALESCE(st.required,0)=0 AND (%s OR (%s) OR (q.task_type='poster_repair' AND q.ingest_run_id IS NOT NULL AND q.ingest_step_id IS NULL AND q.generation>0 AND EXISTS(SELECT 1 FROM media m JOIN media_ingest_run r ON r.id=q.ingest_run_id WHERE m.id=q.media_id AND m.ingest_generation=q.generation AND m.publication_state IN ('published','degraded') AND m.published_at IS NOT NULL AND r.media_id=q.media_id AND r.generation=q.generation AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL))) ORDER BY %s,%s LIMIT 1`, familyDueSQL(QueuePostIngest, "q"), sqlPlaceholders(len(req.TaskTypes)), familyLegacySQL(QueuePostIngest, "q"), linkedEligibilitySQL("q"), caseOrder, familyOrderSQL(QueuePostIngest, "q", req.SchedulerPolicy, time.Now()))
 	var id int64
 	var typ string
 	if err := tx.QueryRowContext(ctx, query, args...).Scan(&id, &typ); errors.Is(err, sql.ErrNoRows) {
@@ -213,7 +219,7 @@ func claimEligibleTx(ctx context.Context, tx store.ImmediateConnTx, req ClaimReq
 		return nil, nil
 	}
 	if linked {
-		oldest, err := oldestEligibleRequired(ctx, tx, req.Registry)
+		oldest, err := oldestEligibleRequired(ctx, tx, req.Registry, req.SchedulerPolicy)
 		if err != nil {
 			return nil, err
 		}
@@ -267,7 +273,13 @@ func familyAvailableSQL(f QueueFamily, alias string) string {
 	}
 	return "COALESCE(" + alias + ".available_at," + alias + ".created_at)"
 }
-func familyOrderSQL(f QueueFamily, alias string) string {
+func familyOrderSQL(f QueueFamily, alias string, policy *scheduler.Policy, now time.Time) string {
+	if f == QueuePostIngest {
+		if policy != nil {
+			return scheduler.EffectivePrioritySQL(alias, policy, now) + " DESC," + familyAvailableSQL(f, alias) + "," + alias + ".created_at," + alias + ".id"
+		}
+		return alias + ".source_class DESC," + alias + ".base_priority DESC," + alias + ".priority DESC," + familyAvailableSQL(f, alias) + "," + alias + ".created_at," + alias + ".id"
+	}
 	return alias + ".priority DESC," + familyAvailableSQL(f, alias) + "," + alias + ".created_at," + alias + ".id"
 }
 
@@ -296,7 +308,7 @@ func selectFamilyCandidate(ctx context.Context, tx store.SQLExecutor, req ClaimR
 	if req.Family == QueuePostIngest && req.TaskType == "poster_repair" {
 		repair = `q.task_type='poster_repair' AND q.ingest_run_id IS NOT NULL AND q.ingest_step_id IS NULL AND q.generation>0 AND EXISTS(SELECT 1 FROM media m JOIN media_ingest_run r ON r.id=q.ingest_run_id WHERE m.id=q.media_id AND m.ingest_generation=q.generation AND m.publication_state IN ('published','degraded') AND m.published_at IS NOT NULL AND r.media_id=q.media_id AND r.generation=q.generation AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL)`
 	}
-	query := fmt.Sprintf(`SELECT q.id,COALESCE(st.required,0),q.ingest_run_id IS NOT NULL FROM %s q LEFT JOIN media_ingest_step st ON st.id=q.ingest_step_id WHERE %s%s AND (%s OR (%s) OR (%s)) ORDER BY %s LIMIT 1`, table, due, typeFilter, familyLegacySQL(req.Family, alias), link, repair, familyOrderSQL(req.Family, alias))
+	query := fmt.Sprintf(`SELECT q.id,COALESCE(st.required,0),q.ingest_run_id IS NOT NULL FROM %s q LEFT JOIN media_ingest_step st ON st.id=q.ingest_step_id WHERE %s%s AND (%s OR (%s) OR (%s)) ORDER BY %s LIMIT 1`, table, due, typeFilter, familyLegacySQL(req.Family, alias), link, repair, familyOrderSQL(req.Family, alias, req.SchedulerPolicy, time.Now()))
 	err = tx.QueryRowContext(ctx, query, args...).Scan(&id, &required, &linked)
 	return
 }
@@ -306,6 +318,8 @@ type requiredCandidate struct {
 	id                 int64
 	taskType           string
 	priority           int64
+	sourceClass        int64
+	basePriority       int64
 	available, created string
 }
 
@@ -331,11 +345,11 @@ func familyAdvertised(registry coreiface.CapabilityRegistry, f QueueFamily) bool
 	}
 	return false
 }
-func oldestEligibleRequired(ctx context.Context, tx store.SQLExecutor, registry coreiface.CapabilityRegistry) (*requiredCandidate, error) {
-	return oldestEligibleRequiredFor(ctx, tx, registry, nil)
+func oldestEligibleRequired(ctx context.Context, tx store.SQLExecutor, registry coreiface.CapabilityRegistry, policy *scheduler.Policy) (*requiredCandidate, error) {
+	return oldestEligibleRequiredFor(ctx, tx, registry, nil, policy)
 }
 
-func oldestEligibleRequiredFor(ctx context.Context, tx store.SQLExecutor, registry coreiface.CapabilityRegistry, postTypes []string) (*requiredCandidate, error) {
+func oldestEligibleRequiredFor(ctx context.Context, tx store.SQLExecutor, registry coreiface.CapabilityRegistry, postTypes []string, policy *scheduler.Policy) (*requiredCandidate, error) {
 	var best *requiredCandidate
 	for _, f := range []QueueFamily{QueuePostIngest, QueueScrape, QueuePrepare} {
 		table, a := familySource(f)
@@ -362,10 +376,10 @@ func oldestEligibleRequiredFor(ctx context.Context, tx store.SQLExecutor, regist
 			}
 		}
 		availableExpr := familyAvailableSQL(f, a)
-		query := fmt.Sprintf(`SELECT q.id,st.step_type,COALESCE(q.priority,0),CAST(%s AS TEXT),CAST(q.created_at AS TEXT) FROM %s q JOIN media_ingest_step st ON st.id=q.ingest_step_id WHERE st.required=1 AND %s AND %s%s ORDER BY %s LIMIT 1`, availableExpr, table, familyDueSQL(f, a), linkedEligibilitySQL(a), typeFilter, familyOrderSQL(f, a))
+		query := fmt.Sprintf(`SELECT q.id,st.step_type,COALESCE(q.priority,0),CAST(0 AS INTEGER),CAST(0 AS INTEGER),CAST(%s AS TEXT),CAST(q.created_at AS TEXT) FROM %s q JOIN media_ingest_step st ON st.id=q.ingest_step_id WHERE st.required=1 AND %s AND %s%s ORDER BY %s LIMIT 1`, availableExpr, table, familyDueSQL(f, a), linkedEligibilitySQL(a), typeFilter, familyOrderSQL(f, a, policy, time.Now()))
 		var c requiredCandidate
 		c.family = f
-		err = tx.QueryRowContext(ctx, query, queryArgs...).Scan(&c.id, &c.taskType, &c.priority, &c.available, &c.created)
+		err = tx.QueryRowContext(ctx, query, queryArgs...).Scan(&c.id, &c.taskType, &c.priority, &c.sourceClass, &c.basePriority, &c.available, &c.created)
 		if errors.Is(err, sql.ErrNoRows) {
 			continue
 		}
@@ -383,6 +397,14 @@ func oldestEligibleRequiredFor(ctx context.Context, tx store.SQLExecutor, regist
 	return best, nil
 }
 func requiredLess(a, b requiredCandidate) bool {
+	if a.family == QueuePostIngest && b.family == QueuePostIngest {
+		if a.sourceClass != b.sourceClass {
+			return a.sourceClass > b.sourceClass
+		}
+		if a.basePriority != b.basePriority {
+			return a.basePriority > b.basePriority
+		}
+	}
 	if a.priority != b.priority {
 		return a.priority > b.priority
 	}
@@ -399,7 +421,7 @@ func requiredLess(a, b requiredCandidate) bool {
 }
 
 func eligibleRequiredExists(ctx context.Context, tx store.SQLExecutor, registry coreiface.CapabilityRegistry) (bool, error) {
-	c, err := oldestEligibleRequired(ctx, tx, registry)
+	c, err := oldestEligibleRequired(ctx, tx, registry, nil)
 	return c != nil, err
 }
 
@@ -434,7 +456,7 @@ func updateFamilyClaim(ctx context.Context, tx store.SQLExecutor, req ClaimReque
 	var lease sql.NullTime
 	switch req.Family {
 	case QueuePostIngest:
-		err = tx.QueryRowContext(ctx, `SELECT media_id,ingest_run_id,ingest_step_id,scan_task_id,generation,task_type,attempts,max_attempts,retry_round,lease_until FROM post_ingest_task WHERE id=?`, id).Scan(&p.MediaID, &p.RunID, &p.StepID, &p.ScanTaskID, &p.Generation, &p.TaskType, &p.Attempts, &p.MaxAttempts, &p.RetryRound, &lease)
+		err = tx.QueryRowContext(ctx, `SELECT media_id,ingest_run_id,ingest_step_id,scan_task_id,generation,task_type,attempts,max_attempts,retry_round,lease_until,source_class,base_priority,library_id,resource_profile_version,resource_profile_json FROM post_ingest_task WHERE id=?`, id).Scan(&p.MediaID, &p.RunID, &p.StepID, &p.ScanTaskID, &p.Generation, &p.TaskType, &p.Attempts, &p.MaxAttempts, &p.RetryRound, &lease, &p.SourceClass, &p.BasePriority, &p.LibraryID, &p.ResourceProfileVersion, &p.ResourceProfileJSON)
 	case QueueScrape:
 		err = tx.QueryRowContext(ctx, `SELECT media_id,ingest_run_id,ingest_step_id,generation,COALESCE(fail_count,0),retry_round,lease_until FROM scrape_task WHERE id=?`, id).Scan(&p.MediaID, &p.RunID, &p.StepID, &p.Generation, &p.Attempts, &p.RetryRound, &lease)
 		p.TaskType = "scrape"
@@ -478,7 +500,7 @@ func claimByOwner(ctx context.Context, db *sql.DB, f QueueFamily, owner string) 
 	var err error
 	switch f {
 	case QueuePostIngest:
-		err = db.QueryRowContext(ctx, `SELECT q.id,q.media_id,q.ingest_run_id,q.ingest_step_id,q.scan_task_id,q.generation,q.task_type,q.attempts,q.max_attempts,q.retry_round,q.lease_until FROM post_ingest_task q LEFT JOIN media_ingest_step st ON st.id=q.ingest_step_id LEFT JOIN media_ingest_run r ON r.id=q.ingest_run_id LEFT JOIN media m ON m.id=q.media_id WHERE q.lease_owner=? AND q.status='running' AND ((q.ingest_run_id IS NULL AND q.ingest_step_id IS NULL AND q.generation=0) OR (st.status='running' AND st.lease_owner=q.lease_owner AND st.run_id=q.ingest_run_id AND st.media_id=q.media_id AND st.generation=q.generation AND r.id=st.run_id AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND m.ingest_generation=q.generation) OR (q.task_type='poster_repair' AND q.ingest_run_id IS NOT NULL AND q.ingest_step_id IS NULL AND q.generation>0 AND EXISTS(SELECT 1 FROM media m JOIN media_ingest_run r ON r.id=q.ingest_run_id WHERE m.id=q.media_id AND m.ingest_generation=q.generation AND m.publication_state IN ('published','degraded') AND m.published_at IS NOT NULL AND r.media_id=q.media_id AND r.generation=q.generation AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL)))`, owner).Scan(&p.QueueID, &p.MediaID, &p.RunID, &p.StepID, &p.ScanTaskID, &p.Generation, &p.TaskType, &p.Attempts, &p.MaxAttempts, &p.RetryRound, &lease)
+		err = db.QueryRowContext(ctx, `SELECT q.id,q.media_id,q.ingest_run_id,q.ingest_step_id,q.scan_task_id,q.generation,q.task_type,q.attempts,q.max_attempts,q.retry_round,q.lease_until,q.source_class,q.base_priority,q.library_id,q.resource_profile_version,q.resource_profile_json FROM post_ingest_task q LEFT JOIN media_ingest_step st ON st.id=q.ingest_step_id LEFT JOIN media_ingest_run r ON r.id=q.ingest_run_id LEFT JOIN media m ON m.id=q.media_id WHERE q.lease_owner=? AND q.status='running' AND ((q.ingest_run_id IS NULL AND q.ingest_step_id IS NULL AND q.generation=0) OR (st.status='running' AND st.lease_owner=q.lease_owner AND st.run_id=q.ingest_run_id AND st.media_id=q.media_id AND st.generation=q.generation AND r.id=st.run_id AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND m.ingest_generation=q.generation) OR (q.task_type='poster_repair' AND q.ingest_run_id IS NOT NULL AND q.ingest_step_id IS NULL AND q.generation>0 AND EXISTS(SELECT 1 FROM media m JOIN media_ingest_run r ON r.id=q.ingest_run_id WHERE m.id=q.media_id AND m.ingest_generation=q.generation AND m.publication_state IN ('published','degraded') AND m.published_at IS NOT NULL AND r.media_id=q.media_id AND r.generation=q.generation AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL)))`, owner).Scan(&p.QueueID, &p.MediaID, &p.RunID, &p.StepID, &p.ScanTaskID, &p.Generation, &p.TaskType, &p.Attempts, &p.MaxAttempts, &p.RetryRound, &lease, &p.SourceClass, &p.BasePriority, &p.LibraryID, &p.ResourceProfileVersion, &p.ResourceProfileJSON)
 	case QueueScrape:
 		err = db.QueryRowContext(ctx, `SELECT q.id,q.media_id,q.ingest_run_id,q.ingest_step_id,q.generation,COALESCE(q.fail_count,0),q.retry_round,q.lease_until FROM scrape_task q LEFT JOIN media_ingest_step st ON st.id=q.ingest_step_id LEFT JOIN media_ingest_run r ON r.id=q.ingest_run_id LEFT JOIN media m ON m.id=q.media_id WHERE q.lease_owner=? AND q.status='running' AND ((q.ingest_run_id IS NULL AND q.ingest_step_id IS NULL AND q.generation IS NULL) OR (st.status='running' AND st.lease_owner=q.lease_owner AND st.run_id=q.ingest_run_id AND st.media_id=q.media_id AND st.generation=q.generation AND r.id=st.run_id AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND m.ingest_generation=q.generation))`, owner).Scan(&p.QueueID, &p.MediaID, &p.RunID, &p.StepID, &p.Generation, &p.Attempts, &p.RetryRound, &lease)
 		p.TaskType = "scrape"

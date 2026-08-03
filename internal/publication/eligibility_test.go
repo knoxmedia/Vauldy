@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"knox-media/internal/scheduler"
 	"knox-media/internal/store"
 	"strings"
 	"testing"
@@ -495,5 +496,132 @@ func TestLinkedClaimEligibilityRejectsPartialLegacyIdentityAllFamilies(t *testin
 				t.Fatalf("partial claimed=%+v", p)
 			}
 		})
+	}
+}
+
+// TestAgingEffectivePriorityClaimOrder verifies that aging boosts a lower
+// source-class task past a younger higher-class task.  Without aging, the
+// higher priority always wins.  With aging, the older lower-priority task
+// accrues enough effective priority to be claimed first.
+func TestAgingEffectivePriorityClaimOrder(t *testing.T) {
+	db := openEligibilityDB(t)
+	now := "datetime(CURRENT_TIMESTAMP)"
+	old := "datetime(CURRENT_TIMESTAMP, '-36000 seconds')" // 10 hours ago
+	_, err := db.Exec(`
+		INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l');
+		INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state)
+			VALUES(10,1,'f10','video',1,'processing'),(11,1,'f11','video',1,'processing');
+		INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version)
+			VALUES(20,10,1,'scan','processing','{}',2),(21,11,1,'scan','processing','{}',2);
+		INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status)
+			VALUES(30,20,10,1,'encrypt',1,'waiting'),(31,21,11,1,'encrypt',1,'waiting');
+		INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status,
+			available_at,created_at,priority)
+			VALUES
+			 (40,10,20,30,1,'encrypt','waiting',`+now+`,`+now+`,50),
+			 (41,11,21,31,1,'encrypt','waiting',`+old+`,`+old+`,0);
+	`)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	policy := scheduler.PolicyDefaults()
+	registry := NewCapabilityMatrix([]string{"encrypt"})
+	got, err := ClaimEligible(context.Background(), db, ClaimRequest{
+		Family: QueuePostIngest, TaskType: "encrypt", Owner: "worker", Registry: registry,
+		SchedulerPolicy: &policy,
+	})
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected a claim")
+	}
+	// With aging (interval=300s, step=1): task 41 is 10h old → aging_boost=120
+	// Task 41 effective=120 beats task 40 raw priority=50.
+	if got.QueueID != 41 {
+		t.Fatalf("aging claim: got queue %d, want 41 (older task wins via aging boost)", got.QueueID)
+	}
+}
+
+// TestEffectivePriorityNoAgingCap verifies that aging has no cap and can grow
+// unbounded, guaranteeing that every source class eventually makes progress.
+func TestEffectivePriorityNoAgingCap(t *testing.T) {
+	db := openEligibilityDB(t)
+	now := "datetime(CURRENT_TIMESTAMP)"
+	veryOld := "datetime(CURRENT_TIMESTAMP, '-31536000 seconds')" // ~1 year ago
+	_, err := db.Exec(`
+		INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l');
+		INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state)
+			VALUES(10,1,'f10','video',1,'processing'),(11,1,'f11','video',1,'processing');
+		INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version)
+			VALUES(20,10,1,'scan','processing','{}',2),(21,11,1,'scan','processing','{}',2);
+		INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status)
+			VALUES(30,20,10,1,'encrypt',1,'waiting'),(31,21,11,1,'encrypt',1,'waiting');
+		INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status,
+			available_at,created_at,priority,source_class,base_priority)
+			VALUES
+			 (40,10,20,30,1,'encrypt','waiting',`+now+`,`+now+`,0,400,400),
+			 (41,11,21,31,1,'encrypt','waiting',`+veryOld+`,`+veryOld+`,0,100,100);
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := scheduler.PolicyDefaults()
+	registry := NewCapabilityMatrix([]string{"encrypt"})
+	got, err := ClaimEligible(context.Background(), db, ClaimRequest{
+		Family: QueuePostIngest, TaskType: "encrypt", Owner: "worker", Registry: registry,
+		SchedulerPolicy: &policy,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil {
+		t.Fatal("expected a claim")
+	}
+	// Task 41 (source_class=100, 1 year old) should overtake task 40
+	// (source_class=400, brand new) because aging is uncapped.
+	if got.QueueID != 41 {
+		t.Fatalf("uncapped aging claim: got queue %d, want 41 (old task wins via uncapped aging)", got.QueueID)
+	}
+}
+
+// TestClaimOrderStableTieBreakers verifies that when effective priorities are
+// equal, stable tie-breaking uses available_at, created_at, and ID.
+func TestClaimOrderStableTieBreakers(t *testing.T) {
+	db := openEligibilityDB(t)
+	_, err := db.Exec(`
+		INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l');
+		INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state)
+			VALUES(10,1,'f10','video',1,'processing'),(11,1,'f11','video',1,'processing');
+		INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version)
+			VALUES(20,10,1,'scan','processing','{}',2),(21,11,1,'scan','processing','{}',2);
+		INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status)
+			VALUES(30,20,10,1,'encrypt',1,'waiting'),(31,21,11,1,'encrypt',1,'waiting');
+		-- Same source_class and base_priority, but different available_at.
+		-- Task 41 has earlier available_at → should be claimed first.
+		INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status,
+			available_at,created_at,priority,source_class,base_priority)
+			VALUES
+			 (40,10,20,30,1,'encrypt','waiting','2020-01-02T00:00:00','2020-01-01T00:00:00',0,300,300),
+			 (41,11,21,31,1,'encrypt','waiting','2020-01-01T00:00:00','2020-01-01T00:00:00',0,300,300);
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := NewCapabilityMatrix([]string{"encrypt"})
+	policy := scheduler.PolicyDefaults()
+	got, err := ClaimEligible(context.Background(), db, ClaimRequest{
+		Family: QueuePostIngest, TaskType: "encrypt", Owner: "worker", Registry: registry,
+		SchedulerPolicy: &policy,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil {
+		t.Fatal("expected a claim")
+	}
+	// Task 41 should win because available_at is earlier (stable tie-breaker).
+	if got.QueueID != 41 {
+		t.Fatalf("stable tie claim: got queue %d, want 41 (earlier available_at wins equal priority)", got.QueueID)
 	}
 }

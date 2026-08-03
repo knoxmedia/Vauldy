@@ -344,6 +344,12 @@ CREATE TABLE IF NOT EXISTS post_ingest_task (
     removed_at TIMESTAMP,
     removed_by TEXT NOT NULL DEFAULT '',
     remove_reason TEXT NOT NULL DEFAULT '',
+    source_class INTEGER NOT NULL DEFAULT 0,
+    base_priority INTEGER NOT NULL DEFAULT 0,
+    library_id INTEGER,
+    resource_profile_version INTEGER NOT NULL DEFAULT 0,
+    resource_profile_json TEXT NOT NULL DEFAULT '',
+    run_now_expires TIMESTAMP,
     FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE,
     FOREIGN KEY (scan_task_id) REFERENCES scan_task(id) ON DELETE SET NULL,
     FOREIGN KEY (ingest_run_id) REFERENCES media_ingest_run(id) ON DELETE CASCADE,
@@ -1239,6 +1245,7 @@ func OpenSQLiteContext(ctx context.Context, path string) (opened *sql.DB, return
 		_ = db.Close()
 		return nil, fmt.Errorf("migrate subtitle_task stages: %w", err)
 	}
+	_, _ = startupExecContext(ctx, db, `ALTER TABLE post_ingest_task ADD COLUMN run_now_expires TIMESTAMP`)
 	_, _ = startupExecContext(ctx, db, `ALTER TABLE library ADD COLUMN drm_enabled INTEGER DEFAULT 0`)
 	_, _ = startupExecContext(ctx, db, `ALTER TABLE library ADD COLUMN encryption_mode TEXT DEFAULT 'drm'`)
 	_, _ = startupExecContext(ctx, db, `ALTER TABLE library ADD COLUMN cleanup_local_source_after_package INTEGER DEFAULT 0`)
@@ -1558,6 +1565,11 @@ func OpenSQLiteContext(ctx context.Context, path string) (opened *sql.DB, return
 	if err := withStartupBusyRetry(ctx, func() error { return migrateSchedulerSchema(ctx, db) }); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("scheduler schema migration: %w", err)
+	}
+	// Add scheduler admission metadata columns (source_class, library_id, resource_profile) to post_ingest_task.
+	if err := withStartupBusyRetry(ctx, func() error { return migratePostIngestTaskSourceMetadata(ctx, db) }); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("post_ingest_task source metadata migration: %w", err)
 	}
 	// Apply enterprise migrations registered via RegisterEnterpriseMigration.
 	// In the community build this slice is empty; commercial init() functions

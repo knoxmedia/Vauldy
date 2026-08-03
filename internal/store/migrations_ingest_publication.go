@@ -117,6 +117,12 @@ const postIngestTaskPublicationSchema = `CREATE TABLE post_ingest_task_new (
     removed_at TIMESTAMP,
     removed_by TEXT NOT NULL DEFAULT '',
     remove_reason TEXT NOT NULL DEFAULT '',
+    source_class INTEGER NOT NULL DEFAULT 0,
+    base_priority INTEGER NOT NULL DEFAULT 0,
+    library_id INTEGER,
+    resource_profile_version INTEGER NOT NULL DEFAULT 0,
+    resource_profile_json TEXT NOT NULL DEFAULT '',
+    run_now_expires TIMESTAMP,
     FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE,
     FOREIGN KEY (scan_task_id) REFERENCES scan_task(id) ON DELETE SET NULL,
     FOREIGN KEY (ingest_run_id) REFERENCES media_ingest_run(id) ON DELETE CASCADE,
@@ -2341,6 +2347,12 @@ func publicationColumns(ctx context.Context, q SQLExecutor, table string) (map[s
 	}
 	return out, rows.Err()
 }
+
+// PublicationColumns returns a set of column names present in the named table.
+func PublicationColumns(ctx context.Context, db *sql.DB, table string) (map[string]bool, error) {
+	return publicationColumns(ctx, db, table)
+}
+
 func publicationTableSQL(ctx context.Context, q SQLExecutor, table string) (string, error) {
 	var s string
 	e := q.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&s)
@@ -3689,4 +3701,74 @@ func migrateSchedulerSchema(ctx context.Context, db *sql.DB) error {
 		return fmt.Errorf("scheduler indexes: %w", err)
 	}
 	return nil
+}
+
+// postIngestTaskSourceMetadata adds scheduler admission identity columns to post_ingest_task.
+const postIngestTaskSourceMetadataSQL = `
+ALTER TABLE post_ingest_task ADD COLUMN source_class INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE post_ingest_task ADD COLUMN base_priority INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE post_ingest_task ADD COLUMN library_id INTEGER REFERENCES library(id) ON DELETE SET NULL;
+ALTER TABLE post_ingest_task ADD COLUMN resource_profile_version INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE post_ingest_task ADD COLUMN resource_profile_json TEXT NOT NULL DEFAULT '';
+`
+
+// migratePostIngestTaskSourceMetadata adds columns for source class, library identity,
+// and resource profile to post_ingest_task if they don't already exist.
+func migratePostIngestTaskSourceMetadata(ctx context.Context, db *sql.DB) error {
+	for _, statement := range []string{
+		`ALTER TABLE post_ingest_task ADD COLUMN source_class INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE post_ingest_task ADD COLUMN base_priority INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE post_ingest_task ADD COLUMN library_id INTEGER REFERENCES library(id) ON DELETE SET NULL`,
+		`ALTER TABLE post_ingest_task ADD COLUMN resource_profile_version INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE post_ingest_task ADD COLUMN resource_profile_json TEXT NOT NULL DEFAULT ''`,
+	} {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			// SQLite returns "duplicate column name" when column already exists; treat as no-op.
+			if isDuplicateColumnError(err) {
+				continue
+			}
+			return fmt.Errorf("post_ingest_task source metadata: %w", err)
+		}
+	}
+	return nil
+}
+
+func isDuplicateColumnError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return containsIgnoreCase(msg, "duplicate column name")
+}
+
+func containsIgnoreCase(s, substr string) bool {
+	if len(s) < len(substr) {
+		return false
+	}
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if equalFoldPrefix(s[i:i+len(substr)], substr) {
+			return true
+		}
+	}
+	return false
+}
+
+func equalFoldPrefix(a, b string) bool {
+	if len(a) < len(b) {
+		return false
+	}
+	for i := 0; i < len(b); i++ {
+		ca := a[i]
+		cb := b[i]
+		if ca >= 'A' && ca <= 'Z' {
+			ca += 'a' - 'A'
+		}
+		if cb >= 'A' && cb <= 'Z' {
+			cb += 'a' - 'A'
+		}
+		if ca != cb {
+			return false
+		}
+	}
+	return true
 }

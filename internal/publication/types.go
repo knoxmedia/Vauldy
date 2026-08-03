@@ -135,6 +135,45 @@ type PlanOptions struct {
 	EncryptionValidator       EncryptionPolicyValidator
 	EncryptedSourceStrategies EncryptedSourceRegistry
 }
+// SourceClass reflects the canonical priority tier for scheduler admission.
+// Values are ordered so higher numbers win scheduling races: manual/run-now > upload > scan > repair.
+type SourceClass int
+
+const (
+	SourceClassScheduled      SourceClass = 100 // scheduled/repair/backfill
+	SourceClassManualScan     SourceClass = 200 // manual scan
+	SourceClassUploadDiscovery SourceClass = 300 // upload/discovery
+	SourceClassManualRunNow   SourceClass = 400 // manual/run-now
+)
+
+// SourceClassFromReason maps a plan reason and origin to its canonical SourceClass.
+func SourceClassFromReason(reason PlanReason, ingestItemID int64) SourceClass {
+	switch reason {
+	case PlanReasonManualRetry:
+		return SourceClassManualRunNow
+	case PlanReasonUpload, PlanReasonEvent:
+		return SourceClassUploadDiscovery
+	case PlanReasonScan:
+		if ingestItemID > 0 {
+			return SourceClassUploadDiscovery
+		}
+		return SourceClassManualScan
+	case PlanReasonRepair, PlanReasonSourceReplaced:
+		return SourceClassScheduled
+	default:
+		return SourceClassScheduled
+	}
+}
+
+// BasePriority returns the canonical base priority for a SourceClass.
+func (sc SourceClass) BasePriority() int { return int(sc) }
+
+// ResourceProfile is a lightweight descriptor profile version and resource request snapshot.
+type ResourceProfile struct {
+	PolicyVersion int   `json:"policy_version"`
+	LibraryID     int64 `json:"library_id"`
+}
+
 type NewMedia struct {
 	MediaID, ScanTaskID int64
 	IngestItemID        int64

@@ -145,9 +145,9 @@ func (q *Queue) Enqueue(ctx context.Context, mediaID int64, scanTaskID *int64, t
 	var inserted bool
 	err := store.WithBusyRetry(ctx, q.metrics, func() error {
 		result, err := q.db.ExecContext(ctx, `
-			INSERT INTO post_ingest_task (media_id, scan_task_id, generation, task_type, max_attempts)
-			SELECT ?, ?, COALESCE(ingest_generation, 0), ?, ? FROM media WHERE id=?
-			ON CONFLICT(media_id, generation, task_type) DO NOTHING`, mediaID, nullableInt64(scanTaskID), typ, publication.DefaultMaxAttempts(string(typ)), mediaID)
+			INSERT INTO post_ingest_task (media_id, scan_task_id, generation, task_type, max_attempts, source_class, base_priority, library_id, resource_profile_version, resource_profile_json)
+			SELECT ?, ?, COALESCE(ingest_generation, 0), ?, ?, 200, 200, library_id, ?, '{}' FROM media WHERE id=?
+			ON CONFLICT(media_id, generation, task_type) DO NOTHING`, mediaID, nullableInt64(scanTaskID), typ, publication.DefaultMaxAttempts(string(typ)), publication.CurrentPolicyVersion, mediaID)
 		if err != nil {
 			return err
 		}
@@ -279,7 +279,7 @@ func (q *Queue) taskFromClaimPayload(ctx context.Context, payload *publication.C
 	if stillOwned != 1 {
 		return nil, nil
 	}
-	task := &Task{ID: payload.QueueID, MediaID: payload.MediaID, Type: TaskType(payload.TaskType), Status: StatusRunning, Attempts: payload.Attempts, MaxAttempts: payload.MaxAttempts, RetryRound: payload.RetryRound, LeaseOwner: payload.Owner, LeaseUntil: payload.LeaseUntil}
+	task := &Task{ID: payload.QueueID, MediaID: payload.MediaID, Type: TaskType(payload.TaskType), Status: StatusRunning, Attempts: payload.Attempts, MaxAttempts: payload.MaxAttempts, RetryRound: payload.RetryRound, LeaseOwner: payload.Owner, LeaseUntil: payload.LeaseUntil, SourceClass: payload.SourceClass, BasePriority: payload.BasePriority, ResourceProfileVersion: payload.ResourceProfileVersion, ResourceProfileJSON: payload.ResourceProfileJSON}
 	if payload.ScanTaskID.Valid {
 		v := payload.ScanTaskID.Int64
 		task.ScanTaskID = &v
@@ -295,6 +295,10 @@ func (q *Queue) taskFromClaimPayload(ctx context.Context, payload *publication.C
 	if payload.Generation.Valid {
 		v := payload.Generation.Int64
 		task.Generation = v
+	}
+	if payload.LibraryID.Valid {
+		v := payload.LibraryID.Int64
+		task.LibraryID = &v
 	}
 	return task, nil
 }
@@ -941,7 +945,7 @@ func (q *Queue) EnqueueEncryptManual(ctx context.Context, mediaID int64) (taskID
 				taskID = existingID
 				return nil
 			}
-			result, err := tx.ExecContext(ctx, `INSERT INTO post_ingest_task(media_id,generation,task_type,status,max_attempts) VALUES(?,?,'encrypt','waiting',?)`, mediaID, generation, publication.DefaultMaxAttempts(string(TaskEncrypt)))
+			result, err := tx.ExecContext(ctx, `INSERT INTO post_ingest_task(media_id,generation,task_type,status,max_attempts,source_class,base_priority,library_id,resource_profile_version,resource_profile_json) VALUES(?,?,'encrypt','waiting',?,400,400,(SELECT library_id FROM media WHERE id=?),?,'{}')`, mediaID, generation, publication.DefaultMaxAttempts(string(TaskEncrypt)), mediaID, publication.CurrentPolicyVersion)
 			if err != nil {
 				return err
 			}
