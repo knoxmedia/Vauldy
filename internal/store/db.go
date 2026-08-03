@@ -36,6 +36,14 @@ CREATE TABLE IF NOT EXISTS library (
     subtitle_recognize INTEGER NOT NULL DEFAULT 0,
     keyframe_extract INTEGER NOT NULL DEFAULT 0,
     ai_analysis INTEGER NOT NULL DEFAULT 0,
+    lyric_recognize INTEGER NOT NULL DEFAULT 0,
+    audio_analysis INTEGER NOT NULL DEFAULT 0,
+    photo_classify INTEGER NOT NULL DEFAULT 0,
+    photo_geocode INTEGER NOT NULL DEFAULT 0,
+    photo_face INTEGER NOT NULL DEFAULT 0,
+    image_ocr INTEGER NOT NULL DEFAULT 0,
+    document_convert INTEGER NOT NULL DEFAULT 0,
+    document_fulltext INTEGER NOT NULL DEFAULT 0,
     encryption_mode TEXT DEFAULT 'drm',
     scraper TEXT DEFAULT 'tmdb',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -280,7 +288,7 @@ CREATE TABLE IF NOT EXISTS media_ingest_run (
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     finished_at TIMESTAMP,
-    policy_version INTEGER NOT NULL DEFAULT 1 CHECK(policy_version IN (1,2,3)),
+    policy_version INTEGER NOT NULL DEFAULT 1 CHECK(policy_version IN (1,2,3,4)),
     terminal_reason TEXT NOT NULL DEFAULT '',
     superseded_by_generation INTEGER,
     superseded_at TIMESTAMP,
@@ -1241,6 +1249,13 @@ func OpenSQLiteContext(ctx context.Context, path string) (opened *sql.DB, return
 			return nil, fmt.Errorf("migrate library.%s: %w", column, err)
 		}
 	}
+	// Phase 5: ensure media-typed processing columns
+	for _, column := range []string{"lyric_recognize", "audio_analysis", "photo_classify", "photo_geocode", "photo_face", "image_ocr", "document_convert", "document_fulltext"} {
+		if err := ensureLibraryProcessingColumnContext(ctx, db, column); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("migrate library.%s: %w", column, err)
+		}
+	}
 	if err := ensureSubtitleTaskStageColumns(ctx, db); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("migrate subtitle_task stages: %w", err)
@@ -1575,6 +1590,11 @@ func OpenSQLiteContext(ctx context.Context, path string) (opened *sql.DB, return
 	if err := withStartupBusyRetry(ctx, func() error { return migrateTaskControlSchema(ctx, db) }); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("task control schema migration: %w", err)
+	}
+	// Apply Phase 5 orchestration migration (node_key, capability_subtask, document/ai tables).
+	if err := withStartupBusyRetry(ctx, func() error { return migrateOrchestrationPhase5(ctx, db) }); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("orchestration phase 5 migration: %w", err)
 	}
 	// Apply enterprise migrations registered via RegisterEnterpriseMigration.
 	// In the community build this slice is empty; commercial init() functions

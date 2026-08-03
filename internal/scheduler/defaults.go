@@ -16,9 +16,16 @@ const (
 	FamilyEncryption      = "encryption"
 	FamilyRetirement      = "retirement"
 	FamilyScan            = "scan"
-	FamilyLyric           = "lyric"
+	FamilyLyricRecognize  = "lyric_recognize"
+	FamilyAudioAnalysis   = "audio_analysis"
 	FamilyPhotoClassify   = "photo_classify"
+	FamilyPhotoGeocode    = "photo_geocode"
 	FamilyPhotoFace       = "photo_face"
+	FamilyImageOCR        = "image_ocr"
+	FamilyDocumentConvert = "document_convert"
+	FamilyDocumentFulltext = "document_fulltext"
+	FamilyPersonScrape    = "person_scrape"
+	FamilyArtworkCover    = "artwork_cover"
 )
 
 // CompiledDefaults holds the default concurrency and resource profile for a registered task type.
@@ -31,7 +38,7 @@ type CompiledDefaults struct {
 	ProfileVersion     int
 }
 
-// compiledDefaults is the canonical set of Phase 1/2 scheduler defaults.
+// compiledDefaults is the canonical set of Phase 1-5 scheduler defaults.
 var compiledDefaults = []CompiledDefaults{
 	{TaskType: "ingest", Family: FamilyIngest, DefaultConcurrency: 3, Resources: ResourceRequest{CPU: 1, DiskRead: 1, DiskWrite: 1}, ProfileVersion: 1},
 	{TaskType: "metadata", Family: FamilyIngest, DefaultConcurrency: 3, Resources: ResourceRequest{CPU: 1, DiskRead: 1, ExternalProcess: 1}, ProfileVersion: 1},
@@ -49,10 +56,23 @@ var compiledDefaults = []CompiledDefaults{
 	{TaskType: "prepare", Family: FamilyPrepare, DefaultConcurrency: 1, Resources: ResourceRequest{CPU: 1, DiskRead: 1, DiskWrite: 1, ExternalProcess: 1}, ProfileVersion: 1},
 	{TaskType: "ai_analysis", Family: FamilyAI, DefaultConcurrency: 3, Resources: ResourceRequest{CPU: 1, Network: 1}, ProfileVersion: 1},
 	{TaskType: "retirement", Family: FamilyRetirement, DefaultConcurrency: 1, Resources: ResourceRequest{CPU: 1, DiskRead: 1, DiskWrite: 1}, ProfileVersion: 1},
-	{TaskType: "doc_convert", Family: FamilyDocConvert, DefaultConcurrency: 2, Resources: ResourceRequest{CPU: 1, DiskRead: 1, DiskWrite: 1, ExternalProcess: 1}, ProfileVersion: 1},
-	{TaskType: "lyric", Family: FamilyLyric, DefaultConcurrency: 2, Resources: ResourceRequest{CPU: 1, DiskRead: 1, DiskWrite: 1}, ProfileVersion: 1},
+	// Phase 5 audio
+	{TaskType: "lyric_recognize", Family: FamilyLyricRecognize, DefaultConcurrency: 2, Resources: ResourceRequest{CPU: 1, DiskRead: 1, DiskWrite: 1}, ProfileVersion: 1},
+	{TaskType: "audio_analysis", Family: FamilyAudioAnalysis, DefaultConcurrency: 2, Resources: ResourceRequest{CPU: 1, DiskRead: 1, DiskWrite: 1}, ProfileVersion: 1},
+	// Phase 5 image
 	{TaskType: "photo_classify", Family: FamilyPhotoClassify, DefaultConcurrency: 1, Resources: ResourceRequest{CPU: 1, DiskRead: 1}, ProfileVersion: 1},
+	{TaskType: "photo_geocode", Family: FamilyPhotoGeocode, DefaultConcurrency: 2, Resources: ResourceRequest{CPU: 1, DiskRead: 1, Network: 1}, ProfileVersion: 1},
 	{TaskType: "photo_face", Family: FamilyPhotoFace, DefaultConcurrency: 1, Resources: ResourceRequest{CPU: 1, DiskRead: 1, DiskWrite: 1}, ProfileVersion: 1},
+	{TaskType: "image_ocr", Family: FamilyImageOCR, DefaultConcurrency: 1, Resources: ResourceRequest{CPU: 1, DiskRead: 1, DiskWrite: 1}, ProfileVersion: 1},
+	// Phase 5 document
+	{TaskType: "document_convert", Family: FamilyDocumentConvert, DefaultConcurrency: 2, Resources: ResourceRequest{CPU: 1, DiskRead: 1, DiskWrite: 1, ExternalProcess: 1}, ProfileVersion: 1},
+	{TaskType: "document_fulltext", Family: FamilyDocumentFulltext, DefaultConcurrency: 1, Resources: ResourceRequest{CPU: 1, DiskRead: 1, DiskWrite: 1, ExternalProcess: 1}, ProfileVersion: 1},
+	// Phase 5 other
+	{TaskType: "person_scrape", Family: FamilyPersonScrape, DefaultConcurrency: 2, Resources: ResourceRequest{CPU: 1, Network: 1}, ProfileVersion: 1},
+	{TaskType: "artwork_cover", Family: FamilyArtworkCover, DefaultConcurrency: 2, Resources: ResourceRequest{CPU: 1, DiskRead: 1, DiskWrite: 1, ExternalProcess: 1}, ProfileVersion: 1},
+	// Legacy compatibility aliases (not Phase 5 canon)
+	{TaskType: "doc_convert", Family: FamilyDocConvert, DefaultConcurrency: 2, Resources: ResourceRequest{CPU: 1, DiskRead: 1, DiskWrite: 1, ExternalProcess: 1}, ProfileVersion: 1},
+	{TaskType: "lyric", Family: FamilyLyricRecognize, DefaultConcurrency: 2, Resources: ResourceRequest{CPU: 1, DiskRead: 1, DiskWrite: 1}, ProfileVersion: 1},
 }
 
 // Registry maps task type names to their compiled defaults descriptor.

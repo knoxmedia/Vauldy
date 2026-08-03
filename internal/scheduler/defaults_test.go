@@ -4,7 +4,7 @@ import (
 	"testing"
 )
 
-// Phase 1/2 executable types that must be registered in the scheduler.
+// Phase 1-5 executable types that must be registered in the scheduler.
 var requiredTaskTypes = []string{
 	"ingest", "metadata", "scan",
 	"scrape",
@@ -16,10 +16,13 @@ var requiredTaskTypes = []string{
 	"prepare",
 	"ai_analysis",
 	"retirement",
-	"doc_convert",
-	"lyric",
-	"photo_classify",
-	"photo_face",
+	// Phase 5 types
+	"lyric_recognize", "audio_analysis",
+	"photo_classify", "photo_geocode", "photo_face", "image_ocr",
+	"document_convert", "document_fulltext",
+	"person_scrape", "artwork_cover",
+	// Legacy aliases
+	"doc_convert", "lyric",
 }
 
 // TestSchedulerRegistryAllTypesRegistered asserts that every Phase 1/2
@@ -128,6 +131,17 @@ func TestSchedulerDefaultsConcurrencyValues(t *testing.T) {
 		"doc_convert":       2,
 		"ai_analysis":       3,
 		"scan":              1,
+		// Phase 5
+		"lyric_recognize":   2,
+		"audio_analysis":    2,
+		"photo_classify":    1,
+		"photo_geocode":     2,
+		"photo_face":        1,
+		"image_ocr":         1,
+		"document_convert":  2,
+		"document_fulltext": 1,
+		"person_scrape":     2,
+		"artwork_cover":     2,
 	}
 	for typ, want := range cases {
 		t.Run(typ, func(t *testing.T) {
@@ -168,6 +182,14 @@ func TestSchedulerDescriptorResourceProfiles(t *testing.T) {
 		{"scrape", ResourceRequest{CPU: 1, Network: 1}},
 		{"ai_analysis", ResourceRequest{CPU: 1, Network: 1}},
 		{"subtitle_recognize", ResourceRequest{CPU: 1, DiskRead: 1, DiskWrite: 1}},
+		{"lyric_recognize", ResourceRequest{CPU: 1, DiskRead: 1, DiskWrite: 1}},
+		{"audio_analysis", ResourceRequest{CPU: 1, DiskRead: 1, DiskWrite: 1}},
+		{"photo_geocode", ResourceRequest{CPU: 1, DiskRead: 1, Network: 1}},
+		{"image_ocr", ResourceRequest{CPU: 1, DiskRead: 1, DiskWrite: 1}},
+		{"document_convert", ResourceRequest{CPU: 1, DiskRead: 1, DiskWrite: 1, ExternalProcess: 1}},
+		{"document_fulltext", ResourceRequest{CPU: 1, DiskRead: 1, DiskWrite: 1, ExternalProcess: 1}},
+		{"person_scrape", ResourceRequest{CPU: 1, Network: 1}},
+		{"artwork_cover", ResourceRequest{CPU: 1, DiskRead: 1, DiskWrite: 1, ExternalProcess: 1}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.typ, func(t *testing.T) {

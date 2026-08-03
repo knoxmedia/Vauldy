@@ -12,6 +12,16 @@ var knownPhase1Nodes = map[StepType]bool{
 	StepPoster: true, StepThumbnail: true, StepScrape: true, StepPreview: true, StepEncrypt: true, StepPrepare: true,
 	StepPackage: true, StepPretranscode: true, StepMetadata: true, StepMediaVisible: true,
 	StepSubtitleExtract: true, StepAtrackExtract: true, StepSubtitleRecognize: true, StepKeyframeExtract: true, StepAIAnalysis: true,
+	// Phase 5 media task types
+	StepLyricRecognize: true, StepAudioAnalysis: true, StepPhotoClassify: true, StepPhotoGeocode: true,
+	StepPhotoFace: true, StepImageOCR: true, StepDocumentConvert: true, StepDocumentFulltext: true,
+	StepPersonScrape: true, StepArtworkCover: true,
+}
+
+var knownPhase5Nodes = map[StepType]bool{
+	StepLyricRecognize: true, StepAudioAnalysis: true, StepPhotoClassify: true, StepPhotoGeocode: true,
+	StepPhotoFace: true, StepImageOCR: true, StepDocumentConvert: true, StepDocumentFulltext: true,
+	StepPersonScrape: true, StepArtworkCover: true,
 }
 
 type phase1TaskDescriptor struct{ async, retryAfterPlaintextRetirement bool }
@@ -30,6 +40,9 @@ func requiresEncryptedSourceStrategy(step StepType) bool {
 var asyncPhase1Nodes = map[StepType]bool{
 	StepScrape: true, StepPreview: true, StepPrepare: true, StepSubtitleExtract: true, StepAtrackExtract: true,
 	StepSubtitleRecognize: true, StepKeyframeExtract: true, StepAIAnalysis: true, StepPackage: true, StepPretranscode: true,
+	// Phase 5 async nodes
+	StepLyricRecognize: true, StepAudioAnalysis: true, StepPhotoClassify: true, StepPhotoGeocode: true, StepPhotoFace: true,
+	StepImageOCR: true, StepDocumentConvert: true, StepDocumentFulltext: true,
 }
 
 type allowedEdge struct{ from, to StepType }
@@ -42,7 +55,31 @@ var allowedPhase1Edges = map[allowedEdge]map[DependencyKind]bool{
 	{StepPackage, StepMediaVisible}: {DependencySuccess: true}, {StepPretranscode, StepMediaVisible}: {DependencySuccess: true},
 	{StepSubtitleRecognize, StepSubtitleExtract}: {DependencySuccess: true}, {StepSubtitleRecognize, StepAtrackExtract}: {DependencySuccess: true},
 	{StepAIAnalysis, StepSubtitleRecognize}: {DependencySuccess: true},
-	{StepEncrypt, StepPoster}:               {DependencySuccess: true}, {StepEncrypt, StepThumbnail}: {DependencySuccess: true},
+	{StepEncrypt, StepPoster}:                  {DependencySuccess: true}, {StepEncrypt, StepThumbnail}: {DependencySuccess: true},
+	// Phase 5 audio edges
+	{StepLyricRecognize, StepMediaVisible}: {DependencySuccess: true},
+	{StepAudioAnalysis, StepMediaVisible}:  {DependencySuccess: true},
+	{StepAIAnalysis, StepLyricRecognize}:   {DependencySuccess: true},
+	{StepAIAnalysis, StepAudioAnalysis}:    {DependencySuccess: true},
+	// Phase 5 image edges
+	{StepPhotoClassify, StepMediaVisible}: {DependencySuccess: true},
+	{StepPhotoGeocode, StepMediaVisible}:  {DependencySuccess: true},
+	{StepPhotoFace, StepMediaVisible}:     {DependencySuccess: true},
+	{StepImageOCR, StepMediaVisible}:      {DependencySuccess: true},
+	{StepAIAnalysis, StepPhotoClassify}:   {DependencySuccess: true},
+	{StepAIAnalysis, StepPhotoGeocode}:    {DependencySuccess: true},
+	{StepAIAnalysis, StepPhotoFace}:       {DependencySuccess: true},
+	// Phase 5 document edges
+	{StepDocumentConvert, StepMediaVisible}:  {DependencySuccess: true},
+	{StepDocumentFulltext, StepMediaVisible}: {DependencySuccess: true},
+	{StepImageOCR, StepMediaVisible}:         {DependencySuccess: true},
+	{StepAIAnalysis, StepDocumentFulltext}:   {DependencySuccess: true},
+	{StepImageOCR, StepDocumentFulltext}:     {DependencySuccess: true},
+	{StepDocumentConvert, StepDocumentFulltext}: {DependencySuccess: true},
+	{StepDocumentFulltext, StepDocumentConvert}: {DependencySuccess: true},
+	// Phase 5 common edges
+	{StepPersonScrape, StepMediaVisible}: {DependencySuccess: true},
+	{StepArtworkCover, StepMediaVisible}: {DependencySuccess: true},
 }
 
 type logicalNode struct {

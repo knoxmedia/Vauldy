@@ -134,7 +134,8 @@ func (p *Planner) buildCurrentPolicyTx(ctx context.Context, tx store.SQLExecutor
 	}
 	var policy currentPolicy
 	var preview, subtitleExtract, atrackExtract, recognize, keyframe, ai, encrypted, prepare, cleanupPackage, cleanupEncrypted int
-	err := tx.QueryRowContext(ctx, `SELECT m.library_id,COALESCE(m.file_type,''),COALESCE(l.preview_extract,0),COALESCE(l.subtitle_extract,0),COALESCE(l.atrack_extract,0),COALESCE(l.subtitle_recognize,0),COALESCE(l.keyframe_extract,0),COALESCE(l.ai_analysis,0),COALESCE(l.encrypted_assets_enabled,0),COALESCE(l.jit_prepare_on_ingest,0),COALESCE(l.cleanup_local_source_after_package,0),COALESCE(l.encrypted_assets_cleanup_plaintext,0),m.ingest_generation FROM media m JOIN library l ON l.id=m.library_id WHERE m.id=?`, mediaID).Scan(&policy.libraryID, &policy.fileType, &preview, &subtitleExtract, &atrackExtract, &recognize, &keyframe, &ai, &encrypted, &prepare, &cleanupPackage, &cleanupEncrypted, &policy.generation)
+	var lyricRecognize, audioAnalysis, photoClassify, photoGeocode, photoFace, imageOCR, documentConvert, documentFulltext int
+	err := tx.QueryRowContext(ctx, `SELECT m.library_id,COALESCE(m.file_type,''),COALESCE(l.preview_extract,0),COALESCE(l.subtitle_extract,0),COALESCE(l.atrack_extract,0),COALESCE(l.subtitle_recognize,0),COALESCE(l.keyframe_extract,0),COALESCE(l.ai_analysis,0),COALESCE(l.lyric_recognize,0),COALESCE(l.audio_analysis,0),COALESCE(l.photo_classify,0),COALESCE(l.photo_geocode,0),COALESCE(l.photo_face,0),COALESCE(l.image_ocr,0),COALESCE(l.document_convert,0),COALESCE(l.document_fulltext,0),COALESCE(l.encrypted_assets_enabled,0),COALESCE(l.jit_prepare_on_ingest,0),COALESCE(l.cleanup_local_source_after_package,0),COALESCE(l.encrypted_assets_cleanup_plaintext,0),m.ingest_generation FROM media m JOIN library l ON l.id=m.library_id WHERE m.id=?`, mediaID).Scan(&policy.libraryID, &policy.fileType, &preview, &subtitleExtract, &atrackExtract, &recognize, &keyframe, &ai, &lyricRecognize, &audioAnalysis, &photoClassify, &photoGeocode, &photoFace, &imageOCR, &documentConvert, &documentFulltext, &encrypted, &prepare, &cleanupPackage, &cleanupEncrypted, &policy.generation)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errors.New("publication planner: media or library not found")
 	}
@@ -142,7 +143,7 @@ func (p *Planner) buildCurrentPolicyTx(ctx context.Context, tx store.SQLExecutor
 		return nil, fmt.Errorf("publication planner: load media: %w", err)
 	}
 	policy.fileType = strings.TrimSpace(policy.fileType)
-	policy.explicit = libraryprocessing.Options{Preview: preview == 1, SubtitleExtract: subtitleExtract == 1, ATrackExtract: atrackExtract == 1, SubtitleRecognize: recognize == 1, KeyframeExtract: keyframe == 1, AIAnalysis: ai == 1}
+	policy.explicit = libraryprocessing.Options{Preview: preview == 1, SubtitleExtract: subtitleExtract == 1, ATrackExtract: atrackExtract == 1, SubtitleRecognize: recognize == 1, KeyframeExtract: keyframe == 1, AIAnalysis: ai == 1, LyricRecognize: lyricRecognize == 1, AudioAnalysis: audioAnalysis == 1, PhotoClassify: photoClassify == 1, PhotoGeocode: photoGeocode == 1, PhotoFace: photoFace == 1, ImageOCR: imageOCR == 1, DocumentConvert: documentConvert == 1, DocumentFulltext: documentFulltext == 1}
 	policy.libraryEncrypt = encrypted == 1
 	policy.jitPrepare = prepare == 1
 	policy.cleanupPackage = cleanupPackage == 1
@@ -160,10 +161,10 @@ func (p *Planner) buildCurrentPolicyTx(ctx context.Context, tx store.SQLExecutor
 			return nil, errors.New("publication planner: scan task does not belong to media library")
 		}
 	}
-	if policy.fileType != "video" && policy.fileType != "image" {
+	if policy.fileType != "video" && policy.fileType != "image" && !isMediaCategory(policy.fileType) {
 		return nil, nil
 	}
-	effective, provenance := libraryprocessing.Close(policy.explicit)
+	effective, provenance := libraryprocessing.Close(policy.fileType, policy.explicit)
 	if provenance.Explicit == nil {
 		provenance.Explicit = []string{}
 	}
@@ -181,7 +182,7 @@ func (p *Planner) buildCurrentPolicyTx(ctx context.Context, tx store.SQLExecutor
 	}
 	if policy.fileType != "video" {
 		policy.explicit = libraryprocessing.Options{}
-		effective, provenance = libraryprocessing.Close(policy.explicit)
+		effective, provenance = libraryprocessing.Close(policy.fileType, policy.explicit)
 	}
 	if provenance.Explicit == nil {
 		provenance.Explicit = []string{}
@@ -195,30 +196,22 @@ func (p *Planner) buildCurrentPolicyTx(ctx context.Context, tx store.SQLExecutor
 			return nil, fmt.Errorf("%w: executable adapter unavailable for %s under policy v%d", ErrCapabilityUnavailable, step, CurrentPolicyVersion)
 		}
 	}
-	required := []StepType{StepPoster}
-	if policy.fileType == "image" {
-		required = []StepType{StepThumbnail}
+	tmpl, err := lookupTemplate(policy.fileType)
+	if err != nil {
+		return nil, fmt.Errorf("publication planner: %w", err)
 	}
-	optional := []StepType{StepMediaVisible, StepScrape}
-	if policy.fileType == "video" {
-		if effective.Preview {
-			optional = append(optional, StepPreview)
-		}
-		if effective.SubtitleExtract {
-			optional = append(optional, StepSubtitleExtract)
-		}
-		if effective.ATrackExtract {
-			optional = append(optional, StepAtrackExtract)
-		}
-		if effective.SubtitleRecognize {
-			optional = append(optional, StepSubtitleRecognize)
-		}
-		if effective.KeyframeExtract {
-			optional = append(optional, StepKeyframeExtract)
-		}
-		if effective.AIAnalysis {
-			optional = append(optional, StepAIAnalysis)
-		}
+	if err := validatePhase5Template(tmpl); err != nil {
+		return nil, fmt.Errorf("publication planner: validate template: %w", err)
+	}
+
+	required := append([]StepType(nil), tmpl.AllRequired...)
+	optional := tmpl.enabledSteps(effective)
+	// Ensure media_visible and scrape are always present
+	if !containsStepType(optional, StepMediaVisible) {
+		optional = append(optional, StepMediaVisible)
+	}
+	if !containsStepType(optional, StepScrape) {
+		optional = append(optional, StepScrape)
 	}
 	encrypt := p.options.EncryptGlobal && policy.libraryEncrypt
 	if encrypt {
@@ -256,12 +249,27 @@ func (p *Planner) buildCurrentPolicyTx(ctx context.Context, tx store.SQLExecutor
 	if encrypt {
 		addEdge(StepEncrypt, required[0], DependencySuccess)
 	}
-	if effective.SubtitleRecognize {
+	if policy.fileType == "video" && effective.SubtitleRecognize {
 		addEdge(StepSubtitleRecognize, StepSubtitleExtract, DependencySuccess)
 		addEdge(StepSubtitleRecognize, StepAtrackExtract, DependencySuccess)
 	}
-	if effective.AIAnalysis {
-		addEdge(StepAIAnalysis, StepSubtitleRecognize, DependencySuccess)
+	// Phase 5 AI edges for all media types
+	category := ClassifyMediaType(policy.fileType)
+	aiEdges := phase5AIEdges(effective, category)
+	for _, aiEdge := range aiEdges {
+		addEdge(aiEdge.Step, *aiEdge.DependsOn, aiEdge.Kind)
+	}
+	// Document-specific edges
+	if category == MediaCategoryDocument {
+		if effective.ImageOCR {
+			addEdge(StepImageOCR, StepDocumentFulltext, DependencySuccess)
+		}
+		if effective.DocumentFulltext && !effective.ImageOCR {
+			addEdge(StepDocumentFulltext, StepDocumentConvert, DependencySuccess)
+		}
+		if effective.DocumentConvert && !effective.DocumentFulltext {
+			addEdge(StepDocumentConvert, StepDocumentFulltext, DependencySuccess)
+		}
 	}
 	graph := PlanGraph{Nodes: nodes, Edges: edges}
 	if err := ValidatePlanGraph(graph); err != nil {
@@ -317,7 +325,7 @@ VALUES(?,?,?,?,?,?, ?,?,?)`, plan.mediaID, generation, nullScanTask(plan.scanTas
 		}
 		taskType := executionTaskType(step)
 		maxAttempts := DefaultMaxAttempts(string(taskType))
-		result, err = tx.ExecContext(ctx, `INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status,max_attempts) VALUES(?,?,?,?,?,'waiting',?)`, runID, plan.mediaID, generation, step, requiredFlag, maxAttempts)
+		result, err = tx.ExecContext(ctx, `INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,node_key,required,status,max_attempts) VALUES(?,?,?,?,?,?,'waiting',?)`, runID, plan.mediaID, generation, step, nodeKeyForStep(step), requiredFlag, maxAttempts)
 		if err != nil {
 			return Run{}, fmt.Errorf("publication planner: insert %s step: %w", step, err)
 		}
@@ -493,7 +501,8 @@ func nullIngestItem(id int64) any {
 
 func queueBacked(step StepType) bool {
 	switch step {
-	case StepPoster, StepThumbnail, StepPreview, StepKeyframe, StepSubtitle, StepAtrack, StepEncrypt, StepSubtitleExtract, StepAtrackExtract, StepSubtitleRecognize, StepKeyframeExtract, StepAIAnalysis:
+	case StepPoster, StepThumbnail, StepPreview, StepKeyframe, StepSubtitle, StepAtrack, StepEncrypt, StepSubtitleExtract, StepAtrackExtract, StepSubtitleRecognize, StepKeyframeExtract, StepAIAnalysis,
+		StepLyricRecognize, StepAudioAnalysis, StepPhotoClassify, StepPhotoGeocode, StepPhotoFace, StepImageOCR, StepDocumentConvert, StepDocumentFulltext:
 		return true
 	default:
 		return false
@@ -519,4 +528,25 @@ func hasExecutableAdapter(registry ExecutableAdapterRegistry, step StepType) boo
 	}
 	adapter, ok := registry.Adapter(step)
 	return ok && adapter != nil && adapter.TaskType() == step
+}
+
+func stepPtr(step StepType) *StepType { return &step }
+
+func containsStepType(steps []StepType, target StepType) bool {
+	for _, s := range steps {
+		if s == target {
+			return true
+		}
+	}
+	return false
+}
+
+func removeStep(steps []StepType, target StepType) []StepType {
+	out := make([]StepType, 0, len(steps))
+	for _, s := range steps {
+		if s != target {
+			out = append(out, s)
+		}
+	}
+	return out
 }

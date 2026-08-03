@@ -477,8 +477,11 @@ func validateMediaIngestStepSchema(ctx context.Context, tx *sql.Tx) error {
 	if err != nil {
 		return err
 	}
-	if !sets["run_id,step_type"] || !sets["id,media_id,generation"] {
+	if !sets["run_id,step_type"] && !sets["run_id,node_key"] {
 		return fmt.Errorf("required unique keys missing: %v", sets)
+	}
+	if !sets["id,media_id,generation"] {
+		return fmt.Errorf("required unique key (id,media_id,generation) missing: %v", sets)
 	}
 	return nil
 }
@@ -967,7 +970,15 @@ func migratePublicationV2(ctx context.Context, db *sql.DB) (err error) {
 			encryptionCanonical := exactPublicationTable(ctx, conn, "media_encryption_stage_journal", canonicalEncryptionStageJournalSchema) == nil
 			encryptionFKCanonical := requirePublicationFKSet(ctx, conn, "media_encryption_stage_journal", "post_ingest_task:task_id:id:restrict", "media_ingest_run:run_id,media_id,generation:id,media_id,generation:cascade", "media_ingest_step:step_id,media_id,generation:id,media_id,generation:cascade") == nil
 			assetCanonical := exactPublicationTable(ctx, conn, "media_asset_stage_journal", canonicalAssetStageJournalSchema) == nil
-			stepCanonical := !tableExists(ctx, conn, "media_ingest_step") || exactPublicationTable(ctx, conn, "media_ingest_step", strings.Replace(mediaIngestStepSchema, "CREATE TABLE IF NOT EXISTS", "CREATE TABLE", 1)) == nil
+			cols, _ := publicationColumns(ctx, conn, "media_ingest_step")
+			stepCanonical := !tableExists(ctx, conn, "media_ingest_step")
+			if !stepCanonical {
+				stepDDL := strings.Replace(mediaIngestStepSchema, "CREATE TABLE IF NOT EXISTS", "CREATE TABLE", 1)
+				if cols["node_key"] {
+					stepDDL = canonicalMediaIngestStepPhase5Schema()
+				}
+				stepCanonical = exactPublicationTable(ctx, conn, "media_ingest_step", stepDDL) == nil
+			}
 			if encryptionCanonical && encryptionFKCanonical && assetCanonical && stepCanonical {
 				if err = validatePublicationV2Schema(ctx, conn); err != nil {
 					return fmt.Errorf("publication v2 precommit existing schema: %w", err)
@@ -975,7 +986,7 @@ func migratePublicationV2(ctx context.Context, db *sql.DB) (err error) {
 			}
 		}
 	}
-	for _, alter := range []string{`ALTER TABLE media_ingest_run ADD COLUMN ingest_item_id INTEGER REFERENCES ingest_item(id) ON DELETE SET NULL`, `ALTER TABLE media_ingest_run ADD COLUMN policy_version INTEGER NOT NULL DEFAULT 1 CHECK(policy_version IN (1,2,3))`, `ALTER TABLE media_ingest_run ADD COLUMN terminal_reason TEXT NOT NULL DEFAULT ''`, `ALTER TABLE media_ingest_run ADD COLUMN superseded_by_generation INTEGER`, `ALTER TABLE media_ingest_run ADD COLUMN superseded_at TIMESTAMP`} {
+	for _, alter := range []string{`ALTER TABLE media_ingest_run ADD COLUMN ingest_item_id INTEGER REFERENCES ingest_item(id) ON DELETE SET NULL`, `ALTER TABLE media_ingest_run ADD COLUMN policy_version INTEGER NOT NULL DEFAULT 1 CHECK(policy_version IN (1,2,3,4))`, `ALTER TABLE media_ingest_run ADD COLUMN terminal_reason TEXT NOT NULL DEFAULT ''`, `ALTER TABLE media_ingest_run ADD COLUMN superseded_by_generation INTEGER`, `ALTER TABLE media_ingest_run ADD COLUMN superseded_at TIMESTAMP`} {
 		if _, e := conn.ExecContext(ctx, alter); e != nil && !strings.Contains(strings.ToLower(e.Error()), "duplicate column") {
 			return e
 		}
@@ -1507,7 +1518,14 @@ func createPublicationParents(ctx context.Context, q SQLExecutor, g []publicatio
 		}
 	}
 	if _, ok := graphMeta(g, "media_ingest_step"); ok {
-		if _, e := q.ExecContext(ctx, strings.Replace(mediaIngestStepSchema, "CREATE TABLE IF NOT EXISTS", "CREATE TABLE", 1)); e != nil {
+		stepDDL := strings.Replace(mediaIngestStepSchema, "CREATE TABLE IF NOT EXISTS", "CREATE TABLE", 1)
+		// If Phase 5 migration has already run (node_key indexes or supplemental tables exist),
+		// use the Phase 5 DDL that includes node_key and capability_subtask.
+		var phase5Tables int
+		if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('document_artifact','document_fulltext','ai_analysis_result')`).Scan(&phase5Tables); err == nil && phase5Tables > 0 {
+			stepDDL = canonicalMediaIngestStepPhase5Schema()
+		}
+		if _, e := q.ExecContext(ctx, stepDDL); e != nil {
 			return e
 		}
 	}
@@ -2880,7 +2898,12 @@ func validatePublicationV2Schema(ctx context.Context, q SQLExecutor) error {
 		return err
 	}
 	if tableExists(ctx, q, "media_ingest_step") {
-		if err := exactPublicationTable(ctx, q, "media_ingest_step", strings.Replace(mediaIngestStepSchema, "CREATE TABLE IF NOT EXISTS", "CREATE TABLE", 1)); err != nil {
+		cols, _ := publicationColumns(ctx, q, "media_ingest_step")
+		stepDDL := strings.Replace(mediaIngestStepSchema, "CREATE TABLE IF NOT EXISTS", "CREATE TABLE", 1)
+		if cols["node_key"] {
+			stepDDL = canonicalMediaIngestStepPhase5Schema()
+		}
+		if err := exactPublicationTable(ctx, q, "media_ingest_step", stepDDL); err != nil {
 			return err
 		}
 		if err := requirePublicationFKSet(ctx, q, "media_ingest_step", "media_ingest_run:run_id:id:cascade", "media:media_id:id:cascade", "media_ingest_run:media_id,generation:media_id,generation:no action", "media_ingest_run:run_id,media_id,generation:id,media_id,generation:no action"); err != nil {
@@ -3550,7 +3573,7 @@ func canonicalMediaIngestRunV2Schema() string {
 	return strings.Replace(strings.Replace(base,
 		`    FOREIGN KEY (media_id)`,
 		`    ingest_item_id INTEGER,
-    policy_version INTEGER NOT NULL DEFAULT 1 CHECK(policy_version IN (1,2,3)),
+    policy_version INTEGER NOT NULL DEFAULT 1 CHECK(policy_version IN (1,2,3,4)),
     terminal_reason TEXT NOT NULL DEFAULT '',
     superseded_by_generation INTEGER,
     superseded_at TIMESTAMP,

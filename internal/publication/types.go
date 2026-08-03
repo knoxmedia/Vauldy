@@ -57,10 +57,22 @@ const (
 	StepSubtitleRecognize StepType = "subtitle_recognize"
 	StepKeyframeExtract   StepType = "keyframe_extract"
 	StepAIAnalysis        StepType = "ai_analysis"
+	// Phase 5 media task types
+	StepLyricRecognize   StepType = "lyric_recognize"
+	StepAudioAnalysis    StepType = "audio_analysis"
+	StepPhotoClassify    StepType = "photo_classify"
+	StepPhotoGeocode     StepType = "photo_geocode"
+	StepPhotoFace        StepType = "photo_face"
+	StepImageOCR         StepType = "image_ocr"
+	StepDocumentConvert  StepType = "document_convert"
+	StepDocumentFulltext StepType = "document_fulltext"
+	StepPersonScrape     StepType = "person_scrape"
+	StepArtworkCover     StepType = "artwork_cover"
 )
 const (
 	PolicyV2             = 2
 	PolicyV3             = 3
+	PolicyV4             = 4
 	CurrentPolicyVersion = PolicyV3
 )
 

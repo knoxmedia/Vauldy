@@ -974,7 +974,7 @@ func TestMigrateIngestPublicationV2ManagedConstraintsBehavior(t *testing.T) {
 	runID, _ := res.LastInsertId()
 	res, _ = db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status) VALUES(?,20,1,'poster',1,'done')`, runID)
 	stepID, _ := res.LastInsertId()
-	if _, err := db.Exec(`INSERT INTO media_ingest_run(media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(21,1,'scan','processing','{}',4)`); err == nil {
+	if _, err := db.Exec(`INSERT INTO media_ingest_run(media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(21,1,'scan','processing','{}',99)`); err == nil {
 		t.Fatal("invalid policy accepted")
 	}
 	if _, err := db.Exec(`INSERT INTO media_ingest_step_dependency(step_id,dependency_kind) VALUES(?,'success')`, stepID); err == nil {
@@ -2438,8 +2438,14 @@ func TestOpenSQLiteFreshPublicationSchemaMatchesCanonical(t *testing.T) {
 	}
 	defer conn.Close()
 	for table, canonical := range map[string]string{
-		"media_ingest_run":                   canonicalMediaIngestRunV2Schema(),
-		"media_ingest_step":                  strings.Replace(mediaIngestStepSchema, "CREATE TABLE IF NOT EXISTS", "CREATE TABLE", 1),
+		"media_ingest_run":       canonicalMediaIngestRunV2Schema(),
+		"media_ingest_step":      func() string {
+			var count int
+			if err := conn.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='document_artifact'`).Scan(&count); err == nil && count > 0 {
+				return canonicalMediaIngestStepPhase5Schema()
+			}
+			return strings.Replace(mediaIngestStepSchema, "CREATE TABLE IF NOT EXISTS", "CREATE TABLE", 1)
+		}(),
 		"post_ingest_task":                   strings.Replace(postIngestTaskPublicationSchema, "post_ingest_task_new", "post_ingest_task", 1),
 		"media_ingest_step_dependency":       canonicalIngestDependencySchema,
 		"media_encryption_stage_journal":     canonicalEncryptionStageJournalSchema,

@@ -472,8 +472,6 @@ func TestPlannerRejectsInvalidDependencyGraphAtomically(t *testing.T) {
 	}
 }
 
-func stepPtr(step StepType) *StepType { return &step }
-
 func TestInsertDependenciesRejectsCrossIdentityAndCycle(t *testing.T) {
 	db := openPlannerTestDB(t)
 	_, mediaA, scanA := seedPlannerMedia(t, db, "video", 0, 0, 0)
@@ -621,7 +619,7 @@ func TestReplacementLoadsDBFileTypeVideoAndPhoto(t *testing.T) {
 	for _, tc := range []struct {
 		fileType string
 		want     []StepType
-	}{{"video", []StepType{StepPoster, StepMediaVisible, StepScrape}}, {"image", []StepType{StepThumbnail, StepMediaVisible, StepScrape}}} {
+	}{{"video", []StepType{StepPoster, StepMediaVisible, StepScrape}}, {"image", []StepType{StepThumbnail, StepMediaVisible, StepScrape}}, {"audio", []StepType{StepPoster, StepMediaVisible, StepScrape}}, {"document", []StepType{StepPoster, StepMediaVisible, StepScrape}}} {
 		t.Run(tc.fileType, func(t *testing.T) {
 			db := openPlannerTestDB(t)
 			_, mediaID, _ := seedPlannerMedia(t, db, tc.fileType, 0, 0, 0)
@@ -632,16 +630,6 @@ func TestReplacementLoadsDBFileTypeVideoAndPhoto(t *testing.T) {
 			snapshot := loadPlannerSnapshot(t, db, result.Run.ID)
 			if snapshot.FileType != tc.fileType {
 				t.Fatalf("snapshot file type=%q", snapshot.FileType)
-			}
-		})
-	}
-	for _, fileType := range []string{"audio", "document"} {
-		t.Run(fileType, func(t *testing.T) {
-			db := openPlannerTestDB(t)
-			_, mediaID, _ := seedPlannerMedia(t, db, fileType, 0, 0, 0)
-			result := planReplacementAndCommit(t, db, NewPlanner(PlanOptions{}), mediaID, ReplacementOptions{Reason: PlanReasonRepair, ExpectedGeneration: 0})
-			if result.Run.ID != 0 || result.NewGeneration != 0 {
-				t.Fatalf("unexpected plan=%+v", result)
 			}
 		})
 	}
