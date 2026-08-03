@@ -3502,3 +3502,658 @@ func TestSchedulerMigrationExactSchemaValidation(t *testing.T) {
 	conn.Close()
 	assertNoForeignKeyViolations(t, db)
 }
+
+// --- Phase 4 task control migration tests ---
+
+func openTaskControlMigrationTestDB(t *testing.T) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err = db.Exec(`PRAGMA foreign_keys=ON;
+CREATE TABLE library (id INTEGER PRIMARY KEY);
+CREATE TABLE scan_task (id INTEGER PRIMARY KEY, library_id INTEGER NOT NULL, FOREIGN KEY(library_id) REFERENCES library(id));
+CREATE TABLE media (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, library_id INTEGER, file_id TEXT UNIQUE,
+ FOREIGN KEY(library_id) REFERENCES library(id)
+);
+CREATE TABLE post_ingest_task (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, media_id INTEGER NOT NULL, scan_task_id INTEGER,
+ task_type TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'waiting', attempts INTEGER NOT NULL DEFAULT 0,
+ max_attempts INTEGER NOT NULL DEFAULT 3, available_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ lease_owner TEXT, lease_until TIMESTAMP, last_error TEXT NOT NULL DEFAULT '',
+ created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ started_at TIMESTAMP, finished_at TIMESTAMP, retry_round INTEGER NOT NULL DEFAULT 0 CHECK(retry_round >= 0),
+ priority INTEGER NOT NULL DEFAULT 0, removed_at TIMESTAMP, removed_by TEXT NOT NULL DEFAULT '',
+ remove_reason TEXT NOT NULL DEFAULT '',
+ FOREIGN KEY(media_id) REFERENCES media(id) ON DELETE CASCADE,
+ FOREIGN KEY(scan_task_id) REFERENCES scan_task(id) ON DELETE SET NULL,
+ UNIQUE(media_id,task_type),
+ CHECK(task_type IN ('poster','preview','keyframe','subtitle','atrack','encrypt','subtitle_extract','subtitle_recognize','atrack_extract','keyframe_extract','ai_analysis','thumbnail','package','pretranscode','metadata','media_visible')),
+ CHECK(status IN ('waiting','running','done','failed','cancelled'))
+);
+CREATE INDEX idx_post_ingest_claim ON post_ingest_task(status,available_at,lease_until,created_at);
+INSERT INTO library(id) VALUES(1);
+INSERT INTO scan_task(id,library_id) VALUES(10,1);
+INSERT INTO media(id,library_id,file_id) VALUES(20,1,'file-a');
+INSERT INTO post_ingest_task(id,media_id,scan_task_id,task_type,status) VALUES(30,20,10,'poster','done');
+INSERT INTO post_ingest_task(id,media_id,scan_task_id,task_type,status,attempts) VALUES(31,20,10,'keyframe','waiting',2);`); err != nil {
+		t.Fatalf("create legacy schema: %v", err)
+	}
+	return db
+}
+
+func TestTaskControlMigrationCreatesCanonicalTables(t *testing.T) {
+	db := openTaskControlMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateTaskControlSchema(ctx, db); err != nil {
+		t.Fatalf("migrateTaskControlSchema: %v", err)
+	}
+	for _, table := range []string{
+		"task_projection_sequence",
+		"task_projection_revision",
+		"task_abort_intent",
+		"task_control_audit",
+		"task_batch_operation",
+		"task_batch_item",
+	} {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&count); err != nil {
+			t.Fatalf("check table %s: %v", table, err)
+		}
+		if count != 1 {
+			t.Fatalf("table %s missing: count=%d", table, count)
+		}
+	}
+}
+
+func TestTaskControlMigrationProjectionSequenceSchema(t *testing.T) {
+	db := openTaskControlMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateTaskControlSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	expected := map[string]string{
+		"singleton_id":  "INTEGER",
+		"next_revision": "INTEGER",
+	}
+	rows, err := db.Query(`PRAGMA table_info("task_projection_sequence")`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	got := map[string]bool{}
+	for rows.Next() {
+		var cid, nn, pk int
+		var name, typ string
+		var d sql.NullString
+		rows.Scan(&cid, &name, &typ, &nn, &d, &pk)
+		got[strings.ToLower(name)] = true
+		if wantTyp, ok := expected[strings.ToLower(name)]; ok {
+			if !strings.Contains(strings.ToUpper(typ), wantTyp) {
+				t.Errorf("column %s type=%s want=%s", name, typ, wantTyp)
+			}
+		} else {
+			t.Errorf("unexpected column %s in task_projection_sequence", name)
+		}
+	}
+	for col := range expected {
+		if !got[strings.ToLower(col)] {
+			t.Errorf("task_projection_sequence missing column %s", col)
+		}
+	}
+
+	// Verify singleton constraint: only id=1 allowed
+	if _, err := db.ExecContext(ctx, `INSERT INTO task_projection_sequence(singleton_id, next_revision) VALUES(2, 100)`); err == nil {
+		t.Fatal("inserted non-singleton sequence row")
+	}
+}
+
+func TestTaskControlMigrationProjectionRevisionSchema(t *testing.T) {
+	db := openTaskControlMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateTaskControlSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	expected := map[string]string{
+		"task_identity": "TEXT",
+		"revision":      "INTEGER",
+		"updated_at":    "TIMESTAMP",
+	}
+	rows, err := db.Query(`PRAGMA table_info("task_projection_revision")`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	got := map[string]bool{}
+	for rows.Next() {
+		var cid, nn, pk int
+		var name, typ string
+		var d sql.NullString
+		rows.Scan(&cid, &name, &typ, &nn, &d, &pk)
+		got[strings.ToLower(name)] = true
+	}
+	for col := range expected {
+		if !got[strings.ToLower(col)] {
+			t.Errorf("task_projection_revision missing column %s", col)
+		}
+	}
+
+	// Verify revision uniqueness using an unallocated revision
+	var nextRev int64
+	if err := db.QueryRow(`SELECT next_revision FROM task_projection_sequence WHERE singleton_id=1`).Scan(&nextRev); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO task_projection_revision(task_identity, revision) VALUES('a', ?)`, nextRev); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO task_projection_revision(task_identity, revision) VALUES('b', ?)`, nextRev); err == nil {
+		t.Fatal("duplicate revision accepted")
+	}
+}
+
+func TestTaskControlMigrationAbortIntentSchema(t *testing.T) {
+	db := openTaskControlMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateTaskControlSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	expected := map[string]string{
+		"task_identity":        "TEXT",
+		"requested_at":         "TIMESTAMP",
+		"requested_by":         "TEXT",
+		"reason":               "TEXT",
+		"owner_fence":          "TEXT",
+		"deadline":             "TIMESTAMP",
+		"acknowledged_at":      "TIMESTAMP",
+		"outcome":              "TEXT",
+		"recovery_required_at": "TIMESTAMP",
+	}
+	rows, err := db.Query(`PRAGMA table_info("task_abort_intent")`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	got := map[string]bool{}
+	for rows.Next() {
+		var cid, nn, pk int
+		var name, typ string
+		var d sql.NullString
+		rows.Scan(&cid, &name, &typ, &nn, &d, &pk)
+		got[strings.ToLower(name)] = true
+	}
+	for col := range expected {
+		if !got[strings.ToLower(col)] {
+			t.Errorf("task_abort_intent missing column %s", col)
+		}
+	}
+
+	// Verify upsert behaves as expected
+	if _, err := db.ExecContext(ctx, `INSERT OR REPLACE INTO task_abort_intent(task_identity, reason) VALUES('test-task', 'admin abort')`); err != nil {
+		t.Fatalf("insert abort intent: %v", err)
+	}
+	var reason string
+	if err := db.QueryRow(`SELECT reason FROM task_abort_intent WHERE task_identity='test-task'`).Scan(&reason); err != nil || reason != "admin abort" {
+		t.Fatalf("abort intent not persisted: reason=%q err=%v", reason, err)
+	}
+}
+
+func TestTaskControlMigrationControlAuditSchema(t *testing.T) {
+	db := openTaskControlMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateTaskControlSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	expected := map[string]string{
+		"id":                    "INTEGER",
+		"task_identity":         "TEXT",
+		"task_type":             "TEXT",
+		"action":                "TEXT",
+		"actor_id":              "INTEGER",
+		"actor_name":            "TEXT",
+		"reason":                "TEXT",
+		"previous_status":       "TEXT",
+		"previous_revision":     "INTEGER",
+		"previous_generation":   "INTEGER",
+		"previous_retry_round":  "INTEGER",
+		"new_status":            "TEXT",
+		"new_revision":          "INTEGER",
+		"new_retry_round":       "INTEGER",
+		"operation_id":          "TEXT",
+		"outcome_code":          "TEXT",
+		"metadata_json":         "TEXT",
+		"created_at":            "TIMESTAMP",
+	}
+	rows, err := db.Query(`PRAGMA table_info("task_control_audit")`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	got := map[string]bool{}
+	for rows.Next() {
+		var cid, nn, pk int
+		var name, typ string
+		var d sql.NullString
+		rows.Scan(&cid, &name, &typ, &nn, &d, &pk)
+		got[strings.ToLower(name)] = true
+	}
+	for col := range expected {
+		if !got[strings.ToLower(col)] {
+			t.Errorf("task_control_audit missing column %s", col)
+		}
+	}
+
+	// Verify JSON default constraint
+	if _, err := db.ExecContext(ctx, `INSERT INTO task_control_audit(task_identity, task_type, action) VALUES('t','poster','reset')`); err != nil {
+		t.Fatalf("insert audit with defaults: %v", err)
+	}
+	var metadataJSON string
+	if err := db.QueryRow(`SELECT metadata_json FROM task_control_audit WHERE id=1`).Scan(&metadataJSON); err != nil || metadataJSON != "{}" {
+		t.Fatalf("metadata_json default: got=%q err=%v", metadataJSON, err)
+	}
+	// Invalid JSON should be rejected
+	if _, err := db.ExecContext(ctx, `INSERT INTO task_control_audit(task_identity, task_type, action, metadata_json) VALUES('t2','poster','reset','invalid')`); err == nil {
+		t.Fatal("invalid metadata_json accepted")
+	}
+}
+
+func TestTaskControlMigrationBatchOperationSchema(t *testing.T) {
+	db := openTaskControlMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateTaskControlSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	expected := map[string]string{
+		"operation_id":    "TEXT",
+		"action":          "TEXT",
+		"actor_id":        "INTEGER",
+		"reason":          "TEXT",
+		"requested_count": "INTEGER",
+		"created_at":      "TIMESTAMP",
+		"completed_at":    "TIMESTAMP",
+	}
+	rows, err := db.Query(`PRAGMA table_info("task_batch_operation")`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	got := map[string]bool{}
+	for rows.Next() {
+		var cid, nn, pk int
+		var name, typ string
+		var d sql.NullString
+		rows.Scan(&cid, &name, &typ, &nn, &d, &pk)
+		got[strings.ToLower(name)] = true
+	}
+	for col := range expected {
+		if !got[strings.ToLower(col)] {
+			t.Errorf("task_batch_operation missing column %s", col)
+		}
+	}
+
+	// Verify requested_count >= 0
+	if _, err := db.ExecContext(ctx, `INSERT INTO task_batch_operation(operation_id, action, requested_count) VALUES('op1','reset',-1)`); err == nil {
+		t.Fatal("negative requested_count accepted")
+	}
+}
+
+func TestTaskControlMigrationBatchItemSchema(t *testing.T) {
+	db := openTaskControlMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateTaskControlSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	expected := map[string]string{
+		"operation_id":     "TEXT",
+		"task_identity":    "TEXT",
+		"action":           "TEXT",
+		"request_revision": "INTEGER",
+		"ok":               "INTEGER",
+		"outcome_code":     "TEXT",
+		"result_revision":  "INTEGER",
+		"result_json":      "TEXT",
+		"created_at":       "TIMESTAMP",
+	}
+	rows, err := db.Query(`PRAGMA table_info("task_batch_item")`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	got := map[string]bool{}
+	for rows.Next() {
+		var cid, nn, pk int
+		var name, typ string
+		var d sql.NullString
+		rows.Scan(&cid, &name, &typ, &nn, &d, &pk)
+		got[strings.ToLower(name)] = true
+	}
+	for col := range expected {
+		if !got[strings.ToLower(col)] {
+			t.Errorf("task_batch_item missing column %s", col)
+		}
+	}
+}
+
+func TestTaskControlMigrationBatchItemOperationFK(t *testing.T) {
+	db := openTaskControlMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateTaskControlSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+
+	// Insert without parent operation should fail
+	if _, err := db.ExecContext(ctx, `INSERT INTO task_batch_item(operation_id, task_identity, action, ok) VALUES('no-parent','t1','reset',1)`); err == nil {
+		t.Fatal("inserted batch item without parent operation")
+	}
+}
+
+func TestTaskControlMigrationBatchOperationUniqueness(t *testing.T) {
+	db := openTaskControlMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateTaskControlSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := db.ExecContext(ctx, `INSERT INTO task_batch_operation(operation_id, action) VALUES('op-dup','reset')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO task_batch_operation(operation_id, action) VALUES('op-dup','reset')`); err == nil {
+		t.Fatal("duplicate operation_id accepted")
+	}
+}
+
+func TestTaskControlMigrationIndexesExist(t *testing.T) {
+	db := openTaskControlMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateTaskControlSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	indexes := []string{
+		"idx_task_control_audit_task",
+		"idx_task_control_audit_operation",
+	}
+	for _, idx := range indexes {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?`, idx).Scan(&count); err != nil {
+			t.Fatalf("check index %s: %v", idx, err)
+		}
+		if count != 1 {
+			t.Fatalf("index %s missing", idx)
+		}
+	}
+}
+
+func TestTaskControlMigrationSequenceMonotonicity(t *testing.T) {
+	db := openTaskControlMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateTaskControlSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+
+	var initial int64
+	if err := db.QueryRow(`SELECT next_revision FROM task_projection_sequence WHERE singleton_id=1`).Scan(&initial); err != nil {
+		t.Fatal(err)
+	}
+	if initial < 1 {
+		t.Fatalf("initial next_revision = %d, want >= 1", initial)
+	}
+
+	// Advance sequence and verify monotonicity
+	if _, err := db.ExecContext(ctx, `UPDATE task_projection_sequence SET next_revision = next_revision + 5 WHERE singleton_id=1`); err != nil {
+		t.Fatal(err)
+	}
+	var updated int64
+	if err := db.QueryRow(`SELECT next_revision FROM task_projection_sequence WHERE singleton_id=1`).Scan(&updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated != initial+5 {
+		t.Fatalf("sequence not monotonic: initial=%d updated=%d", initial, updated)
+	}
+}
+
+func TestTaskControlMigrationSeedRevision(t *testing.T) {
+	db := openTaskControlMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateTaskControlSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify revisions are seeded for existing post_ingest_task rows.
+	// We inserted two rows: id=30 (status=done) and id=31 (status=waiting).
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM task_projection_revision`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count < 2 {
+		t.Fatalf("expected >=2 seeded revisions, got %d", count)
+	}
+
+	// Verify deterministic ordering: orchestration:30 < orchestration:31
+	var rev30, rev31 int64
+	if err := db.QueryRow(`SELECT revision FROM task_projection_revision WHERE task_identity='orchestration:30'`).Scan(&rev30); err != nil {
+		t.Fatalf("missing revision for orchestration:30: %v", err)
+	}
+	if err := db.QueryRow(`SELECT revision FROM task_projection_revision WHERE task_identity='orchestration:31'`).Scan(&rev31); err != nil {
+		t.Fatalf("missing revision for orchestration:31: %v", err)
+	}
+	if rev30 >= rev31 {
+		t.Fatalf("revisions not in deterministic order: 30=%d 31=%d", rev30, rev31)
+	}
+
+	// Each revision must be unique
+	rows, err := db.Query(`SELECT revision, COUNT(*) FROM task_projection_revision GROUP BY revision HAVING COUNT(*) > 1`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		t.Fatal("duplicate revision found")
+	}
+}
+
+func TestTaskControlMigrationLegacyRowPreservation(t *testing.T) {
+	db := openTaskControlMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateTaskControlSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+
+	// Legacy post_ingest_task rows survive the migration unchanged.
+	var status string
+	if err := db.QueryRow(`SELECT status FROM post_ingest_task WHERE id=30`).Scan(&status); err != nil || status != "done" {
+		t.Fatalf("legacy row 30 lost: status=%q err=%v", status, err)
+	}
+	var attempts int
+	if err := db.QueryRow(`SELECT attempts FROM post_ingest_task WHERE id=31`).Scan(&attempts); err != nil || attempts != 2 {
+		t.Fatalf("legacy row 31 lost: attempts=%d err=%v", attempts, err)
+	}
+}
+
+func TestTaskControlMigrationIdempotent(t *testing.T) {
+	db := openTaskControlMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateTaskControlSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	// Second run should succeed.
+	if err := migrateTaskControlSchema(ctx, db); err != nil {
+		t.Fatalf("repeat migration: %v", err)
+	}
+	// Tables still exist.
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='task_projection_revision'`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("repeat migration lost tables: count=%d err=%v", count, err)
+	}
+	// Revision count unchanged.
+	var revCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM task_projection_revision`).Scan(&revCount); err != nil {
+		t.Fatal(err)
+	}
+	if revCount < 2 {
+		t.Fatalf("revisions lost on repeat: count=%d", revCount)
+	}
+}
+
+func TestTaskControlMigrationFaultRollback(t *testing.T) {
+	db := openTaskControlMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateTaskControlSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify transaction rollback works on batch_item FK
+	if _, err := db.ExecContext(ctx, `INSERT INTO task_batch_operation(operation_id, action) VALUES('rb-test','reset')`); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO task_batch_item(operation_id, task_identity, action, ok) VALUES('rb-test','t1','reset',1)`); err != nil {
+		tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	var itemCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM task_batch_item WHERE operation_id='rb-test'`).Scan(&itemCount); err != nil {
+		t.Fatal(err)
+	}
+	if itemCount != 0 {
+		t.Fatalf("rolled-back batch item persisted: rows=%d", itemCount)
+	}
+}
+
+func TestTaskControlMigrationReopenIdempotence(t *testing.T) {
+	db := openTaskControlMigrationTestDB(t)
+	ctx := context.Background()
+	// Run schema migration multiple times
+	if err := migrateTaskControlSchema(ctx, db); err != nil {
+		t.Fatalf("first migration: %v", err)
+	}
+	if err := migrateTaskControlSchema(ctx, db); err != nil {
+		t.Fatalf("reopen migration: %v", err)
+	}
+
+	// Schema should be identical after reopen
+	for _, table := range []string{
+		"task_projection_sequence",
+		"task_projection_revision",
+		"task_abort_intent",
+		"task_control_audit",
+		"task_batch_operation",
+		"task_batch_item",
+	} {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&count); err != nil {
+			t.Fatalf("table %s after reopen: %v", table, err)
+		}
+		if count != 1 {
+			t.Fatalf("table %s missing after reopen", table)
+		}
+	}
+
+	// Audit append-only: records inserted before reopen are preserved
+	if _, err := db.ExecContext(ctx, `INSERT INTO task_control_audit(task_identity, task_type, action) VALUES('t-reopen','poster','reset')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateTaskControlSchema(ctx, db); err != nil {
+		t.Fatalf("reopen after audit insert: %v", err)
+	}
+	var auditCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM task_control_audit WHERE task_identity='t-reopen'`).Scan(&auditCount); err != nil || auditCount != 1 {
+		t.Fatalf("audit record lost after reopen: count=%d err=%v", auditCount, err)
+	}
+}
+
+func TestTaskControlMigrationFreshSchemaEquivalence(t *testing.T) {
+	// Open a brand new DB and run migration
+	db1 := openTaskControlMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateTaskControlSchema(ctx, db1); err != nil {
+		t.Fatal(err)
+	}
+
+	// Open a second brand new DB and run migration
+	db2, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db2.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db2.Close() })
+	if _, err = db2.Exec(`PRAGMA foreign_keys=ON;
+CREATE TABLE library (id INTEGER PRIMARY KEY);
+CREATE TABLE scan_task (id INTEGER PRIMARY KEY, library_id INTEGER NOT NULL, FOREIGN KEY(library_id) REFERENCES library(id));
+CREATE TABLE media (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, library_id INTEGER, file_id TEXT UNIQUE,
+ FOREIGN KEY(library_id) REFERENCES library(id)
+);
+CREATE TABLE post_ingest_task (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, media_id INTEGER NOT NULL, scan_task_id INTEGER,
+ task_type TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'waiting', attempts INTEGER NOT NULL DEFAULT 0,
+ max_attempts INTEGER NOT NULL DEFAULT 3, available_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ lease_owner TEXT, lease_until TIMESTAMP, last_error TEXT NOT NULL DEFAULT '',
+ created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ started_at TIMESTAMP, finished_at TIMESTAMP, retry_round INTEGER NOT NULL DEFAULT 0 CHECK(retry_round >= 0),
+ priority INTEGER NOT NULL DEFAULT 0, removed_at TIMESTAMP, removed_by TEXT NOT NULL DEFAULT '',
+ remove_reason TEXT NOT NULL DEFAULT '',
+ FOREIGN KEY(media_id) REFERENCES media(id) ON DELETE CASCADE,
+ FOREIGN KEY(scan_task_id) REFERENCES scan_task(id) ON DELETE SET NULL,
+ UNIQUE(media_id,task_type),
+ CHECK(task_type IN ('poster','preview','keyframe','subtitle','atrack','encrypt','subtitle_extract','subtitle_recognize','atrack_extract','keyframe_extract','ai_analysis','thumbnail','package','pretranscode','metadata','media_visible')),
+ CHECK(status IN ('waiting','running','done','failed','cancelled'))
+);
+INSERT INTO library(id) VALUES(1);
+INSERT INTO scan_task(id,library_id) VALUES(10,1);
+INSERT INTO media(id,library_id,file_id) VALUES(20,1,'file-a');
+INSERT INTO post_ingest_task(id,media_id,scan_task_id,task_type,status) VALUES(30,20,10,'poster','done');`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateTaskControlSchema(ctx, db2); err != nil {
+		t.Fatal(err)
+	}
+
+	// Compare table lists
+	for _, table := range []string{
+		"task_projection_sequence",
+		"task_projection_revision",
+		"task_abort_intent",
+		"task_control_audit",
+		"task_batch_operation",
+		"task_batch_item",
+	} {
+		var c1, c2 int
+		if err := db1.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&c1); err != nil {
+			t.Fatal(err)
+		}
+		if err := db2.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&c2); err != nil {
+			t.Fatal(err)
+		}
+		if c1 != c2 {
+			t.Errorf("fresh schema mismatch for %s: db1=%d db2=%d", table, c1, c2)
+		}
+	}
+	assertNoForeignKeyViolations(t, db2)
+}
+
+func TestTaskControlBatchItemCompositePK(t *testing.T) {
+	db := openTaskControlMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateTaskControlSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO task_batch_operation(operation_id, action) VALUES('pk-test','reset')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO task_batch_item(operation_id, task_identity, action, ok) VALUES('pk-test','t1','reset',1)`); err != nil {
+		t.Fatal(err)
+	}
+	// Duplicate composite PK should fail
+	if _, err := db.ExecContext(ctx, `INSERT INTO task_batch_item(operation_id, task_identity, action, ok) VALUES('pk-test','t1','reset',0)`); err == nil {
+		t.Fatal("duplicate composite PK accepted")
+	}
+}

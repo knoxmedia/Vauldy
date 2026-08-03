@@ -2086,8 +2086,6 @@ export type AdminOverview = {
     cpu_percent: number;
     memory_percent: number;
     disk_percent: number;
-    transcode_task_count: number;
-    media_total: number;
   };
   system: {
     cpu_count: number;
@@ -2112,45 +2110,6 @@ export type AdminOverview = {
     message: string;
     created_at: string;
   }>;
-  post_ingest_queue: {
-    by_status: Record<string, number>;
-    by_type: Record<string, Record<string, number>>;
-    oldest_waiting_seconds: number;
-    expired_lease_count: number;
-  };
-  task_alignment: {
-    by_type: Record<string, Record<string, number>>;
-  };
-  running_post_ingest_tasks: Array<{
-    id: number;
-    media_id: number;
-    task_type: string;
-    type: string;
-    scan_task_id: number | null;
-    attempts: number;
-    attempt: number;
-    max_attempts: number;
-    run_seconds: number;
-    started_at: string;
-    lease_owner: string;
-    lease_until: string;
-    lease_expires: string;
-  }>;
-  scan_leases: Array<{
-    library_id: number;
-    scan_task_id: number;
-    owner_id: string;
-    lease_until: string;
-    expired: boolean;
-  }>;
-  resource_budget: {
-    global_limit: number;
-    global_used: number;
-    poster_limit: number;
-    poster_used: number;
-    preview_limit: number;
-    preview_used: number;
-  };
   sqlite_metrics: {
     scope: string;
     persistent: false;
@@ -2161,7 +2120,6 @@ export type AdminOverview = {
     log_failures: number;
     dropped_logs: number;
   };
-  publication_policy: PublicationPolicyDiagnostic[];
 };
 
 export async function fetchAdminOverview(signal?: AbortSignal) {

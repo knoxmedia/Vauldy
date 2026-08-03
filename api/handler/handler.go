@@ -95,6 +95,7 @@ type Handler struct {
 	PublicationPlanner      *publication.Planner
 	PublicationCapabilities coreiface.CapabilityRegistry
 	SchedulerAdmin          *taskscheduler.Service
+	TaskCtrl                *TaskControl
 	Queue                   *postingest.Queue
 	PostIngestEnqueuer      PostIngestEnqueuer
 	Dispatcher              *postingest.Dispatcher

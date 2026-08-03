@@ -425,13 +425,14 @@ func TestMainInjectsSchedulerSnapshotIntoAdminOverview(t *testing.T) {
 	}
 	src := string(data)
 
-	// Admin overview builder must receive the scheduler service for budget snapshots.
-	if !strings.Contains(src, "NewAdminOverviewBuilder(db, schedulerService, sqliteMetrics)") {
-		t.Fatal("AdminOverviewBuilder must receive schedulerService, not the legacy dispatcher")
+	// Admin overview builder is now system-only (CPU, memory, disk, SQLite, health);
+	// it no longer receives scheduler service for budget snapshots.
+	if !strings.Contains(src, "NewAdminOverviewBuilder(db, sqliteMetrics)") {
+		t.Fatal("AdminOverviewBuilder must use the system-only signature with sqliteMetrics only")
 	}
-	// Legacy dispatcher-based wiring must be gone.
-	if strings.Contains(src, "NewAdminOverviewBuilder(db, dispatcher, sqliteMetrics)") {
-		t.Fatal("AdminOverviewBuilder must not pass dispatcher as scheduler snapshotter")
+	// Scheduler service wiring is no longer part of the overview builder.
+	if strings.Contains(src, "NewAdminOverviewBuilder(db, schedulerService") {
+		t.Fatal("AdminOverviewBuilder must not pass schedulerService (system-only)")
 	}
 }
 
