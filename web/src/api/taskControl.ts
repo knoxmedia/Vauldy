@@ -99,7 +99,7 @@ export interface TaskSpec {
 export interface TaskGroup {
   label: string;
   selectable: boolean;
-  types: TaskSpec[];
+  types: TaskSpec[] | null;
 }
 
 export interface Registry {
@@ -365,12 +365,12 @@ export interface TaskControlBatchParams {
 // =============================================================================
 
 export async function fetchTaskControlRegistry(): Promise<Registry> {
-  const { data } = await api.get<Registry>("/api/v1/task-control/registry");
+  const { data } = await api.get<Registry>("/api/v1/admin/tasks/registry");
   return data;
 }
 
 export async function fetchTaskControlOverview(signal?: AbortSignal): Promise<Overview> {
-  const { data } = await api.get<Overview>("/api/v1/task-control/overview", { signal });
+  const { data } = await api.get<Overview>("/api/v1/admin/tasks/overview", { signal });
   return data;
 }
 
@@ -381,13 +381,13 @@ export async function fetchTaskControlList(params: TaskControlListParams): Promi
       cleanParams[key] = val;
     }
   }
-  const { data } = await api.get<ListResult>("/api/v1/task-control/list", { params: cleanParams });
+  const { data } = await api.get<ListResult>("/api/v1/admin/tasks", { params: cleanParams });
   return data;
 }
 
 export async function fetchTaskControlDetail(taskId: string): Promise<DetailResult | null> {
   try {
-    const { data } = await api.get<DetailResult>(`/api/v1/task-control/${encodeURIComponent(taskId)}/detail`);
+    const { data } = await api.get<DetailResult>(`/api/v1/admin/tasks/${encodeURIComponent(taskId)}`);
     return data;
   } catch (err) {
     const ax = err as { response?: { status?: number } };
@@ -401,7 +401,7 @@ export async function fetchTaskControlActions(
   params: TaskControlActionParams,
 ): Promise<{ status: string; action: string; task_id: string; row?: ProjectionRow }> {
   const { data } = await api.post(
-    `/api/v1/task-control/${encodeURIComponent(taskId)}/actions`,
+    `/api/v1/admin/tasks/${encodeURIComponent(taskId)}/actions`,
     {
       action: params.action,
       reason: params.reason,
@@ -414,6 +414,6 @@ export async function fetchTaskControlActions(
 }
 
 export async function fetchTaskControlBatch(params: TaskControlBatchParams): Promise<BatchResult> {
-  const { data } = await api.post("/api/v1/task-control/batch", params);
+  const { data } = await api.post("/api/v1/admin/tasks/batch", params);
   return data;
 }

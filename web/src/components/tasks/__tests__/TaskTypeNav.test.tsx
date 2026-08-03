@@ -138,7 +138,7 @@ describe("TaskTypeNav", () => {
     const tabs = screen.getByRole("tablist");
     fireEvent.keyDown(tabs, { key: "End" });
 
-    const lastType = videoGroup.types[videoGroup.types.length - 1]!;
+    const lastType = videoGroup.types![videoGroup.types!.length - 1]!;
     expect(onSelect).toHaveBeenCalledWith(lastType.type);
   });
 

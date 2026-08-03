@@ -192,7 +192,7 @@ describe("taskControl API client", () => {
       mockGet.mockResolvedValueOnce({ data: reg });
       const result = await fetchTaskControlRegistry();
       expect(result).toEqual(reg);
-      expect(mockGet).toHaveBeenCalledWith("/api/v1/task-control/registry");
+      expect(mockGet).toHaveBeenCalledWith("/api/v1/admin/tasks/registry");
     });
   });
 
@@ -231,7 +231,7 @@ describe("taskControl API client", () => {
       await fetchTaskControlList({
         task_type: "poster", status: "running", cursor: "abc", limit: 25, removed: "exclude",
       });
-      expect(mockGet).toHaveBeenCalledWith("/api/v1/task-control/list", {
+      expect(mockGet).toHaveBeenCalledWith("/api/v1/admin/tasks", {
         params: { task_type: "poster", status: "running", cursor: "abc", limit: 25, removed: "exclude" },
       });
     });
@@ -241,7 +241,7 @@ describe("taskControl API client", () => {
         data: { items: [], total: 0, has_more: false, truncated: false, snapshot_revision: 1 },
       });
       await fetchTaskControlList({ task_type: "transcode", library_id: 42, generation: 3 });
-      expect(mockGet).toHaveBeenCalledWith("/api/v1/task-control/list", {
+      expect(mockGet).toHaveBeenCalledWith("/api/v1/admin/tasks", {
         params: { task_type: "transcode", library_id: 42, generation: 3 },
       });
     });
@@ -253,7 +253,7 @@ describe("taskControl API client", () => {
       mockGet.mockResolvedValueOnce({ data: detail });
       const result = await fetchTaskControlDetail("orchestration:1");
       expect(result).toEqual(detail);
-      expect(mockGet).toHaveBeenCalledWith("/api/v1/task-control/orchestration%3A1/detail");
+      expect(mockGet).toHaveBeenCalledWith("/api/v1/admin/tasks/orchestration%3A1");
     });
   });
 
@@ -267,7 +267,7 @@ describe("taskControl API client", () => {
       });
       expect(result.row).toBeDefined();
       expect(mockPost).toHaveBeenCalledWith(
-        "/api/v1/task-control/orchestration%3A1/actions",
+        "/api/v1/admin/tasks/orchestration%3A1/actions",
         expect.objectContaining({ action: "abort", reason: "test abort", expected_revision: 5 }),
       );
     });
@@ -283,7 +283,7 @@ describe("taskControl API client", () => {
         items: [{ task_identity: "orchestration:1" }],
       });
       expect(result.operation_id).toBe("op-1");
-      expect(mockPost).toHaveBeenCalledWith("/api/v1/task-control/batch", {
+      expect(mockPost).toHaveBeenCalledWith("/api/v1/admin/tasks/batch", {
         operation_id: "op-1", action: "remove", reason: "cleanup",
         items: [{ task_identity: "orchestration:1" }],
       });

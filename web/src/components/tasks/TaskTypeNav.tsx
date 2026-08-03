@@ -21,7 +21,7 @@ function flattenTabs(registry: Registry): FlatTabItem[] {
   tabs.push({ key: "overview", label: "Overview", available: true });
 
   for (const group of registry.groups) {
-    if (group.types.length === 0) continue;
+    if (!group.types || group.types.length === 0) continue;
     // Add a separator for the group
     // Then add each type as a tab
     for (const spec of group.types) {

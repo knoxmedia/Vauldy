@@ -69,7 +69,7 @@ export default function TaskManagerPage() {
   const allTypeKeys = registry
     ? [
         "overview",
-        ...registry.groups.flatMap((g) => g.types.map((x) => x.type)),
+        ...registry.groups.flatMap((g) => (g.types ?? []).map((x) => x.type)),
       ]
     : [];
 

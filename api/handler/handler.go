@@ -70,6 +70,7 @@ type Dependencies struct {
 	PublicationPlanner      *publication.Planner
 	PublicationCapabilities coreiface.CapabilityRegistry
 	SchedulerAdmin          *taskscheduler.Service
+	TaskCtrl                *TaskControl
 }
 
 type Handler struct {
@@ -125,7 +126,7 @@ func New(a *app.App, deps Dependencies) *Handler {
 		PhotoClassifyWorker: deps.PhotoClassifyWorker, DocCoverWorker: deps.DocCoverWorker, KeyVault: deps.KeyVault,
 		AssetEncryptor: deps.AssetEncryptor, DerivedStore: deps.DerivedStore, PublicationPlanner: deps.PublicationPlanner, PublicationCapabilities: deps.PublicationCapabilities, Queue: deps.Queue,
 		PostIngestEnqueuer: deps.PostIngest, Dispatcher: deps.Dispatcher, AdminOverviewBuilder: deps.AdminOverviewBuilder, ScanCoordinator: deps.Coordinator,
-		SchedulerAdmin: deps.SchedulerAdmin,
+		SchedulerAdmin: deps.SchedulerAdmin, TaskCtrl: deps.TaskCtrl,
 		runningScans:   map[int64]scanRuntime{}, Background: deps.Background, ServerContext: deps.ServerContext,
 	}
 	if deps.ServerContext != nil && deps.Background != nil {

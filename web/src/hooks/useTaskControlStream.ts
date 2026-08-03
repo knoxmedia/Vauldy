@@ -27,7 +27,7 @@ interface DeltaEvent {
  * SSE stream reconciliation hook for real-time task control updates.
  *
  * Strategy:
- * 1. Opens SSE to /api/v1/task-control/stream with auth token in URL.
+ * 1. Opens SSE to /api/v1/admin/tasks/stream with auth token in URL.
  * 2. Snapshot events replace the entire item set.
  * 3. Delta events update individual rows only when the incoming revision
  *    is strictly greater than the currently tracked revision for that row.
@@ -103,7 +103,7 @@ export function useTaskControlStream(
     }
 
     // Build SSE URL with auth token
-    const url = `/api/v1/task-control/stream?access_token=${encodeURIComponent(t)}`;
+    const url = `/api/v1/admin/tasks/stream?access_token=${encodeURIComponent(t)}`;
     const es = new EventSource(url);
     esRef.current = es;
 

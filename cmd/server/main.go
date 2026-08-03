@@ -55,6 +55,7 @@ import (
 	"knox-media/internal/store"
 	"knox-media/internal/subtitle"
 	taskscheduler "knox-media/internal/scheduler"
+	"knox-media/internal/taskcontrol"
 	"knox-media/internal/transcode"
 	"knox-media/internal/upload"
 	"knox-media/internal/zapglobal"
@@ -508,6 +509,7 @@ func main() {
 		LyricWorker: lyricWorker, PhotoClassifyWorker: photoClassifyWorker, DocCoverWorker: docCoverWorker,
 		KeyVault: keyVault, AssetEncryptor: assetEnc, DerivedStore: derivedStore, PublicationPlanner: publicationPlanner, PublicationCapabilities: publicationCapabilities,
 		SchedulerAdmin: schedulerService,
+		TaskCtrl: buildTaskControl(db),
 	}
 
 	// (6) 注入依赖并创建 HTTP API 路由引擎。
@@ -752,6 +754,13 @@ func loadSystemOptionsTranscodeSettings(db *sql.DB) transcode.Settings {
 		return transcode.DefaultSettings()
 	}
 	return transcode.SettingsFromOptionsJSON(raw.String)
+}
+
+func buildTaskControl(db *sql.DB) *handler.TaskControl {
+	registry := taskcontrol.NewRegistry()
+	projection := taskcontrol.NewProjectionBuilder(db, registry)
+	stream := taskcontrol.NewStreamBroker(db, projection, taskcontrol.StreamBrokerConfig{})
+	return handler.NewTaskControl(db, registry, projection, stream)
 }
 
 func startupBuildLog(info buildinfo.Info, identity store.SQLiteDBIdentity) string {

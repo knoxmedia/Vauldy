@@ -68,7 +68,7 @@ func NewRegistry() *Registry {
 	groups = append(groups, TaskGroup{
 		Label:      "tasks.group.overview",
 		Selectable: false,
-		Types:      nil,
+		Types:      []TaskSpec{},
 	})
 
 	// Video Post-Processing group
