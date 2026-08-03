@@ -3772,3 +3772,168 @@ func equalFoldPrefix(a, b string) bool {
 	}
 	return true
 }
+
+// --- Phase 4 task control schema ---
+
+const taskProjectionSequenceSchema = `CREATE TABLE IF NOT EXISTS task_projection_sequence (
+    singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+    next_revision INTEGER NOT NULL DEFAULT 1 CHECK (next_revision >= 1)
+)`
+
+const taskProjectionRevisionSchema = `CREATE TABLE IF NOT EXISTS task_projection_revision (
+    task_identity TEXT PRIMARY KEY,
+    revision INTEGER NOT NULL UNIQUE,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+)`
+
+const taskAbortIntentSchema = `CREATE TABLE IF NOT EXISTS task_abort_intent (
+    task_identity TEXT PRIMARY KEY,
+    requested_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    requested_by TEXT NOT NULL DEFAULT '',
+    reason TEXT NOT NULL DEFAULT '',
+    owner_fence TEXT NOT NULL DEFAULT '',
+    deadline TIMESTAMP,
+    acknowledged_at TIMESTAMP,
+    outcome TEXT NOT NULL DEFAULT '',
+    recovery_required_at TIMESTAMP
+)`
+
+const taskControlAuditSchema = `CREATE TABLE IF NOT EXISTS task_control_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_identity TEXT NOT NULL,
+    task_type TEXT NOT NULL,
+    action TEXT NOT NULL,
+    actor_id INTEGER NOT NULL DEFAULT 0,
+    actor_name TEXT NOT NULL DEFAULT '',
+    reason TEXT NOT NULL DEFAULT '',
+    previous_status TEXT NOT NULL DEFAULT '',
+    previous_revision INTEGER,
+    previous_generation INTEGER,
+    previous_retry_round INTEGER,
+    new_status TEXT NOT NULL DEFAULT '',
+    new_revision INTEGER,
+    new_retry_round INTEGER,
+    operation_id TEXT NOT NULL DEFAULT '',
+    outcome_code TEXT NOT NULL DEFAULT '',
+    metadata_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(metadata_json)),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+)`
+
+const taskBatchOperationSchema = `CREATE TABLE IF NOT EXISTS task_batch_operation (
+    operation_id TEXT PRIMARY KEY,
+    action TEXT NOT NULL,
+    actor_id INTEGER NOT NULL DEFAULT 0,
+    reason TEXT NOT NULL DEFAULT '',
+    requested_count INTEGER NOT NULL DEFAULT 0 CHECK (requested_count >= 0),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at TIMESTAMP
+)`
+
+const taskBatchItemSchema = `CREATE TABLE IF NOT EXISTS task_batch_item (
+    operation_id TEXT NOT NULL,
+    task_identity TEXT NOT NULL,
+    action TEXT NOT NULL,
+    request_revision INTEGER NOT NULL DEFAULT 0,
+    ok INTEGER NOT NULL CHECK (ok IN (0, 1)),
+    outcome_code TEXT NOT NULL DEFAULT '',
+    result_revision INTEGER,
+    result_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(result_json)),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (operation_id, task_identity, action),
+    FOREIGN KEY (operation_id) REFERENCES task_batch_operation(operation_id) ON DELETE RESTRICT
+)`
+
+const taskControlIndexesSQL = `
+CREATE INDEX IF NOT EXISTS idx_task_control_audit_task ON task_control_audit(task_identity, created_at);
+CREATE INDEX IF NOT EXISTS idx_task_control_audit_operation ON task_control_audit(operation_id);
+`
+
+// Exported copies for test use.
+const TaskProjectionSequenceSchema = taskProjectionSequenceSchema
+const TaskProjectionRevisionSchema = taskProjectionRevisionSchema
+const TaskAbortIntentSchema = taskAbortIntentSchema
+const TaskControlAuditSchema = taskControlAuditSchema
+const TaskBatchOperationSchema = taskBatchOperationSchema
+const TaskBatchItemSchema = taskBatchItemSchema
+
+// migrateTaskControlSchema creates or validates the Phase 4 task control tables,
+// indexes, and constraints. Idempotent.
+func migrateTaskControlSchema(ctx context.Context, db *sql.DB) error {
+	if _, err := db.ExecContext(ctx, taskProjectionSequenceSchema); err != nil {
+		return fmt.Errorf("task_projection_sequence: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, taskProjectionRevisionSchema); err != nil {
+		return fmt.Errorf("task_projection_revision: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, taskAbortIntentSchema); err != nil {
+		return fmt.Errorf("task_abort_intent: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, taskControlAuditSchema); err != nil {
+		return fmt.Errorf("task_control_audit: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, taskBatchOperationSchema); err != nil {
+		return fmt.Errorf("task_batch_operation: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, taskBatchItemSchema); err != nil {
+		return fmt.Errorf("task_batch_item: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, taskControlIndexesSQL); err != nil {
+		return fmt.Errorf("task control indexes: %w", err)
+	}
+	return seedTaskControlRevisions(ctx, db)
+}
+
+// seedTaskControlRevisions seeds one revision for every registered existing
+// task identity in deterministic source/id order. Allocates revisions
+// transactionally; never uses timestamps as concurrency tokens.
+func seedTaskControlRevisions(ctx context.Context, db *sql.DB) error {
+	// Ensure the sequence row exists.
+	if _, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO task_projection_sequence(singleton_id, next_revision) VALUES(1, 1)`); err != nil {
+		return fmt.Errorf("seed projection sequence: %w", err)
+	}
+
+	// Seed revision for existing post_ingest_task rows using orchestration:<id> identity.
+	if tableExists(ctx, db, "post_ingest_task") {
+		// Collect all IDs first to avoid holding a query cursor across ExecContext calls.
+		var ids []int64
+		rows, err := db.QueryContext(ctx, `SELECT id FROM post_ingest_task ORDER BY id ASC`)
+		if err != nil {
+			return fmt.Errorf("query post_ingest_task: %w", err)
+		}
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return fmt.Errorf("scan post_ingest_task id: %w", err)
+			}
+			ids = append(ids, id)
+		}
+		rows.Close()
+
+		if len(ids) == 0 {
+			return nil
+		}
+
+		// Determine the current next_revision as the base revision.
+		var baseRev int64
+		if err := db.QueryRowContext(ctx, `SELECT next_revision FROM task_projection_sequence WHERE singleton_id = 1`).Scan(&baseRev); err != nil {
+			return fmt.Errorf("read projection sequence: %w", err)
+		}
+
+		// Insert revisions for each task identity with deterministic revision order.
+		for i, id := range ids {
+			identity := fmt.Sprintf("orchestration:%d", id)
+			rev := baseRev + int64(i)
+			if _, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO task_projection_revision(task_identity, revision) VALUES(?, ?)`, identity, rev); err != nil {
+				return fmt.Errorf("seed revision %q: %w", identity, err)
+			}
+		}
+
+		// Advance sequence past all allocated revisions.
+		if _, err := db.ExecContext(ctx, `UPDATE task_projection_sequence SET next_revision = next_revision + ? WHERE singleton_id = 1`, int64(len(ids))); err != nil {
+			return fmt.Errorf("advance projection sequence: %w", err)
+		}
+	}
+
+	return nil
+}

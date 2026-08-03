@@ -1571,6 +1571,11 @@ func OpenSQLiteContext(ctx context.Context, path string) (opened *sql.DB, return
 		_ = db.Close()
 		return nil, fmt.Errorf("post_ingest_task source metadata migration: %w", err)
 	}
+	// Apply Phase 4 task control schema migration (projection, abort, audit, batch).
+	if err := withStartupBusyRetry(ctx, func() error { return migrateTaskControlSchema(ctx, db) }); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("task control schema migration: %w", err)
+	}
 	// Apply enterprise migrations registered via RegisterEnterpriseMigration.
 	// In the community build this slice is empty; commercial init() functions
 	// append migrations for pretranscode/license tables before main runs.
