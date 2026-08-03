@@ -500,8 +500,7 @@ func main() {
 	deps := handler.Dependencies{
 		ServerContext: serverCtx, Background: background, StartupReady: startupReady,
 		Coordinator: coordinator, Queue: postIngestQueue, PostIngest: postIngestEnqueuer, Dispatcher: dispatcher, AdminOverviewBuilder: func() handler.OverviewBuilder {
-			b := handler.NewAdminOverviewBuilder(db, schedulerService, sqliteMetrics)
-			b.Capabilities = publicationCapabilities
+			b := handler.NewAdminOverviewBuilder(db, sqliteMetrics)
 			return b
 		}(),
 		Worker: worker, PackageWorker: packageWorker, PreviewWorker: previewWorker, Subtitle: subSvc, Upload: up,
