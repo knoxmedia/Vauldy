@@ -55,12 +55,12 @@ type BudgetSnapshot struct {
 	GlobalLimit, GlobalUsed, PosterLimit, PosterUsed, PreviewLimit, PreviewUsed, SubtitleLimit, SubtitleUsed int
 }
 type DispatcherOptions struct {
-	OwnerID                                                              string
-	Global, Poster, Preview, Subtitle                                    int
-	SubtitleTimeoutRealtimeFactor                                        float64
-	PollInterval, LeaseDuration, HeartbeatInterval, RecoverInterval      time.Duration
-	ExecutorStopGrace                                                    time.Duration
-	Timeouts                                                             map[TaskType]time.Duration
+	OwnerID                                                         string
+	Global, Poster, Preview, Subtitle                               int
+	SubtitleTimeoutRealtimeFactor                                   float64
+	PollInterval, LeaseDuration, HeartbeatInterval, RecoverInterval time.Duration
+	ExecutorStopGrace                                               time.Duration
+	Timeouts                                                        map[TaskType]time.Duration
 }
 
 func DefaultDispatcherOptions() DispatcherOptions {
@@ -72,7 +72,7 @@ func DefaultDispatcherOptions() DispatcherOptions {
 		global = 4
 	}
 	return DispatcherOptions{Global: global, Poster: min(2, global), Preview: 1, Subtitle: 1, SubtitleTimeoutRealtimeFactor: 2.0, PollInterval: 250 * time.Millisecond, LeaseDuration: leaseDuration, HeartbeatInterval: 30 * time.Second, RecoverInterval: 30 * time.Second, ExecutorStopGrace: 10 * time.Second, Timeouts: map[TaskType]time.Duration{
-		TaskPoster: 2 * time.Minute, TaskPosterRepair: 2 * time.Minute, TaskThumbnail: 2 * time.Minute, TaskPreview: 30 * time.Minute, TaskKeyframe: 30 * time.Minute, TaskSubtitle: 60 * time.Minute, TaskAtrack: 30 * time.Minute, TaskEncrypt: 120 * time.Minute,
+		TaskPoster: 2 * time.Minute, TaskPosterRepair: 2 * time.Minute, TaskThumbnail: 2 * time.Minute, TaskPreview: 30 * time.Minute, TaskKeyframe: 30 * time.Minute, TaskSubtitle: 60 * time.Minute, TaskSubtitleRecognize: 60 * time.Minute, TaskAIAnalysis: 15 * time.Minute, TaskAtrack: 30 * time.Minute, TaskEncrypt: 120 * time.Minute,
 	}}
 }
 
@@ -99,25 +99,25 @@ func (w *workerState) reason() (FailureKind, error) {
 }
 
 type Dispatcher struct {
-	q                                   *Queue
-	executor                            Executor
-	opts                                DispatcherOptions
-	global, poster, preview, subtitle             chan struct{}
-	mu                                            sync.Mutex
+	q                                                 *Queue
+	executor                                          Executor
+	opts                                              DispatcherOptions
+	global, poster, preview, subtitle                 chan struct{}
+	mu                                                sync.Mutex
 	globalUsed, posterUsed, previewUsed, subtitleUsed int
-	highPriorityUsed                              int
-	bandNext                                      []int
-	running                                       map[int64]*workerState
-	sourceLookupBudget                            time.Duration
-	sourceSize                                    func(context.Context, Task) int64
-	mediaDuration                                 func(context.Context, Task) int64
-	sourceLookups                                 chan struct{}
-	scans                                         map[int64]map[int64]*workerState
-	wg                                            sync.WaitGroup
-	startMu                                       sync.Mutex
-	started                                       bool
-	beforeRegister                                func(Task)
-	beforeRun                                     func(Task)
+	highPriorityUsed                                  int
+	bandNext                                          []int
+	running                                           map[int64]*workerState
+	sourceLookupBudget                                time.Duration
+	sourceSize                                        func(context.Context, Task) int64
+	mediaDuration                                     func(context.Context, Task) int64
+	sourceLookups                                     chan struct{}
+	scans                                             map[int64]map[int64]*workerState
+	wg                                                sync.WaitGroup
+	startMu                                           sync.Mutex
+	started                                           bool
+	beforeRegister                                    func(Task)
+	beforeRun                                         func(Task)
 }
 
 func NewDispatcher(q *Queue, executor Executor, opts DispatcherOptions) (*Dispatcher, error) {
@@ -175,14 +175,14 @@ func NewDispatcher(q *Queue, executor Executor, opts DispatcherOptions) (*Dispat
 	return d, nil
 }
 
-var taskTypes = []TaskType{TaskPoster, TaskPosterRepair, TaskThumbnail, TaskPreview, TaskKeyframe, TaskSubtitle, TaskAtrack, TaskEncrypt}
+var taskTypes = []TaskType{TaskPoster, TaskPosterRepair, TaskThumbnail, TaskPreview, TaskKeyframe, TaskSubtitle, TaskSubtitleRecognize, TaskAIAnalysis, TaskAtrack, TaskEncrypt}
 
 // priorityBands is highest-priority first. Types in the same band are equal and rotate.
 var priorityBands = [][]TaskType{
 	{TaskPoster, TaskPosterRepair},
 	{TaskEncrypt},
 	{TaskPreview, TaskThumbnail, TaskKeyframe, TaskAtrack},
-	{TaskSubtitle},
+	{TaskSubtitle, TaskSubtitleRecognize, TaskAIAnalysis},
 }
 
 const priorityBurstSlots = 1
@@ -205,7 +205,11 @@ func sizedTaskTimeout(typ TaskType) bool {
 }
 
 func deferredTaskTimeout(typ TaskType) bool {
-	return sizedTaskTimeout(typ) || typ == TaskSubtitle
+	return sizedTaskTimeout(typ) || typ == TaskSubtitle || typ == TaskSubtitleRecognize
+}
+
+func usesSubtitleSlot(typ TaskType) bool {
+	return typ == TaskSubtitle || typ == TaskSubtitleRecognize
 }
 
 // subtitleTaskTimeout returns min(8h, max(base, durationSec*factor seconds)).
@@ -295,7 +299,7 @@ func (d *Dispatcher) timeoutForTask(ctx context.Context, task Task, heartbeat *t
 	// call retains its slot, so later tasks fall back instead of amplifying leaks.
 	go func() {
 		defer func() { <-d.sourceLookups }()
-		if task.Type == TaskSubtitle {
+		if task.Type == TaskSubtitle || task.Type == TaskSubtitleRecognize {
 			lookup := d.mediaDuration
 			if lookup == nil {
 				lookup = d.mediaDurationSec
@@ -310,7 +314,7 @@ func (d *Dispatcher) timeoutForTask(ctx context.Context, task Task, heartbeat *t
 	for {
 		select {
 		case value := <-result:
-			if task.Type == TaskSubtitle {
+			if task.Type == TaskSubtitle || task.Type == TaskSubtitleRecognize {
 				return subtitleTaskTimeout(base, value, d.opts.SubtitleTimeoutRealtimeFactor), ctx.Err() == nil
 			}
 			return taskTimeoutForSource(task.Type, base, value), ctx.Err() == nil
@@ -435,6 +439,10 @@ func (d *Dispatcher) allowedTaskTypes() []TaskType {
 	burstSubtitleOnly := false
 	switch {
 	case globalUsed < d.opts.Global:
+	case d.opts.Global == 1:
+		// Preserve strict priority for a single configured slot. The burst slot is a
+		// starvation escape hatch for concurrent pools, not a second worker lane.
+		return nil
 	case globalUsed < d.opts.Global+priorityBurstSlots && highUsed == 0:
 		burstHigh = true
 	case globalUsed < d.opts.Global+priorityBurstSlots && subtitleAvailable:
@@ -446,13 +454,29 @@ func (d *Dispatcher) allowedTaskTypes() []TaskType {
 	allowed := make([]TaskType, 0, len(taskTypes))
 	for band, types := range priorityBands {
 		if burstSubtitleOnly {
-			if len(types) != 1 || types[0] != TaskSubtitle {
+			hasSubtitle := false
+			for _, typ := range types {
+				if usesSubtitleSlot(typ) {
+					hasSubtitle = true
+					break
+				}
+			}
+			if !hasSubtitle {
 				continue
 			}
-		} else if burstHigh && band > 1 && !(len(types) == 1 && types[0] == TaskSubtitle) {
-			// High-priority bands only, plus subtitle so ClaimAny can fall through when
-			// no high-priority work is eligible.
-			continue
+		} else if burstHigh && band > 1 {
+			hasSubtitle := false
+			for _, typ := range types {
+				if usesSubtitleSlot(typ) {
+					hasSubtitle = true
+					break
+				}
+			}
+			if !hasSubtitle {
+				// High-priority bands only, plus subtitle family so ClaimAny can fall through when
+				// no high-priority work is eligible.
+				continue
+			}
 		}
 		n := len(types)
 		start := 0
@@ -467,7 +491,10 @@ func (d *Dispatcher) allowedTaskTypes() []TaskType {
 			if typ == TaskPreview && !previewAvailable {
 				continue
 			}
-			if typ == TaskSubtitle && !subtitleAvailable {
+			if usesSubtitleSlot(typ) && !subtitleAvailable {
+				continue
+			}
+			if burstSubtitleOnly && !usesSubtitleSlot(typ) {
 				continue
 			}
 			allowed = append(allowed, typ)
@@ -503,7 +530,7 @@ func (d *Dispatcher) tryAcquire(typ TaskType) bool {
 	}
 	if atSoftCap {
 		highBurstOK := isHighPriorityTask(typ) && highUsed == 0
-		subtitleBurstOK := typ == TaskSubtitle
+		subtitleBurstOK := usesSubtitleSlot(typ)
 		if !highBurstOK && !subtitleBurstOK {
 			return false
 		}
@@ -518,7 +545,7 @@ func (d *Dispatcher) tryAcquire(typ TaskType) bool {
 		sub = d.poster
 	} else if typ == TaskPreview {
 		sub = d.preview
-	} else if typ == TaskSubtitle {
+	} else if usesSubtitleSlot(typ) {
 		sub = d.subtitle
 	}
 	if sub != nil {
@@ -540,7 +567,7 @@ func (d *Dispatcher) tryAcquire(typ TaskType) bool {
 	if typ == TaskPreview {
 		d.previewUsed++
 	}
-	if typ == TaskSubtitle {
+	if usesSubtitleSlot(typ) {
 		d.subtitleUsed++
 	}
 	d.mu.Unlock()
@@ -551,7 +578,7 @@ func (d *Dispatcher) release(typ TaskType) {
 		<-d.poster
 	} else if typ == TaskPreview {
 		<-d.preview
-	} else if typ == TaskSubtitle {
+	} else if usesSubtitleSlot(typ) {
 		<-d.subtitle
 	}
 	<-d.global
@@ -566,7 +593,7 @@ func (d *Dispatcher) release(typ TaskType) {
 	if typ == TaskPreview {
 		d.previewUsed--
 	}
-	if typ == TaskSubtitle {
+	if usesSubtitleSlot(typ) {
 		d.subtitleUsed--
 	}
 	d.mu.Unlock()
