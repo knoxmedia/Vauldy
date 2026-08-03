@@ -249,6 +249,7 @@ func NewEngine(cfg *config.Config, application *app.App, deps handler.Dependenci
 		admStream.Use(middleware.RequireAdmin())
 		{
 			admStream.GET("/admin/overview/stream", h.AdminOverviewStream)
+			admStream.GET("/admin/tasks/stream", h.TaskControlStream)
 		}
 
 		// Admin only: media management + uploads + transcode control
@@ -400,6 +401,15 @@ func NewEngine(cfg *config.Config, application *app.App, deps handler.Dependenci
 			adm.PUT("/admin/scheduler/policy", h.SchedulerAdminPutPolicy)
 			adm.PATCH("/admin/scheduler/policy", h.SchedulerAdminPatchPolicy)
 			adm.POST("/admin/scheduler/control", h.SchedulerAdminControl)
+			adm.POST("/admin/scheduler/explain", h.SchedulerAdminExplainTask)
+
+			// --- Unified task control plane (Phase 4) ---
+			adm.GET("/admin/tasks/registry", h.TaskControlRegistry)
+			adm.GET("/admin/tasks/overview", h.TaskControlOverview)
+			adm.GET("/admin/tasks", h.TaskControlList)
+			adm.GET("/admin/tasks/:task_id", h.TaskControlDetail)
+			adm.POST("/admin/tasks/:task_id/actions", h.TaskControlActions)
+			adm.POST("/admin/tasks/batch", h.TaskControlBatch)
 
 			// --- Enterprise modules (commercial) ---
 			// Register routes from enterprise modules (e.g., license status).
