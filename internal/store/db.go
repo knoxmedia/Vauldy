@@ -1554,6 +1554,11 @@ func OpenSQLiteContext(ctx context.Context, path string) (opened *sql.DB, return
 		_ = db.Close()
 		return nil, fmt.Errorf("media relationship migration: %w", err)
 	}
+	// Apply scheduler schema migration for unified media task orchestration.
+	if err := withStartupBusyRetry(ctx, func() error { return migrateSchedulerSchema(ctx, db) }); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("scheduler schema migration: %w", err)
+	}
 	// Apply enterprise migrations registered via RegisterEnterpriseMigration.
 	// In the community build this slice is empty; commercial init() functions
 	// append migrations for pretranscode/license tables before main runs.

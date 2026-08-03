@@ -3582,3 +3582,111 @@ func validatePublicationKnownReferences(ctx context.Context, q SQLExecutor) erro
 	}
 	return nil
 }
+
+// --- Scheduler canonical DDL constants ---
+
+const schedulerPolicyRevisionSchema = `CREATE TABLE IF NOT EXISTS scheduler_policy_revision (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ schema_version INTEGER NOT NULL CHECK(schema_version > 0),
+ parent_revision_id INTEGER REFERENCES scheduler_policy_revision(id),
+ policy_json TEXT NOT NULL CHECK(json_valid(policy_json)),
+ author TEXT NOT NULL CHECK(length(author) > 0),
+ reason TEXT NOT NULL CHECK(length(reason) > 0),
+ validation_hash TEXT NOT NULL,
+ is_active INTEGER NOT NULL DEFAULT 0 CHECK(is_active IN (0,1)),
+ created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ activated_at TIMESTAMP
+)`
+
+const schedulerControlSchema = `CREATE TABLE IF NOT EXISTS scheduler_control (
+ task_type TEXT PRIMARY KEY,
+ state TEXT NOT NULL CHECK(state IN ('paused','draining','running')),
+ revision INTEGER NOT NULL DEFAULT 0 CHECK(revision >= 0),
+ updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+)`
+
+const schedulerFairnessSchema = `CREATE TABLE IF NOT EXISTS scheduler_fairness (
+ task_type TEXT PRIMARY KEY,
+ cursor TIMESTAMP NOT NULL,
+ updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+)`
+
+const schedulerReservationSchema = `CREATE TABLE IF NOT EXISTS scheduler_reservation (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ execution_id TEXT UNIQUE NOT NULL CHECK(length(execution_id) > 0),
+ task_type TEXT NOT NULL CHECK(length(task_type) > 0),
+ reserved_units INTEGER NOT NULL CHECK(reserved_units > 0),
+ policy_revision_id INTEGER NOT NULL,
+ status TEXT NOT NULL CHECK(status IN ('active','released')),
+ lease_until TIMESTAMP,
+ released_at TIMESTAMP,
+ release_reason TEXT NOT NULL DEFAULT '',
+ released_by TEXT NOT NULL DEFAULT '',
+ created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ CHECK((status='active' AND released_at IS NULL AND release_reason='' AND released_by='') OR (status='released' AND released_at IS NOT NULL AND release_reason<>'' AND released_by<>'')),
+ FOREIGN KEY(policy_revision_id) REFERENCES scheduler_policy_revision(id)
+)`
+
+const schedulerAuditSchema = `CREATE TABLE IF NOT EXISTS scheduler_audit (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ event_type TEXT NOT NULL CHECK(length(event_type) > 0),
+ actor TEXT NOT NULL CHECK(length(actor) > 0),
+ detail_json TEXT NOT NULL CHECK(json_valid(detail_json)),
+ created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+)`
+
+const schedulerIndexesSQL = `
+CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduler_active_policy ON scheduler_policy_revision(is_active) WHERE is_active=1;
+CREATE INDEX IF NOT EXISTS idx_scheduler_reservation_status ON scheduler_reservation(status,created_at);
+CREATE INDEX IF NOT EXISTS idx_scheduler_reservation_task_type ON scheduler_reservation(task_type,status);
+CREATE INDEX IF NOT EXISTS idx_scheduler_audit_created ON scheduler_audit(created_at)
+`
+
+// SchedulerPolicyRevisionSchema is the exported canonical DDL for the
+// scheduler_policy_revision table.
+const SchedulerPolicyRevisionSchema = schedulerPolicyRevisionSchema
+
+// SchedulerControlSchema is the exported canonical DDL for the
+// scheduler_control table.
+const SchedulerControlSchema = schedulerControlSchema
+
+// SchedulerFairnessSchema is the exported canonical DDL for the
+// scheduler_fairness table.
+const SchedulerFairnessSchema = schedulerFairnessSchema
+
+// SchedulerReservationSchema is the exported canonical DDL for the
+// scheduler_reservation table.
+const SchedulerReservationSchema = schedulerReservationSchema
+
+// SchedulerAuditSchema is the exported canonical DDL for the
+// scheduler_audit table.
+const SchedulerAuditSchema = schedulerAuditSchema
+
+// SchedulerIndexesSQL is the exported canonical index DDL for all scheduler
+// tables.
+const SchedulerIndexesSQL = schedulerIndexesSQL
+
+// migrateSchedulerSchema creates or validates the scheduler tables, indexes,
+// and constraints for policy revision, control, fairness, reservation, and audit.
+func migrateSchedulerSchema(ctx context.Context, db *sql.DB) error {
+	if _, err := db.ExecContext(ctx, schedulerPolicyRevisionSchema); err != nil {
+		return fmt.Errorf("scheduler_policy_revision: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, schedulerControlSchema); err != nil {
+		return fmt.Errorf("scheduler_control: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, schedulerFairnessSchema); err != nil {
+		return fmt.Errorf("scheduler_fairness: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, schedulerReservationSchema); err != nil {
+		return fmt.Errorf("scheduler_reservation: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, schedulerAuditSchema); err != nil {
+		return fmt.Errorf("scheduler_audit: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, schedulerIndexesSQL); err != nil {
+		return fmt.Errorf("scheduler indexes: %w", err)
+	}
+	return nil
+}
