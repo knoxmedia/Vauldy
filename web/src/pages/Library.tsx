@@ -20,13 +20,27 @@ import {
 import { useT } from "../i18n";
 import { useLibraryRequestScope } from "../lib/libraryRequestScope";
 import { createGuardedPoll, createResumeRefresh, LIBRARY_ACTIVE_POLL_MS, LIBRARY_IDLE_POLL_MS, type PollController } from "../lib/polling";
+import {
+  applyExplicitProcessingOptionChange,
+  deriveEffectiveProcessingOptions,
+  directProcessingOptionLockReason,
+  EMPTY_LIBRARY_PROCESSING_CHOICES,
+  hydrateLibraryProcessingOptions,
+  isVideoProcessingLibraryType,
+  processingChoicesToForm,
+  processingOptionScalarFields,
+  type LibraryProcessingChoices,
+  type LibraryProcessingOptionName,
+} from "../lib/libraryProcessingOptions";
 
 function stableLibrarySnapshot(data: Awaited<ReturnType<typeof fetchLibrariesWithCapabilities>>): string {
   return JSON.stringify({
     items: data.items.map((item) => ({
       id: item.id, name: item.name, type: item.type, path: item.path, folders: item.folders ?? [],
       auto_scan: item.auto_scan, enabled: item.enabled, realtime_monitor: item.realtime_monitor,
-      preview_extract: item.preview_extract, drm_enabled: item.drm_enabled, encryption_mode: item.encryption_mode,
+      preview_extract: item.preview_extract, subtitle_extract: item.subtitle_extract, atrack_extract: item.atrack_extract,
+      subtitle_recognize: item.subtitle_recognize, keyframe_extract: item.keyframe_extract, ai_analysis: item.ai_analysis,
+      processing_options: item.processing_options, drm_enabled: item.drm_enabled, encryption_mode: item.encryption_mode,
       encrypted_assets_enabled: item.encrypted_assets_enabled,
       encrypted_assets_cleanup_plaintext: item.encrypted_assets_cleanup_plaintext,
       encrypted_assets_dir_mode: item.encrypted_assets_dir_mode,
@@ -58,6 +72,8 @@ export function LibraryPageSession() {
   const [encryptedAssetsConfig, setEncryptedAssetsConfig] = useState<{ data_dot_encrypted_dir?: string }>({});
   const [form] = Form.useForm();
   const [providerSourceTab, setProviderSourceTab] = useState("metadata");
+  const [explicitProcessingChoices, setExplicitProcessingChoices] = useState<LibraryProcessingChoices>(EMPTY_LIBRARY_PROCESSING_CHOICES);
+  const effectiveProcessingChoices = deriveEffectiveProcessingOptions(explicitProcessingChoices);
   const screens = Grid.useBreakpoint();
   const pollRef = useRef<PollController | null>(null);
   const tRef = useRef(t);
@@ -132,7 +148,7 @@ export function LibraryPageSession() {
         auto_scan: v.auto_scan ? 1 : 0,
         enabled: v.enabled ? 1 : 0,
         realtime_monitor: v.realtime_monitor ? 1 : 0,
-        preview_extract: v.preview_extract ? 1 : 0,
+        ...processingOptionScalarFields(explicitProcessingChoices),
         drm_enabled: v.drm_enabled ? 1 : 0,
         encryption_mode: "standard" as const,
         encrypted_assets_enabled: v.encrypted_assets_enabled ? 1 : 0,
@@ -175,11 +191,13 @@ export function LibraryPageSession() {
             setEditing(null);
             setProviderSourceTab("metadata");
             form.resetFields();
+            const choices = { ...EMPTY_LIBRARY_PROCESSING_CHOICES };
+            setExplicitProcessingChoices(choices);
             form.setFieldsValue({
               auto_scan: true,
               enabled: true,
               realtime_monitor: false,
-              preview_extract: false,
+              ...processingChoicesToForm(deriveEffectiveProcessingOptions(choices)),
               drm_enabled: false,
               encryption_mode: "standard",
               encrypted_assets_enabled: false,
@@ -250,6 +268,8 @@ export function LibraryPageSession() {
                   onClick={() => {
                     setEditing(r);
                     setProviderSourceTab("metadata");
+                    const choices = hydrateLibraryProcessingOptions(r);
+                    setExplicitProcessingChoices(choices);
                     form.setFieldsValue({
                       name: r.name,
                       type: r.type,
@@ -257,7 +277,7 @@ export function LibraryPageSession() {
                       auto_scan: r.auto_scan === 1,
                       enabled: (r.enabled ?? 1) === 1,
                       realtime_monitor: (r.realtime_monitor ?? 0) === 1,
-                      preview_extract: (r.preview_extract ?? 0) === 1,
+                      ...processingChoicesToForm(deriveEffectiveProcessingOptions(choices)),
                       drm_enabled: (r.drm_enabled ?? 0) === 1,
                       encryption_mode: "standard",
                       encrypted_assets_enabled: (r.encrypted_assets_enabled ?? 0) === 1,
@@ -406,16 +426,6 @@ export function LibraryPageSession() {
             </Col>
             <Col xs={24} sm={12} md={8}>
               <Form.Item
-                name="preview_extract"
-                label={t("pages.library.field_preview_extract")}
-                valuePropName="checked"
-                initialValue={false}
-              >
-                <Switch />
-              </Form.Item>
-            </Col>
-            <Col xs={24} sm={12} md={8}>
-              <Form.Item
                 name="encrypted_assets_enabled"
                 label={t("pages.library.field_encrypted_assets")}
                 tooltip={t("pages.library.field_encrypted_assets_hint")}
@@ -435,6 +445,56 @@ export function LibraryPageSession() {
               </Form.Item>
             </Col>
           </Row>
+
+          <Form.Item noStyle shouldUpdate={(prev, next) => prev.type !== next.type}>
+            {({ getFieldValue }) => isVideoProcessingLibraryType(getFieldValue("type")) ? (
+              <>
+                <Divider>{t("pages.library.section_processing_options")}</Divider>
+                <Form.Item noStyle shouldUpdate>
+                  {() => (
+                    <Row gutter={16}>
+                      {([
+                        ["preview", "preview_extract", "field_preview_extract"],
+                        ["subtitle_extract", "subtitle_extract", "field_subtitle_extract"],
+                        ["atrack_extract", "atrack_extract", "field_atrack_extract"],
+                        ["subtitle_recognize", "subtitle_recognize", "field_subtitle_recognize"],
+                        ["keyframe_extract", "keyframe_extract", "field_keyframe_extract"],
+                        ["ai_analysis", "ai_analysis", "field_ai_analysis"],
+                      ] as const).map(([option, field, labelKey]) => {
+                        const lockReason = directProcessingOptionLockReason(effectiveProcessingChoices, option);
+                        const reasonText = lockReason === "ai_analysis"
+                          ? t("pages.library.processing_required_by_ai")
+                          : lockReason === "subtitle_recognize"
+                            ? t("pages.library.processing_required_by_recognition")
+                            : undefined;
+                        return (
+                          <Col xs={24} sm={12} md={8} key={option}>
+                            <Form.Item
+                              name={field}
+                              label={t(`pages.library.${labelKey}`)}
+                              tooltip={reasonText}
+                              extra={reasonText}
+                              valuePropName="checked"
+                              initialValue={false}
+                            >
+                              <Switch
+                                disabled={Boolean(lockReason)}
+                                onChange={(checked) => {
+                                  const next = applyExplicitProcessingOptionChange(explicitProcessingChoices, option as LibraryProcessingOptionName, checked);
+                                  setExplicitProcessingChoices(next);
+                                  form.setFieldsValue(processingChoicesToForm(deriveEffectiveProcessingOptions(next)));
+                                }}
+                              />
+                            </Form.Item>
+                          </Col>
+                        );
+                      })}
+                    </Row>
+                  )}
+                </Form.Item>
+              </>
+            ) : null}
+          </Form.Item>
 
           <Form.Item name="encryption_mode" hidden initialValue="standard">
             <Input />

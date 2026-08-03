@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"knox-media/api/middleware"
+	"knox-media/internal/libraryprocessing"
 	"knox-media/internal/mediastore"
 	"knox-media/internal/storage"
 )
@@ -27,6 +28,11 @@ type libraryBody struct {
 	Enabled                         *int     `json:"enabled"`
 	RealtimeMonitor                 *int     `json:"realtime_monitor"`
 	PreviewExtract                  *int     `json:"preview_extract"`
+	SubtitleExtract                 *int     `json:"subtitle_extract"`
+	ATrackExtract                   *int     `json:"atrack_extract"`
+	SubtitleRecognize               *int     `json:"subtitle_recognize"`
+	KeyframeExtract                 *int     `json:"keyframe_extract"`
+	AIAnalysis                      *int     `json:"ai_analysis"`
 	DRMEnabled                      *int     `json:"drm_enabled"`
 	EncryptionMode                  string   `json:"encryption_mode"`
 	CleanupLocalSource              *int     `json:"cleanup_local_source_after_package"`
@@ -43,10 +49,10 @@ type libraryBody struct {
 }
 
 type libraryListRow struct {
-	id, auto, enabled, realtime, preview, drmEnabled, cleanupLocal, jitIngest, encAssets, encCleanupPlain, mediaCount                                      int
-	scanTaskID, scanProcessed, scanTotal, scanAdded                                                                                                        int64
-	scanIngested, scanIngesting                                                                                                                                                        int
-	name, typ, path, encryptionMode, encDirMode, encCustomDir, metadataProviders, imageProviders, refreshPolicy, scraper, created, scanStatus, scanStarted string
+	id, auto, enabled, realtime, preview, subtitleExtract, atrackExtract, subtitleRecognize, keyframeExtract, aiAnalysis, drmEnabled, cleanupLocal, jitIngest, encAssets, encCleanupPlain, mediaCount int
+	scanTaskID, scanProcessed, scanTotal, scanAdded                                                                                                                                                   int64
+	scanIngested, scanIngesting                                                                                                                                                                       int
+	name, typ, path, encryptionMode, encDirMode, encCustomDir, metadataProviders, imageProviders, refreshPolicy, scraper, created, scanStatus, scanStarted                                            string
 }
 
 func (h *Handler) ListLibraries(c *gin.Context) {
@@ -70,7 +76,7 @@ func (h *Handler) ListLibraries(c *gin.Context) {
 			}
 		}
 	}
-	query := `SELECT l.id,l.name,l.type,l.path,l.auto_scan,l.enabled,l.realtime_monitor,l.preview_extract,l.drm_enabled,COALESCE(l.encryption_mode,'drm'),l.cleanup_local_source_after_package,l.jit_prepare_on_ingest,COALESCE(l.encrypted_assets_enabled,0),COALESCE(l.encrypted_assets_cleanup_plaintext,0),COALESCE(l.encrypted_assets_dir_mode,'library'),COALESCE(l.encrypted_assets_custom_dir,''),l.metadata_providers,l.image_providers,l.metadata_refresh_policy,l.scraper,l.created_at,COALESCE(mc.media_count,0),COALESCE(latest_scan.id,0),COALESCE(latest_scan.status,''),COALESCE(latest_scan.processed_count,0),COALESCE(latest_scan.total_count,0),COALESCE(latest_scan.added_count,0),COALESCE(latest_scan.started_at,'') FROM library l LEFT JOIN (SELECT library_id,COUNT(*) AS media_count FROM media WHERE publication_state IN ('published','degraded') GROUP BY library_id) mc ON mc.library_id=l.id LEFT JOIN (SELECT st.* FROM scan_task st JOIN (SELECT library_id,MAX(id) AS max_id FROM scan_task GROUP BY library_id) latest ON latest.max_id=st.id) latest_scan ON latest_scan.library_id=l.id`
+	query := `SELECT l.id,l.name,l.type,l.path,l.auto_scan,l.enabled,l.realtime_monitor,l.preview_extract,l.subtitle_extract,l.atrack_extract,l.subtitle_recognize,l.keyframe_extract,l.ai_analysis,l.drm_enabled,COALESCE(l.encryption_mode,'drm'),l.cleanup_local_source_after_package,l.jit_prepare_on_ingest,COALESCE(l.encrypted_assets_enabled,0),COALESCE(l.encrypted_assets_cleanup_plaintext,0),COALESCE(l.encrypted_assets_dir_mode,'library'),COALESCE(l.encrypted_assets_custom_dir,''),l.metadata_providers,l.image_providers,l.metadata_refresh_policy,l.scraper,l.created_at,COALESCE(mc.media_count,0),COALESCE(latest_scan.id,0),COALESCE(latest_scan.status,''),COALESCE(latest_scan.processed_count,0),COALESCE(latest_scan.total_count,0),COALESCE(latest_scan.added_count,0),COALESCE(latest_scan.started_at,'') FROM library l LEFT JOIN (SELECT library_id,COUNT(*) AS media_count FROM media WHERE publication_state IN ('published','degraded') GROUP BY library_id) mc ON mc.library_id=l.id LEFT JOIN (SELECT st.* FROM scan_task st JOIN (SELECT library_id,MAX(id) AS max_id FROM scan_task GROUP BY library_id) latest ON latest.max_id=st.id) latest_scan ON latest_scan.library_id=l.id`
 	args := []any{}
 	if strings.EqualFold(profile.LibraryScope, "selected") {
 		ids := make([]int64, 0, len(profile.AllowedLibraryIDs))
@@ -95,7 +101,7 @@ func (h *Handler) ListLibraries(c *gin.Context) {
 	visible := make([]libraryListRow, 0)
 	for rows.Next() {
 		var r libraryListRow
-		if err := rows.Scan(&r.id, &r.name, &r.typ, &r.path, &r.auto, &r.enabled, &r.realtime, &r.preview, &r.drmEnabled, &r.encryptionMode, &r.cleanupLocal, &r.jitIngest, &r.encAssets, &r.encCleanupPlain, &r.encDirMode, &r.encCustomDir, &r.metadataProviders, &r.imageProviders, &r.refreshPolicy, &r.scraper, &r.created, &r.mediaCount, &r.scanTaskID, &r.scanStatus, &r.scanProcessed, &r.scanTotal, &r.scanAdded, &r.scanStarted); err != nil {
+		if err := rows.Scan(&r.id, &r.name, &r.typ, &r.path, &r.auto, &r.enabled, &r.realtime, &r.preview, &r.subtitleExtract, &r.atrackExtract, &r.subtitleRecognize, &r.keyframeExtract, &r.aiAnalysis, &r.drmEnabled, &r.encryptionMode, &r.cleanupLocal, &r.jitIngest, &r.encAssets, &r.encCleanupPlain, &r.encDirMode, &r.encCustomDir, &r.metadataProviders, &r.imageProviders, &r.refreshPolicy, &r.scraper, &r.created, &r.mediaCount, &r.scanTaskID, &r.scanStatus, &r.scanProcessed, &r.scanTotal, &r.scanAdded, &r.scanStarted); err != nil {
 			rows.Close()
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -163,7 +169,7 @@ func (h *Handler) ListLibraries(c *gin.Context) {
 	}
 	list := make([]gin.H, 0, len(visible))
 	for _, r := range visible {
-		item := gin.H{"id": r.id, "name": r.name, "type": r.typ, "path": r.path, "folders": responseFoldersForLibrary(profile, folderMap, int64(r.id), r.path), "auto_scan": r.auto, "enabled": r.enabled, "realtime_monitor": r.realtime, "preview_extract": r.preview, "drm_enabled": r.drmEnabled, "encryption_mode": h.normalizeEncryptionMode(r.encryptionMode), "cleanup_local_source_after_package": r.cleanupLocal, "jit_prepare_on_ingest": r.jitIngest, "encrypted_assets_enabled": r.encAssets, "encrypted_assets_cleanup_plaintext": r.encCleanupPlain, "encrypted_assets_dir_mode": storage.NormalizeEncDirMode(r.encDirMode), "encrypted_assets_custom_dir": r.encCustomDir, "metadata_providers": splitCSVList(r.metadataProviders), "image_providers": splitCSVList(r.imageProviders), "metadata_refresh_policy": r.refreshPolicy, "scraper": r.scraper, "created_at": r.created, "media_count": r.mediaCount, "scan_task_id": r.scanTaskID, "scan_status": r.scanStatus, "scan_processed_count": r.scanProcessed, "scan_total_count": r.scanTotal, "scan_added_count": r.scanAdded, "scan_started_at": r.scanStarted, "scan_ingested_count": r.scanIngested, "scan_ingesting_count": r.scanIngesting}
+		item := gin.H{"id": r.id, "name": r.name, "type": r.typ, "path": r.path, "folders": responseFoldersForLibrary(profile, folderMap, int64(r.id), r.path), "auto_scan": r.auto, "enabled": r.enabled, "realtime_monitor": r.realtime, "preview_extract": r.preview, "subtitle_extract": r.subtitleExtract, "atrack_extract": r.atrackExtract, "subtitle_recognize": r.subtitleRecognize, "keyframe_extract": r.keyframeExtract, "ai_analysis": r.aiAnalysis, "processing_options": processingOptionsResponse(r.typ, processingOptionsFromInts(r.preview, r.subtitleExtract, r.atrackExtract, r.subtitleRecognize, r.keyframeExtract, r.aiAnalysis)), "drm_enabled": r.drmEnabled, "encryption_mode": h.normalizeEncryptionMode(r.encryptionMode), "cleanup_local_source_after_package": r.cleanupLocal, "jit_prepare_on_ingest": r.jitIngest, "encrypted_assets_enabled": r.encAssets, "encrypted_assets_cleanup_plaintext": r.encCleanupPlain, "encrypted_assets_dir_mode": storage.NormalizeEncDirMode(r.encDirMode), "encrypted_assets_custom_dir": r.encCustomDir, "metadata_providers": splitCSVList(r.metadataProviders), "image_providers": splitCSVList(r.imageProviders), "metadata_refresh_policy": r.refreshPolicy, "scraper": r.scraper, "created_at": r.created, "media_count": r.mediaCount, "scan_task_id": r.scanTaskID, "scan_status": r.scanStatus, "scan_processed_count": r.scanProcessed, "scan_total_count": r.scanTotal, "scan_added_count": r.scanAdded, "scan_started_at": r.scanStarted, "scan_ingested_count": r.scanIngested, "scan_ingesting_count": r.scanIngesting}
 		if u := h.libraryPreviewPublicURL(int64(r.id)); u != "" {
 			item["preview_url"] = u
 		} else if r.mediaCount > 0 {
@@ -257,10 +263,15 @@ func (h *Handler) CreateLibrary(c *gin.Context) {
 	if body.RealtimeMonitor != nil {
 		realtime = *body.RealtimeMonitor
 	}
+	if err := validateProcessingValues(body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 	preview := 0
 	if body.PreviewExtract != nil {
 		preview = *body.PreviewExtract
 	}
+	explicitProcessing := processingOptionsFromBody(body)
 	drmEnabled := 0
 	if body.DRMEnabled != nil {
 		drmEnabled = *body.DRMEnabled
@@ -303,8 +314,8 @@ func (h *Handler) CreateLibrary(c *gin.Context) {
 		refreshPolicy = "never"
 	}
 	res, err := h.App.DB.Exec(
-		`INSERT INTO library (name, type, path, auto_scan, enabled, realtime_monitor, preview_extract, drm_enabled, encryption_mode, cleanup_local_source_after_package, jit_prepare_on_ingest, encrypted_assets_enabled, encrypted_assets_cleanup_plaintext, encrypted_assets_dir_mode, encrypted_assets_custom_dir, metadata_providers, image_providers, metadata_refresh_policy, scraper) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		body.Name, body.Type, rootPath, auto, enabled, realtime, preview, drmEnabled, encryptionMode, cleanupLocal, jitIngest, encAssets, encCleanupPlain, encDirMode, encCustomDir, metadataProviders, imageProviders, refreshPolicy, scraper,
+		`INSERT INTO library (name, type, path, auto_scan, enabled, realtime_monitor, preview_extract, subtitle_extract, atrack_extract, subtitle_recognize, keyframe_extract, ai_analysis, drm_enabled, encryption_mode, cleanup_local_source_after_package, jit_prepare_on_ingest, encrypted_assets_enabled, encrypted_assets_cleanup_plaintext, encrypted_assets_dir_mode, encrypted_assets_custom_dir, metadata_providers, image_providers, metadata_refresh_policy, scraper) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		body.Name, body.Type, rootPath, auto, enabled, realtime, preview, boolInt(explicitProcessing.SubtitleExtract), boolInt(explicitProcessing.ATrackExtract), boolInt(explicitProcessing.SubtitleRecognize), boolInt(explicitProcessing.KeyframeExtract), boolInt(explicitProcessing.AIAnalysis), drmEnabled, encryptionMode, cleanupLocal, jitIngest, encAssets, encCleanupPlain, encDirMode, encCustomDir, metadataProviders, imageProviders, refreshPolicy, scraper,
 	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -312,7 +323,7 @@ func (h *Handler) CreateLibrary(c *gin.Context) {
 	}
 	id, _ := res.LastInsertId()
 	_ = replaceLibraryFolders(h.App.DB, id, folders)
-	c.JSON(http.StatusCreated, gin.H{"id": id})
+	c.JSON(http.StatusCreated, libraryProcessingItem(id, body.Type, explicitProcessing))
 }
 
 func (h *Handler) UpdateLibrary(c *gin.Context) {
@@ -343,9 +354,9 @@ func (h *Handler) UpdateLibrary(c *gin.Context) {
 	if body.RealtimeMonitor != nil {
 		realtime = *body.RealtimeMonitor
 	}
-	preview := 0
-	if body.PreviewExtract != nil {
-		preview = *body.PreviewExtract
+	if err := validateProcessingValues(body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
 	}
 	drmEnabled := 0
 	if body.DRMEnabled != nil {
@@ -385,8 +396,8 @@ func (h *Handler) UpdateLibrary(c *gin.Context) {
 		return
 	}
 	_, err = h.App.DB.Exec(
-		`UPDATE library SET name = ?, type = ?, path = ?, auto_scan = ?, enabled = ?, realtime_monitor = ?, preview_extract = ?, drm_enabled = ?, encryption_mode = ?, cleanup_local_source_after_package = ?, jit_prepare_on_ingest = ?, encrypted_assets_enabled = ?, encrypted_assets_cleanup_plaintext = ?, encrypted_assets_dir_mode = ?, encrypted_assets_custom_dir = ?, metadata_providers = ?, image_providers = ?, metadata_refresh_policy = ?, scraper = ?, scan_exclude_patterns = COALESCE(NULLIF(?, ''), scan_exclude_patterns) WHERE id = ?`,
-		body.Name, body.Type, folders[0], auto, enabled, realtime, preview, drmEnabled, encryptionMode, cleanupLocal, jitIngest, encAssets, encCleanupPlain, encDirMode, encCustomDir, metadataProviders, imageProviders, refreshPolicy, scraper, strings.TrimSpace(body.ScanExcludePatterns), id,
+		`UPDATE library SET name = ?, type = ?, path = ?, auto_scan = ?, enabled = ?, realtime_monitor = ?, preview_extract = COALESCE(?, preview_extract), subtitle_extract = COALESCE(?, subtitle_extract), atrack_extract = COALESCE(?, atrack_extract), subtitle_recognize = COALESCE(?, subtitle_recognize), keyframe_extract = COALESCE(?, keyframe_extract), ai_analysis = COALESCE(?, ai_analysis), drm_enabled = ?, encryption_mode = ?, cleanup_local_source_after_package = ?, jit_prepare_on_ingest = ?, encrypted_assets_enabled = ?, encrypted_assets_cleanup_plaintext = ?, encrypted_assets_dir_mode = ?, encrypted_assets_custom_dir = ?, metadata_providers = ?, image_providers = ?, metadata_refresh_policy = ?, scraper = ?, scan_exclude_patterns = COALESCE(NULLIF(?, ''), scan_exclude_patterns) WHERE id = ?`,
+		body.Name, body.Type, folders[0], auto, enabled, realtime, body.PreviewExtract, body.SubtitleExtract, body.ATrackExtract, body.SubtitleRecognize, body.KeyframeExtract, body.AIAnalysis, drmEnabled, encryptionMode, cleanupLocal, jitIngest, encAssets, encCleanupPlain, encDirMode, encCustomDir, metadataProviders, imageProviders, refreshPolicy, scraper, strings.TrimSpace(body.ScanExcludePatterns), id,
 	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -396,7 +407,14 @@ func (h *Handler) UpdateLibrary(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	explicit, loadErr := loadLibraryProcessing(h.App.DB, id)
+	if loadErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": loadErr.Error()})
+		return
+	}
+	item := libraryProcessingItem(id, body.Type, explicit)
+	item["ok"] = true
+	c.JSON(http.StatusOK, item)
 }
 
 func (h *Handler) DeleteLibrary(c *gin.Context) {
@@ -667,4 +685,64 @@ func (h *Handler) validateEncryptedAssetsSettings(encEnabled int, mode, customDi
 		}
 	}
 	return nil
+}
+
+func processingOptionsFromBody(body libraryBody) libraryprocessing.Options {
+	return processingOptionsFromInts(pointerInt(body.PreviewExtract), pointerInt(body.SubtitleExtract), pointerInt(body.ATrackExtract), pointerInt(body.SubtitleRecognize), pointerInt(body.KeyframeExtract), pointerInt(body.AIAnalysis))
+}
+func processingOptionsFromInts(preview, subtitle, atrack, recognize, keyframe, ai int) libraryprocessing.Options {
+	return libraryprocessing.Options{Preview: preview == 1, SubtitleExtract: subtitle == 1, ATrackExtract: atrack == 1, SubtitleRecognize: recognize == 1, KeyframeExtract: keyframe == 1, AIAnalysis: ai == 1}
+}
+func pointerInt(v *int) int {
+	if v == nil {
+		return 0
+	}
+	return *v
+}
+func boolInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
+}
+func validateProcessingValues(body libraryBody) error {
+	for name, value := range map[string]*int{"preview_extract": body.PreviewExtract, "subtitle_extract": body.SubtitleExtract, "atrack_extract": body.ATrackExtract, "subtitle_recognize": body.SubtitleRecognize, "keyframe_extract": body.KeyframeExtract, "ai_analysis": body.AIAnalysis} {
+		if value != nil && *value != 0 && *value != 1 {
+			return fmt.Errorf("%s must be 0 or 1", name)
+		}
+	}
+	return nil
+}
+func videoProcessingLibraryType(typ string) bool {
+	switch strings.ToLower(strings.TrimSpace(typ)) {
+	case "movie", "tv", "video", "anime":
+		return true
+	default:
+		return false
+	}
+}
+func processingOptionsMap(o libraryprocessing.Options) gin.H {
+	return gin.H{"preview": o.Preview, "subtitle_extract": o.SubtitleExtract, "atrack_extract": o.ATrackExtract, "subtitle_recognize": o.SubtitleRecognize, "keyframe_extract": o.KeyframeExtract, "ai_analysis": o.AIAnalysis}
+}
+func processingOptionsResponse(typ string, explicit libraryprocessing.Options) gin.H {
+	effective, provenance := libraryprocessing.Close(explicit)
+	if !videoProcessingLibraryType(typ) {
+		effective = libraryprocessing.Options{}
+		provenance.DependencyAdded = nil
+	}
+	if provenance.Explicit == nil {
+		provenance.Explicit = []string{}
+	}
+	if provenance.DependencyAdded == nil {
+		provenance.DependencyAdded = []string{}
+	}
+	return gin.H{"explicit": processingOptionsMap(explicit), "effective": processingOptionsMap(effective), "provenance": provenance}
+}
+func libraryProcessingItem(id int64, typ string, explicit libraryprocessing.Options) gin.H {
+	return gin.H{"id": id, "preview_extract": boolInt(explicit.Preview), "subtitle_extract": boolInt(explicit.SubtitleExtract), "atrack_extract": boolInt(explicit.ATrackExtract), "subtitle_recognize": boolInt(explicit.SubtitleRecognize), "keyframe_extract": boolInt(explicit.KeyframeExtract), "ai_analysis": boolInt(explicit.AIAnalysis), "processing_options": processingOptionsResponse(typ, explicit)}
+}
+func loadLibraryProcessing(db *sql.DB, id int64) (libraryprocessing.Options, error) {
+	var preview, subtitle, atrack, recognize, keyframe, ai int
+	err := db.QueryRow(`SELECT preview_extract,subtitle_extract,atrack_extract,subtitle_recognize,keyframe_extract,ai_analysis FROM library WHERE id=?`, id).Scan(&preview, &subtitle, &atrack, &recognize, &keyframe, &ai)
+	return processingOptionsFromInts(preview, subtitle, atrack, recognize, keyframe, ai), err
 }
