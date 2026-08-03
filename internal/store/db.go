@@ -288,7 +288,7 @@ CREATE TABLE IF NOT EXISTS media_ingest_run (
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     finished_at TIMESTAMP,
-    policy_version INTEGER NOT NULL DEFAULT 1 CHECK(policy_version IN (1,2,3)),
+    policy_version INTEGER NOT NULL DEFAULT 1 CHECK(policy_version IN (1,2,3,4)),
     terminal_reason TEXT NOT NULL DEFAULT '',
     superseded_by_generation INTEGER,
     superseded_at TIMESTAMP,

@@ -221,3 +221,8 @@ func optionEnabled(options Options, option string) bool {
 		return false
 	}
 }
+
+// OptionEnabled reports whether the named processing option is enabled in the given options.
+func OptionEnabled(options Options, option string) bool {
+	return optionEnabled(options, option)
+}
