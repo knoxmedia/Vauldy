@@ -625,3 +625,168 @@ func TestClaimOrderStableTieBreakers(t *testing.T) {
 		t.Fatalf("stable tie claim: got queue %d, want 41 (earlier available_at wins equal priority)", got.QueueID)
 	}
 }
+
+// ============================================================================
+// ClaimWithAdmission tests - RED phase
+// ============================================================================
+
+func seedAdmissionPolicy(t *testing.T, db *sql.DB, concurrency map[string]int, resources map[string]int) {
+	t.Helper()
+	concurrencyJSON := "{}"
+	if len(concurrency) > 0 {
+		parts := make([]string, 0, len(concurrency))
+		for k, v := range concurrency {
+			parts = append(parts, fmt.Sprintf("%q:%d", k, v))
+		}
+		concurrencyJSON = "{" + strings.Join(parts, ",") + "}"
+	}
+	resourcesJSON := "{}"
+	if len(resources) > 0 {
+		parts := make([]string, 0, len(resources))
+		for k, v := range resources {
+			parts = append(parts, fmt.Sprintf("%q:%d", k, v))
+		}
+		resourcesJSON = "{" + strings.Join(parts, ",") + "}"
+	}
+	policyJSON := fmt.Sprintf(`{"type_concurrency":%s,"resource_capacity":%s,"provider_capacity":{},"aging_interval_sec":300,"aging_step":1,"run_now_amount":100,"run_now_ttl_sec":600}`, concurrencyJSON, resourcesJSON)
+	if _, err := db.Exec(`INSERT INTO scheduler_policy_revision(schema_version,policy_json,author,reason,validation_hash,is_active,activated_at) VALUES(1,?,'test','admission test','hash',1,CURRENT_TIMESTAMP)`, policyJSON); err != nil {
+		t.Fatalf("insert policy: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO scheduler_control(task_type,state) VALUES('poster','running'),('thumbnail','running'),('encrypt','running'),('ai_analysis','running')`); err != nil {
+		t.Fatalf("insert control: %v", err)
+	}
+}
+
+func TestClaimWithAdmissionCreatesReservation(t *testing.T) {
+	db := openEligibilityDB(t)
+	seedAdmissionPolicy(t, db, map[string]int{"poster": 5}, map[string]int{"cpu": 10})
+	_, err := db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l'); INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state) VALUES(10,1,'f','video',1,'processing'); INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(20,10,1,'scan','processing','{}',2); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(30,20,10,1,'poster',1,'waiting'); INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(40,10,20,30,1,'poster','waiting')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := scheduler.PolicyDefaults()
+	policy.TypeConcurrency["poster"] = 5
+	req := ClaimRequest{Family: QueuePostIngest, TaskType: "poster", Owner: "worker", Registry: NewCapabilityMatrix([]string{"poster"}), SchedulerPolicy: &policy}
+	payload, result, blockers, err := ClaimWithAdmission(context.Background(), db, req)
+	if err != nil {
+		t.Fatalf("ClaimWithAdmission: %v", err)
+	}
+	if payload == nil {
+		t.Fatalf("expected payload, got nil (blockers=%+v)", blockers)
+	}
+	if result == nil {
+		t.Fatalf("expected AdmissionResult, got nil")
+	}
+	if result.ReservationID == 0 {
+		t.Fatal("expected non-zero reservation ID")
+	}
+	if result.ExecutionID == "" {
+		t.Fatal("expected non-empty execution ID")
+	}
+	if result.QueueID != 40 {
+		t.Fatalf("expected queue 40, got %d", result.QueueID)
+	}
+	// Verify reservation was created in DB
+	var resCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM scheduler_reservation WHERE execution_id=? AND status='active'`, result.ExecutionID).Scan(&resCount); err != nil {
+		t.Fatal(err)
+	}
+	if resCount != 1 {
+		t.Fatalf("expected 1 active reservation, got %d", resCount)
+	}
+}
+
+func TestClaimWithAdmissionTypeLimitBlocks(t *testing.T) {
+	db := openEligibilityDB(t)
+	seedAdmissionPolicy(t, db, map[string]int{"poster": 1}, map[string]int{"cpu": 10})
+	_, err := db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l'); INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state) VALUES(10,1,'f','video',1,'processing'),(11,1,'g','video',1,'processing'); INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(20,10,1,'scan','processing','{}',2),(21,11,1,'scan','processing','{}',2); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(30,20,10,1,'poster',1,'waiting'),(31,21,11,1,'poster',1,'waiting'); INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(40,10,20,30,1,'poster','waiting'),(41,11,21,31,1,'poster','waiting')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := scheduler.PolicyDefaults()
+	policy.TypeConcurrency["poster"] = 1
+	req := ClaimRequest{Family: QueuePostIngest, TaskType: "poster", Owner: "worker", Registry: NewCapabilityMatrix([]string{"poster"}), SchedulerPolicy: &policy}
+
+	// First claim should succeed
+	payload1, result1, blockers1, err1 := ClaimWithAdmission(context.Background(), db, req)
+	if err1 != nil || payload1 == nil || result1 == nil {
+		t.Fatalf("first claim: err=%v payload=%+v result=%+v blockers=%+v", err1, payload1, result1, blockers1)
+	}
+
+	// Second claim should be blocked (concurrency=1)
+	payload2, result2, blockers2, err2 := ClaimWithAdmission(context.Background(), db, req)
+	if err2 != nil {
+		t.Fatalf("second claim: %v", err2)
+	}
+	if payload2 != nil || result2 != nil {
+		t.Fatalf("second claim should be nil, got payload=%+v result=%+v", payload2, result2)
+	}
+	if len(blockers2) == 0 {
+		t.Fatal("expected type limit blockers")
+	}
+	foundTypeLimit := false
+	for _, b := range blockers2 {
+		if strings.Contains(strings.ToLower(b.Reason), "concurrency") {
+			foundTypeLimit = true
+		}
+	}
+	if !foundTypeLimit {
+		t.Fatalf("expected concurrency blocker, got %+v", blockers2)
+	}
+}
+
+func TestClaimWithAdmissionResourceBudgetBlocks(t *testing.T) {
+	db := openEligibilityDB(t)
+	seedAdmissionPolicy(t, db, map[string]int{"encrypt": 5}, map[string]int{"cpu": 1})
+	_, err := db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l'); INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state) VALUES(10,1,'f','video',1,'processing'),(11,1,'g','video',1,'processing'); INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(20,10,1,'scan','processing','{}',2),(21,11,1,'scan','processing','{}',2); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(30,20,10,1,'encrypt',1,'waiting'),(31,21,11,1,'encrypt',1,'waiting'); INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(40,10,20,30,1,'encrypt','waiting'),(41,11,21,31,1,'encrypt','waiting')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := scheduler.PolicyDefaults()
+	policy.TypeConcurrency["encrypt"] = 5
+	policy.ResourceCapacity[scheduler.CPU] = 1
+	req := ClaimRequest{Family: QueuePostIngest, TaskType: "encrypt", Owner: "worker", Registry: NewCapabilityMatrix([]string{"encrypt"}), SchedulerPolicy: &policy}
+
+	// First claim succeeds
+	payload1, _, _, err1 := ClaimWithAdmission(context.Background(), db, req)
+	if err1 != nil || payload1 == nil {
+		t.Fatalf("first encrypt claim: err=%v payload=%+v", err1, payload1)
+	}
+
+	// Second claim blocked by CPU budget (encrypt uses 1 CPU, capacity=1)
+	payload2, _, blockers2, err2 := ClaimWithAdmission(context.Background(), db, req)
+	if err2 != nil {
+		t.Fatalf("second encrypt claim: %v", err2)
+	}
+	if payload2 != nil {
+		t.Fatalf("second encrypt claim should be nil, got %+v", payload2)
+	}
+	foundResource := false
+	for _, b := range blockers2 {
+		if strings.Contains(strings.ToLower(b.Reason), "resource") {
+			foundResource = true
+		}
+	}
+	if !foundResource {
+		t.Fatalf("expected resource blocker, got %+v", blockers2)
+	}
+}
+
+func TestClaimWithAdmissionNoPolicyFallsThrough(t *testing.T) {
+	db := openEligibilityDB(t)
+	_, err := db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l'); INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state) VALUES(10,1,'f','video',1,'processing'); INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(20,10,1,'scan','processing','{}',2); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(30,20,10,1,'poster',1,'waiting'); INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(40,10,20,30,1,'poster','waiting')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := ClaimRequest{Family: QueuePostIngest, TaskType: "poster", Owner: "worker", Registry: NewCapabilityMatrix([]string{"poster"})}
+	payload, result, _, err := ClaimWithAdmission(context.Background(), db, req)
+	if err != nil {
+		t.Fatalf("ClaimWithAdmission without policy: %v", err)
+	}
+	if payload == nil {
+		t.Fatal("expected payload with nil policy")
+	}
+	if result != nil {
+		t.Fatalf("expected nil AdmissionResult without policy, got %+v", result)
+	}
+}

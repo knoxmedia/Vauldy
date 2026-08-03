@@ -246,7 +246,18 @@ func (q *Queue) ClaimAny(ctx context.Context, types []TaskType) (*Task, error) {
 		}
 		requested = append(requested, string(typ))
 	}
-	payload, err := publication.ClaimEligibleAny(ctx, q.db, publication.ClaimRequest{Family: publication.QueuePostIngest, TaskTypes: requested, Owner: q.owner, Registry: q.registry, Metrics: q.metrics, SchedulerPolicy: q.schedulerPolicy})
+	var payload *publication.ClaimPayload
+	var err error
+	if q.schedulerPolicy != nil {
+		for _, typ := range requested {
+			payload, _, _, err = publication.ClaimWithAdmission(ctx, q.db, publication.ClaimRequest{Family: publication.QueuePostIngest, TaskType: typ, Owner: q.owner, Registry: q.registry, Metrics: q.metrics, SchedulerPolicy: q.schedulerPolicy})
+			if err != nil || payload != nil {
+				break
+			}
+		}
+	} else {
+		payload, err = publication.ClaimEligibleAny(ctx, q.db, publication.ClaimRequest{Family: publication.QueuePostIngest, TaskTypes: requested, Owner: q.owner, Registry: q.registry, Metrics: q.metrics, SchedulerPolicy: q.schedulerPolicy})
+	}
 	if err != nil || payload == nil {
 		return nil, err
 	}
@@ -264,7 +275,14 @@ func (q *Queue) Claim(ctx context.Context, typ TaskType) (*Task, error) {
 	if err := validateTaskType(typ); err != nil {
 		return nil, err
 	}
-	payload, err := publication.ClaimEligible(ctx, q.db, publication.ClaimRequest{Family: publication.QueuePostIngest, TaskType: string(typ), Owner: q.owner, Registry: q.registry, Metrics: q.metrics, SchedulerPolicy: q.schedulerPolicy})
+	req := publication.ClaimRequest{Family: publication.QueuePostIngest, TaskType: string(typ), Owner: q.owner, Registry: q.registry, Metrics: q.metrics, SchedulerPolicy: q.schedulerPolicy}
+	var payload *publication.ClaimPayload
+	var err error
+	if q.schedulerPolicy != nil {
+		payload, _, _, err = publication.ClaimWithAdmission(ctx, q.db, req)
+	} else {
+		payload, err = publication.ClaimEligible(ctx, q.db, req)
+	}
 	if err != nil || payload == nil {
 		return nil, err
 	}

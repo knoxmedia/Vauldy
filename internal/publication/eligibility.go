@@ -290,6 +290,13 @@ func familyLegacySQL(f QueueFamily, alias string) string {
 	return fmt.Sprintf("(%s.ingest_run_id IS NULL AND %s.ingest_step_id IS NULL AND %s.generation IS NULL)", alias, alias, alias)
 }
 
+// SelectFamilyCandidateTx returns the best eligible candidate id for a claim
+// request within the given transaction. It returns whether the candidate is a
+// required step and whether it is linked to an ingest run/step.
+func SelectFamilyCandidateTx(ctx context.Context, tx store.SQLExecutor, req ClaimRequest) (id int64, required, linked bool, err error) {
+	return selectFamilyCandidate(ctx, tx, req)
+}
+
 func selectFamilyCandidate(ctx context.Context, tx store.SQLExecutor, req ClaimRequest) (id int64, required, linked bool, err error) {
 	table, alias := familySource(req.Family)
 	due := familyDueSQL(req.Family, alias)
@@ -425,6 +432,13 @@ func eligibleRequiredExists(ctx context.Context, tx store.SQLExecutor, registry 
 	return c != nil, err
 }
 
+// ClaimFamilyCandidateTx atomically marks a candidate as claimed (running)
+// within the given transaction and returns the resulting ClaimPayload.
+// It also transitions the linked media_ingest_step if applicable.
+func ClaimFamilyCandidateTx(ctx context.Context, tx store.SQLExecutor, req ClaimRequest, id int64, owner string) (*ClaimPayload, error) {
+	return updateFamilyClaim(ctx, tx, req, id, owner)
+}
+
 func updateFamilyClaim(ctx context.Context, tx store.SQLExecutor, req ClaimRequest, id int64, owner string) (*ClaimPayload, error) {
 	table, a := familySource(req.Family)
 	due := familyDueSQL(req.Family, a)
@@ -525,4 +539,137 @@ func claimByOwner(ctx context.Context, db *sql.DB, f QueueFamily, owner string) 
 // LinkedClaimEligibilitySQL is the canonical linked-or-legacy dependency predicate.
 func LinkedClaimEligibilitySQL(alias string) string {
 	return fmt.Sprintf(`((%[1]s.ingest_run_id IS NULL AND %[1]s.ingest_step_id IS NULL AND %[1]s.generation IS NULL) OR (%s))`, alias, linkedEligibilitySQL(alias))
+}
+
+// ClaimWithAdmission orchestrates a claim admission inside one BEGIN IMMEDIATE
+// transaction, checking scheduler control state, type concurrency, resource
+// budget, and provider limits before claiming a candidate. On success it also
+// inserts a scheduler_reservation row.
+//
+// Returns:
+//   - (*ClaimPayload, *AdmissionResult, nil, nil) when a candidate is admitted
+//   - (nil, nil, AdmissionBlockers, nil) when candidates exist but none fit
+//   - (nil, nil, nil, nil) when no candidates are available
+//   - (nil, nil, nil, error) on database errors
+func ClaimWithAdmission(ctx context.Context, db *sql.DB, req ClaimRequest) (*ClaimPayload, *scheduler.AdmissionResult, scheduler.AdmissionBlockers, error) {
+	if req.SchedulerPolicy == nil {
+		payload, err := ClaimEligible(ctx, db, req)
+		return payload, nil, nil, err
+	}
+
+	var payload *ClaimPayload
+	var admitResult *scheduler.AdmissionResult
+	var blockers scheduler.AdmissionBlockers
+
+	ownerToken := strings.TrimSpace(req.Owner) + "/" + uuid.NewString()
+	policy := store.RetryPolicy{Operation: "publication_claim_admission", MaxElapsed: 2 * time.Second, BaseBackoff: 10 * time.Millisecond, MaxBackoff: 100 * time.Millisecond}
+	err := store.WithBusyRetryPolicyContext(ctx, nil, policy, func(attempt context.Context) error {
+		payload = nil
+		admitResult = nil
+		blockers = nil
+		req.Metrics.RecordImmediateTransaction()
+		outcome, err := store.WithImmediateConnTx(attempt, db, func(tx store.ImmediateConnTx) error {
+			now := time.Now()
+
+			// Step 1: Check control state
+			_, cb, err := scheduler.CheckControlState(attempt, tx, req.TaskType)
+			if err != nil {
+				return err
+			}
+			if cb != nil {
+				blockers = append(blockers, *cb)
+				return nil
+			}
+
+			// Step 2: Check budgets (type concurrency, resource, provider)
+			budgetBlockers, err := scheduler.CheckAllBudgets(attempt, tx, req.TaskType, *req.SchedulerPolicy, now)
+			if err != nil {
+				return err
+			}
+			if len(budgetBlockers) > 0 {
+				blockers = budgetBlockers
+				return nil
+			}
+
+			// Step 3: Select candidate
+			candidateID, _, _, err := selectFamilyCandidate(attempt, tx, req)
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+
+			// Step 4: Claim candidate
+			p, err := updateFamilyClaim(attempt, tx, req, candidateID, ownerToken)
+			if err != nil {
+				return err
+			}
+			if p == nil {
+				return nil
+			}
+			payload = p
+
+			// Step 5: Get active policy revision ID for reservation FK
+			var revID sql.NullInt64
+			if err := tx.QueryRowContext(attempt,
+				`SELECT id FROM scheduler_policy_revision WHERE is_active=1`).Scan(&revID); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					return fmt.Errorf("publication claim admission: no active policy revision")
+				}
+				return err
+			}
+
+			// Step 6: Create reservation
+			executionID := scheduler.GenerateExecutionID(strings.TrimSpace(req.Owner))
+			leaseUntil := time.Now().Add(90 * time.Second)
+			resID, err := scheduler.InsertAdmissionReservation(attempt, tx, executionID, req.TaskType, 1, revID.Int64, leaseUntil)
+			if err != nil {
+				return fmt.Errorf("publication claim admission: insert reservation: %w", err)
+			}
+
+			// Step 7: Advance fairness cursor
+			if _, err := tx.ExecContext(attempt,
+				`INSERT INTO scheduler_fairness(task_type,cursor,updated_at) VALUES(?,?,?)
+				 ON CONFLICT(task_type) DO UPDATE SET cursor=?, updated_at=?`,
+				req.TaskType, now, now, now, now); err != nil {
+				return fmt.Errorf("publication claim admission: advance fairness: %w", err)
+			}
+
+			admitResult = &scheduler.AdmissionResult{
+				QueueID:       p.QueueID,
+				TaskType:      p.TaskType,
+				Owner:         p.Owner,
+				MediaID:       p.MediaID,
+				ReservationID: resID,
+				ExecutionID:   executionID,
+				LeaseUntil:    p.LeaseUntil.Format(time.RFC3339),
+			}
+			return nil
+		})
+		if err != nil && outcome.CommitAttempted {
+			return fmt.Errorf("%w: %v", ErrClaimCommitUncertain, err)
+		}
+		if err == nil && outcome.CommitConfirmed && payload != nil && req.afterCommit != nil {
+			if hookErr := req.afterCommit(); hookErr != nil {
+				return fmt.Errorf("%w: %v", ErrClaimCommitUncertain, hookErr)
+			}
+		}
+		return err
+	})
+	if errors.Is(err, ErrClaimCommitUncertain) {
+		reconciled, reconcileErr := claimByOwner(ctx, db, req.Family, ownerToken)
+		if reconcileErr == nil && reconciled != nil {
+			// Attempt to find the reservation too
+			return reconciled, admitResult, nil, nil
+		}
+		return nil, nil, nil, err
+	}
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if len(blockers) > 0 {
+		return nil, nil, blockers, nil
+	}
+	return payload, admitResult, nil, nil
 }
