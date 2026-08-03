@@ -15,7 +15,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"knox-media/internal/postingest"
+	"knox-media/internal/scheduler"
 	"knox-media/internal/store"
 )
 
@@ -67,9 +67,9 @@ func TestAdminOverview_InternalError(t *testing.T) {
 	}
 }
 
-type snapshotterStub struct{ snapshot postingest.BudgetSnapshot }
+type snapshotterStub struct{ snapshot scheduler.BudgetSnapshot }
 
-func (s snapshotterStub) Snapshot() postingest.BudgetSnapshot { return s.snapshot }
+func (s snapshotterStub) Snapshot(context.Context) (scheduler.BudgetSnapshot, error) { return s.snapshot, nil }
 
 func TestAdminOverview_ReturnsResourceControlMetrics(t *testing.T) {
 	db, err := store.OpenSQLite(filepath.Join(t.TempDir(), "overview.sqlite"))
@@ -90,7 +90,7 @@ func TestAdminOverview_ReturnsResourceControlMetrics(t *testing.T) {
 	metrics.BusyRetries.Add(2)
 	metrics.ProgressBatches.Add(3)
 	metrics.DroppedLogs.Add(4)
-	b := NewAdminOverviewBuilder(db, snapshotterStub{postingest.BudgetSnapshot{GlobalLimit: 6, GlobalUsed: 2, PosterLimit: 2, PosterUsed: 1, PreviewLimit: 1, PreviewUsed: 1}}, metrics)
+	b := NewAdminOverviewBuilder(db, snapshotterStub{scheduler.BudgetSnapshot{GlobalLimit: 6, GlobalUsed: 2, PosterLimit: 2, PosterUsed: 1, PreviewLimit: 1, PreviewUsed: 1}}, metrics)
 	b.SampleSystem = func(context.Context, string) (SystemSample, error) { return SystemSample{}, nil }
 	data, err := b.Build(context.Background())
 	if err != nil {

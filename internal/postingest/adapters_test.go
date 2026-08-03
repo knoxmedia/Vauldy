@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"knox-media/internal/scheduler"
 	"knox-media/internal/storage"
 
 	_ "modernc.org/sqlite"
@@ -851,6 +852,45 @@ func TestAdapterSchedulerProfileUnknownType(t *testing.T) {
 	_, err := set.SchedulerProfile(TaskType("nonexistent_task_xyz"))
 	if err == nil {
 		t.Fatal("expected error for unknown task type")
+	}
+}
+
+// TestAdapterSchedulerFallbackProfile asserts that a GPU-capable task type
+// declares a CPU-heavy fallback profile: strictly more CPU than the primary
+// profile and no GPU request.
+func TestAdapterSchedulerFallbackProfile(t *testing.T) {
+	set := AdapterSet{}
+	primary, err := set.SchedulerProfile(TaskSubtitleRecognize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fallback, err := set.SchedulerFallbackProfile(TaskSubtitleRecognize)
+	if err != nil {
+		t.Fatalf("SchedulerFallbackProfile(%q): %v", TaskSubtitleRecognize, err)
+	}
+	if len(fallback) == 0 {
+		t.Fatal("fallback profile has no resource requests")
+	}
+	if fallback[scheduler.CPU] <= primary.Resources[scheduler.CPU] {
+		t.Fatalf("fallback CPU=%d want strictly more than primary CPU=%d", fallback[scheduler.CPU], primary.Resources[scheduler.CPU])
+	}
+	if _, hasGPU := fallback[scheduler.GPU]; hasGPU {
+		t.Fatal("fallback profile must not request GPU")
+	}
+	if err := scheduler.ValidateResourceRequest(fallback); err != nil {
+		t.Fatalf("fallback profile invalid: %v", err)
+	}
+}
+
+// TestAdapterSchedulerFallbackProfileUnsupported asserts that task types whose
+// primary adapter is not GPU-capable have no CPU fallback profile.
+func TestAdapterSchedulerFallbackProfileUnsupported(t *testing.T) {
+	set := AdapterSet{}
+	types := []TaskType{TaskPoster, TaskPosterRepair, TaskThumbnail, TaskPreview, TaskKeyframe, TaskSubtitle, TaskAIAnalysis, TaskAtrack, TaskEncrypt}
+	for _, typ := range types {
+		if _, err := set.SchedulerFallbackProfile(typ); err == nil {
+			t.Fatalf("SchedulerFallbackProfile(%q): expected error for non-GPU type", typ)
+		}
 	}
 }
 

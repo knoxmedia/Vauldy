@@ -72,7 +72,7 @@ func ClaimEligibleAny(ctx context.Context, db *sql.DB, req ClaimRequest) (*Claim
 		return nil, nil
 	}
 	req.TaskTypes = filtered
-	if ok, err := postIngestCandidateHint(ctx, db, req); err != nil || !ok {
+	if ok, err := PostIngestCandidateHint(ctx, db, req); err != nil || !ok {
 		return nil, err
 	}
 	return claimEligible(ctx, db, req, true)
@@ -131,7 +131,10 @@ func sqlPlaceholders(n int) string {
 	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
 }
 
-func postIngestCandidateHint(ctx context.Context, db *sql.DB, req ClaimRequest) (bool, error) {
+// PostIngestCandidateHint reports whether any eligible post-ingest candidate
+// exists among the requested task types. It is a cheap read-only fast path used
+// to avoid write-lock admission transactions when there is nothing to claim.
+func PostIngestCandidateHint(ctx context.Context, db *sql.DB, req ClaimRequest) (bool, error) {
 	args := make([]any, len(req.TaskTypes))
 	for i, typ := range req.TaskTypes {
 		args[i] = typ

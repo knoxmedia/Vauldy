@@ -21,8 +21,8 @@ import (
 
 	"knox-media/internal/buildinfo"
 	"knox-media/internal/coreiface"
-	"knox-media/internal/postingest"
 	"knox-media/internal/publication"
+	"knox-media/internal/scheduler"
 	"knox-media/internal/store"
 	"knox-media/internal/taskalign"
 )
@@ -36,13 +36,13 @@ type OverviewBuilder interface {
 	Build(context.Context) (AdminOverviewData, error)
 }
 
-type budgetSnapshotter interface {
-	Snapshot() postingest.BudgetSnapshot
+type schedulerBudgetSnapshotter interface {
+	Snapshot(context.Context) (scheduler.BudgetSnapshot, error)
 }
 
 type AdminOverviewBuilder struct {
 	DB           *sql.DB
-	Dispatcher   budgetSnapshotter
+	Scheduler    schedulerBudgetSnapshotter
 	Metrics      *store.SQLiteMetrics
 	Capabilities coreiface.CapabilityRegistry
 	SampleSystem func(context.Context, string) (SystemSample, error)
@@ -131,8 +131,8 @@ type SQLiteMetricsOverview struct {
 	DroppedLogs      uint64 `json:"dropped_logs"`
 }
 
-func NewAdminOverviewBuilder(db *sql.DB, d budgetSnapshotter, m *store.SQLiteMetrics) *AdminOverviewBuilder {
-	return &AdminOverviewBuilder{DB: db, Dispatcher: d, Metrics: m, SampleSystem: sampleSystem}
+func NewAdminOverviewBuilder(db *sql.DB, s schedulerBudgetSnapshotter, m *store.SQLiteMetrics) *AdminOverviewBuilder {
+	return &AdminOverviewBuilder{DB: db, Scheduler: s, Metrics: m, SampleSystem: sampleSystem}
 }
 
 func sampleSystem(ctx context.Context, path string) (SystemSample, error) {
@@ -333,9 +333,14 @@ func (b *AdminOverviewBuilder) loadActivities(ctx context.Context) ([]map[string
 	return out, rows.Err()
 }
 func (b *AdminOverviewBuilder) budget() ResourceBudgetOverview {
-	var s postingest.BudgetSnapshot
-	if b.Dispatcher != nil {
-		s = b.Dispatcher.Snapshot()
+	if b.Scheduler == nil {
+		return ResourceBudgetOverview{}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	s, err := b.Scheduler.Snapshot(ctx)
+	if err != nil {
+		return ResourceBudgetOverview{}
 	}
 	return ResourceBudgetOverview{s.GlobalLimit, s.GlobalUsed, s.PosterLimit, s.PosterUsed, s.PreviewLimit, s.PreviewUsed, s.SubtitleLimit, s.SubtitleUsed}
 }

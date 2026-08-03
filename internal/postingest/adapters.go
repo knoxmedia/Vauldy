@@ -46,6 +46,20 @@ func (s AdapterSet) SchedulerProfile(taskType TaskType) (scheduler.Descriptor, e
 	return desc, nil
 }
 
+// SchedulerFallbackProfile returns the CPU-heavy fallback resource request for
+// a task type whose primary adapter may request GPU capacity. GPU initialization
+// failure fences the original reservation and re-admits with this profile; the
+// fallback is a fresh admission and never mutates tokens under a running
+// reservation. Types without a GPU-capable adapter return an error.
+func (s AdapterSet) SchedulerFallbackProfile(taskType TaskType) (scheduler.ResourceRequest, error) {
+	switch taskType {
+	case TaskSubtitleRecognize:
+		return scheduler.ResourceRequest{scheduler.CPU: 2, scheduler.DiskRead: 1, scheduler.DiskWrite: 1}, nil
+	default:
+		return nil, fmt.Errorf("no CPU fallback profile for task type %q", taskType)
+	}
+}
+
 type AdapterSet struct {
 	Poster            Adapter
 	Thumbnail         Adapter

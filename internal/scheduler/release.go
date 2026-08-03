@@ -9,6 +9,11 @@ import (
 	"knox-media/internal/store"
 )
 
+// ErrReservationNotActive is returned when releasing a reservation that is not
+// currently active (already released or absent). Queue lifecycle transitions
+// treat it as a successful no-op so the queue row still transitions.
+var ErrReservationNotActive = errors.New("reservation not active")
+
 // ReleaseReservationTx marks a reservation as released with evidence inside an
 // open transaction. Uses WHERE execution_id=? AND status='active' to guarantee
 // exactly-once semantics. Returns an error if the reservation was already
@@ -25,7 +30,7 @@ func ReleaseReservationTx(ctx context.Context, tx store.SQLExecutor, executionID
 		return fmt.Errorf("rows affected: %w", err)
 	}
 	if n == 0 {
-		return fmt.Errorf("reservation %s not found or already released", executionID)
+		return fmt.Errorf("%w: %s", ErrReservationNotActive, executionID)
 	}
 	return nil
 }

@@ -250,6 +250,12 @@ func (q *Queue) ClaimAny(ctx context.Context, types []TaskType) (*Task, error) {
 	var admitResult *scheduler.AdmissionResult
 	var err error
 	if q.schedulerPolicy != nil {
+		// Cheap read-only fast path: skip write-lock admission transactions when
+		// no candidate is eligible, so idle claim polls do not contend with the
+		// write transactions executors use to complete or fail tasks.
+		if ok, hintErr := publication.PostIngestCandidateHint(ctx, q.db, publication.ClaimRequest{Family: publication.QueuePostIngest, TaskTypes: requested, Owner: q.owner, Registry: q.registry, Metrics: q.metrics, SchedulerPolicy: q.schedulerPolicy}); hintErr != nil || !ok {
+			return nil, hintErr
+		}
 		for _, typ := range requested {
 			payload, admitResult, _, err = publication.ClaimWithAdmission(ctx, q.db, publication.ClaimRequest{Family: publication.QueuePostIngest, TaskType: typ, Owner: q.owner, Registry: q.registry, Metrics: q.metrics, SchedulerPolicy: q.schedulerPolicy})
 			if err != nil || payload != nil {
@@ -668,16 +674,23 @@ func releaseTaskPlaintextTemp(task Task) {
 // releaseReservationIfNeeded releases a scheduler reservation in the open
 // transaction if the task has a non-empty execution ID. Returns nil on success
 // or if no reservation exists (caller should not treat a missing reservation as
-// fatal - a claim may not have produced one).
+// fatal - a claim may not have produced one). An already-released reservation
+// is a successful no-op: exactly-once release makes a duplicate a normal
+// outcome (e.g. after a GPU fallback fence).
 func releaseReservationIfNeeded(ctx context.Context, tx store.SQLExecutor, task Task, reason string) error {
 	if task.ExecutionID == "" {
 		return nil
 	}
-	return scheduler.ReleaseReservationTx(ctx, tx, task.ExecutionID, reason, task.LeaseOwner)
+	err := scheduler.ReleaseReservationTx(ctx, tx, task.ExecutionID, reason, task.LeaseOwner)
+	if err == nil || errors.Is(err, scheduler.ErrReservationNotActive) {
+		return nil
+	}
+	return err
 }
 
 // releaseReservationDirect releases a scheduler reservation outside a
-// transaction using the database connection directly.
+// transaction using the database connection directly. Already-released
+// reservations are a successful no-op.
 func releaseReservationDirect(ctx context.Context, db *sql.DB, task Task, reason string) error {
 	if task.ExecutionID == "" {
 		return nil
@@ -688,6 +701,9 @@ func releaseReservationDirect(ctx context.Context, db *sql.DB, task Task, reason
 	}
 	defer func() { _ = tx.Rollback() }()
 	if err := scheduler.ReleaseReservationTx(ctx, tx, task.ExecutionID, reason, task.LeaseOwner); err != nil {
+		if errors.Is(err, scheduler.ErrReservationNotActive) {
+			return nil
+		}
 		return err
 	}
 	return tx.Commit()
