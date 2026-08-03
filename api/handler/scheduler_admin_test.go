@@ -80,7 +80,11 @@ func doSchedulerAdmin(t *testing.T, h *Handler, method, path string, body any, u
 	case http.MethodPatch:
 		h.SchedulerAdminPatchPolicy(c)
 	case http.MethodPost:
-		h.SchedulerAdminControl(c)
+		if strings.Contains(path, "/scheduler/explain") {
+			h.SchedulerAdminExplainTask(c)
+		} else {
+			h.SchedulerAdminControl(c)
+		}
 	}
 	return w
 }
@@ -97,12 +101,14 @@ func TestSchedulerAdminRequiresAdmin(t *testing.T) {
 	admin.PUT("/scheduler/policy", h.SchedulerAdminPutPolicy)
 	admin.PATCH("/scheduler/policy", h.SchedulerAdminPatchPolicy)
 	admin.POST("/scheduler/control", h.SchedulerAdminControl)
+	admin.POST("/scheduler/explain", h.SchedulerAdminExplainTask)
 
 	for _, tc := range []struct{ method, path string }{
 		{http.MethodGet, "/api/v1/admin/scheduler/policy"},
 		{http.MethodPut, "/api/v1/admin/scheduler/policy"},
 		{http.MethodPatch, "/api/v1/admin/scheduler/policy"},
 		{http.MethodPost, "/api/v1/admin/scheduler/control"},
+		{http.MethodPost, "/api/v1/admin/scheduler/explain"},
 	} {
 		w := httptest.NewRecorder()
 		req := httptest.NewRequest(tc.method, tc.path, nil)
@@ -433,5 +439,227 @@ func TestSchedulerAdminControlRevisionConflict(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "revision_conflict") {
 		t.Fatalf("body=%s want revision_conflict", w.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Explain task handler tests
+// ---------------------------------------------------------------------------
+
+func TestSchedulerAdminExplainTaskRunnable(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	base := scheduler.PolicyDefaults()
+	h, _, _, _ := newSchedulerAdminTestHandler(t, base)
+
+	row := scheduler.QueueRow{
+		ID:           100,
+		TaskType:     "poster",
+		Priority:     5,
+		Runnable:     true,
+		DependencyMet: true,
+		CapableWorker: true,
+		SourceReady:   true,
+		CiphertextReady: true,
+	}
+	w := doSchedulerAdmin(t, h, http.MethodPost, "/api/v1/admin/scheduler/explain", row, 2, "admin", "admin")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s want 200", w.Code, w.Body.String())
+	}
+	var exp scheduler.Explanation
+	if err := json.Unmarshal(w.Body.Bytes(), &exp); err != nil {
+		t.Fatalf("decode: %v body=%s", err, w.Body.String())
+	}
+	if !exp.Runnable {
+		t.Fatalf("expected runnable, got primary=%q", exp.PrimaryBlocker.Code)
+	}
+}
+
+func TestSchedulerAdminExplainTaskBlockedByControl(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	base := scheduler.PolicyDefaults()
+	h, _, db, _ := newSchedulerAdminTestHandler(t, base)
+	ctx := context.Background()
+	st := scheduler.NewStore(db)
+
+	// Pause the poster type.
+	if err := st.SetControlState(ctx, "poster", "paused"); err != nil {
+		t.Fatal(err)
+	}
+
+	row := scheduler.QueueRow{
+		ID:           101,
+		TaskType:     "poster",
+		Priority:     5,
+		Runnable:     true,
+		DependencyMet: true,
+		CapableWorker: true,
+		SourceReady:   true,
+		CiphertextReady: true,
+	}
+	w := doSchedulerAdmin(t, h, http.MethodPost, "/api/v1/admin/scheduler/explain", row, 2, "admin", "admin")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s want 200", w.Code, w.Body.String())
+	}
+	var exp scheduler.Explanation
+	if err := json.Unmarshal(w.Body.Bytes(), &exp); err != nil {
+		t.Fatalf("decode: %v body=%s", err, w.Body.String())
+	}
+	if exp.Runnable {
+		t.Fatal("expected not runnable when paused")
+	}
+	if exp.PrimaryBlocker.Code != scheduler.BlockerControl {
+		t.Fatalf("expected control blocker, got %q", exp.PrimaryBlocker.Code)
+	}
+}
+
+func TestSchedulerAdminExplainTaskBlockedByTypeExhausted(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	base := scheduler.PolicyDefaults()
+	base.TypeConcurrency["poster"] = 2
+	h, _, db, _ := newSchedulerAdminTestHandler(t, base)
+	ctx := context.Background()
+
+	// Create 2 active reservations to exhaust the type.
+	rev, _ := scheduler.NewStore(db).GetActivePolicyRevision(ctx)
+	for i := 0; i < 2; i++ {
+		execID := scheduler.GenerateExecutionID("admin")
+		if _, err := scheduler.NewStore(db).CreateReservation(ctx, execID, "poster", 1, rev.ID, time.Now().Add(time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	row := scheduler.QueueRow{
+		ID:           102,
+		TaskType:     "poster",
+		Priority:     5,
+		Runnable:     true,
+		DependencyMet: true,
+		CapableWorker: true,
+		SourceReady:   true,
+		CiphertextReady: true,
+	}
+	w := doSchedulerAdmin(t, h, http.MethodPost, "/api/v1/admin/scheduler/explain", row, 2, "admin", "admin")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s want 200", w.Code, w.Body.String())
+	}
+	var exp scheduler.Explanation
+	if err := json.Unmarshal(w.Body.Bytes(), &exp); err != nil {
+		t.Fatalf("decode: %v body=%s", err, w.Body.String())
+	}
+	if exp.Runnable {
+		t.Fatal("expected not runnable when type exhausted")
+	}
+	if exp.PrimaryBlocker.Code != scheduler.BlockerTypeExhausted {
+		t.Fatalf("expected type_exhausted blocker, got %q", exp.PrimaryBlocker.Code)
+	}
+}
+
+func TestSchedulerAdminExplainTaskInvalidJSON(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	base := scheduler.PolicyDefaults()
+	h, _, _, _ := newSchedulerAdminTestHandler(t, base)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/admin/scheduler/explain", bytes.NewReader([]byte("not json")))
+	c.Request.Header.Set("Content-Type", "application/json")
+	setUserCtx(c, 2, "admin", "admin")
+	h.SchedulerAdminExplainTask(c)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s want 400", w.Code, w.Body.String())
+	}
+}
+
+func TestSchedulerAdminExplainTaskSnapshotPointInTime(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	base := scheduler.PolicyDefaults()
+	h, _, _, _ := newSchedulerAdminTestHandler(t, base)
+
+	row := scheduler.QueueRow{
+		ID:           103,
+		TaskType:     "poster",
+		Priority:     5,
+		Runnable:     true,
+		DependencyMet: true,
+		CapableWorker: true,
+		SourceReady:   true,
+		CiphertextReady: true,
+	}
+	w := doSchedulerAdmin(t, h, http.MethodPost, "/api/v1/admin/scheduler/explain", row, 2, "admin", "admin")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s want 200", w.Code, w.Body.String())
+	}
+	var exp scheduler.Explanation
+	if err := json.Unmarshal(w.Body.Bytes(), &exp); err != nil {
+		t.Fatalf("decode: %v body=%s", err, w.Body.String())
+	}
+	if exp.SnapshotAt.IsZero() {
+		t.Fatal("snapshot_at must not be zero")
+	}
+	// Explanation includes resource context.
+	if exp.RequiredResources == nil {
+		t.Fatal("required_resources must not be nil")
+	}
+	if len(exp.RequiredResources) == 0 {
+		t.Fatal("required_resources must not be empty for poster")
+	}
+}
+
+func TestSchedulerAdminExplainTaskNoSideEffect(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	base := scheduler.PolicyDefaults()
+	h, _, db, _ := newSchedulerAdminTestHandler(t, base)
+	ctx := context.Background()
+
+	// Pause poster.
+	if err := scheduler.NewStore(db).SetControlState(ctx, "poster", "paused"); err != nil {
+		t.Fatal(err)
+	}
+
+	row := scheduler.QueueRow{
+		ID:           104,
+		TaskType:     "poster",
+		Priority:     5,
+		Runnable:     true,
+		DependencyMet: true,
+		CapableWorker: true,
+		SourceReady:   true,
+		CiphertextReady: true,
+	}
+
+	// Call explain twice; both responses must be identical.
+	w1 := doSchedulerAdmin(t, h, http.MethodPost, "/api/v1/admin/scheduler/explain", row, 2, "admin", "admin")
+	w2 := doSchedulerAdmin(t, h, http.MethodPost, "/api/v1/admin/scheduler/explain", row, 2, "admin", "admin")
+
+	if w1.Code != http.StatusOK || w2.Code != http.StatusOK {
+		t.Fatalf("status w1=%d w2=%d", w1.Code, w2.Code)
+	}
+
+	var exp1, exp2 scheduler.Explanation
+	json.Unmarshal(w1.Body.Bytes(), &exp1)
+	json.Unmarshal(w2.Body.Bytes(), &exp2)
+
+	// Primary blockers must match.
+	if exp1.PrimaryBlocker.Code != exp2.PrimaryBlocker.Code {
+		t.Fatalf("non-deterministic: w1=%q w2=%q", exp1.PrimaryBlocker.Code, exp2.PrimaryBlocker.Code)
+	}
+
+	// Verify no reservation was created (explain is read-only).
+	active, err := scheduler.NewStore(db).ListActiveReservations(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != 0 {
+		t.Fatalf("explain should not create reservations, got %d", len(active))
+	}
+
+	// Verify control state was not mutated.
+	cs, err := scheduler.NewStore(db).GetControlState(ctx, "poster")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cs.State != "paused" {
+		t.Fatalf("explain mutated control state: %q", cs.State)
 	}
 }

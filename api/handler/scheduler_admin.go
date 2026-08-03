@@ -192,3 +192,26 @@ func (h *Handler) SchedulerAdminControl(c *gin.Context) {
 		"reason":            res.Reason,
 	})
 }
+
+// SchedulerAdminExplainTask produces a point-in-time, read-only admission
+// explanation for a single queue row.  It does not claim, reserve, mutate
+// fairness, or write audit records.  The endpoint is suitable for Phase 4
+// Task Manager reuse.
+func (h *Handler) SchedulerAdminExplainTask(c *gin.Context) {
+	svc := h.SchedulerAdmin
+	if svc == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "scheduler_admin_unavailable"})
+		return
+	}
+	var row taskscheduler.QueueRow
+	if err := c.ShouldBindJSON(&row); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_json"})
+		return
+	}
+	exp, err := svc.ExplainTask(c.Request.Context(), row)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "explain_failed"})
+		return
+	}
+	c.JSON(http.StatusOK, exp)
+}

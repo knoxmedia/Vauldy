@@ -719,6 +719,45 @@ func (s *Service) PolicyStatus(ctx context.Context) (PolicyStatus, error) {
 	}, nil
 }
 
+// ExplainTask gathers current scheduler state and produces a point-in-time,
+// read-only admission explanation for a single queue row.  It does not claim,
+// reserve, mutate fairness, or write audit records.
+func (s *Service) ExplainTask(ctx context.Context, row QueueRow) (Explanation, error) {
+	now := time.Now()
+	p := s.currentPolicy()
+	st := NewStore(s.db)
+
+	// Control state.
+	controlState := "running"
+	if cs, err := st.GetControlState(ctx, row.TaskType); err == nil && cs != nil {
+		controlState = cs.State
+	}
+
+	// Active type count.
+	typeCount, err := ActiveReservationCount(ctx, s.db, row.TaskType, now)
+	if err != nil {
+		typeCount = 0
+	}
+
+	// Resource usage.
+	resourceUsage, err := ActiveResourceUsage(ctx, s.db, now)
+	if err != nil {
+		resourceUsage = map[ResourceKind]int{}
+	}
+
+	// Provider usage.
+	providerUsage, err := ActiveProviderUsage(ctx, s.db, now)
+	if err != nil {
+		providerUsage = map[string]int{}
+	}
+
+	// Fairness cursor — for single-row explanation we use 0 (no cursor state).
+	fairnessPosition := int64(0)
+
+	exp := ExplainTask(row, p, controlState, typeCount, resourceUsage, providerUsage, fairnessPosition, now)
+	return exp, nil
+}
+
 // ControlResult reports the outcome of a control command.
 type ControlResult struct {
 	TaskType         string
