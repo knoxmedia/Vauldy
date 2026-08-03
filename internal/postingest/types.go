@@ -66,6 +66,8 @@ type Task struct {
 	LibraryID              *int64
 	ResourceProfileVersion int
 	ResourceProfileJSON    string
+	// Scheduler reservation identity propagated from claim.
+	ExecutionID string
 }
 
 type Queue struct {
