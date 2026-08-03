@@ -15,8 +15,8 @@ const library = (overrides: Partial<Library> = {}): Library => ({
   id: 7, name: "Anime Library", type: "anime", path: "E:/anime", folders: ["E:/anime"], auto_scan: 0, scraper: "tmdb", created_at: "",
   preview_extract: 0, subtitle_extract: 0, atrack_extract: 0, subtitle_recognize: 0, keyframe_extract: 1, ai_analysis: 1,
   processing_options: {
-    explicit: { preview: false, subtitle_extract: false, atrack_extract: false, subtitle_recognize: false, keyframe_extract: true, ai_analysis: true },
-    effective: { preview: false, subtitle_extract: true, atrack_extract: true, subtitle_recognize: true, keyframe_extract: true, ai_analysis: true },
+    explicit: { preview: false, subtitle_extract: false, atrack_extract: false, subtitle_recognize: false, keyframe_extract: true, ai_analysis: true, lyric_recognize: false, audio_analysis: false, photo_classify: false, photo_geocode: false, photo_face: false, image_ocr: false, document_convert: false, document_fulltext: false },
+    effective: { preview: false, subtitle_extract: true, atrack_extract: true, subtitle_recognize: true, keyframe_extract: true, ai_analysis: true, lyric_recognize: false, audio_analysis: false, photo_classify: false, photo_geocode: false, photo_face: false, image_ocr: false, document_convert: false, document_fulltext: false },
     provenance: { explicit: ["ai_analysis", "keyframe_extract"], dependency_added: ["atrack_extract", "subtitle_extract", "subtitle_recognize"] },
   }, ...overrides,
 });

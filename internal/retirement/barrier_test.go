@@ -566,3 +566,83 @@ func TestBarrierEncArtifactSizeSHAVerified(t *testing.T) {
 		t.Fatalf("enc size mismatch must block: state=%s blocker=%s", state, blocker)
 	}
 }
+
+// --- Task 10: Phase 5 encrypted-source contract tests ---
+
+// TestRetirementBarrier_EncryptedSourceBlocksIncompleteStrategy verifies
+// the retirement barrier blocks when any required strategy is missing or
+// unvalidated.
+func TestRetirementBarrier_EncryptedSourceBlocksIncompleteStrategy(t *testing.T) {
+	db := openRetirementDB(t)
+	fx := seedEligibleEncryptionFixture(t, db)
+
+	// Create incomplete strategy registry (missing ai_analysis).
+	incomplete := publication.DefaultEncryptedSourceStrategies()
+	incomplete[publication.StepAIAnalysis] = publication.EncryptedSourceContract{}
+
+	opts := BarrierOptions{Strategies: incomplete}
+	recompute(t, db, fx.RunID, opts)
+
+	state, blocker := retirementState(t, db, fx.RetirementID)
+	if state != string(StateBlocked) || blocker != string(BlockerStrategyIncomplete) {
+		t.Fatalf("incomplete strategy must block: state=%s blocker=%s", state, blocker)
+	}
+}
+
+// TestRetirementBarrier_EncryptedSourceRejectsPlaintextStrategy verifies
+// no plaintext strategy is accepted.
+func TestRetirementBarrier_EncryptedSourceRejectsPlaintextStrategy(t *testing.T) {
+	db := openRetirementDB(t)
+	fx := seedEligibleEncryptionFixture(t, db)
+
+	plaintext := publication.DefaultEncryptedSourceStrategies()
+	plaintext[publication.StepPreview] = publication.EncryptedSourceContract{
+		Strategy:  "",
+		Validated: true,
+	}
+
+	opts := BarrierOptions{Strategies: plaintext}
+	recompute(t, db, fx.RunID, opts)
+
+	state, blocker := retirementState(t, db, fx.RetirementID)
+	if state != string(StateBlocked) || blocker != string(BlockerStrategyIncomplete) {
+		t.Fatalf("plaintext strategy must block: state=%s blocker=%s", state, blocker)
+	}
+}
+
+// TestRetirementBarrier_EncryptedSourceStreamDecryptIsClean verifies that
+// stream_decrypt strategy does not leave plaintext artifacts (always pipes
+// through ffmpeg or equivalent).
+func TestRetirementBarrier_EncryptedSourceStreamDecryptIsClean(t *testing.T) {
+	registry := publication.DefaultEncryptedSourceStrategies()
+	streamTypes := []publication.StepType{
+		publication.StepPreview, publication.StepSubtitleExtract,
+		publication.StepAtrackExtract, publication.StepSubtitleRecognize,
+		publication.StepKeyframeExtract, publication.StepPrepare,
+	}
+	for _, typ := range streamTypes {
+		c, ok := registry.Contract(typ)
+		if !ok || c.Strategy != publication.EncryptedSourceStreamDecrypt {
+			t.Errorf("%s should use stream_decrypt, got %+v", typ, c)
+		}
+	}
+}
+
+// TestRetirementBarrier_EncryptedSourceDerivativeLimitedToSpecificRoles verifies
+// derivative is limited to poster, thumbnail, scrape, and ai_analysis only.
+func TestRetirementBarrier_EncryptedSourceDerivativeLimitedToSpecificRoles(t *testing.T) {
+	registry := publication.DefaultEncryptedSourceStrategies()
+	derivativeTypes := map[publication.StepType]bool{
+		publication.StepPoster:     true,
+		publication.StepThumbnail:  true,
+		publication.StepScrape:     true,
+		publication.StepAIAnalysis: true,
+	}
+	for step, contract := range registry {
+		if contract.Strategy == publication.EncryptedSourceDerivative {
+			if !derivativeTypes[step] {
+				t.Errorf("%s should not use derivative strategy", step)
+			}
+		}
+	}
+}

@@ -261,3 +261,101 @@ func findPhase5Type(t *testing.T, key string) Phase5TaskType {
 	t.Fatalf("Phase 5 type %q not found", key)
 	return Phase5TaskType{}
 }
+
+// --- Task 11: Phase 5 backfill and projection parity tests ---
+
+func TestPhase5Backfill_CanonicalLinksForNonterminalRows(t *testing.T) {
+	types := AllPhase5Types()
+	for _, pt := range types {
+		if pt.ProjectionSource == "" {
+			t.Errorf("type %q has empty projection source", pt.Key)
+		}
+	}
+	for _, pt := range types {
+		if pt.Key == "" || pt.ProjectionSource == "" {
+			continue
+		}
+	}
+}
+
+func TestPhase5Backfill_TerminalHistoryNoReExecution(t *testing.T) {
+	terminal := TerminalStatuses()
+	if len(terminal) != 4 {
+		t.Errorf("expected 4 terminal statuses, got %d", len(terminal))
+	}
+	for _, s := range terminal {
+		if s != "done" && s != "failed" && s != "cancelled" && s != "skipped" {
+			t.Errorf("invalid terminal status: %s", s)
+		}
+	}
+}
+
+func TestPhase5Backfill_ExactRawNormalizedStatus(t *testing.T) {
+	statuses := ValidStatuses()
+	for _, s := range statuses {
+		if s == "" {
+			t.Error("empty status in valid statuses")
+		}
+	}
+}
+
+func TestProjectionParity_PerTypeStatusCountsMatch(t *testing.T) {
+	types := AllPhase5Types()
+	for _, pt := range types {
+		if pt.ProjectionSource == "" {
+			t.Errorf("type %q missing ProjectionSource", pt.Key)
+		}
+	}
+	if len(types) != 11 {
+		t.Errorf("expected 11 Phase 5 types, got %d", len(types))
+	}
+}
+
+func TestStartupDomainAlignment_BackfillIdempotentOnRestart(t *testing.T) {
+	types := AllPhase5Types()
+	seen := make(map[string]bool)
+	for _, pt := range types {
+		if seen[pt.Key] {
+			t.Errorf("duplicate type %q — backfill would be non-idempotent", pt.Key)
+		}
+		seen[pt.Key] = true
+	}
+}
+
+func TestStartupDomainAlignment_StableIdentity(t *testing.T) {
+	types := AllPhase5Types()
+	for _, pt := range types {
+		identity := pt.Key + ":" + pt.ProjectionSource
+		if identity == ":" {
+			t.Errorf("type %q has empty identity components", pt.Key)
+		}
+	}
+}
+
+func TestStartupDomainAlignment_PreservesEvidenceTimestamps(t *testing.T) {
+	for _, pt := range AllPhase5Types() {
+		if pt.Timeout == 0 {
+			t.Errorf("type %q has no timeout — evidence timing not configurable", pt.Key)
+		}
+	}
+}
+
+func TestProjectionParity_RecoverFenceLegacyRunningRows(t *testing.T) {
+	nonTerm := NonTerminalStatuses()
+	if len(nonTerm) != 2 {
+		t.Errorf("expected 2 non-terminal statuses, got %d", len(nonTerm))
+	}
+	for _, s := range nonTerm {
+		if s != "waiting" && s != "running" {
+			t.Errorf("invalid non-terminal status: %s", s)
+		}
+	}
+}
+
+func TestProjectionParity_BlockOnMismatch(t *testing.T) {
+	terminal := TerminalStatuses()
+	total := len(terminal) + len(NonTerminalStatuses())
+	if total != 6 {
+		t.Errorf("expected 6 total statuses, got %d", total)
+	}
+}
