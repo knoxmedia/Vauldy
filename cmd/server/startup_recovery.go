@@ -9,6 +9,7 @@ import (
 
 	"knox-media/internal/metadatalib"
 	"knox-media/internal/postingest"
+	"knox-media/internal/retirement"
 	"knox-media/internal/store"
 	"knox-media/internal/taskalign"
 )
@@ -20,6 +21,7 @@ type StartupRecoveryRoots struct {
 	Thumbnail     postingest.ThumbnailRecoveryRoots
 	Poster        postingest.PosterRecoveryRoots
 	ScrapeArtwork string
+	Retirement    retirement.RecoveryOptions
 }
 
 func recoverStartupArtifacts(ctx context.Context, db *sql.DB, roots StartupRecoveryRoots) error {
@@ -44,6 +46,22 @@ func recoverStartupArtifacts(ctx context.Context, db *sql.DB, roots StartupRecov
 	}
 	if _, _, err := postingest.ReconcileThumbnailStages(ctx, db, roots.Thumbnail, 100); err != nil {
 		return fmt.Errorf("startup recovery: thumbnail stages: %w", err)
+	}
+	if err := recoverStartupRetirement(ctx, db, roots.Retirement); err != nil {
+		return err
+	}
+	return nil
+}
+
+func recoverStartupRetirement(ctx context.Context, db *sql.DB, opts retirement.RecoveryOptions) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if db == nil {
+		return fmt.Errorf("startup recovery: database is required")
+	}
+	if err := retirement.ReconcileStartup(ctx, db, opts); err != nil {
+		return fmt.Errorf("startup recovery: retirement: %w", err)
 	}
 	return nil
 }

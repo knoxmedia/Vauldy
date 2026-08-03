@@ -5,10 +5,18 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"knox-media/internal/publication"
 	"knox-media/internal/storage"
 	"knox-media/internal/store"
 	"os"
 )
+
+// encryptionQuarantinesBeforeCommit reports whether the encryption state machine
+// still moves plaintext into quarantine before selection commit. New policy
+// generations leave the source present and hand cleanup to retirement instead.
+func encryptionQuarantinesBeforeCommit(policyVersion int) bool {
+	return policyVersion < publication.PolicyV3
+}
 
 type EncryptionStateMachineSeams struct {
 	BeforeMove, AfterMove, BeforeMarkQuarantined, BeforeFinalCommit func() error
@@ -48,7 +56,7 @@ func reserveEncryptionQuarantine(ctx context.Context, db *sql.DB, task Task, s s
 		return "", err
 	}
 	_, err = seams.immediate(ctx, db, func(tx store.ImmediateConnTx) error {
-		res, e := tx.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET quarantine_path=?,state='quarantining',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND task_id=? AND attempt=? AND media_id=? AND run_id=? AND step_id=? AND generation=? AND owner_token=? AND source_path=? AND source_fingerprint=? AND state='staged'`, path, s.StageID, task.ID, task.Attempts, task.MediaID, *task.RunID, *task.StepID, task.Generation, task.LeaseOwner, s.OriginalPath, s.SourceFingerprint)
+		res, e := tx.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET quarantine_path=?,state='quarantining',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND task_id=? AND retry_round=? AND attempt=? AND media_id=? AND run_id=? AND step_id=? AND generation=? AND owner_token=? AND source_path=? AND source_fingerprint=? AND state='staged'`, path, s.StageID, task.ID, task.RetryRound, task.Attempts, task.MediaID, *task.RunID, *task.StepID, task.Generation, task.LeaseOwner, s.OriginalPath, s.SourceFingerprint)
 		if e != nil {
 			return e
 		}
@@ -85,7 +93,7 @@ func moveReservedEncryptionQuarantine(ctx context.Context, db *sql.DB, task Task
 	}
 
 	_, err = seams.immediate(ctx, db, func(tx store.ImmediateConnTx) error {
-		res, e := tx.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='quarantined',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND task_id=? AND attempt=? AND media_id=? AND generation=? AND owner_token=? AND quarantine_path=? AND state='quarantining'`, s.StageID, task.ID, task.Attempts, task.MediaID, task.Generation, task.LeaseOwner, path)
+		res, e := tx.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='quarantined',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND task_id=? AND retry_round=? AND attempt=? AND media_id=? AND generation=? AND owner_token=? AND quarantine_path=? AND state='quarantining'`, s.StageID, task.ID, task.RetryRound, task.Attempts, task.MediaID, task.Generation, task.LeaseOwner, path)
 		if e != nil {
 			return e
 		}
@@ -99,7 +107,7 @@ func moveReservedEncryptionQuarantine(ctx context.Context, db *sql.DB, task Task
 }
 func verifyDurableQuarantine(ctx context.Context, tx store.SQLExecutor, task Task, s storage.StagedMediaEncryption, path string) error {
 	var n int
-	err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM media_encryption_stage_journal WHERE stage_id=? AND task_id=? AND attempt=? AND media_id=? AND run_id=? AND step_id=? AND generation=? AND owner_token=? AND source_path=? AND source_fingerprint=? AND quarantine_path=? AND state='quarantined'`, s.StageID, task.ID, task.Attempts, task.MediaID, *task.RunID, *task.StepID, task.Generation, task.LeaseOwner, s.OriginalPath, s.SourceFingerprint, path).Scan(&n)
+	err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM media_encryption_stage_journal WHERE stage_id=? AND task_id=? AND retry_round=? AND attempt=? AND media_id=? AND run_id=? AND step_id=? AND generation=? AND owner_token=? AND source_path=? AND source_fingerprint=? AND quarantine_path=? AND state='quarantined'`, s.StageID, task.ID, task.RetryRound, task.Attempts, task.MediaID, *task.RunID, *task.StepID, task.Generation, task.LeaseOwner, s.OriginalPath, s.SourceFingerprint, path).Scan(&n)
 	if err != nil {
 		return err
 	}

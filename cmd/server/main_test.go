@@ -70,15 +70,16 @@ func TestSharedResourceControlAssemblyMainOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	src := string(data)
+	// Assembly markers in main.go are Chinese; keep English meaning aligned with order.
 	markers := []string{
-		"// (1) Database, metrics, and validated configuration.",
-		"// (2) Vault, derived storage, and domain workers.",
-		"// (3) Shared post-ingest queue, enqueuer, seven adapters, and dispatcher.",
-		"// (4) Scanner dependencies and the process-wide scan coordinator.",
-		"// (5) Admin overview uses the shared resource-control instances.",
-		"// (6) Handler dependencies are injected into the API router.",
-		"// (7) Monitor submits through the same coordinator and starts last.",
-		"// (8) Root cancellation stops monitor, scans, and dispatcher.",
+		"// (1) 打开 SQLite、记录构建/库身份信息，并写入默认用户。",
+		"// (2) 密钥库/派生资产存储，以及转码、预览、字幕等域内 Worker。",
+		"// (3) 入库后处理：能力矩阵、队列、入队器、七类适配器、分发器；企业模块与 Publication V2 启动编排。",
+		"// (4) 媒体库扫描器与进程级扫描协调器（租约、心跳、发现回调）。",
+		"// (5) 后台阶段对账协程，并组装 Handler 依赖注入包。",
+		"// (6) 注入依赖并创建 HTTP API 路由引擎。",
+		"// (7) 目录监控：通过同一扫描协调器提交增量扫描（放在最后启动）。",
+		"// (8) 启动 HTTP 服务；根 context 取消后按序关停各子系统。",
 	}
 	previous := -1
 	for _, marker := range markers {
@@ -109,6 +110,83 @@ func TestMainUsesThumbnailAdapterWithoutLegacyEnsure(t *testing.T) {
 	}
 	if strings.Contains(src, "generatePhotoVariantsOnScan") || strings.Contains(src, "imagethumb.Ensure") {
 		t.Fatal("server retains legacy direct thumbnail publication")
+	}
+}
+
+func TestMainDoesNotStartKickPendingPlaintextCleanups(t *testing.T) {
+	data, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "KickPendingPlaintextCleanups") {
+		t.Fatal("main still starts legacy KickPendingPlaintextCleanups goroutine")
+	}
+}
+
+func TestMainWiresRetirementWorkerBeforeClaimers(t *testing.T) {
+	mainSrc, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	startupSrc, err := os.ReadFile("startup_recovery.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	main := string(mainSrc)
+	startup := string(startupSrc)
+	if !strings.Contains(startup, "retirement.ReconcileStartup(") {
+		t.Fatal("startup recovery missing retirement.ReconcileStartup")
+	}
+	workerAt := strings.Index(main, "retirement.RunWorkerLoop(")
+	if workerAt < 0 {
+		workerAt = strings.Index(main, "RunWorkerLoop(")
+	}
+	reconcilerAt := strings.Index(main, "retirement.RunReconciler(")
+	if reconcilerAt < 0 {
+		reconcilerAt = strings.Index(main, "RunReconciler(")
+	}
+	claimerAt := strings.Index(main, "dispatcher.Start(serverCtx)")
+	bgAt := strings.Index(main, "background := &handler.BackgroundGroup{}")
+	if workerAt < 0 || reconcilerAt < 0 || claimerAt < 0 || bgAt < 0 {
+		t.Fatalf("missing retirement wiring markers worker=%d reconciler=%d claimer=%d bg=%d", workerAt, reconcilerAt, claimerAt, bgAt)
+	}
+	if bgAt > claimerAt {
+		t.Fatal("background group must be created before claimers so retirement can register first")
+	}
+	if workerAt > claimerAt || reconcilerAt > claimerAt {
+		t.Fatal("retirement worker/reconciler must start before dispatcher claimers")
+	}
+}
+
+func TestMainWiresRetirementActiveConsumerCallback(t *testing.T) {
+	data, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(data)
+	if !strings.Contains(src, "retirement.SetDefaultActiveConsumer(") {
+		t.Fatal("main must register default ActiveConsumer for barrier recompute")
+	}
+	defaultAt := strings.Index(src, "retirement.SetDefaultActiveConsumer(")
+	workerAt := strings.Index(src, "retirementWorker := &retirement.Worker{")
+	if defaultAt < 0 || workerAt < 0 || defaultAt > workerAt {
+		t.Fatal("SetDefaultActiveConsumer must run before retirement worker construction")
+	}
+	seamsAt := strings.Index(src[workerAt:], "Seams: retirement.CrashSeams{")
+	if seamsAt < 0 {
+		t.Fatal("retirement worker missing CrashSeams")
+	}
+	seamsBlock := src[workerAt+seamsAt:]
+	end := strings.Index(seamsBlock, "},")
+	if end < 0 {
+		end = len(seamsBlock)
+	}
+	seamsBlock = seamsBlock[:end]
+	if !strings.Contains(seamsBlock, "ActiveConsumer:") || !strings.Contains(seamsBlock, "storage.HasActivePlaintextConsumer(") {
+		t.Fatal("main must wire HasActivePlaintextConsumer into CrashSeams.ActiveConsumer")
+	}
+	if !strings.Contains(src[defaultAt:workerAt], "storage.HasActivePlaintextConsumer(") {
+		t.Fatal("SetDefaultActiveConsumer must use HasActivePlaintextConsumer")
 	}
 }
 
