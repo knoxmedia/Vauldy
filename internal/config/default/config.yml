@@ -127,3 +127,34 @@ jit:
 cors:
   allow_origins:
     - "*"
+# Unified scheduler (Phase 3+). Omit all keys to use compiled defaults.
+# Zero concurrency = paused; zero resource = unavailable.
+# Legacy post_ingest limits are translated when scheduler.concurrency is absent.
+# scheduler:
+#   concurrency:
+#     ingest: 3
+#     metadata: 3
+#     scan: 1
+#     scrape: 6
+#     poster: 3
+#     preview: 2
+#     encrypt: 1
+#     atrack: 2
+#     subtitle_recognize: 1
+#     keyframe: 3
+#     prepare: 1
+#     doc_convert: 2
+#     ai_analysis: 3
+#   resources:
+#     cpu: 0           # 0 = unlimited (no global CPU budget)
+#     gpu: 0
+#     disk_read: 0
+#     disk_write: 0
+#     network: 0
+#     external_process: 0
+#   providers: {}      # provider:<id> tokens, e.g. "provider:openai": 5
+#   priority:
+#     aging_interval_sec: 300   # seconds between aging steps
+#     aging_step: 1             # priority increment per interval
+#     run_now_amount: 100       # run-now priority boost
+#     run_now_ttl_sec: 600      # run-now boost duration
