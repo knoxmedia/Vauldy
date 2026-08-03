@@ -9,9 +9,12 @@ import (
 type PlanReason string
 
 const (
-	PlanReasonScan        PlanReason = "scan"
-	PlanReasonRepair      PlanReason = "repair"
-	PlanReasonManualRetry PlanReason = "manual_retry"
+	PlanReasonScan           PlanReason = "scan"
+	PlanReasonRepair         PlanReason = "repair"
+	PlanReasonManualRetry    PlanReason = "manual_retry"
+	PlanReasonEvent          PlanReason = "event"
+	PlanReasonUpload         PlanReason = "upload"
+	PlanReasonSourceReplaced PlanReason = "source_replaced"
 )
 
 type ReplacementOptions struct {
@@ -134,13 +137,14 @@ type PlanOptions struct {
 }
 type NewMedia struct {
 	MediaID, ScanTaskID int64
+	IngestItemID        int64
 	FileType            string
 	MetadataAttempt     MetadataAttempt
 }
 type Run struct {
-	ID, MediaID, ScanTaskID, LibraryID, Generation int64
-	State                                          State
-	Steps                                          []StepType
+	ID, MediaID, ScanTaskID, IngestItemID, LibraryID, Generation int64
+	State                                                        State
+	Steps                                                        []StepType
 }
 type ConfigSnapshot struct {
 	PolicyVersion        int                          `json:"policy_version"`

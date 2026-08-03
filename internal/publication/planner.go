@@ -33,25 +33,29 @@ type currentPolicy struct {
 }
 
 type currentPlan struct {
-	mediaID, scanTaskID       int64
-	policy                    currentPolicy
-	reason                    PlanReason
-	preserve                  bool
-	metadata                  MetadataAttempt
-	required, optional, steps []StepType
-	dependencies              []Dependency
-	graph                     PlanGraph
-	snapshotJSON              []byte
+	mediaID, scanTaskID, ingestItemID int64
+	policy                           currentPolicy
+	reason                           PlanReason
+	preserve                         bool
+	metadata                         MetadataAttempt
+	required, optional, steps        []StepType
+	dependencies                     []Dependency
+	graph                            PlanGraph
+	snapshotJSON                     []byte
 }
 
 func (p *Planner) PlanNewMediaTx(ctx context.Context, tx *sql.Tx, media NewMedia) (Run, error) {
 	if tx == nil {
 		return Run{}, errors.New("publication planner: nil transaction")
 	}
-	if media.ScanTaskID <= 0 {
+	reason := PlanReasonScan
+	if media.ScanTaskID <= 0 && media.IngestItemID > 0 {
+		reason = PlanReasonUpload
+	}
+	if media.ScanTaskID <= 0 && media.IngestItemID <= 0 {
 		return Run{}, errors.New("publication planner: invalid scan task id")
 	}
-	plan, err := p.buildCurrentPolicyTx(ctx, tx, media.MediaID, media.ScanTaskID, PlanReasonScan, false, media.MetadataAttempt)
+	plan, err := p.buildCurrentPolicyTx(ctx, tx, media.MediaID, media.ScanTaskID, reason, false, media.MetadataAttempt)
 	if err != nil || plan == nil {
 		return Run{}, err
 	}
@@ -61,6 +65,7 @@ func (p *Planner) PlanNewMediaTx(ctx context.Context, tx *sql.Tx, media NewMedia
 	if strings.TrimSpace(media.FileType) != plan.policy.fileType {
 		return Run{}, fmt.Errorf("publication planner: file type hint %q does not match database file type %q", strings.TrimSpace(media.FileType), plan.policy.fileType)
 	}
+	plan.ingestItemID = media.IngestItemID
 	return p.persistPlanTx(ctx, tx, plan, plan.policy.generation)
 }
 
@@ -78,7 +83,7 @@ func (p *Planner) planReplacement(ctx context.Context, tx store.SQLExecutor, med
 	if tx == nil {
 		return ReplacementResult{}, errors.New("publication planner: nil transaction")
 	}
-	if opts.Reason != PlanReasonRepair && opts.Reason != PlanReasonManualRetry {
+	if opts.Reason != PlanReasonRepair && opts.Reason != PlanReasonManualRetry && opts.Reason != PlanReasonSourceReplaced {
 		return ReplacementResult{}, fmt.Errorf("publication planner: invalid replacement reason %q", opts.Reason)
 	}
 	plan, err := p.buildCurrentPolicyTx(ctx, tx, mediaID, 0, opts.Reason, opts.PreserveVisibility, MetadataAttempt{})
@@ -292,8 +297,8 @@ WHERE id=? AND ingest_generation=?`, boolDB(plan.preserve), boolDB(plan.preserve
 	}
 	generation := expectedGeneration + 1
 
-	result, err = tx.ExecContext(ctx, `INSERT INTO media_ingest_run(media_id,generation,scan_task_id,reason,status,preserve_visibility,config_snapshot_json,policy_version)
-VALUES(?,?,?,?, 'processing',?,?,?)`, plan.mediaID, generation, nullScanTask(plan.scanTaskID), string(plan.reason), boolDB(plan.preserve), string(plan.snapshotJSON), CurrentPolicyVersion)
+	result, err = tx.ExecContext(ctx, `INSERT INTO media_ingest_run(media_id,generation,scan_task_id,ingest_item_id,reason,status,preserve_visibility,config_snapshot_json,policy_version)
+VALUES(?,?,?,?,?,?, ?,?,?)`, plan.mediaID, generation, nullScanTask(plan.scanTaskID), nullIngestItem(plan.ingestItemID), string(plan.reason), "processing", boolDB(plan.preserve), string(plan.snapshotJSON), CurrentPolicyVersion)
 	if err != nil {
 		return Run{}, fmt.Errorf("publication planner: insert run: %w", err)
 	}
@@ -348,7 +353,7 @@ VALUES(?,?,?,?, 'processing',?,?,?)`, plan.mediaID, generation, nullScanTask(pla
 	if err := insertDependenciesTx(ctx, tx, plan.dependencies, stepIDs, plan.mediaID, generation, runID); err != nil {
 		return Run{}, fmt.Errorf("publication planner: %w", err)
 	}
-	return Run{ID: runID, MediaID: plan.mediaID, ScanTaskID: plan.scanTaskID, LibraryID: plan.policy.libraryID,
+	return Run{ID: runID, MediaID: plan.mediaID, ScanTaskID: plan.scanTaskID, IngestItemID: plan.ingestItemID, LibraryID: plan.policy.libraryID,
 		Generation: generation, State: StateProcessing, Steps: append([]StepType(nil), plan.steps...)}, nil
 }
 
@@ -467,6 +472,12 @@ func boolDB(v bool) int {
 	return 0
 }
 func nullScanTask(id int64) any {
+	if id <= 0 {
+		return nil
+	}
+	return id
+}
+func nullIngestItem(id int64) any {
 	if id <= 0 {
 		return nil
 	}
