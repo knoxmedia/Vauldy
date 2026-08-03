@@ -314,8 +314,10 @@ func main() {
 	}
 	effectivePolicy := schedulerService.CurrentPolicy()
 	postIngestQueue.SetSchedulerPolicy(&effectivePolicy)
-	dispatcherOptions := buildDispatcherOptions(cfg, queueOwner)
-	dispatcher, err := postingest.NewDispatcher(postIngestQueue, adapters, dispatcherOptions, schedulerService) // 按调度器准入认领并执行已入住的保留任务
+	dispatcherOpts := postingest.DefaultDispatcherOptions()
+	dispatcherOpts.OwnerID = queueOwner
+	dispatcherOpts.SubtitleTimeoutRealtimeFactor = cfg.PostIngest.SubtitleTimeoutRealtimeFactor
+	dispatcher, err := postingest.NewDispatcher(postIngestQueue, adapters, dispatcherOpts, schedulerService) // 按调度器准入认领并执行已入住的保留任务
 	if err != nil {
 		log.Fatalf("post-ingest dispatcher: %v", err)
 	}
@@ -369,7 +371,11 @@ func main() {
 			}
 			return nil
 		},
-		RecoverLeases: func(ctx context.Context) error { return recoverStartupLeases(ctx, db, postIngestQueue) },
+		RecoverLeases:       func(ctx context.Context) error { return recoverStartupLeases(ctx, db, postIngestQueue) },
+		RecoverReservations: func(ctx context.Context) error {
+			_, err := ReconcileStartupReservations(ctx, db, "startup-recovery-"+processID)
+			return err
+		},
 		ReplaceActiveV1: func(ctx context.Context) error {
 			_, reconcileErr := publication.ReplaceActiveV1Runs(ctx, db, publicationPlanner)
 			return reconcileErr
@@ -477,6 +483,9 @@ func main() {
 
 	// (5) 后台阶段对账协程，并组装 Handler 依赖注入包。
 	background.Go(serverCtx, func(ctx context.Context) {
+		StartReservationExpiryReconciler(ctx, db, time.Minute)
+	}) // 调度器预留过期对账
+	background.Go(serverCtx, func(ctx context.Context) {
 		metadatalib.RunScrapeArtworkStageReconciler(ctx, db, cfg.Data.MetadataLibrary, time.Minute, 100, func(err error) { log.Printf("scrape artwork stage reconcile: %v", err) })
 	}) // 刮削封面阶段状态对账
 	background.Go(serverCtx, func(ctx context.Context) {
@@ -491,7 +500,7 @@ func main() {
 	deps := handler.Dependencies{
 		ServerContext: serverCtx, Background: background, StartupReady: startupReady,
 		Coordinator: coordinator, Queue: postIngestQueue, PostIngest: postIngestEnqueuer, Dispatcher: dispatcher, AdminOverviewBuilder: func() handler.OverviewBuilder {
-			b := handler.NewAdminOverviewBuilder(db, dispatcher, sqliteMetrics)
+			b := handler.NewAdminOverviewBuilder(db, schedulerService, sqliteMetrics)
 			b.Capabilities = publicationCapabilities
 			return b
 		}(),
@@ -574,13 +583,6 @@ func main() {
 	case <-shutdownCtx.Done():
 		log.Printf("post-ingest dispatcher shutdown: %v", shutdownCtx.Err())
 	}
-}
-
-func buildDispatcherOptions(cfg *config.Config, owner string) postingest.DispatcherOptions {
-	opts := postingest.DefaultDispatcherOptions()
-	opts.OwnerID = owner
-	opts.SubtitleTimeoutRealtimeFactor = cfg.PostIngest.SubtitleTimeoutRealtimeFactor
-	return opts
 }
 
 // buildSchedulerPolicy derives the effective scheduler policy from compiled

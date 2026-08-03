@@ -121,7 +121,7 @@ VALUES(1,10,1,?,?,'encryption',113,?,NULL,0,'quarantining',1,?,'{}','dead')`, so
 		RecoverArtifacts: func(ctx context.Context) error {
 			return recoverStartupArtifacts(ctx, db, roots)
 		},
-		RecoverLeases: ok, ReplaceActiveV1: ok, ValidateAggregateV2: ok,
+		RecoverLeases: ok, RecoverReservations: ok, ReplaceActiveV1: ok, ValidateAggregateV2: ok,
 		Preflight:     func(context.Context) ([]string, error) { return nil, nil },
 		StartClaimers: func() { claimed = true }, StartSubmissionSources: func() {},
 	}
@@ -147,7 +147,7 @@ func TestStartupRecoveryRetirementFailureBlocksClaims(t *testing.T) {
 		RecoverArtifacts: func(context.Context) error {
 			return errors.New("startup recovery: retirement: reconcile failed")
 		},
-		RecoverLeases: ok, ReplaceActiveV1: ok, ValidateAggregateV2: ok,
+		RecoverLeases: ok, RecoverReservations: ok, ReplaceActiveV1: ok, ValidateAggregateV2: ok,
 		Preflight:     func(context.Context) ([]string, error) { return nil, nil },
 		StartClaimers: func() { claimed = true }, StartSubmissionSources: func() { sourced = true },
 	}

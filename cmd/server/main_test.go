@@ -228,11 +228,24 @@ func TestGracefulShutdownAssemblyUsesSignalsAndHTTPServer(t *testing.T) {
 	}
 }
 
-func TestBuildDispatcherOptionsMapsPostIngestConfig(t *testing.T) {
-	cfg := &config.Config{PostIngest: config.PostIngestConfig{MaxConcurrent: 3, PosterMaxConcurrent: 1, PreviewMaxConcurrent: 2, SubtitleMaxConcurrent: 1, SubtitleTimeoutRealtimeFactor: 1.5}}
-	got := buildDispatcherOptions(cfg, "owner")
-	if got.OwnerID != "owner" || got.SubtitleTimeoutRealtimeFactor != 1.5 {
-		t.Fatalf("options=%+v", got)
+func TestMainInlinesDispatcherOptionsWiring(t *testing.T) {
+	data, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(data)
+	// After migration, dispatcher options are inlined rather than calling buildDispatcherOptions.
+	if strings.Contains(src, "buildDispatcherOptions") {
+		t.Fatal("buildDispatcherOptions must be removed after scheduler migration")
+	}
+	for _, required := range []string{
+		"postingest.DefaultDispatcherOptions()",
+		"OwnerID =",
+		"SubtitleTimeoutRealtimeFactor",
+	} {
+		if !strings.Contains(src, required) {
+			t.Fatalf("main missing inline dispatcher wiring %q", required)
+		}
 	}
 }
 
