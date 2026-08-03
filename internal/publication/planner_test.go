@@ -1,15 +1,18 @@
 package publication
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	"knox-media/internal/coreiface"
+	"knox-media/internal/libraryprocessing"
 	"knox-media/internal/store"
 )
 
@@ -64,7 +67,7 @@ func TestPlannerVideoSnapshotsRequiredSteps(t *testing.T) {
 	db := openPlannerTestDB(t)
 	libraryID, mediaID, scanID := seedPlannerMedia(t, db, "video", 1, 1, 1)
 	run := planAndCommit(t, db, NewPlanner(PlanOptions{SubtitleAuto: true, ATrackAuto: true, EncryptGlobal: true, PreparePlanner: &recordingPreparePlanner{}, Capabilities: NewCapabilityMatrix([]string{"prepare"})}), NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
-	wantSteps := []StepType{StepPoster, StepEncrypt, StepScrape, StepPreview, StepSubtitle, StepPrepare}
+	wantSteps := []StepType{StepPoster, StepEncrypt, StepMediaVisible, StepScrape, StepPreview, StepSubtitleExtract, StepAtrackExtract, StepPrepare}
 	if run.ID == 0 || run.MediaID != mediaID || run.Generation != 1 || !reflect.DeepEqual(run.Steps, wantSteps) {
 		t.Fatalf("run=%+v want steps=%v", run, wantSteps)
 	}
@@ -93,7 +96,7 @@ func TestPlannerDisabledFeaturesAreOmitted(t *testing.T) {
 	db := openPlannerTestDB(t)
 	_, mediaID, scanID := seedPlannerMedia(t, db, "video", 0, 1, 1)
 	run := planAndCommit(t, db, NewPlanner(PlanOptions{}), NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
-	want := []StepType{StepPoster, StepScrape}
+	want := []StepType{StepPoster, StepMediaVisible, StepScrape}
 	if !reflect.DeepEqual(run.Steps, want) {
 		t.Fatalf("steps=%v want %v", run.Steps, want)
 	}
@@ -126,12 +129,12 @@ func TestPlannerQueueRowsLinkExactStepsAndGeneration(t *testing.T) {
 		if err := rows.Scan(&taskType, &stepType, &runID, &linkedStepID, &stepID, &generation); err != nil {
 			t.Fatal(err)
 		}
-		if taskType != stepType || runID != run.ID || linkedStepID != stepID || generation != run.Generation {
+		if executionTaskType(stepType) != taskType || runID != run.ID || linkedStepID != stepID || generation != run.Generation {
 			t.Fatalf("bad queue link task=%s step=%s run=%d/%d stepID=%d/%d gen=%d", taskType, stepType, runID, run.ID, linkedStepID, stepID, generation)
 		}
 		got = append(got, taskType)
 	}
-	want := []StepType{StepPoster, StepEncrypt, StepPreview, StepSubtitle}
+	want := []StepType{StepPoster, StepEncrypt, StepPreview, StepSubtitle, StepAtrack}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("queued=%v want %v", got, want)
 	}
@@ -322,7 +325,7 @@ func TestPlannerV2VideoMatrix(t *testing.T) {
 	p := NewPlanner(PlanOptions{SubtitleAuto: true, EncryptGlobal: true, PreparePlanner: &recordingPreparePlanner{}, Capabilities: NewCapabilityMatrix([]string{"prepare"})})
 	run := planAndCommit(t, db, p, NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
 	wantRequired := []StepType{StepPoster, StepEncrypt}
-	wantOptional := []StepType{StepScrape, StepPreview, StepSubtitle, StepPrepare}
+	wantOptional := []StepType{StepMediaVisible, StepScrape, StepPreview, StepSubtitleExtract, StepPrepare}
 	var raw string
 	if err := db.QueryRow(`SELECT config_snapshot_json FROM media_ingest_run WHERE id=?`, run.ID).Scan(&raw); err != nil {
 		t.Fatal(err)
@@ -331,10 +334,10 @@ func TestPlannerV2VideoMatrix(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &snapshot); err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.PolicyVersion != PolicyV2 || !reflect.DeepEqual(snapshot.RequiredSteps, wantRequired) || !reflect.DeepEqual(snapshot.OptionalSteps, wantOptional) {
+	if snapshot.PolicyVersion != CurrentPolicyVersion || !reflect.DeepEqual(snapshot.RequiredSteps, wantRequired) || !reflect.DeepEqual(snapshot.OptionalSteps, wantOptional) {
 		t.Fatalf("snapshot=%+v", snapshot)
 	}
-	if !reflect.DeepEqual(run.Steps, []StepType{StepPoster, StepEncrypt, StepScrape, StepPreview, StepSubtitle, StepPrepare}) {
+	if !reflect.DeepEqual(run.Steps, []StepType{StepPoster, StepEncrypt, StepMediaVisible, StepScrape, StepPreview, StepSubtitleExtract, StepPrepare}) {
 		t.Fatalf("steps=%v", run.Steps)
 	}
 }
@@ -343,7 +346,7 @@ func TestPlannerV2PhotoMatrix(t *testing.T) {
 	db := openPlannerTestDB(t)
 	_, mediaID, scanID := seedPlannerMedia(t, db, "image", 0, 1, 0)
 	run := planAndCommit(t, db, NewPlanner(PlanOptions{EncryptGlobal: true}), NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "image"})
-	if !reflect.DeepEqual(run.Steps, []StepType{StepThumbnail, StepEncrypt, StepScrape}) {
+	if !reflect.DeepEqual(run.Steps, []StepType{StepThumbnail, StepEncrypt, StepMediaVisible, StepScrape}) {
 		t.Fatalf("steps=%v", run.Steps)
 	}
 	var raw string
@@ -354,7 +357,7 @@ func TestPlannerV2PhotoMatrix(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &snapshot); err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.PolicyVersion != PolicyV2 || !reflect.DeepEqual(snapshot.RequiredSteps, []StepType{StepThumbnail, StepEncrypt}) || !reflect.DeepEqual(snapshot.OptionalSteps, []StepType{StepScrape}) {
+	if snapshot.PolicyVersion != CurrentPolicyVersion || !reflect.DeepEqual(snapshot.RequiredSteps, []StepType{StepThumbnail, StepEncrypt}) || !reflect.DeepEqual(snapshot.OptionalSteps, []StepType{StepMediaVisible, StepScrape}) {
 		t.Fatalf("snapshot=%+v", snapshot)
 	}
 }
@@ -365,16 +368,16 @@ func TestPlannerV2PersistsDependenciesBeforeCommit(t *testing.T) {
 	run := planAndCommit(t, db, NewPlanner(PlanOptions{EncryptGlobal: true}), NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
 	var kind string
 	var count int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM media_ingest_step_dependency d JOIN media_ingest_step s ON s.id=d.step_id WHERE s.run_id=? AND d.dependency_kind='step_done'`, run.ID).Scan(&count); err != nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM media_ingest_step_dependency d JOIN media_ingest_step s ON s.id=d.step_id WHERE s.run_id=? AND d.dependency_kind='success'`, run.ID).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 1 {
+	if count != 2 {
 		t.Fatalf("step dependencies=%d", count)
 	}
 	if err := db.QueryRow(`SELECT d.dependency_kind FROM media_ingest_step_dependency d JOIN media_ingest_step s ON s.id=d.step_id WHERE s.run_id=? AND s.step_type='encrypt'`, run.ID).Scan(&kind); err != nil {
 		t.Fatal(err)
 	}
-	if kind != "step_done" {
+	if kind != "success" {
 		t.Fatalf("kind=%s", kind)
 	}
 }
@@ -442,8 +445,8 @@ func TestPlannerRejectsInvalidDependencyGraphAtomically(t *testing.T) {
 		deps []Dependency
 		ids  map[StepType]int64
 	}{
-		{"self", []Dependency{{Step: StepPoster, Kind: DependencyStepDone, DependsOn: stepPtr(StepPoster)}}, map[StepType]int64{StepPoster: ids[0]}},
-		{"missing target", []Dependency{{Step: StepPoster, Kind: DependencyStepDone, DependsOn: stepPtr(StepThumbnail)}}, map[StepType]int64{StepPoster: ids[0]}},
+		{"self", []Dependency{{Step: StepPoster, Kind: DependencySuccess, DependsOn: stepPtr(StepPoster)}}, map[StepType]int64{StepPoster: ids[0]}},
+		{"missing target", []Dependency{{Step: StepPoster, Kind: DependencySuccess, DependsOn: stepPtr(StepThumbnail)}}, map[StepType]int64{StepPoster: ids[0]}},
 	}
 	for _, tc := range bad {
 		if err := insertDependenciesTx(context.Background(), tx, tc.deps, tc.ids, mediaID, run.Generation, run.ID); err == nil {
@@ -513,19 +516,19 @@ func TestInsertDependenciesRejectsCrossIdentityAndCycle(t *testing.T) {
 		{"cross-media", crossRun, mediaA, 99, foreignRun},
 		{"cross-generation", crossRun, mediaB, run.Generation, foreignRun},
 	} {
-		deps := []Dependency{{Step: StepPoster, Kind: DependencyStepDone, DependsOn: stepPtr(StepScrape)}}
+		deps := []Dependency{{Step: StepPoster, Kind: DependencySuccess, DependsOn: stepPtr(StepScrape)}}
 		if err := insertDependenciesTx(context.Background(), tx, deps, map[StepType]int64{StepPoster: poster, StepScrape: tc.target}, tc.media, tc.generation, tc.runID); err == nil {
 			t.Fatalf("%s: expected error", tc.name)
 		}
 	}
-	if _, err := tx.Exec(`INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(?,?,'step_done')`, poster, scrape); err != nil {
+	if _, err := tx.Exec(`INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(?,?,'success')`, poster, scrape); err != nil {
 		t.Fatal(err)
 	}
-	cycle := []Dependency{{Step: StepScrape, Kind: DependencyStepDone, DependsOn: stepPtr(StepPoster)}}
+	cycle := []Dependency{{Step: StepScrape, Kind: DependencySuccess, DependsOn: stepPtr(StepPoster)}}
 	if err := insertDependenciesTx(context.Background(), tx, cycle, map[StepType]int64{StepPoster: poster, StepScrape: scrape}, mediaA, run.Generation, run.ID); err == nil {
 		t.Fatal("expected cycle error")
 	}
-	batch := []Dependency{{Step: StepScrape, Kind: DependencyMediaVisible}, {Step: StepPoster, Kind: DependencyStepDone, DependsOn: stepPtr(StepPoster)}}
+	batch := []Dependency{{Step: StepScrape, Kind: DependencySuccess}, {Step: StepPoster, Kind: DependencySuccess, DependsOn: stepPtr(StepPoster)}}
 	if err := insertDependenciesTx(context.Background(), tx, batch, map[StepType]int64{StepPoster: poster, StepScrape: scrape}, mediaA, run.Generation, run.ID); err == nil {
 		t.Fatal("expected second batch edge failure")
 	}
@@ -589,8 +592,8 @@ func TestPlannerManualRetryUsesCurrentPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	prepare := &recordingPreparePlanner{}
-	result := planReplacementAndCommit(t, db, NewPlanner(PlanOptions{SubtitleAuto: true, EncryptGlobal: true, PreparePlanner: prepare, Capabilities: NewCapabilityMatrix([]string{"prepare"})}), mediaID, ReplacementOptions{Reason: PlanReasonManualRetry, ExpectedGeneration: first.Generation})
-	want := []StepType{StepPoster, StepEncrypt, StepScrape, StepPreview, StepSubtitle, StepPrepare}
+	result := planReplacementAndCommit(t, db, NewPlanner(PlanOptions{SubtitleAuto: true, ATrackAuto: true, EncryptGlobal: true, PreparePlanner: prepare, Capabilities: NewCapabilityMatrix([]string{"prepare"})}), mediaID, ReplacementOptions{Reason: PlanReasonManualRetry, ExpectedGeneration: first.Generation})
+	want := []StepType{StepPoster, StepEncrypt, StepMediaVisible, StepScrape, StepPreview, StepSubtitleExtract, StepAtrackExtract, StepPrepare}
 	if result.OldGeneration != first.Generation || result.NewGeneration != first.Generation+1 || !reflect.DeepEqual(result.Run.Steps, want) {
 		t.Fatalf("result=%+v want steps=%v", result, want)
 	}
@@ -618,7 +621,7 @@ func TestReplacementLoadsDBFileTypeVideoAndPhoto(t *testing.T) {
 	for _, tc := range []struct {
 		fileType string
 		want     []StepType
-	}{{"video", []StepType{StepPoster, StepScrape}}, {"image", []StepType{StepThumbnail, StepScrape}}} {
+	}{{"video", []StepType{StepPoster, StepMediaVisible, StepScrape}}, {"image", []StepType{StepThumbnail, StepMediaVisible, StepScrape}}} {
 		t.Run(tc.fileType, func(t *testing.T) {
 			db := openPlannerTestDB(t)
 			_, mediaID, _ := seedPlannerMedia(t, db, tc.fileType, 0, 0, 0)
@@ -670,7 +673,7 @@ func TestReplacementReflectsChangedEncryptionPreviewCapabilities(t *testing.T) {
 	}
 	prepare := &recordingPreparePlanner{}
 	result := planReplacementAndCommit(t, db, NewPlanner(PlanOptions{EncryptGlobal: true, PreparePlanner: prepare, Capabilities: NewCapabilityMatrix([]string{"prepare"})}), mediaID, ReplacementOptions{Reason: PlanReasonRepair, ExpectedGeneration: first.Generation})
-	want := []StepType{StepPoster, StepEncrypt, StepScrape, StepPreview, StepPrepare}
+	want := []StepType{StepPoster, StepEncrypt, StepMediaVisible, StepScrape, StepPreview, StepPrepare}
 	if !reflect.DeepEqual(result.Run.Steps, want) {
 		t.Fatalf("steps=%v want=%v", result.Run.Steps, want)
 	}
@@ -761,5 +764,226 @@ func TestPlanReplacementRejectsNilTransaction(t *testing.T) {
 	}
 	if got, want := err.Error(), "publication planner: nil transaction"; got != want {
 		t.Fatalf("error=%q want %q", got, want)
+	}
+}
+
+func TestPlannerEffectiveOptionsSnapshotAndAIAdmission(t *testing.T) {
+	db := openPlannerTestDB(t)
+	_, mediaID, scanID := seedPlannerMedia(t, db, "video", 0, 0, 0)
+	if _, err := db.Exec(`UPDATE library SET ai_analysis=1 WHERE id=(SELECT library_id FROM media WHERE id=?)`, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = NewPlanner(PlanOptions{}).PlanNewMediaTx(context.Background(), tx, NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
+	if !errors.Is(err, ErrCapabilityUnavailable) {
+		t.Fatalf("err=%v", err)
+	}
+	_ = tx.Rollback()
+	var generation, runs, queue int
+	_ = db.QueryRow(`SELECT ingest_generation FROM media WHERE id=?`, mediaID).Scan(&generation)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM media_ingest_run WHERE media_id=?`, mediaID).Scan(&runs)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM post_ingest_task WHERE media_id=?`, mediaID).Scan(&queue)
+	if generation+runs+queue != 0 {
+		t.Fatalf("admission failure persisted generation=%d runs=%d queue=%d", generation, runs, queue)
+	}
+
+	tx, err = db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = NewPlanner(PlanOptions{Capabilities: NewCapabilityMatrix([]string{string(StepAIAnalysis)})}).PlanNewMediaTx(context.Background(), tx, NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
+	if !errors.Is(err, ErrCapabilityUnavailable) {
+		t.Fatalf("advertised AI err=%v", err)
+	}
+	_ = tx.Rollback()
+
+}
+
+func TestPlannerOldGenerationSnapshotAndTopologyRemainImmutable(t *testing.T) {
+	db := openPlannerTestDB(t)
+	_, mediaID, scanID := seedPlannerMedia(t, db, "video", 0, 0, 0)
+	first := planAndCommit(t, db, NewPlanner(PlanOptions{}), NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
+	var before string
+	_ = db.QueryRow(`SELECT config_snapshot_json FROM media_ingest_run WHERE id=?`, first.ID).Scan(&before)
+	var beforeSteps int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM media_ingest_step WHERE run_id=?`, first.ID).Scan(&beforeSteps)
+	_, _ = db.Exec(`UPDATE library SET keyframe_extract=1 WHERE id=(SELECT library_id FROM media WHERE id=?)`, mediaID)
+	second := planReplacementAndCommit(t, db, NewPlanner(PlanOptions{}), mediaID, ReplacementOptions{Reason: PlanReasonRepair, ExpectedGeneration: first.Generation, PreserveVisibility: true})
+	var after string
+	_ = db.QueryRow(`SELECT config_snapshot_json FROM media_ingest_run WHERE id=?`, first.ID).Scan(&after)
+	var afterSteps int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM media_ingest_step WHERE run_id=?`, first.ID).Scan(&afterSteps)
+	if before != after || beforeSteps != afterSteps {
+		t.Fatalf("old generation mutated snapshot=%v steps=%d/%d", before != after, beforeSteps, afterSteps)
+	}
+	if !containsStep(second.Run.Steps, StepKeyframeExtract) {
+		t.Fatalf("new steps=%v", second.Run.Steps)
+	}
+}
+
+func containsStep(steps []StepType, want StepType) bool {
+	for _, step := range steps {
+		if step == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestPlannerLegacyAutoDefaultsDoNotChangeExplicitProvenance(t *testing.T) {
+	db := openPlannerTestDB(t)
+	_, mediaID, scanID := seedPlannerMedia(t, db, "video", 0, 0, 0)
+	run := planAndCommit(t, db, NewPlanner(PlanOptions{SubtitleAuto: true, ATrackAuto: true}), NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
+	snapshot := loadPlannerSnapshot(t, db, run.ID)
+	if snapshot.ProcessingExplicit.SubtitleExtract || snapshot.ProcessingExplicit.ATrackExtract || len(snapshot.ProcessingProvenance.Explicit) != 0 {
+		t.Fatalf("canonical explicit/provenance=%+v/%+v", snapshot.ProcessingExplicit, snapshot.ProcessingProvenance)
+	}
+	if !reflect.DeepEqual(snapshot.LegacyOptionDefaults, []string{"subtitle_extract", "atrack_extract"}) || !containsStep(run.Steps, StepSubtitleExtract) || !containsStep(run.Steps, StepAtrackExtract) {
+		t.Fatalf("legacy defaults=%v steps=%v", snapshot.LegacyOptionDefaults, run.Steps)
+	}
+}
+
+func TestConfigSnapshotJSONUsesDistinctProcessingKeys(t *testing.T) {
+	snapshot := ConfigSnapshot{PolicyVersion: PolicyV3, ProcessingProvenance: libraryprocessing.Provenance{Explicit: []string{"preview"}}, LegacyOptionDefaults: []string{"subtitle_extract"}}
+	raw, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var object map[string]json.RawMessage
+	if err = json.Unmarshal(raw, &object); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := object["processing_provenance"]; !ok {
+		t.Fatalf("missing processing_provenance: %s", raw)
+	}
+	if _, ok := object["legacy_option_defaults"]; !ok {
+		t.Fatalf("missing legacy_option_defaults: %s", raw)
+	}
+	if _, duplicate := object["ProcessingProvenance"]; duplicate {
+		t.Fatalf("wrong implicit key: %s", raw)
+	}
+	var decoded ConfigSnapshot
+	if err = json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(decoded.ProcessingProvenance, snapshot.ProcessingProvenance) || !reflect.DeepEqual(decoded.LegacyOptionDefaults, snapshot.LegacyOptionDefaults) {
+		t.Fatalf("decoded=%+v", decoded)
+	}
+}
+
+func TestPlannerRecognitionRequiresExecutableAdapter(t *testing.T) {
+	db := openPlannerTestDB(t)
+	_, mediaID, scanID := seedPlannerMedia(t, db, "video", 0, 0, 0)
+	_, _ = db.Exec(`UPDATE library SET subtitle_recognize=1 WHERE id=(SELECT library_id FROM media WHERE id=?)`, mediaID)
+	tx, _ := db.BeginTx(context.Background(), nil)
+	_, err := NewPlanner(PlanOptions{Capabilities: NewCapabilityMatrix([]string{string(StepSubtitleRecognize)})}).PlanNewMediaTx(context.Background(), tx, NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
+	_ = tx.Rollback()
+	if !errors.Is(err, ErrCapabilityUnavailable) {
+		t.Fatalf("err=%v", err)
+	}
+	var generation, rows int
+	_ = db.QueryRow(`SELECT ingest_generation FROM media WHERE id=?`, mediaID).Scan(&generation)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM media_ingest_run WHERE media_id=?`, mediaID).Scan(&rows)
+	if generation != 0 || rows != 0 {
+		t.Fatalf("generation=%d rows=%d", generation, rows)
+	}
+}
+
+type fakeExecutableAdapter StepType
+
+func (a fakeExecutableAdapter) TaskType() StepType                 { return StepType(a) }
+func (fakeExecutableAdapter) Execute(context.Context, int64) error { return nil }
+
+type fakeExecutableRegistry map[StepType]ExecutableTaskAdapter
+
+func (r fakeExecutableRegistry) Adapter(step StepType) (ExecutableTaskAdapter, bool) {
+	a, ok := r[step]
+	return a, ok
+}
+
+func TestPlannerTypedRecognitionAdapterAdmissionContract(t *testing.T) {
+	db := openPlannerTestDB(t)
+	_, mediaID, scanID := seedPlannerMedia(t, db, "video", 0, 0, 0)
+	_, _ = db.Exec(`UPDATE library SET subtitle_recognize=1 WHERE id=(SELECT library_id FROM media WHERE id=?)`, mediaID)
+	registry := fakeExecutableRegistry{StepSubtitleRecognize: fakeExecutableAdapter(StepSubtitleRecognize)}
+	run := planAndCommit(t, db, NewPlanner(PlanOptions{ExecutableAdapters: registry}), NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
+	if !containsStep(run.Steps, StepSubtitleRecognize) {
+		t.Fatalf("steps=%v", run.Steps)
+	}
+}
+
+func TestPlannerCleanupEligibleWithDefaultSourceStrategies(t *testing.T) {
+	db := openPlannerTestDB(t)
+	_, mid, scan := seedPlannerMedia(t, db, "video", 1, 0, 0)
+	_, _ = db.Exec(`UPDATE library SET cleanup_local_source_after_package=1 WHERE id=(SELECT library_id FROM media WHERE id=?)`, mid)
+	run := planAndCommit(t, db, NewPlanner(PlanOptions{EncryptedSourceStrategies: DefaultEncryptedSourceStrategies()}), NewMedia{MediaID: mid, ScanTaskID: scan, FileType: "video"})
+	var raw string
+	_ = db.QueryRow(`SELECT config_snapshot_json FROM media_ingest_run WHERE id=?`, run.ID).Scan(&raw)
+	var snapshot ConfigSnapshot
+	if err := json.Unmarshal([]byte(raw), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.EncryptedSourceStrategies) == 0 {
+		t.Fatal("expected frozen strategies")
+	}
+	if snapshot.EncryptedSourceStrategies[StepPreview].Strategy != EncryptedSourceStreamDecrypt {
+		t.Fatalf("preview strategy=%+v", snapshot.EncryptedSourceStrategies[StepPreview])
+	}
+}
+
+func TestPlannerCleanupEligibleRequiresFutureSourceStrategyRegistry(t *testing.T) {
+	db := openPlannerTestDB(t)
+	_, mid, scan := seedPlannerMedia(t, db, "video", 1, 0, 0)
+	_, _ = db.Exec(`UPDATE library SET cleanup_local_source_after_package=1 WHERE id=(SELECT library_id FROM media WHERE id=?)`, mid)
+	tx, _ := db.BeginTx(context.Background(), nil)
+	_, err := NewPlanner(PlanOptions{}).PlanNewMediaTx(context.Background(), tx, NewMedia{MediaID: mid, ScanTaskID: scan, FileType: "video"})
+	_ = tx.Rollback()
+	if err == nil || !strings.Contains(err.Error(), "lacks validated encrypted-source strategy") {
+		t.Fatalf("err=%v", err)
+	}
+	var generation, rows int
+	_ = db.QueryRow(`SELECT ingest_generation FROM media WHERE id=?`, mid).Scan(&generation)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM media_ingest_run WHERE media_id=?`, mid).Scan(&rows)
+	if generation != 0 || rows != 0 {
+		t.Fatalf("generation=%d rows=%d", generation, rows)
+	}
+}
+
+func TestPlannerSnapshotsDeterministicFakeSourceStrategies(t *testing.T) {
+	db := openPlannerTestDB(t)
+	_, mid, scan := seedPlannerMedia(t, db, "video", 1, 0, 0)
+	_, _ = db.Exec(`UPDATE library SET cleanup_local_source_after_package=1 WHERE id=(SELECT library_id FROM media WHERE id=?)`, mid)
+	registry := fakeSourceRegistry{StepPoster: {Strategy: EncryptedSourceDerivative, Validated: true}, StepScrape: {Strategy: EncryptedSourceDerivative, Validated: true}, StepPreview: {Strategy: EncryptedSourceStreamDecrypt, Validated: true}}
+	run := planAndCommit(t, db, NewPlanner(PlanOptions{EncryptedSourceStrategies: registry}), NewMedia{MediaID: mid, ScanTaskID: scan, FileType: "video"})
+	var raw string
+	_ = db.QueryRow(`SELECT config_snapshot_json FROM media_ingest_run WHERE id=?`, run.ID).Scan(&raw)
+	var snapshot ConfigSnapshot
+	if err := json.Unmarshal([]byte(raw), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(snapshot.EncryptedSourceStrategies, map[StepType]EncryptedSourceContract{StepPoster: {Strategy: EncryptedSourceDerivative, Validated: true}, StepScrape: {Strategy: EncryptedSourceDerivative, Validated: true}, StepPreview: {Strategy: EncryptedSourceStreamDecrypt, Validated: true}}) {
+		t.Fatalf("strategies=%v", snapshot.EncryptedSourceStrategies)
+	}
+}
+
+func TestConfigSnapshotJSONDeterministicAcrossEquivalentStrategyMaps(t *testing.T) {
+	makeSnapshot := func(reverse bool) ConfigSnapshot {
+		m := map[StepType]EncryptedSourceContract{}
+		if reverse {
+			m[StepPreview] = EncryptedSourceContract{Strategy: EncryptedSourceStreamDecrypt, Validated: true}
+			m[StepPoster] = EncryptedSourceContract{Strategy: EncryptedSourceDerivative, Validated: true}
+		} else {
+			m[StepPoster] = EncryptedSourceContract{Strategy: EncryptedSourceDerivative, Validated: true}
+			m[StepPreview] = EncryptedSourceContract{Strategy: EncryptedSourceStreamDecrypt, Validated: true}
+		}
+		return ConfigSnapshot{PolicyVersion: PolicyV3, EncryptedSourceStrategies: m}
+	}
+	a, _ := json.Marshal(makeSnapshot(false))
+	b, _ := json.Marshal(makeSnapshot(true))
+	if !bytes.Equal(a, b) {
+		t.Fatalf("snapshot bytes differ:\n%s\n%s", a, b)
 	}
 }

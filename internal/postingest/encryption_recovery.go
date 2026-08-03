@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"knox-media/internal/storage"
+	"knox-media/internal/store"
 )
 
 const (
@@ -37,20 +38,21 @@ func ReconcileEncryptionStages(ctx context.Context, db *sql.DB, roots Encryption
 	if limit <= 0 || limit > encryptionStageBatchMax {
 		limit = encryptionStageBatchMax
 	}
-	rows, err := db.QueryContext(ctx, `SELECT j.stage_id,j.task_id,j.attempt,j.media_id,j.run_id,j.step_id,j.generation,j.owner_token,j.source_path,j.quarantine_path,j.source_fingerprint,j.enc_path,j.wrapped_dek,j.iv,j.enc_sha256,j.enc_size,j.state FROM media_encryption_stage_journal j WHERE (j.state IN ('staged','quarantining','quarantined') OR (j.state='failed_closed' AND j.quarantine_path<>'' AND j.recovery_error LIKE 'restore_pending:%' AND j.recovery_attempts<? AND j.next_retry_at<=CURRENT_TIMESTAMP) OR (j.state='committed' AND j.recovery_attempts<? AND (j.recovery_error='' OR (j.recovery_error LIKE 'plaintext_cleanup_pending:%' AND j.next_retry_at<=CURRENT_TIMESTAMP)))) AND (j.state='committed' OR j.state='quarantining' OR NOT EXISTS(SELECT 1 FROM post_ingest_task p WHERE p.id=j.task_id AND p.attempts=j.attempt AND p.status='running' AND p.lease_owner=j.owner_token)) ORDER BY CASE WHEN j.state='failed_closed' THEN j.next_retry_at ELSE j.updated_at END,j.stage_id LIMIT ?`, encryptionRecoveryMaxAttempts, encryptionRecoveryMaxAttempts, limit)
+	rows, err := db.QueryContext(ctx, `SELECT j.stage_id,j.task_id,j.retry_round,j.attempt,j.media_id,j.run_id,j.step_id,j.generation,j.owner_token,j.source_path,j.quarantine_path,j.source_fingerprint,j.enc_path,j.wrapped_dek,j.iv,j.enc_sha256,j.enc_size,j.cleanup_plaintext,j.state FROM media_encryption_stage_journal j WHERE (j.state IN ('staged','quarantining','quarantined') OR (j.state='failed_closed' AND j.quarantine_path<>'' AND j.recovery_error LIKE 'restore_pending:%' AND j.recovery_attempts<? AND j.next_retry_at<=CURRENT_TIMESTAMP) OR (j.state='committed' AND j.recovery_attempts<? AND (j.recovery_error='' OR ((j.recovery_error LIKE 'plaintext_cleanup_pending:%' OR j.recovery_error LIKE 'retirement_handoff_pending:%') AND j.next_retry_at<=CURRENT_TIMESTAMP)))) AND (j.state='committed' OR j.state='quarantining' OR NOT EXISTS(SELECT 1 FROM post_ingest_task p WHERE p.id=j.task_id AND p.retry_round=j.retry_round AND p.attempts=j.attempt AND p.status='running' AND p.lease_owner=j.owner_token)) ORDER BY CASE WHEN j.state='failed_closed' THEN j.next_retry_at ELSE j.updated_at END,j.stage_id LIMIT ?`, encryptionRecoveryMaxAttempts, encryptionRecoveryMaxAttempts, limit)
 	if err != nil {
 		return 0, 0, err
 	}
 	type row struct {
-		stage                                                        string
-		task, attempt, media, run, step, generation                  int64
-		owner, source, quarantine, fp, enc, wrapped, iv, hash, state string
-		size                                                         int64
+		stage                                                               string
+		task, retryRound, attempt, media, run, step, generation             int64
+		owner, source, quarantine, fp, enc, wrapped, iv, hash, state        string
+		size                                                                int64
+		cleanup                                                             int
 	}
 	var batch []row
 	for rows.Next() {
 		var r row
-		if err = rows.Scan(&r.stage, &r.task, &r.attempt, &r.media, &r.run, &r.step, &r.generation, &r.owner, &r.source, &r.quarantine, &r.fp, &r.enc, &r.wrapped, &r.iv, &r.hash, &r.size, &r.state); err != nil {
+		if err = rows.Scan(&r.stage, &r.task, &r.retryRound, &r.attempt, &r.media, &r.run, &r.step, &r.generation, &r.owner, &r.source, &r.quarantine, &r.fp, &r.enc, &r.wrapped, &r.iv, &r.hash, &r.size, &r.cleanup, &r.state); err != nil {
 			rows.Close()
 			return checked, cleaned, err
 		}
@@ -76,7 +78,7 @@ func ReconcileEncryptionStages(ctx context.Context, db *sql.DB, roots Encryption
 		}
 		quarantineRoot := resolveEncryptionQuarantineRoot(r.source, roots.Quarantine)
 		if !managedEncryptionPath(stageRoot, r.enc) || r.quarantine != "" && !managedEncryptionPath(quarantineRoot, r.quarantine) {
-			if _, err = db.ExecContext(ctx, `UPDATE media SET publication_state='failed',last_error='unsafe encryption recovery path' WHERE id=?`, r.media); err != nil {
+			if _, err = db.ExecContext(ctx, `UPDATE media SET publication_state='failed',publication_error='unsafe encryption recovery path' WHERE id=?`, r.media); err != nil {
 				return checked, cleaned, err
 			}
 			if _, err = db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='failed_closed',recovery_error='unsafe_path',updated_at=CURRENT_TIMESTAMP WHERE stage_id=?`, r.stage); err != nil {
@@ -102,14 +104,15 @@ func ReconcileEncryptionStages(ctx context.Context, db *sql.DB, roots Encryption
 				retErr = errors.Join(retErr, errors.New("committed encryption recovery mismatch"))
 				continue
 			}
-			outcome, cleanupErr := cleanupCommittedEncryptionPlaintext(quarantineRoot, r.media, r.generation, r.stage, r.quarantine, defaultEncryptionFileOps())
-			if err = recordCommittedCleanupOutcome(ctx, db, r.stage, outcome, cleanupErr); err != nil {
+			// Committed encryption no longer deletes plaintext. Hand cleanup to a
+			// durable retirement intent; leave source present or already quarantined.
+			if err = handoffCommittedEncryptionRetirement(ctx, db, r.stage, r.task, r.retryRound, r.attempt, r.media, r.run, r.step, r.generation, r.source, r.fp, r.quarantine, r.cleanup == 1); err != nil {
 				return checked, cleaned, err
 			}
 			continue
 		}
 		var active int
-		if err = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM post_ingest_task WHERE id=? AND attempts=? AND status='running' AND lease_owner=?`, r.task, r.attempt, r.owner).Scan(&active); err != nil {
+		if err = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM post_ingest_task WHERE id=? AND retry_round=(SELECT retry_round FROM media_encryption_stage_journal WHERE stage_id=?) AND attempts=? AND status='running' AND lease_owner=?`, r.task, r.stage, r.attempt, r.owner).Scan(&active); err != nil {
 			return checked, cleaned, err
 		}
 		if active == 1 && r.state != "quarantining" {
@@ -341,6 +344,34 @@ func recordCommittedCleanupOutcome(ctx context.Context, db *sql.DB, stageID stri
 		return errors.New("unknown committed cleanup outcome")
 	}
 	return err
+}
+
+func handoffCommittedEncryptionRetirement(ctx context.Context, db *sql.DB, stageID string, taskID, retryRound, attempt, mediaID, runID, stepID, generation int64, source, fingerprint, quarantinePath string, cleanup bool) error {
+	_, err := store.WithImmediateConnTx(ctx, db, func(tx store.ImmediateConnTx) error {
+		marker := "verified_committed"
+		if cleanup {
+			run, step := runID, stepID
+			task := Task{
+				ID: taskID, MediaID: mediaID, Type: TaskEncrypt, Generation: generation, RetryRound: int(retryRound),
+				RunID: &run, StepID: &step, Attempts: int(attempt),
+			}
+			staged := storage.StagedMediaEncryption{
+				StageID: stageID, MediaID: mediaID, OriginalPath: source, SourceFingerprint: fingerprint, CleanupPlaintext: true,
+			}
+			if e := upsertEncryptionRetirementIntentTx(ctx, tx, task, staged, quarantinePath); e != nil {
+				return e
+			}
+			marker = "retirement_handoff"
+		}
+		_, e := tx.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET recovery_error=?,next_retry_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='committed'`, marker, stageID)
+		return e
+	})
+	if err != nil {
+		pending := boundedRecoveryError("retirement_handoff_pending: ", err)
+		_, updateErr := db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET recovery_error=?,recovery_attempts=recovery_attempts+1,next_retry_at=datetime(CURRENT_TIMESTAMP,'+' || min(3600,30*(1 << min(recovery_attempts,7))) || ' seconds'),updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='committed'`, pending, stageID)
+		return errors.Join(err, updateErr)
+	}
+	return nil
 }
 
 func cleanupCommittedEncryptionPlaintext(root string, mediaID, generation int64, stageID, quarantine string, ops encryptionFileOps) (committedCleanupOutcome, error) {

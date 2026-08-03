@@ -89,9 +89,10 @@ func TestAdapterSetRejectsUnknownAndNilAdapter(t *testing.T) {
 		name string
 		set  AdapterSet
 		task Task
+		kind FailureKind
 	}{
-		{"unknown", AdapterSet{}, Task{Type: TaskType("bogus")}},
-		{"nil", AdapterSet{}, Task{Type: TaskPoster}},
+		{"unknown", AdapterSet{}, Task{Type: TaskType("bogus")}, FailurePermanent},
+		{"nil", AdapterSet{}, Task{Type: TaskPoster}, FailureRetryable},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -100,11 +101,36 @@ func TestAdapterSetRejectsUnknownAndNilAdapter(t *testing.T) {
 			if !errors.As(err, &classified) {
 				t.Fatalf("error %T %v is not ClassifiedError", err, err)
 			}
-			if classified.Kind != FailurePermanent {
-				t.Fatalf("kind=%v want permanent", classified.Kind)
+			if classified.Kind != tt.kind {
+				t.Fatalf("kind=%v want %v", classified.Kind, tt.kind)
 			}
 			if classified.Err == nil {
 				t.Fatal("classified cause is nil")
+			}
+		})
+	}
+}
+
+func TestMissingWorkerIsAdmissionBlockerNotPermanent(t *testing.T) {
+	db := task11AdapterDB(t)
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{"preview", NewPreviewAdapter(db, nil).Execute(context.Background(), Task{ID: 1, MediaID: 41, Type: TaskPreview})},
+		{"keyframe", NewKeyframeAdapter(db, nil).Execute(context.Background(), Task{ID: 1, MediaID: 41, Type: TaskKeyframe})},
+		{"atrack", NewAtrackAdapter(db, nil).Execute(context.Background(), Task{ID: 1, MediaID: 41, Type: TaskAtrack})},
+		{"subtitle", NewSubtitleAdapter(db, nil).Execute(context.Background(), Task{ID: 1, MediaID: 41, Type: TaskSubtitle})},
+		{"recognize", NewSubtitleRecognizeAdapter(db, nil).Execute(context.Background(), Task{ID: 1, MediaID: 41, Type: TaskSubtitleRecognize})},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var ce ClassifiedError
+			if !errors.As(tc.err, &ce) || ce.Kind != FailureRetryable {
+				t.Fatalf("err=%v want retryable admission blocker", tc.err)
+			}
+			if strings.Contains(strings.ToLower(tc.err.Error()), "skip") {
+				t.Fatal("worker absence must not skip")
 			}
 		})
 	}
@@ -276,7 +302,13 @@ func (s *recordingSubtitleService) EnsurePendingSubtitleTask(id int64) error {
 	s.mediaID = id
 	return s.err
 }
-func (s *recordingSubtitleService) ProcessMedia(ctx context.Context, id int64) error {
+func (s *recordingSubtitleService) ExtractMedia(ctx context.Context, id int64) error {
+	s.processCalls++
+	s.ctx = ctx
+	s.mediaID = id
+	return s.err
+}
+func (s *recordingSubtitleService) RecognizeMedia(ctx context.Context, id int64) error {
 	s.processCalls++
 	s.ctx = ctx
 	s.mediaID = id
@@ -321,6 +353,30 @@ INSERT INTO media(id,library_id,file_path,file_type) VALUES(41,3,'video.mp4','vi
 		t.Fatal(err)
 	}
 	return db
+}
+
+func TestSubtitleRecognizeAndAIAnalysisAdapters(t *testing.T) {
+	db := task11AdapterDB(t)
+	svc := &recordingSubtitleService{}
+	ctx := context.WithValue(context.Background(), struct{ name string }{"ctx"}, "same")
+	if err := NewSubtitleRecognizeAdapter(db, svc).Execute(ctx, Task{ID: 7, MediaID: 41, Type: TaskSubtitleRecognize}); err != nil {
+		t.Fatal(err)
+	}
+	if svc.ensureCalls != 1 || svc.processCalls != 1 || svc.mediaID != 41 {
+		t.Fatalf("recognize ensure=%d process=%d media=%d", svc.ensureCalls, svc.processCalls, svc.mediaID)
+	}
+	// Successful recognition with no usable text artifact → AI no-op success (not permanent).
+	if err := NewAIAnalysisAdapter(db).Execute(context.Background(), Task{ID: 9, MediaID: 41, Type: TaskAIAnalysis}); err != nil {
+		t.Fatalf("ai empty recognition should no-op, err=%v", err)
+	}
+	vtt := filepath.Join(t.TempDir(), "ready.vtt")
+	if err := os.WriteFile(vtt, []byte("WEBVTT\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = db.Exec(`INSERT INTO media_subtitle(media_id,status,vtt_path) VALUES(41,'ready',?)`, vtt)
+	if err := NewAIAnalysisAdapter(db).Execute(context.Background(), Task{ID: 9, MediaID: 41, Type: TaskAIAnalysis}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestSubtitleAdapter_EnsuresDomainTaskAndPassesContext(t *testing.T) {
@@ -607,7 +663,7 @@ func TestEncryptAdapter_ClassifiesErrorsAndAlreadyEncryptedAsSuccess(t *testing.
 		{"bad type", Task{ID: 1, MediaID: 41, Type: TaskPoster}, &recordingEncryptor{}, FailurePermanent, false},
 		{"bad task id", Task{MediaID: 41, Type: TaskEncrypt}, &recordingEncryptor{}, FailurePermanent, false},
 		{"bad media id", Task{ID: 1, Type: TaskEncrypt}, &recordingEncryptor{}, FailurePermanent, false},
-		{"nil encryptor", Task{ID: 1, MediaID: 41, Type: TaskEncrypt}, nil, FailurePermanent, false},
+		{"nil encryptor", Task{ID: 1, MediaID: 41, Type: TaskEncrypt}, nil, FailureRetryable, false},
 		{"already", Task{ID: 1, MediaID: 41, Type: TaskEncrypt}, &recordingEncryptor{err: storage.ErrAlreadyEncrypted}, FailureRetryable, true},
 		{"temporary", Task{ID: 1, MediaID: 41, Type: TaskEncrypt}, &recordingEncryptor{err: errors.New("temporarily locked")}, FailureRetryable, false},
 	} {

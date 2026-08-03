@@ -143,7 +143,9 @@ func TestRunTaskUpdatesPackageStatusAndAsset(t *testing.T) {
 	if err := os.WriteFile(srcFile, []byte("video"), 0o644); err != nil {
 		t.Fatalf("write source: %v", err)
 	}
-	if _, err := db.Exec(`INSERT INTO library (id, drm_enabled, cleanup_local_source_after_package) VALUES (1, 1, 1)`); err != nil {
+	// cleanup=0: minimal schema lacks retirement tables; cleanup-pending would
+	// fail-closed. Full cleanup→retirement coverage lives in package_retirement_test.go.
+	if _, err := db.Exec(`INSERT INTO library (id, drm_enabled, cleanup_local_source_after_package) VALUES (1, 1, 0)`); err != nil {
 		t.Fatalf("insert library: %v", err)
 	}
 	if _, err := db.Exec(`INSERT INTO media (id, library_id, file_id, file_path, height) VALUES (201, 1, 'f201', ?, 1080)`, srcFile); err != nil {
@@ -172,14 +174,14 @@ func TestRunTaskUpdatesPackageStatusAndAsset(t *testing.T) {
 		Scan(&status, &progress, &drmStatus, &cleanupStatus, &outPath); err != nil {
 		t.Fatalf("query package task: %v", err)
 	}
-	if status.String != "done" || progress != 100 || drmStatus.String != "done" || cleanupStatus.String != "success" {
+	if status.String != "done" || progress != 100 || drmStatus.String != "done" || cleanupStatus.String != "skipped" {
 		t.Fatalf("unexpected task status=%s progress=%d drm=%s cleanup=%s", status.String, progress, drmStatus.String, cleanupStatus.String)
 	}
 	if !outPath.Valid || !strings.HasSuffix(strings.ToLower(outPath.String), "master.m3u8") {
 		t.Fatalf("unexpected output path: %#v", outPath)
 	}
-	if _, err := os.Stat(srcFile); !os.IsNotExist(err) {
-		t.Fatalf("expected source to be deleted, stat err=%v", err)
+	if _, err := os.Stat(srcFile); err != nil {
+		t.Fatalf("expected authoritative source to remain, stat err=%v", err)
 	}
 
 	var kid, keyRef string

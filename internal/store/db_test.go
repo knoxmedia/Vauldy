@@ -655,3 +655,54 @@ CREATE INDEX idx_post_ingest_scan ON post_ingest_task(scan_task_id,status);`); e
 		}
 	}
 }
+
+func TestEnsureLibraryProcessingColumnAlterFailureRecheck(t *testing.T) {
+	alterErr := errors.New("duplicate column name: subtitle_extract")
+	recheckErr := errors.New("pragma recheck failed")
+	compatible := libraryProcessingColumnInfo{typ: "INTEGER", notNull: 1, defaultValue: sql.NullString{String: "0", Valid: true}}
+	incompatible := libraryProcessingColumnInfo{typ: "TEXT", notNull: 1, defaultValue: sql.NullString{String: "0", Valid: true}}
+
+	for _, tc := range []struct {
+		name        string
+		metadata    []libraryProcessingColumnInfo
+		metadataErr []error
+		wantErr     []string
+	}{
+		{name: "compatible competing addition", metadata: []libraryProcessingColumnInfo{{}, compatible}, metadataErr: []error{sql.ErrNoRows, nil}},
+		{name: "incompatible competing addition", metadata: []libraryProcessingColumnInfo{{}, incompatible}, metadataErr: []error{sql.ErrNoRows, nil}, wantErr: []string{"incompatible library processing column subtitle_extract"}},
+		{name: "column remains absent", metadata: []libraryProcessingColumnInfo{{}, {}}, metadataErr: []error{sql.ErrNoRows, sql.ErrNoRows}, wantErr: []string{"duplicate column name", "column still absent"}},
+		{name: "metadata recheck fails", metadata: []libraryProcessingColumnInfo{{}, {}}, metadataErr: []error{sql.ErrNoRows, recheckErr}, wantErr: []string{"duplicate column name", "recheck metadata", "pragma recheck failed"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			metadataCalls := 0
+			alterCalls := 0
+			err := ensureLibraryProcessingColumnWith(
+				context.Background(),
+				"subtitle_extract",
+				func(context.Context, string) (libraryProcessingColumnInfo, error) {
+					i := metadataCalls
+					metadataCalls++
+					return tc.metadata[i], tc.metadataErr[i]
+				},
+				func(context.Context, string) error { alterCalls++; return alterErr },
+			)
+			if metadataCalls != 2 || alterCalls != 1 {
+				t.Fatalf("metadata calls=%d alter calls=%d", metadataCalls, alterCalls)
+			}
+			if len(tc.wantErr) == 0 {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			for _, want := range tc.wantErr {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("error=%q missing %q", err, want)
+				}
+			}
+		})
+	}
+}

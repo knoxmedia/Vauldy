@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"knox-media/internal/postingest"
+	_ "knox-media/internal/publication"
 	"knox-media/internal/store"
 )
 

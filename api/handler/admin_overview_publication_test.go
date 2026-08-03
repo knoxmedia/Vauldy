@@ -45,17 +45,20 @@ INSERT INTO media_ingest_run(id,media_id,generation,reason,status,preserve_visib
 INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status,attempts,max_attempts,last_error) VALUES
  (200,100,10,1,'poster',1,'failed',3,3,'poster failed'),
  (201,100,10,1,'scrape',0,'waiting',0,3,''),
+ (211,100,10,1,'media_visible',0,'done',0,3,''),
  (202,101,11,1,'poster',1,'waiting',0,3,''),
  (203,101,11,1,'scrape',0,'waiting',0,3,''),
  (204,101,11,1,'prepare',0,'waiting',0,3,''),
+ (212,101,11,1,'media_visible',0,'done',0,3,''),
  (205,102,12,1,'poster',1,'done',1,3,''),
  (206,103,13,1,'poster',1,'failed',3,3,'old'),
  (207,104,13,2,'poster',1,'running',1,3,''),
  (208,105,14,1,'poster',1,'done',1,3,''),
  (209,105,14,1,'scrape',0,'waiting',0,3,''),
- (210,105,14,1,'prepare',0,'failed',3,3,'prepare boom');
+ (210,105,14,1,'prepare',0,'failed',3,3,'prepare boom'),
+ (213,105,14,1,'media_visible',0,'done',0,3,'');
 INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES
- (201,NULL,'media_visible'),(203,NULL,'media_visible'),(204,NULL,'media_visible'),(209,NULL,'media_visible'),(210,NULL,'media_visible');
+ (201,211,'success'),(203,212,'success'),(204,212,'success'),(209,213,'success'),(210,213,'success');
 INSERT INTO media_asset_stage_journal(stage_id,media_id,run_id,step_id,generation,owner_token,source_fingerprint,artifact_kind,state,staged_path,hashes_sizes_json,recovery_error,updated_at) VALUES
  ('stage-10',10,100,200,1,'owner','fp','poster','quarantined','/tmp/stage','{}','asset recovery failed',datetime('2026-07-22 12:01:00'));
 `, snapshot, snapshot, secretSnapshot, snapshot)
@@ -260,8 +263,8 @@ INSERT INTO media(id,library_id,file_id,title,file_path,file_type,status,publica
 INSERT INTO media_ingest_run(id,media_id,generation,reason,status,preserve_visibility,config_snapshot_json,error_message,policy_version,terminal_reason) VALUES
  (201,101,1,'scan','processing',0,?,'',2,'');
 INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status,attempts,max_attempts,last_error) VALUES
- (301,201,101,1,'poster',1,'running',1,3,''),(302,201,101,1,'scrape',0,'waiting',0,3,'');
-INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(302,NULL,'media_visible');
+ (301,201,101,1,'poster',1,'running',1,3,''),(302,201,101,1,'scrape',0,'waiting',0,3,''),(303,201,101,1,'media_visible',0,'done',0,3,'');
+INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(302,303,'success');
 INSERT INTO media_ingest_evidence(run_id,step_id,media_id,generation,kind,source_fingerprint,artifact_refs_json,verified_at,stage_id) VALUES
  (201,301,101,1,'poster','fp','{"path":"/poster.jpg","wrapped_dek":"SECRET"}',CURRENT_TIMESTAMP,'ev-1');
 INSERT INTO media_asset_stage_journal(stage_id,media_id,run_id,step_id,generation,owner_token,source_fingerprint,artifact_kind,state,staged_path,hashes_sizes_json,recovery_error) VALUES
@@ -334,7 +337,7 @@ INSERT INTO media_asset_stage_journal(stage_id,media_id,run_id,step_id,generatio
 		t.Fatalf("unresolved_recovery_errors=%v", payload.UnresolvedRecovery)
 	}
 	// backward compatible keys
-	if payload.Media["id"] == nil || len(payload.Steps) != 2 {
+	if payload.Media["id"] == nil || len(payload.Steps) != 3 {
 		t.Fatalf("backward compatible payload broken: media=%v steps=%d", payload.Media, len(payload.Steps))
 	}
 }

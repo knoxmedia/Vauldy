@@ -368,7 +368,7 @@ func (w *Worker) failPoisonedParent(ctx context.Context, job claimedJob, reason 
 	if n, _ := r.RowsAffected(); n != 1 {
 		return ErrJobOwnershipLost
 	}
-	if err = publication.AggregateTx(ctx, tx, p.RunID); err != nil {
+	if err = publication.FinalizeNodeTransitionTx(ctx, tx, p.RunID); err != nil {
 		return err
 	}
 	if err = tx.Commit(); err != nil {

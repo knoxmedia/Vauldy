@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 
+	"knox-media/internal/libraryprocessing"
 	"knox-media/internal/store"
 	"knox-media/internal/taskalign"
 )
@@ -25,9 +26,10 @@ func NewPlanner(options PlanOptions) *Planner {
 var ErrGenerationConflict = errors.New("publication planner: generation conflict")
 
 type currentPolicy struct {
-	libraryID, generation                      int64
-	fileType                                   string
-	previewExtract, libraryEncrypt, jitPrepare bool
+	libraryID, generation                                        int64
+	fileType                                                     string
+	explicit                                                     libraryprocessing.Options
+	libraryEncrypt, jitPrepare, cleanupPackage, cleanupEncrypted bool
 }
 
 type currentPlan struct {
@@ -38,6 +40,7 @@ type currentPlan struct {
 	metadata                  MetadataAttempt
 	required, optional, steps []StepType
 	dependencies              []Dependency
+	graph                     PlanGraph
 	snapshotJSON              []byte
 }
 
@@ -124,14 +127,9 @@ func (p *Planner) buildCurrentPolicyTx(ctx context.Context, tx store.SQLExecutor
 	if mediaID <= 0 {
 		return nil, errors.New("publication planner: invalid media id")
 	}
-
 	var policy currentPolicy
-	var previewExtract, libraryEncrypt, jitPrepare int
-	err := tx.QueryRowContext(ctx, `
-SELECT m.library_id,COALESCE(m.file_type,''),COALESCE(l.preview_extract,0),
-       COALESCE(l.encrypted_assets_enabled,0),COALESCE(l.jit_prepare_on_ingest,0),m.ingest_generation
-FROM media m JOIN library l ON l.id=m.library_id WHERE m.id=?`, mediaID).Scan(
-		&policy.libraryID, &policy.fileType, &previewExtract, &libraryEncrypt, &jitPrepare, &policy.generation)
+	var preview, subtitleExtract, atrackExtract, recognize, keyframe, ai, encrypted, prepare, cleanupPackage, cleanupEncrypted int
+	err := tx.QueryRowContext(ctx, `SELECT m.library_id,COALESCE(m.file_type,''),COALESCE(l.preview_extract,0),COALESCE(l.subtitle_extract,0),COALESCE(l.atrack_extract,0),COALESCE(l.subtitle_recognize,0),COALESCE(l.keyframe_extract,0),COALESCE(l.ai_analysis,0),COALESCE(l.encrypted_assets_enabled,0),COALESCE(l.jit_prepare_on_ingest,0),COALESCE(l.cleanup_local_source_after_package,0),COALESCE(l.encrypted_assets_cleanup_plaintext,0),m.ingest_generation FROM media m JOIN library l ON l.id=m.library_id WHERE m.id=?`, mediaID).Scan(&policy.libraryID, &policy.fileType, &preview, &subtitleExtract, &atrackExtract, &recognize, &keyframe, &ai, &encrypted, &prepare, &cleanupPackage, &cleanupEncrypted, &policy.generation)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errors.New("publication planner: media or library not found")
 	}
@@ -139,35 +137,83 @@ FROM media m JOIN library l ON l.id=m.library_id WHERE m.id=?`, mediaID).Scan(
 		return nil, fmt.Errorf("publication planner: load media: %w", err)
 	}
 	policy.fileType = strings.TrimSpace(policy.fileType)
-	policy.previewExtract, policy.libraryEncrypt, policy.jitPrepare = previewExtract == 1, libraryEncrypt == 1, jitPrepare == 1
-
+	policy.explicit = libraryprocessing.Options{Preview: preview == 1, SubtitleExtract: subtitleExtract == 1, ATrackExtract: atrackExtract == 1, SubtitleRecognize: recognize == 1, KeyframeExtract: keyframe == 1, AIAnalysis: ai == 1}
+	policy.libraryEncrypt = encrypted == 1
+	policy.jitPrepare = prepare == 1
+	policy.cleanupPackage = cleanupPackage == 1
+	policy.cleanupEncrypted = cleanupEncrypted == 1
 	if reason == PlanReasonScan {
-		var scanLibraryID int64
-		err = tx.QueryRowContext(ctx, `SELECT library_id FROM scan_task WHERE id=?`, scanTaskID).Scan(&scanLibraryID)
+		var libraryID int64
+		err = tx.QueryRowContext(ctx, `SELECT library_id FROM scan_task WHERE id=?`, scanTaskID).Scan(&libraryID)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, errors.New("publication planner: scan task not found")
 		}
 		if err != nil {
 			return nil, fmt.Errorf("publication planner: load scan task: %w", err)
 		}
-		if scanLibraryID != policy.libraryID {
+		if libraryID != policy.libraryID {
 			return nil, errors.New("publication planner: scan task does not belong to media library")
 		}
 	}
 	if policy.fileType != "video" && policy.fileType != "image" {
 		return nil, nil
 	}
-
+	effective, provenance := libraryprocessing.Close(policy.explicit)
+	if provenance.Explicit == nil {
+		provenance.Explicit = []string{}
+	}
+	if provenance.DependencyAdded == nil {
+		provenance.DependencyAdded = []string{}
+	}
+	var legacyDefaults []string
+	if p.options.SubtitleAuto && !effective.SubtitleExtract {
+		effective.SubtitleExtract = true
+		legacyDefaults = append(legacyDefaults, libraryprocessing.OptionSubtitleExtract)
+	}
+	if p.options.ATrackAuto && !effective.ATrackExtract {
+		effective.ATrackExtract = true
+		legacyDefaults = append(legacyDefaults, libraryprocessing.OptionATrackExtract)
+	}
+	if policy.fileType != "video" {
+		policy.explicit = libraryprocessing.Options{}
+		effective, provenance = libraryprocessing.Close(policy.explicit)
+	}
+	if provenance.Explicit == nil {
+		provenance.Explicit = []string{}
+	}
+	if provenance.DependencyAdded == nil {
+		provenance.DependencyAdded = []string{}
+	}
+	for _, step := range []StepType{StepSubtitleRecognize, StepAIAnalysis} {
+		selected := step == StepSubtitleRecognize && effective.SubtitleRecognize || step == StepAIAnalysis && effective.AIAnalysis
+		if selected && !hasExecutableAdapter(p.options.ExecutableAdapters, step) {
+			return nil, fmt.Errorf("%w: executable adapter unavailable for %s under policy v%d", ErrCapabilityUnavailable, step, CurrentPolicyVersion)
+		}
+	}
 	required := []StepType{StepPoster}
 	if policy.fileType == "image" {
 		required = []StepType{StepThumbnail}
 	}
-	optional := []StepType{StepScrape}
-	if policy.fileType == "video" && policy.previewExtract {
-		optional = append(optional, StepPreview)
-	}
-	if policy.fileType == "video" && p.options.SubtitleAuto {
-		optional = append(optional, StepSubtitle)
+	optional := []StepType{StepMediaVisible, StepScrape}
+	if policy.fileType == "video" {
+		if effective.Preview {
+			optional = append(optional, StepPreview)
+		}
+		if effective.SubtitleExtract {
+			optional = append(optional, StepSubtitleExtract)
+		}
+		if effective.ATrackExtract {
+			optional = append(optional, StepAtrackExtract)
+		}
+		if effective.SubtitleRecognize {
+			optional = append(optional, StepSubtitleRecognize)
+		}
+		if effective.KeyframeExtract {
+			optional = append(optional, StepKeyframeExtract)
+		}
+		if effective.AIAnalysis {
+			optional = append(optional, StepAIAnalysis)
+		}
 	}
 	encrypt := p.options.EncryptGlobal && policy.libraryEncrypt
 	if encrypt {
@@ -178,32 +224,57 @@ FROM media m JOIN library l ON l.id=m.library_id WHERE m.id=?`, mediaID).Scan(
 		}
 		required = append(required, StepEncrypt)
 	}
-	prepare := p.options.PreparePlanner != nil && p.options.Capabilities != nil && p.options.Capabilities.Available(string(StepPrepare)) && policy.jitPrepare
-	if prepare && policy.fileType == "video" {
+	prepareEnabled := p.options.PreparePlanner != nil && p.options.Capabilities != nil && p.options.Capabilities.Available(string(StepPrepare)) && policy.jitPrepare && policy.fileType == "video"
+	if prepareEnabled {
 		optional = append(optional, StepPrepare)
 	}
 	steps := append(append([]StepType(nil), required...), optional...)
-	dependencies := make([]Dependency, 0, len(steps))
+	generation := policy.generation + 1
+	requiredSet := map[StepType]bool{}
+	for _, step := range required {
+		requiredSet[step] = true
+	}
+	nodes := make([]PlanNode, 0, len(steps))
+	for _, step := range steps {
+		nodes = append(nodes, PlanNode{Step: step, Generation: generation, Required: requiredSet[step]})
+	}
+	edges := make([]Dependency, 0, len(optional)+4)
+	addEdge := func(step, target StepType, kind DependencyKind) {
+		copy := target
+		edges = append(edges, Dependency{Step: step, Kind: kind, DependsOn: &copy, Generation: generation, DependsOnGeneration: generation})
+	}
 	for _, step := range optional {
-		dependencies = append(dependencies, Dependency{Step: step, Kind: DependencyMediaVisible})
+		if step != StepMediaVisible {
+			addEdge(step, StepMediaVisible, DependencySuccess)
+		}
 	}
 	if encrypt {
-		dep := required[0]
-		dependencies = append(dependencies, Dependency{Step: StepEncrypt, Kind: DependencyStepDone, DependsOn: &dep})
+		addEdge(StepEncrypt, required[0], DependencySuccess)
 	}
-
-	snapshot := ConfigSnapshot{PolicyVersion: PolicyV2, LibraryID: policy.libraryID, FileType: policy.fileType,
-		PreviewExtract: policy.previewExtract, SubtitleAuto: p.options.SubtitleAuto, ATrackAuto: p.options.ATrackAuto,
-		Encrypt: encrypt, Prepare: prepare, Steps: append([]StepType(nil), steps...), Metadata: metadata,
-		RequiredSteps: append([]StepType(nil), required...), OptionalSteps: append([]StepType(nil), optional...), Dependencies: dependencies}
+	if effective.SubtitleRecognize {
+		addEdge(StepSubtitleRecognize, StepSubtitleExtract, DependencySuccess)
+		addEdge(StepSubtitleRecognize, StepAtrackExtract, DependencySuccess)
+	}
+	if effective.AIAnalysis {
+		addEdge(StepAIAnalysis, StepSubtitleRecognize, DependencySuccess)
+	}
+	graph := PlanGraph{Nodes: nodes, Edges: edges}
+	if err := ValidatePlanGraph(graph); err != nil {
+		return nil, fmt.Errorf("publication planner: validate graph: %w", err)
+	}
+	basis := EncryptionCleanupBasis{Encryption: encrypt && policy.cleanupEncrypted, Package: policy.cleanupPackage}
+	basis.CleanupEligible = basis.Encryption || basis.Package
+	strategies, err := ValidateEncryptedSourceContracts(steps, basis.CleanupEligible, p.options.EncryptedSourceStrategies)
+	if err != nil {
+		return nil, fmt.Errorf("publication planner: %w", err)
+	}
+	snapshot := ConfigSnapshot{PolicyVersion: CurrentPolicyVersion, LibraryID: policy.libraryID, FileType: policy.fileType, ProcessingExplicit: policy.explicit, ProcessingEffective: effective, ProcessingProvenance: provenance, LegacyOptionDefaults: legacyDefaults, EncryptedSourceStrategies: strategies, CleanupBasis: basis, PreviewExtract: policy.explicit.Preview, SubtitleAuto: policy.explicit.SubtitleExtract, ATrackAuto: policy.explicit.ATrackExtract, Encrypt: encrypt, Prepare: prepareEnabled, Steps: append([]StepType(nil), steps...), Metadata: metadata, RequiredSteps: append([]StepType(nil), required...), OptionalSteps: append([]StepType(nil), optional...), Dependencies: append([]Dependency(nil), edges...), Graph: graph}
 	snapshotJSON, err := json.Marshal(snapshot)
 	if err != nil {
 		return nil, fmt.Errorf("publication planner: encode snapshot: %w", err)
 	}
-	return &currentPlan{mediaID: mediaID, scanTaskID: scanTaskID, policy: policy, reason: reason, preserve: preserve,
-		metadata: metadata, required: required, optional: optional, steps: steps, dependencies: dependencies, snapshotJSON: snapshotJSON}, nil
+	return &currentPlan{mediaID: mediaID, scanTaskID: scanTaskID, policy: policy, reason: reason, preserve: preserve, metadata: metadata, required: required, optional: optional, steps: steps, dependencies: edges, graph: graph, snapshotJSON: snapshotJSON}, nil
 }
-
 func (p *Planner) persistPlanTx(ctx context.Context, tx store.SQLExecutor, plan *currentPlan, expectedGeneration int64) (Run, error) {
 	result, err := tx.ExecContext(ctx, `UPDATE media SET ingest_generation=ingest_generation+1,
 publication_state=CASE WHEN ? THEN publication_state ELSE 'processing' END,
@@ -222,7 +293,7 @@ WHERE id=? AND ingest_generation=?`, boolDB(plan.preserve), boolDB(plan.preserve
 	generation := expectedGeneration + 1
 
 	result, err = tx.ExecContext(ctx, `INSERT INTO media_ingest_run(media_id,generation,scan_task_id,reason,status,preserve_visibility,config_snapshot_json,policy_version)
-VALUES(?,?,?,?, 'processing',?,?,?)`, plan.mediaID, generation, nullScanTask(plan.scanTaskID), string(plan.reason), boolDB(plan.preserve), string(plan.snapshotJSON), PolicyV2)
+VALUES(?,?,?,?, 'processing',?,?,?)`, plan.mediaID, generation, nullScanTask(plan.scanTaskID), string(plan.reason), boolDB(plan.preserve), string(plan.snapshotJSON), CurrentPolicyVersion)
 	if err != nil {
 		return Run{}, fmt.Errorf("publication planner: insert run: %w", err)
 	}
@@ -239,7 +310,8 @@ VALUES(?,?,?,?, 'processing',?,?,?)`, plan.mediaID, generation, nullScanTask(pla
 				requiredFlag = 1
 			}
 		}
-		maxAttempts := DefaultMaxAttempts(string(step))
+		taskType := executionTaskType(step)
+		maxAttempts := DefaultMaxAttempts(string(taskType))
 		result, err = tx.ExecContext(ctx, `INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status,max_attempts) VALUES(?,?,?,?,?,'waiting',?)`, runID, plan.mediaID, generation, step, requiredFlag, maxAttempts)
 		if err != nil {
 			return Run{}, fmt.Errorf("publication planner: insert %s step: %w", step, err)
@@ -265,11 +337,11 @@ VALUES(?,?,?,?, 'processing',?,?,?)`, plan.mediaID, generation, nullScanTask(pla
 		if !queueBacked(step) {
 			continue
 		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO post_ingest_task(media_id,scan_task_id,ingest_run_id,ingest_step_id,generation,task_type,status,max_attempts) VALUES(?,?,?,?,?,?,'waiting',?)`, plan.mediaID, nullScanTask(plan.scanTaskID), runID, stepID, generation, step, maxAttempts)
+		_, err = tx.ExecContext(ctx, `INSERT INTO post_ingest_task(media_id,scan_task_id,ingest_run_id,ingest_step_id,generation,task_type,status,max_attempts) VALUES(?,?,?,?,?,?,'waiting',?)`, plan.mediaID, nullScanTask(plan.scanTaskID), runID, stepID, generation, taskType, maxAttempts)
 		if err != nil {
 			return Run{}, fmt.Errorf("publication planner: enqueue %s step: %w", step, err)
 		}
-		if err = taskalign.EnsureDomainWaiting(ctx, tx, string(step), plan.mediaID); err != nil {
+		if err = taskalign.EnsureDomainWaiting(ctx, tx, string(taskType), plan.mediaID); err != nil {
 			return Run{}, fmt.Errorf("publication planner: initialize %s domain task: %w", step, err)
 		}
 	}
@@ -332,7 +404,7 @@ func validateDependencyTx(ctx context.Context, tx store.SQLExecutor, stepID int6
 		return errors.New("dependency target belongs to a different run/media/generation")
 	}
 	graph := map[int64][]int64{}
-	rows, err := tx.QueryContext(ctx, `SELECT d.step_id,d.depends_on_step_id FROM media_ingest_step_dependency d JOIN media_ingest_step s ON s.id=d.step_id WHERE s.run_id=? AND d.dependency_kind='step_done' AND d.depends_on_step_id IS NOT NULL`, runID)
+	rows, err := tx.QueryContext(ctx, `SELECT d.step_id,d.depends_on_step_id FROM media_ingest_step_dependency d JOIN media_ingest_step s ON s.id=d.step_id WHERE s.run_id=? AND d.dependency_kind IN ('success','terminal') AND d.depends_on_step_id IS NOT NULL`, runID)
 	if err != nil {
 		return err
 	}
@@ -403,9 +475,30 @@ func nullScanTask(id int64) any {
 
 func queueBacked(step StepType) bool {
 	switch step {
-	case StepPoster, StepThumbnail, StepPreview, StepKeyframe, StepSubtitle, StepAtrack, StepEncrypt:
+	case StepPoster, StepThumbnail, StepPreview, StepKeyframe, StepSubtitle, StepAtrack, StepEncrypt, StepSubtitleExtract, StepAtrackExtract, StepSubtitleRecognize, StepKeyframeExtract, StepAIAnalysis:
 		return true
 	default:
 		return false
 	}
+}
+
+func executionTaskType(step StepType) StepType {
+	switch step {
+	case StepSubtitleExtract:
+		return StepSubtitle
+	case StepAtrackExtract:
+		return StepAtrack
+	case StepKeyframeExtract:
+		return StepKeyframe
+	default:
+		return step
+	}
+}
+
+func hasExecutableAdapter(registry ExecutableAdapterRegistry, step StepType) bool {
+	if registry == nil {
+		return false
+	}
+	adapter, ok := registry.Adapter(step)
+	return ok && adapter != nil && adapter.TaskType() == step
 }

@@ -78,7 +78,7 @@ func (h *Handler) ServeDocumentPreview(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "preview conversion not supported for this format"})
 		return
 	}
-	workPath, cleanup, err := storage.MaterializePlaintextTemp(h.App.DB, h.KeyVault, id, path)
+	workPath, cleanup, err := storage.MaterializePlaintextTempUnsafeLegacy(h.App.DB, h.KeyVault, id, path)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

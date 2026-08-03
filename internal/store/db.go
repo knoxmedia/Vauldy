@@ -27,6 +27,11 @@ CREATE TABLE IF NOT EXISTS library (
     image_providers TEXT DEFAULT 'tmdb,omdb,embedded,screen_grabber',
     metadata_refresh_policy TEXT DEFAULT 'never',
     preview_extract INTEGER DEFAULT 0,
+    subtitle_extract INTEGER NOT NULL DEFAULT 0,
+    atrack_extract INTEGER NOT NULL DEFAULT 0,
+    subtitle_recognize INTEGER NOT NULL DEFAULT 0,
+    keyframe_extract INTEGER NOT NULL DEFAULT 0,
+    ai_analysis INTEGER NOT NULL DEFAULT 0,
     encryption_mode TEXT DEFAULT 'drm',
     scraper TEXT DEFAULT 'tmdb',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -153,7 +158,8 @@ CREATE TABLE IF NOT EXISTS package_task (
     error_message TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (media_id) REFERENCES media(id)
+    FOREIGN KEY (media_id) REFERENCES media(id),
+    UNIQUE(id,media_id)
 );
 
 CREATE TABLE IF NOT EXISTS drm_asset (
@@ -269,6 +275,10 @@ CREATE TABLE IF NOT EXISTS media_ingest_run (
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     finished_at TIMESTAMP,
+    policy_version INTEGER NOT NULL DEFAULT 1 CHECK(policy_version IN (1,2,3)),
+    terminal_reason TEXT NOT NULL DEFAULT '',
+    superseded_by_generation INTEGER,
+    superseded_at TIMESTAMP,
     FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE,
     FOREIGN KEY (scan_task_id) REFERENCES scan_task(id) ON DELETE SET NULL,
     UNIQUE(media_id,generation),
@@ -282,7 +292,7 @@ CREATE TABLE IF NOT EXISTS media_ingest_step (
     run_id INTEGER NOT NULL,
     media_id INTEGER NOT NULL,
     generation INTEGER NOT NULL CHECK (generation > 0),
-    step_type TEXT NOT NULL CHECK (step_type IN ('poster','scrape','preview','keyframe','subtitle','atrack','encrypt','prepare')),
+    step_type TEXT NOT NULL CHECK (step_type IN ('poster','scrape','preview','keyframe','subtitle','atrack','encrypt','prepare','thumbnail','package','pretranscode','metadata','media_visible','subtitle_extract','atrack_extract','subtitle_recognize','keyframe_extract','ai_analysis')),
     required INTEGER NOT NULL CHECK (required IN (0,1)),
     status TEXT NOT NULL CHECK (status IN ('waiting','running','done','skipped','failed','cancelled')),
     attempts INTEGER NOT NULL DEFAULT 0,
@@ -295,6 +305,7 @@ CREATE TABLE IF NOT EXISTS media_ingest_step (
     finished_at TIMESTAMP,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    retry_round INTEGER NOT NULL DEFAULT 0 CHECK(retry_round >= 0),
     FOREIGN KEY (run_id) REFERENCES media_ingest_run(id) ON DELETE CASCADE,
     FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE,
     FOREIGN KEY (media_id,generation) REFERENCES media_ingest_run(media_id,generation),
@@ -313,6 +324,7 @@ CREATE TABLE IF NOT EXISTS post_ingest_task (
     task_type TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'waiting',
     attempts INTEGER NOT NULL DEFAULT 0,
+    retry_round INTEGER NOT NULL DEFAULT 0 CHECK(retry_round >= 0),
     max_attempts INTEGER NOT NULL DEFAULT 3,
     available_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     lease_owner TEXT,
@@ -323,6 +335,9 @@ CREATE TABLE IF NOT EXISTS post_ingest_task (
     started_at TIMESTAMP,
     finished_at TIMESTAMP,
     priority INTEGER NOT NULL DEFAULT 0,
+    removed_at TIMESTAMP,
+    removed_by TEXT NOT NULL DEFAULT '',
+    remove_reason TEXT NOT NULL DEFAULT '',
     FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE,
     FOREIGN KEY (scan_task_id) REFERENCES scan_task(id) ON DELETE SET NULL,
     FOREIGN KEY (ingest_run_id) REFERENCES media_ingest_run(id) ON DELETE CASCADE,
@@ -330,11 +345,44 @@ CREATE TABLE IF NOT EXISTS post_ingest_task (
     FOREIGN KEY (ingest_run_id,media_id,generation) REFERENCES media_ingest_run(id,media_id,generation),
     FOREIGN KEY (ingest_step_id,media_id,generation) REFERENCES media_ingest_step(id,media_id,generation),
     UNIQUE(media_id,generation,task_type),
-    CHECK (task_type IN ('poster','preview','keyframe','subtitle','atrack','encrypt')),
-    CHECK (status IN ('waiting','running','done','failed','cancelled'))
+    CHECK (task_type IN ('poster','poster_repair','preview','keyframe','subtitle','atrack','encrypt','thumbnail','package','pretranscode','metadata','media_visible','subtitle_extract','atrack_extract','subtitle_recognize','keyframe_extract','ai_analysis')),
+    CHECK (status IN ('waiting','running','done','skipped','failed','cancelled'))
 );
 CREATE INDEX IF NOT EXISTS idx_post_ingest_claim ON post_ingest_task(status,available_at,lease_until,created_at);
 CREATE INDEX IF NOT EXISTS idx_post_ingest_scan ON post_ingest_task(scan_task_id,status);
+
+CREATE TABLE IF NOT EXISTS media_encrypt_admin_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL,
+    media_id INTEGER NOT NULL,
+    generation INTEGER NOT NULL,
+    action TEXT NOT NULL CHECK(action IN ('reset','reset_from_removed','remove','purge','purge_rejected')),
+    actor_id INTEGER NOT NULL DEFAULT 0,
+    reason TEXT NOT NULL DEFAULT '',
+    previous_status TEXT NOT NULL,
+    previous_attempts INTEGER NOT NULL,
+    previous_retry_round INTEGER NOT NULL,
+    new_retry_round INTEGER NOT NULL DEFAULT 0,
+    previous_error TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(task_id) REFERENCES post_ingest_task(id) ON DELETE RESTRICT
+);
+CREATE TABLE IF NOT EXISTS media_encrypt_admin_audit_archive (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL,
+    media_id INTEGER NOT NULL,
+    generation INTEGER NOT NULL,
+    action TEXT NOT NULL,
+    actor_id INTEGER NOT NULL DEFAULT 0,
+    reason TEXT NOT NULL DEFAULT '',
+    previous_status TEXT NOT NULL DEFAULT '',
+    previous_attempts INTEGER NOT NULL DEFAULT 0,
+    previous_retry_round INTEGER NOT NULL DEFAULT 0,
+    new_retry_round INTEGER NOT NULL DEFAULT 0,
+    previous_error TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    archived_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 
 CREATE TABLE IF NOT EXISTS user (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -574,6 +622,10 @@ CREATE TABLE IF NOT EXISTS subtitle_task (
     media_id INTEGER NOT NULL UNIQUE,
     status TEXT NOT NULL DEFAULT 'pending',
     message TEXT,
+    extract_status TEXT NOT NULL DEFAULT 'pending',
+    recognize_status TEXT NOT NULL DEFAULT 'pending',
+    extract_message TEXT,
+    recognize_message TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     started_at TIMESTAMP,
     finished_at TIMESTAMP,
@@ -807,6 +859,82 @@ func startupExecContext(ctx context.Context, db *sql.DB, query string, args ...a
 	return result, err
 }
 
+func normalizeSQLiteDefault(value string) string {
+	value = strings.TrimSpace(value)
+	for len(value) >= 2 && value[0] == '(' && value[len(value)-1] == ')' {
+		value = strings.TrimSpace(value[1 : len(value)-1])
+	}
+	if len(value) >= 2 && ((value[0] == '\'' && value[len(value)-1] == '\'') || (value[0] == '"' && value[len(value)-1] == '"')) {
+		value = strings.TrimSpace(value[1 : len(value)-1])
+	}
+	return value
+}
+
+type libraryProcessingColumnInfo struct {
+	typ          string
+	notNull      int
+	defaultValue sql.NullString
+}
+
+func libraryProcessingColumnMetadata(ctx context.Context, db *sql.DB, column string) (libraryProcessingColumnInfo, error) {
+	var info libraryProcessingColumnInfo
+	query := fmt.Sprintf(`SELECT type,"notnull",dflt_value FROM pragma_table_info(%q) WHERE name=?`, "library")
+	err := withStartupBusyRetry(ctx, func() error {
+		return db.QueryRowContext(ctx, query, column).Scan(&info.typ, &info.notNull, &info.defaultValue)
+	})
+	return info, err
+}
+
+func validateLibraryProcessingColumn(column string, info libraryProcessingColumnInfo) error {
+	if !strings.EqualFold(strings.TrimSpace(info.typ), "INTEGER") || info.notNull != 1 || !info.defaultValue.Valid || normalizeSQLiteDefault(info.defaultValue.String) != "0" {
+		return fmt.Errorf("incompatible library processing column %s: type=%q notnull=%d default=%q; want INTEGER NOT NULL DEFAULT 0", column, info.typ, info.notNull, info.defaultValue.String)
+	}
+	return nil
+}
+
+type libraryProcessingMetadataFunc func(context.Context, string) (libraryProcessingColumnInfo, error)
+type libraryProcessingAlterFunc func(context.Context, string) error
+
+func ensureLibraryProcessingColumnWith(ctx context.Context, column string, metadata libraryProcessingMetadataFunc, alter libraryProcessingAlterFunc) error {
+	info, err := metadata(ctx, column)
+	if err == nil {
+		return validateLibraryProcessingColumn(column, info)
+	}
+	if err != sql.ErrNoRows {
+		return err
+	}
+
+	alterErr := alter(ctx, column)
+	if alterErr == nil {
+		return nil
+	}
+
+	// Another startup may have added the column after our initial metadata read.
+	// Accept that race only when the competing DDL satisfies the canonical contract.
+	info, recheckErr := metadata(ctx, column)
+	if recheckErr == nil {
+		return validateLibraryProcessingColumn(column, info)
+	}
+	if recheckErr == sql.ErrNoRows {
+		return fmt.Errorf("add library processing column %s: %w (column still absent after failure)", column, alterErr)
+	}
+	return fmt.Errorf("add library processing column %s: %w; recheck metadata: %v", column, alterErr, recheckErr)
+}
+
+func ensureLibraryProcessingColumnContext(ctx context.Context, db *sql.DB, column string) error {
+	return ensureLibraryProcessingColumnWith(
+		ctx,
+		column,
+		func(ctx context.Context, column string) (libraryProcessingColumnInfo, error) {
+			return libraryProcessingColumnMetadata(ctx, db, column)
+		},
+		func(ctx context.Context, column string) error {
+			_, err := startupExecContext(ctx, db, fmt.Sprintf("ALTER TABLE library ADD COLUMN %s INTEGER NOT NULL DEFAULT 0", column))
+			return err
+		},
+	)
+}
+
 func ensureColumnContext(ctx context.Context, db *sql.DB, table, column, definition string) error {
 	var exists int
 	query := fmt.Sprintf("SELECT COUNT(*) FROM pragma_table_info(%q) WHERE name=?", table)
@@ -824,6 +952,33 @@ func ensureColumnContext(ctx context.Context, db *sql.DB, table, column, definit
 			return nil
 		}
 	}
+	return err
+}
+
+// ensureSubtitleTaskStageColumns adds extract/recognize stage fields so split post-ingest
+// executors do not permanently poison each other through the shared status column.
+func ensureSubtitleTaskStageColumns(ctx context.Context, db *sql.DB) error {
+	for _, col := range []struct{ name, def string }{
+		{"extract_status", "TEXT NOT NULL DEFAULT 'pending'"},
+		{"recognize_status", "TEXT NOT NULL DEFAULT 'pending'"},
+		{"extract_message", "TEXT"},
+		{"recognize_message", "TEXT"},
+	} {
+		if err := ensureColumnContext(ctx, db, "subtitle_task", col.name, col.def); err != nil {
+			return err
+		}
+	}
+	// Legacy failed rows predate stage isolation: mark both stages failed so
+	// existing poison remains until an admin reset or successful stage rewrite.
+	_, err := startupExecContext(ctx, db, `
+UPDATE subtitle_task
+SET extract_status='failed',
+    recognize_status='failed',
+    extract_message=COALESCE(extract_message, message),
+    recognize_message=COALESCE(recognize_message, message)
+WHERE status='failed'
+  AND COALESCE(extract_status,'pending')='pending'
+  AND COALESCE(recognize_status,'pending')='pending'`)
 	return err
 }
 
@@ -891,6 +1046,22 @@ func OpenSQLiteContext(ctx context.Context, path string) (opened *sql.DB, return
 			}
 		}
 	}
+	for _, col := range []struct{ name, def string }{
+		{"removed_at", "TIMESTAMP"},
+		{"removed_by", "TEXT NOT NULL DEFAULT ''"},
+		{"remove_reason", "TEXT NOT NULL DEFAULT ''"},
+	} {
+		if err := ensureColumnContext(ctx, db, "post_ingest_task", col.name, col.def); err != nil {
+			if !strings.Contains(err.Error(), "no such table") {
+				_ = db.Close()
+				return nil, fmt.Errorf("migrate post_ingest_task.%s: %w", col.name, err)
+			}
+		}
+	}
+	if err := ensureEncryptAdminAuditSchema(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate media_encrypt_admin_audit: %w", err)
+	}
 	if err := withStartupBusyRetry(ctx, func() error { return migrateIngestPublication(ctx, db) }); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("ingest publication migration: %w", err)
@@ -909,6 +1080,16 @@ func OpenSQLiteContext(ctx context.Context, path string) (opened *sql.DB, return
 	_, _ = startupExecContext(ctx, db, `ALTER TABLE library ADD COLUMN image_providers TEXT DEFAULT 'tmdb,omdb,embedded,screen_grabber'`)
 	_, _ = startupExecContext(ctx, db, `ALTER TABLE library ADD COLUMN metadata_refresh_policy TEXT DEFAULT 'never'`)
 	_, _ = startupExecContext(ctx, db, `ALTER TABLE library ADD COLUMN preview_extract INTEGER DEFAULT 0`)
+	for _, column := range []string{"subtitle_extract", "atrack_extract", "subtitle_recognize", "keyframe_extract", "ai_analysis"} {
+		if err := ensureLibraryProcessingColumnContext(ctx, db, column); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("migrate library.%s: %w", column, err)
+		}
+	}
+	if err := ensureSubtitleTaskStageColumns(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate subtitle_task stages: %w", err)
+	}
 	_, _ = startupExecContext(ctx, db, `ALTER TABLE library ADD COLUMN drm_enabled INTEGER DEFAULT 0`)
 	_, _ = startupExecContext(ctx, db, `ALTER TABLE library ADD COLUMN encryption_mode TEXT DEFAULT 'drm'`)
 	_, _ = startupExecContext(ctx, db, `ALTER TABLE library ADD COLUMN cleanup_local_source_after_package INTEGER DEFAULT 0`)

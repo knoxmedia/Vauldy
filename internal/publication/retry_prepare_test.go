@@ -223,3 +223,36 @@ func TestRetryOptionalPrepareCancelsOnlyAfterCommit(t *testing.T) {
 		t.Fatalf("round=%d cancelled=%d order=%v", roundNow, cancelledRound, cancelOrder)
 	}
 }
+
+func TestRetryOptionalPrepareFinalizesBarrierPlanAndAggregate(t *testing.T) {
+	db, err := store.OpenSQLite(filepath.Join(t.TempDir(), "prepare-retry-finalize.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mediaID, runID, stepID, _, _ := seedOptionalPrepareRetry(t, db)
+	seen := 0
+	SetRetirementBarrierProbeForTest(func(id int64) {
+		if id == runID {
+			seen++
+		}
+	})
+	t.Cleanup(ClearRetirementBarrierProbeForTest)
+	if err = RetryOptionalPrepare(context.Background(), db, OptionalPrepareRetryRequest{MediaID: mediaID, StepID: stepID, ActorID: 13, Reason: "finalizer consistency"}, NewCapabilityMatrix([]string{"prepare"})); err != nil {
+		t.Fatal(err)
+	}
+	if seen != 1 {
+		t.Fatalf("retirement barrier calls=%d", seen)
+	}
+	var all, waiting int
+	var pub, runState string
+	if err = db.QueryRow(`SELECT all_terminal,waiting_count FROM media_plan_completion WHERE run_id=?`, runID).Scan(&all, &waiting); err != nil {
+		t.Fatalf("plan completion missing: %v", err)
+	}
+	if err = db.QueryRow(`SELECT r.status,m.publication_state FROM media_ingest_run r JOIN media m ON m.id=r.media_id WHERE r.id=?`, runID).Scan(&runState, &pub); err != nil {
+		t.Fatal(err)
+	}
+	if all != 0 || waiting != 1 || runState != "published" || pub != "published" {
+		t.Fatalf("plan all=%d waiting=%d run=%s media=%s", all, waiting, runState, pub)
+	}
+}

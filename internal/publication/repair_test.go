@@ -75,7 +75,7 @@ func TestRepairLegacyMediaCreatesGenerationForMissingPoster(t *testing.T) {
 	_ = db.QueryRow(`SELECT COUNT(*) FROM media_ingest_step WHERE media_id=?`, mediaID).Scan(&steps)
 	_ = db.QueryRow(`SELECT COUNT(*) FROM post_ingest_task WHERE media_id=? AND generation=1`, mediaID).Scan(&post)
 	_ = db.QueryRow(`SELECT COUNT(*) FROM scrape_task WHERE media_id=? AND generation=1`, mediaID).Scan(&scrape)
-	if steps != 2 || post != 1 || scrape != 1 {
+	if steps != 3 || post != 1 || scrape != 1 {
 		t.Fatalf("steps=%d post=%d scrape=%d", steps, post, scrape)
 	}
 }
@@ -512,7 +512,7 @@ func TestRepairLegacyMediaConcurrentCallsCreateOneGeneration(t *testing.T) {
 	_ = db1.QueryRow(`SELECT COUNT(*) FROM media_ingest_step WHERE media_id=?`, mediaID).Scan(&steps)
 	_ = db1.QueryRow(`SELECT COUNT(*) FROM post_ingest_task WHERE media_id=?`, mediaID).Scan(&post)
 	_ = db1.QueryRow(`SELECT COUNT(*) FROM scrape_task WHERE media_id=? AND ingest_run_id IS NOT NULL`, mediaID).Scan(&scrape)
-	if generation != 1 || runs != 1 || current != 1 || steps != 2 || post != 1 || scrape != 1 {
+	if generation != 1 || runs != 1 || current != 1 || steps != 3 || post != 1 || scrape != 1 {
 		t.Fatalf("generation=%d runs=%d current=%d steps=%d post=%d scrape=%d", generation, runs, current, steps, post, scrape)
 	}
 }

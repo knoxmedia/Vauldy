@@ -79,7 +79,13 @@ func RecoverExpiredPrepareParents(ctx context.Context, db *sql.DB, limit int) (i
 				return err
 			}
 			if superseded == 1 {
-				if err = publication.AggregateTx(ctx, tx, runID); err != nil {
+				// Cancelled terminal can affect dependency skips and aggregate.
+				if err = publication.FinalizeNodeTransitionTx(ctx, tx, runID); err != nil {
+					return err
+				}
+			} else {
+				// Non-superseded running→waiting must keep waiting/running projection accurate.
+				if err = publication.RecomputePlanCompletionTx(ctx, tx, runID); err != nil {
 					return err
 				}
 			}

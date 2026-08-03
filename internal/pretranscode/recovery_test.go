@@ -22,7 +22,14 @@ func TestRecoverExpiredPrepareParentsResetsCurrentAndCancelsSuperseded(t *testin
 	if ts != "waiting" || ss != "waiting" || js != "waiting" {
 		t.Fatalf("states=%s/%s/%s", ts, ss, js)
 	}
-	_, _ = db.Exec(`UPDATE transcode_task SET status='running',lease_owner='old',lease_until=datetime(CURRENT_TIMESTAMP,'-1 second') WHERE id=?;UPDATE media_ingest_step SET status='running',lease_owner='old',lease_until=datetime(CURRENT_TIMESTAMP,'-1 second') WHERE id=?;UPDATE pretranscode_rendition_job SET status='running' WHERE task_id=?;UPDATE media_ingest_run SET superseded_at=CURRENT_TIMESTAMP WHERE id=?`, task, step, task, run)
+	var waiting, running int
+	if err := db.QueryRow(`SELECT waiting_count,running_count FROM media_plan_completion WHERE run_id=?`, run).Scan(&waiting, &running); err != nil {
+		t.Fatalf("plan completion missing after current-gen recover: %v", err)
+	}
+	if waiting != 1 || running != 0 {
+		t.Fatalf("plan counts waiting=%d running=%d", waiting, running)
+	}
+	_, _ = db.Exec(`UPDATE transcode_task SET status='running',lease_owner='old',lease_until=datetime(CURRENT_TIMESTAMP,'-1 second') WHERE id=?; UPDATE media_ingest_step SET status='running',lease_owner='old',lease_until=datetime(CURRENT_TIMESTAMP,'-1 second') WHERE id=?; UPDATE pretranscode_rendition_job SET status='running' WHERE task_id=?; UPDATE media_ingest_run SET superseded_at=CURRENT_TIMESTAMP WHERE id=?`, task, step, task, run)
 	n, err = RecoverExpiredPrepareParents(context.Background(), db, 10)
 	if err != nil || n != 1 {
 		t.Fatalf("stale recover=%d/%v", n, err)
@@ -50,7 +57,7 @@ func TestRecoverExpiredPrepareParentsLeavesUnexpired(t *testing.T) {
 func TestRecoverExpiredPrepareParentsRejectsGenerationMismatchWithoutSupersession(t *testing.T) {
 	db := newTestDB(t)
 	task, _, step, media := seedLinkedPrepareTerminal(t, db, 1)
-	_, _ = db.Exec(`UPDATE transcode_task SET lease_until=datetime('now','-1 second') WHERE id=?;UPDATE media SET ingest_generation=2 WHERE id=?`, task, media)
+	_, _ = db.Exec(`UPDATE transcode_task SET lease_until=datetime('now','-1 second') WHERE id=?; UPDATE media SET ingest_generation=2 WHERE id=?`, task, media)
 	if _, err := RecoverExpiredPrepareParents(context.Background(), db, 10); err == nil {
 		t.Fatal("expected diagnostic")
 	}
@@ -63,7 +70,7 @@ func TestRecoverExpiredPrepareParentsRejectsGenerationMismatchWithoutSupersessio
 func TestRecoverExpiredSupersededPrepareAggregatesNoOp(t *testing.T) {
 	db := newTestDB(t)
 	task, run, step, _ := seedLinkedPrepareTerminal(t, db, 1)
-	_, _ = db.Exec(`UPDATE transcode_task SET lease_until=datetime('now','-1 second') WHERE id=?;UPDATE media_ingest_run SET status='cancelled',superseded_at=CURRENT_TIMESTAMP WHERE id=?`, task, run)
+	_, _ = db.Exec(`UPDATE transcode_task SET lease_until=datetime('now','-1 second') WHERE id=?; UPDATE media_ingest_run SET status='cancelled',superseded_at=CURRENT_TIMESTAMP WHERE id=?`, task, run)
 	if n, err := RecoverExpiredPrepareParents(context.Background(), db, 10); err != nil || n != 1 {
 		t.Fatalf("%d/%v", n, err)
 	}

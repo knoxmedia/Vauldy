@@ -26,7 +26,7 @@ func TestLinkedClaimEligibilitySQLDependencyMatrix(t *testing.T) {
 INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state) VALUES(10,1,'f','video',1,'processing');
 INSERT INTO media_ingest_run(id,media_id,generation,reason,status,preserve_visibility,config_snapshot_json,policy_version) VALUES(20,10,1,'scan','processing',0,'{}',2);
 INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(30,20,10,1,'poster',1,'waiting'),(31,20,10,1,'encrypt',1,'waiting'),(32,20,10,1,'preview',0,'waiting');
-INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(31,30,'step_done'),(32,NULL,'media_visible');
+INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(33,20,10,1,'media_visible',0,'done'); INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(31,30,'success'),(32,33,'success');
 INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(40,10,20,31,1,'encrypt','waiting'),(41,10,20,32,1,'preview','waiting')`)
 	if err != nil {
 		t.Fatal(err)
@@ -43,15 +43,15 @@ INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation
 		t.Fatal("encrypt eligible before dependency done")
 	}
 	db.Exec(`UPDATE media_ingest_step SET status='skipped' WHERE id=30`)
-	if !eligible(40) {
-		t.Fatal("skipped dependency should satisfy step_done")
+	if eligible(40) {
+		t.Fatal("skipped dependency must not satisfy success")
 	}
 	if eligible(41) {
-		t.Fatal("media_visible eligible while hidden")
+		t.Fatal("optional work remains blocked until publication is visible")
 	}
 	db.Exec(`UPDATE media SET publication_state='published',published_at=CURRENT_TIMESTAMP WHERE id=10; UPDATE media_ingest_run SET status='published' WHERE id=20; UPDATE media_ingest_step SET status='done' WHERE id IN (30,31)`)
 	if !eligible(41) {
-		t.Fatal("published media should satisfy media_visible")
+		t.Fatal("published media should preserve visibility eligibility")
 	}
 	db.Exec(`UPDATE media SET publication_state='degraded' WHERE id=10; UPDATE media_ingest_run SET status='degraded' WHERE id=20`)
 	if !eligible(41) {
@@ -69,7 +69,7 @@ func TestLinkedClaimEligibilitySQLFailsClosedForStaleAndMalformedIdentity(t *tes
 INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state) VALUES(10,1,'f','video',2,'processing');
 INSERT INTO media_ingest_run(id,media_id,generation,reason,status,preserve_visibility,config_snapshot_json,policy_version) VALUES(20,10,1,'scan','processing',0,'{}',2),(21,10,2,'scan','processing',0,'{}',2);
 INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(30,20,10,1,'poster',1,'done'),(31,21,10,2,'encrypt',1,'waiting');
-INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(31,30,'step_done');
+INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(31,30,'success');
 INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(40,10,20,30,1,'poster','waiting'),(41,10,21,31,2,'encrypt','waiting')`)
 	if err != nil {
 		t.Fatal(err)
@@ -102,7 +102,7 @@ func TestPostingestClaimReturnsPublicationIdentity(t *testing.T) {
 
 func TestRequiredFirstAcrossPostIngestScrapePrepareRace(t *testing.T) {
 	db := openEligibilityDB(t)
-	_, err := db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l'); INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state,published_at) VALUES(10,1,'f','video',1,'published',CURRENT_TIMESTAMP); INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(20,10,1,'repair','processing','{}',2); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status,created_at) VALUES(30,20,10,1,'poster',1,'waiting','2020-01-01'),(31,20,10,1,'scrape',0,'waiting','2020-01-02'),(32,20,10,1,'prepare',0,'waiting','2020-01-03'); INSERT INTO media_ingest_step_dependency(step_id,dependency_kind) VALUES(31,'media_visible'),(32,'media_visible'); INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(40,10,20,30,1,'poster','waiting'); INSERT INTO scrape_task(id,media_id,status,ingest_run_id,ingest_step_id,generation) VALUES(41,10,'waiting',20,31,1); INSERT INTO transcode_task(id,file_id,media_id,status,task_type,ingest_run_id,ingest_step_id,generation) VALUES(42,'f',10,'waiting','pretranscode',20,32,1)`)
+	_, err := db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l'); INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state,published_at) VALUES(10,1,'f','video',1,'published',CURRENT_TIMESTAMP); INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(20,10,1,'repair','processing','{}',2); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status,created_at) VALUES(30,20,10,1,'poster',1,'waiting','2020-01-01'),(31,20,10,1,'scrape',0,'waiting','2020-01-02'),(32,20,10,1,'prepare',0,'waiting','2020-01-03'),(33,20,10,1,'media_visible',0,'done','2020-01-01'); INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(31,33,'success'),(32,33,'success'); INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(40,10,20,30,1,'poster','waiting'); INSERT INTO scrape_task(id,media_id,status,ingest_run_id,ingest_step_id,generation) VALUES(41,10,'waiting',20,31,1); INSERT INTO transcode_task(id,file_id,media_id,status,task_type,ingest_run_id,ingest_step_id,generation) VALUES(42,'f',10,'waiting','pretranscode',20,32,1)`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +159,7 @@ INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation
 
 func TestPrepareClaimsParentOnceBeforeRenditions(t *testing.T) {
 	db := openEligibilityDB(t)
-	_, err := db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l'); INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state,published_at) VALUES(10,1,'f','video',1,'published',CURRENT_TIMESTAMP); INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(20,10,1,'repair','published','{}',2); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(30,20,10,1,'prepare',0,'waiting'); INSERT INTO media_ingest_step_dependency(step_id,dependency_kind) VALUES(30,'media_visible'); INSERT INTO transcode_task(id,file_id,media_id,status,task_type,ingest_run_id,ingest_step_id,generation) VALUES(40,'f',10,'waiting','pretranscode',20,30,1)`)
+	_, err := db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l'); INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state,published_at) VALUES(10,1,'f','video',1,'published',CURRENT_TIMESTAMP); INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(20,10,1,'repair','published','{}',2); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(30,20,10,1,'prepare',0,'waiting'),(31,20,10,1,'media_visible',0,'done'); INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(30,31,'success'); INSERT INTO transcode_task(id,file_id,media_id,status,task_type,ingest_run_id,ingest_step_id,generation) VALUES(40,'f',10,'waiting','pretranscode',20,30,1)`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -366,7 +366,7 @@ func TestClaimEligibilityStatusDependencyMatrixAllFamilies(t *testing.T) {
 		{"optional published independent", "published", "published", true, false, "media_visible", "", true}, {"optional degraded independent", "degraded", "degraded", true, false, "media_visible", "", true},
 		{"optional processing preserve visibility", "processing", "published", true, false, "media_visible", "", true}, {"optional processing degraded visibility", "processing", "degraded", true, false, "media_visible", "", true}, {"optional processing not yet visible", "processing", "processing", false, false, "media_visible", "", false},
 		{"optional failed", "failed", "published", true, false, "media_visible", "", false}, {"optional cancelled", "cancelled", "published", true, false, "media_visible", "", false},
-		{"optional degraded explicit failed dep", "degraded", "degraded", true, false, "step_done", "failed", false}, {"optional degraded explicit done dep", "degraded", "degraded", true, false, "step_done", "done", true},
+		{"optional degraded explicit failed dep", "degraded", "degraded", true, false, "success", "failed", false}, {"optional degraded explicit done dep", "degraded", "degraded", true, false, "success", "done", true},
 	}
 	for _, family := range []QueueFamily{QueuePostIngest, QueueScrape, QueuePrepare} {
 		for _, tc := range cases {
@@ -388,9 +388,9 @@ func TestClaimEligibilityStatusDependencyMatrixAllFamilies(t *testing.T) {
 					return tc.depStatus
 				}(), typ, required)
 				if tc.depKind == "media_visible" {
-					q += `INSERT INTO media_ingest_step_dependency(step_id,dependency_kind) VALUES(30,'media_visible');`
-				} else if tc.depKind == "step_done" {
-					q += `INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(30,29,'step_done');`
+					q += `INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(31,20,10,1,'media_visible',0,'done'); INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(30,31,'success');`
+				} else if tc.depKind == "success" {
+					q += `INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(30,29,'success');`
 				}
 				switch family {
 				case QueuePostIngest:
