@@ -25,6 +25,7 @@ type Config struct {
 	DRMPackaging  DRMPackagingConfig       `yaml:"drm_packaging"`
 	DRM           DRMConfig                `yaml:"drm"`
 	PostIngest    PostIngestConfig         `yaml:"post_ingest"`
+	Ingest        IngestConfig             `yaml:"ingest"`
 	Scan          ScanConfig               `yaml:"scan"`
 	Subtitle      SubtitleProcessingConfig `yaml:"subtitle"`
 	ATrack        ATrackConfig             `yaml:"atrack"`
@@ -265,6 +266,52 @@ func (c *Config) normalizePostIngest() {
 		c.PostIngest.SubtitleTimeoutRealtimeFactor = 2.0
 	}
 }
+
+// compiledIngestDefaultMaxConcurrent is the compiled default for ingest.max_concurrent.
+const compiledIngestDefaultMaxConcurrent = 3
+
+// IngestConfig controls the ingest worker concurrency and internal lease timing.
+type IngestConfig struct {
+	// MaxConcurrent bounds simultaneous hash/probe/publication workers. Default 3; valid [1,32].
+	MaxConcurrent int `yaml:"max_concurrent"`
+	maxConcurrentSet bool
+}
+
+// UnmarshalYAML tracks whether max_concurrent was explicitly set in YAML.
+func (c *IngestConfig) UnmarshalYAML(node *yaml.Node) error {
+	type plain IngestConfig
+	var decoded plain
+	if err := node.Decode(&decoded); err != nil {
+		return err
+	}
+	*c = IngestConfig(decoded)
+	if node.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			if node.Content[i].Value == "max_concurrent" {
+				c.maxConcurrentSet = true
+			}
+		}
+	}
+	return nil
+}
+
+func (c IngestConfig) Validate() error {
+	if c.MaxConcurrent < 1 || c.MaxConcurrent > 32 {
+		return fmt.Errorf("Ingest.MaxConcurrent must be in [1,32]")
+	}
+	return nil
+}
+
+func (c *Config) normalizeIngest() {
+	if c.Ingest.MaxConcurrent == 0 && !c.Ingest.maxConcurrentSet {
+		c.Ingest.MaxConcurrent = compiledIngestDefaultMaxConcurrent
+	}
+}
+
+func defaultIngestLeaseSeconds() int       { return 120 }
+func defaultIngestHeartbeatSeconds() int    { return 30 }
+func defaultIngestStabilitySeconds() int    { return 5 }
+func defaultIngestReconciliationSeconds() int { return 60 }
 
 type ServerConfig struct {
 	Host string `yaml:"host"`
@@ -636,6 +683,10 @@ func Load(path string) (*Config, error) {
 	}
 	c.normalizePostIngest()
 	if err := c.PostIngest.Validate(); err != nil {
+		return nil, fmt.Errorf("validate config: %w", err)
+	}
+	c.normalizeIngest()
+	if err := c.Ingest.Validate(); err != nil {
 		return nil, fmt.Errorf("validate config: %w", err)
 	}
 	c.normalizeDRMPackaging()

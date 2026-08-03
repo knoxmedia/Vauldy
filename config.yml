@@ -80,6 +80,11 @@ encrypted_assets:
 #   preview_max_concurrent: 1
 #   subtitle_max_concurrent: 1
 #   subtitle_timeout_realtime_factor: 2.0
+# Ingest worker concurrency; independent of post_ingest.max_concurrent.
+# Default 3; valid range [1,32]. Omit to use compiled default.
+
+# ingest:
+#   max_concurrent: 3
 scan:
   file_hash_on_scan: false
   fast_ffprobe: true

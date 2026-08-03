@@ -987,3 +987,138 @@ func TestConfigSnapshotJSONDeterministicAcrossEquivalentStrategyMaps(t *testing.
 		t.Fatalf("snapshot bytes differ:\n%s\n%s", a, b)
 	}
 }
+
+func seedIngestItem(t *testing.T, db *sql.DB, libraryID int64, submissionKey, canonicalPath string) int64 {
+	t.Helper()
+	res, err := db.Exec(`INSERT INTO ingest_item(submission_key,source,library_id,canonical_path,path_key,state) VALUES(?,'upload',?,?,'path_key_'||?,'done')`, submissionKey, libraryID, canonicalPath, submissionKey)
+	if err != nil {
+		t.Fatalf("insert ingest_item: %v", err)
+	}
+	id, _ := res.LastInsertId()
+	return id
+}
+
+func TestPlannerEventOriginProducesSameTopologyAsScan(t *testing.T) {
+	db := openPlannerTestDB(t)
+	_, mediaID, scanID := seedPlannerMedia(t, db, "video", 0, 0, 0)
+	itemID := seedIngestItem(t, db, 1, "evt-topo", "/evt")
+	p := NewPlanner(PlanOptions{})
+	scanRun := planAndCommit(t, db, p, NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
+	eventRun := planAndCommit(t, db, p, NewMedia{MediaID: mediaID, IngestItemID: itemID, FileType: "video"})
+	scanSnap := loadPlannerSnapshot(t, db, scanRun.ID)
+	eventSnap := loadPlannerSnapshot(t, db, eventRun.ID)
+	if !reflect.DeepEqual(scanSnap.RequiredSteps, eventSnap.RequiredSteps) || !reflect.DeepEqual(scanSnap.OptionalSteps, eventSnap.OptionalSteps) {
+		t.Fatalf("topology differs:\nscan  required=%v optional=%v\nevent required=%v optional=%v", scanSnap.RequiredSteps, scanSnap.OptionalSteps, eventSnap.RequiredSteps, eventSnap.OptionalSteps)
+	}
+	// Compare graph structure (node steps and edge relationships), ignoring generation numbers.
+	if len(scanSnap.Graph.Nodes) != len(eventSnap.Graph.Nodes) || len(scanSnap.Graph.Edges) != len(eventSnap.Graph.Edges) {
+		t.Fatalf("graph size differs: scan nodes=%d edges=%d event nodes=%d edges=%d", len(scanSnap.Graph.Nodes), len(scanSnap.Graph.Edges), len(eventSnap.Graph.Nodes), len(eventSnap.Graph.Edges))
+	}
+	for i, node := range scanSnap.Graph.Nodes {
+		if node.Step != eventSnap.Graph.Nodes[i].Step || node.Required != eventSnap.Graph.Nodes[i].Required {
+			t.Fatalf("node %d differs: scan=%+v event=%+v", i, node, eventSnap.Graph.Nodes[i])
+		}
+	}
+	for i, edge := range scanSnap.Graph.Edges {
+		other := eventSnap.Graph.Edges[i]
+		if edge.Step != other.Step || edge.Kind != other.Kind || (edge.DependsOn == nil) != (other.DependsOn == nil) {
+			t.Fatalf("edge %d differs: scan=%+v event=%+v", i, edge, other)
+		}
+		if edge.DependsOn != nil && other.DependsOn != nil && *edge.DependsOn != *other.DependsOn {
+			t.Fatalf("edge %d target differs: scan=%s event=%s", i, *edge.DependsOn, *other.DependsOn)
+		}
+	}
+	if scanRun.Generation == eventRun.Generation {
+		t.Fatalf("generations should differ: scan=%d event=%d", scanRun.Generation, eventRun.Generation)
+	}
+}
+
+func TestPlannerUploadOriginPersistsIngestItemLinkage(t *testing.T) {
+	db := openPlannerTestDB(t)
+	libraryID, mediaID, _ := seedPlannerMedia(t, db, "video", 0, 0, 0)
+	itemID := seedIngestItem(t, db, libraryID, "upload-link", "/up")
+	p := NewPlanner(PlanOptions{})
+	run := planAndCommit(t, db, p, NewMedia{MediaID: mediaID, IngestItemID: itemID, FileType: "video"})
+	var linkedItemID sql.NullInt64
+	var reason string
+	if err := db.QueryRow(`SELECT ingest_item_id,reason FROM media_ingest_run WHERE id=?`, run.ID).Scan(&linkedItemID, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if !linkedItemID.Valid || linkedItemID.Int64 != itemID {
+		t.Fatalf("ingest_item_id=%v want %d", linkedItemID, itemID)
+	}
+	if reason != string(PlanReasonUpload) {
+		t.Fatalf("reason=%q want %q", reason, PlanReasonUpload)
+	}
+}
+
+func TestPlannerSourceReplacementReasonValidates(t *testing.T) {
+	db := openPlannerTestDB(t)
+	_, mediaID, scanID := seedPlannerMedia(t, db, "video", 0, 0, 0)
+	first := planAndCommit(t, db, NewPlanner(PlanOptions{}), NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
+	result := planReplacementAndCommit(t, db, NewPlanner(PlanOptions{}), mediaID, ReplacementOptions{Reason: PlanReasonSourceReplaced, ExpectedGeneration: first.Generation})
+	var reason string
+	if err := db.QueryRow(`SELECT reason FROM media_ingest_run WHERE id=?`, result.Run.ID).Scan(&reason); err != nil {
+		t.Fatal(err)
+	}
+	if reason != string(PlanReasonSourceReplaced) {
+		t.Fatalf("reason=%q want %q", reason, PlanReasonSourceReplaced)
+	}
+}
+
+func TestPlannerScanOriginRequiresScanTaskID(t *testing.T) {
+	db := openPlannerTestDB(t)
+	_, mediaID, _ := seedPlannerMedia(t, db, "video", 0, 0, 0)
+	tx, _ := db.BeginTx(context.Background(), nil)
+	defer tx.Rollback()
+	_, err := NewPlanner(PlanOptions{}).PlanNewMediaTx(context.Background(), tx, NewMedia{MediaID: mediaID, FileType: "video"})
+	if err == nil {
+		t.Fatal("expected scan origin to require scan task id")
+	}
+}
+
+func TestPlannerEventOriginRejectsZeroIngestItemID(t *testing.T) {
+	db := openPlannerTestDB(t)
+	_, mediaID, _ := seedPlannerMedia(t, db, "video", 0, 0, 0)
+	tx, _ := db.BeginTx(context.Background(), nil)
+	defer tx.Rollback()
+	_, err := NewPlanner(PlanOptions{}).PlanNewMediaTx(context.Background(), tx, NewMedia{MediaID: mediaID, FileType: "video"})
+	if err == nil {
+		t.Fatal("expected event origin to require valid ingest item id or scan task id")
+	}
+}
+
+func TestPlannerReplacementSourceReplacedSupersedesOldGeneration(t *testing.T) {
+	db := openPlannerTestDB(t)
+	_, mediaID, scanID := seedPlannerMedia(t, db, "video", 0, 0, 0)
+	old := planAndCommit(t, db, NewPlanner(PlanOptions{}), NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
+	result := planReplacementAndCommit(t, db, NewPlanner(PlanOptions{}), mediaID, ReplacementOptions{Reason: PlanReasonSourceReplaced, ExpectedGeneration: old.Generation})
+	if result.OldGeneration != old.Generation || result.NewGeneration != old.Generation+1 {
+		t.Fatalf("generations old=%d new=%d want old=%d new=%d", result.OldGeneration, result.NewGeneration, old.Generation, old.Generation+1)
+	}
+	var supersededBy sql.NullInt64
+	if err := db.QueryRow(`SELECT superseded_by_generation FROM media_ingest_run WHERE id=?`, old.ID).Scan(&supersededBy); err != nil {
+		t.Fatal(err)
+	}
+	if !supersededBy.Valid || supersededBy.Int64 != result.NewGeneration {
+		t.Fatalf("superseded=%v want %d", supersededBy, result.NewGeneration)
+	}
+}
+
+func TestReconcileStartupValidatesIngestRunLinkage(t *testing.T) {
+	db := openPlannerTestDB(t)
+	libraryID, mediaID, scanID := seedPlannerMedia(t, db, "video", 0, 0, 0)
+	itemID := seedIngestItem(t, db, libraryID, "reconcile-link", "/reconcile")
+	run := planAndCommit(t, db, NewPlanner(PlanOptions{}), NewMedia{MediaID: mediaID, IngestItemID: itemID, ScanTaskID: scanID, FileType: "video"})
+	var linkedItemID sql.NullInt64
+	if err := db.QueryRow(`SELECT ingest_item_id FROM media_ingest_run WHERE id=?`, run.ID).Scan(&linkedItemID); err != nil {
+		t.Fatal(err)
+	}
+	if !linkedItemID.Valid || linkedItemID.Int64 != itemID {
+		t.Fatalf("linked ingest_item_id=%v want %d", linkedItemID, itemID)
+	}
+	// ValidateAggregateCurrentPolicy should still pass with the linkage in place.
+	if err := ValidateAggregateCurrentPolicy(context.Background(), db); err != nil {
+		t.Fatalf("validate with linkage: %v", err)
+	}
+}
