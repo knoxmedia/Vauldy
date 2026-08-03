@@ -386,9 +386,9 @@ func NewRegistry() *Registry {
 		Selectable: false,
 		Types: []TaskSpec{
 			{
-				Type:  "lyric",
+				Type:  "lyric_recognize",
 				Group: "tasks.group.audio",
-				Route: "tasks/audio/lyric",
+				Route: "tasks/audio/lyric_recognize",
 				Family: "audio_processing",
 				SourceMappings: []SourceMapping{
 					{Kind: "lyric_task"},
@@ -425,6 +425,48 @@ func NewRegistry() *Registry {
 				Columns:      sortedColumns(commonTaskColumns()),
 				Filters:      commonTaskFilters(),
 				Capabilities: sortedStrings([]string{"ai", "audio", "summary"}),
+				Available:    false,
+			},
+		},
+	})
+
+	// Person Scrape group
+	groups = append(groups, TaskGroup{
+		Label:      "tasks.group.person",
+		Selectable: false,
+		Types: []TaskSpec{
+			{
+				Type:  "person_scrape",
+				Group: "tasks.group.person",
+				Route: "tasks/person/person_scrape",
+				Family: "system",
+				SourceMappings: []SourceMapping{
+					{Kind: "person_scrape_task"},
+				},
+				Columns:      sortedColumns(commonTaskColumns()),
+				Filters:      commonTaskFilters(),
+				Capabilities: sortedStrings([]string{"network", "person", "scrape"}),
+				Available:    false,
+			},
+		},
+	})
+
+	// Artwork group
+	groups = append(groups, TaskGroup{
+		Label:      "tasks.group.artwork",
+		Selectable: false,
+		Types: []TaskSpec{
+			{
+				Type:  "artwork_cover",
+				Group: "tasks.group.artwork",
+				Route: "tasks/artwork/artwork_cover",
+				Family: "media_ingestion",
+				SourceMappings: []SourceMapping{
+					{Kind: "artwork_cover_task"},
+				},
+				Columns:      sortedColumns(commonTaskColumns()),
+				Filters:      commonTaskFilters(),
+				Capabilities: sortedStrings([]string{"artwork", "cover", "image"}),
 				Available:    false,
 			},
 		},

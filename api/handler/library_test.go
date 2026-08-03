@@ -76,6 +76,14 @@ type libraryProcessingOptionsJSON struct {
 	SubtitleRecognize bool `json:"subtitle_recognize"`
 	KeyframeExtract   bool `json:"keyframe_extract"`
 	AIAnalysis        bool `json:"ai_analysis"`
+	LyricRecognize    bool `json:"lyric_recognize"`
+	AudioAnalysis     bool `json:"audio_analysis"`
+	PhotoClassify     bool `json:"photo_classify"`
+	PhotoGeocode      bool `json:"photo_geocode"`
+	PhotoFace         bool `json:"photo_face"`
+	ImageOCR          bool `json:"image_ocr"`
+	DocumentConvert   bool `json:"document_convert"`
+	DocumentFulltext  bool `json:"document_fulltext"`
 }
 type libraryProcessingJSON struct {
 	Explicit   libraryProcessingOptionsJSON `json:"explicit"`
@@ -93,6 +101,14 @@ type libraryProcessingResponse struct {
 	SubtitleRecognize int                         `json:"subtitle_recognize"`
 	KeyframeExtract   int                         `json:"keyframe_extract"`
 	AIAnalysis        int                         `json:"ai_analysis"`
+	LyricRecognize    int                         `json:"lyric_recognize"`
+	AudioAnalysis     int                         `json:"audio_analysis"`
+	PhotoClassify     int                         `json:"photo_classify"`
+	PhotoGeocode      int                         `json:"photo_geocode"`
+	PhotoFace         int                         `json:"photo_face"`
+	ImageOCR          int                         `json:"image_ocr"`
+	DocumentConvert   int                         `json:"document_convert"`
+	DocumentFulltext  int                         `json:"document_fulltext"`
 	ProcessingOptions libraryProcessingJSON       `json:"processing_options"`
 	Items             []libraryProcessingResponse `json:"items"`
 }
@@ -141,7 +157,7 @@ func decodeLibraryProcessingResponse(t *testing.T, w *httptest.ResponseRecorder)
 }
 func TestLibraryProcessingSchemaColumnsAndDefaults(t *testing.T) {
 	_, db := newLibraryProcessingHandler(t)
-	for _, column := range []string{"subtitle_extract", "atrack_extract", "subtitle_recognize", "keyframe_extract", "ai_analysis"} {
+	for _, column := range []string{"subtitle_extract", "atrack_extract", "subtitle_recognize", "keyframe_extract", "ai_analysis", "lyric_recognize", "audio_analysis", "photo_classify", "photo_geocode", "photo_face", "image_ocr", "document_convert", "document_fulltext"} {
 		var typ string
 		var notNull int
 		var d sql.NullString
@@ -155,11 +171,11 @@ func TestLibraryProcessingSchemaColumnsAndDefaults(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO library(name,type,path) VALUES('defaults','movie','E:/defaults')`); err != nil {
 		t.Fatal(err)
 	}
-	var v [5]int
-	if err := db.QueryRow(`SELECT subtitle_extract,atrack_extract,subtitle_recognize,keyframe_extract,ai_analysis FROM library WHERE name='defaults'`).Scan(&v[0], &v[1], &v[2], &v[3], &v[4]); err != nil {
+	var v [13]int
+	if err := db.QueryRow(`SELECT subtitle_extract,atrack_extract,subtitle_recognize,keyframe_extract,ai_analysis,lyric_recognize,audio_analysis,photo_classify,photo_geocode,photo_face,image_ocr,document_convert,document_fulltext FROM library WHERE name='defaults'`).Scan(&v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7], &v[8], &v[9], &v[10], &v[11], &v[12]); err != nil {
 		t.Fatal(err)
 	}
-	if v != [5]int{} {
+	if v != [13]int{} {
 		t.Fatalf("defaults=%v", v)
 	}
 }
@@ -183,12 +199,12 @@ func TestLibraryProcessingMigratesExistingDatabase(t *testing.T) {
 		t.Fatalf("open legacy sqlite: %v", err)
 	}
 	defer db.Close()
-	var preview, subtitle, atrack, recognize, keyframe, ai int
-	if err := db.QueryRow(`SELECT preview_extract,subtitle_extract,atrack_extract,subtitle_recognize,keyframe_extract,ai_analysis FROM library WHERE name='legacy'`).Scan(&preview, &subtitle, &atrack, &recognize, &keyframe, &ai); err != nil {
+	var preview, subtitle, atrack, recognize, keyframe, ai, lyric, audio, classify, geocode, face, ocr, docConvert, docFulltext int
+	if err := db.QueryRow(`SELECT preview_extract,subtitle_extract,atrack_extract,subtitle_recognize,keyframe_extract,ai_analysis,COALESCE(lyric_recognize,0),COALESCE(audio_analysis,0),COALESCE(photo_classify,0),COALESCE(photo_geocode,0),COALESCE(photo_face,0),COALESCE(image_ocr,0),COALESCE(document_convert,0),COALESCE(document_fulltext,0) FROM library WHERE name='legacy'`).Scan(&preview, &subtitle, &atrack, &recognize, &keyframe, &ai, &lyric, &audio, &classify, &geocode, &face, &ocr, &docConvert, &docFulltext); err != nil {
 		t.Fatal(err)
 	}
-	if preview != 1 || subtitle != 0 || atrack != 0 || recognize != 0 || keyframe != 0 || ai != 0 {
-		t.Fatalf("migrated values=%d,%d,%d,%d,%d,%d", preview, subtitle, atrack, recognize, keyframe, ai)
+	if preview != 1 || subtitle != 0 || atrack != 0 || recognize != 0 || keyframe != 0 || ai != 0 || lyric != 0 || audio != 0 || classify != 0 || geocode != 0 || face != 0 || ocr != 0 || docConvert != 0 || docFulltext != 0 {
+		t.Fatalf("migrated values=%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d", preview, subtitle, atrack, recognize, keyframe, ai, lyric, audio, classify, geocode, face, ocr, docConvert, docFulltext)
 	}
 }
 
@@ -367,10 +383,12 @@ func TestCreateLibraryProcessingNonVideoKeepsExplicitAndDisablesEffective(t *tes
 	if !got.Explicit.AIAnalysis || !got.Explicit.Preview {
 		t.Fatalf("explicit=%+v", got.Explicit)
 	}
-	if got.Effective != (libraryProcessingOptionsJSON{}) {
+	// Phase 5: music (audio) media type applies audio closure: AI → lyric_recognize.
+	expectedEffective := libraryProcessingOptionsJSON{AIAnalysis: true, Preview: true, LyricRecognize: true}
+	if got.Effective != expectedEffective {
 		t.Fatalf("effective=%+v", got.Effective)
 	}
-	if !reflect.DeepEqual(got.Provenance.Explicit, []string{"ai_analysis", "preview"}) || len(got.Provenance.DependencyAdded) != 0 {
+	if !reflect.DeepEqual(got.Provenance.Explicit, []string{"ai_analysis", "preview"}) || !reflect.DeepEqual(got.Provenance.DependencyAdded, []string{"lyric_recognize"}) {
 		t.Fatalf("provenance=%+v", got.Provenance)
 	}
 }

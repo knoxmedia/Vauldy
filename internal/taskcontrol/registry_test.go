@@ -93,6 +93,8 @@ func TestRegistryPhase5TypesVisibleUnavailable(t *testing.T) {
 		"image_ocr":          false,
 		"document_convert":   false,
 		"document_fulltext":  false,
+		"person_scrape":      false,
+		"artwork_cover":      false,
 	}
 	found := map[string]bool{}
 	for _, g := range r.Groups {
@@ -255,10 +257,17 @@ func TestRegistrySourceMappingsCoversPhase1To3Names(t *testing.T) {
 		"photo_classify":      {"photo_classify_task:"},
 		"photo_geocode":       {"photo_geocode_task:"},
 		"photo_face":          {"photo_face_task:"},
-		"lyric":               {"lyric_task:"},
+		"lyric_recognize":     {"lyric_task:"},
 		"subtitle":            {"subtitle_task:"},
 		"scheduled":           {"scheduled_task:"},
 		"media_visible":       {"post_ingest_task:media_visible"},
+		"audio_analysis":      {"audio_analysis_task:"},
+		"audio_ai_analysis":   {"audio_ai_analysis_task:"},
+		"image_ocr":           {"image_ocr_task:"},
+		"document_convert":    {"document_convert_task:"},
+		"document_fulltext":   {"document_fulltext_task:"},
+		"person_scrape":       {"person_scrape_task:"},
+		"artwork_cover":       {"artwork_cover_task:"},
 	}
 
 	for typ, expected := range requiredMappings {
@@ -273,6 +282,47 @@ func TestRegistrySourceMappingsCoversPhase1To3Names(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestRegistryPhase5TypeEnumeration(t *testing.T) {
+	r := NewRegistry()
+	phase5Types := []string{
+		"lyric_recognize", "audio_analysis",
+		"photo_classify", "photo_geocode", "photo_face", "image_ocr",
+		"document_convert", "document_fulltext",
+		"ai_analysis", "person_scrape", "artwork_cover",
+	}
+	for _, typ := range phase5Types {
+		spec := findSpec(t, r, typ)
+		if spec.Type != typ {
+			t.Errorf("spec type %q != expected %q", spec.Type, typ)
+		}
+		if spec.Route == "" {
+			t.Errorf("type %q has empty route", typ)
+		}
+		if spec.Family == "" {
+			t.Errorf("type %q has empty family", typ)
+		}
+		if len(spec.SourceMappings) == 0 {
+			t.Errorf("type %q has no source mappings", typ)
+		}
+		if len(spec.Columns) == 0 {
+			t.Errorf("type %q has no columns", typ)
+		}
+		if len(spec.Capabilities) == 0 {
+			t.Errorf("type %q has no capabilities", typ)
+		}
+	}
+}
+
+func TestRegistryAIOnlyPermitsMultipleCapabilitySubtasks(t *testing.T) {
+	r := NewRegistry()
+	aiSpec := findSpec(t, r, "ai_analysis")
+	if aiSpec.Type != "ai_analysis" {
+		t.Fatalf("expected ai_analysis, got %q", aiSpec.Type)
+	}
+	// ai_analysis is the only type that supports multiple capability subtasks
+	// (summary, classification, tags) which is validated by Phase5Subtasks() in taskalign
 }
 
 func findSpec(t *testing.T, r *Registry, typeName string) TaskSpec {

@@ -10,6 +10,17 @@ const (
 	OptionSubtitleRecognize = "subtitle_recognize"
 	OptionKeyframeExtract   = "keyframe_extract"
 	OptionAIAnalysis        = "ai_analysis"
+	// Phase 5 audio options
+	OptionLyricRecognize = "lyric_recognize"
+	OptionAudioAnalysis  = "audio_analysis"
+	// Phase 5 image options
+	OptionPhotoClassify = "photo_classify"
+	OptionPhotoGeocode  = "photo_geocode"
+	OptionPhotoFace     = "photo_face"
+	OptionImageOCR      = "image_ocr"
+	// Phase 5 document options
+	OptionDocumentConvert  = "document_convert"
+	OptionDocumentFulltext = "document_fulltext"
 )
 
 const (
@@ -19,11 +30,28 @@ const (
 	optionSubtitleRecognize = OptionSubtitleRecognize
 	optionKeyframeExtract   = OptionKeyframeExtract
 	optionAIAnalysis        = OptionAIAnalysis
+	// Phase 5 audio
+	optionLyricRecognize = OptionLyricRecognize
+	optionAudioAnalysis  = OptionAudioAnalysis
+	// Phase 5 image
+	optionPhotoClassify = OptionPhotoClassify
+	optionPhotoGeocode  = OptionPhotoGeocode
+	optionPhotoFace     = OptionPhotoFace
+	optionImageOCR      = OptionImageOCR
+	// Phase 5 document
+	optionDocumentConvert  = OptionDocumentConvert
+	optionDocumentFulltext = OptionDocumentFulltext
 )
 
 type Options struct {
 	Preview, SubtitleExtract, ATrackExtract        bool
 	SubtitleRecognize, KeyframeExtract, AIAnalysis bool
+	// Phase 5 audio
+	LyricRecognize, AudioAnalysis bool
+	// Phase 5 image
+	PhotoClassify, PhotoGeocode, PhotoFace, ImageOCR bool
+	// Phase 5 document
+	DocumentConvert, DocumentFulltext bool
 }
 
 type Provenance struct {
@@ -31,14 +59,68 @@ type Provenance struct {
 	DependencyAdded []string `json:"dependency_added"`
 }
 
-func Close(explicit Options) (effective Options, provenance Provenance) {
-	effective = explicit
-	if effective.AIAnalysis {
-		effective.SubtitleRecognize = true
+// allOptionNames returns every known option identifier in stable order.
+func allOptionNames() []string {
+	return []string{
+		optionPreview,
+		optionSubtitleExtract,
+		optionATrackExtract,
+		optionSubtitleRecognize,
+		optionKeyframeExtract,
+		optionAIAnalysis,
+		// Phase 5 audio
+		optionLyricRecognize,
+		optionAudioAnalysis,
+		// Phase 5 image
+		optionPhotoClassify,
+		optionPhotoGeocode,
+		optionPhotoFace,
+		optionImageOCR,
+		// Phase 5 document
+		optionDocumentConvert,
+		optionDocumentFulltext,
 	}
-	if effective.SubtitleRecognize {
-		effective.SubtitleExtract = true
-		effective.ATrackExtract = true
+}
+
+func Close(typ string, explicit Options) (effective Options, provenance Provenance) {
+	effective = explicit
+	switch typ {
+	case "movie", "tv", "video", "anime":
+		// Video dependency closure: AI → subtitle_recognize → subtitle_extract + atrack_extract
+		if effective.AIAnalysis {
+			effective.SubtitleRecognize = true
+			effective.KeyframeExtract = true
+		}
+		if effective.SubtitleRecognize {
+			effective.SubtitleExtract = true
+			effective.ATrackExtract = true
+		}
+	case "music", "audio", "podcast":
+		// Audio dependency closure: AI → lyric_recognize
+		if effective.AIAnalysis {
+			effective.LyricRecognize = true
+		}
+	case "photo", "image", "picture":
+		// Image dependency closure: AI → photo_classify, photo_geocode, photo_face
+		if effective.AIAnalysis {
+			effective.PhotoClassify = true
+			effective.PhotoGeocode = true
+			effective.PhotoFace = true
+		}
+	case "document", "book", "ebook":
+		// Document dependency closure: AI → fulltext, OCR → fulltext, convert ↔ fulltext
+		if effective.AIAnalysis {
+			effective.DocumentFulltext = true
+		}
+		if effective.ImageOCR {
+			effective.DocumentFulltext = true
+		}
+		if effective.DocumentFulltext {
+			effective.DocumentConvert = true
+		}
+		if effective.DocumentConvert {
+			effective.DocumentFulltext = true
+		}
 	}
 
 	provenance.Explicit = enabledOptionNames(explicit)
@@ -62,6 +144,30 @@ func RequiredBy(effective Options, option string) []string {
 		if effective.AIAnalysis {
 			requiredBy = append(requiredBy, optionAIAnalysis)
 		}
+	// Phase 5: cross-media guarding — only report within the same media family.
+	case optionLyricRecognize:
+		if effective.AIAnalysis {
+			requiredBy = append(requiredBy, optionAIAnalysis)
+		}
+	case optionAudioAnalysis:
+		if effective.AIAnalysis {
+			requiredBy = append(requiredBy, optionAIAnalysis)
+		}
+	case optionPhotoClassify, optionPhotoGeocode, optionPhotoFace:
+		if effective.AIAnalysis {
+			requiredBy = append(requiredBy, optionAIAnalysis)
+		}
+	case optionDocumentFulltext:
+		if effective.AIAnalysis {
+			requiredBy = append(requiredBy, optionAIAnalysis)
+		}
+		if effective.ImageOCR {
+			requiredBy = append(requiredBy, optionImageOCR)
+		}
+	case optionDocumentConvert:
+		if effective.DocumentFulltext {
+			requiredBy = append(requiredBy, optionDocumentFulltext)
+		}
 	}
 	sort.Strings(requiredBy)
 	return requiredBy
@@ -69,14 +175,7 @@ func RequiredBy(effective Options, option string) []string {
 
 func enabledOptionNames(options Options) []string {
 	var names []string
-	for _, option := range []string{
-		optionPreview,
-		optionSubtitleExtract,
-		optionATrackExtract,
-		optionSubtitleRecognize,
-		optionKeyframeExtract,
-		optionAIAnalysis,
-	} {
+	for _, option := range allOptionNames() {
 		if optionEnabled(options, option) {
 			names = append(names, option)
 		}
@@ -99,6 +198,25 @@ func optionEnabled(options Options, option string) bool {
 		return options.KeyframeExtract
 	case optionAIAnalysis:
 		return options.AIAnalysis
+	// Phase 5 audio
+	case optionLyricRecognize:
+		return options.LyricRecognize
+	case optionAudioAnalysis:
+		return options.AudioAnalysis
+	// Phase 5 image
+	case optionPhotoClassify:
+		return options.PhotoClassify
+	case optionPhotoGeocode:
+		return options.PhotoGeocode
+	case optionPhotoFace:
+		return options.PhotoFace
+	case optionImageOCR:
+		return options.ImageOCR
+	// Phase 5 document
+	case optionDocumentConvert:
+		return options.DocumentConvert
+	case optionDocumentFulltext:
+		return options.DocumentFulltext
 	default:
 		return false
 	}
