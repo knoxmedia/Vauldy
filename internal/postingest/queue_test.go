@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"knox-media/internal/publication"
+	"knox-media/internal/scheduler"
 	"knox-media/internal/store"
 	"os"
 	"path/filepath"
@@ -2376,5 +2377,78 @@ func TestQueue_FailureShutdownUsesLightLinkedSync(t *testing.T) {
 	}
 	if stepErr != "stopping" {
 		t.Fatalf("linked step last_error=%q", stepErr)
+	}
+}
+
+// TestLibraryFairnessCursorPersistence verifies that the last-served library
+// cursor is updated after each claim.
+func TestLibraryFairnessCursorPersistence(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	q := NewQueue(db, "worker", nil)
+	policy := scheduler.PolicyDefaults()
+	q.SetSchedulerPolicy(&policy)
+
+	// Seed: library 1 and 2; two tasks with different libraries.
+	_, err := db.Exec(`
+		INSERT INTO library(id,name,type,path) VALUES(1,'lib1','video','/lib1'),(2,'lib2','video','/lib2');
+		INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state)
+			VALUES(10,1,'f10','video',1,'processing'),(11,2,'f11','video',1,'processing');
+		INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version)
+			VALUES(20,10,1,'scan','processing','{}',2),(21,11,1,'scan','processing','{}',2);
+		INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status)
+			VALUES(30,20,10,1,'encrypt',1,'waiting'),(31,21,11,1,'encrypt',1,'waiting');
+		INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status,
+			available_at,created_at,priority,library_id)
+			VALUES
+			 (40,10,20,30,1,'encrypt','waiting',datetime(CURRENT_TIMESTAMP),datetime(CURRENT_TIMESTAMP),0,1),
+			 (41,11,21,31,1,'encrypt','waiting',datetime(CURRENT_TIMESTAMP,'-10 seconds'),datetime(CURRENT_TIMESTAMP,'-10 seconds'),0,2);
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := publication.NewCapabilityMatrix([]string{"encrypt"})
+	q.registry = registry
+
+	// Claim first task.
+	task, err := q.Claim(context.Background(), TaskEncrypt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task == nil {
+		t.Fatal("expected a claim")
+	}
+	// Verify cursor was updated with the claimed library.
+	cursor := q.fairnessCursors["encrypt"]
+	if cursor == nil {
+		t.Fatal("expected fairness cursor for encrypt")
+	}
+	if cursor.LastServedLibrary == nil {
+		t.Fatal("expected last-served library to be set")
+	}
+	if task.LibraryID == nil || *cursor.LastServedLibrary != *task.LibraryID {
+		t.Fatalf("cursor last-served=%v, want=%v", cursor.LastServedLibrary, task.LibraryID)
+	}
+	_ = cursor
+
+	// Complete the first task.
+	if err := q.Complete(context.Background(), *task); err != nil {
+		t.Fatal(err)
+	}
+
+	// Claim second task.
+	task2, err := q.Claim(context.Background(), TaskEncrypt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task2 == nil {
+		t.Fatal("expected a second claim")
+	}
+	// Verify cursor was updated again.
+	cursor2 := q.fairnessCursors["encrypt"]
+	if cursor2 == nil || cursor2.LastServedLibrary == nil {
+		t.Fatal("expected updated cursor")
+	}
+	if task2.LibraryID == nil || *cursor2.LastServedLibrary != *task2.LibraryID {
+		t.Fatalf("cursor last-served=%v, want=%v", cursor2.LastServedLibrary, task2.LibraryID)
 	}
 }

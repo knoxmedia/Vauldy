@@ -3,9 +3,11 @@ package postingest
 import (
 	"context"
 	"database/sql"
+	"sync"
 	"time"
 
 	"knox-media/internal/coreiface"
+	"knox-media/internal/scheduler"
 	"knox-media/internal/store"
 )
 
@@ -74,7 +76,10 @@ type Queue struct {
 	beforeFailTransition func()
 	registry             coreiface.CapabilityRegistry
 	// immediateTx overrides store.WithImmediateConnTx for tests (ambiguous commit seams).
-	immediateTx func(context.Context, *sql.DB, func(store.ImmediateConnTx) error) (store.ImmediateOutcome, error)
+	immediateTx   func(context.Context, *sql.DB, func(store.ImmediateConnTx) error) (store.ImmediateOutcome, error)
+	schedulerPolicy *scheduler.Policy
+	fairnessMu      sync.Mutex
+	fairnessCursors map[string]*scheduler.LibraryFairnessCursor
 }
 
 type compatibilityCapabilities struct{}
@@ -86,7 +91,14 @@ func NewQueue(db *sql.DB, owner string, metrics *store.SQLiteMetrics, registries
 	if len(registries) > 0 {
 		registry = registries[0]
 	}
-	return &Queue{db: db, owner: owner, metrics: metrics, registry: registry}
+	return &Queue{db: db, owner: owner, metrics: metrics, registry: registry, fairnessCursors: make(map[string]*scheduler.LibraryFairnessCursor)}
+}
+
+// SetSchedulerPolicy configures the scheduler policy used for claim ordering
+// and library fairness. If policy is nil, effective-priority ordering is
+// disabled and raw priority ordering is used instead.
+func (q *Queue) SetSchedulerPolicy(policy *scheduler.Policy) {
+	q.schedulerPolicy = policy
 }
 
 func (q *Queue) withImmediate(ctx context.Context, fn func(store.ImmediateConnTx) error) (store.ImmediateOutcome, error) {

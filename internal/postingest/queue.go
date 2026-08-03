@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"knox-media/internal/publication"
+	"knox-media/internal/scheduler"
 	"knox-media/internal/storage"
 
 	"knox-media/internal/store"
@@ -245,11 +246,16 @@ func (q *Queue) ClaimAny(ctx context.Context, types []TaskType) (*Task, error) {
 		}
 		requested = append(requested, string(typ))
 	}
-	payload, err := publication.ClaimEligibleAny(ctx, q.db, publication.ClaimRequest{Family: publication.QueuePostIngest, TaskTypes: requested, Owner: q.owner, Registry: q.registry, Metrics: q.metrics})
+	payload, err := publication.ClaimEligibleAny(ctx, q.db, publication.ClaimRequest{Family: publication.QueuePostIngest, TaskTypes: requested, Owner: q.owner, Registry: q.registry, Metrics: q.metrics, SchedulerPolicy: q.schedulerPolicy})
 	if err != nil || payload == nil {
 		return nil, err
 	}
-	return q.taskFromClaimPayload(ctx, payload)
+	task, err := q.taskFromClaimPayload(ctx, payload)
+	if err != nil || task == nil {
+		return nil, err
+	}
+	q.fairnessCommit(string(task.Type), task)
+	return task, nil
 }
 func (q *Queue) Claim(ctx context.Context, typ TaskType) (*Task, error) {
 	if err := q.validate(true); err != nil {
@@ -258,11 +264,16 @@ func (q *Queue) Claim(ctx context.Context, typ TaskType) (*Task, error) {
 	if err := validateTaskType(typ); err != nil {
 		return nil, err
 	}
-	payload, err := publication.ClaimEligible(ctx, q.db, publication.ClaimRequest{Family: publication.QueuePostIngest, TaskType: string(typ), Owner: q.owner, Registry: q.registry, Metrics: q.metrics})
+	payload, err := publication.ClaimEligible(ctx, q.db, publication.ClaimRequest{Family: publication.QueuePostIngest, TaskType: string(typ), Owner: q.owner, Registry: q.registry, Metrics: q.metrics, SchedulerPolicy: q.schedulerPolicy})
 	if err != nil || payload == nil {
 		return nil, err
 	}
-	return q.taskFromClaimPayload(ctx, payload)
+	task, err := q.taskFromClaimPayload(ctx, payload)
+	if err != nil || task == nil {
+		return nil, err
+	}
+	q.fairnessCommit(string(typ), task)
+	return task, nil
 }
 
 func (q *Queue) taskFromClaimPayload(ctx context.Context, payload *publication.ClaimPayload) (*Task, error) {
@@ -280,6 +291,10 @@ func (q *Queue) taskFromClaimPayload(ctx context.Context, payload *publication.C
 		return nil, nil
 	}
 	task := &Task{ID: payload.QueueID, MediaID: payload.MediaID, Type: TaskType(payload.TaskType), Status: StatusRunning, Attempts: payload.Attempts, MaxAttempts: payload.MaxAttempts, RetryRound: payload.RetryRound, LeaseOwner: payload.Owner, LeaseUntil: payload.LeaseUntil, SourceClass: payload.SourceClass, BasePriority: payload.BasePriority, ResourceProfileVersion: payload.ResourceProfileVersion, ResourceProfileJSON: payload.ResourceProfileJSON}
+	if payload.LibraryID.Valid {
+		v := payload.LibraryID.Int64
+		task.LibraryID = &v
+	}
 	if payload.ScanTaskID.Valid {
 		v := payload.ScanTaskID.Int64
 		task.ScanTaskID = &v
@@ -1428,4 +1443,25 @@ func (q *Queue) adminMutateEncrypt(ctx context.Context, id int64, updateSQL, op 
 		return fmt.Errorf("postingest queue: task %d is not encrypt", id)
 	}
 	return fmt.Errorf("postingest queue: encrypt task %d in status %s cannot be %sed", id, status, op)
+}
+
+// fairnessCommit records the library of the claimed task so that subsequent
+// claims rotate through libraries fairly.
+func (q *Queue) fairnessCommit(taskType string, task *Task) {
+	if q.schedulerPolicy == nil || task == nil {
+		return
+	}
+	q.fairnessMu.Lock()
+	defer q.fairnessMu.Unlock()
+	if q.fairnessCursors == nil {
+		q.fairnessCursors = make(map[string]*scheduler.LibraryFairnessCursor)
+	}
+	cursor, ok := q.fairnessCursors[taskType]
+	if !ok {
+		cursor = &scheduler.LibraryFairnessCursor{TaskType: taskType}
+		q.fairnessCursors[taskType] = cursor
+	}
+	scheduler.LibraryFairnessCommit(cursor, scheduler.LibraryCandidate{
+		LibraryID: task.LibraryID,
+	})
 }
