@@ -546,7 +546,7 @@ func commitStagedPoster(ctx context.Context, db *sql.DB, task Task, staged Stage
 			if n != 1 {
 				return fmt.Errorf("poster commit: step fence lost")
 			}
-			return publication.AggregateTx(ctx, tx, *task.RunID)
+			return publication.FinalizeNodeTransitionTx(ctx, tx, *task.RunID)
 		}
 		return nil
 	})

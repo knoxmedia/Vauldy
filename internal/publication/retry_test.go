@@ -424,7 +424,7 @@ func TestRetryIngestDropsRemovedOptionalAndOldKeyframeAtrack(t *testing.T) {
 		}
 		got = append(got, s)
 	}
-	want := []string{"poster", "encrypt", "scrape", "preview", "subtitle", "prepare"}
+	want := []string{"poster", "encrypt", "media_visible", "scrape", "preview", "subtitle_extract", "prepare"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("steps=%v want=%v", got, want)
 	}
@@ -757,5 +757,93 @@ func TestAggregatePreservesTerminalOutcomeAfterOptionalRetry(t *testing.T) {
 	}
 	if runStatus != "degraded" || runErr != "run exact error" || runFinished != "2026-07-02T03:04:05Z" || mediaStatus != "degraded" || mediaErr != "media exact error" || published != "2026-07-02T03:04:05Z" {
 		t.Fatalf("status=%s/%s/%s media=%s/%s/%s", runStatus, runErr, runFinished, mediaStatus, mediaErr, published)
+	}
+}
+
+func seedOptionalScrapeRetry(t *testing.T, db *sql.DB) (mediaID, runID, stepID, queueID int64) {
+	t.Helper()
+	res, err := db.Exec(`INSERT INTO library(name,type,path) VALUES('optional-scrape','video','/optional-scrape')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	libraryID, _ := res.LastInsertId()
+	res, err = db.Exec(`INSERT INTO media(library_id,file_id,file_type,publication_state,published_at,publication_error,ingest_generation) VALUES(?,'optional-scrape','video','published','2026-07-01 00:00:00','preserve scrape',1)`, libraryID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mediaID, _ = res.LastInsertId()
+	res, err = db.Exec(`INSERT INTO media_ingest_run(media_id,generation,reason,status,preserve_visibility,config_snapshot_json,error_message,finished_at) VALUES(?,1,'scan','published',1,'{}','run outcome',CURRENT_TIMESTAMP)`, mediaID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID, _ = res.LastInsertId()
+	res, err = db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status,attempts,max_attempts,last_error,lease_owner,lease_until,started_at,finished_at) VALUES(?,?,1,'scrape',0,'failed',?,?, 'old step error','old-owner','2026-01-01','2026-01-01','2026-01-01')`, runID, mediaID, DefaultNetworkMaxAttempts, DefaultNetworkMaxAttempts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stepID, _ = res.LastInsertId()
+	res, err = db.Exec(`INSERT INTO scrape_task(media_id,source,status,fail_count,message,ingest_run_id,ingest_step_id,generation,lease_owner,lease_until,started_at,finished_at) VALUES(?,'auto','failed',?,'old queue error',?,?,1,'old-owner','2026-01-01','2026-01-01','2026-01-01')`, mediaID, DefaultNetworkMaxAttempts, runID, stepID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queueID, _ = res.LastInsertId()
+	return
+}
+
+func TestRetryOptionalPostIngestFinalizesBarrierPlanAndAggregate(t *testing.T) {
+	db := openRetryTestDB(t)
+	mediaID, runID, stepID, _ := seedOptionalPostIngestRetry(t, db, "published", "published", "preview", 0)
+	seen := 0
+	SetRetirementBarrierProbeForTest(func(id int64) {
+		if id == runID {
+			seen++
+		}
+	})
+	t.Cleanup(ClearRetirementBarrierProbeForTest)
+	if err := RetryOptionalPostIngest(context.Background(), db, OptionalPostIngestRetryRequest{MediaID: mediaID, StepID: stepID, ActorID: 11, Reason: "finalizer consistency"}); err != nil {
+		t.Fatal(err)
+	}
+	if seen != 1 {
+		t.Fatalf("retirement barrier calls=%d", seen)
+	}
+	var all, waiting int
+	var pub, runState string
+	if err := db.QueryRow(`SELECT all_terminal,waiting_count FROM media_plan_completion WHERE run_id=?`, runID).Scan(&all, &waiting); err != nil {
+		t.Fatalf("plan completion missing: %v", err)
+	}
+	if err := db.QueryRow(`SELECT r.status,m.publication_state FROM media_ingest_run r JOIN media m ON m.id=r.media_id WHERE r.id=?`, runID).Scan(&runState, &pub); err != nil {
+		t.Fatal(err)
+	}
+	if all != 0 || waiting != 1 || runState != "published" || pub != "published" {
+		t.Fatalf("plan all=%d waiting=%d run=%s media=%s", all, waiting, runState, pub)
+	}
+}
+
+func TestRetryOptionalScrapeFinalizesBarrierPlanAndAggregate(t *testing.T) {
+	db := openRetryTestDB(t)
+	mediaID, runID, stepID, _ := seedOptionalScrapeRetry(t, db)
+	seen := 0
+	SetRetirementBarrierProbeForTest(func(id int64) {
+		if id == runID {
+			seen++
+		}
+	})
+	t.Cleanup(ClearRetirementBarrierProbeForTest)
+	if err := RetryOptionalScrape(context.Background(), db, OptionalScrapeRetryRequest{MediaID: mediaID, StepID: stepID, ActorID: 12, Reason: "finalizer consistency"}, NewCapabilityMatrix([]string{"scrape"})); err != nil {
+		t.Fatal(err)
+	}
+	if seen != 1 {
+		t.Fatalf("retirement barrier calls=%d", seen)
+	}
+	var all, waiting int
+	var pub, runState, qs, ss string
+	if err := db.QueryRow(`SELECT all_terminal,waiting_count FROM media_plan_completion WHERE run_id=?`, runID).Scan(&all, &waiting); err != nil {
+		t.Fatalf("plan completion missing: %v", err)
+	}
+	if err := db.QueryRow(`SELECT r.status,m.publication_state,q.status,s.status FROM media_ingest_run r JOIN media m ON m.id=r.media_id JOIN scrape_task q ON q.ingest_run_id=r.id JOIN media_ingest_step s ON s.id=q.ingest_step_id WHERE r.id=?`, runID).Scan(&runState, &pub, &qs, &ss); err != nil {
+		t.Fatal(err)
+	}
+	if all != 0 || waiting != 1 || runState != "published" || pub != "published" || qs != "waiting" || ss != "waiting" {
+		t.Fatalf("plan all=%d waiting=%d run=%s media=%s queue=%s step=%s", all, waiting, runState, pub, qs, ss)
 	}
 }

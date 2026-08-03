@@ -246,13 +246,13 @@ SELECT 1 FROM media_ingest_step st JOIN media_ingest_run r ON r.id=st.run_id JOI
 WHERE st.id=%[1]s.ingest_step_id AND st.run_id=%[1]s.ingest_run_id AND st.media_id=%[1]s.media_id AND st.generation=%[1]s.generation
 AND r.media_id=st.media_id AND r.generation=st.generation AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND m.ingest_generation=st.generation
 AND st.status='waiting' AND ((st.required=1 AND r.status='processing') OR (st.required=0 AND m.published_at IS NOT NULL AND ((r.status='processing' AND m.publication_state IN ('published','degraded')) OR (r.status='published' AND NOT EXISTS(SELECT 1 FROM media_ingest_step rr WHERE rr.run_id=r.id AND rr.required=1 AND rr.status NOT IN ('done','skipped'))) OR (r.status='degraded' AND NOT EXISTS(SELECT 1 FROM media_ingest_step rr WHERE rr.run_id=r.id AND rr.required=1 AND rr.status IN ('waiting','running'))))))
-AND NOT EXISTS(SELECT 1 FROM media_ingest_step_dependency d LEFT JOIN media_ingest_step dep ON dep.id=d.depends_on_step_id WHERE d.step_id=st.id AND NOT ((d.dependency_kind='step_done' AND dep.id IS NOT NULL AND dep.run_id=st.run_id AND dep.media_id=st.media_id AND dep.generation=st.generation AND dep.status IN ('done','skipped')) OR (d.dependency_kind='media_visible' AND d.depends_on_step_id IS NULL AND m.publication_state IN ('published','degraded') AND m.published_at IS NOT NULL))))`, alias)
+AND NOT EXISTS(SELECT 1 FROM media_ingest_step_dependency d LEFT JOIN media_ingest_step dep ON dep.id=d.depends_on_step_id WHERE d.step_id=st.id AND NOT ((d.dependency_kind='success' AND dep.id IS NOT NULL AND dep.run_id=st.run_id AND dep.media_id=st.media_id AND dep.generation=st.generation AND dep.status='done') OR (d.dependency_kind='terminal' AND dep.id IS NOT NULL AND dep.run_id=st.run_id AND dep.media_id=st.media_id AND dep.generation=st.generation AND dep.status IN ('done','skipped','failed','cancelled')))))`, alias)
 }
 
 func familyDueSQL(f QueueFamily, alias string) string {
 	switch f {
 	case QueuePostIngest:
-		return fmt.Sprintf(`%s.status='waiting' AND %s.available_at<=CURRENT_TIMESTAMP AND %s.attempts<%s.max_attempts AND (%s.scan_task_id IS NULL OR EXISTS(SELECT 1 FROM scan_task sc WHERE sc.id=%s.scan_task_id AND sc.cancelled=0 AND sc.status<>'cancelled'))`, alias, alias, alias, alias, alias, alias)
+		return fmt.Sprintf(`%s.status='waiting' AND %s.removed_at IS NULL AND %s.available_at<=CURRENT_TIMESTAMP AND %s.attempts<%s.max_attempts AND (%s.scan_task_id IS NULL OR EXISTS(SELECT 1 FROM scan_task sc WHERE sc.id=%s.scan_task_id AND sc.cancelled=0 AND sc.status<>'cancelled'))`, alias, alias, alias, alias, alias, alias, alias)
 	case QueueScrape:
 		return fmt.Sprintf(`%s.status IN ('waiting','failed') AND COALESCE(%s.fail_count,0)<%d AND COALESCE(%s.available_at,CURRENT_TIMESTAMP)<=CURRENT_TIMESTAMP AND (%s.lease_until IS NULL OR %s.lease_until<CURRENT_TIMESTAMP)`, alias, alias, DefaultNetworkMaxAttempts, alias, alias, alias)
 	case QueuePrepare:
@@ -462,6 +462,11 @@ func updateFamilyClaim(ctx context.Context, tx store.SQLExecutor, req ClaimReque
 		}
 		if stepRows != 1 {
 			return nil, fmt.Errorf("publication claim: linked step transition affected %d rows", stepRows)
+		}
+		if p.RunID.Valid {
+			if err := FinalizeClaimTransitionTx(ctx, tx, p.RunID.Int64); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return p, nil

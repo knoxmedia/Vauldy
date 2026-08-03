@@ -323,7 +323,7 @@ func (s *TaskService) cancelTaskAttemptTx(ctx context.Context, id int64) error {
 		if e != nil {
 			return e
 		}
-		return publication.AggregateTx(ctx, tx, run)
+		return publication.FinalizeNodeTransitionTx(ctx, tx, run)
 	})
 	return err
 }
@@ -386,7 +386,7 @@ func (s *TaskService) RetryTask(id int64) error {
 		if _, err = tx.Exec(`UPDATE media_ingest_run SET status='processing',preserve_visibility=1,error_message='',finished_at=NULL WHERE id=?`, runID); err != nil {
 			return err
 		}
-		if err = publication.AggregateTx(context.Background(), tx, runID); err != nil {
+		if err = publication.FinalizeNodeTransitionTx(context.Background(), tx, runID); err != nil {
 			return err
 		}
 	}
@@ -948,7 +948,7 @@ func (s *TaskService) failLinkedOrphan(taskID, runID, stepID int64, message stri
 	if _, err = tx.Exec(`UPDATE media_ingest_step SET status='failed',last_error=?,finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND run_id=? AND status='waiting'`, message, stepID, runID); err != nil {
 		return err
 	}
-	if err = publication.AggregateTx(context.Background(), tx, runID); err != nil {
+	if err = publication.FinalizeNodeTransitionTx(context.Background(), tx, runID); err != nil {
 		return err
 	}
 	return tx.Commit()

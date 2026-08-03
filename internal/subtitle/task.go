@@ -16,13 +16,13 @@ import (
 // EnsurePendingSubtitleTask inserts a pending row when none exists for media_id (INSERT OR IGNORE).
 func (s *Service) EnsurePendingSubtitleTask(mediaID int64) error {
 	_, err := s.DB.Exec(`
-		INSERT OR IGNORE INTO subtitle_task (media_id, status, message, created_at, started_at, finished_at, updated_at)
-		VALUES (?, 'pending', NULL, CURRENT_TIMESTAMP, NULL, NULL, CURRENT_TIMESTAMP)
+		INSERT OR IGNORE INTO subtitle_task (media_id, status, message, extract_status, recognize_status, created_at, started_at, finished_at, updated_at)
+		VALUES (?, 'pending', NULL, 'pending', 'pending', CURRENT_TIMESTAMP, NULL, NULL, CURRENT_TIMESTAMP)
 	`, mediaID)
 	return err
 }
 
-func (s *Service) setTaskDoneGuarded(ctx context.Context, mediaID int64) error {
+func (s *Service) setTaskDoneGuarded(ctx context.Context, mediaID int64, stage subtitleStage) error {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -31,7 +31,8 @@ func (s *Service) setTaskDoneGuarded(ctx context.Context, mediaID int64) error {
 	if err = validateCommitGuardTx(ctx, tx); err != nil {
 		return err
 	}
-	res, err := tx.ExecContext(ctx, `UPDATE subtitle_task SET status='done',finished_at=CURRENT_TIMESTAMP,message=NULL,updated_at=CURRENT_TIMESTAMP WHERE media_id=?`, mediaID)
+	query, args := stageDoneSQL(mediaID, stage)
+	res, err := tx.ExecContext(ctx, query, args...)
 	if err != nil {
 		return err
 	}
@@ -44,29 +45,110 @@ func (s *Service) setTaskDoneGuarded(ctx context.Context, mediaID int64) error {
 	}
 	return tx.Commit()
 }
-func (s *Service) upsertTaskRunning(ctx context.Context, mediaID int64) error {
-	_, err := s.DB.ExecContext(ctx, `
-		INSERT INTO subtitle_task (media_id, status, started_at, updated_at)
-		VALUES (?, 'running', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-		ON CONFLICT(media_id) DO UPDATE SET status='running',message=NULL,started_at=CURRENT_TIMESTAMP,finished_at=NULL,updated_at=CURRENT_TIMESTAMP
-	`, mediaID)
-	return err
+
+func stageDoneSQL(mediaID int64, stage subtitleStage) (string, []any) {
+	switch stage {
+	case subtitleStageExtract:
+		return `UPDATE subtitle_task SET
+			extract_status='done',extract_message=NULL,
+			status=CASE WHEN recognize_status='failed' THEN 'failed' WHEN recognize_status='done' THEN 'done' ELSE 'done' END,
+			message=CASE WHEN recognize_status='failed' THEN recognize_message ELSE NULL END,
+			finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE media_id=?`, []any{mediaID}
+	case subtitleStageRecognize:
+		return `UPDATE subtitle_task SET
+			recognize_status='done',recognize_message=NULL,
+			status=CASE WHEN extract_status='failed' THEN 'failed' ELSE 'done' END,
+			message=CASE WHEN extract_status='failed' THEN extract_message ELSE NULL END,
+			finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE media_id=?`, []any{mediaID}
+	default:
+		return `UPDATE subtitle_task SET
+			status='done',message=NULL,
+			extract_status='done',recognize_status='done',
+			extract_message=NULL,recognize_message=NULL,
+			finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE media_id=?`, []any{mediaID}
+	}
 }
-func (s *Service) upsertTaskDone(ctx context.Context, mediaID int64) error {
-	_, err := s.DB.ExecContext(ctx, `UPDATE subtitle_task SET status='done',finished_at=CURRENT_TIMESTAMP,message=NULL,updated_at=CURRENT_TIMESTAMP WHERE media_id=?`, mediaID)
-	return err
+
+func (s *Service) upsertTaskRunning(ctx context.Context, mediaID int64, stage subtitleStage) error {
+	switch stage {
+	case subtitleStageExtract:
+		_, err := s.DB.ExecContext(ctx, `
+			INSERT INTO subtitle_task (media_id, status, extract_status, recognize_status, started_at, updated_at)
+			VALUES (?, 'running', 'running', 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+			ON CONFLICT(media_id) DO UPDATE SET
+				status='running',message=NULL,
+				extract_status='running',extract_message=NULL,
+				started_at=CURRENT_TIMESTAMP,finished_at=NULL,updated_at=CURRENT_TIMESTAMP`, mediaID)
+		return err
+	case subtitleStageRecognize:
+		_, err := s.DB.ExecContext(ctx, `
+			INSERT INTO subtitle_task (media_id, status, extract_status, recognize_status, started_at, updated_at)
+			VALUES (?, 'running', 'pending', 'running', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+			ON CONFLICT(media_id) DO UPDATE SET
+				status='running',message=NULL,
+				recognize_status='running',recognize_message=NULL,
+				started_at=CURRENT_TIMESTAMP,finished_at=NULL,updated_at=CURRENT_TIMESTAMP`, mediaID)
+		return err
+	default:
+		_, err := s.DB.ExecContext(ctx, `
+			INSERT INTO subtitle_task (media_id, status, extract_status, recognize_status, started_at, updated_at)
+			VALUES (?, 'running', 'running', 'running', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+			ON CONFLICT(media_id) DO UPDATE SET
+				status='running',message=NULL,
+				extract_status='running',recognize_status='running',
+				extract_message=NULL,recognize_message=NULL,
+				started_at=CURRENT_TIMESTAMP,finished_at=NULL,updated_at=CURRENT_TIMESTAMP`, mediaID)
+		return err
+	}
 }
-func (s *Service) upsertTaskFailed(ctx context.Context, mediaID int64, msg string) error {
+
+func (s *Service) upsertTaskFailed(ctx context.Context, mediaID int64, stage subtitleStage, msg string) error {
 	msg = strings.TrimSpace(msg)
 	if len(msg) > 2000 {
 		msg = msg[:2000]
 	}
-	_, err := s.DB.ExecContext(ctx, `UPDATE subtitle_task SET status='failed',finished_at=CURRENT_TIMESTAMP,message=?,updated_at=CURRENT_TIMESTAMP WHERE media_id=?`, msg, mediaID)
-	return err
+	switch stage {
+	case subtitleStageExtract:
+		_, err := s.DB.ExecContext(ctx, `UPDATE subtitle_task SET
+			extract_status='failed',extract_message=?,
+			status='failed',message=?,
+			finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE media_id=?`, msg, msg, mediaID)
+		return err
+	case subtitleStageRecognize:
+		_, err := s.DB.ExecContext(ctx, `UPDATE subtitle_task SET
+			recognize_status='failed',recognize_message=?,
+			status='failed',message=?,
+			finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE media_id=?`, msg, msg, mediaID)
+		return err
+	default:
+		_, err := s.DB.ExecContext(ctx, `UPDATE subtitle_task SET
+			status='failed',message=?,
+			extract_status='failed',recognize_status='failed',
+			extract_message=?,recognize_message=?,
+			finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE media_id=?`, msg, msg, msg, mediaID)
+		return err
+	}
 }
-func (s *Service) setTaskWaiting(ctx context.Context, mediaID int64, msg string) error {
-	_, err := s.DB.ExecContext(ctx, `UPDATE subtitle_task SET status='pending',started_at=NULL,finished_at=NULL,message=?,updated_at=CURRENT_TIMESTAMP WHERE media_id=?`, msg, mediaID)
-	return err
+
+func (s *Service) setTaskWaiting(ctx context.Context, mediaID int64, stage subtitleStage, msg string) error {
+	switch stage {
+	case subtitleStageExtract:
+		_, err := s.DB.ExecContext(ctx, `UPDATE subtitle_task SET
+			status='pending',extract_status='pending',extract_message=?,
+			started_at=NULL,finished_at=NULL,message=?,updated_at=CURRENT_TIMESTAMP WHERE media_id=?`, msg, msg, mediaID)
+		return err
+	case subtitleStageRecognize:
+		_, err := s.DB.ExecContext(ctx, `UPDATE subtitle_task SET
+			status='pending',recognize_status='pending',recognize_message=?,
+			started_at=NULL,finished_at=NULL,message=?,updated_at=CURRENT_TIMESTAMP WHERE media_id=?`, msg, msg, mediaID)
+		return err
+	default:
+		_, err := s.DB.ExecContext(ctx, `UPDATE subtitle_task SET
+			status='pending',extract_status='pending',recognize_status='pending',
+			extract_message=NULL,recognize_message=NULL,
+			started_at=NULL,finished_at=NULL,message=?,updated_at=CURRENT_TIMESTAMP WHERE media_id=?`, msg, mediaID)
+		return err
+	}
 }
 
 // ResetSubtitleJob removes generated subtitle rows and files, then marks task as pending.
@@ -79,11 +161,15 @@ func (s *Service) ResetSubtitleJob(mediaID int64) error {
 	dir := filepath.Join(s.SubtitleDir, strconv.FormatInt(mediaID, 10))
 	_ = os.RemoveAll(dir)
 	_, err := s.DB.Exec(`
-		INSERT INTO subtitle_task (media_id, status, message, created_at, started_at, finished_at, updated_at)
-		VALUES (?, 'pending', NULL, CURRENT_TIMESTAMP, NULL, NULL, CURRENT_TIMESTAMP)
+		INSERT INTO subtitle_task (media_id, status, message, extract_status, recognize_status, extract_message, recognize_message, created_at, started_at, finished_at, updated_at)
+		VALUES (?, 'pending', NULL, 'pending', 'pending', NULL, NULL, CURRENT_TIMESTAMP, NULL, NULL, CURRENT_TIMESTAMP)
 		ON CONFLICT(media_id) DO UPDATE SET
 			status = 'pending',
 			message = NULL,
+			extract_status = 'pending',
+			recognize_status = 'pending',
+			extract_message = NULL,
+			recognize_message = NULL,
 			started_at = NULL,
 			finished_at = NULL,
 			updated_at = CURRENT_TIMESTAMP
@@ -93,8 +179,9 @@ func (s *Service) ResetSubtitleJob(mediaID int64) error {
 
 const subtitleDeletedByAdminMarker = "deleted by admin"
 
-// DeleteSubtitleTask atomically retires the current queue execution and removes
-// the domain task row. The queue row remains so startup repair cannot recreate it.
+// DeleteSubtitleTask atomically retires current-generation subtitle extract/recognize
+// queue executions and removes the domain task row. Queue rows remain cancelled so
+// startup repair cannot recreate them.
 func (s *Service) DeleteSubtitleTask(mediaID int64) error {
 	if s == nil || s.DB == nil || mediaID <= 0 {
 		return fmt.Errorf("invalid media id")
@@ -114,33 +201,59 @@ func (s *Service) DeleteSubtitleTask(mediaID int64) error {
 		}
 		domainExists = false
 	}
-	var queueID int64
-	var queueStatus string
-	var stepID, runID sql.NullInt64
-	queueExists := true
-	err = tx.QueryRowContext(ctx, `
+
+	rows, err := tx.QueryContext(ctx, `
 		SELECT q.id,q.status,q.ingest_step_id,q.ingest_run_id
 		FROM post_ingest_task q JOIN media m ON m.id=q.media_id
-		WHERE q.media_id=? AND q.task_type='subtitle'
+		WHERE q.media_id=? AND q.task_type IN ('subtitle','subtitle_recognize')
 		  AND q.generation=COALESCE(m.ingest_generation,0)
-		ORDER BY q.id DESC LIMIT 1`, mediaID).Scan(&queueID, &queueStatus, &stepID, &runID)
+		ORDER BY q.id`, mediaID)
 	if err != nil {
-		if err != sql.ErrNoRows {
+		return err
+	}
+	type queueRow struct {
+		id             int64
+		status         string
+		stepID, runID  sql.NullInt64
+	}
+	var queues []queueRow
+	for rows.Next() {
+		var q queueRow
+		if err = rows.Scan(&q.id, &q.status, &q.stepID, &q.runID); err != nil {
+			_ = rows.Close()
 			return err
 		}
-		queueExists = false
+		queues = append(queues, q)
 	}
-	if !domainExists && !queueExists {
+	if err = rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	if !domainExists && len(queues) == 0 {
 		return fmt.Errorf("task not found")
 	}
-	if queueExists && strings.EqualFold(strings.TrimSpace(queueStatus), "running") {
+	for _, q := range queues {
+		if strings.EqualFold(strings.TrimSpace(q.status), "running") {
+			return fmt.Errorf("task is running")
+		}
+	}
+	hasTerminalCurrent := false
+	for _, q := range queues {
+		if isTerminalSubtitleQueueStatus(q.status) {
+			hasTerminalCurrent = true
+			break
+		}
+	}
+	if domainExists && strings.EqualFold(strings.TrimSpace(domainStatus), "running") && !hasTerminalCurrent {
 		return fmt.Errorf("task is running")
 	}
-	if domainExists && strings.EqualFold(strings.TrimSpace(domainStatus), "running") && (!queueExists || !isTerminalSubtitleQueueStatus(queueStatus)) {
-		return fmt.Errorf("task is running")
-	}
-	if queueExists {
-		res, err := tx.ExecContext(ctx, `UPDATE post_ingest_task SET status='cancelled',lease_owner=NULL,lease_until=NULL,last_error=?,finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status<>'running'`, subtitleDeletedByAdminMarker, queueID)
+
+	runIDs := map[int64]struct{}{}
+	for _, q := range queues {
+		res, err := tx.ExecContext(ctx, `UPDATE post_ingest_task SET status='cancelled',lease_owner=NULL,lease_until=NULL,last_error=?,finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status<>'running'`, subtitleDeletedByAdminMarker, q.id)
 		if err != nil {
 			return err
 		}
@@ -150,8 +263,8 @@ func (s *Service) DeleteSubtitleTask(mediaID int64) error {
 			}
 			return fmt.Errorf("subtitle queue delete raced")
 		}
-		if stepID.Valid {
-			res, err = tx.ExecContext(ctx, `UPDATE media_ingest_step SET status='cancelled',lease_owner=NULL,lease_until=NULL,last_error=?,finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?`, subtitleDeletedByAdminMarker, stepID.Int64)
+		if q.stepID.Valid {
+			res, err = tx.ExecContext(ctx, `UPDATE media_ingest_step SET status='cancelled',lease_owner=NULL,lease_until=NULL,last_error=?,finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?`, subtitleDeletedByAdminMarker, q.stepID.Int64)
 			if err != nil {
 				return err
 			}
@@ -162,10 +275,13 @@ func (s *Service) DeleteSubtitleTask(mediaID int64) error {
 				return fmt.Errorf("linked subtitle ingest step not found")
 			}
 		}
-		if runID.Valid {
-			if err := publication.AggregateTx(ctx, tx, runID.Int64); err != nil {
-				return err
-			}
+		if q.runID.Valid {
+			runIDs[q.runID.Int64] = struct{}{}
+		}
+	}
+	for runID := range runIDs {
+		if err := publication.FinalizeNodeTransitionTx(ctx, tx, runID); err != nil {
+			return err
 		}
 	}
 	if domainExists {
@@ -221,6 +337,9 @@ func (s *Service) CleanupSubtitleTasksFailed() (int64, error) {
 	if err := taskalign.DeleteCurrentGenQueueTasks(context.Background(), s.DB, "subtitle", mediaIDs...); err != nil {
 		return n, err
 	}
+	if err := taskalign.DeleteCurrentGenQueueTasks(context.Background(), s.DB, "subtitle_recognize", mediaIDs...); err != nil {
+		return n, err
+	}
 	return n, nil
 }
 
@@ -264,6 +383,9 @@ func (s *Service) CleanupSubtitleTasksBefore(days int) (int64, error) {
 		return 0, err
 	}
 	if err := taskalign.DeleteCurrentGenQueueTasks(context.Background(), s.DB, "subtitle", mediaIDs...); err != nil {
+		return n, err
+	}
+	if err := taskalign.DeleteCurrentGenQueueTasks(context.Background(), s.DB, "subtitle_recognize", mediaIDs...); err != nil {
 		return n, err
 	}
 	return n, nil

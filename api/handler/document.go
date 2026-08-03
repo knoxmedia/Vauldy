@@ -414,7 +414,7 @@ func (h *Handler) ServeDocumentCover(c *gin.Context) {
 	}
 	if strings.EqualFold(format.String, "epub") {
 		epubPath := filePath.String
-		if work, cleanup, err := storage.MaterializePlaintextTemp(h.App.DB, h.KeyVault, id, epubPath); err == nil {
+		if work, cleanup, err := storage.MaterializePlaintextTempUnsafeLegacy(h.App.DB, h.KeyVault, id, epubPath); err == nil {
 			epubPath = work
 			defer cleanup()
 		}

@@ -42,13 +42,13 @@ func subtitleResetTx(mediaID int64) explicitResetTx {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM media_subtitle WHERE media_id=?`, mediaID); err != nil {
 			return err
 		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO subtitle_task(media_id,status,message,created_at,started_at,finished_at,updated_at) VALUES(?,'pending',NULL,CURRENT_TIMESTAMP,NULL,NULL,CURRENT_TIMESTAMP) ON CONFLICT(media_id) DO UPDATE SET status='pending',message=NULL,started_at=NULL,finished_at=NULL,updated_at=CURRENT_TIMESTAMP`, mediaID)
+		_, err := tx.ExecContext(ctx, `INSERT INTO subtitle_task(media_id,status,message,extract_status,recognize_status,extract_message,recognize_message,created_at,started_at,finished_at,updated_at) VALUES(?,'pending',NULL,'pending','pending',NULL,NULL,CURRENT_TIMESTAMP,NULL,NULL,CURRENT_TIMESTAMP) ON CONFLICT(media_id) DO UPDATE SET status='pending',message=NULL,extract_status='pending',recognize_status='pending',extract_message=NULL,recognize_message=NULL,started_at=NULL,finished_at=NULL,updated_at=CURRENT_TIMESTAMP`, mediaID)
 		return err
 	}
 }
 func subtitleEnsureTx(mediaID int64) explicitResetTx {
 	return func(ctx context.Context, tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO subtitle_task(media_id,status,message,created_at,started_at,finished_at,updated_at) VALUES(?,'pending',NULL,CURRENT_TIMESTAMP,NULL,NULL,CURRENT_TIMESTAMP)`, mediaID)
+		_, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO subtitle_task(media_id,status,message,extract_status,recognize_status,created_at,started_at,finished_at,updated_at) VALUES(?,'pending',NULL,'pending','pending',CURRENT_TIMESTAMP,NULL,NULL,CURRENT_TIMESTAMP)`, mediaID)
 		return err
 	}
 }

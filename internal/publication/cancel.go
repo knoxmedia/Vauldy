@@ -9,6 +9,12 @@ import (
 // CancelRunTx records an explicit whole-run cancellation before fencing all
 // outstanding work. The caller owns the transaction so intent and work
 // cancellation commit or roll back together.
+//
+// Post-ingest plaintext temps for cancelled waiting/running tasks are released
+// after the cancel statements succeed. Release uses media/generation/task
+// identity (not lease_owner) because this path nulls the lease. If the outer
+// transaction later rolls back, temps may already be gone — preferred over
+// orphaning on successful commit; a subsequent claim rematerializes.
 func CancelRunTx(ctx context.Context, tx store.SQLExecutor, runID int64, reason string) (bool, error) {
 	if tx == nil || runID <= 0 || reason == "" {
 		return false, fmt.Errorf("publication cancel: invalid transaction, run, or reason")
@@ -21,6 +27,30 @@ func CancelRunTx(ctx context.Context, tx store.SQLExecutor, runID int64, reason 
 	if err != nil || n == 0 {
 		return false, err
 	}
+
+	// Capture identities before lease_owner is cleared.
+	rows, err := tx.QueryContext(ctx, `SELECT id, media_id, generation FROM post_ingest_task WHERE ingest_run_id=? AND status IN ('waiting','running')`, runID)
+	if err != nil {
+		return false, err
+	}
+	type attempt struct{ taskID, mediaID, generation int64 }
+	var attempts []attempt
+	for rows.Next() {
+		var a attempt
+		if err := rows.Scan(&a.taskID, &a.mediaID, &a.generation); err != nil {
+			_ = rows.Close()
+			return false, err
+		}
+		attempts = append(attempts, a)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return false, err
+	}
+	if err := rows.Close(); err != nil {
+		return false, err
+	}
+
 	statements := []struct {
 		query string
 		args  []any
@@ -36,8 +66,11 @@ func CancelRunTx(ctx context.Context, tx store.SQLExecutor, runID int64, reason 
 			return false, err
 		}
 	}
-	if err = AggregateTx(ctx, tx, runID); err != nil {
+	if err = FinalizeNodeTransitionTx(ctx, tx, runID); err != nil {
 		return false, err
+	}
+	for _, a := range attempts {
+		invokePostIngestTempRelease(a.mediaID, a.generation, a.taskID)
 	}
 	return true, nil
 }

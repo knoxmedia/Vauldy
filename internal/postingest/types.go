@@ -12,14 +12,16 @@ import (
 type TaskType string
 
 const (
-	TaskPoster       TaskType = "poster"
-	TaskPosterRepair TaskType = "poster_repair"
-	TaskThumbnail    TaskType = "thumbnail"
-	TaskPreview      TaskType = "preview"
-	TaskKeyframe     TaskType = "keyframe"
-	TaskSubtitle     TaskType = "subtitle"
-	TaskAtrack       TaskType = "atrack"
-	TaskEncrypt      TaskType = "encrypt"
+	TaskPoster            TaskType = "poster"
+	TaskPosterRepair      TaskType = "poster_repair"
+	TaskThumbnail         TaskType = "thumbnail"
+	TaskPreview           TaskType = "preview"
+	TaskKeyframe          TaskType = "keyframe"
+	TaskSubtitle          TaskType = "subtitle"
+	TaskAtrack            TaskType = "atrack"
+	TaskEncrypt           TaskType = "encrypt"
+	TaskSubtitleRecognize TaskType = "subtitle_recognize"
+	TaskAIAnalysis        TaskType = "ai_analysis"
 )
 
 type Status string
@@ -65,6 +67,8 @@ type Queue struct {
 	isScanCancelled      func(context.Context, int64) (bool, error)
 	beforeFailTransition func()
 	registry             coreiface.CapabilityRegistry
+	// immediateTx overrides store.WithImmediateConnTx for tests (ambiguous commit seams).
+	immediateTx func(context.Context, *sql.DB, func(store.ImmediateConnTx) error) (store.ImmediateOutcome, error)
 }
 
 type compatibilityCapabilities struct{}
@@ -77,4 +81,11 @@ func NewQueue(db *sql.DB, owner string, metrics *store.SQLiteMetrics, registries
 		registry = registries[0]
 	}
 	return &Queue{db: db, owner: owner, metrics: metrics, registry: registry}
+}
+
+func (q *Queue) withImmediate(ctx context.Context, fn func(store.ImmediateConnTx) error) (store.ImmediateOutcome, error) {
+	if q != nil && q.immediateTx != nil {
+		return q.immediateTx(ctx, q.db, fn)
+	}
+	return store.WithImmediateConnTx(ctx, q.db, fn)
 }

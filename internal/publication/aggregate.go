@@ -16,6 +16,15 @@ const (
 	requiredStepFallback     = "required step exhausted"
 )
 
+// aggregateProbe is installed by tests to observe AggregateTx call sites.
+var aggregateProbe func(runID int64)
+
+// SetAggregateProbeForTest installs a probe observing AggregateTx.
+func SetAggregateProbeForTest(fn func(runID int64)) { aggregateProbe = fn }
+
+// ClearAggregateProbeForTest clears the AggregateTx probe.
+func ClearAggregateProbeForTest() { aggregateProbe = nil }
+
 type requiredStepDiagnostic struct {
 	stepType string
 	status   string
@@ -69,6 +78,9 @@ func truncatePublicationError(message string) string {
 func AggregateTx(ctx context.Context, tx store.SQLExecutor, runID int64) error {
 	if tx == nil || runID <= 0 {
 		return fmt.Errorf("publication aggregate: invalid transaction or run")
+	}
+	if aggregateProbe != nil {
+		aggregateProbe(runID)
 	}
 	var mediaID, generation int64
 	var preserve int
