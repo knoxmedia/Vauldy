@@ -807,7 +807,8 @@
       "category_atrack": "音轨",
       "category_preview": "进度条预览",
       "category_scrape": "刮削",
-      "category_cleanup": "清理"
+      "category_cleanup": "清理",
+      "confirm_action": "确定执行此操作？"
     },
     "playback_history": {
       "title": "播放历史",

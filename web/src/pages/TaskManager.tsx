@@ -17,7 +17,6 @@ import {
   DeleteOutlined,
   RedoOutlined,
   ReloadOutlined,
-  RollbackOutlined,
   StopOutlined,
   ThunderboltOutlined,
 } from "@ant-design/icons";
@@ -25,18 +24,15 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   cancelScanTask,
   cancelTranscodeTask,
-  cancelEncryptTask,
   cleanupFailedTranscodeTasks,
   cancelSubtitleTask,
   cleanupFailedSubtitleTasks,
   cleanupSubtitleTasksBefore,
   deleteSubtitleTask,
-  deleteEncryptTask,
   runNowSubtitleTask,
   cleanupFailedLyricTasks,
   cleanupLyricTasksBefore,
   fetchAtrackTasks,
-  fetchEncryptTasks,
   fetchKeyframeTasks,
   fetchLyricTasks,
   fetchPreviewTasks,
@@ -44,7 +40,6 @@ import {
   fetchScrapeTasks,
   fetchSubtitleTasks,
   fetchTranscodeTasks,
-  resetEncryptTask,
   retryAudioTrackExtraction,
   retryKeyframeExtraction,
   retryPreviewTask,
@@ -52,7 +47,6 @@ import {
   retryTranscodeTask,
   retrySubtitleTask,
   batchSubtitleTasks,
-  batchEncryptTasks,
   batchTranscodeTasks,
   batchLyricTasks,
   batchPreviewTasks,
@@ -60,7 +54,6 @@ import {
   batchKeyframeTasks,
   type BatchTaskAction,
   type AtrackTask,
-  type EncryptTask,
   type KeyframeTask,
   type LyricTask,
   type PreviewTask,
@@ -83,7 +76,6 @@ function ActionIconButton({
   onClick,
   loading,
   disabled,
-  danger,
   type = "text",
 }: {
   title: string;
@@ -91,7 +83,6 @@ function ActionIconButton({
   onClick?: () => void;
   loading?: boolean;
   disabled?: boolean;
-  danger?: boolean;
   type?: "primary" | "text" | "link" | "default";
 }) {
   const button = (
@@ -102,7 +93,6 @@ function ActionIconButton({
       onClick={onClick}
       loading={loading}
       disabled={disabled}
-      danger={danger}
       aria-label={title}
     />
   );
@@ -119,7 +109,6 @@ function ActionIconConfirmButton({
   icon,
   onConfirm,
   loading,
-  danger,
   disabled,
   type = "text",
 }: {
@@ -128,7 +117,6 @@ function ActionIconConfirmButton({
   icon: ReactNode;
   onConfirm: () => void;
   loading?: boolean;
-  danger?: boolean;
   disabled?: boolean;
   type?: "primary" | "text" | "link" | "default";
 }) {
@@ -138,7 +126,6 @@ function ActionIconConfirmButton({
       size="small"
       icon={icon}
       loading={loading}
-      danger={danger}
       disabled={disabled}
       aria-label={title}
     />
@@ -200,16 +187,9 @@ export default function TaskManagerPage() {
   const [retryingLyricId, setRetryingLyricId] = useState<number | null>(null);
   const [cleaningLyricFailed, setCleaningLyricFailed] = useState(false);
   const [cleaningLyricOld, setCleaningLyricOld] = useState(false);
-  const [encryptTasks, setEncryptTasks] = useState<EncryptTask[]>([]);
-  const [encryptLoading, setEncryptLoading] = useState(false);
-  const [encryptStatusFilter, setEncryptStatusFilter] = useState("all");
-  const [cancellingEncryptId, setCancellingEncryptId] = useState<number | null>(null);
-  const [resettingEncryptId, setResettingEncryptId] = useState<number | null>(null);
-  const [deletingEncryptId, setDeletingEncryptId] = useState<number | null>(null);
   const [selectedTranscodeKeys, setSelectedTranscodeKeys] = useState<Key[]>([]);
   const [selectedSubtitleKeys, setSelectedSubtitleKeys] = useState<Key[]>([]);
   const [selectedLyricKeys, setSelectedLyricKeys] = useState<Key[]>([]);
-  const [selectedEncryptKeys, setSelectedEncryptKeys] = useState<Key[]>([]);
   const [selectedPreviewKeys, setSelectedPreviewKeys] = useState<Key[]>([]);
   const [selectedAtrackKeys, setSelectedAtrackKeys] = useState<Key[]>([]);
   const [selectedKeyframeKeys, setSelectedKeyframeKeys] = useState<Key[]>([]);
@@ -302,16 +282,6 @@ export default function TaskManagerPage() {
     }
   };
 
-  const loadEncryptTasks = async (silent = false) => {
-    if (!silent) setEncryptLoading(true);
-    try {
-      setEncryptTasks(await fetchEncryptTasks(200));
-    } catch {
-      if (!silent) setEncryptTasks([]);
-    } finally {
-      if (!silent) setEncryptLoading(false);
-    }
-  };
 
   useEffect(() => {
     void loadTranscode();
@@ -322,7 +292,6 @@ export default function TaskManagerPage() {
     void loadAtrackTasks();
     void loadKeyframeTasks();
     void loadLyricTasks();
-    void loadEncryptTasks();
   }, []);
 
   useEffect(() => {
@@ -336,7 +305,6 @@ export default function TaskManagerPage() {
       if (activeTab === "atrack") void loadAtrackTasks(true);
       if (activeTab === "keyframe") void loadKeyframeTasks(true);
       if (activeTab === "lyric") void loadLyricTasks(true);
-      if (activeTab === "encrypt") void loadEncryptTasks(true);
     }, 10000);
     return () => window.clearInterval(timer);
   }, [autoRefresh, activeTab]);
@@ -372,10 +340,6 @@ export default function TaskManagerPage() {
   const filteredLyric = useMemo(
     () => lyricTasks.filter((x) => (lyricStatusFilter === "all" ? true : x.status === lyricStatusFilter)),
     [lyricTasks, lyricStatusFilter]
-  );
-  const filteredEncrypt = useMemo(
-    () => encryptTasks.filter((x) => (encryptStatusFilter === "all" ? true : x.status === encryptStatusFilter)),
-    [encryptTasks, encryptStatusFilter]
   );
   const getStatusOptionsForTab = (tab: string) => {
     const commonAll = [{ value: "all", label: t("pages.task_manager.all_statuses") }];
@@ -424,16 +388,6 @@ export default function TaskManagerPage() {
         { value: "running", label: "running" },
         { value: "done", label: "done" },
         { value: "failed", label: "failed" },
-      ];
-    }
-    if (tab === "encrypt") {
-      return [
-        ...commonAll,
-        { value: "waiting", label: "waiting" },
-        { value: "running", label: "running" },
-        { value: "done", label: "done" },
-        { value: "failed", label: "failed" },
-        { value: "cancelled", label: "cancelled" },
       ];
     }
     if (tab === "preview" || tab === "atrack" || tab === "keyframe") {
@@ -518,36 +472,38 @@ export default function TaskManagerPage() {
           {t("pages.task_manager.batch_selected", { n: selected.length })}
         </Tag>
       ) : null}
-      <ActionIconButton
+      <ActionIconConfirmButton
         title={t("pages.task_manager.batch_run_now")}
+        confirmTitle={t("pages.task_manager.confirm_action")}
         icon={<ThunderboltOutlined />}
         type="default"
         disabled={selected.length === 0}
         loading={batchLoading}
-        onClick={() => onAction("run_now")}
+        onConfirm={() => onAction("run_now")}
       />
-      <ActionIconButton
+      <ActionIconConfirmButton
         title={t("pages.task_manager.batch_retry")}
+        confirmTitle={t("pages.task_manager.confirm_action")}
         icon={<RedoOutlined />}
         type="default"
         disabled={selected.length === 0}
         loading={batchLoading}
-        onClick={() => onAction("retry")}
+        onConfirm={() => onAction("retry")}
       />
-      <ActionIconButton
+      <ActionIconConfirmButton
         title={t("pages.task_manager.batch_stop")}
+        confirmTitle={t("pages.task_manager.confirm_action")}
         icon={<StopOutlined />}
         type="default"
         disabled={selected.length === 0}
         loading={batchLoading}
-        onClick={() => onAction("cancel")}
+        onConfirm={() => onAction("cancel")}
       />
       <ActionIconConfirmButton
         title={t("pages.task_manager.batch_delete")}
         confirmTitle={t("pages.task_manager.confirm_batch_delete")}
         icon={<DeleteOutlined />}
         type="default"
-        danger
         disabled={selected.length === 0}
         loading={batchLoading}
         onConfirm={() => onAction("delete")}
@@ -599,7 +555,6 @@ export default function TaskManagerPage() {
                     confirmTitle={t("pages.task_manager.confirm_cleanup_all_failed")}
                     icon={<ClearOutlined />}
                     type="default"
-                    danger
                     loading={cleaning}
                     onConfirm={() => {
                       setCleaning(true);
@@ -627,8 +582,6 @@ export default function TaskManagerPage() {
                   { title: "Pipeline", dataIndex: "pipeline_type", width: 110, render: (v?: string) => v || "-" },
                   { title: t("pages.task_manager.col_quality"), dataIndex: "quality", width: 90 },
                   { title: t("pages.task_manager.col_status"), dataIndex: "status", width: 100 },
-                  { title: "DRM", dataIndex: "drm_status", width: 90, render: (v?: string) => v || "-" },
-                  { title: "Cleanup", dataIndex: "source_cleanup_status", width: 110, render: (v?: string) => v || "-" },
                   { title: t("pages.task_manager.col_progress"), dataIndex: "progress", width: 80, render: (p: number) => `${p}%` },
                   { title: t("pages.task_manager.col_error"), dataIndex: "error_message", ellipsis: true, render: (v?: string) => v || "-" },
                   { title: t("pages.task_manager.col_created_at"), dataIndex: "created_at", width: 180, render: fmtTaskTs },
@@ -640,10 +593,11 @@ export default function TaskManagerPage() {
                     render: (_: unknown, r: TranscodeTask) => (
                       <Space size={4}>
                         {(r.status === "waiting" || r.status === "running") ? (
-                          <ActionIconButton
+                          <ActionIconConfirmButton
                             title={t("pages.task_manager.tooltip_cancel_task")}
+                            confirmTitle={t("pages.task_manager.confirm_action")}
                             icon={<StopOutlined />}
-                            onClick={() => {
+                            onConfirm={() => {
                               void cancelTranscodeTask(r.id)
                                 .then(() => message.success(t("pages.task_manager.task_cancelled")))
                                 .then(loadTranscode)
@@ -652,11 +606,12 @@ export default function TaskManagerPage() {
                           />
                         ) : null}
                         {(r.status === "failed" || r.status === "cancelled") ? (
-                          <ActionIconButton
+                          <ActionIconConfirmButton
                             title={t("pages.task_manager.tooltip_retry")}
+                            confirmTitle={t("pages.task_manager.confirm_action")}
                             icon={<RedoOutlined />}
                             type="primary"
-                            onClick={() => {
+                            onConfirm={() => {
                               void retryTranscodeTask(r.id)
                                 .then(() => message.success(t("pages.task_manager.retry_submitted")))
                                 .then(loadTranscode)
@@ -776,12 +731,13 @@ export default function TaskManagerPage() {
                     align: "center",
                     fixed: "right",
                     render: (_: unknown, r: ScanTask) => (
-                      <ActionIconButton
+                      <ActionIconConfirmButton
                         title={t("pages.task_manager.tooltip_cancel_scan")}
+                        confirmTitle={t("pages.task_manager.confirm_action")}
                         icon={<StopOutlined />}
                         disabled={r.status !== "running"}
                         loading={cancellingScanId === r.id}
-                        onClick={() => {
+                        onConfirm={() => {
                           setCancellingScanId(r.id);
                           void cancelScanTask(r.id)
                             .then(() => message.success(t("pages.task_manager.cancel_requested")))
@@ -824,7 +780,6 @@ export default function TaskManagerPage() {
                     confirmTitle={t("pages.task_manager.confirm_subtitle_cleanup_failed")}
                     icon={<ClearOutlined />}
                     type="default"
-                    danger
                     loading={cleaningSubtitleFailed}
                     onConfirm={() => {
                       setCleaningSubtitleFailed(true);
@@ -894,11 +849,12 @@ export default function TaskManagerPage() {
                       return (
                         <Space size={4}>
                           {s === "running" ? (
-                            <ActionIconButton
+                            <ActionIconConfirmButton
                               title={t("pages.task_manager.tooltip_cancel_subtitle")}
+                              confirmTitle={t("pages.task_manager.confirm_action")}
                               icon={<StopOutlined />}
                               loading={cancellingSubtitleId === r.media_id}
-                              onClick={() => {
+                              onConfirm={() => {
                                 setCancellingSubtitleId(r.media_id);
                                 void cancelSubtitleTask(r.media_id)
                                   .then(() => message.success(t("pages.task_manager.cancel_requested")))
@@ -911,12 +867,13 @@ export default function TaskManagerPage() {
                             />
                           ) : null}
                           {s === "waiting" ? (
-                            <ActionIconButton
+                            <ActionIconConfirmButton
                               title={t("pages.task_manager.tooltip_run_now_subtitle")}
+                              confirmTitle={t("pages.task_manager.confirm_action")}
                               icon={<ThunderboltOutlined />}
                               type="primary"
                               loading={runNowSubtitleId === r.media_id}
-                              onClick={() => {
+                              onConfirm={() => {
                                 setRunNowSubtitleId(r.media_id);
                                 void runNowSubtitleTask(r.media_id)
                                   .then(() => message.success(t("pages.task_manager.run_now_submitted")))
@@ -929,12 +886,13 @@ export default function TaskManagerPage() {
                             />
                           ) : null}
                           {s === "failed" || s === "cancelled" ? (
-                            <ActionIconButton
+                            <ActionIconConfirmButton
                               title={t("pages.task_manager.tooltip_reprocess")}
+                              confirmTitle={t("pages.task_manager.confirm_action")}
                               icon={<RedoOutlined />}
                               type="primary"
                               loading={retryingSubtitleId === r.media_id}
-                              onClick={() => {
+                              onConfirm={() => {
                                 setRetryingSubtitleId(r.media_id);
                                 void retrySubtitleTask(r.media_id)
                                   .then(() => message.success(t("pages.task_manager.retry_submitted")))
@@ -951,7 +909,6 @@ export default function TaskManagerPage() {
                               title={t("pages.task_manager.tooltip_delete")}
                               confirmTitle={t("pages.task_manager.confirm_subtitle_delete")}
                               icon={<DeleteOutlined />}
-                              danger
                               loading={deletingSubtitleId === r.media_id}
                               onConfirm={() => {
                                 setDeletingSubtitleId(r.media_id);
@@ -1002,7 +959,6 @@ export default function TaskManagerPage() {
                     confirmTitle={t("pages.task_manager.confirm_lyric_cleanup_failed")}
                     icon={<ClearOutlined />}
                     type="default"
-                    danger
                     loading={cleaningLyricFailed}
                     onConfirm={() => {
                       setCleaningLyricFailed(true);
@@ -1069,11 +1025,12 @@ export default function TaskManagerPage() {
                     align: "center",
                     fixed: "right",
                     render: (_: unknown, r: LyricTask) => (
-                      <ActionIconButton
+                      <ActionIconConfirmButton
                         title={t("pages.task_manager.tooltip_retry")}
+                        confirmTitle={t("pages.task_manager.confirm_action")}
                         icon={<RedoOutlined />}
                         loading={retryingLyricId === r.media_id}
-                        onClick={async () => {
+                        onConfirm={async () => {
                           setRetryingLyricId(r.media_id);
                           try {
                             await retryLyricTask(r.media_id);
@@ -1139,11 +1096,12 @@ export default function TaskManagerPage() {
                     width: 70,
                     align: "center",
                     render: (_: unknown, r: PreviewTask) => (
-                      <ActionIconButton
+                      <ActionIconConfirmButton
                         title={t("pages.task_manager.tooltip_retry")}
+                        confirmTitle={t("pages.task_manager.confirm_action")}
                         icon={<RedoOutlined />}
                         loading={retryingPreview === r.media_id}
-                        onClick={() => {
+                        onConfirm={() => {
                           setRetryingPreview(r.media_id);
                           void retryPreviewTask(r.media_id).then(() => message.success(t("pages.task_manager.trigger_retry_success"))).then(loadPreview).catch(() => message.error(t("pages.task_manager.retry_failed"))).finally(() => setRetryingPreview(null));
                         }}
@@ -1200,11 +1158,12 @@ export default function TaskManagerPage() {
                     width: 70,
                     align: "center",
                     render: (_: unknown, r: AtrackTask) => (
-                      <ActionIconButton
+                      <ActionIconConfirmButton
                         title={t("pages.task_manager.tooltip_retry")}
+                        confirmTitle={t("pages.task_manager.confirm_action")}
                         icon={<RedoOutlined />}
                         loading={retryingAtrackId === r.media_id}
-                        onClick={async () => {
+                        onConfirm={async () => {
                           setRetryingAtrackId(r.media_id);
                           try {
                             await retryAudioTrackExtraction(r.media_id);
@@ -1270,11 +1229,12 @@ export default function TaskManagerPage() {
                     width: 70,
                     align: "center",
                     render: (_: unknown, r: KeyframeTask) => (
-                      <ActionIconButton
+                      <ActionIconConfirmButton
                         title={t("pages.task_manager.tooltip_retry")}
+                        confirmTitle={t("pages.task_manager.confirm_action")}
                         icon={<RedoOutlined />}
                         loading={retryingKeyframeId === r.media_id}
-                        onClick={async () => {
+                        onConfirm={async () => {
                           setRetryingKeyframeId(r.media_id);
                           try {
                             await retryKeyframeExtraction(r.media_id);
@@ -1287,119 +1247,6 @@ export default function TaskManagerPage() {
                           }
                         }}
                       />
-                    ),
-                  },
-                ]}
-              />
-            </Card>
-          ),
-        },
-        {
-          key: "encrypt",
-          label: t("pages.task_manager.tab_encrypt"),
-          children: (
-            <Card
-              title={t("pages.task_manager.encrypt_card_title")}
-              extra={(
-                <Space size={4} wrap={false}>
-                  {renderListHeaderControls("encrypt", encryptStatusFilter, setEncryptStatusFilter, () => void loadEncryptTasks())}
-                  {toolbarDivider}
-                  {renderBatchToolbar(selectedEncryptKeys, (action) => {
-                    void runBatch(
-                      action,
-                      selectedEncryptKeys,
-                      (k) => Number(k),
-                      batchEncryptTasks,
-                      async () => { await loadEncryptTasks(); },
-                      () => setSelectedEncryptKeys([]),
-                    );
-                  })}
-                </Space>
-              )}
-            >
-              <div style={{ marginBottom: 8, color: "#888", fontSize: 12 }}>
-                {t("pages.task_manager.encrypt_help")}
-              </div>
-              <Table
-                rowKey="id"
-                loading={encryptLoading}
-                dataSource={filteredEncrypt}
-                rowSelection={{
-                  selectedRowKeys: selectedEncryptKeys,
-                  onChange: setSelectedEncryptKeys,
-                }}
-                pagination={{ pageSize: 10 }}
-                columns={[
-                  { title: t("pages.task_manager.col_task_id"), dataIndex: "id", width: 80 },
-                  { title: t("pages.task_manager.col_media_id"), dataIndex: "media_id", width: 90 },
-                  { title: t("pages.task_manager.col_title"), dataIndex: "title", ellipsis: true },
-                  { title: t("pages.task_manager.col_status"), dataIndex: "status", width: 110 },
-                  { title: t("pages.task_manager.col_attempts"), dataIndex: "attempts", width: 90 },
-                  { title: t("pages.task_manager.col_started_at"), dataIndex: "started_at", width: 170, render: fmtTaskTs },
-                  { title: t("pages.task_manager.col_lease_until"), dataIndex: "lease_until", width: 170, render: fmtTaskTs },
-                  { title: t("pages.task_manager.col_error_message"), dataIndex: "last_error", ellipsis: true, render: (v?: string) => v || "-" },
-                  {
-                    title: t("pages.task_manager.col_actions"),
-                    key: "actions",
-                    width: 130,
-                    align: "center",
-                    render: (_: unknown, r: EncryptTask) => (
-                      <Space size={4}>
-                        {r.status === "running" || r.status === "waiting" ? (
-                          <ActionIconButton
-                            title={t("pages.task_manager.tooltip_cancel_encrypt")}
-                            icon={<StopOutlined />}
-                            loading={cancellingEncryptId === r.id}
-                            onClick={() => {
-                              setCancellingEncryptId(r.id);
-                              void cancelEncryptTask(r.id)
-                                .then(() => message.success(t("pages.task_manager.cancel_requested")))
-                                .catch(() => message.error(t("pages.task_manager.task_cancel_failed")))
-                                .finally(async () => {
-                                  setCancellingEncryptId(null);
-                                  await loadEncryptTasks();
-                                });
-                            }}
-                          />
-                        ) : null}
-                        {r.status === "failed" || r.status === "cancelled" || r.status === "running" ? (
-                          <ActionIconConfirmButton
-                            title={t("pages.task_manager.tooltip_reset")}
-                            confirmTitle={t("pages.task_manager.confirm_encrypt_reset")}
-                            icon={<RollbackOutlined />}
-                            loading={resettingEncryptId === r.id}
-                            onConfirm={() => {
-                              setResettingEncryptId(r.id);
-                              void resetEncryptTask(r.id)
-                                .then(() => message.success(t("pages.task_manager.reset_success")))
-                                .catch(() => message.error(t("pages.task_manager.reset_failed")))
-                                .finally(async () => {
-                                  setResettingEncryptId(null);
-                                  await loadEncryptTasks();
-                                });
-                            }}
-                          />
-                        ) : null}
-                        {r.status === "waiting" || r.status === "failed" || r.status === "cancelled" ? (
-                          <ActionIconConfirmButton
-                            title={t("pages.task_manager.tooltip_delete")}
-                            confirmTitle={t("pages.task_manager.confirm_encrypt_delete")}
-                            icon={<DeleteOutlined />}
-                            danger
-                            loading={deletingEncryptId === r.id}
-                            onConfirm={() => {
-                              setDeletingEncryptId(r.id);
-                              void deleteEncryptTask(r.id)
-                                .then(() => message.success(t("common.delete_success")))
-                                .catch(() => message.error(t("common.delete_failed")))
-                                .finally(async () => {
-                                  setDeletingEncryptId(null);
-                                  await loadEncryptTasks();
-                                });
-                            }}
-                          />
-                        ) : null}
-                      </Space>
                     ),
                   },
                 ]}

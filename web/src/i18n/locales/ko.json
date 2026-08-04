@@ -765,7 +765,8 @@
       "task_type_scrape_run": "스크래핑 작업 정기 실행",
       "task_type_subtitle_process": "자막 정기 처리(일괄)",
       "task_type_transcode_cleanup": "과거 트랜스코드 실패 작업 정리",
-      "trigger_retry_success": "재시도를 트리거했습니다"
+      "trigger_retry_success": "재시도를 트리거했습니다",
+      "confirm_action": "이 작업을 실행하시겠습니까?"
     },
     "playback_history": {
       "title": "재생 기록",

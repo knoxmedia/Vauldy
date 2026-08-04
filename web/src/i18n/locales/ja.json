@@ -765,7 +765,8 @@
       "task_type_scrape_run": "スクレイピングタスクを定期実行",
       "task_type_subtitle_process": "字幕を定期処理（バッチ）",
       "task_type_transcode_cleanup": "過去のトランスコード失敗タスクをクリーンアップ",
-      "trigger_retry_success": "再試行をトリガーしました"
+      "trigger_retry_success": "再試行をトリガーしました",
+      "confirm_action": "この操作を実行しますか？"
     },
     "playback_history": {
       "title": "再生履歴",

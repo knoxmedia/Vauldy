@@ -808,7 +808,8 @@
       "category_atrack": "Audio track",
       "category_preview": "Preview thumbnails",
       "category_scrape": "Scrape",
-      "category_cleanup": "Cleanup"
+      "category_cleanup": "Cleanup",
+      "confirm_action": "Confirm this action?"
     },
     "playback_history": {
       "title": "Playback history",

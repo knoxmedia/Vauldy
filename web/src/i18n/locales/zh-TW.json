@@ -776,7 +776,8 @@
       "category_atrack": "音軌",
       "category_preview": "進度條預覽",
       "category_scrape": "刮削",
-      "category_cleanup": "清理"
+      "category_cleanup": "清理",
+      "confirm_action": "確定執行此操作？"
     },
     "playback_history": {
       "title": "播放紀錄",
