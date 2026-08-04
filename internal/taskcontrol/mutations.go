@@ -586,9 +586,10 @@ func (s *MutateService) Reset(ctx context.Context, p ResetParams) error {
 		}
 		var status string
 		var retryRound, generation int64
+		var ingestRunID, ingestStepID sql.NullInt64
 		if err := tx.QueryRowContext(ctx,
-			`SELECT status, retry_round, generation FROM post_ingest_task WHERE id=?`,
-			id).Scan(&status, &retryRound, &generation); err != nil {
+			`SELECT status, retry_round, generation, ingest_run_id, ingest_step_id FROM post_ingest_task WHERE id=?`,
+			id).Scan(&status, &retryRound, &generation, &ingestRunID, &ingestStepID); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return fmt.Errorf("%w: task not found", ErrInvalidOperation)
 			}
@@ -633,6 +634,15 @@ func (s *MutateService) Reset(ctx context.Context, p ResetParams) error {
 		n, _ := result.RowsAffected()
 		if n != 1 {
 			return fmt.Errorf("%w: reset race", ErrInvalidOperation)
+		}
+
+		// Reopen the linked ingest step so the task can be claimed again. A
+		// required barrier step also reopens its run to processing; otherwise
+		// claim eligibility (required steps need a processing run) never holds.
+		if ingestRunID.Valid && ingestStepID.Valid {
+			if err := resetLinkedStepTx(ctx, tx, ingestRunID.Int64, ingestStepID.Int64, nextRound); err != nil {
+				return err
+			}
 		}
 
 		// Write audit
@@ -883,6 +893,54 @@ func syncLinkedStepTerminalTx(ctx context.Context, tx store.ImmediateConnTx, run
 		return fmt.Errorf("taskcontrol: finalize linked ingest step: %w", err)
 	}
 	return nil
+}
+
+// resetLinkedStepTx reopens a linked ingest step after a terminal→waiting reset
+// so its orchestration task becomes claimable again. The step returns to
+// waiting with its attempts and lease cleared. A required barrier step also
+// reopens its ingest run to processing (and, for non-preserve runs, returns the
+// media to processing), because claim eligibility for required steps requires a
+// processing run. Optional steps keep the run state; their eligibility holds for
+// published/degraded runs as long as no required work is pending.
+func resetLinkedStepTx(ctx context.Context, tx store.ImmediateConnTx, runID, stepID int64, nextRound int) error {
+	var required int
+	var runStatus string
+	if err := tx.QueryRowContext(ctx, `SELECT required FROM media_ingest_step WHERE id=? AND run_id=?`, stepID, runID).Scan(&required); err != nil {
+		return fmt.Errorf("taskcontrol: load linked ingest step: %w", err)
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT status FROM media_ingest_run WHERE id=?`, runID).Scan(&runStatus); err != nil {
+		return fmt.Errorf("taskcontrol: load linked ingest run: %w", err)
+	}
+	res, err := tx.ExecContext(ctx,
+		`UPDATE media_ingest_step SET status='waiting', attempts=0, last_error='', lease_owner=NULL, lease_until=NULL,
+		 finished_at=NULL, retry_round=?, updated_at=CURRENT_TIMESTAMP
+		 WHERE id=? AND run_id=?`, nextRound, stepID, runID)
+	if err != nil {
+		return fmt.Errorf("taskcontrol: reset linked ingest step: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return fmt.Errorf("%w: linked ingest step %d in run %d", ErrInvalidOperation, stepID, runID)
+	}
+	if required == 1 && runStatus != "processing" {
+		reopened, err := tx.ExecContext(ctx,
+			`UPDATE media_ingest_run SET status='processing', finished_at=NULL, error_message='', terminal_reason='', updated_at=CURRENT_TIMESTAMP
+			 WHERE id=? AND superseded_at IS NULL AND superseded_by_generation IS NULL`, runID)
+		if err != nil {
+			return fmt.Errorf("taskcontrol: reopen linked ingest run: %w", err)
+		}
+		if n, _ := reopened.RowsAffected(); n == 1 {
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE media SET publication_state='processing', publication_error=''
+				 WHERE id=(SELECT media_id FROM media_ingest_run WHERE id=?)
+				   AND ingest_generation=(SELECT generation FROM media_ingest_run WHERE id=?)
+				   AND publication_state IN ('published','degraded','failed')
+				   AND NOT EXISTS (SELECT 1 FROM media_ingest_run r WHERE r.id=? AND r.preserve_visibility=1)`,
+				runID, runID, runID); err != nil {
+				return fmt.Errorf("taskcontrol: reopen linked media publication state: %w", err)
+			}
+		}
+	}
+	return publication.FinalizeNodeTransitionTx(ctx, tx, runID)
 }
 
 // =============================================================================
@@ -1263,7 +1321,8 @@ func ResetInTx(ctx context.Context, tx store.ImmediateConnTx, taskIdentity strin
 	}
 	var status string
 	var retryRound int64
-	if err := tx.QueryRowContext(ctx, `SELECT status, retry_round FROM post_ingest_task WHERE id=?`, id).Scan(&status, &retryRound); err != nil {
+	var ingestRunID, ingestStepID sql.NullInt64
+	if err := tx.QueryRowContext(ctx, `SELECT status, retry_round, ingest_run_id, ingest_step_id FROM post_ingest_task WHERE id=?`, id).Scan(&status, &retryRound, &ingestRunID, &ingestStepID); err != nil {
 		return err
 	}
 	if !isTerminalStatus(status) {
@@ -1277,6 +1336,11 @@ func ResetInTx(ctx context.Context, tx store.ImmediateConnTx, taskIdentity strin
 		nextRound, id, retryRound)
 	if err != nil {
 		return err
+	}
+	if ingestRunID.Valid && ingestStepID.Valid {
+		if err := resetLinkedStepTx(ctx, tx, ingestRunID.Int64, ingestStepID.Int64, nextRound); err != nil {
+			return err
+		}
 	}
 	_, err = tx.ExecContext(ctx,
 		`INSERT INTO task_control_audit (task_identity, actor_id, action, reason, previous_status, new_status)

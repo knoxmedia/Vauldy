@@ -1105,6 +1105,109 @@ INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation
 	return 10, 11, 12, 111, 112
 }
 
+func TestResetReopensLinkedRequiredStepRunAndMedia(t *testing.T) {
+	db := openLinkedMutationTestDB(t)
+	svc := NewMutateService(db)
+	_, err := db.Exec(`
+INSERT INTO library(name,type,path) VALUES('taskcontrol-reset','video','/taskcontrol-reset');
+INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state,published_at) VALUES(1,1,'linked-reset','video',1,'degraded',CURRENT_TIMESTAMP);
+INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version,preserve_visibility,finished_at) VALUES(20,1,1,'scan','degraded','{}',3,0,CURRENT_TIMESTAMP);
+INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status,attempts,max_attempts,last_error,retry_round) VALUES
+ (21,20,1,1,'poster',1,'failed',1,1,'context deadline exceeded',0),
+ (22,20,1,1,'media_visible',0,'cancelled',0,1,'',0);
+INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status,attempts,max_attempts,retry_round,last_error) VALUES
+ (200,1,20,21,1,'poster','failed',1,1,0,'context deadline exceeded');`)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	taskID := BuildIdentity("orchestration", 200)
+	if err := svc.Reset(context.Background(), ResetParams{TaskIdentity: taskID, ActorID: 1, Reason: "retry"}); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+
+	var status string
+	var retryRound, attempts int
+	if err := db.QueryRow(`SELECT status, retry_round, attempts FROM post_ingest_task WHERE id=200`).Scan(&status, &retryRound, &attempts); err != nil {
+		t.Fatal(err)
+	}
+	if status != "waiting" || retryRound != 1 || attempts != 0 {
+		t.Errorf("task not reset: status=%s retry_round=%d attempts=%d", status, retryRound, attempts)
+	}
+
+	var stepStatus string
+	var stepAttempts, stepRound int
+	if err := db.QueryRow(`SELECT status, attempts, retry_round FROM media_ingest_step WHERE id=21`).Scan(&stepStatus, &stepAttempts, &stepRound); err != nil {
+		t.Fatal(err)
+	}
+	if stepStatus != "waiting" || stepAttempts != 0 || stepRound != 1 {
+		t.Errorf("linked step not reopened: status=%s attempts=%d retry_round=%d", stepStatus, stepAttempts, stepRound)
+	}
+
+	var runStatus string
+	if err := db.QueryRow(`SELECT status FROM media_ingest_run WHERE id=20`).Scan(&runStatus); err != nil {
+		t.Fatal(err)
+	}
+	if runStatus != "processing" {
+		t.Errorf("run should be processing after required reset, got %s", runStatus)
+	}
+
+	var pubState string
+	if err := db.QueryRow(`SELECT publication_state FROM media WHERE id=1`).Scan(&pubState); err != nil {
+		t.Fatal(err)
+	}
+	if pubState != "processing" {
+		t.Errorf("media should be processing for non-preserve run, got %s", pubState)
+	}
+
+	// The claim eligibility predicate for a required linked step now holds:
+	// task waiting, step waiting, run processing.
+	var eligible int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM post_ingest_task q LEFT JOIN media_ingest_step st ON st.id=q.ingest_step_id WHERE q.id=200 AND q.status='waiting' AND st.status='waiting' AND st.required=1`).Scan(&eligible); err != nil {
+		t.Fatal(err)
+	}
+	if eligible != 1 {
+		t.Error("reset task should be claim-eligible with a waiting required step")
+	}
+}
+
+func TestResetLinkedOptionalStepKeepsPublishedRun(t *testing.T) {
+	db := openLinkedMutationTestDB(t)
+	svc := NewMutateService(db)
+	_, err := db.Exec(`
+INSERT INTO library(name,type,path) VALUES('taskcontrol-optional','video','/taskcontrol-optional');
+INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state,published_at) VALUES(1,1,'linked-optional','video',1,'published',CURRENT_TIMESTAMP);
+INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version,preserve_visibility,finished_at) VALUES(30,1,1,'scan','published','{}',3,0,CURRENT_TIMESTAMP);
+INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status,attempts,max_attempts,last_error,retry_round) VALUES
+ (31,30,1,1,'preview',0,'failed',1,3,'boom',0);
+INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status,attempts,max_attempts,retry_round,last_error) VALUES
+ (300,1,30,31,1,'preview','failed',1,3,0,'boom');`)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	taskID := BuildIdentity("orchestration", 300)
+	if err := svc.Reset(context.Background(), ResetParams{TaskIdentity: taskID, ActorID: 1, Reason: "retry"}); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+
+	var runStatus string
+	if err := db.QueryRow(`SELECT status FROM media_ingest_run WHERE id=30`).Scan(&runStatus); err != nil {
+		t.Fatal(err)
+	}
+	if runStatus != "published" {
+		t.Errorf("optional reset should keep run published, got %s", runStatus)
+	}
+
+	var pubState string
+	if err := db.QueryRow(`SELECT publication_state FROM media WHERE id=1`).Scan(&pubState); err != nil {
+		t.Fatal(err)
+	}
+	if pubState != "published" {
+		t.Errorf("media should stay published for optional reset, got %s", pubState)
+	}
+}
+
 func assertLinkedTerminalPropagation(t *testing.T, db *sql.DB, sourceStepID, dependentStepID, sourceTaskID, dependentTaskID int64, wantSource string) {
 	t.Helper()
 	var queueSource, stepSource, queueDependent, stepDependent string
