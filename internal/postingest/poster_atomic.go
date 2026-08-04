@@ -103,7 +103,15 @@ func (a *PosterAdapter) ExecuteWithResult(ctx context.Context, task Task) (Execu
 		return ordinary, err
 	}
 	if fp == "" {
-		fp, err = posterSourceFingerprint(ctx, input)
+		var reason string
+		if task.RunID != nil {
+			_ = a.DB.QueryRowContext(ctx, `SELECT reason FROM media_ingest_run WHERE id=? AND media_id=? AND generation=?`, *task.RunID, task.MediaID, task.Generation).Scan(&reason)
+		}
+		if reason == string(publication.PlanReasonRepair) {
+			fp, err = publication.SourceIdentityFingerprint(input)
+		} else {
+			fp, err = cachedPosterSourceFingerprint(ctx, a.DB, task.MediaID, input)
+		}
 		if err != nil {
 			return ordinary, err
 		}
@@ -170,6 +178,55 @@ func currentPosterEvidence(ctx context.Context, db *sql.DB, task Task, sourcePat
 		return false, "", err
 	}
 	return posterInMeta(decodePosterMeta(meta)) == v.URL, current, nil
+}
+
+// cachedPosterSourceFingerprint returns a source fingerprint without reading the
+// file when a previously committed poster/thumbnail evidence row for the same
+// media still matches the file's identity (path|size|mtime). Re-hashing a large
+// source on every poster generation during a repair sweep would saturate disk
+// I/O; the full-file SHA-256 is only computed when no reusable evidence exists.
+func cachedPosterSourceFingerprint(ctx context.Context, db *sql.DB, mediaID int64, path string) (string, error) {
+	info, err := posterSourceStat(path)
+	if err != nil {
+		return "", err
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	wantIdentity := fmt.Sprintf("%s|%d|%d", filepath.Clean(abs), info.Size(), info.ModTime().UnixNano())
+	rows, err := db.QueryContext(ctx, `SELECT source_fingerprint FROM media_ingest_evidence WHERE media_id=? AND kind IN ('poster','thumbnail') ORDER BY id DESC LIMIT 8`, mediaID)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var fp string
+		if err := rows.Scan(&fp); err != nil {
+			return "", err
+		}
+		// Precapture placeholders carry a zeroed content hash and stale rows may
+		// hold malformed digests. Both are valid for identity checks during
+		// repair preflight but must never be bound as the source fingerprint of
+		// a staged poster.
+		if isPosterPlaceholderFingerprint(fp) {
+			continue
+		}
+		if _, err := parsePosterSourceFingerprint(fp, path); err != nil {
+			continue
+		}
+		if identity, ok := publication.FingerprintIdentityKey(fp); ok && identity == wantIdentity {
+			return fp, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	return posterSourceFingerprint(ctx, path)
+}
+
+func isPosterPlaceholderFingerprint(fp string) bool {
+	return strings.HasSuffix(strings.TrimSpace(fp), "|sha256:"+strings.Repeat("0", 64))
 }
 
 type posterSourceSelection struct {

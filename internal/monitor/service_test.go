@@ -115,7 +115,7 @@ func TestScanSourcesDistinguishRealtimeAndAutoScan(t *testing.T) {
 			scheduledCount++
 		}
 	}
-	if monitorCount != 2 || scheduledCount != 1 {
+	if monitorCount != 1 || scheduledCount != 1 {
 		t.Fatalf("monitor=%d scheduled=%d requests=%+v", monitorCount, scheduledCount, spy.requests)
 	}
 }
@@ -142,10 +142,12 @@ func TestScanSourcesCoalesceRealtimeAndAutoScanPerTick(t *testing.T) {
 	spy := &scanSubmitterSpy{called: make(chan struct{}, 4)}
 	service := NewService(db, spy, time.Hour)
 	service.AutoScanInterval = time.Hour
+	service.MonitorScanInterval = time.Hour
 
 	service.tick(context.Background())
 	service.mu.Lock()
 	service.lastAutoScan[id] = time.Now().Add(-2 * time.Hour)
+	service.lastMonitorScan[id] = time.Now().Add(-2 * time.Hour)
 	service.mu.Unlock()
 	service.tick(context.Background())
 
@@ -213,5 +215,44 @@ func TestAutoScanWithoutRootsDoesNotAdvance(t *testing.T) {
 	service.mu.Unlock()
 	if marked {
 		t.Fatal("no-roots scan advanced auto-scan time")
+	}
+}
+
+func TestRealtimeMonitorThrottlesFullScansAndRetriesFailure(t *testing.T) {
+	db, err := store.OpenSQLite(filepath.Join(t.TempDir(), "monitor-throttle.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	root := t.TempDir()
+	result, err := db.Exec(`INSERT INTO library(name,path,type,enabled,realtime_monitor,auto_scan) VALUES('mon',?,'movie',1,1,0)`, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	libraryID, _ := result.LastInsertId()
+	spy := &scanSubmitterSpy{errs: []error{errors.New("submit failed"), nil}}
+	service := NewService(db, spy, time.Millisecond)
+	service.MonitorScanInterval = time.Hour
+
+	service.tick(context.Background()) // failure: must not advance the throttle
+	service.tick(context.Background()) // success: records last submission
+	service.tick(context.Background()) // suppressed within the interval
+
+	spy.mu.Lock()
+	requests := append([]scancoord.ScanRequest(nil), spy.requests...)
+	spy.mu.Unlock()
+	if len(requests) != 2 {
+		t.Fatalf("requests=%d want failed retry then suppression", len(requests))
+	}
+	for _, req := range requests {
+		if req.LibraryID != libraryID || req.Source != scancoord.SourceMonitor {
+			t.Fatalf("request=%+v", req)
+		}
+	}
+	service.mu.Lock()
+	_, marked := service.lastMonitorScan[libraryID]
+	service.mu.Unlock()
+	if !marked {
+		t.Fatal("accepted monitor scan did not advance throttle")
 	}
 }

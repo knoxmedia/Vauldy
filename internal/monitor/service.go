@@ -13,6 +13,7 @@ import (
 )
 
 const defaultAutoScanInterval = 5 * time.Minute
+const defaultMonitorScanInterval = 5 * time.Minute
 
 type ScanSubmitter interface {
 	Submit(context.Context, scancoord.ScanRequest) (scancoord.SubmitResult, error)
@@ -24,10 +25,13 @@ type Service struct {
 	Interval  time.Duration
 	// AutoScanInterval controls periodic scheduled submissions when auto_scan=1.
 	AutoScanInterval time.Duration
+	// MonitorScanInterval bounds full-library polling for realtime_monitor.
+	MonitorScanInterval time.Duration
 
-	mu           sync.Mutex
-	running      map[int64]bool
-	lastAutoScan map[int64]time.Time
+	mu              sync.Mutex
+	running         map[int64]bool
+	lastAutoScan    map[int64]time.Time
+	lastMonitorScan map[int64]time.Time
 }
 
 func NewService(db *sql.DB, submitter ScanSubmitter, interval time.Duration) *Service {
@@ -35,12 +39,14 @@ func NewService(db *sql.DB, submitter ScanSubmitter, interval time.Duration) *Se
 		interval = 15 * time.Second
 	}
 	return &Service{
-		DB:               db,
-		Submitter:        submitter,
-		Interval:         interval,
-		AutoScanInterval: defaultAutoScanInterval,
-		running:          make(map[int64]bool),
-		lastAutoScan:     make(map[int64]time.Time),
+		DB:                  db,
+		Submitter:           submitter,
+		Interval:            interval,
+		AutoScanInterval:    defaultAutoScanInterval,
+		MonitorScanInterval: defaultMonitorScanInterval,
+		running:             make(map[int64]bool),
+		lastAutoScan:        make(map[int64]time.Time),
+		lastMonitorScan:     make(map[int64]time.Time),
 	}
 }
 
@@ -76,7 +82,7 @@ func (s *Service) tick(ctx context.Context) {
 			continue
 		}
 		var source scancoord.Source
-		if realtime == 1 {
+		if realtime == 1 && s.monitorScanDue(id, now) {
 			source = scancoord.SourceMonitor
 		} else if autoScan == 1 && s.autoScanDue(id, now) {
 			source = scancoord.SourceScheduled
@@ -92,8 +98,27 @@ func (s *Service) tick(ctx context.Context) {
 			log.Printf("library scan submit failed library=%d source=%s err=%v", id, source, err)
 		} else if source == scancoord.SourceScheduled {
 			s.markAutoScan(id, now)
+		} else if source == scancoord.SourceMonitor {
+			s.markMonitorScan(id, now)
 		}
 	}
+}
+
+func (s *Service) monitorScanDue(libraryID int64, now time.Time) bool {
+	interval := s.MonitorScanInterval
+	if interval <= 0 {
+		interval = defaultMonitorScanInterval
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	last, ok := s.lastMonitorScan[libraryID]
+	return !ok || now.Sub(last) >= interval
+}
+
+func (s *Service) markMonitorScan(libraryID int64, now time.Time) {
+	s.mu.Lock()
+	s.lastMonitorScan[libraryID] = now
+	s.mu.Unlock()
 }
 
 func (s *Service) autoScanDue(libraryID int64, now time.Time) bool {

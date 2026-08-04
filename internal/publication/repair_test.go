@@ -258,7 +258,7 @@ func TestRepairLegacyAcceptsPrecaptureZeroHashPosterAfterPlaintextCleanup(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity, ok := fingerprintIdentityKey(fp)
+	identity, ok := FingerprintIdentityKey(fp)
 	if !ok {
 		t.Fatalf("fingerprint identity: %q", fp)
 	}
@@ -422,14 +422,101 @@ func TestRepairLegacyMediaCreatesNextGenerationWhenRequirementsExpand(t *testing
 	}
 }
 
+func TestRepairLegacyMediaAdoptsCompletedOptionalWorkBeforeDispatch(t *testing.T) {
+	db := openRepairTestDB(t)
+	mediaID := seedLegacyVideo(t, db, 1, "published")
+	if _, err := db.Exec(`UPDATE library SET preview_extract=1,subtitle_extract=1 WHERE id=(SELECT library_id FROM media WHERE id=?)`, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	addRepairEvidence(t, db, mediaID, StepScrape)
+	addRepairEvidence(t, db, mediaID, StepPreview)
+	addRepairEvidence(t, db, mediaID, StepSubtitle)
+
+	if n, err := RepairLegacyMedia(context.Background(), db, NewPlanner(PlanOptions{}), 4); err != nil || n != 1 {
+		t.Fatalf("repair=%d err=%v", n, err)
+	}
+	var runID int64
+	if err := db.QueryRow(`SELECT id FROM media_ingest_run WHERE media_id=? AND reason='repair' ORDER BY id DESC LIMIT 1`, mediaID).Scan(&runID); err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range []StepType{StepScrape, StepPreview, StepSubtitleExtract} {
+		var status string
+		if err := db.QueryRow(`SELECT status FROM media_ingest_step WHERE run_id=? AND step_type=?`, runID, step).Scan(&status); err != nil {
+			t.Fatalf("%s step: %v", step, err)
+		}
+		if status != "done" {
+			t.Fatalf("%s status=%s want done", step, status)
+		}
+	}
+	var waitingHeavy int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM post_ingest_task WHERE ingest_run_id=? AND task_type IN ('preview','subtitle') AND status='waiting'`, runID).Scan(&waitingHeavy); err != nil {
+		t.Fatal(err)
+	}
+	if waitingHeavy != 0 {
+		t.Fatalf("waiting heavy optional tasks=%d want 0", waitingHeavy)
+	}
+	var waitingScrape int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM scrape_task WHERE ingest_run_id=? AND status='waiting'`, runID).Scan(&waitingScrape); err != nil {
+		t.Fatal(err)
+	}
+	if waitingScrape != 0 {
+		t.Fatalf("waiting scrape tasks=%d want 0", waitingScrape)
+	}
+}
+func TestRepairLegacyMediaSkipsOptionalWorkWithoutHistoricalEvidence(t *testing.T) {
+	db := openRepairTestDB(t)
+	mediaID := seedLegacyVideo(t, db, 1, "published")
+	if _, err := db.Exec(`UPDATE library SET preview_extract=1,subtitle_extract=1 WHERE id=(SELECT library_id FROM media WHERE id=?)`, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := RepairLegacyMedia(context.Background(), db, NewPlanner(PlanOptions{}), 4); err != nil || n != 1 {
+		t.Fatalf("repair=%d err=%v", n, err)
+	}
+	var runID int64
+	if err := db.QueryRow(`SELECT id FROM media_ingest_run WHERE media_id=? AND reason='repair'`, mediaID).Scan(&runID); err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range []StepType{StepScrape, StepPreview, StepSubtitleExtract} {
+		var status string
+		if err := db.QueryRow(`SELECT status FROM media_ingest_step WHERE run_id=? AND step_type=?`, runID, step).Scan(&status); err != nil {
+			t.Fatal(err)
+		}
+		if status != "skipped" {
+			t.Fatalf("%s status=%s want skipped", step, status)
+		}
+	}
+	var queued int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM post_ingest_task WHERE ingest_run_id=? AND task_type IN ('preview','subtitle') AND status='waiting'`, runID).Scan(&queued); err != nil {
+		t.Fatal(err)
+	}
+	if queued != 0 {
+		t.Fatalf("queued heavy optional tasks=%d", queued)
+	}
+}
 func TestRepairLegacyMediaPendingCurrentRepairSkipsDuplicate(t *testing.T) {
 	db := openRepairTestDB(t)
 	mediaID := seedLegacyVideo(t, db, 1, "published")
 	if n, err := RepairLegacyMedia(context.Background(), db, NewPlanner(PlanOptions{}), 4); err != nil || n != 1 {
 		t.Fatalf("first=%d err=%v", n, err)
 	}
+	sourceFingerprintReadMu.Lock()
+	originalRead := sourceFingerprintRead
+	readCalls := 0
+	sourceFingerprintRead = func(r io.Reader, p []byte) (int, error) {
+		readCalls++
+		return originalRead(r, p)
+	}
+	sourceFingerprintReadMu.Unlock()
+	t.Cleanup(func() {
+		sourceFingerprintReadMu.Lock()
+		sourceFingerprintRead = originalRead
+		sourceFingerprintReadMu.Unlock()
+	})
 	if n, err := RepairLegacyMedia(context.Background(), db, NewPlanner(PlanOptions{}), 4); err != nil || n != 0 {
 		t.Fatalf("second=%d err=%v", n, err)
+	}
+	if readCalls != 0 {
+		t.Fatalf("pending current repair re-read source %d times", readCalls)
 	}
 	if repairRunCount(t, db, mediaID) != 1 {
 		t.Fatalf("runs=%d", repairRunCount(t, db, mediaID))

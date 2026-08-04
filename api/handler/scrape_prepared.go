@@ -98,7 +98,7 @@ func prepareSeriesEffects(ctx context.Context, q store.SQLExecutor, libraryID, m
 			rows.Close()
 			return nil, err
 		}
-		v.DesiredMeta, err = scraper.MergeMetaJSON(v.OriginalMeta, patch)
+		v.DesiredMeta, err = scraper.MergeSeriesFieldsPreservingEpisode(v.OriginalMeta, patch)
 		if err != nil {
 			rows.Close()
 			return nil, err

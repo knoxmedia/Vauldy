@@ -438,3 +438,75 @@ func TestPosterAtomicFinalizerFencesStaleRetryRound(t *testing.T) {
 		t.Fatalf("current round finalizer: %v", err)
 	}
 }
+
+func TestCachedPosterSourceFingerprintReusesEvidenceOnIdentityMatch(t *testing.T) {
+	db, _, mediaID, _ := seedPosterTest(t, "{}", "video")
+	source := filepath.Join(t.TempDir(), "video.mp4")
+	if err := os.WriteFile(source, []byte("video-source"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE media SET file_path=?,ingest_generation=1,publication_state='processing' WHERE id=?`, source, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(7301,?,1,'scan','processing','{}',2);INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(7302,7301,?,1,'poster',1,'done')`, mediaID, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	fp, err := publication.SourceFingerprintContext(context.Background(), source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO media_ingest_evidence(run_id,step_id,media_id,generation,kind,source_fingerprint,artifact_refs_json,reason,verified_at,stage_id) VALUES(7301,7302,?,1,'poster',?,'{}','generated',CURRENT_TIMESTAMP,'cache-1')`, mediaID, fp); err != nil {
+		t.Fatal(err)
+	}
+	original := posterSourceFingerprint
+	calls := 0
+	posterSourceFingerprint = func(ctx context.Context, path string) (string, error) {
+		calls++
+		return "", errors.New("full hash unexpectedly called")
+	}
+	t.Cleanup(func() { posterSourceFingerprint = original })
+	got, err := cachedPosterSourceFingerprint(context.Background(), db, mediaID, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != fp {
+		t.Fatalf("got=%q want=%q", got, fp)
+	}
+	if calls != 0 {
+		t.Fatalf("full fingerprint calls=%d want 0", calls)
+	}
+}
+
+func TestCachedPosterSourceFingerprintFallsBackOnIdentityMismatch(t *testing.T) {
+	db, _, mediaID, _ := seedPosterTest(t, "{}", "video")
+	source := filepath.Join(t.TempDir(), "video.mp4")
+	if err := os.WriteFile(source, []byte("video-source"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE media SET file_path=?,ingest_generation=1,publication_state='processing' WHERE id=?`, source, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(7301,?,1,'scan','processing','{}',2);INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(7302,7301,?,1,'poster',1,'done')`, mediaID, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO media_ingest_evidence(run_id,step_id,media_id,generation,kind,source_fingerprint,artifact_refs_json,reason,verified_at,stage_id) VALUES(7301,7302,?,1,'poster','stale|1|1|sha256:deadbeef','{}','generated',CURRENT_TIMESTAMP,'cache-2')`, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	original := posterSourceFingerprint
+	calls := 0
+	posterSourceFingerprint = func(ctx context.Context, path string) (string, error) {
+		calls++
+		return publication.SourceFingerprintContext(ctx, path)
+	}
+	t.Cleanup(func() { posterSourceFingerprint = original })
+	got, err := cachedPosterSourceFingerprint(context.Background(), db, mediaID, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("full fingerprint calls=%d want 1", calls)
+	}
+	if !strings.Contains(got, "|sha256:") {
+		t.Fatalf("unexpected fingerprint=%q", got)
+	}
+}

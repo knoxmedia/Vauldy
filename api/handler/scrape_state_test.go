@@ -973,6 +973,48 @@ func TestPrepareSeriesEffectsEmptyScrapePreservesEstablishedFields(t *testing.T)
 	}
 }
 
+func TestSiblingScrapePreservesCommittedPosterPointer(t *testing.T) {
+	db, mid := posterHandlerTestDB(t)
+	claim := seedAndClaimLinkedScrape(t, db, mid)
+	lid, siblingID := seedScrapeAcceptanceSeries(t, db, mid)
+	// Simulate a poster task that already committed a local poster pointer on the sibling episode.
+	_, _ = db.Exec(`UPDATE media SET meta_json='{"scrape":{"poster":"/uploads/posters/sha.jpg","title":"Show S01E02","backdrop":"/uploads/b.jpg","extra":{"poster":"/uploads/posters/sha.jpg","episode":2,"season":1,"episode_still":"https://x/still.jpg"}}}' WHERE id=?`, siblingID)
+	_, _ = db.Exec(`UPDATE library SET type='tv' WHERE id=?; UPDATE media SET file_path='Show S01E01.mkv',publication_state='published',published_at=CURRENT_TIMESTAMP WHERE id=?`, lid, mid)
+	res := &scraper.ScrapeResult{Title: "After Show", Overview: "Overview", Poster: "https://image.tmdb.org/s.jpg", Extra: map[string]any{"series_title": "After Show", "series_poster": "https://image.tmdb.org/s.jpg"}}
+	if err := completeScrapeClaimWithEffects(context.Background(), db, *claim, "auto", "q", "ok", res, scrapeCompletionEffects{LibraryID: lid}); err != nil {
+		t.Fatal(err)
+	}
+	var siblingMeta string
+	_ = db.QueryRow(`SELECT meta_json FROM media WHERE id=?`, siblingID).Scan(&siblingMeta)
+	var sibling map[string]any
+	if err := json.Unmarshal([]byte(siblingMeta), &sibling); err != nil {
+		t.Fatal(err)
+	}
+	scrapeMeta, _ := sibling["scrape"].(map[string]any)
+	if scrapeMeta == nil {
+		t.Fatalf("sibling scrape missing: %s", siblingMeta)
+	}
+	if scrapeMeta["poster"] != "/uploads/posters/sha.jpg" {
+		t.Fatalf("sibling poster was dropped: %v (meta=%s)", scrapeMeta["poster"], siblingMeta)
+	}
+	if scrapeMeta["title"] != "Show S01E02" {
+		t.Fatalf("sibling episode title was dropped: %v (meta=%s)", scrapeMeta["title"], siblingMeta)
+	}
+	extra, _ := scrapeMeta["extra"].(map[string]any)
+	if extra == nil || extra["poster"] != "/uploads/posters/sha.jpg" {
+		t.Fatalf("sibling extra poster was dropped: %v (meta=%s)", extra, siblingMeta)
+	}
+	if extra == nil || extra["episode"] != float64(2) {
+		t.Fatalf("sibling episode field was dropped: %v (meta=%s)", extra, siblingMeta)
+	}
+	if scrapeMeta["series_title"] != "Before Show" {
+		t.Fatalf("series_title not propagated: %v (meta=%s)", scrapeMeta["series_title"], siblingMeta)
+	}
+	if scrapeMeta["series_poster"] != "https://image.tmdb.org/s.jpg" {
+		t.Fatalf("series_poster not propagated: %v (meta=%s)", scrapeMeta["series_poster"], siblingMeta)
+	}
+}
+
 func TestCompleteScrapePreparationHonorsCallerDeadline(t *testing.T) {
 	db, mid := posterHandlerTestDB(t)
 	claim := seedAndClaimLinkedScrape(t, db, mid)
