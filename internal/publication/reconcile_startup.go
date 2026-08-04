@@ -101,11 +101,17 @@ func ValidateAggregateCurrentPolicy(ctx context.Context, db *sql.DB, adapters ..
 	if _, err := RepairMissingQueueExecutions(ctx, db); err != nil {
 		return fmt.Errorf("publication current-policy startup repair missing queues: %w", err)
 	}
+	if _, err := ReconcileCompletedPostIngestDomainWork(ctx, db); err != nil {
+		return fmt.Errorf("publication current-policy startup adopt completed domain work: %w", err)
+	}
 	if _, err := RepairDesyncedQueueStepStatus(ctx, db); err != nil {
 		return fmt.Errorf("publication current-policy startup repair desynced queue/step status: %w", err)
 	}
 	if _, err := ReconcileOrphanFailedQueueState(ctx, db); err != nil {
 		return fmt.Errorf("publication current-policy startup reconcile orphan failed queues: %w", err)
+	}
+	if _, err := ReconcileVisibleMediaSteps(ctx, db); err != nil {
+		return fmt.Errorf("publication current-policy startup reconcile visible media steps: %w", err)
 	}
 	for _, id := range ids {
 		_, err = store.WithImmediateConnTx(ctx, db, func(tx store.ImmediateConnTx) error {
@@ -122,6 +128,118 @@ func ValidateAggregateCurrentPolicy(ctx context.Context, db *sql.DB, adapters ..
 		}
 	}
 	return nil
+}
+
+// ReconcileVisibleMediaSteps completes stale media_visible barriers when the
+// current media and its current policy run already record durable visibility.
+func ReconcileVisibleMediaSteps(ctx context.Context, db *sql.DB) (int, error) {
+	if db == nil {
+		return 0, errors.New("publication visible media step reconcile: database is required")
+	}
+	reconciled := 0
+	_, err := store.WithImmediateConnTx(ctx, db, func(tx store.ImmediateConnTx) error {
+		res, execErr := tx.ExecContext(ctx, `
+UPDATE media_ingest_step SET
+  status='done',
+  finished_at=COALESCE(finished_at,CURRENT_TIMESTAMP),
+  updated_at=CURRENT_TIMESTAMP
+WHERE status='waiting' AND step_type='media_visible' AND id IN (
+  SELECT s.id FROM media_ingest_step s
+  JOIN media_ingest_run r ON r.id=s.run_id AND r.media_id=s.media_id AND r.generation=s.generation
+  JOIN media m ON m.id=r.media_id AND m.ingest_generation=r.generation
+  WHERE r.policy_version IN (2,3)
+    AND r.superseded_at IS NULL
+    AND r.status IN ('processing','published','degraded')
+    AND m.published_at IS NOT NULL
+    AND m.publication_state IN ('published','degraded')
+)`)
+		if execErr != nil {
+			return execErr
+		}
+		n, rowsErr := res.RowsAffected()
+		if rowsErr != nil {
+			return rowsErr
+		}
+		reconciled = int(n)
+		return nil
+	})
+	return reconciled, err
+}
+
+// ReconcileCompletedPostIngestDomainWork adopts strong preview/subtitle domain
+// completion for exact waiting executions in the current non-superseded generation.
+func ReconcileCompletedPostIngestDomainWork(ctx context.Context, db *sql.DB) (int, error) {
+	if db == nil {
+		return 0, errors.New("publication completed domain reconcile: database is required")
+	}
+	changed := 0
+	_, err := store.WithImmediateConnTx(ctx, db, func(tx store.ImmediateConnTx) error {
+		res, e := tx.ExecContext(ctx, `
+UPDATE post_ingest_task AS q SET
+  status='done',last_error='',lease_owner=NULL,lease_until=NULL,
+  finished_at=COALESCE(finished_at,CURRENT_TIMESTAMP),updated_at=CURRENT_TIMESTAMP
+WHERE q.status='waiting' AND q.task_type IN ('preview','subtitle')
+AND EXISTS (
+  SELECT 1 FROM media_ingest_step s
+  JOIN media_ingest_run r ON r.id=s.run_id
+  JOIN media m ON m.id=r.media_id AND m.ingest_generation=r.generation
+  WHERE s.id=q.ingest_step_id AND s.run_id=q.ingest_run_id
+    AND s.media_id=q.media_id AND s.generation=q.generation
+    AND r.media_id=q.media_id AND r.generation=q.generation
+    AND r.policy_version IN (2,3) AND r.superseded_at IS NULL
+    AND s.status='waiting'
+    AND ((q.task_type='preview' AND s.step_type='preview')
+      OR (q.task_type='subtitle' AND s.step_type IN ('subtitle','subtitle_extract')))
+)
+AND (
+  (q.task_type='preview' AND EXISTS (
+    SELECT 1 FROM preview_task d WHERE d.media_id=q.media_id
+      AND d.status IN ('ready','done')
+      AND (TRIM(COALESCE(d.sprite_path,''))<>'' OR TRIM(COALESCE(d.vtt_path,''))<>'')
+  ))
+  OR (q.task_type='subtitle' AND (
+    EXISTS (SELECT 1 FROM subtitle_task d WHERE d.media_id=q.media_id AND d.status='done')
+    OR EXISTS (SELECT 1 FROM media_subtitle d WHERE d.media_id=q.media_id
+      AND d.status='ready' AND TRIM(COALESCE(d.vtt_path,''))<>'')
+  ))
+)`)
+		if e != nil {
+			return e
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			changed = int(n)
+		}
+		_, e = tx.ExecContext(ctx, `
+UPDATE media_ingest_step AS s SET
+  status='done',last_error='',lease_owner=NULL,lease_until=NULL,
+  finished_at=COALESCE(finished_at,CURRENT_TIMESTAMP),updated_at=CURRENT_TIMESTAMP
+WHERE s.status='waiting' AND EXISTS (
+  SELECT 1 FROM post_ingest_task q
+  JOIN media_ingest_run r ON r.id=q.ingest_run_id
+  JOIN media m ON m.id=r.media_id AND m.ingest_generation=r.generation
+  WHERE q.ingest_step_id=s.id AND q.ingest_run_id=s.run_id
+    AND q.media_id=s.media_id AND q.generation=s.generation
+    AND r.id=s.run_id AND r.media_id=s.media_id AND r.generation=s.generation
+    AND r.policy_version IN (2,3) AND r.superseded_at IS NULL
+    AND q.status='done' AND q.task_type=CASE s.step_type
+      WHEN 'subtitle_extract' THEN 'subtitle' ELSE s.step_type END
+    AND q.task_type IN ('preview','subtitle')
+    AND (
+      (q.task_type='preview' AND EXISTS (
+        SELECT 1 FROM preview_task d WHERE d.media_id=q.media_id
+          AND d.status IN ('ready','done')
+          AND (TRIM(COALESCE(d.sprite_path,''))<>'' OR TRIM(COALESCE(d.vtt_path,''))<>'')
+      ))
+      OR (q.task_type='subtitle' AND (
+        EXISTS (SELECT 1 FROM subtitle_task d WHERE d.media_id=q.media_id AND d.status='done')
+        OR EXISTS (SELECT 1 FROM media_subtitle d WHERE d.media_id=q.media_id
+          AND d.status='ready' AND TRIM(COALESCE(d.vtt_path,''))<>'')
+      ))
+    )
+)`)
+		return e
+	})
+	return changed, err
 }
 
 // RepairDesyncedQueueStepStatus copies linked queue execution status onto the

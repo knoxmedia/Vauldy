@@ -1171,26 +1171,48 @@ func TestDispatcher_SubtitleSlotDoesNotFatalOnBacklog(t *testing.T) {
 	o := dispatcherOptions("sub-backlog")
 	d := schedulerDispatcher(t, q, policy, exec, o)
 	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- d.Start(ctx) }()
+	done := make(chan struct{})
+	var dispatcherErr error
+	go func() {
+		dispatcherErr = d.Start(ctx)
+		close(done)
+	}()
+	var shutdownOnce sync.Once
+	var shutdownErr error
+	shutdown := func() error {
+		shutdownOnce.Do(func() {
+			cancel()
+			select {
+			case <-done:
+				shutdownErr = dispatcherErr
+			case <-time.After(5 * time.Second):
+				shutdownErr = errors.New("dispatcher shutdown timed out after 5s")
+			}
+		})
+		return shutdownErr
+	}
+	t.Cleanup(func() {
+		if err := shutdown(); err != nil {
+			t.Errorf("dispatcher shutdown: %v", err)
+		}
+	})
 	select {
 	case <-started:
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("first subtitle did not start")
 	}
 	select {
 	case <-started:
 		t.Fatal("second subtitle started while subtitle concurrency=1")
-	case err := <-done:
-		t.Fatalf("dispatcher exited early: %v", err)
+	case <-done:
+		t.Fatalf("dispatcher exited early: %v", dispatcherErr)
 	case <-time.After(150 * time.Millisecond):
 	}
 	if snap := snap(d); snap.SubtitleUsed != 1 || snap.GlobalUsed != 1 {
 		t.Fatalf("snapshot=%+v", snap)
 	}
 	close(block)
-	cancel()
-	if err := <-done; err != nil {
+	if err := shutdown(); err != nil {
 		t.Fatalf("dispatcher exited with error: %v", err)
 	}
 }

@@ -512,6 +512,7 @@ func TestStartupValidatesAllRunsBeforeRepairingAny(t *testing.T) {
 	_, mid1, scan1 := seedPlannerMedia(t, db, "video", 0, 0, 0)
 	run1 := planAndCommit(t, db, NewPlanner(PlanOptions{}), NewMedia{MediaID: mid1, ScanTaskID: scan1, FileType: "video"})
 	_, _ = db.Exec(`DELETE FROM post_ingest_task WHERE ingest_run_id=? AND task_type='poster'`, run1.ID)
+	_, _ = db.Exec(`UPDATE media SET publication_state='published',published_at=CURRENT_TIMESTAMP WHERE id=?`, mid1)
 	_, mid2, scan2 := seedPlannerMedia(t, db, "video", 0, 0, 0)
 	run2 := planAndCommit(t, db, NewPlanner(PlanOptions{}), NewMedia{MediaID: mid2, ScanTaskID: scan2, FileType: "video"})
 	_, _ = db.Exec(`UPDATE media_ingest_step SET required=1 WHERE run_id=? AND step_type='scrape'`, run2.ID)
@@ -523,6 +524,11 @@ func TestStartupValidatesAllRunsBeforeRepairingAny(t *testing.T) {
 	_ = db.QueryRow(`SELECT COUNT(*) FROM post_ingest_task WHERE ingest_run_id=? AND task_type='poster'`, run1.ID).Scan(&count)
 	if count != 0 {
 		t.Fatalf("first run mutated: %d", count)
+	}
+	var visibleStatus string
+	_ = db.QueryRow(`SELECT status FROM media_ingest_step WHERE run_id=? AND step_type='media_visible'`, run1.ID).Scan(&visibleStatus)
+	if visibleStatus != "waiting" {
+		t.Fatalf("visibility repaired before all preflight validation: %s", visibleStatus)
 	}
 }
 
@@ -627,5 +633,161 @@ func TestReconcileStartupFinalizesDependencyPlanCompletionAndBarrier(t *testing.
 	}
 	if seen != 2 {
 		t.Fatalf("idempotent barrier calls=%d", seen)
+	}
+}
+func TestStartupReconcilesVisibleBarrierAndUnblocksOptionalClaims(t *testing.T) {
+	for _, state := range []string{"published", "degraded"} {
+		t.Run(state, func(t *testing.T) {
+			db := openPlannerTestDB(t)
+			_, mid, scan := seedPlannerMedia(t, db, "video", 1, 0, 0)
+			run := planAndCommit(t, db, NewPlanner(PlanOptions{}), NewMedia{MediaID: mid, ScanTaskID: scan, FileType: "video"})
+			stmts := []string{
+				`UPDATE media_ingest_step SET status='done',finished_at=CURRENT_TIMESTAMP WHERE run_id=?`,
+				`UPDATE post_ingest_task SET status='done',finished_at=CURRENT_TIMESTAMP WHERE ingest_run_id=?`,
+				`UPDATE scrape_task SET status='done',finished_at=CURRENT_TIMESTAMP WHERE ingest_run_id=?`,
+				`UPDATE media_ingest_step SET status='waiting',finished_at=NULL WHERE run_id=? AND step_type IN ('media_visible','preview','scrape')`,
+				`UPDATE post_ingest_task SET status='waiting',finished_at=NULL WHERE ingest_run_id=? AND task_type='preview'`,
+				`UPDATE scrape_task SET status='waiting',finished_at=NULL WHERE ingest_run_id=?`,
+				`UPDATE media_ingest_run SET status=?,finished_at=CURRENT_TIMESTAMP WHERE id=?`,
+				`UPDATE media SET publication_state=?,published_at=CURRENT_TIMESTAMP WHERE id=?`,
+			}
+			args := [][]any{{run.ID}, {run.ID}, {run.ID}, {run.ID}, {run.ID}, {run.ID}, {state, run.ID}, {state, mid}}
+			for i, stmt := range stmts {
+				if _, err := db.Exec(stmt, args[i]...); err != nil {
+					t.Fatalf("seed stmt %d: %v", i, err)
+				}
+			}
+
+			if err := ValidateAggregateCurrentPolicy(context.Background(), db); err != nil {
+				t.Fatal(err)
+			}
+			var visibleStatus string
+			var finished, updated sql.NullTime
+			if err := db.QueryRow(`SELECT status,finished_at,updated_at FROM media_ingest_step WHERE run_id=? AND step_type='media_visible'`, run.ID).Scan(&visibleStatus, &finished, &updated); err != nil {
+				t.Fatal(err)
+			}
+			if visibleStatus != "done" || !finished.Valid || !updated.Valid {
+				t.Fatalf("visible status=%s finished=%v updated=%v", visibleStatus, finished.Valid, updated.Valid)
+			}
+			registry := NewCapabilityMatrix([]string{"preview", "scrape"})
+			preview, err := ClaimEligible(context.Background(), db, ClaimRequest{Family: QueuePostIngest, TaskType: "preview", Owner: "preview-worker", Registry: registry})
+			if err != nil || preview == nil {
+				t.Fatalf("preview claim=%+v err=%v", preview, err)
+			}
+			scrape, err := ClaimEligible(context.Background(), db, ClaimRequest{Family: QueueScrape, TaskType: "scrape", Owner: "scrape-worker", Registry: registry})
+			if err != nil || scrape == nil {
+				t.Fatalf("scrape claim=%+v err=%v", scrape, err)
+			}
+
+			count, err := ReconcileVisibleMediaSteps(context.Background(), db)
+			if err != nil || count != 0 {
+				t.Fatalf("idempotent reconcile count=%d err=%v", count, err)
+			}
+		})
+	}
+}
+
+func TestReconcileVisibleBarrierExcludesFailedAndCancelledRuns(t *testing.T) {
+	for _, runStatus := range []string{"failed", "cancelled"} {
+		t.Run(runStatus, func(t *testing.T) {
+			db := openPlannerTestDB(t)
+			_, mid, scan := seedPlannerMedia(t, db, "video", 1, 0, 0)
+			run := planAndCommit(t, db, NewPlanner(PlanOptions{}), NewMedia{MediaID: mid, ScanTaskID: scan, FileType: "video"})
+			if _, err := db.Exec(`UPDATE media SET publication_state='published',published_at=CURRENT_TIMESTAMP WHERE id=?`, mid); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`UPDATE media_ingest_run SET status=? WHERE id=?`, runStatus, run.ID); err != nil {
+				t.Fatal(err)
+			}
+			count, err := ReconcileVisibleMediaSteps(context.Background(), db)
+			if err != nil || count != 0 {
+				t.Fatalf("reconcile count=%d err=%v", count, err)
+			}
+			var status string
+			if err := db.QueryRow(`SELECT status FROM media_ingest_step WHERE run_id=? AND step_type='media_visible'`, run.ID).Scan(&status); err != nil {
+				t.Fatal(err)
+			}
+			if status != "waiting" {
+				t.Fatalf("media_visible status=%s", status)
+			}
+			claim, err := ClaimEligible(context.Background(), db, ClaimRequest{Family: QueuePostIngest, TaskType: "preview", Owner: "worker", Registry: NewCapabilityMatrix([]string{"preview"})})
+			if err != nil || claim != nil {
+				t.Fatalf("claim=%+v err=%v", claim, err)
+			}
+		})
+	}
+}
+
+func TestReconcileCompletedPostIngestDomainWorkAdoptsStrongEvidenceIdempotently(t *testing.T) {
+	db := openPlannerTestDB(t)
+	_, mid, scan := seedPlannerMedia(t, db, "video", 1, 0, 0)
+	run := planAndCommit(t, db, NewPlanner(PlanOptions{SubtitleAuto: true}), NewMedia{MediaID: mid, ScanTaskID: scan, FileType: "video"})
+	if _, err := db.Exec(`UPDATE preview_task SET status='ready',sprite_path='sprite.jpg',vtt_path='preview.vtt' WHERE media_id=?; UPDATE subtitle_task SET status='done',finished_at=CURRENT_TIMESTAMP WHERE media_id=?`, mid, mid); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := ReconcileCompletedPostIngestDomainWork(context.Background(), db)
+	if err != nil || n != 2 {
+		t.Fatalf("adopted=%d err=%v", n, err)
+	}
+	for _, step := range []StepType{StepPreview, StepSubtitleExtract} {
+		var stepStatus, queueStatus string
+		var stepLease, queueLease sql.NullString
+		var stepFinished, queueFinished sql.NullString
+		if err := db.QueryRow(`SELECT s.status,q.status,s.lease_owner,q.lease_owner,s.finished_at,q.finished_at FROM media_ingest_step s JOIN post_ingest_task q ON q.ingest_step_id=s.id WHERE s.run_id=? AND s.step_type=?`, run.ID, step).Scan(&stepStatus, &queueStatus, &stepLease, &queueLease, &stepFinished, &queueFinished); err != nil {
+			t.Fatal(err)
+		}
+		if stepStatus != "done" || queueStatus != "done" || stepLease.Valid || queueLease.Valid || !stepFinished.Valid || !queueFinished.Valid {
+			t.Fatalf("%s step=%s queue=%s stepLease=%v queueLease=%v finished=%v/%v", step, stepStatus, queueStatus, stepLease, queueLease, stepFinished, queueFinished)
+		}
+	}
+	if n, err = ReconcileCompletedPostIngestDomainWork(context.Background(), db); err != nil || n != 0 {
+		t.Fatalf("second adopted=%d err=%v", n, err)
+	}
+}
+
+func TestReconcileCompletedPostIngestDomainWorkRejectsWeakOrStaleEvidence(t *testing.T) {
+	cases := []struct {
+		name     string
+		preview  int
+		subtitle bool
+		evidence string
+		mutate   string
+	}{
+		{name: "preview ready missing artifacts", preview: 1, evidence: `UPDATE preview_task SET status='ready',sprite_path=NULL,vtt_path=NULL WHERE media_id=?`},
+		{name: "preview pending with artifacts", preview: 1, evidence: `UPDATE preview_task SET status='waiting',sprite_path='sprite.jpg',vtt_path=NULL WHERE media_id=?`},
+		{name: "subtitle pending", subtitle: true, evidence: `UPDATE subtitle_task SET status='pending' WHERE media_id=?`},
+		{name: "subtitle ready missing artifact", subtitle: true, evidence: `INSERT INTO media_subtitle(media_id,dedupe_key,source_kind,vtt_path,status) VALUES(?,'en','embedded','','ready')`},
+		{name: "noncurrent generation", preview: 1, evidence: `UPDATE preview_task SET status='ready',sprite_path='sprite.jpg',vtt_path=NULL WHERE media_id=?`, mutate: `UPDATE media SET ingest_generation=ingest_generation+1 WHERE id=?`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openPlannerTestDB(t)
+			_, mid, scan := seedPlannerMedia(t, db, "video", tc.preview, 0, 0)
+			run := planAndCommit(t, db, NewPlanner(PlanOptions{SubtitleAuto: tc.subtitle}), NewMedia{MediaID: mid, ScanTaskID: scan, FileType: "video"})
+			if _, err := db.Exec(tc.evidence, mid); err != nil {
+				t.Fatal(err)
+			}
+			if tc.mutate != "" {
+				if _, err := db.Exec(tc.mutate, mid); err != nil {
+					t.Fatal(err)
+				}
+			}
+			n, err := ReconcileCompletedPostIngestDomainWork(context.Background(), db)
+			if err != nil || n != 0 {
+				t.Fatalf("adopted=%d err=%v", n, err)
+			}
+			step := StepPreview
+			if tc.subtitle {
+				step = StepSubtitleExtract
+			}
+			var stepStatus, queueStatus string
+			if err := db.QueryRow(`SELECT s.status,q.status FROM media_ingest_step s JOIN post_ingest_task q ON q.ingest_step_id=s.id WHERE s.run_id=? AND s.step_type=?`, run.ID, step).Scan(&stepStatus, &queueStatus); err != nil {
+				t.Fatal(err)
+			}
+			if stepStatus != "waiting" || queueStatus != "waiting" {
+				t.Fatalf("step=%s queue=%s", stepStatus, queueStatus)
+			}
+		})
 	}
 }

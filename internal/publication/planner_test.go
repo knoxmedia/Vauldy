@@ -720,7 +720,7 @@ func TestReplacementDoesNotCopyOldSteps(t *testing.T) {
 	if err := db.QueryRow(`SELECT COUNT(*) FROM media_ingest_step WHERE run_id=? AND last_error<>''`, result.Run.ID).Scan(&copiedErrors); err != nil {
 		t.Fatal(err)
 	}
-	if oldFailed == 0 || newWaiting != len(result.Run.Steps) || copiedErrors != 0 {
+	if oldFailed == 0 || newWaiting != len(result.Run.Steps)-1 || copiedErrors != 0 {
 		t.Fatalf("oldFailed=%d newWaiting=%d copiedErrors=%d", oldFailed, newWaiting, copiedErrors)
 	}
 	var state string
@@ -1108,5 +1108,60 @@ func TestReconcileStartupValidatesIngestRunLinkage(t *testing.T) {
 	// ValidateAggregateCurrentPolicy should still pass with the linkage in place.
 	if err := ValidateAggregateCurrentPolicy(context.Background(), db); err != nil {
 		t.Fatalf("validate with linkage: %v", err)
+	}
+}
+func TestVisibilityPreservingReplacementImmediatelyUnblocksOptionalTask(t *testing.T) {
+	db := openPlannerTestDB(t)
+	_, mediaID, _ := seedPlannerMedia(t, db, "video", 1, 0, 0)
+	if _, err := db.Exec(`UPDATE media SET publication_state='published',published_at=CURRENT_TIMESTAMP WHERE id=?`, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	result := planReplacementAndCommit(t, db, NewPlanner(PlanOptions{}), mediaID, ReplacementOptions{Reason: PlanReasonRepair, ExpectedGeneration: 0, PreserveVisibility: true})
+	var status string
+	var finished sql.NullTime
+	if err := db.QueryRow(`SELECT status,finished_at FROM media_ingest_step WHERE run_id=? AND step_type='media_visible'`, result.Run.ID).Scan(&status, &finished); err != nil {
+		t.Fatal(err)
+	}
+	if status != "done" || !finished.Valid {
+		t.Fatalf("media_visible=%s finished=%v", status, finished.Valid)
+	}
+	claim, err := ClaimEligible(context.Background(), db, ClaimRequest{Family: QueuePostIngest, TaskType: "preview", Owner: "worker", Registry: NewCapabilityMatrix([]string{"preview"})})
+	if err != nil || claim == nil {
+		t.Fatalf("preview claim=%+v err=%v", claim, err)
+	}
+}
+
+func TestAggregateCompletesInitialVisibilityBarrierAndUnblocksOptionalTask(t *testing.T) {
+	db := openPlannerTestDB(t)
+	_, mediaID, scanID := seedPlannerMedia(t, db, "video", 1, 0, 0)
+	run := planAndCommit(t, db, NewPlanner(PlanOptions{}), NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
+	var status string
+	if err := db.QueryRow(`SELECT status FROM media_ingest_step WHERE run_id=? AND step_type='media_visible'`, run.ID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "waiting" {
+		t.Fatalf("initial media_visible=%s", status)
+	}
+	if _, err := db.Exec(`UPDATE media_ingest_step SET status='done',finished_at=CURRENT_TIMESTAMP WHERE run_id=? AND required=1; UPDATE post_ingest_task SET status='done',finished_at=CURRENT_TIMESTAMP WHERE ingest_run_id=? AND ingest_step_id IN (SELECT id FROM media_ingest_step WHERE run_id=? AND required=1)`, run.ID, run.ID, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	aggregateCall(t, db, run.ID)
+	var finished sql.NullTime
+	if err := db.QueryRow(`SELECT status,finished_at FROM media_ingest_step WHERE run_id=? AND step_type='media_visible'`, run.ID).Scan(&status, &finished); err != nil {
+		t.Fatal(err)
+	}
+	if status != "done" || !finished.Valid {
+		t.Fatalf("aggregated media_visible=%s finished=%v", status, finished.Valid)
+	}
+	var waiting int
+	if err := db.QueryRow(`SELECT waiting_count FROM media_plan_completion WHERE run_id=?`, run.ID).Scan(&waiting); err != nil {
+		t.Fatal(err)
+	}
+	if waiting == len(run.Steps) {
+		t.Fatalf("plan completion not recomputed: waiting=%d", waiting)
+	}
+	claim, err := ClaimEligible(context.Background(), db, ClaimRequest{Family: QueuePostIngest, TaskType: "preview", Owner: "worker", Registry: NewCapabilityMatrix([]string{"preview"})})
+	if err != nil || claim == nil {
+		t.Fatalf("preview claim=%+v err=%v", claim, err)
 	}
 }

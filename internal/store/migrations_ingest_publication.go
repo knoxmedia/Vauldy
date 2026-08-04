@@ -3650,9 +3650,12 @@ const schedulerControlSchema = `CREATE TABLE IF NOT EXISTS scheduler_control (
 )`
 
 const schedulerFairnessSchema = `CREATE TABLE IF NOT EXISTS scheduler_fairness (
- task_type TEXT PRIMARY KEY,
- cursor TIMESTAMP NOT NULL,
- updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+ task_type TEXT PRIMARY KEY CHECK(length(task_type) > 0),
+ last_library_id INTEGER,
+ initialized INTEGER NOT NULL DEFAULT 0 CHECK(initialized IN (0,1)),
+ revision INTEGER NOT NULL DEFAULT 0 CHECK(revision >= 0),
+ updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ CHECK((initialized=0 AND last_library_id IS NULL) OR initialized=1)
 )`
 
 const schedulerReservationSchema = `CREATE TABLE IF NOT EXISTS scheduler_reservation (
@@ -3713,6 +3716,41 @@ const SchedulerIndexesSQL = schedulerIndexesSQL
 
 // migrateSchedulerSchema creates or validates the scheduler tables, indexes,
 // and constraints for policy revision, control, fairness, reservation, and audit.
+func migrateSchedulerFairness(ctx context.Context, db *sql.DB) error {
+	var exists int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='scheduler_fairness'`).Scan(&exists); err != nil {
+		return err
+	}
+	if exists == 0 {
+		_, err := db.ExecContext(ctx, schedulerFairnessSchema)
+		return err
+	}
+	columns, err := publicationColumns(ctx, db, "scheduler_fairness")
+	if err != nil {
+		return err
+	}
+	if columns["last_library_id"] && columns["initialized"] && columns["revision"] {
+		return nil
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `ALTER TABLE scheduler_fairness RENAME TO scheduler_fairness_legacy`); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, schedulerFairnessSchema); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO scheduler_fairness(task_type,last_library_id,initialized,revision,updated_at) SELECT task_type,NULL,0,0,updated_at FROM scheduler_fairness_legacy`); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `DROP TABLE scheduler_fairness_legacy`); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
 func migrateSchedulerSchema(ctx context.Context, db *sql.DB) error {
 	if _, err := db.ExecContext(ctx, schedulerPolicyRevisionSchema); err != nil {
 		return fmt.Errorf("scheduler_policy_revision: %w", err)
@@ -3720,7 +3758,7 @@ func migrateSchedulerSchema(ctx context.Context, db *sql.DB) error {
 	if _, err := db.ExecContext(ctx, schedulerControlSchema); err != nil {
 		return fmt.Errorf("scheduler_control: %w", err)
 	}
-	if _, err := db.ExecContext(ctx, schedulerFairnessSchema); err != nil {
+	if err := migrateSchedulerFairness(ctx, db); err != nil {
 		return fmt.Errorf("scheduler_fairness: %w", err)
 	}
 	if _, err := db.ExecContext(ctx, schedulerReservationSchema); err != nil {

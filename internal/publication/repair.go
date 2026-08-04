@@ -264,11 +264,11 @@ func stepEvidenceTx(ctx context.Context, tx *sql.Tx, mediaID int64, step StepTyp
 		}
 		return taskDone == 1 || scraper.HasScrapedMetaJSON(metaJSON), nil
 	case StepPreview:
-		query = `SELECT EXISTS(SELECT 1 FROM preview_task WHERE media_id=? AND status='done' AND (TRIM(COALESCE(sprite_path,''))<>'' OR TRIM(COALESCE(vtt_path,''))<>'')) OR EXISTS(SELECT 1 FROM post_ingest_task WHERE media_id=? AND task_type='preview' AND status='done')`
+		query = `SELECT EXISTS(SELECT 1 FROM preview_task WHERE media_id=? AND status IN ('ready','done') AND (TRIM(COALESCE(sprite_path,''))<>'' OR TRIM(COALESCE(vtt_path,''))<>'')) OR EXISTS(SELECT 1 FROM post_ingest_task WHERE media_id=? AND task_type='preview' AND status='done')`
 	case StepKeyframe:
 		query = `SELECT EXISTS(SELECT 1 FROM keyframe_task WHERE media_id=? AND status='done' AND (COALESCE(keyframe_count,0)>0 OR TRIM(COALESCE(output_dir,''))<>'')) OR EXISTS(SELECT 1 FROM post_ingest_task WHERE media_id=? AND task_type='keyframe' AND status='done')`
 	case StepSubtitle:
-		query = `SELECT EXISTS(SELECT 1 FROM media_subtitle WHERE media_id=? AND status='ready') OR EXISTS(SELECT 1 FROM subtitle_task WHERE media_id=? AND status='done') OR EXISTS(SELECT 1 FROM post_ingest_task WHERE media_id=? AND task_type='subtitle' AND status='done')`
+		query = `SELECT EXISTS(SELECT 1 FROM media_subtitle WHERE media_id=? AND status='ready' AND TRIM(COALESCE(vtt_path,''))<>'') OR EXISTS(SELECT 1 FROM subtitle_task WHERE media_id=? AND status='done') OR EXISTS(SELECT 1 FROM post_ingest_task WHERE media_id=? AND task_type='subtitle' AND status='done')`
 	case StepAtrack:
 		query = `SELECT EXISTS(SELECT 1 FROM atrack_task WHERE media_id=? AND status='done') OR EXISTS(SELECT 1 FROM media_derived_assets WHERE media_id=? AND artifact_kind IN ('atrack_playlist','atrack_segment')) OR EXISTS(SELECT 1 FROM post_ingest_task WHERE media_id=? AND task_type='atrack' AND status='done')`
 	case StepEncrypt:

@@ -51,10 +51,10 @@ import (
 	"knox-media/internal/retirement"
 	"knox-media/internal/scancoord"
 	"knox-media/internal/scanner"
+	taskscheduler "knox-media/internal/scheduler"
 	"knox-media/internal/storage"
 	"knox-media/internal/store"
 	"knox-media/internal/subtitle"
-	taskscheduler "knox-media/internal/scheduler"
 	"knox-media/internal/taskcontrol"
 	"knox-media/internal/transcode"
 	"knox-media/internal/upload"
@@ -143,11 +143,11 @@ func main() {
 	}
 
 	// (2) 密钥库/派生资产存储，以及转码、预览、字幕等域内 Worker。
-	transcodeSettings := loadSystemOptionsTranscodeSettings(db)                   // 从 system_options 读取转码/硬编设置
-	keyVault, assetEnc := storage.NewAssetEncryptorFromConfig(cfg, db)            // 媒体加密密钥库与资产加密器
-	derivedStore := storage.NewDerivedAssetStoreFromConfig(cfg, db, keyVault)     // 派生资产（封面/预览等）存储
-	worker := transcode.NewWorker(db, cfg.FFmpeg.FFmpegPath, cfg.Data.Transcode)  // 常规转码 Worker
-	packageWorker := transcode.NewPackageWorker(db, cfg, keyVault)                // DRM/打包 Worker
+	transcodeSettings := loadSystemOptionsTranscodeSettings(db)                  // 从 system_options 读取转码/硬编设置
+	keyVault, assetEnc := storage.NewAssetEncryptorFromConfig(cfg, db)           // 媒体加密密钥库与资产加密器
+	derivedStore := storage.NewDerivedAssetStoreFromConfig(cfg, db, keyVault)    // 派生资产（封面/预览等）存储
+	worker := transcode.NewWorker(db, cfg.FFmpeg.FFmpegPath, cfg.Data.Transcode) // 常规转码 Worker
+	packageWorker := transcode.NewPackageWorker(db, cfg, keyVault)               // DRM/打包 Worker
 	go func() {
 		// 启动时修复历史损坏的 DRM init 文件。
 		scanned, fixed, err := packageWorker.HealLegacyInitFiles()
@@ -190,9 +190,9 @@ func main() {
 		MkvmergePath:   cfg.Subtitle.GraphicalOCR.MkvmergePath,
 	})
 	subSvc.AIProofread = cfg.SubtitleAIProofreadEnabled()
-	up := &upload.Service{UploadDir: cfg.Data.Upload, ChunksDir: cfg.Data.Chunks} // 分片上传服务
+	up := &upload.Service{UploadDir: cfg.Data.Upload, ChunksDir: cfg.Data.Chunks}                                                 // 分片上传服务
 	atrackWorker := atrack.NewWorker(db, keyVault, derivedStore, cfg.FFmpeg.FFmpegPath, cfg.FFmpeg.FFprobePath, cfg.Data.ATracks) // 音轨提取
-	keyframeWorker := keyframe.NewWorker(db, keyVault, derivedStore, cfg.FFmpeg.FFprobePath, cfg.Data.Keyframes)                 // 关键帧索引
+	keyframeWorker := keyframe.NewWorker(db, keyVault, derivedStore, cfg.FFmpeg.FFprobePath, cfg.Data.Keyframes)                  // 关键帧索引
 	lyricWorkDir := filepath.Join(cfg.Data.Dir, "lyrics")
 	lyricWorker := lyrictask.NewWorker(db, derivedStore, lyricWorkDir, cfg.FFmpeg.FFprobePath, subSvc) // 歌词任务
 	photoClassifyWorker := photoclass.NewWorker(db, keyVault, filepath.Dir(cfgPath), cfg.FFmpeg.FFmpegPath, cfg.Data.Preview, func() config.PhotoClassifyConfig {
@@ -372,7 +372,7 @@ func main() {
 			}
 			return nil
 		},
-		RecoverLeases:       func(ctx context.Context) error { return recoverStartupLeases(ctx, db, postIngestQueue) },
+		RecoverLeases: func(ctx context.Context) error { return recoverStartupLeases(ctx, db, postIngestQueue) },
 		RecoverReservations: func(ctx context.Context) error {
 			_, err := ReconcileStartupReservations(ctx, db, "startup-recovery-"+processID)
 			return err
@@ -509,7 +509,7 @@ func main() {
 		LyricWorker: lyricWorker, PhotoClassifyWorker: photoClassifyWorker, DocCoverWorker: docCoverWorker,
 		KeyVault: keyVault, AssetEncryptor: assetEnc, DerivedStore: derivedStore, PublicationPlanner: publicationPlanner, PublicationCapabilities: publicationCapabilities,
 		SchedulerAdmin: schedulerService,
-		TaskCtrl: buildTaskControl(db),
+		TaskCtrl:       buildTaskControl(db, dispatcher),
 	}
 
 	// (6) 注入依赖并创建 HTTP API 路由引擎。
@@ -756,12 +756,16 @@ func loadSystemOptionsTranscodeSettings(db *sql.DB) transcode.Settings {
 	return transcode.SettingsFromOptionsJSON(raw.String)
 }
 
-func buildTaskControl(db *sql.DB) *handler.TaskControl {
+func buildTaskControl(db *sql.DB, dispatcher *postingest.Dispatcher) *handler.TaskControl {
 	registry := taskcontrol.NewRegistry()
 	projection := taskcontrol.NewProjectionBuilder(db, registry)
 	projection.RegisterAdapter(taskcontrol.NewOracleAdapter(db))
 	stream := taskcontrol.NewStreamBroker(db, projection, taskcontrol.StreamBrokerConfig{})
-	return handler.NewTaskControl(db, registry, projection, stream)
+	control := handler.NewTaskControl(db, registry, projection, stream)
+	if dispatcher != nil {
+		control.Mutations.SetAbortNotifier(dispatcher.CancelTask)
+	}
+	return control
 }
 
 func startupBuildLog(info buildinfo.Info, identity store.SQLiteDBIdentity) string {

@@ -253,10 +253,11 @@ func (q *Queue) ClaimAny(ctx context.Context, types []TaskType) (*Task, error) {
 		// Cheap read-only fast path: skip write-lock admission transactions when
 		// no candidate is eligible, so idle claim polls do not contend with the
 		// write transactions executors use to complete or fail tasks.
-		if ok, hintErr := publication.PostIngestCandidateHint(ctx, q.db, publication.ClaimRequest{Family: publication.QueuePostIngest, TaskTypes: requested, Owner: q.owner, Registry: q.registry, Metrics: q.metrics, SchedulerPolicy: q.schedulerPolicy}); hintErr != nil || !ok {
+		eligibleTypes, hintErr := publication.PostIngestEligibleTaskTypes(ctx, q.db, publication.ClaimRequest{Family: publication.QueuePostIngest, TaskTypes: requested, Owner: q.owner, Registry: q.registry, Metrics: q.metrics, SchedulerPolicy: q.schedulerPolicy})
+		if hintErr != nil || len(eligibleTypes) == 0 {
 			return nil, hintErr
 		}
-		for _, typ := range requested {
+		for _, typ := range eligibleTypes {
 			payload, admitResult, _, err = publication.ClaimWithAdmission(ctx, q.db, publication.ClaimRequest{Family: publication.QueuePostIngest, TaskType: typ, Owner: q.owner, Registry: q.registry, Metrics: q.metrics, SchedulerPolicy: q.schedulerPolicy})
 			if err != nil || payload != nil {
 				break
@@ -272,7 +273,6 @@ func (q *Queue) ClaimAny(ctx context.Context, types []TaskType) (*Task, error) {
 	if err != nil || task == nil {
 		return nil, err
 	}
-	q.fairnessCommit(string(task.Type), task)
 	return task, nil
 }
 func (q *Queue) Claim(ctx context.Context, typ TaskType) (*Task, error) {
@@ -298,7 +298,6 @@ func (q *Queue) Claim(ctx context.Context, typ TaskType) (*Task, error) {
 	if err != nil || task == nil {
 		return nil, err
 	}
-	q.fairnessCommit(string(typ), task)
 	return task, nil
 }
 
@@ -1567,25 +1566,4 @@ func (q *Queue) adminMutateEncrypt(ctx context.Context, id int64, updateSQL, op 
 		return fmt.Errorf("postingest queue: task %d is not encrypt", id)
 	}
 	return fmt.Errorf("postingest queue: encrypt task %d in status %s cannot be %sed", id, status, op)
-}
-
-// fairnessCommit records the library of the claimed task so that subsequent
-// claims rotate through libraries fairly.
-func (q *Queue) fairnessCommit(taskType string, task *Task) {
-	if q.schedulerPolicy == nil || task == nil {
-		return
-	}
-	q.fairnessMu.Lock()
-	defer q.fairnessMu.Unlock()
-	if q.fairnessCursors == nil {
-		q.fairnessCursors = make(map[string]*scheduler.LibraryFairnessCursor)
-	}
-	cursor, ok := q.fairnessCursors[taskType]
-	if !ok {
-		cursor = &scheduler.LibraryFairnessCursor{TaskType: taskType}
-		q.fairnessCursors[taskType] = cursor
-	}
-	scheduler.LibraryFairnessCommit(cursor, scheduler.LibraryCandidate{
-		LibraryID: task.LibraryID,
-	})
 }

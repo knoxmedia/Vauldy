@@ -51,9 +51,18 @@ func setupTaskControlTestDB(t *testing.T) (*sql.DB, *taskcontrol.ProjectionBuild
 			library_id INTEGER,
 			run_now_expires TIMESTAMP,
 			finished_at TIMESTAMP,
-			started_at TIMESTAMP,
-			abort_requested_at TIMESTAMP,
-			abort_timeout_recovery_required INTEGER NOT NULL DEFAULT 0
+			started_at TIMESTAMP
+		)`,
+		`CREATE TABLE task_abort_intent (
+			task_identity TEXT PRIMARY KEY,
+			requested_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			requested_by TEXT NOT NULL DEFAULT '',
+			reason TEXT NOT NULL DEFAULT '',
+			owner_fence TEXT NOT NULL DEFAULT '',
+			deadline TIMESTAMP,
+			acknowledged_at TIMESTAMP,
+			outcome TEXT NOT NULL DEFAULT '',
+			recovery_required_at TIMESTAMP
 		)`,
 		`CREATE TABLE task_projection_sequence (
 			singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),

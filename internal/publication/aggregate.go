@@ -148,12 +148,16 @@ func AggregateTx(ctx context.Context, tx store.SQLExecutor, runID int64) error {
 		return nil
 	}
 	if next == "published" {
-		_, err := tx.ExecContext(ctx, `UPDATE media SET publication_state='published',published_at=COALESCE(published_at,CURRENT_TIMESTAMP),publication_error='' WHERE id=?`, mediaID)
-		return err
+		if _, err := tx.ExecContext(ctx, `UPDATE media SET publication_state='published',published_at=COALESCE(published_at,CURRENT_TIMESTAMP),publication_error='' WHERE id=?`, mediaID); err != nil {
+			return err
+		}
+		return completeVisibleBarrierTx(ctx, tx, runID, mediaID, generation)
 	}
 	if next == "degraded" {
-		_, err := tx.ExecContext(ctx, `UPDATE media SET publication_state='degraded',publication_error=? WHERE id=?`, diagnostic, mediaID)
-		return err
+		if _, err := tx.ExecContext(ctx, `UPDATE media SET publication_state='degraded',publication_error=? WHERE id=?`, diagnostic, mediaID); err != nil {
+			return err
+		}
+		return completeVisibleBarrierTx(ctx, tx, runID, mediaID, generation)
 	}
 	if next == "cancelled" {
 		if preserve == 1 {
@@ -169,6 +173,31 @@ func AggregateTx(ctx context.Context, tx store.SQLExecutor, runID int64) error {
 	}
 	_, err := tx.ExecContext(ctx, `UPDATE media SET publication_state='processing',publication_error='' WHERE id=?`, mediaID)
 	return err
+}
+
+func completeVisibleBarrierTx(ctx context.Context, tx store.SQLExecutor, runID, mediaID, generation int64) error {
+	result, err := tx.ExecContext(ctx, `
+UPDATE media_ingest_step SET
+  status='done',finished_at=COALESCE(finished_at,CURRENT_TIMESTAMP),updated_at=CURRENT_TIMESTAMP
+WHERE run_id=? AND media_id=? AND generation=?
+  AND step_type='media_visible' AND status='waiting'
+  AND EXISTS (
+    SELECT 1 FROM media m
+    WHERE m.id=? AND m.ingest_generation=?
+      AND m.published_at IS NOT NULL
+      AND m.publication_state IN ('published','degraded')
+  )`, runID, mediaID, generation, mediaID, generation)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed == 0 {
+		return nil
+	}
+	return RecomputePlanCompletionTx(ctx, tx, runID)
 }
 
 const blockedRequiredCancelMessage = "cancelled: blocked by required failure"
