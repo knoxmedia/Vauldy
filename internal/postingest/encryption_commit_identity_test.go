@@ -148,12 +148,12 @@ func TestLoadJournalEncryptionStageReusesResumeIdentityAndInsertIsIdempotent(t *
 
 	runID, stepID := int64(11), int64(12)
 	task := Task{
-		ID: 7, MediaID: 41, Type: TaskEncrypt, Generation: 2, RetryRound: 0,
+		ID: 7, MediaID: 41, Type: TaskEncrypt, Generation: 2,
 		RunID: &runID, StepID: &stepID, LeaseOwner: "worker", Attempts: 3,
 	}
 	stageID := "10000000-0000-0000-0000-000000000001"
-	if _, err = db.Exec(`INSERT INTO media_encryption_stage_journal(stage_id,task_id,retry_round,attempt,media_id,run_id,step_id,generation,owner_token,source_path,source_fingerprint,enc_path,wrapped_dek,iv,enc_sha256,enc_size,cleanup_plaintext,state) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'staged')`,
-		stageID, task.ID, task.RetryRound, task.Attempts, task.MediaID, runID, stepID, task.Generation, task.LeaseOwner,
+	if _, err = db.Exec(`INSERT INTO media_encryption_stage_journal(stage_id,task_id,attempt,media_id,run_id,step_id,generation,owner_token,source_path,source_fingerprint,enc_path,wrapped_dek,iv,enc_sha256,enc_size,cleanup_plaintext,state) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'staged')`,
+		stageID, task.ID, task.Attempts, task.MediaID, runID, stepID, task.Generation, task.LeaseOwner,
 		source, "captured-at-stage", encPath, "wrapped", "iv", "hash", 9, 1); err != nil {
 		t.Fatal(err)
 	}
@@ -181,68 +181,6 @@ func TestLoadJournalEncryptionStageReusesResumeIdentityAndInsertIsIdempotent(t *
 	}
 	if count != 1 {
 		t.Fatalf("journal rows=%d want 1", count)
-	}
-}
-
-func TestEncryptionJournalRetryRoundIdentityUniquenessAndStaleFence(t *testing.T) {
-	db, _ := openQueueTestDB(t)
-	if _, err := db.Exec(`PRAGMA foreign_keys=OFF`); err != nil {
-		t.Fatal(err)
-	}
-	runID, stepID := int64(21), int64(22)
-	root := t.TempDir()
-	source := filepath.Join(root, "plain.bin")
-	enc0 := filepath.Join(root, "r0.enc")
-	enc2 := filepath.Join(root, "r2.enc")
-	for _, p := range []string{source, enc0, enc2} {
-		if err := os.WriteFile(p, []byte("x"), 0600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	current := Task{
-		ID: 9, MediaID: 55, Type: TaskEncrypt, Generation: 3, RetryRound: 2,
-		RunID: &runID, StepID: &stepID, LeaseOwner: "worker", Attempts: 1,
-	}
-	stageRound0 := "10000000-0000-0000-0000-000000000050"
-	stageRound2 := "10000000-0000-0000-0000-000000000052"
-	if _, err := db.Exec(`INSERT INTO media_encryption_stage_journal(stage_id,task_id,retry_round,attempt,media_id,run_id,step_id,generation,owner_token,source_path,source_fingerprint,enc_path,wrapped_dek,iv,enc_sha256,enc_size,state)
-VALUES(?,?,0,1,?,?,?,3,'old-owner',?,'fp',?,'dek','iv','hash',1,'staged')`, stageRound0, current.ID, current.MediaID, runID, stepID, source, enc0); err != nil {
-		t.Fatal(err)
-	}
-	if err := insertEncryptionStageJournal(context.Background(), db, current, storage.StagedMediaEncryption{
-		StageID: stageRound2, OriginalPath: source, EncPath: enc2,
-		SourceFingerprint: "fp2", WrappedDEK: "dek", IV: "iv", SHA256: "hash2", Size: 1,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	var round int
-	if err := db.QueryRow(`SELECT retry_round FROM media_encryption_stage_journal WHERE stage_id=?`, stageRound2).Scan(&round); err != nil || round != 2 {
-		t.Fatalf("current journal retry_round=%d err=%v", round, err)
-	}
-	if _, err := db.Exec(`INSERT INTO media_encryption_stage_journal(stage_id,task_id,retry_round,attempt,media_id,run_id,step_id,generation,owner_token,source_path,source_fingerprint,enc_path,wrapped_dek,iv,enc_sha256,enc_size,state)
-VALUES('10000000-0000-0000-0000-000000000053',?,2,1,?,?,?,3,'worker',?,'fp','enc3','dek','iv','hash',1,'staged')`, current.ID, current.MediaID, runID, stepID, source); err == nil {
-		t.Fatal("expected uniqueness collision on (task_id,retry_round,attempt)")
-	}
-
-	stale := current
-	stale.RetryRound = 0
-	loadedStale, err := loadJournalEncryptionStage(context.Background(), db, stale)
-	if err == nil && loadedStale.StageID == stageRound2 {
-		t.Fatal("stale retry_round loaded current-round journal")
-	}
-	loaded, err := loadJournalEncryptionStage(context.Background(), db, current)
-	if err != nil || loaded.StageID != stageRound2 {
-		t.Fatalf("current load=%+v err=%v", loaded, err)
-	}
-	if err := finishEncryptionLifecycleTx(context.Background(), db, stale); err == nil {
-		t.Fatal("stale retry_round committed lifecycle")
-	}
-	var oldN, curN int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM media_encryption_stage_journal WHERE task_id=? AND retry_round=0`, current.ID).Scan(&oldN); err != nil || oldN != 1 {
-		t.Fatalf("old journals=%d err=%v", oldN, err)
-	}
-	if err := db.QueryRow(`SELECT COUNT(*) FROM media_encryption_stage_journal WHERE task_id=? AND retry_round=2`, current.ID).Scan(&curN); err != nil || curN != 1 {
-		t.Fatalf("current journals=%d err=%v", curN, err)
 	}
 }
 

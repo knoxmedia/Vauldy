@@ -222,3 +222,23 @@ func TestMusicBrowseOmitsAggregatesWithNoVisibleTracks(t *testing.T) {
 		})
 	}
 }
+
+func TestLibraryPreviewCandidatesOnlyIncludePublishedAndDegraded(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := setupPublicationBrowseTestDB(t)
+	if _, err := h.App.DB.Exec(`INSERT INTO media(id,library_id,file_id,title,file_path,file_type,status,publication_state,meta_json) VALUES
+		(109,2,'preview-published','Published','E:/tv/published.mkv','video','active','published','{"scrape":{"poster":"published.jpg"}}')`); err != nil {
+		t.Fatal(err)
+	}
+	items, err := h.queryVideoPreviewCandidates(2, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []int64
+	for _, item := range items {
+		ids = append(ids, item.mediaID)
+	}
+	if got := fmt.Sprint(ids); got != "[109 107]" {
+		t.Fatalf("preview candidates=%s want published and degraded only", got)
+	}
+}

@@ -16,15 +16,6 @@ const (
 	requiredStepFallback     = "required step exhausted"
 )
 
-// aggregateProbe is installed by tests to observe AggregateTx call sites.
-var aggregateProbe func(runID int64)
-
-// SetAggregateProbeForTest installs a probe observing AggregateTx.
-func SetAggregateProbeForTest(fn func(runID int64)) { aggregateProbe = fn }
-
-// ClearAggregateProbeForTest clears the AggregateTx probe.
-func ClearAggregateProbeForTest() { aggregateProbe = nil }
-
 type requiredStepDiagnostic struct {
 	stepType string
 	status   string
@@ -78,9 +69,6 @@ func truncatePublicationError(message string) string {
 func AggregateTx(ctx context.Context, tx store.SQLExecutor, runID int64) error {
 	if tx == nil || runID <= 0 {
 		return fmt.Errorf("publication aggregate: invalid transaction or run")
-	}
-	if aggregateProbe != nil {
-		aggregateProbe(runID)
 	}
 	var mediaID, generation int64
 	var preserve int
@@ -183,8 +171,47 @@ func cancelBlockedRequiredWaiting(ctx context.Context, tx store.SQLExecutor, run
 	if _, err := tx.ExecContext(ctx, `UPDATE scrape_task SET status='cancelled',lease_owner=NULL,lease_until=NULL,message=CASE WHEN TRIM(COALESCE(message,''))='' THEN ? ELSE message END,progress=100,finished_at=COALESCE(finished_at,CURRENT_TIMESTAMP) WHERE ingest_run_id=? AND status IN ('waiting','running','failed') AND ingest_step_id IN (SELECT id FROM media_ingest_step WHERE run_id=? AND required=1 AND status='cancelled')`, blockedRequiredCancelMessage, runID, runID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE transcode_task SET status='cancelled',lease_owner=NULL,lease_until=NULL,error_message=CASE WHEN TRIM(COALESCE(error_message,''))='' THEN ? ELSE error_message END,progress=100,completed_at=COALESCE(completed_at,CURRENT_TIMESTAMP) WHERE ingest_run_id=? AND status IN ('waiting','running') AND ingest_step_id IN (SELECT id FROM media_ingest_step WHERE run_id=? AND required=1 AND status='cancelled')`, blockedRequiredCancelMessage, runID, runID); err != nil {
+	hasIngestStep, err := publicationColumnExistsTx(ctx, tx, "transcode_task", "ingest_step_id")
+	if err != nil {
 		return err
+	}
+	if hasIngestStep {
+		query := `UPDATE transcode_task SET status='cancelled'`
+		args := []any{}
+		hasLease, err := publicationColumnExistsTx(ctx, tx, "transcode_task", "lease_owner")
+		if err != nil {
+			return err
+		}
+		if hasLease {
+			query += `,lease_owner=NULL,lease_until=NULL`
+		}
+		hasError, err := publicationColumnExistsTx(ctx, tx, "transcode_task", "error_message")
+		if err != nil {
+			return err
+		}
+		if hasError {
+			query += `,error_message=CASE WHEN TRIM(COALESCE(error_message,''))='' THEN ? ELSE error_message END`
+			args = append(args, blockedRequiredCancelMessage)
+		}
+		hasProgress, err := publicationColumnExistsTx(ctx, tx, "transcode_task", "progress")
+		if err != nil {
+			return err
+		}
+		if hasProgress {
+			query += `,progress=100`
+		}
+		hasCompleted, err := publicationColumnExistsTx(ctx, tx, "transcode_task", "completed_at")
+		if err != nil {
+			return err
+		}
+		if hasCompleted {
+			query += `,completed_at=COALESCE(completed_at,CURRENT_TIMESTAMP)`
+		}
+		query += ` WHERE status IN ('waiting','running') AND ingest_step_id IN (SELECT id FROM media_ingest_step WHERE run_id=? AND required=1 AND status='cancelled')`
+		args = append(args, runID)
+		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+			return err
+		}
 	}
 	return nil
 }

@@ -26,12 +26,24 @@ func mediaPublicationVisiblePredicate(alias string) string {
 	return alias + "publication_state IN " + mediaPublicationVisibleStatesSQL
 }
 
+// includeUnpublished is reserved for the existing ListMedia admin view and
+// authenticated admin direct inspection through requireMediaAccess. Ordinary
+// browse, aggregate, history, and collection queries always use the strict predicate.
 func mediaPublicationVisibilityPredicate(alias string, includeUnpublished bool) string {
 	if includeUnpublished {
 		return "1=1"
 	}
 	return mediaPublicationVisiblePredicate(alias)
 }
+
+// Specialized aggregate subroutes use these strict existence predicates even
+// for admin callers. Admin all-state aggregate APIs are intentionally separate.
+const (
+	visibleAlbumExistsSQL  = `EXISTS (SELECT 1 FROM music_track visible_mt JOIN media visible_m ON visible_m.id=visible_mt.media_id WHERE visible_mt.album_id=a.id AND visible_m.publication_state IN ('published','degraded'))`
+	visibleArtistExistsSQL = `EXISTS (SELECT 1 FROM music_album visible_a JOIN music_track visible_mt ON visible_mt.album_id=visible_a.id JOIN media visible_m ON visible_m.id=visible_mt.media_id WHERE visible_a.album_artist_id=ar.id AND visible_m.publication_state IN ('published','degraded'))`
+	visibleSeriesExistsSQL = `EXISTS (SELECT 1 FROM season visible_se JOIN episode visible_ep ON visible_ep.season_id=visible_se.id JOIN episode_media visible_em ON visible_em.episode_id=visible_ep.id JOIN media visible_m ON visible_m.id=visible_em.media_id WHERE visible_se.tv_id=s.id AND visible_m.publication_state IN ('published','degraded'))`
+	visibleSeasonExistsSQL = `EXISTS (SELECT 1 FROM episode visible_ep JOIN episode_media visible_em ON visible_em.episode_id=visible_ep.id JOIN media visible_m ON visible_m.id=visible_em.media_id WHERE visible_ep.season_id=se.id AND visible_m.publication_state IN ('published','degraded'))`
+)
 
 type userPermissionProfile struct {
 	UserID                int64
@@ -207,7 +219,6 @@ func (h *Handler) requireMediaAccess(c *gin.Context, mediaID int64, needPlay boo
 		return libraryID, true
 	}
 	if uid <= 0 && strings.TrimSpace(middleware.Role(c)) == "" {
-		// Allow direct handler tests / internal calls without auth middleware context.
 		return libraryID, true
 	}
 	if uid <= 0 {

@@ -22,15 +22,13 @@ import {
 import type { MenuProps } from "antd";
 import { Button, Checkbox, Dropdown, Empty, Modal, Popover, Select, Space, Spin, Pagination, message } from "antd";
 import type { ComponentType } from "react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { formatServerDateTime, serverDateTimeToMillis } from "../lib/datetime";
 import { buildMediaMenuItems } from "../components/mediaMenuItems";
 import AddToFavoriteFolderPickerModal from "../components/AddToFavoriteFolderPickerModal";
 import AddToPlaylistModal from "../components/AddToPlaylistModal";
 import MediaMatchModal from "../components/MediaMatchModal";
-import VideoOptimizationModal from "../components/VideoOptimizationModal";
-import { useLicenseStatus } from "../enterprise";
 import {
   MediaItem,
   PLAYLIST_PLAY_SESSION_KEY,
@@ -39,8 +37,9 @@ import {
   addPlaylistItem,
   createScrapeTasks,
   deleteMedia,
-  fetchLibraries,
+  fetchLibrariesWithCapabilities,
   fetchMedia,
+  isTVLibraryType,
   isMusicLibraryType,
   isPhotoLibraryType,
   isDocumentLibraryType,
@@ -50,7 +49,6 @@ import {
   transcodeAsync,
   unmatchMedia,
   type MediaMatchListUpdate,
-  optimizationAssetRecorded,
 } from "../api/client";
 import SeriesBrowse from "./SeriesBrowse";
 import MusicBrowse from "./MusicBrowse";
@@ -61,21 +59,11 @@ import { MAX_RECENT_FAVORITE_FOLDERS } from "../lib/recentFavoriteFolders";
 import { readRecentPlaylists, rememberPlaylistAdded } from "../lib/recentPlaylists";
 import { useT, type TranslateFn } from "../i18n";
 import styles from "./Browse.module.css";
-import { useLibraryRequestScope } from "../lib/libraryRequestScope";
 
 type ViewMode = "poster" | "thumb" | "list" | "table";
 type SortField = "title" | "added" | "played" | "release_date" | "year" | "type" | "quality" | "bitrate" | "duration";
 type SortOrder = "asc" | "desc";
 type TableColKey = "title" | "year" | "release_date" | "duration" | "last_play" | "quality" | "bitrate" | "added" | "type";
-type LibraryResolution = {
-  status: "idle" | "loading" | "ready" | "error";
-  type: string;
-  name: string;
-  libraryId?: number;
-  generation: number;
-  error?: string;
-  signal?: AbortSignal;
-};
 
 const BROWSE_PREFS_KEY = "knox.browse.prefs.v1";
 /** Per-library view mode (poster / thumb / list / table). */
@@ -226,36 +214,20 @@ function readBrowsePrefs(): {
   }
 }
 
-function isBrowseTVLibraryType(type?: string): boolean {
-  const normalized = (type || "").trim().toLowerCase();
-  return normalized === "tv" || normalized === "television" || normalized === "series";
-}
-
-function isGenericBrowseLibraryType(type?: string): boolean {
-  const normalized = (type || "").trim().toLowerCase();
-  return normalized === "movie" || normalized === "video" || normalized === "anime";
-}
-
-function isSupportedBrowseLibraryType(type?: string): boolean {
-  return isBrowseTVLibraryType(type) || isMusicLibraryType(type) || isPhotoLibraryType(type) ||
-    isDocumentLibraryType(type) || isGenericBrowseLibraryType(type);
-}
-
 export default function BrowsePage() {
   const t = useT();
   const VIEW_MODES = useMemo(() => buildViewModes(t), [t]);
   const TABLE_COL_SPECS = useMemo(() => buildTableColSpecs(t), [t]);
   const nav = useNavigate();
-  const libraryRequests = useLibraryRequestScope();
   const [searchParams] = useSearchParams();
   const libraryIdParam = searchParams.get("library_id") ?? searchParams.get("library");
   const sortParam = searchParams.get("sort");
   const qParam = searchParams.get("q")?.trim() ?? "";
-  const parsedLibraryId = libraryIdParam == null ? undefined : Number(libraryIdParam);
-  const libraryParamInvalid =
-    libraryIdParam != null &&
-    (!Number.isInteger(parsedLibraryId) || (parsedLibraryId ?? 0) <= 0);
-  const libFromUrl = libraryParamInvalid ? undefined : parsedLibraryId;
+
+  const libFromUrl =
+    libraryIdParam && !Number.isNaN(Number(libraryIdParam))
+      ? Number(libraryIdParam)
+      : undefined;
 
   const [rows, setRows] = useState<MediaItem[]>([]);
   const [loading, setLoading] = useState(false);
@@ -273,152 +245,93 @@ export default function BrowsePage() {
   const [playlistModalMediaIds, setPlaylistModalMediaIds] = useState<number[] | null>(null);
   const [addToFavoriteFolderMediaId, setAddToFavoriteFolderMediaId] = useState<number | null>(null);
   const [matchMedia, setMatchMedia] = useState<MediaItem | null>(null);
-  const [optimizationModalMediaId, setOptimizationModalMediaId] = useState<number | null>(null);
-  const [optimizationModalTitle, setOptimizationModalTitle] = useState<string | undefined>();
-  const { status: licenseStatus } = useLicenseStatus();
   const [recentPlaylistMenu, setRecentPlaylistMenu] = useState(readRecentPlaylists);
   const { recentFavoriteFolders, rememberFolderMenuAdded } = useFavoriteFolderMenuRecents();
-  const [resolution, setResolution] = useState<LibraryResolution>(() => ({
-    status: libraryParamInvalid ? "error" : libFromUrl == null ? "idle" : "loading",
-    type: "",
-    name: "",
-    libraryId: libFromUrl,
-    generation: 0,
-    error: libraryParamInvalid ? t("common.loading_failed") : undefined,
-  }));
-  const [resolutionRetry, setResolutionRetry] = useState(0);
+  const [libraryType, setLibraryType] = useState<string>("");
+  const [libraryName, setLibraryName] = useState<string>("");
+  const [libraryResolved, setLibraryResolved] = useState(() => libFromUrl == null);
   const [tvUseFlatFiles, setTvUseFlatFiles] = useState(false);
+  const [musicUseFlatFiles, setMusicUseFlatFiles] = useState(false);
   const [photoUseFlatFiles, setPhotoUseFlatFiles] = useState(false);
-  const resolutionGenerationRef = useRef(0);
-  const currentLibraryRef = useRef(libFromUrl);
-  const mediaControllerRef = useRef<AbortController | null>(null);
-  const specializedControllerRef = useRef<AbortController | null>(null);
-  const mediaGenerationRef = useRef(0);
-  const currentRouteKeyRef = useRef("");
-  currentLibraryRef.current = libFromUrl;
-  const routeKey = `${libraryIdParam ?? "_all"}|${sortParam ?? ""}`;
-  const activeRouteKey = `${routeKey}|${resolution.generation}`;
-  currentRouteKeyRef.current = activeRouteKey;
 
   useEffect(() => {
-    const generation = ++resolutionGenerationRef.current;
-    specializedControllerRef.current?.abort();
-    specializedControllerRef.current = null;
-    mediaControllerRef.current?.abort();
-    mediaGenerationRef.current++;
-    setRows([]);
-    setLoading(false);
-    setBrowseSelectedIds(new Set());
     setTvUseFlatFiles(false);
+    setMusicUseFlatFiles(false);
     setPhotoUseFlatFiles(false);
+  }, [libFromUrl]);
 
-    if (libraryParamInvalid) {
-      setResolution({ status: "error", type: "", name: "", generation, error: t("common.loading_failed") });
-      return;
-    }
+  const handleTvBrowseEmpty = useCallback(() => setTvUseFlatFiles(true), []);
+  const handleMusicBrowseEmpty = useCallback(() => setMusicUseFlatFiles(true), []);
+  const handlePhotoBrowseEmpty = useCallback(() => setPhotoUseFlatFiles(true), []);
+
+  useEffect(() => {
     if (libFromUrl == null) {
-      setResolution({ status: "idle", type: "", name: "", generation });
+      setLibraryType("");
+      setLibraryName("");
+      setLibraryResolved(true);
       return;
     }
-
-    const controller = new AbortController();
-    setResolution({ status: "loading", type: "", name: "", libraryId: libFromUrl, generation });
-    const request = libraryRequests
-      ? libraryRequests.load(controller.signal).then((result) => {
-          setEncryptAssetsEnabled(result.encryptedAssetsConfig?.enabled !== false);
-          return result.items;
-        })
-      : fetchLibraries(controller.signal).then((items) => {
-          setEncryptAssetsEnabled(true);
-          return items;
-        });
-    void request
-      .then((libs) => {
-        if (controller.signal.aborted || resolutionGenerationRef.current !== generation) return;
-        const lib = libs.find((item) => item.id === libFromUrl);
-        if (!lib || !isSupportedBrowseLibraryType(lib.type)) throw new Error(t("common.loading_failed"));
-        const specializedController = new AbortController();
-        specializedControllerRef.current?.abort();
-        specializedControllerRef.current = specializedController;
-        setResolution({ status: "ready", type: lib.type.trim().toLowerCase(), name: lib.name || "", libraryId: libFromUrl, generation, signal: specializedController.signal });
+    let cancelled = false;
+    setLibraryResolved(false);
+    void fetchLibrariesWithCapabilities()
+      .then((result) => {
+        if (cancelled) return;
+        setEncryptAssetsEnabled(result.encryptedAssetsConfig?.enabled !== false);
+        const lib = result.items.find((l) => l.id === libFromUrl);
+        setLibraryType(lib?.type || "");
+        setLibraryName(lib?.name || "");
       })
-      .catch((error: unknown) => {
-        if (controller.signal.aborted || resolutionGenerationRef.current !== generation) return;
-        setResolution({
-          status: "error", type: "", name: "", libraryId: libFromUrl, generation,
-          error: (error as Error).message || t("common.loading_failed"),
-        });
+      .finally(() => {
+        if (!cancelled) setLibraryResolved(true);
       });
     return () => {
-      controller.abort();
-      specializedControllerRef.current?.abort();
-      specializedControllerRef.current = null;
+      cancelled = true;
     };
-  }, [libFromUrl, libraryParamInvalid, resolutionRetry, t, libraryRequests]);
+  }, [libFromUrl]);
 
-  const acceptsEmpty = useCallback((kind: "tv" | "photo") => {
-    if (resolution.status !== "ready" || resolution.libraryId !== currentLibraryRef.current || resolution.generation !== resolutionGenerationRef.current) return false;
-    if (kind === "tv") return isBrowseTVLibraryType(resolution.type);
-    return isPhotoLibraryType(resolution.type);
-  }, [resolution]);
-
-  const handleTvBrowseEmpty = useCallback(() => { if (acceptsEmpty("tv")) setTvUseFlatFiles(true); }, [acceptsEmpty]);
-  const handlePhotoBrowseEmpty = useCallback(() => { if (acceptsEmpty("photo")) setPhotoUseFlatFiles(true); }, [acceptsEmpty]);
-
-  const genericRouteReady =
-    (!libraryParamInvalid && libFromUrl == null) ||
-    (resolution.status === "ready" && resolution.libraryId === libFromUrl &&
-      (isGenericBrowseLibraryType(resolution.type) ||
-        (isBrowseTVLibraryType(resolution.type) && tvUseFlatFiles) ||
-        (isPhotoLibraryType(resolution.type) && photoUseFlatFiles)));
-
-  const load = useCallback(async (expectedRouteKey = activeRouteKey) => {
-    if (!genericRouteReady || currentRouteKeyRef.current !== expectedRouteKey) return;
-    mediaControllerRef.current?.abort();
-    const controller = new AbortController();
-    mediaControllerRef.current = controller;
-    const generation = ++mediaGenerationRef.current;
-    setRows([]);
+  async function load() {
     setLoading(true);
     try {
-      const opts = sortParam === "recent" ? ({ sort: "created_desc" as const, limit: 200 }) : undefined;
-      const items = await fetchMedia(libFromUrl, opts, controller.signal);
-      if (controller.signal.aborted || mediaGenerationRef.current !== generation || currentRouteKeyRef.current !== expectedRouteKey) return;
-      setRows(items);
-    } catch (error: unknown) {
-      if (controller.signal.aborted || mediaGenerationRef.current !== generation || currentRouteKeyRef.current !== expectedRouteKey) return;
-      message.error((error as Error).message || t("pages.browse.load_failed"));
+      const opts =
+        sortParam === "recent"
+          ? ({ sort: "created_desc" as const, limit: 200 })
+          : undefined;
+      setRows(await fetchMedia(libFromUrl, opts));
+    } catch (e: unknown) {
+      message.error((e as Error).message || t("pages.browse.load_failed"));
     } finally {
-      if (!controller.signal.aborted && mediaGenerationRef.current === generation && currentRouteKeyRef.current === expectedRouteKey) setLoading(false);
+      setLoading(false);
     }
-  }, [activeRouteKey, genericRouteReady, libFromUrl, sortParam, t]);
+  }
+
+  function applyMediaMatchUpdate(update: MediaMatchListUpdate) {
+    setRows((prev) =>
+      prev.map((r) =>
+        r.id === update.id
+          ? {
+              ...r,
+              title: update.title || r.title,
+              poster_url: update.poster_url ?? r.poster_url,
+              year: update.year ?? r.year,
+              release_date: update.release_date ?? r.release_date,
+              scraped: update.scraped,
+            }
+          : r,
+      ),
+    );
+  }
+
+  function posterImgKey(r: MediaItem): string {
+    return `${r.id}:${normalizeListPosterUrl(r.poster_url || "")}`;
+  }
 
   useEffect(() => {
-    if (!genericRouteReady) return;
-    const expectedRouteKey = activeRouteKey;
-    const timer = window.setTimeout(() => { void load(expectedRouteKey); }, 0);
-    return () => {
-      window.clearTimeout(timer);
-      mediaControllerRef.current?.abort();
-      mediaGenerationRef.current++;
-    };
-  }, [activeRouteKey, genericRouteReady, load]);
-
-  function applyMediaMatchUpdate(update: MediaMatchListUpdate, expectedRouteKey = activeRouteKey) {
-    if (currentRouteKeyRef.current !== expectedRouteKey) return;
-    setRows((prev) => prev.map((row) => row.id === update.id ? {
-      ...row,
-      title: update.title || row.title,
-      poster_url: update.poster_url ?? row.poster_url,
-      year: update.year ?? row.year,
-      release_date: update.release_date ?? row.release_date,
-      scraped: update.scraped,
-    } : row));
-  }
-
-  function posterImgKey(row: MediaItem): string {
-    return `${row.id}:${normalizeListPosterUrl(row.poster_url || "")}`;
-  }
+    if (libFromUrl != null && isTVLibraryType(libraryType) && !tvUseFlatFiles) return;
+    if (libFromUrl != null && isMusicLibraryType(libraryType) && !musicUseFlatFiles) return;
+    if (libFromUrl != null && isPhotoLibraryType(libraryType) && !photoUseFlatFiles) return;
+    void load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [libFromUrl, sortParam, libraryType, tvUseFlatFiles, musicUseFlatFiles, photoUseFlatFiles]);
 
   useEffect(() => {
     if (sortParam === "recent") {
@@ -816,7 +729,6 @@ export default function BrowsePage() {
 
   function bulkDeleteSelected(ids: number[]) {
     if (ids.length === 0) return;
-    const mutationRouteKey = activeRouteKey;
     Modal.confirm({
       title: t("pages.browse.bulk_delete_title", { count: ids.length }),
       centered: true,
@@ -835,10 +747,8 @@ export default function BrowsePage() {
             fail++;
           }
         }
-        if (currentRouteKeyRef.current !== mutationRouteKey) return;
         setBrowseSelectedIds(new Set());
-        await load(mutationRouteKey);
-        if (currentRouteKeyRef.current !== mutationRouteKey) return;
+        await load();
         if (ok > 0) {
           message.success(
             fail > 0
@@ -853,7 +763,6 @@ export default function BrowsePage() {
   }
 
   function bulkUnmatchSelected(ids: number[]) {
-    const mutationRouteKey = activeRouteKey;
     const scrapedIds = ids.filter((id) => rows.some((r) => r.id === id && r.scraped));
     if (scrapedIds.length === 0) return;
     Modal.confirm({
@@ -873,9 +782,7 @@ export default function BrowsePage() {
             fail++;
           }
         }
-        if (currentRouteKeyRef.current !== mutationRouteKey) return;
-        await load(mutationRouteKey);
-        if (currentRouteKeyRef.current !== mutationRouteKey) return;
+        await load();
         if (ok > 0) {
           message.success(
             fail > 0
@@ -941,30 +848,28 @@ export default function BrowsePage() {
   }
 
   function makeMenu(r: MediaItem, extra?: { isWatched?: boolean }): MenuProps {
-    const menuRouteKey = activeRouteKey;
     const isWatched = extra?.isWatched ?? r.completed === 1;
     return buildMediaMenuItems(r, nav, {
       ...extra,
       isWatched,
       showEncryptAsset: encryptAssetsEnabled && !r.encrypted_asset,
       encryptedAsset: !!r.encrypted_asset,
-      afterEncryptAsset: () => load(menuRouteKey),
-      afterToggleWatched: () => load(menuRouteKey),
+      afterEncryptAsset: () => load(),
+      afterToggleWatched: () => load(),
       scraped: r.scraped,
       onOpenMatch: (mediaId) => {
         const item = rows.find((x) => x.id === mediaId) ?? r;
         setMatchMedia(item);
       },
-      afterUnmatch: () => load(menuRouteKey),
+      afterUnmatch: () => load(),
       afterDelete: () => {
-        if (currentRouteKeyRef.current !== menuRouteKey) return Promise.resolve();
         setBrowseSelectedIds((prev) => {
           if (!prev.has(r.id)) return prev;
           const next = new Set(prev);
           next.delete(r.id);
           return next;
         });
-        return load(menuRouteKey);
+        return load();
       },
       onAddToPlaylist: (mediaId: number) => setPlaylistModalMediaIds([mediaId]),
       recentPlaylists: recentPlaylistMenu,
@@ -983,13 +888,6 @@ export default function BrowsePage() {
         }
       },
       onAddToFavoriteFolder: (mediaId: number) => setAddToFavoriteFolderMediaId(mediaId),
-      onOpenOptimization: licenseStatus?.pretranscode
-        ? (mediaId: number) => {
-            setOptimizationModalMediaId(mediaId);
-            setOptimizationModalTitle(undefined);
-          }
-        : undefined,
-      optimizationAvailable: r.file_type === "video" && optimizationAssetRecorded(r),
       recentFavoriteFolders,
       onQuickAddToFavoriteFolder: async (mediaId: number, folderId: number) => {
         try {
@@ -1006,64 +904,45 @@ export default function BrowsePage() {
     });
   }
 
-  const currentResolution =
-    resolution.libraryId === libFromUrl &&
-    (libraryParamInvalid || resolution.generation === resolutionGenerationRef.current);
-  const currentResolutionReady = libFromUrl != null && currentResolution && resolution.status === "ready";
-  if (!libraryParamInvalid && libFromUrl != null && !currentResolutionReady && !(currentResolution && resolution.status === "error")) {
+  if (libFromUrl != null && !libraryResolved) {
     return (
       <div className={styles.loadingWrap}>
         <Spin />
       </div>
     );
   }
-  if ((libraryParamInvalid || libFromUrl != null) && currentResolution && resolution.status === "error") {
-    return (
-      <div className={styles.loadingWrap} role="alert">
-        <Space direction="vertical">
-          <span>{resolution.error || t("common.loading_failed")}</span>
-          <Button onClick={() => setResolutionRetry((value) => value + 1)}>{t("common.retry")}</Button>
-        </Space>
-      </div>
-    );
-  }
-  const libraryType = resolution.type;
-  const libraryName = resolution.name;
-  if (currentResolutionReady && isBrowseTVLibraryType(libraryType) && !tvUseFlatFiles) {
+  if (libFromUrl != null && isTVLibraryType(libraryType) && !tvUseFlatFiles) {
     return (
       <SeriesBrowse
         libraryId={libFromUrl}
         libraryName={libraryName}
         onEmpty={handleTvBrowseEmpty}
-        signal={resolution.signal}
       />
     );
   }
-  if (currentResolutionReady && isMusicLibraryType(libraryType)) {
+  if (libFromUrl != null && isMusicLibraryType(libraryType) && !musicUseFlatFiles) {
     return (
       <MusicBrowse
         libraryId={libFromUrl}
         libraryName={libraryName}
-        signal={resolution.signal}
+        onEmpty={handleMusicBrowseEmpty}
       />
     );
   }
-  if (currentResolutionReady && isPhotoLibraryType(libraryType) && !photoUseFlatFiles) {
+  if (libFromUrl != null && isPhotoLibraryType(libraryType) && !photoUseFlatFiles) {
     return (
       <PhotoBrowse
         libraryId={libFromUrl}
         libraryName={libraryName}
         onEmpty={handlePhotoBrowseEmpty}
-        signal={resolution.signal}
       />
     );
   }
-  if (currentResolutionReady && isDocumentLibraryType(libraryType)) {
+  if (libFromUrl != null && isDocumentLibraryType(libraryType)) {
     return (
       <DocumentBrowse
         libraryId={libFromUrl}
         libraryName={libraryName}
-        signal={resolution.signal}
       />
     );
   }
@@ -1665,22 +1544,8 @@ export default function BrowsePage() {
         fixMatch={Boolean(matchMedia?.scraped)}
         open={matchMedia != null}
         onClose={() => setMatchMedia(null)}
-        onMatched={(update) => applyMediaMatchUpdate(update, activeRouteKey)}
+        onMatched={applyMediaMatchUpdate}
       />
-      {optimizationModalMediaId !== null && (
-        <VideoOptimizationModal
-          mediaId={optimizationModalMediaId}
-          mediaTitle={optimizationModalTitle}
-          open={optimizationModalMediaId !== null}
-          onClose={() => {
-            setOptimizationModalMediaId(null);
-            setOptimizationModalTitle(undefined);
-          }}
-          onOptimized={() => {
-            load();
-          }}
-        />
-      )}
     </div>
   );
 }

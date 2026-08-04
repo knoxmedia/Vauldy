@@ -63,12 +63,10 @@ type scanSubmitterSpy struct {
 	requests []scancoord.ScanRequest
 	result   scancoord.SubmitResult
 	err      error
-	ctxErr   error
 }
 
-func (s *scanSubmitterSpy) Submit(ctx context.Context, req scancoord.ScanRequest) (scancoord.SubmitResult, error) {
+func (s *scanSubmitterSpy) Submit(_ context.Context, req scancoord.ScanRequest) (scancoord.SubmitResult, error) {
 	s.requests = append(s.requests, req)
-	s.ctxErr = ctx.Err()
 	return s.result, s.err
 }
 

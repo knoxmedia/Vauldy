@@ -13,8 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"knox-media/internal/scheduler"
-
 	"knox-media/internal/publication"
 )
 
@@ -92,7 +90,7 @@ func TestThumbnailDispatcherExecutesPlannedPhotoAndPublishes(t *testing.T) {
 	opts.OwnerID = "thumbnail-owner"
 	opts.PollInterval = 5 * time.Millisecond
 	opts.HeartbeatInterval = time.Second
-	dispatcher, err := NewDispatcher(q, AdapterSet{Thumbnail: NewThumbnailAdapter(db, worker)}, opts, scheduler.NewService(db))
+	dispatcher, err := NewDispatcher(q, AdapterSet{Thumbnail: NewThumbnailAdapter(db, worker)}, opts)
 	if err != nil {
 		t.Fatal(err)
 	}

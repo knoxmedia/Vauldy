@@ -26,8 +26,6 @@ type ImmediateConnTx interface {
 }
 
 type ImmediateOutcome struct {
-	// BodyStarted reports that BEGIN succeeded and callback invocation began.
-	BodyStarted     bool
 	CommitAttempted bool
 	CommitConfirmed bool
 }
@@ -183,7 +181,6 @@ func withImmediateConnTx(ctx context.Context, db *sql.DB, beginTimeout time.Dura
 		}
 	}()
 
-	outcome.BodyStarted = true
 	if err := fn(conn); err != nil {
 		return outcome, err
 	}

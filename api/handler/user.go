@@ -81,11 +81,11 @@ func (h *Handler) Logout(c *gin.Context) {
 func (h *Handler) UserInfo(c *gin.Context) {
 	if middleware.IsAPIClient(c) {
 		c.JSON(http.StatusOK, gin.H{
-			"id":           0,
-			"username":     middleware.Username(c),
-			"role":         "api_client",
-			"can_play":     true,
-			"can_download": true,
+			"id":             0,
+			"username":       middleware.Username(c),
+			"role":           "api_client",
+			"can_play":       true,
+			"can_download":   true,
 		})
 		return
 	}
@@ -117,8 +117,8 @@ func (h *Handler) UserInfo(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"id": uid, "username": username, "role": role,
 		"can_play": playOK, "can_download": downloadOK,
-		"avatar_url":   strings.TrimSpace(avatarURL.String),
-		"ui_locale":    strings.TrimSpace(uiLocale.String),
+		"avatar_url":    strings.TrimSpace(avatarURL.String),
+		"ui_locale":     strings.TrimSpace(uiLocale.String),
 		"player_prefs": prefs,
 	})
 }
@@ -184,28 +184,16 @@ func (h *Handler) UserHistory(c *gin.Context) {
 		scanLimit = 500
 	}
 	q := `
-		WITH user_completion AS MATERIALIZED (
-			SELECT file_id, MAX(COALESCE(completed,0)) AS completed
-			FROM play_progress
-			WHERE user_id = ?
-			GROUP BY file_id
-		)
 		SELECT p.file_id, p.position, p.update_at, m.id, m.title, m.file_path, m.duration, m.library_id,
-		       COALESCE(p.play_start_at,''), COALESCE(p.play_end_at,''), uc.completed, COALESCE(p.play_count,0),
+		       COALESCE(p.play_start_at,''), COALESCE(p.play_end_at,''), COALESCE(p.completed,0), COALESCE(p.play_count,0),
 		       COALESCE(l.type, '')
-		FROM user_completion uc
-		JOIN play_progress p ON p.id = (
-			SELECT freshest.id FROM play_progress freshest
-			WHERE freshest.user_id = ? AND freshest.file_id = uc.file_id
-			ORDER BY unixepoch(freshest.update_at) DESC, freshest.update_at DESC, freshest.id DESC
-			LIMIT 1
-		)
+		FROM play_progress p
 		INNER JOIN media m ON m.file_id = p.file_id AND m.publication_state IN ('published','degraded')
 		LEFT JOIN library l ON l.id = m.library_id
-		WHERE uc.completed = 0
-		ORDER BY unixepoch(p.update_at) DESC, p.update_at DESC, p.id DESC
+		WHERE p.user_id = ? AND COALESCE(p.completed,0) = 0
+		ORDER BY p.update_at DESC
 		LIMIT ` + strconv.Itoa(scanLimit)
-	rows, err := h.App.DB.Query(q, uid, uid)
+	rows, err := h.App.DB.Query(q, uid)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -255,7 +243,7 @@ func (h *Handler) UserHistory(c *gin.Context) {
 		items = append(items, gin.H{
 			"file_id": fid.String, "position": pos.Int64, "update_at": upd.String,
 			"media_id": mid.Int64, "title": title.String, "file_path": fpath.String,
-			"duration":      dur.Int64,
+			"duration": dur.Int64,
 			"play_start_at": nullString(playStartAt),
 			"play_end_at":   nullString(playEndAt),
 			"completed":     completed.Int64,

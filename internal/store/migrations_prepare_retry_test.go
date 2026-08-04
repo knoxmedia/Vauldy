@@ -8,6 +8,9 @@ import (
 )
 
 func TestMigrateIngestPublicationRebuildsOptionalRetryAuditPrepareFamily(t *testing.T) {
+	if !storeEnterprisePrepareReady(t) {
+		t.Skip("enterprise prepare tables unavailable in community build")
+	}
 	db := openIngestPublicationMigrationTestDB(t)
 	if err := migrateIngestPublication(context.Background(), db); err != nil {
 		t.Fatal(err)
@@ -42,6 +45,9 @@ func TestMigrateIngestPublicationRebuildsOptionalRetryAuditPrepareFamily(t *test
 }
 
 func TestOpenSQLiteEnsuresPrepareRetryRoundColumns(t *testing.T) {
+	if !storeEnterprisePrepareReady(t) {
+		t.Skip("enterprise prepare tables unavailable in community build")
+	}
 	path := filepath.Join(t.TempDir(), "prepare-retry-round.sqlite")
 	db, err := OpenSQLite(path)
 	if err != nil {
@@ -55,3 +61,7 @@ func TestOpenSQLiteEnsuresPrepareRetryRoundColumns(t *testing.T) {
 		}
 	}
 }
+
+
+
+

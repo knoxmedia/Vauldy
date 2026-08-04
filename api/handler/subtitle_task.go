@@ -42,10 +42,7 @@ func (h *Handler) runSubtitleWorkerOnce() {
 		return
 	}
 	_, _ = h.App.DB.Exec(`
-		UPDATE subtitle_task SET status = 'pending',
-		  extract_status = CASE WHEN extract_status='running' THEN 'pending' ELSE extract_status END,
-		  recognize_status = CASE WHEN recognize_status='running' THEN 'pending' ELSE recognize_status END,
-		  started_at = NULL, updated_at = CURRENT_TIMESTAMP
+		UPDATE subtitle_task SET status = 'pending', started_at = NULL, updated_at = CURRENT_TIMESTAMP
 		WHERE status = 'running'
 		  AND started_at IS NOT NULL
 		  AND started_at < datetime('now', '-20 minutes')
@@ -85,16 +82,16 @@ func (h *Handler) ListSubtitleTasks(c *gin.Context) {
 			SELECT q.*
 			FROM post_ingest_task q
 			JOIN media m ON m.id = q.media_id
-			WHERE q.task_type IN ('subtitle', 'subtitle_recognize')
+			WHERE q.task_type = 'subtitle'
 			  AND q.generation = COALESCE(m.ingest_generation, 0)
 			  AND NOT (q.status = 'cancelled' AND q.last_error = 'deleted by admin')
 			  AND q.id = (
 				SELECT q2.id
 				FROM post_ingest_task q2
 				WHERE q2.media_id = q.media_id
-				  AND q2.task_type IN ('subtitle', 'subtitle_recognize')
+				  AND q2.task_type = 'subtitle'
 				  AND q2.generation = COALESCE(m.ingest_generation, 0)
-				ORDER BY CASE q2.task_type WHEN 'subtitle' THEN 0 ELSE 1 END, q2.id DESC
+				ORDER BY q2.id DESC
 				LIMIT 1
 			  )
 		), task_media AS (
@@ -243,7 +240,7 @@ func (h *Handler) CancelSubtitleTask(c *gin.Context) {
 			if qerr := h.App.DB.QueryRowContext(c.Request.Context(), `SELECT status FROM post_ingest_task WHERE id=?`, taskID).Scan(&cur); qerr == nil {
 				if cur == postingest.StatusCancelled || cur == postingest.StatusFailed || cur == postingest.StatusDone {
 					_, _ = h.App.DB.ExecContext(c.Request.Context(), `
-UPDATE subtitle_task SET status='pending',extract_status='pending',recognize_status='pending',extract_message=NULL,recognize_message=NULL,started_at=NULL,finished_at=NULL,message='cancelled by admin',updated_at=CURRENT_TIMESTAMP WHERE media_id=?`, mediaID)
+UPDATE subtitle_task SET status='pending',started_at=NULL,finished_at=NULL,message='cancelled by admin',updated_at=CURRENT_TIMESTAMP WHERE media_id=?`, mediaID)
 					c.JSON(http.StatusOK, gin.H{"ok": true, "status": string(cur)})
 					return
 				}
@@ -257,7 +254,7 @@ UPDATE subtitle_task SET status='pending',extract_status='pending',recognize_sta
 		return
 	}
 	_, _ = h.App.DB.ExecContext(c.Request.Context(), `
-UPDATE subtitle_task SET status='pending',extract_status='pending',recognize_status='pending',extract_message=NULL,recognize_message=NULL,started_at=NULL,finished_at=NULL,message='cancelled by admin',updated_at=CURRENT_TIMESTAMP WHERE media_id=?`, mediaID)
+UPDATE subtitle_task SET status='pending',started_at=NULL,finished_at=NULL,message='cancelled by admin',updated_at=CURRENT_TIMESTAMP WHERE media_id=?`, mediaID)
 	c.JSON(http.StatusOK, gin.H{"ok": true, "status": "cancelled"})
 }
 
@@ -294,7 +291,7 @@ func (h *Handler) RunNowSubtitleTask(c *gin.Context) {
 			return
 		}
 		_, _ = h.App.DB.ExecContext(c.Request.Context(), `
-UPDATE subtitle_task SET status='pending',extract_status='pending',recognize_status='pending',extract_message=NULL,recognize_message=NULL,message=NULL,updated_at=CURRENT_TIMESTAMP WHERE media_id=?`, mediaID)
+UPDATE subtitle_task SET status='pending',message=NULL,updated_at=CURRENT_TIMESTAMP WHERE media_id=?`, mediaID)
 		c.JSON(http.StatusOK, gin.H{"ok": true, "status": "waiting", "bumped": true})
 	case postingest.StatusRunning:
 		c.JSON(http.StatusConflict, gin.H{"error": "subtitle task is already running"})

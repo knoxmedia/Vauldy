@@ -8,6 +8,7 @@ import (
 )
 
 func TestPlanReplacementSupersedesActiveGenerationGraph(t *testing.T) {
+	skipIfEnterprisePrepareUnavailable(t)
 	db := openPlannerTestDB(t)
 	_, mediaID, scanID := seedPlannerMedia(t, db, "video", 0, 0, 0)
 	old := planAndCommit(t, db, NewPlanner(PlanOptions{}), NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
@@ -147,9 +148,7 @@ func TestPlanReplacementSupportsCommunityWithoutEnterpriseTables(t *testing.T) {
 	db := openPlannerTestDB(t)
 	_, mediaID, scanID := seedPlannerMedia(t, db, "video", 0, 0, 0)
 	old := planAndCommit(t, db, NewPlanner(PlanOptions{}), NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
-	if _, err := db.Exec(`DROP TABLE pretranscode_rendition_job; DROP TABLE pretranscode_task_meta`); err != nil {
-		t.Fatal(err)
-	}
+	dropEnterprisePrepareTablesIfPresent(t, db)
 	result := planReplacementAndCommit(t, db, NewPlanner(PlanOptions{}), mediaID, ReplacementOptions{Reason: PlanReasonRepair, ExpectedGeneration: old.Generation})
 	if result.NewGeneration != old.Generation+1 {
 		t.Fatalf("generation=%d", result.NewGeneration)
@@ -157,6 +156,7 @@ func TestPlanReplacementSupportsCommunityWithoutEnterpriseTables(t *testing.T) {
 }
 
 func TestPlanReplacementRejectsPartialEnterpriseSchema(t *testing.T) {
+	skipIfEnterprisePrepareUnavailable(t)
 	db := openPlannerTestDB(t)
 	_, mediaID, scanID := seedPlannerMedia(t, db, "video", 0, 0, 0)
 	old := planAndCommit(t, db, NewPlanner(PlanOptions{}), NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})

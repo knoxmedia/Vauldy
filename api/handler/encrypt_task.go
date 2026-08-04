@@ -9,7 +9,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"knox-media/api/middleware"
 	"knox-media/internal/postingest"
 	"knox-media/internal/storage"
 )
@@ -37,9 +36,7 @@ func (h *Handler) ListEncryptTasks(c *gin.Context) {
 	}
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "100"))
 	status := c.DefaultQuery("status", "all")
-	includeRemoved := strings.EqualFold(c.DefaultQuery("include_removed", "0"), "1") ||
-		strings.EqualFold(c.DefaultQuery("include_removed", ""), "true")
-	rows, err := h.Queue.ListEncrypt(c.Request.Context(), status, limit, includeRemoved)
+	rows, err := h.Queue.ListEncrypt(c.Request.Context(), status, limit)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -100,7 +97,7 @@ func (h *Handler) ResetEncryptTask(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "post-ingest queue not configured"})
 		return
 	}
-	if err := h.Queue.AdminResetEncrypt(c.Request.Context(), id, middleware.UserID(c)); err != nil {
+	if err := h.Queue.AdminResetEncrypt(c.Request.Context(), id); err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 			return
@@ -121,7 +118,7 @@ func (h *Handler) DeleteEncryptTask(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "post-ingest queue not configured"})
 		return
 	}
-	if err := h.Queue.AdminRemoveEncrypt(c.Request.Context(), id, middleware.UserID(c)); err != nil {
+	if err := h.Queue.AdminRemoveEncrypt(c.Request.Context(), id); err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 			return

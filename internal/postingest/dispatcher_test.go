@@ -2,21 +2,20 @@ package postingest
 
 import (
 	"context"
-	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
+
+	"knox-media/internal/store"
 	"time"
 
 	"knox-media/internal/scancoord"
 	"knox-media/internal/scanner"
-	"knox-media/internal/scheduler"
-	"knox-media/internal/store"
 )
 
 type executorFunc func(context.Context, Task) error
@@ -57,6 +56,16 @@ func waitUntil(t *testing.T, timeout time.Duration, condition func() bool) {
 
 func TestDefaultDispatcherOptions(t *testing.T) {
 	o := DefaultDispatcherOptions()
+	wantGlobal := runtime.NumCPU() / 2
+	if wantGlobal < 2 {
+		wantGlobal = 2
+	}
+	if wantGlobal > 4 {
+		wantGlobal = 4
+	}
+	if o.Global != wantGlobal || o.Poster != min(2, wantGlobal) || o.Preview != 1 || o.Subtitle != 1 {
+		t.Fatalf("budgets=%d/%d/%d/%d", o.Global, o.Poster, o.Preview, o.Subtitle)
+	}
 	if o.SubtitleTimeoutRealtimeFactor != 2.0 {
 		t.Fatalf("SubtitleTimeoutRealtimeFactor=%v", o.SubtitleTimeoutRealtimeFactor)
 	}
@@ -192,10 +201,16 @@ func TestDispatcher_PosterDeadlinesUsePreferredSourceSize(t *testing.T) {
 		return context.Canceled
 	})
 	o := dispatcherOptions("deadline-owner")
+	o.Global = 4
+	o.Poster = 2
+	o.Preview = 1
 	for _, typ := range taskTypes {
 		o.Timeouts[typ] = 2 * time.Minute
 	}
-	d := schedulerDispatcher(t, q, scheduler.PolicyDefaults(), exec, o)
+	d, err := NewDispatcher(q, exec, o)
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- d.Start(ctx) }()
@@ -255,11 +270,14 @@ func TestDispatcher_PosterDeadlineDoesNotReportRenewLeaseDeadline(t *testing.T) 
 	o.HeartbeatInterval = 15 * time.Millisecond
 	o.Timeouts[TaskPoster] = 60 * time.Millisecond
 	o.ExecutorStopGrace = 200 * time.Millisecond
-	d := schedulerDispatcher(t, q, scheduler.PolicyDefaults(), executorFunc(func(ctx context.Context, _ Task) error {
+	d, err := NewDispatcher(q, executorFunc(func(ctx context.Context, _ Task) error {
 		startOnce.Do(func() { close(started) })
 		<-ctx.Done()
 		return ctx.Err()
 	}), o)
+	if err != nil {
+		t.Fatal(err)
+	}
 	d.sourceSize = func(context.Context, Task) int64 { return 0 }
 	d.sourceLookupBudget = 20 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
@@ -298,10 +316,13 @@ func TestDispatcher_PosterHeartbeatRunsBeforeSourceLookup(t *testing.T) {
 	}
 	lookupChecks := make(chan int, 1)
 	executed := make(chan struct{}, 1)
-	d := schedulerDispatcher(t, q, scheduler.PolicyDefaults(), executorFunc(func(context.Context, Task) error {
+	d, err := NewDispatcher(q, executorFunc(func(context.Context, Task) error {
 		executed <- struct{}{}
 		return nil
 	}), dispatcherOptions("heartbeat-order-owner"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	d.sourceSize = func(context.Context, Task) int64 {
 		lookupChecks <- cancellationChecks
 		return 1
@@ -339,10 +360,13 @@ func TestDispatcher_FailedImmediatePosterHeartbeatSkipsLookupAndExecutor(t *test
 	}
 	lookup := make(chan struct{}, 1)
 	executed := make(chan struct{}, 1)
-	d := schedulerDispatcher(t, q, scheduler.PolicyDefaults(), executorFunc(func(context.Context, Task) error {
+	d, err := NewDispatcher(q, executorFunc(func(context.Context, Task) error {
 		executed <- struct{}{}
 		return nil
 	}), dispatcherOptions("heartbeat-failure-owner"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	d.sourceSize = func(context.Context, Task) int64 {
 		lookup <- struct{}{}
 		return 1
@@ -393,10 +417,16 @@ func TestDispatcher_BlockingPosterSizeLookupDoesNotBlockDispatchAndFallsBack(t *
 		return context.Canceled
 	})
 	o := dispatcherOptions("lookup-owner")
+	o.Global = 2
+	o.Poster = 1
+	o.Preview = 1
 	o.HeartbeatInterval = 25 * time.Millisecond
 	o.Timeouts[TaskPoster] = 2 * time.Minute
 	o.Timeouts[TaskPreview] = 2 * time.Minute
-	d := schedulerDispatcher(t, q, scheduler.PolicyDefaults(), exec, o)
+	d, err := NewDispatcher(q, exec, o)
+	if err != nil {
+		t.Fatal(err)
+	}
 	d.sourceLookupBudget = 150 * time.Millisecond
 	d.sourceSize = func(context.Context, Task) int64 {
 		close(lookupEntered)
@@ -412,11 +442,11 @@ func TestDispatcher_BlockingPosterSizeLookupDoesNotBlockDispatchAndFallsBack(t *
 	case <-time.After(5 * time.Second):
 		t.Fatal("poster lookup did not start")
 	}
-	if _, err := db.Exec(`UPDATE post_ingest_task SET lease_until=datetime(CURRENT_TIMESTAMP,'+1 second') WHERE id=?`, posterID); err != nil {
+	if _, err = db.Exec(`UPDATE post_ingest_task SET lease_until=datetime(CURRENT_TIMESTAMP,'+1 second') WHERE id=?`, posterID); err != nil {
 		t.Fatal(err)
 	}
 	var shortened time.Time
-	if err := db.QueryRow(`SELECT lease_until FROM post_ingest_task WHERE id=?`, posterID).Scan(&shortened); err != nil {
+	if err = db.QueryRow(`SELECT lease_until FROM post_ingest_task WHERE id=?`, posterID).Scan(&shortened); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -448,7 +478,7 @@ func TestDispatcher_BlockingPosterSizeLookupDoesNotBlockDispatchAndFallsBack(t *
 	}
 	cancel()
 	select {
-	case err := <-done:
+	case err = <-done:
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -472,10 +502,13 @@ func TestDispatcher_CancelDuringPosterSizeLookupSkipsExecutor(t *testing.T) {
 	releaseLookup := make(chan struct{})
 	lookupReturned := make(chan struct{})
 	executed := make(chan struct{}, 1)
-	d := schedulerDispatcher(t, q, scheduler.PolicyDefaults(), executorFunc(func(context.Context, Task) error {
+	d, err := NewDispatcher(q, executorFunc(func(context.Context, Task) error {
 		executed <- struct{}{}
 		return nil
 	}), dispatcherOptions("lookup-cancel-owner"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	d.sourceLookupBudget = time.Minute
 	d.sourceSize = func(context.Context, Task) int64 {
 		close(lookupEntered)
@@ -494,7 +527,7 @@ func TestDispatcher_CancelDuringPosterSizeLookupSkipsExecutor(t *testing.T) {
 	started := time.Now()
 	cancel()
 	select {
-	case err := <-done:
+	case err = <-done:
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -518,17 +551,20 @@ func TestDispatcher_CancelDuringPosterSizeLookupSkipsExecutor(t *testing.T) {
 	waitUntil(t, time.Second, func() bool { return len(d.sourceLookups) == 0 })
 }
 
-func TestDispatcher_RejectsInvalidOptions(t *testing.T) {
+func TestDispatcher_RejectsInvalidBudget(t *testing.T) {
 	db, _ := openQueueTestDB(t)
 	q := NewQueue(db, "owner", nil)
 	exec := executorFunc(func(context.Context, Task) error { return nil })
-	svc := scheduler.NewService(db)
 	valid := DefaultDispatcherOptions()
 	valid.OwnerID = "owner"
 	cases := []struct {
 		name, field string
 		mutate      func(*DispatcherOptions)
 	}{
+		{"global zero", "Global", func(o *DispatcherOptions) { o.Global = 0 }}, {"global high", "Global", func(o *DispatcherOptions) { o.Global = 33 }},
+		{"poster zero", "Poster", func(o *DispatcherOptions) { o.Poster = 0 }}, {"poster high", "Poster", func(o *DispatcherOptions) { o.Poster = 3 }}, {"poster global", "Poster", func(o *DispatcherOptions) { o.Global = 1; o.Poster = 2 }},
+		{"preview zero", "Preview", func(o *DispatcherOptions) { o.Preview = 0 }}, {"preview high", "Preview", func(o *DispatcherOptions) { o.Preview = 3 }}, {"preview global", "Preview", func(o *DispatcherOptions) { o.Global = 1; o.Poster = 1; o.Preview = 2 }},
+		{"subtitle zero", "Subtitle", func(o *DispatcherOptions) { o.Subtitle = 0 }}, {"subtitle global", "Subtitle", func(o *DispatcherOptions) { o.Global = 1; o.Poster = 1; o.Preview = 1; o.Subtitle = 2 }},
 		{"subtitle factor", "SubtitleTimeoutRealtimeFactor", func(o *DispatcherOptions) { o.SubtitleTimeoutRealtimeFactor = 0 }},
 		{"owner empty", "OwnerID", func(o *DispatcherOptions) { o.OwnerID = "" }}, {"owner slash", "OwnerID", func(o *DispatcherOptions) { o.OwnerID = "a/b" }},
 		{"poll", "PollInterval", func(o *DispatcherOptions) { o.PollInterval = 0 }}, {"lease", "LeaseDuration", func(o *DispatcherOptions) { o.LeaseDuration = time.Second }},
@@ -541,20 +577,17 @@ func TestDispatcher_RejectsInvalidOptions(t *testing.T) {
 			o := valid
 			o.Timeouts = cloneTimeouts(valid.Timeouts)
 			tc.mutate(&o)
-			_, err := NewDispatcher(q, exec, o, svc)
+			_, err := NewDispatcher(q, exec, o)
 			if err == nil || !strings.Contains(err.Error(), tc.field) {
 				t.Fatalf("err=%v want field %s", err, tc.field)
 			}
 		})
 	}
-	if _, err := NewDispatcher(nil, exec, valid, svc); err == nil || !strings.Contains(err.Error(), "Queue") {
+	if _, err := NewDispatcher(nil, exec, valid); err == nil || !strings.Contains(err.Error(), "Queue") {
 		t.Fatalf("nil queue err=%v", err)
 	}
-	if _, err := NewDispatcher(q, nil, valid, svc); err == nil || !strings.Contains(err.Error(), "Executor") {
+	if _, err := NewDispatcher(q, nil, valid); err == nil || !strings.Contains(err.Error(), "Executor") {
 		t.Fatalf("nil executor err=%v", err)
-	}
-	if _, err := NewDispatcher(q, exec, valid, nil); err == nil || !strings.Contains(err.Error(), "SchedulerService") {
-		t.Fatalf("nil scheduler service err=%v", err)
 	}
 }
 
@@ -566,20 +599,12 @@ func cloneTimeouts(in map[TaskType]time.Duration) map[TaskType]time.Duration {
 	return out
 }
 
-// TestDispatcherScheduler_RealExecutionRespectsCapacity drives blocking
-// executors and asserts actual concurrent starts never exceed any type or
-// resource capacity under scheduler admission.
-func TestDispatcherScheduler_RealExecutionRespectsCapacity(t *testing.T) {
+func TestDispatcher_BudgetsBeforeClaim(t *testing.T) {
 	for _, previewLimit := range []int{1, 2} {
 		t.Run(fmt.Sprintf("preview-%d", previewLimit), func(t *testing.T) {
 			db, _ := openQueueTestDB(t)
 			q := NewQueue(db, "owner", nil)
 			enqueueDispatcherTasks(t, q, 5, TaskPoster, TaskPreview, TaskKeyframe)
-			policy := scheduler.PolicyDefaults()
-			policy.TypeConcurrency["poster"] = 2
-			policy.TypeConcurrency["preview"] = previewLimit
-			policy.TypeConcurrency["keyframe"] = 4
-			policy.ResourceCapacity[scheduler.CPU] = 4
 			var mu sync.Mutex
 			current := map[TaskType]int{}
 			peak := map[TaskType]int{}
@@ -605,18 +630,24 @@ func TestDispatcherScheduler_RealExecutionRespectsCapacity(t *testing.T) {
 			})
 			o := DefaultDispatcherOptions()
 			o.OwnerID = "owner"
+			o.Global = 4
+			o.Poster = 2
+			o.Preview = previewLimit
 			o.PollInterval = 5 * time.Millisecond
-			d := schedulerDispatcher(t, q, policy, exec, o)
+			d, err := NewDispatcher(q, exec, o)
+			if err != nil {
+				t.Fatal(err)
+			}
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan error, 1)
 			go func() { done <- d.Start(ctx) }()
-			waitUntil(t, time.Second, func() bool { return snap(d).GlobalUsed == 4 })
+			waitUntil(t, time.Second, func() bool { return d.Snapshot().GlobalUsed == 4 })
 			time.Sleep(30 * time.Millisecond)
-			s := snap(d)
+			s := d.Snapshot()
 			mu.Lock()
 			gp, pp, vp := globalPeak, peak[TaskPoster], peak[TaskPreview]
 			mu.Unlock()
-			if gp > 4 || pp > 2 || vp > previewLimit || s.GlobalUsed > 4 {
+			if gp > o.Global || pp > 2 || vp > previewLimit || s.GlobalUsed > o.Global {
 				t.Fatalf("peaks global=%d poster=%d preview=%d snapshot=%+v", gp, pp, vp, s)
 			}
 			var waiting int
@@ -632,397 +663,13 @@ func TestDispatcherScheduler_RealExecutionRespectsCapacity(t *testing.T) {
 	}
 }
 
-// TestDispatcherScheduler_UnrelatedWorkFillsTokens asserts a task type with
-// free concurrency cannot start while unrelated work holds the only CPU token.
-func TestDispatcherScheduler_UnrelatedWorkFillsTokens(t *testing.T) {
-	db, _ := openQueueTestDB(t)
-	q := NewQueue(db, "token-owner", nil)
-	blockerID := insertDispatcherTask(t, q, TaskPoster, nil, "cpu-blocker")
-	starvedID := insertDispatcherTask(t, q, TaskSubtitleRecognize, nil, "cpu-starved")
-	policy := scheduler.PolicyDefaults()
-	policy.TypeConcurrency["poster"] = 2
-	policy.TypeConcurrency["subtitle_recognize"] = 2
-	policy.ResourceCapacity[scheduler.CPU] = 1
-	started := make(chan struct{})
-	release := make(chan struct{})
-	exec := executorFunc(func(ctx context.Context, task Task) error {
-		started <- struct{}{}
-		select {
-		case <-release:
-			return nil
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	})
-	d := schedulerDispatcher(t, q, policy, exec, dispatcherOptions("token-owner"))
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- d.Start(ctx) }()
-	select {
-	case <-started:
-	case <-time.After(2 * time.Second):
-		t.Fatal("poster blocker did not start")
-	}
-	// Subtitle recognize has free concurrency but CPU is fully held by poster.
-	var starvedStatus Status
-	_ = db.QueryRow(`SELECT status FROM post_ingest_task WHERE id=?`, starvedID).Scan(&starvedStatus)
-	if starvedStatus != StatusWaiting {
-		t.Fatalf("starved task status=%s want waiting while CPU token held", starvedStatus)
-	}
-	select {
-	case <-started:
-		t.Fatal("starved task started while CPU token held by unrelated work")
-	case <-time.After(150 * time.Millisecond):
-	}
-	close(release)
-	waitUntil(t, 2*time.Second, func() bool {
-		var s Status
-		_ = db.QueryRow(`SELECT status FROM post_ingest_task WHERE id=?`, starvedID).Scan(&s)
-		return s == StatusRunning
-	})
-	_ = blockerID
-	cancel()
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
-}
-
-// TestDispatcherScheduler_NoGlobalPlusOneBurst asserts no soft-cap oversubscribe
-// burst exists: with capacity exhausted, nothing extra starts.
-func TestDispatcherScheduler_NoGlobalPlusOneBurst(t *testing.T) {
-	db, _ := openQueueTestDB(t)
-	q := NewQueue(db, "burst-owner", nil)
-	insertDispatcherTask(t, q, TaskSubtitle, nil, "burst-a")
-	insertDispatcherTask(t, q, TaskSubtitle, nil, "burst-b")
-	insertDispatcherTask(t, q, TaskPoster, nil, "burst-poster")
-	policy := scheduler.PolicyDefaults()
-	policy.TypeConcurrency["subtitle"] = 1
-	policy.TypeConcurrency["poster"] = 1
-	policy.ResourceCapacity[scheduler.CPU] = 1
-	started := make(chan TaskType, 4)
-	release := make(chan struct{})
-	exec := executorFunc(func(ctx context.Context, task Task) error {
-		started <- task.Type
-		select {
-		case <-release:
-			return nil
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	})
-	d := schedulerDispatcher(t, q, policy, exec, dispatcherOptions("burst-owner"))
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- d.Start(ctx) }()
-	select {
-	case <-started:
-	case <-time.After(2 * time.Second):
-		t.Fatal("first task did not start")
-	}
-	select {
-	case <-started:
-		t.Fatal("second task started beyond admitted capacity")
-	case <-time.After(150 * time.Millisecond):
-	}
-	if snap := snap(d); snap.GlobalUsed != 1 {
-		t.Fatalf("GlobalUsed=%d want 1 (no burst)", snap.GlobalUsed)
-	}
-	close(release)
-	waitUntil(t, 2*time.Second, func() bool { return snap(d).GlobalUsed == 1 })
-	cancel()
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
-}
-
-// TestDispatcherScheduler_SnapshotEqualsDurableReservations asserts the
-// compatibility budget snapshot is computed from durable reservations.
-func TestDispatcherScheduler_SnapshotEqualsDurableReservations(t *testing.T) {
-	db, _ := openQueueTestDB(t)
-	q := NewQueue(db, "snap-owner", nil)
-	insertDispatcherTask(t, q, TaskPoster, nil, "snap-poster")
-	insertDispatcherTask(t, q, TaskPreview, nil, "snap-preview")
-	insertDispatcherTask(t, q, TaskSubtitle, nil, "snap-subtitle")
-	policy := scheduler.PolicyDefaults()
-	started := make(chan Task, 3)
-	release := make(chan struct{})
-	exec := executorFunc(func(ctx context.Context, task Task) error {
-		started <- task
-		select {
-		case <-release:
-			return nil
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	})
-	d := schedulerDispatcher(t, q, policy, exec, dispatcherOptions("snap-owner"))
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- d.Start(ctx) }()
-	active := make(map[string]bool, 3)
-	for i := 0; i < 3; i++ {
-		select {
-		case task := <-started:
-			if task.ExecutionID == "" {
-				t.Fatal("admitted task missing execution id")
-			}
-			active[task.ExecutionID] = true
-		case <-time.After(3 * time.Second):
-			t.Fatal("task did not start")
-		}
-	}
-	waitUntil(t, time.Second, func() bool { return snap(d).GlobalUsed == 3 })
-	got := snap(d)
-	if got.GlobalUsed != len(active) || got.PosterUsed != 1 || got.PreviewUsed != 1 || got.SubtitleUsed != 1 {
-		t.Fatalf("snapshot=%+v active=%v", got, len(active))
-	}
-	s := scheduler.NewStore(db)
-	rows, err := s.ListActiveReservations(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(rows) != got.GlobalUsed {
-		t.Fatalf("durable reservations=%d snapshot GlobalUsed=%d", len(rows), got.GlobalUsed)
-	}
-	for _, res := range rows {
-		if !active[res.ExecutionID] {
-			t.Fatalf("snapshot counts unknown reservation %s", res.ExecutionID)
-		}
-	}
-	close(release)
-	cancel()
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
-	waitUntil(t, time.Second, func() bool { return snap(d).GlobalUsed == 0 })
-}
-
-// TestDispatcherScheduler_PolicyLoweringDoesNotCancelRunningTasks asserts a
-// lower-limit revision stops new claims but preserves running reservations.
-func TestDispatcherScheduler_PolicyLoweringDoesNotCancelRunningTasks(t *testing.T) {
-	db, _ := openQueueTestDB(t)
-	q := NewQueue(db, "lower-owner", nil)
-	insertDispatcherTask(t, q, TaskPoster, nil, "lower-a")
-	insertDispatcherTask(t, q, TaskPoster, nil, "lower-b")
-	policy := scheduler.PolicyDefaults()
-	policy.TypeConcurrency["poster"] = 2
-	started := make(chan struct{}, 2)
-	release := make(chan struct{})
-	exec := executorFunc(func(ctx context.Context, _ Task) error {
-		started <- struct{}{}
-		select {
-		case <-release:
-			return nil
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	})
-	d := schedulerDispatcher(t, q, policy, exec, dispatcherOptions("lower-owner"))
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- d.Start(ctx) }()
-	for i := 0; i < 2; i++ {
-		select {
-		case <-started:
-		case <-time.After(3 * time.Second):
-			t.Fatal("poster task did not start")
-		}
-	}
-	waitUntil(t, time.Second, func() bool { return snap(d).GlobalUsed == 2 })
-
-	lowered := scheduler.PolicyDefaults()
-	lowered.TypeConcurrency["poster"] = 1
-	lowered.ResourceCapacity = policy.ResourceCapacity
-	activateSchedulerPolicy(t, db, lowered)
-	q.SetSchedulerPolicy(&lowered)
-	if err := d.svc.Reload(ctx); err != nil {
-		t.Fatal(err)
-	}
-
-	// Running reservations are preserved.
-	waitUntil(t, time.Second, func() bool { return snap(d).GlobalUsed == 2 })
-	s := scheduler.NewStore(db)
-	rows, err := s.ListActiveReservations(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(rows) != 2 {
-		t.Fatalf("active reservations=%d want 2 preserved after lowering", len(rows))
-	}
-
-	// A third poster is not admitted (2 active >= limit 1).
-	thirdID := insertDispatcherTask(t, q, TaskPoster, nil, "lower-c")
-	select {
-	case <-started:
-		t.Fatal("third poster started after limit lowered")
-	case <-time.After(150 * time.Millisecond):
-	}
-	var s3 Status
-	_ = db.QueryRow(`SELECT status FROM post_ingest_task WHERE id=?`, thirdID).Scan(&s3)
-	if s3 != StatusWaiting {
-		t.Fatalf("third poster status=%s want waiting", s3)
-	}
-	close(release)
-	cancel()
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
-}
-
-// TestDispatcherScheduler_FallbackReadmissionFencesGPUAttempt asserts a GPU
-// attempt's reservation is fenced and a fresh CPU-heavy fallback reservation is
-// admitted before the fallback path runs.
-func TestDispatcherScheduler_FallbackReadmissionFencesGPUAttempt(t *testing.T) {
-	db, _ := openQueueTestDB(t)
-	q := NewQueue(db, "fallback-owner", nil)
-	insertDispatcherTask(t, q, TaskSubtitleRecognize, nil, "gpu-fallback")
-	policy := scheduler.PolicyDefaults()
-	policy.TypeConcurrency["subtitle_recognize"] = 2
-	policy.TypeConcurrency["atrack"] = 1
-	// Capacity 2 lets the unrelated atrack and the GPU attempt run together;
-	// the CPU-heavy fallback (CPU:2) then waits while atrack holds one token.
-	policy.ResourceCapacity[scheduler.CPU] = 2
-
-	// Unrelated atrack holds one CPU token so the fresh CPU-heavy fallback waits.
-	_ = insertDispatcherTask(t, q, TaskAtrack, nil, "cpu-blocker")
-
-	type fallbackOutcome struct {
-		fenced     string
-		fresh      string
-		fallbackOn bool
-	}
-	outcome := make(chan fallbackOutcome, 1)
-	blockerRelease := make(chan struct{})
-	blockerStarted := make(chan struct{})
-	gpuProceed := make(chan struct{})
-	gpuFenced := make(chan string, 1)
-	var svc *scheduler.Service
-	exec := executorFunc(func(ctx context.Context, task Task) error {
-		switch task.Type {
-		case TaskAtrack:
-			close(blockerStarted)
-			select {
-			case <-blockerRelease:
-				return nil
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		case TaskSubtitleRecognize:
-			if task.ExecutionID == "" {
-				return errors.New("gpu attempt missing execution id")
-			}
-			// Wait until the unrelated atrack reservation exists so the fresh
-			// CPU-heavy fallback must wait for its token.
-			select {
-			case <-gpuProceed:
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-			gpuExec := task.ExecutionID
-			gpuFenced <- gpuExec
-			res, err := svc.AcquireFallback(ctx, scheduler.FallbackRequest{
-				ExecutionID: gpuExec,
-				TaskType:    string(task.Type),
-				Owner:       "fallback-owner",
-				Resources:   scheduler.ResourceRequest{scheduler.CPU: 2},
-			})
-			if err != nil {
-				return err
-			}
-			outcome <- fallbackOutcome{fenced: gpuExec, fresh: res.ExecutionID, fallbackOn: true}
-			return nil
-		default:
-			return errors.New("unexpected task type")
-		}
-	})
-
-	activateSchedulerPolicy(t, db, policy)
-	q.SetSchedulerPolicy(&policy)
-	svc = scheduler.NewService(db)
-	svc.SetPolicy(policy)
-	o := dispatcherOptions("fallback-owner")
-	// A calmer claim sweep keeps the scheduler write lock available so the
-	// atrack Complete can release its token while the fallback waits.
-	o.PollInterval = 100 * time.Millisecond
-	d, err := NewDispatcher(q, exec, o, svc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- d.Start(ctx) }()
-
-	select {
-	case <-blockerStarted:
-	case <-time.After(3 * time.Second):
-		t.Fatal("atrack blocker did not start")
-	}
-
-	// Let the GPU attempt fence itself; the fresh CPU-heavy fallback must wait
-	// while the atrack blocker holds the CPU token.
-	close(gpuProceed)
-	gpuExec := <-gpuFenced
-	select {
-	case got := <-outcome:
-		t.Fatalf("fallback admitted before atrack release: %+v", got)
-	case err := <-done:
-		t.Fatalf("dispatcher exited early: %v", err)
-	case <-time.After(150 * time.Millisecond):
-		// expected: the fresh fallback waits for capacity
-	}
-
-	// The original GPU reservation is fenced (released) as evidence.
-	s := scheduler.NewStore(db)
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		orig, err := s.GetReservation(ctx, gpuExec)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if orig.Status == "released" {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("gpu attempt reservation status=%s want released", orig.Status)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-
-	// Free the CPU token; the fresh CPU-heavy fallback is now admitted. The
-	// outcome wait is generous because the scheduler claim sweep and the fallback
-	// poll share the single SQLite writer with the atrack Complete.
-	close(blockerRelease)
-	var got fallbackOutcome
-	select {
-	case got = <-outcome:
-	case err := <-done:
-		t.Fatalf("dispatcher exited early: %v", err)
-	case <-time.After(10 * time.Second):
-		t.Fatal("fresh fallback reservation was not admitted after atrack release")
-	}
-	fresh, err := s.GetReservation(ctx, got.fresh)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fresh.Status != "active" || fresh.TaskType != "subtitle_recognize" || fresh.ExecutionID == got.fenced {
-		t.Fatalf("fresh reservation=%+v", fresh)
-	}
-	if !got.fallbackOn {
-		t.Fatal("fallback path did not run")
-	}
-	cancel()
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestDispatcher_NonposterDeadlineStartsAtLaunch(t *testing.T) {
 	db, _ := openQueueTestDB(t)
 	q := NewQueue(db, "nonposter-origin-owner", nil)
 	insertDispatcherTask(t, q, TaskThumbnail, nil, "deadline-origin")
 	const base = 500 * time.Millisecond
 	observed := make(chan time.Duration, 1)
-	d := schedulerDispatcher(t, q, scheduler.PolicyDefaults(), executorFunc(func(ctx context.Context, _ Task) error {
+	d, err := NewDispatcher(q, executorFunc(func(ctx context.Context, _ Task) error {
 		deadline, ok := ctx.Deadline()
 		if !ok {
 			return errors.New("missing deadline")
@@ -1030,6 +677,9 @@ func TestDispatcher_NonposterDeadlineStartsAtLaunch(t *testing.T) {
 		observed <- time.Until(deadline)
 		return context.Canceled
 	}), dispatcherOptions("nonposter-origin-owner"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	d.opts.Timeouts[TaskThumbnail] = base
 	d.beforeRun = func(Task) { time.Sleep(200 * time.Millisecond) }
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1060,7 +710,10 @@ func TestDispatcher_TypeTimeouts(t *testing.T) {
 	o.PollInterval = 5 * time.Millisecond
 	o.Timeouts[TaskPoster] = 20 * time.Millisecond
 	o.Timeouts[TaskPreview] = 35 * time.Millisecond
-	d := schedulerDispatcher(t, q, scheduler.PolicyDefaults(), exec, o)
+	d, err := NewDispatcher(q, exec, o)
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- d.Start(ctx) }()
@@ -1108,12 +761,14 @@ func TestDispatcher_ShutdownWaitsAndSnapshotSafe(t *testing.T) {
 		exited <- struct{}{}
 		return errors.New("stopped")
 	})
-	policy := scheduler.PolicyDefaults()
-	policy.TypeConcurrency["keyframe"] = 2
 	o := DefaultDispatcherOptions()
 	o.OwnerID = "owner"
+	o.Global = 2
 	o.PollInterval = 5 * time.Millisecond
-	d := schedulerDispatcher(t, q, policy, exec, o)
+	d, err := NewDispatcher(q, exec, o)
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- d.Start(ctx) }()
@@ -1125,7 +780,7 @@ func TestDispatcher_ShutdownWaitsAndSnapshotSafe(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 100; j++ {
-				_ = snap(d)
+				_ = d.Snapshot()
 			}
 		}()
 	}
@@ -1134,8 +789,8 @@ func TestDispatcher_ShutdownWaitsAndSnapshotSafe(t *testing.T) {
 		t.Fatal(err)
 	}
 	wg.Wait()
-	if len(exited) != 2 || snap(d).GlobalUsed != 0 {
-		t.Fatalf("workers not converged snapshot=%+v exited=%d", snap(d), len(exited))
+	if len(exited) != 2 || d.Snapshot().GlobalUsed != 0 {
+		t.Fatalf("workers not converged snapshot=%+v exited=%d", d.Snapshot(), len(exited))
 	}
 	if err := d.Start(context.Background()); err == nil {
 		t.Fatal("second Start accepted")
@@ -1147,6 +802,32 @@ func dispatcherOptions(owner string) DispatcherOptions {
 	o.OwnerID = owner
 	o.PollInterval = 5 * time.Millisecond
 	return o
+}
+
+func TestDispatcher_SubtitleSlotCapsConcurrency(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	q := NewQueue(db, "sub-slot", nil)
+	o := dispatcherOptions("sub-slot")
+	o.Global = 4
+	o.Subtitle = 1
+	d, err := NewDispatcher(q, executorFunc(func(context.Context, Task) error { return nil }), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !d.tryAcquire(TaskSubtitle) {
+		t.Fatal("first subtitle acquire failed")
+	}
+	if d.tryAcquire(TaskSubtitle) {
+		t.Fatal("second subtitle acquire should fail when Subtitle=1")
+	}
+	if snap := d.Snapshot(); snap.SubtitleUsed != 1 || snap.SubtitleLimit != 1 {
+		t.Fatalf("snapshot=%+v", snap)
+	}
+	d.release(TaskSubtitle)
+	if !d.tryAcquire(TaskSubtitle) {
+		t.Fatal("acquire after release failed")
+	}
+	d.release(TaskSubtitle)
 }
 
 func TestDispatcher_SubtitleSlotDoesNotFatalOnBacklog(t *testing.T) {
@@ -1166,10 +847,13 @@ func TestDispatcher_SubtitleSlotDoesNotFatalOnBacklog(t *testing.T) {
 			return ctx.Err()
 		}
 	})
-	policy := scheduler.PolicyDefaults()
-	policy.TypeConcurrency["subtitle"] = 1
 	o := dispatcherOptions("sub-backlog")
-	d := schedulerDispatcher(t, q, policy, exec, o)
+	o.Global = 4
+	o.Subtitle = 1
+	d, err := NewDispatcher(q, exec, o)
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- d.Start(ctx) }()
@@ -1180,12 +864,12 @@ func TestDispatcher_SubtitleSlotDoesNotFatalOnBacklog(t *testing.T) {
 	}
 	select {
 	case <-started:
-		t.Fatal("second subtitle started while subtitle concurrency=1")
+		t.Fatal("second subtitle started while Subtitle=1")
 	case err := <-done:
 		t.Fatalf("dispatcher exited early: %v", err)
 	case <-time.After(150 * time.Millisecond):
 	}
-	if snap := snap(d); snap.SubtitleUsed != 1 || snap.GlobalUsed != 1 {
+	if snap := d.Snapshot(); snap.SubtitleUsed != 1 || snap.GlobalUsed != 1 {
 		t.Fatalf("snapshot=%+v", snap)
 	}
 	close(block)
@@ -1212,7 +896,10 @@ func TestDispatcher_RecoversExpiredLeasesPeriodically(t *testing.T) {
 	})
 	o := dispatcherOptions("owner")
 	o.RecoverInterval = 20 * time.Millisecond
-	d := schedulerDispatcher(t, q, scheduler.PolicyDefaults(), exec, o)
+	d, err := NewDispatcher(q, exec, o)
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	errCh := make(chan error, 1)
@@ -1229,6 +916,192 @@ func TestDispatcher_RecoversExpiredLeasesPeriodically(t *testing.T) {
 	})
 	cancel()
 	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDispatcher_RoundRobinPersistsAcrossSlots(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	q := NewQueue(db, "owner", nil)
+	// One task per type; priority order must prefer poster before encrypt before mid-band before subtitle.
+	for _, typ := range []TaskType{TaskSubtitle, TaskEncrypt, TaskKeyframe, TaskPoster, TaskThumbnail, TaskAtrack, TaskPreview} {
+		insertDispatcherTask(t, q, typ, nil, fmt.Sprintf("prio-%s", typ))
+	}
+	started := make(chan TaskType, 8)
+	release := make(chan struct{}, 8)
+	exec := executorFunc(func(ctx context.Context, task Task) error {
+		started <- task.Type
+		select {
+		case <-release:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
+	o := dispatcherOptions("owner")
+	o.Global = 1
+	o.Poster = 1
+	o.Preview = 1
+	d, err := NewDispatcher(q, exec, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- d.Start(ctx) }()
+	wantOrder := []TaskType{TaskPoster, TaskEncrypt}
+	for i, want := range wantOrder {
+		select {
+		case typ := <-started:
+			if typ != want {
+				t.Fatalf("claim %d type=%s want %s", i, typ, want)
+			}
+			release <- struct{}{}
+		case <-time.After(time.Second):
+			t.Fatal("scheduler stalled")
+		}
+	}
+	// Mid-band types are equal; collect the next four without requiring a fixed order among them.
+	mid := map[TaskType]bool{}
+	for i := 0; i < 4; i++ {
+		select {
+		case typ := <-started:
+			switch typ {
+			case TaskPreview, TaskThumbnail, TaskKeyframe, TaskAtrack:
+				mid[typ] = true
+			default:
+				t.Fatalf("mid-band claim got %s", typ)
+			}
+			release <- struct{}{}
+		case <-time.After(time.Second):
+			t.Fatal("scheduler stalled in mid-band")
+		}
+	}
+	if len(mid) != 4 {
+		t.Fatalf("mid-band starts=%v", mid)
+	}
+	select {
+	case typ := <-started:
+		if typ != TaskSubtitle {
+			t.Fatalf("last claim=%s want subtitle", typ)
+		}
+		release <- struct{}{}
+	case <-time.After(time.Second):
+		t.Fatal("subtitle not claimed")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDispatcher_HighPriorityBurstWhenLowPrioritySaturated(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	q := NewQueue(db, "owner", nil)
+	for i := 0; i < 2; i++ {
+		insertDispatcherTask(t, q, TaskSubtitle, nil, fmt.Sprintf("low-%d", i))
+	}
+	started := make(chan TaskType, 4)
+	block := make(chan struct{})
+	exec := executorFunc(func(ctx context.Context, task Task) error {
+		started <- task.Type
+		select {
+		case <-block:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
+	o := dispatcherOptions("owner")
+	o.Global = 2
+	o.Poster = 2
+	o.Preview = 1
+	o.Subtitle = 2 // saturate global with concurrent subtitles for burst coverage
+	d, err := NewDispatcher(q, exec, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- d.Start(ctx) }()
+	for i := 0; i < 2; i++ {
+		select {
+		case typ := <-started:
+			if typ != TaskSubtitle {
+				t.Fatalf("warmup %d=%s", i, typ)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("low priority did not start")
+		}
+	}
+	waitUntil(t, time.Second, func() bool { return d.Snapshot().GlobalUsed == 2 })
+	insertDispatcherTask(t, q, TaskPoster, nil, "burst-poster")
+	select {
+	case typ := <-started:
+		if typ != TaskPoster {
+			t.Fatalf("burst claim=%s want poster", typ)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("high priority burst did not start")
+	}
+	if got := d.Snapshot().GlobalUsed; got != 3 {
+		t.Fatalf("GlobalUsed=%d want 3 (Global+1 burst)", got)
+	}
+	close(block)
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDispatcher_SubtitleBurstWhenHighPrioritySaturatesGlobal(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	q := NewQueue(db, "sub-burst", nil)
+	insertDispatcherTask(t, q, TaskPoster, nil, "poster-a")
+	insertDispatcherTask(t, q, TaskPoster, nil, "poster-b")
+	insertDispatcherTask(t, q, TaskPreview, nil, "preview-fill")
+	insertDispatcherTask(t, q, TaskSubtitle, nil, "subtitle-waiting")
+	started := make(chan TaskType, 4)
+	block := make(chan struct{})
+	exec := executorFunc(func(ctx context.Context, task Task) error {
+		started <- task.Type
+		select {
+		case <-block:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
+	o := dispatcherOptions("sub-burst")
+	o.Global = 3
+	o.Poster = 2
+	o.Preview = 1
+	o.Subtitle = 1
+	d, err := NewDispatcher(q, exec, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- d.Start(ctx) }()
+	seen := map[TaskType]int{}
+	for i := 0; i < 4; i++ {
+		select {
+		case typ := <-started:
+			seen[typ]++
+		case <-time.After(2 * time.Second):
+			t.Fatalf("missing start after %d; seen=%v", i, seen)
+		}
+	}
+	if seen[TaskPoster] != 2 || seen[TaskPreview] != 1 || seen[TaskSubtitle] != 1 {
+		t.Fatalf("starts=%v want 2 poster + 1 preview + 1 subtitle burst", seen)
+	}
+	if snap := d.Snapshot(); snap.GlobalUsed != 4 || snap.SubtitleUsed != 1 {
+		t.Fatalf("snapshot=%+v want GlobalUsed=4 SubtitleUsed=1", snap)
+	}
+	close(block)
+	cancel()
+	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1252,10 +1125,16 @@ func TestDispatcher_AllTypeTimeoutDeadlines(t *testing.T) {
 		return ctx.Err()
 	})
 	o := dispatcherOptions("owner")
+	o.Global = 6
+	o.Poster = 1
+	o.Preview = 1
 	for i, typ := range taskTypes {
 		o.Timeouts[typ] = time.Duration(300+i*20) * time.Millisecond
 	}
-	d := schedulerDispatcher(t, q, scheduler.PolicyDefaults(), exec, o)
+	d, err := NewDispatcher(q, exec, o)
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- d.Start(ctx) }()
@@ -1320,7 +1199,7 @@ func TestDispatcher_HeartbeatRenewsAndObservesScanCancellation(t *testing.T) {
 		exec := executorFunc(func(ctx context.Context, _ Task) error { close(entered); <-ctx.Done(); return ctx.Err() })
 		o := dispatcherOptions("owner")
 		o.HeartbeatInterval = 50 * time.Millisecond
-		d := schedulerDispatcher(t, q, scheduler.PolicyDefaults(), exec, o)
+		d, _ := NewDispatcher(q, exec, o)
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)
 		go func() { done <- d.Start(ctx) }()
@@ -1349,7 +1228,7 @@ func TestDispatcher_HeartbeatRenewsAndObservesScanCancellation(t *testing.T) {
 		exec := executorFunc(func(ctx context.Context, _ Task) error { <-ctx.Done(); close(cancelled); return ctx.Err() })
 		o := dispatcherOptions("owner")
 		o.HeartbeatInterval = 50 * time.Millisecond
-		d := schedulerDispatcher(t, q, scheduler.PolicyDefaults(), exec, o)
+		d, _ := NewDispatcher(q, exec, o)
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)
 		go func() { done <- d.Start(ctx) }()
@@ -1364,7 +1243,7 @@ func TestDispatcher_HeartbeatRenewsAndObservesScanCancellation(t *testing.T) {
 				t.Error("dispatcher did not stop during cleanup")
 			}
 		})
-		waitUntil(t, 5*time.Second, func() bool { return snap(d).GlobalUsed == 1 })
+		waitUntil(t, 5*time.Second, func() bool { return d.Snapshot().GlobalUsed == 1 })
 		if _, err := db.Exec(`UPDATE scan_task SET cancelled=1 WHERE id=?`, scan); err != nil {
 			t.Fatal(err)
 		}
@@ -1394,11 +1273,12 @@ func TestDispatcher_CancelScanOnlyLocalMatchingScan(t *testing.T) {
 		return ctx.Err()
 	})
 	o := dispatcherOptions("owner")
-	d := schedulerDispatcher(t, q, scheduler.PolicyDefaults(), exec, o)
+	o.Global = 2
+	d, _ := NewDispatcher(q, exec, o)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- d.Start(ctx) }()
-	waitUntil(t, time.Second, func() bool { return snap(d).GlobalUsed == 2 })
+	waitUntil(t, time.Second, func() bool { return d.Snapshot().GlobalUsed == 2 })
 	d.CancelScan(scanOne)
 	waitUntil(t, time.Second, func() bool {
 		var s Status
@@ -1436,7 +1316,7 @@ func TestDispatcher_ErrorClassification(t *testing.T) {
 			id := insertDispatcherTask(t, q, TaskEncrypt, nil, "classify-"+tc.name)
 			exec := executorFunc(func(context.Context, Task) error { return tc.err })
 			o := dispatcherOptions("owner")
-			d := schedulerDispatcher(t, q, scheduler.PolicyDefaults(), exec, o)
+			d, _ := NewDispatcher(q, exec, o)
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan error, 1)
 			go func() { done <- d.Start(ctx) }()
@@ -1474,7 +1354,7 @@ func TestDispatcher_StartRecoversBeforeExecutingAndReturnsRecoveryError(t *testi
 		executed := make(chan struct{})
 		exec := executorFunc(func(context.Context, Task) error { close(executed); return nil })
 		o := dispatcherOptions("owner")
-		d := schedulerDispatcher(t, q, scheduler.PolicyDefaults(), exec, o)
+		d, _ := NewDispatcher(q, exec, o)
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)
 		go func() { done <- d.Start(ctx) }()
@@ -1493,10 +1373,7 @@ func TestDispatcher_StartRecoversBeforeExecutingAndReturnsRecoveryError(t *testi
 		var called bool
 		exec := executorFunc(func(context.Context, Task) error { called = true; return nil })
 		o := dispatcherOptions("owner")
-		d, err := NewDispatcher(q, exec, o, scheduler.NewService(db))
-		if err != nil {
-			t.Fatal(err)
-		}
+		d, _ := NewDispatcher(q, exec, o)
 		if err := d.Start(context.Background()); err == nil || !strings.Contains(err.Error(), "recover") {
 			t.Fatalf("Start error=%v", err)
 		}
@@ -1511,7 +1388,7 @@ func TestDispatcher_RejectsInvalidExecutorStopGrace(t *testing.T) {
 	q := NewQueue(db, "owner", nil)
 	o := dispatcherOptions("owner")
 	o.ExecutorStopGrace = 0
-	_, err := NewDispatcher(q, executorFunc(func(context.Context, Task) error { return nil }), o, scheduler.NewService(db))
+	_, err := NewDispatcher(q, executorFunc(func(context.Context, Task) error { return nil }), o)
 	if err == nil || !strings.Contains(err.Error(), "ExecutorStopGrace") {
 		t.Fatalf("error=%v", err)
 	}
@@ -1526,7 +1403,10 @@ func TestDispatcher_UnresponsiveExecutorHasBoundedShutdown(t *testing.T) {
 	exec := executorFunc(func(context.Context, Task) error { close(entered); <-release; return nil })
 	o := dispatcherOptions("owner")
 	o.ExecutorStopGrace = 30 * time.Millisecond
-	d := schedulerDispatcher(t, q, scheduler.PolicyDefaults(), exec, o)
+	d, err := NewDispatcher(q, exec, o)
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- d.Start(ctx) }()
@@ -1544,8 +1424,8 @@ func TestDispatcher_UnresponsiveExecutorHasBoundedShutdown(t *testing.T) {
 	if elapsed := time.Since(started); elapsed < o.ExecutorStopGrace || elapsed > 250*time.Millisecond {
 		t.Fatalf("shutdown elapsed=%v", elapsed)
 	}
-	if snap(d).GlobalUsed != 1 {
-		t.Fatalf("unresponsive executor released budget: %+v", snap(d))
+	if d.Snapshot().GlobalUsed != 1 {
+		t.Fatalf("unresponsive executor released budget: %+v", d.Snapshot())
 	}
 	var status Status
 	var last string
@@ -1557,7 +1437,7 @@ func TestDispatcher_UnresponsiveExecutorHasBoundedShutdown(t *testing.T) {
 		t.Fatalf("status=%s owner=%v last=%q", status, owner, last)
 	}
 	close(release)
-	waitUntil(t, time.Second, func() bool { return snap(d).GlobalUsed == 0 })
+	waitUntil(t, time.Second, func() bool { return d.Snapshot().GlobalUsed == 0 })
 }
 
 func TestDispatcher_UnresponsiveExecutorTimeoutRetainsBudget(t *testing.T) {
@@ -1574,15 +1454,17 @@ func TestDispatcher_UnresponsiveExecutorTimeoutRetainsBudget(t *testing.T) {
 		}
 		return nil
 	})
-	policy := scheduler.PolicyDefaults()
-	policy.TypeConcurrency["preview"] = 1
-	policy.TypeConcurrency["keyframe"] = 1
-	policy.ResourceCapacity[scheduler.CPU] = 1
 	o := dispatcherOptions("owner")
+	o.Global = 1
+	o.Poster = 1
+	o.Preview = 1
 	o.PollInterval = 20 * time.Millisecond
 	o.Timeouts[TaskPreview] = 30 * time.Millisecond
 	o.ExecutorStopGrace = 30 * time.Millisecond
-	d := schedulerDispatcher(t, q, policy, exec, o)
+	d, err := NewDispatcher(q, exec, o)
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- d.Start(ctx) }()
@@ -1590,7 +1472,7 @@ func TestDispatcher_UnresponsiveExecutorTimeoutRetainsBudget(t *testing.T) {
 		t.Fatalf("first task=%d want %d", first.ID, firstID)
 	}
 	time.Sleep(150 * time.Millisecond)
-	if got := snap(d).GlobalUsed; got != 1 {
+	if got := d.Snapshot().GlobalUsed; got != 1 {
 		t.Fatalf("GlobalUsed=%d want 1 while executor runs", got)
 	}
 	select {
@@ -1604,11 +1486,11 @@ func TestDispatcher_UnresponsiveExecutorTimeoutRetainsBudget(t *testing.T) {
 	case <-time.After(300 * time.Millisecond):
 		t.Fatal("Start did not stop")
 	}
-	if snap(d).GlobalUsed != 1 {
-		t.Fatalf("shutdown released live executor budget: %+v", snap(d))
+	if d.Snapshot().GlobalUsed != 1 {
+		t.Fatalf("shutdown released live executor budget: %+v", d.Snapshot())
 	}
 	close(release)
-	waitUntil(t, time.Second, func() bool { return snap(d).GlobalUsed == 0 })
+	waitUntil(t, time.Second, func() bool { return d.Snapshot().GlobalUsed == 0 })
 }
 
 func TestDispatcher_CancelScanFencesSuccessfulExecutorBeforeComplete(t *testing.T) {
@@ -1625,7 +1507,10 @@ func TestDispatcher_CancelScanFencesSuccessfulExecutorBeforeComplete(t *testing.
 	})
 	o := dispatcherOptions("fence-owner")
 	o.HeartbeatInterval = 30 * time.Second
-	d := schedulerDispatcher(t, q, scheduler.PolicyDefaults(), exec, o)
+	d, err := NewDispatcher(q, exec, o)
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- d.Start(ctx) }()
@@ -1659,7 +1544,10 @@ func TestDispatcherUncertainAtomicFinalizationDoesNotFailQueue(t *testing.T) {
 	}
 	exec := uncertainResultExecutor{}
 	o := dispatcherOptions("owner")
-	d := schedulerDispatcher(t, q, scheduler.PolicyDefaults(), exec, o)
+	d, err := NewDispatcher(q, exec, o)
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- d.Start(ctx) }()
@@ -1669,7 +1557,7 @@ func TestDispatcherUncertainAtomicFinalizationDoesNotFailQueue(t *testing.T) {
 		return status == "running"
 	})
 	cancel()
-	if err := <-done; err != nil {
+	if err = <-done; err != nil {
 		t.Fatal(err)
 	}
 	var status string
@@ -1718,7 +1606,10 @@ func TestDispatcher_CancelBetweenClaimAndRegisterSkipsExecutor(t *testing.T) {
 		return nil
 	})
 	o := dispatcherOptions("claim-register-owner")
-	d := schedulerDispatcher(t, q, scheduler.PolicyDefaults(), exec, o)
+	d, err := NewDispatcher(q, exec, o)
+	if err != nil {
+		t.Fatal(err)
+	}
 	claimed := make(chan struct{})
 	releaseRegister := make(chan struct{})
 	d.beforeRegister = func(task Task) {
@@ -1763,7 +1654,10 @@ func TestDispatcher_NilScanTaskSkipsInitialCancellationQuery(t *testing.T) {
 	q.isScanCancelled = func(context.Context, int64) (bool, error) { queries++; return false, nil }
 	executed := make(chan struct{})
 	exec := executorFunc(func(context.Context, Task) error { close(executed); return nil })
-	d := schedulerDispatcher(t, q, scheduler.PolicyDefaults(), exec, dispatcherOptions("nil-scan-owner"))
+	d, err := NewDispatcher(q, exec, dispatcherOptions("nil-scan-owner"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx, stop := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- d.Start(ctx) }()
@@ -1793,7 +1687,10 @@ func TestDispatcher_InitialCancellationReadErrorSkipsExecutor(t *testing.T) {
 		return false, errors.New("injected cancellation read error")
 	}
 	calls := 0
-	d := schedulerDispatcher(t, q, scheduler.PolicyDefaults(), executorFunc(func(context.Context, Task) error { calls++; return nil }), dispatcherOptions("read-error-owner"))
+	d, err := NewDispatcher(q, executorFunc(func(context.Context, Task) error { calls++; return nil }), dispatcherOptions("read-error-owner"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx, stop := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- d.Start(ctx) }()
@@ -1821,7 +1718,10 @@ func TestDispatcher_CancelTaskSoftThenHard(t *testing.T) {
 	})
 	o := dispatcherOptions("owner")
 	o.ExecutorStopGrace = 20 * time.Millisecond
-	d := schedulerDispatcher(t, q, scheduler.PolicyDefaults(), exec, o)
+	d, err := NewDispatcher(q, exec, o)
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- d.Start(ctx) }()
@@ -1834,64 +1734,8 @@ func TestDispatcher_CancelTaskSoftThenHard(t *testing.T) {
 	waitUntil(t, 2*time.Second, func() bool {
 		var s Status
 		_ = db.QueryRow(`SELECT status FROM post_ingest_task WHERE id=?`, id).Scan(&s)
-		return s == StatusCancelled && snap(d).GlobalUsed == 0
+		return s == StatusCancelled && d.Snapshot().GlobalUsed == 0
 	})
 	cancel()
 	<-done
-}
-
-// schedulerPolicyJSON encodes a scheduler.Policy in the revision payload shape.
-func schedulerPolicyJSON(p scheduler.Policy) string {
-	rc := make(map[string]int, len(p.ResourceCapacity))
-	for rk, cap := range p.ResourceCapacity {
-		rc[string(rk)] = cap
-	}
-	payload := struct {
-		TypeConcurrency  map[string]int `json:"type_concurrency"`
-		ResourceCapacity map[string]int `json:"resource_capacity"`
-		ProviderCapacity map[string]int `json:"provider_capacity"`
-		AgingIntervalSec int            `json:"aging_interval_sec"`
-		AgingStep        int            `json:"aging_step"`
-		RunNowAmount     int            `json:"run_now_amount"`
-		RunNowTTLSec     int            `json:"run_now_ttl_sec"`
-	}{p.TypeConcurrency, rc, p.ProviderCapacity, p.AgingIntervalSec, p.AgingStep, p.RunNowAmount, p.RunNowTTLSec}
-	raw, err := json.Marshal(payload)
-	if err != nil {
-		panic(err)
-	}
-	return string(raw)
-}
-
-// activateSchedulerPolicy records the policy as the active DB revision so
-// scheduler admission claims can create durable reservations.
-func activateSchedulerPolicy(t *testing.T, db *sql.DB, p scheduler.Policy) {
-	t.Helper()
-	if _, err := db.Exec(`UPDATE scheduler_policy_revision SET is_active=0 WHERE is_active=1`); err != nil {
-		t.Fatalf("deactivate active scheduler policy: %v", err)
-	}
-	if _, err := db.Exec(`INSERT INTO scheduler_policy_revision(schema_version,policy_json,author,reason,validation_hash,is_active,activated_at) VALUES(1,?,'test','dispatcher test',? ,1,CURRENT_TIMESTAMP)`, schedulerPolicyJSON(p), "test-hash"); err != nil {
-		t.Fatalf("activate scheduler policy: %v", err)
-	}
-}
-
-// schedulerDispatcher wires a queue, service, and dispatcher to one scheduler
-// policy and returns the dispatcher. It activates the policy revision so
-// admission claims produce durable reservations.
-func schedulerDispatcher(t *testing.T, q *Queue, p scheduler.Policy, exec Executor, o DispatcherOptions) *Dispatcher {
-	t.Helper()
-	activateSchedulerPolicy(t, q.db, p)
-	q.SetSchedulerPolicy(&p)
-	svc := scheduler.NewService(q.db)
-	svc.SetPolicy(p)
-	d, err := NewDispatcher(q, exec, o, svc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return d
-}
-
-// snap returns the scheduler budget snapshot through the dispatcher.
-func snap(d *Dispatcher) scheduler.BudgetSnapshot {
-	s, _ := d.Snapshot(context.Background())
-	return s
 }

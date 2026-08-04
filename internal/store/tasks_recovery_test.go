@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"knox-media/internal/postingest"
-	_ "knox-media/internal/publication"
 	"knox-media/internal/store"
 )
 
@@ -131,6 +130,9 @@ func TestRestartRecoveryResetInterruptedTasksPreservesResourceControlledScans(t 
 }
 
 func TestRestartRecoveryResetsLinkedPrepareStepWithTask(t *testing.T) {
+	if !storeEnterprisePrepareReady(t) {
+		t.Skip("enterprise prepare tables unavailable in community build")
+	}
 	db, err := store.OpenSQLite(filepath.Join(t.TempDir(), "prepare-restart.sqlite"))
 	if err != nil {
 		t.Fatal(err)
@@ -176,6 +178,9 @@ func TestRestartRecoveryResetsLinkedPrepareStepWithTask(t *testing.T) {
 }
 
 func TestResetInterruptedPrepareJobMakesAvailabilityCurrent(t *testing.T) {
+	if !storeEnterprisePrepareReady(t) {
+		t.Skip("enterprise prepare tables unavailable in community build")
+	}
 	db, err := store.OpenSQLite(":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -197,3 +202,7 @@ func TestResetInterruptedPrepareJobMakesAvailabilityCurrent(t *testing.T) {
 		t.Fatalf("status=%s due=%d", status, due)
 	}
 }
+
+
+
+

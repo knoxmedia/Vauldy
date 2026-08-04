@@ -25,7 +25,6 @@ type Config struct {
 	DRMPackaging  DRMPackagingConfig       `yaml:"drm_packaging"`
 	DRM           DRMConfig                `yaml:"drm"`
 	PostIngest    PostIngestConfig         `yaml:"post_ingest"`
-	Ingest        IngestConfig             `yaml:"ingest"`
 	Scan          ScanConfig               `yaml:"scan"`
 	Subtitle      SubtitleProcessingConfig `yaml:"subtitle"`
 	ATrack        ATrackConfig             `yaml:"atrack"`
@@ -43,8 +42,6 @@ type Config struct {
 	EncryptedAssets EncryptedAssetsConfig `yaml:"encrypted_assets"`
 	// Branding configures web UI title and favicon.
 	Branding BrandingConfig `yaml:"branding"`
-	// Scheduler configures the unified task scheduler (Phase 3+).
-	Scheduler SchedulerConfig `yaml:"scheduler"`
 }
 
 // BrandingConfig controls sidebar title, document title, and favicon.
@@ -251,117 +248,6 @@ func (c PostIngestConfig) Validate() error {
 	return nil
 }
 
-// SchedulerConfig is the top-level scheduler section in config.yml.
-// Pointer fields enable presence-aware decoding: nil means "not explicitly set".
-type SchedulerConfig struct {
-	// Concurrency maps task type name to concurrency limit.
-	Concurrency map[string]int `yaml:"concurrency"`
-	// Resources maps resource kind (cpu, gpu, disk_read, etc.) to token budget.
-	Resources map[string]int `yaml:"resources"`
-	// Providers maps provider key (e.g. "provider:openai") to token budget.
-	Providers map[string]int `yaml:"providers"`
-	// Priority holds aging and run-now tuning.
-	Priority SchedulerPriorityConfig `yaml:"priority"`
-	// Presence tracking for nil-vs-zero distinction.
-	concurrencySet bool
-	resourcesSet   bool
-	providersSet   bool
-}
-
-// SchedulerPriorityConfig holds aging and run-now tuning values.
-type SchedulerPriorityConfig struct {
-	AgingIntervalSec *int `yaml:"aging_interval_sec"`
-	AgingStep        *int `yaml:"aging_step"`
-	RunNowAmount     *int `yaml:"run_now_amount"`
-	RunNowTTLSec     *int `yaml:"run_now_ttl_sec"`
-	agingIntervalSet bool
-	agingStepSet     bool
-	runNowAmountSet  bool
-	runNowTTLSecSet  bool
-}
-
-// UnmarshalYAML implements presence-aware decoding for SchedulerConfig.
-func (c *SchedulerConfig) UnmarshalYAML(node *yaml.Node) error {
-	type plain SchedulerConfig
-	var decoded plain
-	if err := node.Decode(&decoded); err != nil {
-		return err
-	}
-	*c = SchedulerConfig(decoded)
-	if node.Kind == yaml.MappingNode {
-		for i := 0; i+1 < len(node.Content); i += 2 {
-			key := node.Content[i].Value
-			switch key {
-			case "concurrency":
-				c.concurrencySet = true
-			case "resources":
-				c.resourcesSet = true
-			case "providers":
-				c.providersSet = true
-			case "priority":
-				// Track presence of priority sub-keys.
-				valNode := node.Content[i+1]
-				if valNode.Kind == yaml.MappingNode {
-					for j := 0; j+1 < len(valNode.Content); j += 2 {
-						switch valNode.Content[j].Value {
-						case "aging_interval_sec":
-							c.Priority.agingIntervalSet = true
-						case "aging_step":
-							c.Priority.agingStepSet = true
-						case "run_now_amount":
-							c.Priority.runNowAmountSet = true
-						case "run_now_ttl_sec":
-							c.Priority.runNowTTLSecSet = true
-						}
-					}
-				}
-			}
-		}
-	}
-	return nil
-}
-
-// SchedulerEnabled reports whether the scheduler section was explicitly configured.
-func (c *SchedulerConfig) SchedulerEnabled() bool {
-	return c.concurrencySet || c.resourcesSet || c.providersSet || c.Priority.agingIntervalSet
-}
-
-// ValidateScheduler checks the scheduler configuration for correctness.
-func (c SchedulerConfig) Validate() error {
-	// Validate concurrency values.
-	for typ, n := range c.Concurrency {
-		if n < 0 {
-			return fmt.Errorf("Scheduler.Concurrency[%q] must be >= 0, got %d", typ, n)
-		}
-	}
-	// Validate resource values.
-	for rk, n := range c.Resources {
-		if n < 0 {
-			return fmt.Errorf("Scheduler.Resources[%q] must be >= 0, got %d", rk, n)
-		}
-	}
-	// Validate provider values.
-	for pk, n := range c.Providers {
-		if n < 0 {
-			return fmt.Errorf("Scheduler.Providers[%q] must be >= 0, got %d", pk, n)
-		}
-	}
-	// Validate priority values (only when explicitly set).
-	if c.Priority.AgingIntervalSec != nil && *c.Priority.AgingIntervalSec <= 0 {
-		return fmt.Errorf("Scheduler.Priority.AgingIntervalSec must be > 0, got %d", *c.Priority.AgingIntervalSec)
-	}
-	if c.Priority.AgingStep != nil && *c.Priority.AgingStep <= 0 {
-		return fmt.Errorf("Scheduler.Priority.AgingStep must be > 0, got %d", *c.Priority.AgingStep)
-	}
-	if c.Priority.RunNowAmount != nil && *c.Priority.RunNowAmount <= 0 {
-		return fmt.Errorf("Scheduler.Priority.RunNowAmount must be > 0, got %d", *c.Priority.RunNowAmount)
-	}
-	if c.Priority.RunNowTTLSec != nil && *c.Priority.RunNowTTLSec <= 0 {
-		return fmt.Errorf("Scheduler.Priority.RunNowTTLSec must be > 0, got %d", *c.Priority.RunNowTTLSec)
-	}
-	return nil
-}
-
 func (c *Config) normalizePostIngest() {
 	if c.PostIngest.MaxConcurrent == 0 && !c.PostIngest.maxConcurrentSet {
 		c.PostIngest.MaxConcurrent = defaultPostIngestGlobal()
@@ -379,52 +265,6 @@ func (c *Config) normalizePostIngest() {
 		c.PostIngest.SubtitleTimeoutRealtimeFactor = 2.0
 	}
 }
-
-// compiledIngestDefaultMaxConcurrent is the compiled default for ingest.max_concurrent.
-const compiledIngestDefaultMaxConcurrent = 3
-
-// IngestConfig controls the ingest worker concurrency and internal lease timing.
-type IngestConfig struct {
-	// MaxConcurrent bounds simultaneous hash/probe/publication workers. Default 3; valid [1,32].
-	MaxConcurrent int `yaml:"max_concurrent"`
-	maxConcurrentSet bool
-}
-
-// UnmarshalYAML tracks whether max_concurrent was explicitly set in YAML.
-func (c *IngestConfig) UnmarshalYAML(node *yaml.Node) error {
-	type plain IngestConfig
-	var decoded plain
-	if err := node.Decode(&decoded); err != nil {
-		return err
-	}
-	*c = IngestConfig(decoded)
-	if node.Kind == yaml.MappingNode {
-		for i := 0; i+1 < len(node.Content); i += 2 {
-			if node.Content[i].Value == "max_concurrent" {
-				c.maxConcurrentSet = true
-			}
-		}
-	}
-	return nil
-}
-
-func (c IngestConfig) Validate() error {
-	if c.MaxConcurrent < 1 || c.MaxConcurrent > 32 {
-		return fmt.Errorf("Ingest.MaxConcurrent must be in [1,32]")
-	}
-	return nil
-}
-
-func (c *Config) normalizeIngest() {
-	if c.Ingest.MaxConcurrent == 0 && !c.Ingest.maxConcurrentSet {
-		c.Ingest.MaxConcurrent = compiledIngestDefaultMaxConcurrent
-	}
-}
-
-func defaultIngestLeaseSeconds() int       { return 120 }
-func defaultIngestHeartbeatSeconds() int    { return 30 }
-func defaultIngestStabilitySeconds() int    { return 5 }
-func defaultIngestReconciliationSeconds() int { return 60 }
 
 type ServerConfig struct {
 	Host string `yaml:"host"`
@@ -798,10 +638,6 @@ func Load(path string) (*Config, error) {
 	if err := c.PostIngest.Validate(); err != nil {
 		return nil, fmt.Errorf("validate config: %w", err)
 	}
-	c.normalizeIngest()
-	if err := c.Ingest.Validate(); err != nil {
-		return nil, fmt.Errorf("validate config: %w", err)
-	}
 	c.normalizeDRMPackaging()
 	if c.DRM.Widevine.Enabled == nil {
 		t := true
@@ -809,10 +645,6 @@ func Load(path string) (*Config, error) {
 	}
 	if c.DRM.Widevine.PrivateModuleTimeoutSeconds <= 0 {
 		c.DRM.Widevine.PrivateModuleTimeoutSeconds = 8
-	}
-	c.translateLegacyPostIngest()
-	if err := c.Scheduler.Validate(); err != nil {
-		return nil, fmt.Errorf("validate config: %w", err)
 	}
 	return &c, nil
 }
@@ -837,42 +669,6 @@ func NormalizeDRMPackagingOrder(order []string) []string {
 		return []string{"shaka", "ffmpeg"}
 	}
 	return out
-}
-
-// translateLegacyPostIngest fills scheduler concurrency keys from post_ingest
-// values when the corresponding scheduler key is absent. This preserves backward
-// compatibility with existing config files that only define post_ingest limits.
-// Specific per-type limits take priority over the general max_concurrent.
-func (c *Config) translateLegacyPostIngest() {
-	if c.Scheduler.Concurrency == nil {
-		c.Scheduler.Concurrency = make(map[string]int)
-	}
-	// Only translate when the scheduler section was not explicitly configured.
-	if c.Scheduler.concurrencySet {
-		return
-	}
-	// Apply specific per-type limits first (they take priority).
-	if c.PostIngest.posterMaxConcurrentSet {
-		if _, exists := c.Scheduler.Concurrency["poster"]; !exists {
-			c.Scheduler.Concurrency["poster"] = c.PostIngest.PosterMaxConcurrent
-		}
-	}
-	if c.PostIngest.previewMaxConcurrentSet {
-		if _, exists := c.Scheduler.Concurrency["preview"]; !exists {
-			c.Scheduler.Concurrency["preview"] = c.PostIngest.PreviewMaxConcurrent
-		}
-	}
-	if c.PostIngest.subtitleMaxConcurrentSet {
-		if _, exists := c.Scheduler.Concurrency["subtitle"]; !exists {
-			c.Scheduler.Concurrency["subtitle"] = c.PostIngest.SubtitleMaxConcurrent
-		}
-	}
-	// Then general max_concurrent for types that don't have a specific override.
-	if c.PostIngest.maxConcurrentSet {
-		if _, exists := c.Scheduler.Concurrency["poster"]; !exists {
-			c.Scheduler.Concurrency["poster"] = c.PostIngest.MaxConcurrent
-		}
-	}
 }
 
 func (c *Config) normalizeDRMPackaging() {

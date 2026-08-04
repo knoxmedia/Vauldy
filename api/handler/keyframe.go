@@ -6,8 +6,6 @@ import (
 	"net/http"
 	"strconv"
 
-	"knox-media/internal/postingest"
-
 	"github.com/gin-gonic/gin"
 )
 
@@ -33,14 +31,11 @@ func (h *Handler) EnqueueKeyframeExtraction(c *gin.Context) {
 		return
 	}
 
-	reset := func(ctx context.Context, tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `UPDATE keyframe_task SET status='waiting',error_message=NULL,updated_at=CURRENT_TIMESTAMP WHERE media_id=?`, mediaID)
-		return err
-	}
-	if _, err := enqueueExplicitPostIngest(c.Request.Context(), h.App.DB, mediaID, postingest.TaskKeyframe, false, reset, nil); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
+	h.KeyframeWorker.EnqueueRetry(mediaID)
+	go func() {
+		_ = h.KeyframeWorker.Run(context.Background(), mediaID, fileID.String, filePath.String, float64(duration.Int64))
+	}()
+
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
@@ -104,13 +99,10 @@ func (h *Handler) RetryKeyframeTask(c *gin.Context) {
 		return
 	}
 
-	reset := func(ctx context.Context, tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `UPDATE keyframe_task SET status='waiting',error_message=NULL,updated_at=CURRENT_TIMESTAMP WHERE media_id=?`, mediaID)
-		return err
-	}
-	if _, err := enqueueExplicitPostIngest(c.Request.Context(), h.App.DB, mediaID, postingest.TaskKeyframe, false, reset, nil); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
+	h.KeyframeWorker.EnqueueRetry(mediaID)
+	go func() {
+		_ = h.KeyframeWorker.Run(context.Background(), mediaID, fileID.String, filePath.String, float64(duration.Int64))
+	}()
+
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }

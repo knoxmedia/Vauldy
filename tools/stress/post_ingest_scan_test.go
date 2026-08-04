@@ -32,8 +32,8 @@ func TestRunSmallWorkloadConvergesWithinBudgets(t *testing.T) {
 	if result.Duplicates != 0 {
 		t.Fatalf("duplicate executions = %d, want 0", result.Duplicates)
 	}
-	if got := result.Statuses["done"]; got != 60 {
-		t.Fatalf("done tasks = %d, want 60; statuses=%v", got, result.Statuses)
+	if got := result.Statuses["done"]; got != 50 {
+		t.Fatalf("done tasks = %d, want 50; statuses=%v", got, result.Statuses)
 	}
 	for _, status := range []string{"waiting", "running", "failed", "cancelled"} {
 		if result.Statuses[status] != 0 {
@@ -73,7 +73,7 @@ func TestLoadDuplicateTasksReportsDatabaseRows(t *testing.T) {
 			t.Fatal(err)
 		}
 		mediaID, _ := media.LastInsertId()
-		for _, taskType := range []string{"poster", "preview", "keyframe", "subtitle", "atrack", "encrypt"} {
+		for _, taskType := range []string{"poster", "preview", "keyframe", "subtitle", "atrack"} {
 			if _, err := db.Exec(`INSERT INTO post_ingest_task(media_id,task_type) VALUES(?,?)`, mediaID, taskType); err != nil {
 				t.Fatal(err)
 			}
@@ -83,7 +83,7 @@ func TestLoadDuplicateTasksReportsDatabaseRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if duplicates != 0 || total != 600 {
-		t.Fatalf("duplicates=%d total=%d want 0/600", duplicates, total)
+	if duplicates != 0 || total != 500 {
+		t.Fatalf("duplicates=%d total=%d want 0/500", duplicates, total)
 	}
 }

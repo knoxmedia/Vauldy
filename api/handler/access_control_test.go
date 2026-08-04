@@ -1,14 +1,10 @@
 package handler
 
 import (
-	"context"
-	"database/sql"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -60,14 +56,6 @@ func setUserCtx(c *gin.Context, uid int64, role, username string) {
 	c.Set("username", username)
 }
 
-func TestLibraryPreviewHelpersHandleNilConfig(t *testing.T) {
-	h := setupAccessTestDB(t)
-	h.scheduleLibraryPreviewRefresh(1)
-	if got := h.libraryPreviewPublicURL(1); got != "" {
-		t.Fatalf("library preview URL = %q, want empty with nil config", got)
-	}
-}
-
 func TestListLibrariesFiltersBySelectedScope(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	h := setupAccessTestDB(t)
@@ -90,6 +78,43 @@ func TestListLibrariesFiltersBySelectedScope(t *testing.T) {
 	}
 	if int(payload.Items[0]["id"].(float64)) != 1 {
 		t.Fatalf("expected library id=1, got %v", payload.Items[0]["id"])
+	}
+}
+
+func TestListLibrariesFolderScopedPublishedCounts(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := setupAccessTestDB(t)
+	if _, err := h.App.DB.Exec(`INSERT INTO user_library_folder_permission(user_id,library_id,folder_path) VALUES(1,1,'E:/lib1/allowed');
+		UPDATE media SET file_path='E:/lib1/allowed/legacy.mp4',publication_state='processing' WHERE id=10;
+		INSERT INTO media(id,library_id,file_id,file_path,publication_state) VALUES
+		(51,1,'folder-published','E:/lib1/allowed/published.mp4','published'),
+		(52,1,'folder-degraded','E:/lib1/allowed/degraded.mp4','degraded'),
+		(53,1,'folder-failed','E:/lib1/allowed/failed.mp4','failed'),
+		(54,1,'folder-hidden','E:/lib1/other/published.mp4','published')`); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/library", nil)
+	setUserCtx(c, 1, "user", "normal")
+	h.ListLibraries(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var payload struct {
+		Items []struct {
+			Folders    []string `json:"folders"`
+			MediaCount int64    `json:"media_count"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Items) != 1 || payload.Items[0].MediaCount != 2 {
+		t.Fatalf("items=%d media_count=%v body=%s", len(payload.Items), payload.Items, w.Body.String())
+	}
+	if len(payload.Items[0].Folders) != 1 || payload.Items[0].Folders[0] != "E:/lib1/allowed" {
+		t.Fatalf("folders=%v", payload.Items[0].Folders)
 	}
 }
 
@@ -319,208 +344,165 @@ func TestGetMediaAllowsWhenCanPlayDisabled(t *testing.T) {
 	}
 }
 
-func TestListMediaSelectedScopeWithNoAllowedLibrariesDoesNotLeak(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	h := setupAccessTestDB(t)
-	if _, err := h.App.DB.Exec(`DELETE FROM user_library_permission WHERE user_id=1`); err != nil {
-		t.Fatal(err)
-	}
-	w := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(w)
-	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/media", nil)
-	setUserCtx(c, 1, "user", "normal")
-	h.ListMedia(c)
-	if w.Code != http.StatusOK {
-		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
-	}
-	var payload struct {
-		Items []map[string]any `json:"items"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
-		t.Fatal(err)
-	}
-	if len(payload.Items) != 0 {
-		t.Fatalf("selected user with no libraries received %v", payload.Items)
-	}
-}
-
-func TestListMediaFolderScopeStillFiltersWithinAllowedLibrary(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	h := setupAccessTestDB(t)
-	if _, err := h.App.DB.Exec(`INSERT INTO user_library_folder_permission(user_id,library_id,folder_path) VALUES(1,1,'E:/lib1/visible')`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := h.App.DB.Exec(`UPDATE media SET file_path='E:/lib1/hidden/a.mp4' WHERE id=10`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := h.App.DB.Exec(`INSERT INTO media(id,library_id,file_id,file_path,created_at_sort) VALUES(11,1,'f-11','E:/lib1/visible/b.mp4','2026-01-01T00:00:00.000000Z')`); err != nil {
-		t.Fatal(err)
-	}
-	w := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(w)
-	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/media?sort=id_desc", nil)
-	setUserCtx(c, 1, "user", "normal")
-	h.ListMedia(c)
-	if w.Code != http.StatusOK {
-		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
-	}
-	var payload struct {
-		Items []struct {
-			ID int64 `json:"id"`
-		} `json:"items"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
-		t.Fatal(err)
-	}
-	if len(payload.Items) != 1 || payload.Items[0].ID != 11 {
-		t.Fatalf("items=%v body=%s", payload.Items, w.Body.String())
-	}
-}
-
-func TestPathMatchesAnyFolderUsesDirectoryBoundaries(t *testing.T) {
-	tests := []struct {
-		file, folder string
-		want         bool
+func TestRequireMediaAccessPublicationVisibilityForOrdinaryAndAdmin(t *testing.T) {
+	for _, tc := range []struct {
+		state          string
+		ordinaryStatus int
+		ordinaryOK     bool
 	}{
-		{`C:\Media\Allowed\movie.mkv`, `c:/media/allowed`, true},
-		{`C:/Media/Allowed`, `c:\media\allowed\`, true},
-		{`C:/Media/Allowed-Other/movie.mkv`, `C:/Media/Allowed`, false},
-		{`C:/Media//Allowed/./sub/movie.mkv`, `c:/media/allowed`, true},
-		{`C:/Media/Allowed/../Secret/movie.mkv`, `C:/Media/Allowed`, false},
-		{`C:/anything/movie.mkv`, `C:/`, true},
-		{`/srv/media/movie.mkv`, `/`, true},
-	}
-	for _, tt := range tests {
-		if got := pathMatchesAnyFolder(tt.file, []string{tt.folder}); got != tt.want {
-			t.Errorf("pathMatchesAnyFolder(%q,%q)=%v want %v", tt.file, tt.folder, got, tt.want)
-		}
-	}
-}
-
-func TestLoadUserPermissionProfileContextPropagatesPermissionScanErrors(t *testing.T) {
-	h := setupAccessTestDB(t)
-	if _, err := h.App.DB.Exec(`PRAGMA foreign_keys=OFF; INSERT INTO user_library_permission(user_id,library_id) VALUES(1,'not-an-integer')`); err != nil {
-		t.Fatal(err)
-	}
-	_, err := h.loadUserPermissionProfileContext(context.Background(), 1)
-	if err == nil {
-		t.Fatal("malformed permission row was ignored")
-	}
-}
-
-func TestLoadUserPermissionProfileContextHonorsCancellation(t *testing.T) {
-	h := setupAccessTestDB(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_, err := h.loadUserPermissionProfileContext(ctx, 1)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("err=%v", err)
-	}
-}
-
-func TestListMediaPermissionScanErrorFailsClosed(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	h := setupAccessTestDB(t)
-	if _, err := h.App.DB.Exec(`PRAGMA foreign_keys=OFF; INSERT INTO user_library_permission(user_id,library_id) VALUES(1,'bad-library')`); err != nil {
-		t.Fatal(err)
-	}
-	w := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(w)
-	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/media", nil)
-	setUserCtx(c, 1, "user", "normal")
-	h.ListMedia(c)
-	if w.Code == http.StatusOK || strings.Contains(w.Body.String(), `"items"`) {
-		t.Fatalf("permission scan error leaked success: status=%d body=%s", w.Code, w.Body.String())
-	}
-}
-
-func TestLoadUserPermissionProfileContextMissingUserFailsClosed(t *testing.T) {
-	h := setupAccessTestDB(t)
-	_, err := h.loadUserPermissionProfileContext(context.Background(), 999)
-	if !errors.Is(err, sql.ErrNoRows) {
-		t.Fatalf("err=%v want sql.ErrNoRows", err)
-	}
-}
-
-func TestListMediaMissingUserReturnsNoItems(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	h := setupAccessTestDB(t)
-	w := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(w)
-	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/media", nil)
-	setUserCtx(c, 999, "user", "deleted")
-	h.ListMedia(c)
-	if w.Code == http.StatusOK || strings.Contains(w.Body.String(), `"items"`) {
-		t.Fatalf("missing user got success: status=%d body=%s", w.Code, w.Body.String())
-	}
-}
-
-func TestPathMatchesAnyFolderHonorsPathStyleCaseRules(t *testing.T) {
-	tests := []struct {
-		name, file, folder string
-		want               bool
-	}{
-		{"posix exact case", `/srv/Media/movie.mkv`, `/srv/Media`, true},
-		{"posix case mismatch", `/srv/media/movie.mkv`, `/srv/Media`, false},
-		{"drive insensitive", `C:/MEDIA/movie.mkv`, `c:/media`, true},
-		{"unc insensitive", `\\Server\Share\MEDIA\movie.mkv`, `//server/share/media`, true},
-		{"relative case sensitive", `Media/movie.mkv`, `media`, false},
-		{"drive versus posix mismatch", `C:/media/movie.mkv`, `/c:/media`, false},
-		{"unc versus posix mismatch", `//server/share/media/movie.mkv`, `/server/share/media`, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := pathMatchesAnyFolder(tt.file, []string{tt.folder}); got != tt.want {
-				t.Fatalf("got=%v want=%v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestRequireMediaAccessHidesEveryUnpublishedStateFromOrdinaryCallers(t *testing.T) {
-	for _, state := range []string{"processing", "failed", "cancelled"} {
-		t.Run(state, func(t *testing.T) {
+		{"processing", http.StatusNotFound, false},
+		{"failed", http.StatusNotFound, false},
+		{"cancelled", http.StatusNotFound, false},
+		{"published", http.StatusOK, true},
+		{"degraded", http.StatusOK, true},
+	} {
+		t.Run(tc.state, func(t *testing.T) {
 			h := setupAccessTestDB(t)
-			if _, err := h.App.DB.Exec(`UPDATE media SET publication_state=? WHERE id=10`, state); err != nil {
+			if _, err := h.App.DB.Exec(`UPDATE media SET publication_state=? WHERE id=10`, tc.state); err != nil {
 				t.Fatal(err)
 			}
 			w := httptest.NewRecorder()
 			c, _ := gin.CreateTestContext(w)
 			c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/media/10/meta", nil)
 			setUserCtx(c, 1, "user", "normal")
-			if _, ok := h.requireMediaAccess(c, 10, false); ok || w.Code != http.StatusNotFound {
-				t.Fatalf("state=%s ok=%v status=%d body=%s", state, ok, w.Code, w.Body.String())
+			_, ok := h.requireMediaAccess(c, 10, false)
+			if ok != tc.ordinaryOK || (!ok && w.Code != tc.ordinaryStatus) {
+				t.Fatalf("ordinary state=%s ok=%v status=%d body=%s", tc.state, ok, w.Code, w.Body.String())
+			}
+			w = httptest.NewRecorder()
+			c, _ = gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/media/10/meta", nil)
+			setUserCtx(c, 2, "admin", "admin")
+			if _, ok = h.requireMediaAccess(c, 10, false); !ok {
+				t.Fatalf("admin state=%s status=%d body=%s", tc.state, w.Code, w.Body.String())
 			}
 		})
 	}
 }
 
-func TestPlayMediaDirectLookupHidesProcessing(t *testing.T) {
+func TestListMediaPublicationVisibilityForOrdinaryEndpoints(t *testing.T) {
 	h := setupAccessTestDB(t)
-	if _, err := h.App.DB.Exec(`UPDATE media SET publication_state='processing' WHERE id=10`); err != nil {
+	if _, err := h.App.DB.Exec(`UPDATE media SET publication_state='processing', title='Processing Search' WHERE id=10;
+		INSERT INTO media(id,library_id,file_id,title,file_path,file_type,publication_state) VALUES
+		(11,1,'published-11','Published Search','E:/lib1/published.mp4','video','published'),
+		(12,1,'degraded-12','Degraded Search','E:/lib1/degraded.mp4','video','degraded'),
+		(13,1,'failed-13','Failed Search','E:/lib1/failed.mp4','video','failed'),
+		(14,1,'cancelled-14','Cancelled Search','E:/lib1/cancelled.mp4','video','cancelled')`); err != nil {
 		t.Fatal(err)
 	}
-	w := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(w)
-	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/media/10/play", nil)
-	c.Params = gin.Params{{Key: "id", Value: "10"}}
-	setUserCtx(c, 1, "user", "normal")
-	h.PlayMedia(c)
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	for _, tc := range []struct {
+		name, role string
+		uid        int64
+		want       int
+	}{{"ordinary", "user", 1, 2}, {"admin", "admin", 2, 2}} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/media?q=Search&library_id=1&limit=20", nil)
+			setUserCtx(c, tc.uid, tc.role, tc.name)
+			h.ListMedia(c)
+			var payload struct {
+				Items []map[string]any `json:"items"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+				t.Fatal(err)
+			}
+			if w.Code != http.StatusOK || len(payload.Items) != tc.want {
+				t.Fatalf("status=%d items=%d body=%s", w.Code, len(payload.Items), w.Body.String())
+			}
+		})
 	}
 }
 
-func TestAPIClientCannotBypassPublicationVisibility(t *testing.T) {
+func TestMediaDetailMetaAndPlayHideUnpublishedFromOrdinaryUsers(t *testing.T) {
+	for _, state := range []string{"processing", "failed", "cancelled"} {
+		t.Run(state, func(t *testing.T) {
+			h := setupAccessTestDB(t)
+			if _, err := h.App.DB.Exec(`UPDATE media SET publication_state=? WHERE id=10`, state); err != nil {
+				t.Fatal(err)
+			}
+			for _, endpoint := range []struct {
+				name   string
+				target string
+				call   func(*gin.Context)
+			}{
+				{"detail", "/api/v1/media/10", h.GetMedia},
+				{"meta", "/api/v1/media/10/meta", h.GetMediaMeta},
+				{"play", "/api/v1/media/10/play", h.PlayMedia},
+			} {
+				t.Run(endpoint.name, func(t *testing.T) {
+					w := httptest.NewRecorder()
+					c, _ := gin.CreateTestContext(w)
+					c.Request = httptest.NewRequest(http.MethodGet, endpoint.target, nil)
+					c.Params = gin.Params{{Key: "id", Value: "10"}}
+					setUserCtx(c, 1, "user", "normal")
+					endpoint.call(c)
+					if w.Code != http.StatusNotFound {
+						t.Fatalf("state=%s status=%d body=%s", state, w.Code, w.Body.String())
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestMediaDetailMetaAndPlayAllowVisiblePublicationStates(t *testing.T) {
+	for _, state := range []string{"published", "degraded"} {
+		t.Run(state, func(t *testing.T) {
+			h := setupAccessTestDB(t)
+			if _, err := h.App.DB.Exec(`UPDATE media SET publication_state=? WHERE id=10`, state); err != nil {
+				t.Fatal(err)
+			}
+			for _, endpoint := range []struct {
+				name   string
+				target string
+				call   func(*gin.Context)
+			}{
+				{"detail", "/api/v1/media/10", h.GetMedia},
+				{"meta", "/api/v1/media/10/meta", h.GetMediaMeta},
+			} {
+				t.Run(endpoint.name, func(t *testing.T) {
+					w := httptest.NewRecorder()
+					c, _ := gin.CreateTestContext(w)
+					c.Request = httptest.NewRequest(http.MethodGet, endpoint.target, nil)
+					c.Params = gin.Params{{Key: "id", Value: "10"}}
+					setUserCtx(c, 1, "user", "normal")
+					endpoint.call(c)
+					if w.Code != http.StatusOK {
+						t.Fatalf("state=%s status=%d body=%s", state, w.Code, w.Body.String())
+					}
+					if endpoint.name == "detail" {
+						var payload map[string]any
+						if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+							t.Fatal(err)
+						}
+						if payload["publication_state"] != state {
+							t.Fatalf("publication_state=%v want %s", payload["publication_state"], state)
+						}
+						for _, field := range []string{"published_at", "publication_error", "ingest_generation"} {
+							if _, exists := payload[field]; exists {
+								t.Errorf("ordinary GetMedia exposed %s", field)
+							}
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestGetMediaAdminDoesNotBypassPublicationVisibility(t *testing.T) {
 	h := setupAccessTestDB(t)
-	if _, err := h.App.DB.Exec(`UPDATE media SET publication_state='processing' WHERE id=10`); err != nil {
+	if _, err := h.App.DB.Exec(`UPDATE media SET publication_state='failed' WHERE id=10`); err != nil {
 		t.Fatal(err)
 	}
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/media/10", nil)
-	setUserCtx(c, 0, "api_client", "machine")
-	if _, ok := h.requireMediaAccess(c, 10, false); ok || w.Code != http.StatusNotFound {
-		t.Fatalf("ok=%v status=%d body=%s", ok, w.Code, w.Body.String())
+	c.Params = gin.Params{{Key: "id", Value: "10"}}
+	setUserCtx(c, 2, "admin", "admin")
+	h.GetMedia(c)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
 }

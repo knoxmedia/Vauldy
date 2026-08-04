@@ -79,7 +79,7 @@ func (h *Handler) queryLibrarySeriesItemsContext(ctx context.Context, libID int6
 			 JOIN media m ON m.id=em.media_id
 			 WHERE se.tv_id = s.id AND m.publication_state IN ('published','degraded')) AS episode_count
 		FROM series s
-		WHERE s.library_id = ?
+		WHERE s.library_id = ? AND EXISTS (SELECT 1 FROM season se JOIN episode ep ON ep.season_id=se.id JOIN episode_media em ON em.episode_id=ep.id JOIN media vm ON vm.id=em.media_id WHERE se.tv_id=s.id AND vm.publication_state IN ('published','degraded'))
 		ORDER BY s.title COLLATE NOCASE ASC
 	`, libID)
 	if err != nil {
@@ -120,6 +120,14 @@ func (h *Handler) GetSeries(c *gin.Context) {
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
 	defer cancel()
+	var accessLibID int64
+	if err := h.App.DB.QueryRowContext(ctx, `SELECT library_id FROM series WHERE id=?`, seriesID).Scan(&accessLibID); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		return
+	}
+	if !h.requireSpecializedAggregateAccess(c, accessLibID) {
+		return
+	}
 	row := h.App.DB.QueryRowContext(ctx, `
 		SELECT s.id, s.library_id, s.title, s.title_norm, COALESCE(s.year, 0),
 			COALESCE(s.tmdb_id, ''), COALESCE(s.tvdb_id, ''),
@@ -142,7 +150,7 @@ func (h *Handler) GetSeries(c *gin.Context) {
 				 ORDER BY em.sort_order ASC, m.id ASC LIMIT 1)
 			) AS poster_url,
 			COALESCE(s.folder_paths, '[]'), COALESCE(s.meta_json, ''), s.created_at, s.updated_at
-		FROM series s WHERE s.id = ?`, seriesID)
+		FROM series s WHERE s.id = ? AND EXISTS (SELECT 1 FROM season se JOIN episode ep ON ep.season_id=se.id JOIN episode_media em ON em.episode_id=ep.id JOIN media vm ON vm.id=em.media_id WHERE se.tv_id=s.id AND vm.publication_state IN ('published','degraded'))`, seriesID)
 	var id, libID, year int64
 	var title, titleNorm, tmdbID, tvdbID, posterURL, foldersRaw, metaJSON, created, updated sql.NullString
 	if err := row.Scan(&id, &libID, &title, &titleNorm, &year, &tmdbID, &tvdbID, &posterURL, &foldersRaw, &metaJSON, &created, &updated); err != nil {
@@ -182,7 +190,7 @@ func (h *Handler) listSeasonSummariesContext(ctx context.Context, seriesID int64
 		SELECT se.id, se.season_num, COALESCE(se.name, ''), COALESCE(se.poster, ''),
 			(SELECT COUNT(DISTINCT ep.id) FROM episode ep JOIN episode_media em ON em.episode_id=ep.id JOIN media m ON m.id=em.media_id WHERE ep.season_id = se.id AND m.publication_state IN ('published','degraded')) AS episode_count
 		FROM season se
-		WHERE se.tv_id = ?
+		WHERE se.tv_id = ? AND EXISTS (SELECT 1 FROM episode visible_ep JOIN episode_media visible_em ON visible_em.episode_id=visible_ep.id JOIN media visible_m ON visible_m.id=visible_em.media_id WHERE visible_ep.season_id=se.id AND visible_m.publication_state IN ('published','degraded'))
 		ORDER BY se.season_num ASC
 	`, seriesID)
 	if err != nil {
@@ -217,9 +225,7 @@ func (h *Handler) ListSeasonEpisodes(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
 	defer cancel()
 	var libID int64
-	if err := h.App.DB.QueryRowContext(ctx, `
-		SELECT sr.library_id FROM season se JOIN series sr ON sr.id = se.tv_id WHERE se.id = ?
-	`, seasonID).Scan(&libID); err != nil {
+	if err := h.App.DB.QueryRowContext(ctx, `SELECT sr.library_id FROM season se JOIN series sr ON sr.id=se.tv_id WHERE se.id=?`, seasonID).Scan(&libID); err != nil {
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 			return
@@ -228,6 +234,16 @@ func (h *Handler) ListSeasonEpisodes(c *gin.Context) {
 		return
 	}
 	if !h.requireSpecializedAggregateAccess(c, libID) {
+		return
+	}
+	query := `SELECT 1 FROM season se WHERE se.id=? AND ` + visibleSeasonExistsSQL
+	var visible int
+	if err := h.App.DB.QueryRowContext(ctx, query, seasonID).Scan(&visible); err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	uid := middleware.UserID(c)
@@ -473,14 +489,16 @@ func (h *Handler) ListSeriesImageCandidates(c *gin.Context) {
 	var title string
 	var year int
 	var tmdbID string
-	if err := h.App.DB.QueryRow(
-		`SELECT library_id, COALESCE(title, ''), COALESCE(year, 0), COALESCE(tmdb_id, '') FROM series WHERE id = ?`,
-		seriesID,
-	).Scan(&libraryID, &title, &year, &tmdbID); err != nil {
+	if err := h.App.DB.QueryRow(`SELECT library_id FROM series WHERE id=?`, seriesID).Scan(&libraryID); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "series not found"})
 		return
 	}
 	if !h.requireSpecializedAggregateAccess(c, libraryID) {
+		return
+	}
+	query := `SELECT COALESCE(s.title, ''), COALESCE(s.year, 0), COALESCE(s.tmdb_id, '') FROM series s WHERE s.id = ? AND ` + visibleSeriesExistsSQL
+	if err := h.App.DB.QueryRow(query, seriesID).Scan(&title, &year, &tmdbID); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "series not found"})
 		return
 	}
 
@@ -491,7 +509,7 @@ func (h *Handler) ListSeriesImageCandidates(c *gin.Context) {
 	}
 
 	cfg := h.readLibraryScrapeConfig(libraryID)
-	candidates, errs, scraped := scraper.FetchImageCandidates(cfg, keyword, year, kind, strings.TrimSpace(tmdbID))
+	candidates, errs, scraped := fetchAggregateImageCandidates(cfg, keyword, year, kind, strings.TrimSpace(tmdbID))
 	if candidates == nil {
 		candidates = []scraper.ImageCandidate{}
 	}

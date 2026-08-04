@@ -15,16 +15,15 @@ import (
 
 // WorkerConfig supplies runtime paths for cover generation.
 type WorkerConfig struct {
-	DB           *sql.DB
-	Vault        *keystore.Vault
-	Derived      *storage.DerivedAssetStore
-	MediaRoot    string
-	PreviewDir   string
-	FFmpegPath   string
-	DocTrans     config.DocTransConfig
-	TimeoutSec   func() int
+	DB         *sql.DB
+	Vault      *keystore.Vault
+	Derived    *storage.DerivedAssetStore
+	MediaRoot  string
+	PreviewDir string
+	FFmpegPath string
+	DocTrans   config.DocTransConfig
+	TimeoutSec func() int
 	OnCoverReady func(mediaID int64)
-	EnsureFunc   func(context.Context, Options, int64, string, int64) error
 }
 
 // Worker serializes document cover jobs so LibreOffice conversions do not stampede or time out while waiting.
@@ -68,7 +67,7 @@ func (w *Worker) Start(ctx context.Context) {
 		if !ok {
 			continue
 		}
-		w.RunOnceContext(ctx, id)
+		w.runOne(id)
 	}
 }
 
@@ -91,10 +90,6 @@ func (w *Worker) Enqueue(mediaID int64) {
 
 // BackfillLibrary enqueues documents in a library that still lack a cached cover.
 func (w *Worker) BackfillLibrary(libraryID int64) {
-	w.BackfillLibraryContext(context.Background(), libraryID)
-}
-
-func (w *Worker) BackfillLibraryContext(ctx context.Context, libraryID int64) {
 	if w == nil || w.cfg.DB == nil || libraryID <= 0 {
 		return
 	}
@@ -103,7 +98,7 @@ func (w *Worker) BackfillLibraryContext(ctx context.Context, libraryID int64) {
 	if w.cfg.Derived != nil {
 		derivedBase = w.cfg.Derived.BaseDir
 	}
-	rows, err := w.cfg.DB.QueryContext(ctx, `
+	rows, err := w.cfg.DB.Query(`
 		SELECT id FROM media
 		WHERE library_id = ? AND file_type = 'document' AND status = 'active'`, libraryID)
 	if err != nil {
@@ -129,14 +124,10 @@ func (w *Worker) BackfillLibraryContext(ctx context.Context, libraryID int64) {
 
 // BackfillAllLibraries enqueues missing covers for every document library.
 func (w *Worker) BackfillAllLibraries() {
-	w.BackfillAllLibrariesContext(context.Background())
-}
-
-func (w *Worker) BackfillAllLibrariesContext(ctx context.Context) {
 	if w == nil || w.cfg.DB == nil {
 		return
 	}
-	rows, err := w.cfg.DB.QueryContext(ctx, `SELECT id FROM library WHERE lower(type) = 'document'`)
+	rows, err := w.cfg.DB.Query(`SELECT id FROM library WHERE lower(type) = 'document'`)
 	if err != nil {
 		return
 	}
@@ -146,7 +137,7 @@ func (w *Worker) BackfillAllLibrariesContext(ctx context.Context) {
 		if rows.Scan(&libraryID) != nil || libraryID <= 0 {
 			continue
 		}
-		w.BackfillLibraryContext(ctx, libraryID)
+		w.BackfillLibrary(libraryID)
 	}
 }
 
@@ -185,17 +176,13 @@ func coverJobTimeoutSec(timeoutSec func() int) int {
 	return timeout
 }
 
-func (w *Worker) RunOnce(mediaID int64) {
-	w.RunOnceContext(context.Background(), mediaID)
-}
-
-func (w *Worker) RunOnceContext(ctx context.Context, mediaID int64) {
-	if w == nil || w.cfg.DB == nil || mediaID <= 0 || ctx.Err() != nil {
+func (w *Worker) runOne(mediaID int64) {
+	if w == nil || w.cfg.DB == nil || mediaID <= 0 {
 		return
 	}
 	var filePath, fileType sql.NullString
 	var fileMtime sql.NullInt64
-	if err := w.cfg.DB.QueryRowContext(ctx, `
+	if err := w.cfg.DB.QueryRow(`
 		SELECT file_path, file_type, file_mtime FROM media WHERE id = ? AND status = 'active'`, mediaID).
 		Scan(&filePath, &fileType, &fileMtime); err != nil {
 		return
@@ -219,7 +206,7 @@ func (w *Worker) RunOnceContext(ctx context.Context, mediaID int64) {
 	}
 	log.Printf("document cover generating media=%d", mediaID)
 	timeout := coverJobTimeoutSec(w.cfg.TimeoutSec)
-	jobCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
 	defer cancel()
 	opts := Options{
 		DB:         w.cfg.DB,
@@ -230,11 +217,7 @@ func (w *Worker) RunOnceContext(ctx context.Context, mediaID int64) {
 		MediaRoot:  w.cfg.MediaRoot,
 		DocTrans:   w.cfg.DocTrans,
 	}
-	ensure := w.cfg.EnsureFunc
-	if ensure == nil {
-		ensure = Ensure
-	}
-	if err := ensure(jobCtx, opts, mediaID, filePath.String, mtime); err != nil {
+	if err := Ensure(ctx, opts, mediaID, filePath.String, mtime); err != nil {
 		MarkCoverFailed(preview, mediaID, err)
 		log.Printf("document cover failed media=%d path=%s: %v", mediaID, filePath.String, err)
 		return

@@ -1,4 +1,4 @@
-﻿export type LibraryRequestScope<T> = {
+export type LibraryRequestScope<T> = {
   load(signal?: AbortSignal): Promise<T>;
   acquireOwner(): () => void;
   dispose(): void;

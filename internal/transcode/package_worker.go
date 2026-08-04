@@ -252,9 +252,10 @@ func (w *PackageWorker) StartWaiting(ctx context.Context, limit int) int {
 			continue
 		}
 		started++
-		if err := w.RunTask(ctx, taskID); err != nil && ctx.Err() != nil {
-			return started
-		}
+		id := taskID
+		go func() {
+			_ = w.RunTask(context.Background(), id)
+		}()
 	}
 	return started
 }
@@ -319,14 +320,6 @@ func (w *PackageWorker) RunTask(ctx context.Context, taskID int64) error {
 		_, _ = w.DB.Exec(`UPDATE package_task SET status='failed', progress=0, drm_status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE id = ?`, trimErrorMessage(err.Error()), taskID)
 		return err
 	}
-	// Capture generation at packaging start for mid-flight fence at retirement handoff.
-	// packagedGenerationOK distinguishes captured 0 from "capture failed / unknown".
-	packagedGeneration := int64(0)
-	packagedGenerationOK := false
-	if g, genErr := readMediaIngestGeneration(ctx2, w.DB, mediaID); genErr == nil {
-		packagedGeneration = g
-		packagedGenerationOK = true
-	}
 
 	ladder := chooseLadder(int(sourceHeight.Int64), 1080, nil)
 	if len(ladder) == 0 {
@@ -390,46 +383,17 @@ func (w *PackageWorker) RunTask(ctx context.Context, taskID int64) error {
 
 	cleanupStatus := "skipped"
 	if cleanupFlag.Int64 == 1 && shouldCleanup(w.UploadDir, sourcePath.String) {
-		cleanupStatus = "pending"
+		if err := os.Remove(sourcePath.String); err != nil {
+			cleanupStatus = "failed"
+		} else {
+			cleanupStatus = "success"
+		}
 	}
-	tx, err := w.DB.BeginTx(ctx2, nil)
-	if err != nil {
-		_, _ = w.DB.Exec(`UPDATE package_task SET status='failed', progress=0, drm_status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE id = ?`, trimErrorMessage(err.Error()), taskID)
-		return err
-	}
-	failHandoff := func(cause error) error {
-		_ = tx.Rollback()
-		msg := trimErrorMessage(cause.Error())
-		_, _ = w.DB.Exec(`UPDATE package_task SET status='failed', progress=0, drm_status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE id = ?`, msg, taskID)
-		return cause
-	}
-	if _, err = tx.ExecContext(ctx2, `
+	_, _ = w.DB.Exec(`
 		UPDATE package_task
 		SET status='done', progress=100, drm_status='done', output_path=?, source_cleanup_status=?, error_message=NULL, updated_at=CURRENT_TIMESTAMP
 		WHERE id = ?
-	`, outMaster, cleanupStatus, taskID); err != nil {
-		return failHandoff(err)
-	}
-	if cleanupStatus == "pending" {
-		if packageHandoffHook != nil {
-			packageHandoffHook(mediaID, tx)
-		}
-		req, ok, resolveErr := resolveAuthoritativePackageRetirement(ctx2, tx, mediaID, sourcePath.String, packagedGeneration, packagedGenerationOK)
-		if resolveErr != nil {
-			return failHandoff(resolveErr)
-		}
-		if ok {
-			req.PackageTaskID = taskID
-			if upsertErr := upsertPackageRetirementIntentTx(ctx2, tx, req); upsertErr != nil {
-				return failHandoff(upsertErr)
-			}
-		}
-		// ok=false with nil error: schema present but no authoritative current
-		// generation — leave done+pending without inventing a retirement row.
-	}
-	if err = tx.Commit(); err != nil {
-		return failHandoff(err)
-	}
+	`, outMaster, cleanupStatus, taskID)
 	return nil
 }
 

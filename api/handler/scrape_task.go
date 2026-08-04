@@ -1210,24 +1210,6 @@ func (h *Handler) BackfillScrapeArtwork(c *gin.Context) {
 	})
 }
 
-// finalizeLinkedScrapeTx runs plan lifecycle finalization when the scrape row is
-// linked to an ingest step. Manual unlinked scrapes have no ingest graph, so
-// AggregateTx/Finalize are intentionally skipped.
-func finalizeLinkedScrapeTx(ctx context.Context, tx store.SQLExecutor, run, step sql.NullInt64) error {
-	if !step.Valid {
-		return nil
-	}
-	if !run.Valid {
-		if err := tx.QueryRowContext(ctx, `SELECT run_id FROM media_ingest_step WHERE id=?`, step.Int64).Scan(&run); err != nil {
-			return err
-		}
-	}
-	if !run.Valid {
-		return nil
-	}
-	return publication.FinalizeNodeTransitionTx(ctx, tx, run.Int64)
-}
-
 func completeScrapeTaskTx(ctx context.Context, db *sql.DB, taskID, mediaID int64, source, query, message, resultJSON, owner string) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -1250,8 +1232,10 @@ func completeScrapeTaskTx(ctx context.Context, db *sql.DB, taskID, mediaID int64
 		if _, err = tx.ExecContext(ctx, `UPDATE media_ingest_step SET status='done',finished_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND ((lease_owner IS NULL AND ?='') OR lease_owner=?)`, step.Int64, owner, owner); err != nil {
 			return err
 		}
-		if err = finalizeLinkedScrapeTx(ctx, tx, run, step); err != nil {
-			return err
+		if run.Valid {
+			if err = publication.AggregateTx(ctx, tx, run.Int64); err != nil {
+				return err
+			}
 		}
 	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO scrape_history(task_id,media_id,source,query,status,message,result_json) VALUES(?,?,?,?, 'done',?,?)`, taskID, mediaID, source, query, message, resultJSON); err != nil {
@@ -1295,8 +1279,10 @@ func failScrapeTaskDB(ctx context.Context, db *sql.DB, taskID, mediaID int64, so
 		if _, err = tx.ExecContext(ctx, `UPDATE media_ingest_step SET status=?,attempts=?,last_error=?,finished_at=CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END,lease_owner=NULL,lease_until=NULL,available_at=(SELECT available_at FROM scrape_task WHERE id=?),updated_at=CURRENT_TIMESTAMP WHERE id=?`, stepStatus, fails, message, final, taskID, step.Int64); err != nil {
 			return err
 		}
-		if err = finalizeLinkedScrapeTx(ctx, tx, run, step); err != nil {
-			return err
+		if run.Valid {
+			if err = publication.AggregateTx(ctx, tx, run.Int64); err != nil {
+				return err
+			}
 		}
 	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO scrape_history(task_id,media_id,source,query,status,message) VALUES(?,?,?,?, 'failed',?)`, taskID, mediaID, source, query, message); err != nil {
@@ -1387,7 +1373,7 @@ func completeScrapeClaimWithEffects(ctx context.Context, db *sql.DB, c scrapeCla
 			if n, _ := res.RowsAffected(); n != 1 {
 				return ErrScrapeClaimLost
 			}
-			if err = finalizeLinkedScrapeTx(ctx, tx, c.RunID, c.StepID); err != nil {
+			if err = publication.AggregateTx(ctx, tx, c.RunID.Int64); err != nil {
 				return err
 			}
 		}
@@ -1441,7 +1427,7 @@ func failScrapeClaim(ctx context.Context, db *sql.DB, c scrapeClaim, source, que
 			if n, _ := res.RowsAffected(); n != 1 {
 				return ErrScrapeClaimLost
 			}
-			if err = finalizeLinkedScrapeTx(ctx, tx, c.RunID, c.StepID); err != nil {
+			if err = publication.AggregateTx(ctx, tx, c.RunID.Int64); err != nil {
 				return err
 			}
 		}

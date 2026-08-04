@@ -54,7 +54,7 @@ var playbackCompletionColumns = map[string]playbackCompletionColumn{
 }
 
 func ensurePlaybackCompletionSchema(ctx context.Context, db *sql.DB) error {
-	if _, err := startupExecContext(ctx, db, playbackCompletionSchemaStatements[0]); err != nil {
+	if _, err := db.ExecContext(ctx, playbackCompletionSchemaStatements[0]); err != nil {
 		return fmt.Errorf("create table %s: %w", playbackCompletionTableName, err)
 	}
 	if err := validatePlaybackCompletionTable(ctx, db); err != nil {
@@ -82,7 +82,7 @@ func ensurePlaybackCompletionSchema(ctx context.Context, db *sql.DB) error {
 			}
 			continue
 		}
-		if _, err := startupExecContext(ctx, db, index.statement); err != nil {
+		if _, err := db.ExecContext(ctx, index.statement); err != nil {
 			return fmt.Errorf("create index %s: %w", index.name, err)
 		}
 		if err := validatePlaybackCompletionIndex(ctx, db, index.name, index.columns, index.unique, index.partial, index.predicate); err != nil {

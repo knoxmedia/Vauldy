@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"knox-media/internal/processmetrics"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,8 +19,8 @@ import (
 	"go.uber.org/zap"
 
 	"knox-media/internal/jit/hwenc"
-	"knox-media/internal/jit/processctl"
 	"knox-media/internal/jit/profile"
+	"knox-media/internal/jit/processctl"
 	models "knox-media/internal/model"
 )
 
@@ -332,7 +331,7 @@ func (w *TranscodeWorker) processTranscodeTask(task *models.TranscodeTask) {
 	errLog := &linePrefixWriter{mu: &w.ffmpegLogMu, out: os.Stderr, prefix: logPrefix}
 
 	runOnce := func(args []string) error {
-		cmd := processmetrics.NewFFmpegCommand(w.ffmpeg, args...)
+		cmd := exec.Command(w.ffmpeg, args...)
 		cmd.Stdout = outLog
 		cmd.Stderr = errLog
 		if err := cmd.Start(); err != nil {
@@ -340,7 +339,7 @@ func (w *TranscodeWorker) processTranscodeTask(task *models.TranscodeTask) {
 		}
 		done := make(chan struct{})
 		if task.SessionID != "prefetch" {
-			go w.monitorSession(cmd.Cmd, task.SessionID, done)
+			go w.monitorSession(cmd, task.SessionID, done)
 		}
 		err := cmd.Wait()
 		close(done)
@@ -1026,7 +1025,7 @@ func (w *TranscodeWorker) runContinuousHLS(job *ContinuousHLSJob) {
 
 	logger.Info("Continuous HLS ffmpeg args", zap.Float64("ss_sec", ssSec), zap.Int("start_seg", job.StartSegID), zap.String("args", strings.Join(args, " ")))
 
-	cmd := processmetrics.NewFFmpegCommandContext(ctx, w.ffmpeg, args...)
+	cmd := exec.CommandContext(ctx, w.ffmpeg, args...)
 	logPrefix := fmt.Sprintf("[continuous-hls file=%s br=%s sess=%s] ", job.FileID, job.Bitrate, job.SessionID)
 	outLog := &linePrefixWriter{mu: &w.ffmpegLogMu, out: os.Stdout, prefix: logPrefix}
 	errLog := &linePrefixWriter{mu: &w.ffmpegLogMu, out: os.Stderr, prefix: logPrefix}
@@ -1079,7 +1078,7 @@ func (w *TranscodeWorker) buildVideoEncoderArgsCtn(job *ContinuousHLSJob, segDur
 			"-preset", "medium",
 			"-b:v", pickedBitrate, "-maxrate", pickedBitrate, "-bufsize", "2M",
 			"-profile:v", "high",
-		}, append([]string(nil), gops...)...)
+		}, append(gops)...)
 	case hwenc.H264AMF:
 		return append([]string{
 			"-vf", fmt.Sprintf("scale=%s:%s", wPx, hPx),
@@ -1087,7 +1086,7 @@ func (w *TranscodeWorker) buildVideoEncoderArgsCtn(job *ContinuousHLSJob, segDur
 			"-quality", "balanced",
 			"-b:v", pickedBitrate, "-maxrate", pickedBitrate, "-bufsize", "2M",
 			"-profile:v", "high",
-		}, append([]string(nil), gops...)...)
+		}, append(gops)...)
 	case hwenc.H264NVENC:
 		return append([]string{
 			"-vf", fmt.Sprintf("scale=%s:%s", wPx, hPx),
@@ -1095,14 +1094,14 @@ func (w *TranscodeWorker) buildVideoEncoderArgsCtn(job *ContinuousHLSJob, segDur
 			"-preset", "p4",
 			"-b:v", pickedBitrate, "-maxrate", pickedBitrate, "-bufsize", "2M",
 			"-profile:v", "high",
-		}, append([]string(nil), gops...)...)
+		}, append(gops)...)
 	case hwenc.H264VAAPI:
 		return append([]string{
 			"-vf", fmt.Sprintf("scale=%s:%s,format=nv12", wPx, hPx),
 			"-c:v", "h264_vaapi",
 			"-b:v", pickedBitrate, "-maxrate", pickedBitrate, "-bufsize", "2M",
 			"-profile:v", "high",
-		}, append([]string(nil), gops...)...)
+		}, append(gops)...)
 	default:
 		return append([]string{
 			"-vf", fmt.Sprintf("scale=%s:%s", wPx, hPx),
@@ -1110,7 +1109,7 @@ func (w *TranscodeWorker) buildVideoEncoderArgsCtn(job *ContinuousHLSJob, segDur
 			"-preset", "medium",
 			"-b:v", pickedBitrate, "-maxrate", pickedBitrate, "-bufsize", "2M",
 			"-profile:v", "high",
-		}, append([]string(nil), gops...)...)
+		}, append(gops)...)
 	}
 }
 

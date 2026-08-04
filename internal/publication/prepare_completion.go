@@ -33,5 +33,5 @@ func CompletePrepareTx(ctx context.Context, tx store.SQLExecutor, parent Prepare
 	if n, _ := res.RowsAffected(); n != 1 {
 		return errors.New("publication prepare completion: step ownership or identity mismatch")
 	}
-	return FinalizeNodeTransitionTx(ctx, tx, parent.RunID)
+	return AggregateTx(ctx, tx, parent.RunID)
 }

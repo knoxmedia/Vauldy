@@ -104,7 +104,7 @@ func Ensure(ctx context.Context, opts Options, mediaID int64, sourcePath string,
 	if _, err := os.Stat(sourcePath); err != nil {
 		return fmt.Errorf("source missing: %w", err)
 	}
-	workPath, cleanup, err := storage.MaterializePlaintextTempUnsafeLegacy(opts.DB, opts.Vault, mediaID, sourcePath)
+	workPath, cleanup, err := storage.MaterializePlaintextTemp(opts.DB, opts.Vault, mediaID, sourcePath)
 	if err != nil {
 		return err
 	}

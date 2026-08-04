@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"knox-media/internal/scheduler"
 	"knox-media/internal/store"
 	"strings"
 	"testing"
@@ -27,7 +26,7 @@ func TestLinkedClaimEligibilitySQLDependencyMatrix(t *testing.T) {
 INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state) VALUES(10,1,'f','video',1,'processing');
 INSERT INTO media_ingest_run(id,media_id,generation,reason,status,preserve_visibility,config_snapshot_json,policy_version) VALUES(20,10,1,'scan','processing',0,'{}',2);
 INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(30,20,10,1,'poster',1,'waiting'),(31,20,10,1,'encrypt',1,'waiting'),(32,20,10,1,'preview',0,'waiting');
-INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(33,20,10,1,'media_visible',0,'done'); INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(31,30,'success'),(32,33,'success');
+INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(31,30,'step_done'),(32,NULL,'media_visible');
 INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(40,10,20,31,1,'encrypt','waiting'),(41,10,20,32,1,'preview','waiting')`)
 	if err != nil {
 		t.Fatal(err)
@@ -44,15 +43,15 @@ INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation
 		t.Fatal("encrypt eligible before dependency done")
 	}
 	db.Exec(`UPDATE media_ingest_step SET status='skipped' WHERE id=30`)
-	if eligible(40) {
-		t.Fatal("skipped dependency must not satisfy success")
+	if !eligible(40) {
+		t.Fatal("skipped dependency should satisfy step_done")
 	}
 	if eligible(41) {
-		t.Fatal("optional work remains blocked until publication is visible")
+		t.Fatal("media_visible eligible while hidden")
 	}
 	db.Exec(`UPDATE media SET publication_state='published',published_at=CURRENT_TIMESTAMP WHERE id=10; UPDATE media_ingest_run SET status='published' WHERE id=20; UPDATE media_ingest_step SET status='done' WHERE id IN (30,31)`)
 	if !eligible(41) {
-		t.Fatal("published media should preserve visibility eligibility")
+		t.Fatal("published media should satisfy media_visible")
 	}
 	db.Exec(`UPDATE media SET publication_state='degraded' WHERE id=10; UPDATE media_ingest_run SET status='degraded' WHERE id=20`)
 	if !eligible(41) {
@@ -70,7 +69,7 @@ func TestLinkedClaimEligibilitySQLFailsClosedForStaleAndMalformedIdentity(t *tes
 INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state) VALUES(10,1,'f','video',2,'processing');
 INSERT INTO media_ingest_run(id,media_id,generation,reason,status,preserve_visibility,config_snapshot_json,policy_version) VALUES(20,10,1,'scan','processing',0,'{}',2),(21,10,2,'scan','processing',0,'{}',2);
 INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(30,20,10,1,'poster',1,'done'),(31,21,10,2,'encrypt',1,'waiting');
-INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(31,30,'success');
+INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(31,30,'step_done');
 INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(40,10,20,30,1,'poster','waiting'),(41,10,21,31,2,'encrypt','waiting')`)
 	if err != nil {
 		t.Fatal(err)
@@ -102,8 +101,9 @@ func TestPostingestClaimReturnsPublicationIdentity(t *testing.T) {
 }
 
 func TestRequiredFirstAcrossPostIngestScrapePrepareRace(t *testing.T) {
+	skipIfEnterprisePrepareUnavailable(t)
 	db := openEligibilityDB(t)
-	_, err := db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l'); INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state,published_at) VALUES(10,1,'f','video',1,'published',CURRENT_TIMESTAMP); INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(20,10,1,'repair','processing','{}',2); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status,created_at) VALUES(30,20,10,1,'poster',1,'waiting','2020-01-01'),(31,20,10,1,'scrape',0,'waiting','2020-01-02'),(32,20,10,1,'prepare',0,'waiting','2020-01-03'),(33,20,10,1,'media_visible',0,'done','2020-01-01'); INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(31,33,'success'),(32,33,'success'); INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(40,10,20,30,1,'poster','waiting'); INSERT INTO scrape_task(id,media_id,status,ingest_run_id,ingest_step_id,generation) VALUES(41,10,'waiting',20,31,1); INSERT INTO transcode_task(id,file_id,media_id,status,task_type,ingest_run_id,ingest_step_id,generation) VALUES(42,'f',10,'waiting','pretranscode',20,32,1)`)
+	_, err := db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l'); INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state,published_at) VALUES(10,1,'f','video',1,'published',CURRENT_TIMESTAMP); INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(20,10,1,'repair','processing','{}',2); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status,created_at) VALUES(30,20,10,1,'poster',1,'waiting','2020-01-01'),(31,20,10,1,'scrape',0,'waiting','2020-01-02'),(32,20,10,1,'prepare',0,'waiting','2020-01-03'); INSERT INTO media_ingest_step_dependency(step_id,dependency_kind) VALUES(31,'media_visible'),(32,'media_visible'); INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(40,10,20,30,1,'poster','waiting'); INSERT INTO scrape_task(id,media_id,status,ingest_run_id,ingest_step_id,generation) VALUES(41,10,'waiting',20,31,1); INSERT INTO transcode_task(id,file_id,media_id,status,task_type,ingest_run_id,ingest_step_id,generation) VALUES(42,'f',10,'waiting','pretranscode',20,32,1)`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +139,6 @@ INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation
 		t.Fatal(err)
 	}
 	registry := NewCapabilityMatrix([]string{"poster", "encrypt"})
-	// Poster slots full: dispatcher only offers non-poster types.
 	got, err := ClaimEligibleAny(context.Background(), db, ClaimRequest{
 		Family: QueuePostIngest, TaskTypes: []string{"encrypt"}, Owner: "worker", Registry: registry,
 	})
@@ -159,8 +158,9 @@ INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation
 }
 
 func TestPrepareClaimsParentOnceBeforeRenditions(t *testing.T) {
+	skipIfEnterprisePrepareUnavailable(t)
 	db := openEligibilityDB(t)
-	_, err := db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l'); INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state,published_at) VALUES(10,1,'f','video',1,'published',CURRENT_TIMESTAMP); INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(20,10,1,'repair','published','{}',2); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(30,20,10,1,'prepare',0,'waiting'),(31,20,10,1,'media_visible',0,'done'); INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(30,31,'success'); INSERT INTO transcode_task(id,file_id,media_id,status,task_type,ingest_run_id,ingest_step_id,generation) VALUES(40,'f',10,'waiting','pretranscode',20,30,1)`)
+	_, err := db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l'); INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state,published_at) VALUES(10,1,'f','video',1,'published',CURRENT_TIMESTAMP); INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(20,10,1,'repair','published','{}',2); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(30,20,10,1,'prepare',0,'waiting'); INSERT INTO media_ingest_step_dependency(step_id,dependency_kind) VALUES(30,'media_visible'); INSERT INTO transcode_task(id,file_id,media_id,status,task_type,ingest_run_id,ingest_step_id,generation) VALUES(40,'f',10,'waiting','pretranscode',20,30,1)`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +184,7 @@ func TestPrepareClaimsParentOnceBeforeRenditions(t *testing.T) {
 
 func TestClaimEligibleCommunitySkipsAbsentUnavailablePrepareTable(t *testing.T) {
 	db := openEligibilityDB(t)
-	if _, err := db.Exec(`DROP TABLE pretranscode_rendition_job; DROP TABLE pretranscode_task_meta; DROP TABLE transcode_task`); err != nil {
+	if _, err := db.Exec(`DROP TABLE IF EXISTS pretranscode_rendition_job; DROP TABLE IF EXISTS pretranscode_task_meta; DROP TABLE IF EXISTS transcode_task`); err != nil {
 		t.Fatal(err)
 	}
 	registry := NewCapabilityMatrix([]string{"poster", "scrape"})
@@ -195,7 +195,7 @@ func TestClaimEligibleCommunitySkipsAbsentUnavailablePrepareTable(t *testing.T) 
 
 func TestClaimEligibleAdvertisedCapabilityMissingTableFailsClosed(t *testing.T) {
 	db := openEligibilityDB(t)
-	if _, err := db.Exec(`DROP TABLE pretranscode_rendition_job; DROP TABLE pretranscode_task_meta; DROP TABLE transcode_task`); err != nil {
+	if _, err := db.Exec(`DROP TABLE IF EXISTS pretranscode_rendition_job; DROP TABLE IF EXISTS pretranscode_task_meta; DROP TABLE IF EXISTS transcode_task`); err != nil {
 		t.Fatal(err)
 	}
 	_, err := ClaimEligible(context.Background(), db, ClaimRequest{Family: QueuePrepare, TaskType: "prepare", Owner: "enterprise", Registry: NewCapabilityMatrix([]string{"prepare"})})
@@ -242,6 +242,7 @@ func TestClaimEligibleLinkedStepCASRequiresExactlyOneTransition(t *testing.T) {
 }
 
 func TestGlobalRequiredOrderingBlocksYoungerFamily(t *testing.T) {
+	skipIfEnterprisePrepareUnavailable(t)
 	db := openEligibilityDB(t)
 	seedThreeRequiredClaims(t, db)
 	registry := NewCapabilityMatrix([]string{"poster", "scrape", "prepare"})
@@ -255,6 +256,7 @@ func TestGlobalRequiredOrderingBlocksYoungerFamily(t *testing.T) {
 }
 
 func TestRequiredFirstAcrossPostIngestScrapePrepareSimultaneousBarrier(t *testing.T) {
+	skipIfEnterprisePrepareUnavailable(t)
 	for iteration := 0; iteration < 10; iteration++ {
 		db := openEligibilityDB(t)
 		seedThreeRequiredClaims(t, db)
@@ -367,11 +369,14 @@ func TestClaimEligibilityStatusDependencyMatrixAllFamilies(t *testing.T) {
 		{"optional published independent", "published", "published", true, false, "media_visible", "", true}, {"optional degraded independent", "degraded", "degraded", true, false, "media_visible", "", true},
 		{"optional processing preserve visibility", "processing", "published", true, false, "media_visible", "", true}, {"optional processing degraded visibility", "processing", "degraded", true, false, "media_visible", "", true}, {"optional processing not yet visible", "processing", "processing", false, false, "media_visible", "", false},
 		{"optional failed", "failed", "published", true, false, "media_visible", "", false}, {"optional cancelled", "cancelled", "published", true, false, "media_visible", "", false},
-		{"optional degraded explicit failed dep", "degraded", "degraded", true, false, "success", "failed", false}, {"optional degraded explicit done dep", "degraded", "degraded", true, false, "success", "done", true},
+		{"optional degraded explicit failed dep", "degraded", "degraded", true, false, "step_done", "failed", false}, {"optional degraded explicit done dep", "degraded", "degraded", true, false, "step_done", "done", true},
 	}
 	for _, family := range []QueueFamily{QueuePostIngest, QueueScrape, QueuePrepare} {
 		for _, tc := range cases {
 			t.Run(string(family)+"/"+tc.name, func(t *testing.T) {
+				if family == QueuePrepare {
+					skipIfEnterprisePrepareUnavailable(t)
+				}
 				db := openEligibilityDB(t)
 				published := "NULL"
 				if tc.published {
@@ -389,9 +394,9 @@ func TestClaimEligibilityStatusDependencyMatrixAllFamilies(t *testing.T) {
 					return tc.depStatus
 				}(), typ, required)
 				if tc.depKind == "media_visible" {
-					q += `INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(31,20,10,1,'media_visible',0,'done'); INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(30,31,'success');`
-				} else if tc.depKind == "success" {
-					q += `INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(30,29,'success');`
+					q += `INSERT INTO media_ingest_step_dependency(step_id,dependency_kind) VALUES(30,'media_visible');`
+				} else if tc.depKind == "step_done" {
+					q += `INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(30,29,'step_done');`
 				}
 				switch family {
 				case QueuePostIngest:
@@ -420,7 +425,7 @@ func TestCommunityAbsentPrepareTableRequiredAvailabilityMatrix(t *testing.T) {
 	for _, advertised := range []bool{false, true} {
 		t.Run(fmt.Sprintf("advertised=%v", advertised), func(t *testing.T) {
 			db := openEligibilityDB(t)
-			_, err := db.Exec(`DROP TABLE pretranscode_rendition_job; DROP TABLE pretranscode_task_meta; DROP TABLE transcode_task; INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l'); INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state) VALUES(10,1,'f','video',1,'processing'); INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(20,10,1,'scan','processing','{}',2); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(30,20,10,1,'poster',1,'waiting'); INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(40,10,20,30,1,'poster','waiting')`)
+			_, err := db.Exec(`DROP TABLE IF EXISTS pretranscode_rendition_job; DROP TABLE IF EXISTS pretranscode_task_meta; DROP TABLE IF EXISTS transcode_task; INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l'); INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state) VALUES(10,1,'f','video',1,'processing'); INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(20,10,1,'scan','processing','{}',2); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(30,20,10,1,'poster',1,'waiting'); INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(40,10,20,30,1,'poster','waiting')`)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -443,6 +448,9 @@ func TestCommunityAbsentPrepareTableRequiredAvailabilityMatrix(t *testing.T) {
 func TestSelectFamilyCandidateUsesNormalizedDueOrdering(t *testing.T) {
 	for _, family := range []QueueFamily{QueuePostIngest, QueueScrape, QueuePrepare} {
 		t.Run(string(family), func(t *testing.T) {
+			if family == QueuePrepare {
+				skipIfEnterprisePrepareUnavailable(t)
+			}
 			db := openEligibilityDB(t)
 			typ := map[QueueFamily]string{QueuePostIngest: "poster", QueueScrape: "scrape", QueuePrepare: "prepare"}[family]
 			_, err := db.Exec(fmt.Sprintf(`INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l'); INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state) VALUES(10,1,'f','video',1,'processing'),(11,1,'g','video',1,'processing'); INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(20,10,1,'scan','processing','{}',2),(21,11,1,'scan','processing','{}',2); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(30,20,10,1,'%[1]s',1,'waiting'),(31,21,11,1,'%[1]s',1,'waiting');`, typ))
@@ -471,6 +479,9 @@ func TestSelectFamilyCandidateUsesNormalizedDueOrdering(t *testing.T) {
 func TestLinkedClaimEligibilityRejectsPartialLegacyIdentityAllFamilies(t *testing.T) {
 	for _, family := range []QueueFamily{QueuePostIngest, QueueScrape, QueuePrepare} {
 		t.Run(string(family), func(t *testing.T) {
+			if family == QueuePrepare {
+				skipIfEnterprisePrepareUnavailable(t)
+			}
 			db := openEligibilityDB(t)
 			_, err := db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l'); INSERT INTO media(id,library_id,file_id,file_type) VALUES(10,1,'f','video')`)
 			if err != nil {
@@ -496,297 +507,5 @@ func TestLinkedClaimEligibilityRejectsPartialLegacyIdentityAllFamilies(t *testin
 				t.Fatalf("partial claimed=%+v", p)
 			}
 		})
-	}
-}
-
-// TestAgingEffectivePriorityClaimOrder verifies that aging boosts a lower
-// source-class task past a younger higher-class task.  Without aging, the
-// higher priority always wins.  With aging, the older lower-priority task
-// accrues enough effective priority to be claimed first.
-func TestAgingEffectivePriorityClaimOrder(t *testing.T) {
-	db := openEligibilityDB(t)
-	now := "datetime(CURRENT_TIMESTAMP)"
-	old := "datetime(CURRENT_TIMESTAMP, '-36000 seconds')" // 10 hours ago
-	_, err := db.Exec(`
-		INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l');
-		INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state)
-			VALUES(10,1,'f10','video',1,'processing'),(11,1,'f11','video',1,'processing');
-		INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version)
-			VALUES(20,10,1,'scan','processing','{}',2),(21,11,1,'scan','processing','{}',2);
-		INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status)
-			VALUES(30,20,10,1,'encrypt',1,'waiting'),(31,21,11,1,'encrypt',1,'waiting');
-		INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status,
-			available_at,created_at,priority)
-			VALUES
-			 (40,10,20,30,1,'encrypt','waiting',`+now+`,`+now+`,50),
-			 (41,11,21,31,1,'encrypt','waiting',`+old+`,`+old+`,0);
-	`)
-	if err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	policy := scheduler.PolicyDefaults()
-	registry := NewCapabilityMatrix([]string{"encrypt"})
-	got, err := ClaimEligible(context.Background(), db, ClaimRequest{
-		Family: QueuePostIngest, TaskType: "encrypt", Owner: "worker", Registry: registry,
-		SchedulerPolicy: &policy,
-	})
-	if err != nil {
-		t.Fatalf("claim: %v", err)
-	}
-	if got == nil {
-		t.Fatal("expected a claim")
-	}
-	// With aging (interval=300s, step=1): task 41 is 10h old → aging_boost=120
-	// Task 41 effective=120 beats task 40 raw priority=50.
-	if got.QueueID != 41 {
-		t.Fatalf("aging claim: got queue %d, want 41 (older task wins via aging boost)", got.QueueID)
-	}
-}
-
-// TestEffectivePriorityNoAgingCap verifies that aging has no cap and can grow
-// unbounded, guaranteeing that every source class eventually makes progress.
-func TestEffectivePriorityNoAgingCap(t *testing.T) {
-	db := openEligibilityDB(t)
-	now := "datetime(CURRENT_TIMESTAMP)"
-	veryOld := "datetime(CURRENT_TIMESTAMP, '-31536000 seconds')" // ~1 year ago
-	_, err := db.Exec(`
-		INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l');
-		INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state)
-			VALUES(10,1,'f10','video',1,'processing'),(11,1,'f11','video',1,'processing');
-		INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version)
-			VALUES(20,10,1,'scan','processing','{}',2),(21,11,1,'scan','processing','{}',2);
-		INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status)
-			VALUES(30,20,10,1,'encrypt',1,'waiting'),(31,21,11,1,'encrypt',1,'waiting');
-		INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status,
-			available_at,created_at,priority,source_class,base_priority)
-			VALUES
-			 (40,10,20,30,1,'encrypt','waiting',`+now+`,`+now+`,0,400,400),
-			 (41,11,21,31,1,'encrypt','waiting',`+veryOld+`,`+veryOld+`,0,100,100);
-	`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	policy := scheduler.PolicyDefaults()
-	registry := NewCapabilityMatrix([]string{"encrypt"})
-	got, err := ClaimEligible(context.Background(), db, ClaimRequest{
-		Family: QueuePostIngest, TaskType: "encrypt", Owner: "worker", Registry: registry,
-		SchedulerPolicy: &policy,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got == nil {
-		t.Fatal("expected a claim")
-	}
-	// Task 41 (source_class=100, 1 year old) should overtake task 40
-	// (source_class=400, brand new) because aging is uncapped.
-	if got.QueueID != 41 {
-		t.Fatalf("uncapped aging claim: got queue %d, want 41 (old task wins via uncapped aging)", got.QueueID)
-	}
-}
-
-// TestClaimOrderStableTieBreakers verifies that when effective priorities are
-// equal, stable tie-breaking uses available_at, created_at, and ID.
-func TestClaimOrderStableTieBreakers(t *testing.T) {
-	db := openEligibilityDB(t)
-	_, err := db.Exec(`
-		INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l');
-		INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state)
-			VALUES(10,1,'f10','video',1,'processing'),(11,1,'f11','video',1,'processing');
-		INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version)
-			VALUES(20,10,1,'scan','processing','{}',2),(21,11,1,'scan','processing','{}',2);
-		INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status)
-			VALUES(30,20,10,1,'encrypt',1,'waiting'),(31,21,11,1,'encrypt',1,'waiting');
-		-- Same source_class and base_priority, but different available_at.
-		-- Task 41 has earlier available_at → should be claimed first.
-		INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status,
-			available_at,created_at,priority,source_class,base_priority)
-			VALUES
-			 (40,10,20,30,1,'encrypt','waiting','2020-01-02T00:00:00','2020-01-01T00:00:00',0,300,300),
-			 (41,11,21,31,1,'encrypt','waiting','2020-01-01T00:00:00','2020-01-01T00:00:00',0,300,300);
-	`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	registry := NewCapabilityMatrix([]string{"encrypt"})
-	policy := scheduler.PolicyDefaults()
-	got, err := ClaimEligible(context.Background(), db, ClaimRequest{
-		Family: QueuePostIngest, TaskType: "encrypt", Owner: "worker", Registry: registry,
-		SchedulerPolicy: &policy,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got == nil {
-		t.Fatal("expected a claim")
-	}
-	// Task 41 should win because available_at is earlier (stable tie-breaker).
-	if got.QueueID != 41 {
-		t.Fatalf("stable tie claim: got queue %d, want 41 (earlier available_at wins equal priority)", got.QueueID)
-	}
-}
-
-// ============================================================================
-// ClaimWithAdmission tests - RED phase
-// ============================================================================
-
-func seedAdmissionPolicy(t *testing.T, db *sql.DB, concurrency map[string]int, resources map[string]int) {
-	t.Helper()
-	concurrencyJSON := "{}"
-	if len(concurrency) > 0 {
-		parts := make([]string, 0, len(concurrency))
-		for k, v := range concurrency {
-			parts = append(parts, fmt.Sprintf("%q:%d", k, v))
-		}
-		concurrencyJSON = "{" + strings.Join(parts, ",") + "}"
-	}
-	resourcesJSON := "{}"
-	if len(resources) > 0 {
-		parts := make([]string, 0, len(resources))
-		for k, v := range resources {
-			parts = append(parts, fmt.Sprintf("%q:%d", k, v))
-		}
-		resourcesJSON = "{" + strings.Join(parts, ",") + "}"
-	}
-	policyJSON := fmt.Sprintf(`{"type_concurrency":%s,"resource_capacity":%s,"provider_capacity":{},"aging_interval_sec":300,"aging_step":1,"run_now_amount":100,"run_now_ttl_sec":600}`, concurrencyJSON, resourcesJSON)
-	if _, err := db.Exec(`INSERT INTO scheduler_policy_revision(schema_version,policy_json,author,reason,validation_hash,is_active,activated_at) VALUES(1,?,'test','admission test','hash',1,CURRENT_TIMESTAMP)`, policyJSON); err != nil {
-		t.Fatalf("insert policy: %v", err)
-	}
-	if _, err := db.Exec(`INSERT INTO scheduler_control(task_type,state) VALUES('poster','running'),('thumbnail','running'),('encrypt','running'),('ai_analysis','running')`); err != nil {
-		t.Fatalf("insert control: %v", err)
-	}
-}
-
-func TestClaimWithAdmissionCreatesReservation(t *testing.T) {
-	db := openEligibilityDB(t)
-	seedAdmissionPolicy(t, db, map[string]int{"poster": 5}, map[string]int{"cpu": 10})
-	_, err := db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l'); INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state) VALUES(10,1,'f','video',1,'processing'); INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(20,10,1,'scan','processing','{}',2); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(30,20,10,1,'poster',1,'waiting'); INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(40,10,20,30,1,'poster','waiting')`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	policy := scheduler.PolicyDefaults()
-	policy.TypeConcurrency["poster"] = 5
-	req := ClaimRequest{Family: QueuePostIngest, TaskType: "poster", Owner: "worker", Registry: NewCapabilityMatrix([]string{"poster"}), SchedulerPolicy: &policy}
-	payload, result, blockers, err := ClaimWithAdmission(context.Background(), db, req)
-	if err != nil {
-		t.Fatalf("ClaimWithAdmission: %v", err)
-	}
-	if payload == nil {
-		t.Fatalf("expected payload, got nil (blockers=%+v)", blockers)
-	}
-	if result == nil {
-		t.Fatalf("expected AdmissionResult, got nil")
-	}
-	if result.ReservationID == 0 {
-		t.Fatal("expected non-zero reservation ID")
-	}
-	if result.ExecutionID == "" {
-		t.Fatal("expected non-empty execution ID")
-	}
-	if result.QueueID != 40 {
-		t.Fatalf("expected queue 40, got %d", result.QueueID)
-	}
-	// Verify reservation was created in DB
-	var resCount int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM scheduler_reservation WHERE execution_id=? AND status='active'`, result.ExecutionID).Scan(&resCount); err != nil {
-		t.Fatal(err)
-	}
-	if resCount != 1 {
-		t.Fatalf("expected 1 active reservation, got %d", resCount)
-	}
-}
-
-func TestClaimWithAdmissionTypeLimitBlocks(t *testing.T) {
-	db := openEligibilityDB(t)
-	seedAdmissionPolicy(t, db, map[string]int{"poster": 1}, map[string]int{"cpu": 10})
-	_, err := db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l'); INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state) VALUES(10,1,'f','video',1,'processing'),(11,1,'g','video',1,'processing'); INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(20,10,1,'scan','processing','{}',2),(21,11,1,'scan','processing','{}',2); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(30,20,10,1,'poster',1,'waiting'),(31,21,11,1,'poster',1,'waiting'); INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(40,10,20,30,1,'poster','waiting'),(41,11,21,31,1,'poster','waiting')`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	policy := scheduler.PolicyDefaults()
-	policy.TypeConcurrency["poster"] = 1
-	req := ClaimRequest{Family: QueuePostIngest, TaskType: "poster", Owner: "worker", Registry: NewCapabilityMatrix([]string{"poster"}), SchedulerPolicy: &policy}
-
-	// First claim should succeed
-	payload1, result1, blockers1, err1 := ClaimWithAdmission(context.Background(), db, req)
-	if err1 != nil || payload1 == nil || result1 == nil {
-		t.Fatalf("first claim: err=%v payload=%+v result=%+v blockers=%+v", err1, payload1, result1, blockers1)
-	}
-
-	// Second claim should be blocked (concurrency=1)
-	payload2, result2, blockers2, err2 := ClaimWithAdmission(context.Background(), db, req)
-	if err2 != nil {
-		t.Fatalf("second claim: %v", err2)
-	}
-	if payload2 != nil || result2 != nil {
-		t.Fatalf("second claim should be nil, got payload=%+v result=%+v", payload2, result2)
-	}
-	if len(blockers2) == 0 {
-		t.Fatal("expected type limit blockers")
-	}
-	foundTypeLimit := false
-	for _, b := range blockers2 {
-		if strings.Contains(strings.ToLower(b.Reason), "concurrency") {
-			foundTypeLimit = true
-		}
-	}
-	if !foundTypeLimit {
-		t.Fatalf("expected concurrency blocker, got %+v", blockers2)
-	}
-}
-
-func TestClaimWithAdmissionResourceBudgetBlocks(t *testing.T) {
-	db := openEligibilityDB(t)
-	seedAdmissionPolicy(t, db, map[string]int{"encrypt": 5}, map[string]int{"cpu": 1})
-	_, err := db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l'); INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state) VALUES(10,1,'f','video',1,'processing'),(11,1,'g','video',1,'processing'); INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(20,10,1,'scan','processing','{}',2),(21,11,1,'scan','processing','{}',2); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(30,20,10,1,'encrypt',1,'waiting'),(31,21,11,1,'encrypt',1,'waiting'); INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(40,10,20,30,1,'encrypt','waiting'),(41,11,21,31,1,'encrypt','waiting')`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	policy := scheduler.PolicyDefaults()
-	policy.TypeConcurrency["encrypt"] = 5
-	policy.ResourceCapacity[scheduler.CPU] = 1
-	req := ClaimRequest{Family: QueuePostIngest, TaskType: "encrypt", Owner: "worker", Registry: NewCapabilityMatrix([]string{"encrypt"}), SchedulerPolicy: &policy}
-
-	// First claim succeeds
-	payload1, _, _, err1 := ClaimWithAdmission(context.Background(), db, req)
-	if err1 != nil || payload1 == nil {
-		t.Fatalf("first encrypt claim: err=%v payload=%+v", err1, payload1)
-	}
-
-	// Second claim blocked by CPU budget (encrypt uses 1 CPU, capacity=1)
-	payload2, _, blockers2, err2 := ClaimWithAdmission(context.Background(), db, req)
-	if err2 != nil {
-		t.Fatalf("second encrypt claim: %v", err2)
-	}
-	if payload2 != nil {
-		t.Fatalf("second encrypt claim should be nil, got %+v", payload2)
-	}
-	foundResource := false
-	for _, b := range blockers2 {
-		if strings.Contains(strings.ToLower(b.Reason), "resource") {
-			foundResource = true
-		}
-	}
-	if !foundResource {
-		t.Fatalf("expected resource blocker, got %+v", blockers2)
-	}
-}
-
-func TestClaimWithAdmissionNoPolicyFallsThrough(t *testing.T) {
-	db := openEligibilityDB(t)
-	_, err := db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l'); INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state) VALUES(10,1,'f','video',1,'processing'); INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(20,10,1,'scan','processing','{}',2); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(30,20,10,1,'poster',1,'waiting'); INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(40,10,20,30,1,'poster','waiting')`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req := ClaimRequest{Family: QueuePostIngest, TaskType: "poster", Owner: "worker", Registry: NewCapabilityMatrix([]string{"poster"})}
-	payload, result, _, err := ClaimWithAdmission(context.Background(), db, req)
-	if err != nil {
-		t.Fatalf("ClaimWithAdmission without policy: %v", err)
-	}
-	if payload == nil {
-		t.Fatal("expected payload with nil policy")
-	}
-	if result != nil {
-		t.Fatalf("expected nil AdmissionResult without policy, got %+v", result)
 	}
 }

@@ -8,10 +8,10 @@ import (
 )
 
 var (
-	splitNoise       = regexp.MustCompile(`[._\-+]+`)
+	splitNoise     = regexp.MustCompile(`[._\-+]+`)
 	bracketCharsRE = regexp.MustCompile(`[\[【(（\]】)）]`)
-	yearPattern      = regexp.MustCompile(`(?:^|[\s._-])((?:19|20)\d{2})(?:$|[\s._-])`)
-	englishNoiseRE   = regexp.MustCompile(`(?i)\b(?:bluray|bdrip|brrip|webrip|web-?dl|hdrip|dvdrip|hdtv|uhd|hd|bd|br|4k|8k|3d|x264|x265|h\.?264|h\.?265|hevc|avc|aac|ac3|dts|truehd|atmos|hdr10|hdr10\+|dv|dovi|remux|repack|proper|extended|unrated|director'?s?\.?cut|imax|10bit|8bit|1080p|2160p|1440p|720p|480p|576p|540p|cd\d|disc\d|disk\d|vol\d|chs|cht|gb|cn|eng|english|chinese|mandarin|cantonese|dual|audio|subs?|subbed|dubbed|complete|limited|special|edition|collectors?)\b`)
+	yearPattern    = regexp.MustCompile(`(?:^|[\s._-])((?:19|20)\d{2})(?:$|[\s._-])`)
+	englishNoiseRE = regexp.MustCompile(`(?i)\b(?:bluray|bdrip|brrip|webrip|web-?dl|hdrip|dvdrip|hdtv|uhd|hd|bd|br|4k|8k|3d|x264|x265|h\.?264|h\.?265|hevc|avc|aac|ac3|dts|truehd|atmos|hdr10|hdr10\+|dv|dovi|remux|repack|proper|extended|unrated|director'?s?\.?cut|imax|10bit|8bit|1080p|2160p|1440p|720p|480p|576p|540p|cd\d|disc\d|disk\d|vol\d|chs|cht|gb|cn|eng|english|chinese|mandarin|cantonese|dual|audio|subs?|subbed|dubbed|complete|limited|special|edition|collectors?)\b`)
 )
 
 // Chinese release / source tags often glued to titles without separators.
@@ -294,7 +294,7 @@ func orderProvidersForKeyword(providers []string, keyword string) []string {
 	if !containsHan(keyword) {
 		return providers
 	}
-	// Align with nowen-video Provider Chain priority for CJK titles: 豆瓣 → Bangumi → TMDb.
+	// Chain priority for CJK titles: 豆瓣 → Bangumi → TMDb.
 	boost := []string{"douban", "bangumi", "tmdb", "tvdb"}
 	seen := make(map[string]struct{}, len(providers)+len(boost))
 	out := make([]string, 0, len(providers)+len(boost))

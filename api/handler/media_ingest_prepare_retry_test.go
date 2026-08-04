@@ -18,7 +18,19 @@ import (
 
 func seedAdminPrepareRetry(t *testing.T) (*Handler, int64, int64) {
 	t.Helper()
-	db, err := store.OpenSQLite(filepath.Join(t.TempDir(), "admin-prepare-retry.sqlite"))
+	db, err := store.OpenSQLite(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta, jobs int
+	if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='pretranscode_task_meta'), EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='pretranscode_rendition_job')`).Scan(&meta, &jobs); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	if meta != 1 || jobs != 1 {
+		t.Skip("enterprise prepare tables unavailable in community build")
+	}
+	db, err = store.OpenSQLite(filepath.Join(t.TempDir(), "admin-prepare-retry.sqlite"))
 	if err != nil {
 		t.Fatal(err)
 	}

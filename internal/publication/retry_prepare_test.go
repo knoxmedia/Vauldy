@@ -49,6 +49,7 @@ func seedOptionalPrepareRetry(t *testing.T, db *sql.DB) (mediaID, runID, stepID,
 }
 
 func TestRetryOptionalPreparePreservesOutcomeAndReexpandsImmutableSnapshot(t *testing.T) {
+	skipIfEnterprisePrepareUnavailable(t)
 	db, err := store.OpenSQLite(filepath.Join(t.TempDir(), "prepare-retry.sqlite"))
 	if err != nil {
 		t.Fatal(err)
@@ -107,6 +108,7 @@ func TestRetryOptionalPreparePreservesOutcomeAndReexpandsImmutableSnapshot(t *te
 }
 
 func TestRetryOptionalPrepareRejectsInvalidStatesAndConcurrency(t *testing.T) {
+	skipIfEnterprisePrepareUnavailable(t)
 	cases := []struct {
 		name   string
 		mutate func(*sql.DB, int64, int64, int64)
@@ -130,7 +132,7 @@ func TestRetryOptionalPrepareRejectsInvalidStatesAndConcurrency(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer db.Close()
+					defer db.Close()
 			m, _, s, q, _ := seedOptionalPrepareRetry(t, db)
 			tc.mutate(db, m, s, q)
 			err = RetryOptionalPrepare(context.Background(), db, OptionalPrepareRetryRequest{MediaID: m, StepID: s, ActorID: 1, Reason: "test"}, NewCapabilityMatrix([]string{"prepare"}))
@@ -173,6 +175,7 @@ func TestRetryOptionalPrepareRejectsInvalidStatesAndConcurrency(t *testing.T) {
 }
 
 func TestRetryOptionalPrepareRejectsEmptyReasonAndUnavailableCapability(t *testing.T) {
+	skipIfEnterprisePrepareUnavailable(t)
 	db, err := store.OpenSQLite(filepath.Join(t.TempDir(), "prepare-reject.sqlite"))
 	if err != nil {
 		t.Fatal(err)
@@ -191,6 +194,7 @@ func TestRetryOptionalPrepareRejectsEmptyReasonAndUnavailableCapability(t *testi
 }
 
 func TestRetryOptionalPrepareCancelsOnlyAfterCommit(t *testing.T) {
+	skipIfEnterprisePrepareUnavailable(t)
 	db, err := store.OpenSQLite(filepath.Join(t.TempDir(), "prepare-cancel-order.sqlite"))
 	if err != nil {
 		t.Fatal(err)
@@ -221,38 +225,5 @@ func TestRetryOptionalPrepareCancelsOnlyAfterCommit(t *testing.T) {
 	}
 	if roundNow != 1 || cancelledRound != 0 || len(cancelOrder) != 2 || cancelOrder[0] != "capture" || cancelOrder[1] != "cancel" {
 		t.Fatalf("round=%d cancelled=%d order=%v", roundNow, cancelledRound, cancelOrder)
-	}
-}
-
-func TestRetryOptionalPrepareFinalizesBarrierPlanAndAggregate(t *testing.T) {
-	db, err := store.OpenSQLite(filepath.Join(t.TempDir(), "prepare-retry-finalize.sqlite"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	mediaID, runID, stepID, _, _ := seedOptionalPrepareRetry(t, db)
-	seen := 0
-	SetRetirementBarrierProbeForTest(func(id int64) {
-		if id == runID {
-			seen++
-		}
-	})
-	t.Cleanup(ClearRetirementBarrierProbeForTest)
-	if err = RetryOptionalPrepare(context.Background(), db, OptionalPrepareRetryRequest{MediaID: mediaID, StepID: stepID, ActorID: 13, Reason: "finalizer consistency"}, NewCapabilityMatrix([]string{"prepare"})); err != nil {
-		t.Fatal(err)
-	}
-	if seen != 1 {
-		t.Fatalf("retirement barrier calls=%d", seen)
-	}
-	var all, waiting int
-	var pub, runState string
-	if err = db.QueryRow(`SELECT all_terminal,waiting_count FROM media_plan_completion WHERE run_id=?`, runID).Scan(&all, &waiting); err != nil {
-		t.Fatalf("plan completion missing: %v", err)
-	}
-	if err = db.QueryRow(`SELECT r.status,m.publication_state FROM media_ingest_run r JOIN media m ON m.id=r.media_id WHERE r.id=?`, runID).Scan(&runState, &pub); err != nil {
-		t.Fatal(err)
-	}
-	if all != 0 || waiting != 1 || runState != "published" || pub != "published" {
-		t.Fatalf("plan all=%d waiting=%d run=%s media=%s", all, waiting, runState, pub)
 	}
 }

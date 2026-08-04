@@ -10,10 +10,9 @@ import (
 	"sync"
 
 	"knox-media/internal/config"
-	"knox-media/internal/imagethumb"
 	"knox-media/internal/keystore"
+	"knox-media/internal/imagethumb"
 	"knox-media/internal/photoparse"
-	"knox-media/internal/store"
 )
 
 // Worker classifies photo library images asynchronously.
@@ -197,7 +196,7 @@ func (w *Worker) Process(ctx context.Context, mediaID int64) error {
 
 	_, manualOverride, manualTags := readManual(metaJSON.String)
 	merged := MergeTagsIntoMetaJSON(metaJSON.String, res.Tags, res.Engine, manualOverride, manualTags)
-	err = store.UpdateMediaMetaAndPhotoTime(context.Background(), w.DB, mediaID, merged)
+	_, err = w.DB.Exec(`UPDATE media SET meta_json = ? WHERE id = ?`, merged, mediaID)
 	if err != nil {
 		w.failTask(mediaID, err.Error())
 		return err
@@ -312,5 +311,6 @@ func ApplyManualTags(db *sql.DB, mediaID int64, tags []string) error {
 	clean := dedupeTags(tags)
 	_, aiTags, _ := ReadPhotoTags(metaJSON.String)
 	merged := MergeTagsIntoMetaJSON(metaJSON.String, aiTags, "manual", true, clean)
-	return store.UpdateMediaMetaAndPhotoTime(context.Background(), db, mediaID, merged)
+	_, err := db.Exec(`UPDATE media SET meta_json = ? WHERE id = ?`, merged, mediaID)
+	return err
 }

@@ -15,14 +15,6 @@ import (
 
 type mediaSort string
 
-const optimizationAssetRecordedSQL = `CASE
- WHEN lower(COALESCE(m.file_type,''))!='video' OR NULLIF(TRIM(m.file_path),'') IS NULL THEN 0
- WHEN lower(TRIM(m.file_path)) NOT LIKE '%.enc' THEN 1
- WHEN COALESCE(l.encrypted_assets_cleanup_plaintext,0)=0
-  AND mea.status='encrypted'
-  AND NULLIF(TRIM(mea.plain_path),'') IS NOT NULL THEN 1
- ELSE 0 END`
-
 const (
 	mediaSortIDDesc      mediaSort = "id_desc"
 	mediaSortCreatedDesc mediaSort = "created_desc"
@@ -34,16 +26,16 @@ type mediaCursor struct {
 	ID      int64
 }
 type mediaListSpec struct {
-	LibraryID                                                             *int64
+	LibraryID                                                               *int64
 	FileType, Search, PhotoTag, PhotoPlace, PhotoPerson, PublicationState string
-	AllowedLibraryIDs                                                     []int64
-	FolderScope                                                           map[int64][]string
-	RestrictLibraries                                                     bool
-	Sort                                                                  mediaSort
-	Limit, BatchSize                                                      int
-	Cursor                                                                *mediaCursor
-	UserID                                                                int64
-	IncludeUnpublished                                                    bool
+	AllowedLibraryIDs                                                       []int64
+	FolderScope                                                             map[int64][]string
+	RestrictLibraries                                                       bool
+	Sort                                                                    mediaSort
+	Limit, BatchSize                                                        int
+	Cursor                                                                  *mediaCursor
+	UserID                                                                  int64
+	IncludeUnpublished                                                      bool
 }
 type mediaQuery struct {
 	SQL           string
@@ -57,15 +49,15 @@ type mediaBatchQueryer interface {
 }
 
 type mediaListRow struct {
-	ID                                                                                                                             int64
-	LibraryID                                                                                                                      sql.NullInt64
-	FileID, Title, OriginalTitle, FilePath, FileType, Format, Status, CreatedAt                                                    sql.NullString
-	LastPlayAt, ReleaseDate, PosterURL, BackdropURL, PhotoTakenAt, PhotoTagsRaw                                                    sql.NullString
-	MusicAlbumTitle, MusicArtist, SortKey                                                                                          sql.NullString
-	Duration, Width, Height, Bitrate, ReleaseYear, Scraped, EncryptedAsset, OptimizationAssetRecorded, MusicAlbumID, PlayCompleted sql.NullInt64
-	PhotoTags, PhotoTagIDs                                                                                                         []string
-	PublicationState, PublishedAt, PublicationError, IngestRunStatus                                                               sql.NullString
-	IngestGeneration                                                                                                               sql.NullInt64
+	ID                                                                                                  int64
+	LibraryID                                                                                           sql.NullInt64
+	FileID, Title, OriginalTitle, FilePath, FileType, Format, Status, CreatedAt                         sql.NullString
+	LastPlayAt, ReleaseDate, PosterURL, BackdropURL, PhotoTakenAt, PhotoTagsRaw                         sql.NullString
+	MusicAlbumTitle, MusicArtist, SortKey                                                               sql.NullString
+	PublicationState, PublishedAt, PublicationError, IngestRunStatus                                    sql.NullString
+	Duration, Width, Height, Bitrate, ReleaseYear, Scraped, EncryptedAsset, MusicAlbumID, PlayCompleted sql.NullInt64
+	IngestGeneration                                                                                    sql.NullInt64
+	PhotoTags, PhotoTagIDs                                                                              []string
 }
 
 func parseMediaListSpec(c *gin.Context, profile userPermissionProfile, userID int64) (mediaListSpec, error) {
@@ -150,9 +142,7 @@ func buildMediaQuery(spec mediaListSpec, cursor *mediaCursor, batchLimit int) (m
 	q := `WITH params AS (SELECT ? AS user_id),
 candidates AS MATERIALIZED (SELECT m.* FROM media m WHERE 1=1`
 	args := []any{spec.UserID}
-	if !spec.IncludeUnpublished {
-		q += ` AND ` + mediaPublicationVisiblePredicate("m")
-	}
+	q += ` AND ` + mediaPublicationVisibilityPredicate("m", spec.IncludeUnpublished)
 	if spec.PublicationState != "" {
 		q += ` AND m.publication_state=?`
 		args = append(args, spec.PublicationState)
@@ -223,7 +213,7 @@ NULLIF(json_extract(m.meta_json,'$.photo.taken_at'),''),COALESCE(json_extract(m.
 mt.album_id,COALESCE(NULLIF(TRIM(ma.title),''),''),COALESCE(NULLIF(TRIM(mt.artist_display),''),NULLIF(TRIM(ar.name),''),''),
 CASE WHEN COALESCE(json_extract(m.meta_json,'$.scrape.source'),'') NOT IN ('','aggregated-stub') AND COALESCE(json_extract(m.meta_json,'$.scrape.extra.note'),'')!='stub' AND (NULLIF(TRIM(json_extract(m.meta_json,'$.scrape.overview')),'') IS NOT NULL OR NULLIF(TRIM(json_extract(m.meta_json,'$.scrape.poster')),'') IS NOT NULL OR NULLIF(TRIM(json_extract(m.meta_json,'$.scrape.extra.poster')),'') IS NOT NULL OR CAST(NULLIF(json_extract(m.meta_json,'$.scrape.rating'),'') AS REAL)>0 OR NULLIF(TRIM(json_extract(m.meta_json,'$.scrape.release_date')),'') IS NOT NULL OR NULLIF(TRIM(json_extract(m.meta_json,'$.scrape.extra.tmdb_id')),'') IS NOT NULL OR NULLIF(TRIM(json_extract(m.meta_json,'$.scrape.extra.imdb_id')),'') IS NOT NULL) THEN 1 ELSE 0 END,
 CASE WHEN mea.status='encrypted' OR lower(m.file_path) LIKE '%.enc' THEN 1 ELSE 0 END,
-` + optimizationAssetRecordedSQL + `,` + keyExpr + `,m.publication_state,m.published_at,m.publication_error,m.ingest_generation,` + ingestRunStatusSelect(spec.IncludeUnpublished) + `
+` + keyExpr + `,m.publication_state,m.published_at,m.publication_error,m.ingest_generation,` + ingestRunStatusSelect(spec.IncludeUnpublished) + `
 FROM candidates m
 LEFT JOIN pmax ON pmax.file_id=m.file_id
 LEFT JOIN pu ON pu.file_id=m.file_id
@@ -274,7 +264,7 @@ func (h *Handler) queryMediaBatch(ctx context.Context, q mediaQuery) ([]mediaLis
 	out := make([]mediaListRow, 0)
 	for rows.Next() {
 		var r mediaListRow
-		if err := rows.Scan(&r.ID, &r.LibraryID, &r.FileID, &r.Title, &r.OriginalTitle, &r.FilePath, &r.FileType, &r.Duration, &r.Width, &r.Height, &r.Bitrate, &r.Format, &r.Status, &r.CreatedAt, &r.LastPlayAt, &r.PlayCompleted, &r.ReleaseDate, &r.ReleaseYear, &r.PosterURL, &r.BackdropURL, &r.PhotoTakenAt, &r.PhotoTagsRaw, &r.MusicAlbumID, &r.MusicAlbumTitle, &r.MusicArtist, &r.Scraped, &r.EncryptedAsset, &r.OptimizationAssetRecorded, &r.SortKey, &r.PublicationState, &r.PublishedAt, &r.PublicationError, &r.IngestGeneration, &r.IngestRunStatus); err != nil {
+		if err := rows.Scan(&r.ID, &r.LibraryID, &r.FileID, &r.Title, &r.OriginalTitle, &r.FilePath, &r.FileType, &r.Duration, &r.Width, &r.Height, &r.Bitrate, &r.Format, &r.Status, &r.CreatedAt, &r.LastPlayAt, &r.PlayCompleted, &r.ReleaseDate, &r.ReleaseYear, &r.PosterURL, &r.BackdropURL, &r.PhotoTakenAt, &r.PhotoTagsRaw, &r.MusicAlbumID, &r.MusicAlbumTitle, &r.MusicArtist, &r.Scraped, &r.EncryptedAsset, &r.SortKey, &r.PublicationState, &r.PublishedAt, &r.PublicationError, &r.IngestGeneration, &r.IngestRunStatus); err != nil {
 			return nil, err
 		}
 		r.PhotoTags = parseJSONStringArray(r.PhotoTagsRaw.String)

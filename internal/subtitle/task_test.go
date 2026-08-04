@@ -151,49 +151,6 @@ func TestDeleteSubtitleTaskRollsBackAllChanges(t *testing.T) {
 	}
 }
 
-func TestDeleteSubtitleTaskCancelsRecognizeQueue(t *testing.T) {
-	s := openSubtitleDeleteTestDB(t)
-	insertDeleteMedia(t, s, 9, 1)
-	if _, err := s.DB.Exec(`INSERT INTO subtitle_task(media_id,status) VALUES(9,'failed');
-INSERT INTO post_ingest_task(media_id,generation,task_type,status,last_error) VALUES
- (9,1,'subtitle','done','ok'),(9,1,'subtitle_recognize','failed','recog')`); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.DeleteSubtitleTask(9); err != nil {
-		t.Fatal(err)
-	}
-	var extractStatus, recognizeStatus string
-	_ = s.DB.QueryRow(`SELECT status FROM post_ingest_task WHERE media_id=9 AND task_type='subtitle'`).Scan(&extractStatus)
-	_ = s.DB.QueryRow(`SELECT status FROM post_ingest_task WHERE media_id=9 AND task_type='subtitle_recognize'`).Scan(&recognizeStatus)
-	if extractStatus != "cancelled" || recognizeStatus != "cancelled" {
-		t.Fatalf("extract=%s recognize=%s want both cancelled", extractStatus, recognizeStatus)
-	}
-}
-
-func TestCleanupSubtitleTasksFailedRemovesRecognizeQueue(t *testing.T) {
-	db, err := store.OpenSQLite(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	if _, err := db.Exec(`
-		INSERT INTO library(id,name,type,path) VALUES(1,'sub','video','/sub');
-		INSERT INTO media(id,library_id,file_id,ingest_generation) VALUES(12,1,'f12',1);
-		INSERT INTO subtitle_task(media_id,status) VALUES(12,'failed');
-		INSERT INTO post_ingest_task(media_id,generation,task_type,status,max_attempts) VALUES
-			(12,1,'subtitle','failed',3),(12,1,'subtitle_recognize','failed',3)`); err != nil {
-		t.Fatal(err)
-	}
-	s := &Service{DB: db}
-	if _, err := s.CleanupSubtitleTasksFailed(); err != nil {
-		t.Fatal(err)
-	}
-	var left int
-	if err := db.QueryRow(`SELECT COUNT(1) FROM post_ingest_task WHERE media_id=12`).Scan(&left); err != nil || left != 0 {
-		t.Fatalf("queue left=%d err=%v", left, err)
-	}
-}
-
 func TestCleanupSubtitleTasksFailedSyncsPostIngest(t *testing.T) {
 	db, err := store.OpenSQLite(":memory:")
 	if err != nil {

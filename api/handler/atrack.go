@@ -15,7 +15,6 @@ import (
 	"github.com/gin-gonic/gin"
 
 	models "knox-media/internal/model"
-	"knox-media/internal/postingest"
 	"knox-media/internal/storage"
 )
 
@@ -31,21 +30,23 @@ func (h *Handler) EnqueueAudioTrackExtraction(c *gin.Context) {
 		return
 	}
 
-	var exists int
-	if err := h.App.DB.QueryRow(`SELECT 1 FROM media WHERE id = ? LIMIT 1`, mediaID).Scan(&exists); err != nil {
+	var fileID, filePath sql.NullString
+	if err := h.App.DB.QueryRow(
+		`SELECT COALESCE(file_id,''), file_path FROM media WHERE id = ? LIMIT 1`, mediaID,
+	).Scan(&fileID, &filePath); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "media not found"})
 		return
 	}
-	reset := func(ctx context.Context, tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `INSERT INTO atrack_task(media_id,status,updated_at) VALUES(?,'waiting',CURRENT_TIMESTAMP) ON CONFLICT(media_id) DO UPDATE SET status='waiting',error_message=NULL,updated_at=CURRENT_TIMESTAMP`, mediaID)
-		return err
-	}
-	result, err := enqueueExplicitPostIngest(c.Request.Context(), h.App.DB, mediaID, postingest.TaskAtrack, false, reset, nil)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusAccepted, gin.H{"ok": true, "queued": result.Queued(), "action": result})
+
+	h.AtrackWorker.EnqueueRetry(mediaID)
+	go func() {
+		err := h.AtrackWorker.Run(context.Background(), mediaID, filePath.String)
+		if err == nil && h.Instant != nil && fileID.String != "" && h.App.Config.HLSMultiAudioEnabled() {
+			setAudioPlaylistsFromDir(h, mediaID, fileID.String)
+		}
+	}()
+
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
 // ListAudioTrackTasks returns all atrack_task rows.
@@ -97,21 +98,23 @@ func (h *Handler) RetryAudioTrackTask(c *gin.Context) {
 		return
 	}
 
-	var exists int
-	if err := h.App.DB.QueryRow(`SELECT 1 FROM media WHERE id = ? LIMIT 1`, mediaID).Scan(&exists); err != nil {
+	var fileID, filePath sql.NullString
+	if err := h.App.DB.QueryRow(
+		`SELECT COALESCE(file_id,''), file_path FROM media WHERE id = ? LIMIT 1`, mediaID,
+	).Scan(&fileID, &filePath); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "media not found"})
 		return
 	}
-	reset := func(ctx context.Context, tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `INSERT INTO atrack_task(media_id,status,updated_at) VALUES(?,'waiting',CURRENT_TIMESTAMP) ON CONFLICT(media_id) DO UPDATE SET status='waiting',error_message=NULL,updated_at=CURRENT_TIMESTAMP`, mediaID)
-		return err
-	}
-	result, err := enqueueExplicitPostIngest(c.Request.Context(), h.App.DB, mediaID, postingest.TaskAtrack, true, reset, nil)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusAccepted, gin.H{"ok": true, "queued": result.Queued(), "action": result})
+
+	h.AtrackWorker.EnqueueRetry(mediaID)
+	go func() {
+		err := h.AtrackWorker.Run(context.Background(), mediaID, filePath.String)
+		if err == nil && h.Instant != nil && fileID.String != "" && h.App.Config.HLSMultiAudioEnabled() {
+			setAudioPlaylistsFromDir(h, mediaID, fileID.String)
+		}
+	}()
+
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
 // setAudioPlaylistsFromDir scans the atrack output directory for per-stream HLS playlists

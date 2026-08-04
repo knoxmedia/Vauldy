@@ -13,7 +13,7 @@ import (
 // are left untouched.
 func DeleteCurrentGenQueueTasks(ctx context.Context, exec store.SQLExecutor, taskType string, mediaIDs ...int64) error {
 	switch taskType {
-	case "subtitle", "subtitle_recognize", "preview", "atrack", "keyframe":
+	case "subtitle", "preview", "atrack", "keyframe":
 	default:
 		return nil
 	}

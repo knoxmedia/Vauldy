@@ -18,34 +18,34 @@ import (
 
 // PlayerPrefs is stored as JSON on user.player_prefs_json and echoed in /user/info.
 type SubtitleAppearance struct {
-	TextSize  string `json:"text_size"`
-	TextColor string `json:"text_color"`
-	Shadow    string `json:"shadow"`
-	BgColor   string `json:"bg_color"`
-	BgOpacity int    `json:"bg_opacity"`
-	PosBottom int    `json:"pos_bottom"`
-	PosTop    int    `json:"pos_top"`
+	TextSize   string `json:"text_size"`
+	TextColor  string `json:"text_color"`
+	Shadow     string `json:"shadow"`
+	BgColor    string `json:"bg_color"`
+	BgOpacity  int    `json:"bg_opacity"`
+	PosBottom  int    `json:"pos_bottom"`
+	PosTop     int    `json:"pos_top"`
 }
 
 type PlayerPrefs struct {
-	AutoSelect            bool               `json:"auto_select"`
-	PreferredAudioLang    string             `json:"preferred_audio_lang"`
-	PreferredSubtitleLang string             `json:"preferred_subtitle_lang"`
-	SubtitleMode          string             `json:"subtitle_mode"`
-	SDHSearch             string             `json:"sdh_search"`
-	ForcedSearch          string             `json:"forced_search"`
-	SubtitleAppearance    SubtitleAppearance `json:"subtitle_appearance"`
+	AutoSelect            bool                 `json:"auto_select"`
+	PreferredAudioLang    string               `json:"preferred_audio_lang"`
+	PreferredSubtitleLang string               `json:"preferred_subtitle_lang"`
+	SubtitleMode          string               `json:"subtitle_mode"`
+	SDHSearch             string               `json:"sdh_search"`
+	ForcedSearch          string               `json:"forced_search"`
+	SubtitleAppearance    SubtitleAppearance   `json:"subtitle_appearance"`
 }
 
 func defaultSubtitleAppearance() SubtitleAppearance {
 	return SubtitleAppearance{
-		TextSize:  "normal",
-		TextColor: "white",
-		Shadow:    "shadow",
-		BgColor:   "blue",
-		BgOpacity: 100,
-		PosBottom: 5,
-		PosTop:    5,
+		TextSize:   "normal",
+		TextColor:  "white",
+		Shadow:     "shadow",
+		BgColor:    "blue",
+		BgOpacity:  100,
+		PosBottom:  5,
+		PosTop:     5,
 	}
 }
 

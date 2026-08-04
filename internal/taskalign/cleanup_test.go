@@ -24,7 +24,6 @@ func openCleanupTestDB(t *testing.T) *sql.DB {
 			(14,1,'cleanup-14',1);
 		INSERT INTO post_ingest_task(media_id,generation,task_type,status,max_attempts) VALUES
 			(11,2,'subtitle','failed',3),
-			(11,2,'subtitle_recognize','failed',3),
 			(11,1,'subtitle','done',3),
 			(12,1,'preview','waiting',3),
 			(12,1,'atrack','cancelled',3),
@@ -52,14 +51,8 @@ func TestDeleteCurrentGenQueueTasksRemovesTerminalRows(t *testing.T) {
 	if err := DeleteCurrentGenQueueTasks(ctx, db, "subtitle", 11); err != nil {
 		t.Fatal(err)
 	}
-	if err := DeleteCurrentGenQueueTasks(ctx, db, "subtitle_recognize", 11); err != nil {
-		t.Fatal(err)
-	}
 	if got := countQueue(t, db, 11, "subtitle", "failed"); got != 0 {
 		t.Fatalf("current-gen failed should be deleted, got %d", got)
-	}
-	if got := countQueue(t, db, 11, "subtitle_recognize", "failed"); got != 0 {
-		t.Fatalf("recognize failed should be deleted, got %d", got)
 	}
 	if got := countQueue(t, db, 11, "subtitle", "done"); got != 1 {
 		t.Fatalf("prior-gen done should remain, got %d", got)

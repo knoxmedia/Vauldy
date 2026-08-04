@@ -347,7 +347,7 @@ func TestAdminRetryTerminalIngestCreatesNewGenerationWithAllExecutions(t *testin
 	h.App.DB.QueryRow(`SELECT COUNT(*) FROM post_ingest_task WHERE media_id=101 AND generation=2`).Scan(&post)
 	h.App.DB.QueryRow(`SELECT COUNT(*) FROM scrape_task WHERE media_id=101 AND generation=2`).Scan(&scrape)
 	h.App.DB.QueryRow(`SELECT COUNT(*) FROM media_ingest_step WHERE media_id=101 AND generation=2 AND step_type='encrypt' AND required=1`).Scan(&encrypt)
-	if generation != 2 || runs != 1 || steps != 4 || post != 2 || scrape != 1 || encrypt != 1 {
+	if generation != 2 || runs != 1 || steps != 3 || post != 2 || scrape != 1 || encrypt != 1 {
 		t.Fatalf("generation=%d runs=%d steps=%d post=%d scrape=%d encrypt=%d", generation, runs, steps, post, scrape, encrypt)
 	}
 	c, w = adminIngestContext(http.MethodPost, "/api/v1/admin/media/101/ingest/retry", "101")
@@ -401,7 +401,7 @@ func TestAdminRetryDegradedUsesFreshCurrentPolicyExecutions(t *testing.T) {
 	h.App.DB.QueryRow(`SELECT COUNT(*) FROM media_ingest_step WHERE media_id=102 AND generation=2`).Scan(&steps)
 	h.App.DB.QueryRow(`SELECT (SELECT COUNT(*) FROM post_ingest_task WHERE media_id=102 AND generation=2)+(SELECT COUNT(*) FROM scrape_task WHERE media_id=102 AND generation=2)`).Scan(&executions)
 	h.App.DB.QueryRow(`SELECT COUNT(*) FROM media_ingest_step WHERE media_id=102 AND generation=2 AND step_type IN ('keyframe','atrack')`).Scan(&legacy)
-	if steps != 4 || executions != 3 || legacy != 0 {
+	if steps != 3 || executions != 3 || legacy != 0 {
 		t.Fatalf("steps=%d executions=%d legacy=%d", steps, executions, legacy)
 	}
 }

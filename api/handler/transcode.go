@@ -152,22 +152,7 @@ func (h *Handler) RetryTranscodeTask(c *gin.Context) {
 		return
 	}
 
-	var taskType string
-	if err := h.App.DB.QueryRow(`SELECT COALESCE(task_type,'batch') FROM transcode_task WHERE id=?`, id).Scan(&taskType); err == nil && taskType == "pretranscode" {
-		mod := pretranscodeModule()
-		if mod == nil {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "pretranscode module not available"})
-			return
-		}
-		if err := mod.Task.RetryTask(id); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
-		c.JSON(http.StatusAccepted, gin.H{"ok": true, "status": "waiting", "task_id": id})
-		return
-	}
-
-	res, err := h.App.DB.Exec(`UPDATE transcode_task SET status='waiting', progress=0, error_message=NULL WHERE id=? AND status IN ('failed','cancelled') AND COALESCE(task_type,'batch')='batch'`, id)
+	res, err := h.App.DB.Exec(`UPDATE transcode_task SET status='waiting', progress=0, error_message=NULL WHERE id=? AND status IN ('failed','cancelled')`, id)
 	if err == nil {
 		n, _ := res.RowsAffected()
 		if n > 0 {

@@ -413,8 +413,7 @@ func searchOMDbCandidate(keyword string, year int, apiKey string) (MatchCandidat
 		Plot     string `json:"Plot"`
 		Poster   string `json:"Poster"`
 		Released string `json:"Released"`
-		IMDbID   string `json:"imdbID"`
-		Type     string `json:"Type"`
+		imdbID   string `json:"imdbID"`
 	}
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return MatchCandidate{}, err
@@ -422,17 +421,9 @@ func searchOMDbCandidate(keyword string, year int, apiKey string) (MatchCandidat
 	if !strings.EqualFold(resp.Response, "True") {
 		return MatchCandidate{}, fmt.Errorf("omdb no result")
 	}
-	mediaType := ""
-	switch strings.ToLower(strings.TrimSpace(resp.Type)) {
-	case "series", "tv", "show":
-		mediaType = "tv"
-	case "movie":
-		mediaType = "movie"
-	}
 	return MatchCandidate{
 		Source:      "omdb",
-		MediaType:   mediaType,
-		ExternalID:  resp.IMDbID,
+		ExternalID:  resp.imdbID,
 		Title:       resp.Title,
 		Overview:    resp.Plot,
 		Poster:      noneAsEmpty(resp.Poster),
@@ -458,7 +449,7 @@ func fetchOMDbByID(externalID, apiKey string) (*ScrapeResult, error) {
 		Released   string `json:"Released"`
 		IMDBRating string `json:"imdbRating"`
 		Genre      string `json:"Genre"`
-		IMDbID     string `json:"imdbID"`
+		imdbID     string `json:"imdbID"`
 	}
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, err
@@ -483,8 +474,8 @@ func fetchOMDbByID(externalID, apiKey string) (*ScrapeResult, error) {
 		Rating:      rating,
 		Genres:      genres,
 		Extra: map[string]any{
-			"poster":  noneAsEmpty(resp.Poster),
-			"imdb_id": resp.IMDbID,
+			"poster":   noneAsEmpty(resp.Poster),
+			"imdb_id":  resp.imdbID,
 		},
 	}, nil
 }

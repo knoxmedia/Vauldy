@@ -226,7 +226,7 @@ func ParseForMedia(db *sql.DB, vault *keystore.Vault, mediaID int64, filePath st
 	}
 	work := filePath
 	if storage.InputNeedsPipe(db, mediaID, filePath) {
-		tmp, cleanup, err := storage.MaterializePlaintextTempUnsafeLegacy(db, vault, mediaID, filePath)
+		tmp, cleanup, err := storage.MaterializePlaintextTemp(db, vault, mediaID, filePath)
 		if err != nil {
 			return PhotoMeta{Title: strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filePath))}
 		}

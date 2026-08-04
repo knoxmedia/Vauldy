@@ -46,7 +46,7 @@ func TestEnqueuer_RespectsCapabilities(t *testing.T) {
 		want                            []TaskType
 	}{
 		{"video defaults", "video", 0, false, false, false, 0, []TaskType{TaskPoster, TaskKeyframe}},
-		{"all video capabilities", "video", 1, true, true, true, 1, []TaskType{TaskPoster, TaskPreview, TaskKeyframe, TaskSubtitle, TaskAtrack, TaskEncrypt}},
+		{"all video capabilities", "video", 1, true, true, true, 1, []TaskType{TaskPoster, TaskPreview, TaskKeyframe, TaskSubtitle, TaskAtrack}},
 		{"library disables encryption", "video", 0, true, true, true, 0, []TaskType{TaskPoster, TaskKeyframe, TaskSubtitle, TaskAtrack}},
 		{"global disables encryption", "video", 0, true, true, false, 1, []TaskType{TaskPoster, TaskKeyframe, TaskSubtitle, TaskAtrack}},
 		{"non video has no first batch tasks", "image", 1, true, true, true, 1, nil},
@@ -55,7 +55,7 @@ func TestEnqueuer_RespectsCapabilities(t *testing.T) {
 		db, _ := openQueueTestDB(t)
 		mediaID, scanID := seedEnqueueMedia(t, db, "video", 0, 1)
 		got, err := NewEnqueuer(db, &config.Config{}, nil).EnqueueMedia(context.Background(), mediaID, &scanID, "video")
-		want := []TaskType{TaskPoster, TaskKeyframe, TaskSubtitle, TaskAtrack, TaskEncrypt}
+		want := []TaskType{TaskPoster, TaskKeyframe, TaskSubtitle, TaskAtrack}
 		if err != nil || !reflect.DeepEqual(got, want) {
 			t.Fatalf("zero config=(%v,%v) want %v", got, err, want)
 		}
@@ -111,7 +111,7 @@ func TestEnqueuer_UsesLoadedConfigDefaults(t *testing.T) {
 	db, _ := openQueueTestDB(t)
 	mediaID, scanID := seedEnqueueMedia(t, db, "video", 1, 1)
 	got, err := NewEnqueuer(db, cfg, nil).EnqueueMedia(context.Background(), mediaID, &scanID, "video")
-	want := []TaskType{TaskPoster, TaskPreview, TaskKeyframe, TaskSubtitle, TaskAtrack, TaskEncrypt}
+	want := []TaskType{TaskPoster, TaskPreview, TaskKeyframe, TaskSubtitle, TaskAtrack}
 	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("loaded defaults=(%v,%v) want %v", got, err, want)
 	}
@@ -160,7 +160,7 @@ func TestEnqueuer_KeepsOriginalScanOwnership(t *testing.T) {
 	scanTwo, _ := res.LastInsertId()
 	cfg := &config.Config{Subtitle: config.SubtitleProcessingConfig{AutoOnScan: boolPtr(true)}, ATrack: config.ATrackConfig{AutoOnScan: boolPtr(true)}, EncryptedAssets: config.EncryptedAssetsConfig{Enabled: boolPtr(true)}}
 	e := NewEnqueuer(db, cfg, nil)
-	want := []TaskType{TaskPoster, TaskPreview, TaskKeyframe, TaskSubtitle, TaskAtrack, TaskEncrypt}
+	want := []TaskType{TaskPoster, TaskPreview, TaskKeyframe, TaskSubtitle, TaskAtrack}
 	got, err := e.EnqueueMedia(context.Background(), mediaID, &scanOne, "video")
 	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("first=(%v,%v)", got, err)
@@ -226,7 +226,7 @@ func TestEnqueuer_PreservesDomainTables(t *testing.T) {
 		FROM post_ingest_task WHERE media_id=?`, mediaID).Scan(&waitingDefaults, &attemptsDefaults, &maxAttemptsLocal, &availableDefaults); err != nil {
 		t.Fatal(err)
 	}
-	if waitingDefaults != 6 || attemptsDefaults != 6 || maxAttemptsLocal != 6 || availableDefaults != 6 {
+	if waitingDefaults != 5 || attemptsDefaults != 5 || maxAttemptsLocal != 5 || availableDefaults != 5 {
 		t.Fatalf("enqueue defaults waiting=%d attempts=%d max=%d available=%d", waitingDefaults, attemptsDefaults, maxAttemptsLocal, availableDefaults)
 	}
 	for table, want := range map[string]string{"preview_task": "done", "subtitle_task": "failed", "atrack_task": "done", "keyframe_task": "failed"} {

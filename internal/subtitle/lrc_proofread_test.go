@@ -79,10 +79,10 @@ func TestParseLRCCuesMultiTimestamp(t *testing.T) {
 
 func TestSplitLRCLyricLine(t *testing.T) {
 	cases := []struct {
-		line   string
-		prefix string
-		text   string
-		ok     bool
+		line     string
+		prefix   string
+		text     string
+		ok       bool
 	}{
 		{"[00:12.34]Hello world", "[00:12.34]", "Hello world", true},
 		{"  [00:12.34]  spaced  ", "[00:12.34]", "spaced", true},
@@ -110,10 +110,7 @@ func TestProofreadLRCReassemblyLogic(t *testing.T) {
 	raw := "[ti:Title]\n[ar:Artist]\n[00:01.00]heloo wrold\n[00:03.50]seconnd lne\n"
 	lines := splitLines(raw)
 	out := make([]string, len(lines))
-	type entry struct {
-		prefix, text string
-		idx          int
-	}
+	type entry struct{ prefix, text string; idx int }
 	var lyrics []entry
 	for i, l := range lines {
 		out[i] = l

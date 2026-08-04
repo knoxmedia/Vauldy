@@ -154,15 +154,12 @@ func RetryOptionalScrape(ctx context.Context, db *sql.DB, req OptionalScrapeRetr
 			if n, _ := r.RowsAffected(); n != 1 {
 				return ErrNoRetryableWork
 			}
-			r, err = tx.ExecContext(attempt, `UPDATE media_ingest_step SET status='waiting',attempts=0,retry_round=?,last_error='',lease_owner=NULL,lease_until=NULL,started_at=NULL,finished_at=NULL,available_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND run_id=? AND generation=? AND required=0 AND status IN ('failed','cancelled') AND retry_round=?`, nextRound, req.StepID, runID, generation, queueRound)
+			r, err = tx.ExecContext(attempt, `UPDATE media_ingest_step SET status='waiting',attempts=0,last_error='',lease_owner=NULL,lease_until=NULL,started_at=NULL,finished_at=NULL,available_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND run_id=? AND generation=? AND required=0 AND status IN ('failed','cancelled')`, req.StepID, runID, generation)
 			if err != nil {
 				return err
 			}
 			if n, _ := r.RowsAffected(); n != 1 {
 				return ErrNoRetryableWork
-			}
-			if err := FinalizeNodeTransitionTx(attempt, tx, runID); err != nil {
-				return err
 			}
 			changed = true
 			return nil
@@ -187,8 +184,6 @@ func RetryOptionalScrape(ctx context.Context, db *sql.DB, req OptionalScrapeRetr
 }
 
 // RetryOptionalPostIngest reopens one exhausted optional post-ingest step without changing the terminal publication outcome.
-// It keeps the historical attempts-reset behavior for claim eligibility while sharing ReopenNodeTx fencing/audit
-// fields (retry_round) and routing projection through FinalizeNodeTransitionTx.
 func RetryOptionalPostIngest(ctx context.Context, db *sql.DB, req OptionalPostIngestRetryRequest) error {
 	if db == nil || req.MediaID <= 0 || req.StepID <= 0 || req.ActorID <= 0 || strings.TrimSpace(req.Reason) == "" {
 		return ErrNoRetryableWork
@@ -200,20 +195,20 @@ func RetryOptionalPostIngest(ctx context.Context, db *sql.DB, req OptionalPostIn
 		outcome, err := store.WithImmediateConnTx(attempt, db, func(tx store.ImmediateConnTx) error {
 			var runID, generation int64
 			var mediaState, runState, stepType, stepStatus, queueStatus, queueError, stepError string
-			var attempts, queueAttempts, queueMaxAttempts, queueRound, stepRound int
-			err := tx.QueryRowContext(attempt, `SELECT r.id,r.generation,m.publication_state,r.status,s.step_type,s.status,s.attempts,s.last_error,s.retry_round,q.status,q.attempts,q.max_attempts,q.last_error,q.retry_round FROM media m JOIN media_ingest_run r ON r.media_id=m.id AND r.generation=m.ingest_generation JOIN media_ingest_step s ON s.run_id=r.id AND s.media_id=m.id AND s.generation=r.generation JOIN post_ingest_task q ON q.ingest_step_id=s.id AND q.ingest_run_id=r.id AND q.media_id=m.id AND q.generation=r.generation WHERE m.id=? AND s.id=? AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL`, req.MediaID, req.StepID).Scan(&runID, &generation, &mediaState, &runState, &stepType, &stepStatus, &attempts, &stepError, &stepRound, &queueStatus, &queueAttempts, &queueMaxAttempts, &queueError, &queueRound)
+			var attempts, queueAttempts, queueMaxAttempts, queueRound int
+			err := tx.QueryRowContext(attempt, `SELECT r.id,r.generation,m.publication_state,r.status,s.step_type,s.status,s.attempts,s.last_error,q.status,q.attempts,q.max_attempts,q.last_error,q.retry_round FROM media m JOIN media_ingest_run r ON r.media_id=m.id AND r.generation=m.ingest_generation JOIN media_ingest_step s ON s.run_id=r.id AND s.media_id=m.id AND s.generation=r.generation JOIN post_ingest_task q ON q.ingest_step_id=s.id AND q.ingest_run_id=r.id AND q.media_id=m.id AND q.generation=r.generation WHERE m.id=? AND s.id=? AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL`, req.MediaID, req.StepID).Scan(&runID, &generation, &mediaState, &runState, &stepType, &stepStatus, &attempts, &stepError, &queueStatus, &queueAttempts, &queueMaxAttempts, &queueError, &queueRound)
 			if errors.Is(err, sql.ErrNoRows) {
 				return ErrNoRetryableWork
 			}
 			if err != nil {
 				return err
 			}
-			if (mediaState != "published" && mediaState != "degraded") || (runState != "published" && runState != "degraded") || (stepType != "preview" && stepType != "subtitle") || (stepStatus != "failed" && stepStatus != "cancelled") || (queueStatus != "failed" && queueStatus != "cancelled") || queueAttempts < queueMaxAttempts || stepRound != queueRound {
+			if (mediaState != "published" && mediaState != "degraded") || (runState != "published" && runState != "degraded") || (stepType != "preview" && stepType != "subtitle") || (stepStatus != "failed" && stepStatus != "cancelled") || (queueStatus != "failed" && queueStatus != "cancelled") || queueAttempts < queueMaxAttempts {
 				return ErrNoRetryableWork
 			}
 			nextRound := queueRound + 1
 			committedRetryRound = nextRound
-			_, err = tx.ExecContext(attempt, `INSERT INTO media_ingest_optional_retry_audit(media_id,run_id,step_id,task_id,generation,task_family,task_type,actor_id,reason,previous_queue_status,previous_step_status,previous_attempts,previous_queue_error,previous_step_error,retry_round) SELECT ?,?,?,q.id,?,?,?,?,?,?,?,?,?,?,? FROM post_ingest_task q WHERE q.ingest_step_id=? AND q.ingest_run_id=? AND q.generation=?`, req.MediaID, runID, req.StepID, generation, "post_ingest", stepType, req.ActorID, req.Reason, queueStatus, stepStatus, attempts, queueError, stepError, nextRound, req.StepID, runID, generation)
+			_, err = tx.ExecContext(attempt, `INSERT INTO media_ingest_optional_retry_audit(media_id,run_id,step_id,generation,task_family,task_type,actor_id,reason,previous_queue_status,previous_step_status,previous_attempts,previous_queue_error,previous_step_error,retry_round) VALUES(?,?,?,?, 'post_ingest',?,?,?,?,?,?,?,?,?)`, req.MediaID, runID, req.StepID, generation, stepType, req.ActorID, req.Reason, queueStatus, stepStatus, attempts, queueError, stepError, nextRound)
 			if err != nil {
 				return err
 			}
@@ -224,15 +219,12 @@ func RetryOptionalPostIngest(ctx context.Context, db *sql.DB, req OptionalPostIn
 			if n, _ := r.RowsAffected(); n != 1 {
 				return ErrNoRetryableWork
 			}
-			r, err = tx.ExecContext(attempt, `UPDATE media_ingest_step SET status='waiting',attempts=0,retry_round=?,last_error='',lease_owner=NULL,lease_until=NULL,started_at=NULL,finished_at=NULL,available_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND run_id=? AND generation=? AND required=0 AND status IN ('failed','cancelled') AND retry_round=?`, nextRound, req.StepID, runID, generation, stepRound)
+			r, err = tx.ExecContext(attempt, `UPDATE media_ingest_step SET status='waiting',attempts=0,last_error='',lease_owner=NULL,lease_until=NULL,started_at=NULL,finished_at=NULL,available_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND run_id=? AND generation=? AND required=0 AND status IN ('failed','cancelled')`, req.StepID, runID, generation)
 			if err != nil {
 				return err
 			}
 			if n, _ := r.RowsAffected(); n != 1 {
 				return ErrNoRetryableWork
-			}
-			if err := FinalizeNodeTransitionTx(attempt, tx, runID); err != nil {
-				return err
 			}
 			changed = true
 			return nil
@@ -341,15 +333,12 @@ func RetryOptionalPrepare(ctx context.Context, db *sql.DB, req OptionalPrepareRe
 					return err
 				}
 			}
-			res, err = tx.ExecContext(attempt, `UPDATE media_ingest_step SET status='waiting',attempts=0,retry_round=?,last_error='',lease_owner=NULL,lease_until=NULL,started_at=NULL,finished_at=NULL,available_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND run_id=? AND media_id=? AND generation=? AND step_type='prepare' AND required=0 AND status IN ('failed','cancelled') AND attempts>=max_attempts AND retry_round=?`, committedRound, req.StepID, runID, req.MediaID, generation, previousRound)
+			res, err = tx.ExecContext(attempt, `UPDATE media_ingest_step SET status='waiting',attempts=0,last_error='',lease_owner=NULL,lease_until=NULL,started_at=NULL,finished_at=NULL,available_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND run_id=? AND media_id=? AND generation=? AND step_type='prepare' AND required=0 AND status IN ('failed','cancelled') AND attempts>=max_attempts`, req.StepID, runID, req.MediaID, generation)
 			if err != nil {
 				return err
 			}
 			if n, _ := res.RowsAffected(); n != 1 {
 				return ErrNoRetryableWork
-			}
-			if err := FinalizeNodeTransitionTx(attempt, tx, runID); err != nil {
-				return err
 			}
 			changed = true
 			return nil

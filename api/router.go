@@ -11,16 +11,8 @@ import (
 	"knox-media/api/middleware"
 	"knox-media/internal/app"
 	"knox-media/internal/config"
-	"knox-media/internal/coreiface"
 	"knox-media/internal/metadatalib"
 )
-
-// pretranscodeLicenseMiddleware gates the commercial pretranscode routes on
-// a valid license with the pretranscode feature enabled. In the community
-// build (no license module init), the middleware 403s all requests.
-func pretranscodeLicenseMiddleware() gin.HandlerFunc {
-	return handler.PretranscodeLicenseMiddleware()
-}
 
 func NewEngine(cfg *config.Config, application *app.App, deps handler.Dependencies) *gin.Engine {
 	if deps.ServerContext == nil || deps.Background == nil {
@@ -42,6 +34,8 @@ func NewEngine(cfg *config.Config, application *app.App, deps handler.Dependenci
 	if deps.DocCoverWorker != nil {
 		deps.DocCoverWorker.SetOnCoverReady(h.ScheduleLibraryPreviewRefreshForMedia)
 	}
+	// Defer claim loops until publication v2 startup finishes preflight/recovery.
+	// Preview/subtitle/keyframe/atrack execute through the post-ingest dispatcher.
 	startLoop := func(loop func(context.Context)) {
 		deps.Background.Go(deps.ServerContext, func(ctx context.Context) {
 			if deps.StartupReady != nil {
@@ -71,7 +65,7 @@ func NewEngine(cfg *config.Config, application *app.App, deps handler.Dependenci
 			case <-ctx.Done():
 				return
 			case <-timer.C:
-				deps.DocCoverWorker.BackfillAllLibrariesContext(ctx)
+				deps.DocCoverWorker.BackfillAllLibraries()
 			}
 		})
 	}
@@ -169,16 +163,6 @@ func NewEngine(cfg *config.Config, application *app.App, deps handler.Dependenci
 			auth.GET("/media/:id/subtitles", h.ListMediaSubtitles)
 			auth.GET("/media/:id/lyrics", h.GetMediaLyrics)
 
-			// Media optimization (SRS 5.6, license-gated)
-			opt := auth.Group("")
-			opt.Use(pretranscodeLicenseMiddleware())
-			{
-				opt.GET("/media/:id/optimization", h.GetMediaOptimization)
-				opt.POST("/media/:id/optimization", h.CreateMediaOptimization)
-				opt.DELETE("/media/:id/optimization/renditions/:rid", h.RemoveOptimizationRendition)
-				opt.DELETE("/media/:id/optimization/renditions", h.BatchRemoveOptimizationRenditions)
-			}
-
 			auth.GET("/playlists", h.ListPlaylists)
 			auth.POST("/playlists", h.CreatePlaylist)
 			auth.GET("/playlists/:id", h.GetPlaylist)
@@ -205,7 +189,6 @@ func NewEngine(cfg *config.Config, application *app.App, deps handler.Dependenci
 			play.POST("/media/:id/playback/end", h.PlaybackEnd)
 			play.GET("/media/:id/hls", h.HLSInfo)
 			play.GET("/media/:id/hls/*asset", h.HLSAsset)
-			play.GET("/media/:id/pretranscode/info", h.GetPretranscodeHLSInfo)
 			play.GET("/media/:id/dash/*asset", h.DashAsset)
 			play.GET("/media/:id/preview", h.PreviewInfo)
 			play.GET("/media/:id/preview/sprite.jpg", h.PreviewSprite)
@@ -249,7 +232,6 @@ func NewEngine(cfg *config.Config, application *app.App, deps handler.Dependenci
 		admStream.Use(middleware.RequireAdmin())
 		{
 			admStream.GET("/admin/overview/stream", h.AdminOverviewStream)
-			admStream.GET("/admin/tasks/stream", h.TaskControlStream)
 		}
 
 		// Admin only: media management + uploads + transcode control
@@ -395,89 +377,6 @@ func NewEngine(cfg *config.Config, application *app.App, deps handler.Dependenci
 			adm.PUT("/admin/users/:id", h.UpdateUserAdmin)
 			adm.DELETE("/admin/users/:id", h.DeleteUserAdmin)
 			adm.POST("/admin/users/:id/reset-password", h.ResetUserPasswordAdmin)
-
-			// --- Scheduler runtime overrides and controls ---
-			adm.GET("/admin/scheduler/policy", h.SchedulerAdminGetPolicy)
-			adm.PUT("/admin/scheduler/policy", h.SchedulerAdminPutPolicy)
-			adm.PATCH("/admin/scheduler/policy", h.SchedulerAdminPatchPolicy)
-			adm.POST("/admin/scheduler/control", h.SchedulerAdminControl)
-			adm.POST("/admin/scheduler/explain", h.SchedulerAdminExplainTask)
-
-			// --- Unified task control plane (Phase 4) ---
-			adm.GET("/admin/tasks/registry", h.TaskControlRegistry)
-			adm.GET("/admin/tasks/overview", h.TaskControlOverview)
-			adm.GET("/admin/tasks", h.TaskControlList)
-			adm.GET("/admin/tasks/:task_id", h.TaskControlDetail)
-			adm.POST("/admin/tasks/:task_id/actions", h.TaskControlActions)
-			adm.POST("/admin/tasks/batch", h.TaskControlBatch)
-
-			// --- Enterprise modules (commercial) ---
-			// Register routes from enterprise modules (e.g., license status).
-			// The community build leaves EnterpriseModules empty, so this is a no-op.
-			for _, mod := range coreiface.EnterpriseModules {
-				mod.RegisterRoutes(adm, coreiface.ModuleDeps{
-					DB:           application.DB,
-					Config:       cfg,
-					Vault:        deps.KeyVault,
-					TranscodeDir: cfg.Data.Transcode,
-					FFmpegPath:   cfg.FFmpeg.FFmpegPath,
-					FFprobePath:  cfg.FFmpeg.FFprobePath,
-				})
-			}
-
-			// --- Pretranscode (commercial; license-gated) ---
-			// Routes are registered unconditionally here; the license
-			// middleware (applied per group) returns 403 when the feature is
-			// not licensed. In the community build (no license module init)
-			// the middleware also 403s, keeping these endpoints inert.
-			pre := adm.Group("/")
-			pre.Use(pretranscodeLicenseMiddleware())
-			{
-				// Preset CRUD (SRS 5.1)
-				pre.GET("/admin/settings/pretranscode-presets", h.ListPresets)
-				pre.POST("/admin/settings/pretranscode-presets", h.CreatePreset)
-				pre.GET("/admin/settings/pretranscode-presets/:id", h.GetPreset)
-				pre.PUT("/admin/settings/pretranscode-presets/:id", h.UpdatePreset)
-				pre.DELETE("/admin/settings/pretranscode-presets/:id", h.DeletePreset)
-				pre.POST("/admin/settings/pretranscode-presets/:id/clone", h.ClonePreset)
-				pre.PUT("/admin/settings/pretranscode-presets/:id/toggle", h.TogglePreset)
-				pre.GET("/admin/settings/pretranscode-presets/:id/renditions", h.ListRenditions)
-				pre.POST("/admin/settings/pretranscode-presets/:id/renditions", h.AddRendition)
-				pre.PUT("/admin/settings/pretranscode-presets/:id/renditions/:rid", h.UpdateRendition)
-				pre.DELETE("/admin/settings/pretranscode-presets/:id/renditions/:rid", h.DeleteRendition)
-				pre.PUT("/admin/settings/pretranscode-presets/:id/renditions/sort", h.SortRenditions)
-
-				// Unified tasks (SRS 5.2)
-				pre.GET("/admin/transcode/tasks", h.ListUnifiedTasks)
-				pre.POST("/admin/transcode/tasks", h.CreatePretranscodeTask)
-				pre.POST("/admin/transcode/batch", h.CreateBatchPretranscodeTask)
-				pre.GET("/admin/transcode/tasks/:id", h.GetPretranscodeTask)
-				pre.DELETE("/admin/transcode/tasks/:id", h.DeletePretranscodeTask)
-				pre.POST("/admin/transcode/tasks/:id/cancel", h.CancelPretranscodeTask)
-				pre.POST("/admin/transcode/tasks/:id/retry", h.RetryPretranscodeTask)
-				pre.POST("/admin/transcode/tasks/:id/pause", h.PausePretranscodeTask)
-				pre.POST("/admin/transcode/tasks/:id/resume", h.ResumePretranscodeTask)
-				pre.GET("/admin/transcode/tasks/:id/renditions", h.ListRenditionJobs)
-				pre.POST("/admin/transcode/tasks/:id/renditions/:job_id/cancel", h.CancelRenditionJob)
-				pre.POST("/admin/transcode/tasks/:id/renditions/:job_id/retry", h.RetryRenditionJob)
-				pre.POST("/admin/transcode/cleanup-failed", h.CleanupFailedPretranscodeTasks)
-				pre.GET("/admin/transcode/storage", h.GetPretranscodeStorage)
-				pre.POST("/admin/transcode/cleanup", h.CleanupPretranscodeOutputs)
-
-				// Webhook CRUD (SRS 5.3)
-				pre.GET("/admin/settings/pretranscode-webhooks", h.ListWebhooks)
-				pre.POST("/admin/settings/pretranscode-webhooks", h.CreateWebhook)
-				pre.PUT("/admin/settings/pretranscode-webhooks/:id", h.UpdateWebhook)
-				pre.DELETE("/admin/settings/pretranscode-webhooks/:id", h.DeleteWebhook)
-				pre.POST("/admin/settings/pretranscode-webhooks/:id/test", h.TestWebhook)
-				pre.GET("/admin/settings/pretranscode-webhooks/:id/logs", h.ListWebhookLogs)
-
-				// Cluster stubs (SRS 5.4)
-				pre.GET("/admin/transcode/cluster/nodes", h.ListClusterNodes)
-				pre.GET("/admin/transcode/cluster/stats", h.GetClusterStats)
-				// Available encoders (for admin UI codec dropdown)
-				pre.GET("/admin/transcode/encoders", h.ListAvailableEncoders)
-			}
 		}
 	}
 

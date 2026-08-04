@@ -4,12 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"net/url"
-	"path/filepath"
-	"runtime"
 	"strings"
-	"sync"
-	"sync/atomic"
 
 	_ "modernc.org/sqlite"
 
@@ -31,19 +26,6 @@ CREATE TABLE IF NOT EXISTS library (
     image_providers TEXT DEFAULT 'tmdb,omdb,embedded,screen_grabber',
     metadata_refresh_policy TEXT DEFAULT 'never',
     preview_extract INTEGER DEFAULT 0,
-    subtitle_extract INTEGER NOT NULL DEFAULT 0,
-    atrack_extract INTEGER NOT NULL DEFAULT 0,
-    subtitle_recognize INTEGER NOT NULL DEFAULT 0,
-    keyframe_extract INTEGER NOT NULL DEFAULT 0,
-    ai_analysis INTEGER NOT NULL DEFAULT 0,
-    lyric_recognize INTEGER NOT NULL DEFAULT 0,
-    audio_analysis INTEGER NOT NULL DEFAULT 0,
-    photo_classify INTEGER NOT NULL DEFAULT 0,
-    photo_geocode INTEGER NOT NULL DEFAULT 0,
-    photo_face INTEGER NOT NULL DEFAULT 0,
-    image_ocr INTEGER NOT NULL DEFAULT 0,
-    document_convert INTEGER NOT NULL DEFAULT 0,
-    document_fulltext INTEGER NOT NULL DEFAULT 0,
     encryption_mode TEXT DEFAULT 'drm',
     scraper TEXT DEFAULT 'tmdb',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -170,8 +152,7 @@ CREATE TABLE IF NOT EXISTS package_task (
     error_message TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (media_id) REFERENCES media(id),
-    UNIQUE(id,media_id)
+    FOREIGN KEY (media_id) REFERENCES media(id)
 );
 
 CREATE TABLE IF NOT EXISTS drm_asset (
@@ -279,8 +260,7 @@ CREATE TABLE IF NOT EXISTS media_ingest_run (
     media_id INTEGER NOT NULL,
     generation INTEGER NOT NULL CHECK (generation > 0),
     scan_task_id INTEGER,
-    ingest_item_id INTEGER,
-    reason TEXT NOT NULL CHECK (reason IN ('scan','repair','manual_retry','event','upload','source_replaced')),
+    reason TEXT NOT NULL CHECK (reason IN ('scan','repair','manual_retry')),
     status TEXT NOT NULL CHECK (status IN ('processing','published','degraded','failed','cancelled')),
     preserve_visibility INTEGER NOT NULL DEFAULT 0 CHECK (preserve_visibility IN (0,1)),
     config_snapshot_json TEXT NOT NULL CHECK (json_valid(config_snapshot_json)),
@@ -288,13 +268,8 @@ CREATE TABLE IF NOT EXISTS media_ingest_run (
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     finished_at TIMESTAMP,
-    policy_version INTEGER NOT NULL DEFAULT 1 CHECK(policy_version IN (1,2,3,4)),
-    terminal_reason TEXT NOT NULL DEFAULT '',
-    superseded_by_generation INTEGER,
-    superseded_at TIMESTAMP,
     FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE,
     FOREIGN KEY (scan_task_id) REFERENCES scan_task(id) ON DELETE SET NULL,
-    FOREIGN KEY (ingest_item_id) REFERENCES ingest_item(id) ON DELETE SET NULL,
     UNIQUE(media_id,generation),
     UNIQUE(id,media_id,generation)
 );
@@ -306,7 +281,7 @@ CREATE TABLE IF NOT EXISTS media_ingest_step (
     run_id INTEGER NOT NULL,
     media_id INTEGER NOT NULL,
     generation INTEGER NOT NULL CHECK (generation > 0),
-    step_type TEXT NOT NULL CHECK (step_type IN ('poster','scrape','preview','keyframe','subtitle','atrack','encrypt','prepare','thumbnail','package','pretranscode','metadata','media_visible','subtitle_extract','atrack_extract','subtitle_recognize','keyframe_extract','ai_analysis')),
+    step_type TEXT NOT NULL CHECK (step_type IN ('poster','scrape','preview','keyframe','subtitle','atrack','encrypt','prepare')),
     required INTEGER NOT NULL CHECK (required IN (0,1)),
     status TEXT NOT NULL CHECK (status IN ('waiting','running','done','skipped','failed','cancelled')),
     attempts INTEGER NOT NULL DEFAULT 0,
@@ -319,7 +294,6 @@ CREATE TABLE IF NOT EXISTS media_ingest_step (
     finished_at TIMESTAMP,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    retry_round INTEGER NOT NULL DEFAULT 0 CHECK(retry_round >= 0),
     FOREIGN KEY (run_id) REFERENCES media_ingest_run(id) ON DELETE CASCADE,
     FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE,
     FOREIGN KEY (media_id,generation) REFERENCES media_ingest_run(media_id,generation),
@@ -338,7 +312,6 @@ CREATE TABLE IF NOT EXISTS post_ingest_task (
     task_type TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'waiting',
     attempts INTEGER NOT NULL DEFAULT 0,
-    retry_round INTEGER NOT NULL DEFAULT 0 CHECK(retry_round >= 0),
     max_attempts INTEGER NOT NULL DEFAULT 3,
     available_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     lease_owner TEXT,
@@ -349,15 +322,6 @@ CREATE TABLE IF NOT EXISTS post_ingest_task (
     started_at TIMESTAMP,
     finished_at TIMESTAMP,
     priority INTEGER NOT NULL DEFAULT 0,
-    removed_at TIMESTAMP,
-    removed_by TEXT NOT NULL DEFAULT '',
-    remove_reason TEXT NOT NULL DEFAULT '',
-    source_class INTEGER NOT NULL DEFAULT 0,
-    base_priority INTEGER NOT NULL DEFAULT 0,
-    library_id INTEGER,
-    resource_profile_version INTEGER NOT NULL DEFAULT 0,
-    resource_profile_json TEXT NOT NULL DEFAULT '',
-    run_now_expires TIMESTAMP,
     FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE,
     FOREIGN KEY (scan_task_id) REFERENCES scan_task(id) ON DELETE SET NULL,
     FOREIGN KEY (ingest_run_id) REFERENCES media_ingest_run(id) ON DELETE CASCADE,
@@ -365,44 +329,11 @@ CREATE TABLE IF NOT EXISTS post_ingest_task (
     FOREIGN KEY (ingest_run_id,media_id,generation) REFERENCES media_ingest_run(id,media_id,generation),
     FOREIGN KEY (ingest_step_id,media_id,generation) REFERENCES media_ingest_step(id,media_id,generation),
     UNIQUE(media_id,generation,task_type),
-    CHECK (task_type IN ('poster','poster_repair','preview','keyframe','subtitle','atrack','encrypt','thumbnail','package','pretranscode','metadata','media_visible','subtitle_extract','atrack_extract','subtitle_recognize','keyframe_extract','ai_analysis')),
-    CHECK (status IN ('waiting','running','done','skipped','failed','cancelled'))
+    CHECK (task_type IN ('poster','preview','keyframe','subtitle','atrack','encrypt')),
+    CHECK (status IN ('waiting','running','done','failed','cancelled'))
 );
 CREATE INDEX IF NOT EXISTS idx_post_ingest_claim ON post_ingest_task(status,available_at,lease_until,created_at);
 CREATE INDEX IF NOT EXISTS idx_post_ingest_scan ON post_ingest_task(scan_task_id,status);
-
-CREATE TABLE IF NOT EXISTS media_encrypt_admin_audit (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id INTEGER NOT NULL,
-    media_id INTEGER NOT NULL,
-    generation INTEGER NOT NULL,
-    action TEXT NOT NULL CHECK(action IN ('reset','reset_from_removed','remove','purge','purge_rejected')),
-    actor_id INTEGER NOT NULL DEFAULT 0,
-    reason TEXT NOT NULL DEFAULT '',
-    previous_status TEXT NOT NULL,
-    previous_attempts INTEGER NOT NULL,
-    previous_retry_round INTEGER NOT NULL,
-    new_retry_round INTEGER NOT NULL DEFAULT 0,
-    previous_error TEXT NOT NULL DEFAULT '',
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY(task_id) REFERENCES post_ingest_task(id) ON DELETE RESTRICT
-);
-CREATE TABLE IF NOT EXISTS media_encrypt_admin_audit_archive (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id INTEGER NOT NULL,
-    media_id INTEGER NOT NULL,
-    generation INTEGER NOT NULL,
-    action TEXT NOT NULL,
-    actor_id INTEGER NOT NULL DEFAULT 0,
-    reason TEXT NOT NULL DEFAULT '',
-    previous_status TEXT NOT NULL DEFAULT '',
-    previous_attempts INTEGER NOT NULL DEFAULT 0,
-    previous_retry_round INTEGER NOT NULL DEFAULT 0,
-    new_retry_round INTEGER NOT NULL DEFAULT 0,
-    previous_error TEXT NOT NULL DEFAULT '',
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    archived_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
 
 CREATE TABLE IF NOT EXISTS user (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -642,10 +573,6 @@ CREATE TABLE IF NOT EXISTS subtitle_task (
     media_id INTEGER NOT NULL UNIQUE,
     status TEXT NOT NULL DEFAULT 'pending',
     message TEXT,
-    extract_status TEXT NOT NULL DEFAULT 'pending',
-    recognize_status TEXT NOT NULL DEFAULT 'pending',
-    extract_message TEXT,
-    recognize_message TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     started_at TIMESTAMP,
     finished_at TIMESTAMP,
@@ -842,33 +769,6 @@ func appendSQLitePragmas(path string) string {
 	return path + separator + "_pragma=busy_timeout(30000)&_pragma=foreign_keys(ON)&_pragma=synchronous(NORMAL)"
 }
 
-func isMemorySQLitePath(path string) bool {
-	raw := strings.TrimSpace(path)
-	if strings.EqualFold(raw, ":memory:") {
-		return true
-	}
-	if !strings.HasPrefix(strings.ToLower(raw), "file:") {
-		return false
-	}
-	if strings.EqualFold(strings.SplitN(raw, "?", 2)[0], "file::memory:") {
-		return true
-	}
-	parts := strings.SplitN(raw, "?", 2)
-	if len(parts) != 2 {
-		return false
-	}
-	values, err := url.ParseQuery(parts[1])
-	if err != nil {
-		return false
-	}
-	for key, vals := range values {
-		if strings.EqualFold(key, "mode") && len(vals) > 0 && strings.EqualFold(strings.TrimSpace(vals[0]), "memory") {
-			return true
-		}
-	}
-	return false
-}
-
 func withStartupBusyRetry(ctx context.Context, fn func() error) error {
 	return WithBusyRetry(ctx, nil, fn)
 }
@@ -877,82 +777,6 @@ func startupExecContext(ctx context.Context, db *sql.DB, query string, args ...a
 	var result sql.Result
 	err := withStartupBusyRetry(ctx, func() error { var err error; result, err = db.ExecContext(ctx, query, args...); return err })
 	return result, err
-}
-
-func normalizeSQLiteDefault(value string) string {
-	value = strings.TrimSpace(value)
-	for len(value) >= 2 && value[0] == '(' && value[len(value)-1] == ')' {
-		value = strings.TrimSpace(value[1 : len(value)-1])
-	}
-	if len(value) >= 2 && ((value[0] == '\'' && value[len(value)-1] == '\'') || (value[0] == '"' && value[len(value)-1] == '"')) {
-		value = strings.TrimSpace(value[1 : len(value)-1])
-	}
-	return value
-}
-
-type libraryProcessingColumnInfo struct {
-	typ          string
-	notNull      int
-	defaultValue sql.NullString
-}
-
-func libraryProcessingColumnMetadata(ctx context.Context, db *sql.DB, column string) (libraryProcessingColumnInfo, error) {
-	var info libraryProcessingColumnInfo
-	query := fmt.Sprintf(`SELECT type,"notnull",dflt_value FROM pragma_table_info(%q) WHERE name=?`, "library")
-	err := withStartupBusyRetry(ctx, func() error {
-		return db.QueryRowContext(ctx, query, column).Scan(&info.typ, &info.notNull, &info.defaultValue)
-	})
-	return info, err
-}
-
-func validateLibraryProcessingColumn(column string, info libraryProcessingColumnInfo) error {
-	if !strings.EqualFold(strings.TrimSpace(info.typ), "INTEGER") || info.notNull != 1 || !info.defaultValue.Valid || normalizeSQLiteDefault(info.defaultValue.String) != "0" {
-		return fmt.Errorf("incompatible library processing column %s: type=%q notnull=%d default=%q; want INTEGER NOT NULL DEFAULT 0", column, info.typ, info.notNull, info.defaultValue.String)
-	}
-	return nil
-}
-
-type libraryProcessingMetadataFunc func(context.Context, string) (libraryProcessingColumnInfo, error)
-type libraryProcessingAlterFunc func(context.Context, string) error
-
-func ensureLibraryProcessingColumnWith(ctx context.Context, column string, metadata libraryProcessingMetadataFunc, alter libraryProcessingAlterFunc) error {
-	info, err := metadata(ctx, column)
-	if err == nil {
-		return validateLibraryProcessingColumn(column, info)
-	}
-	if err != sql.ErrNoRows {
-		return err
-	}
-
-	alterErr := alter(ctx, column)
-	if alterErr == nil {
-		return nil
-	}
-
-	// Another startup may have added the column after our initial metadata read.
-	// Accept that race only when the competing DDL satisfies the canonical contract.
-	info, recheckErr := metadata(ctx, column)
-	if recheckErr == nil {
-		return validateLibraryProcessingColumn(column, info)
-	}
-	if recheckErr == sql.ErrNoRows {
-		return fmt.Errorf("add library processing column %s: %w (column still absent after failure)", column, alterErr)
-	}
-	return fmt.Errorf("add library processing column %s: %w; recheck metadata: %v", column, alterErr, recheckErr)
-}
-
-func ensureLibraryProcessingColumnContext(ctx context.Context, db *sql.DB, column string) error {
-	return ensureLibraryProcessingColumnWith(
-		ctx,
-		column,
-		func(ctx context.Context, column string) (libraryProcessingColumnInfo, error) {
-			return libraryProcessingColumnMetadata(ctx, db, column)
-		},
-		func(ctx context.Context, column string) error {
-			_, err := startupExecContext(ctx, db, fmt.Sprintf("ALTER TABLE library ADD COLUMN %s INTEGER NOT NULL DEFAULT 0", column))
-			return err
-		},
-	)
 }
 
 func ensureColumnContext(ctx context.Context, db *sql.DB, table, column, definition string) error {
@@ -975,175 +799,9 @@ func ensureColumnContext(ctx context.Context, db *sql.DB, table, column, definit
 	return err
 }
 
-// ensureSubtitleTaskStageColumns adds extract/recognize stage fields so split post-ingest
-// executors do not permanently poison each other through the shared status column.
-func ensureSubtitleTaskStageColumns(ctx context.Context, db *sql.DB) error {
-	for _, col := range []struct{ name, def string }{
-		{"extract_status", "TEXT NOT NULL DEFAULT 'pending'"},
-		{"recognize_status", "TEXT NOT NULL DEFAULT 'pending'"},
-		{"extract_message", "TEXT"},
-		{"recognize_message", "TEXT"},
-	} {
-		if err := ensureColumnContext(ctx, db, "subtitle_task", col.name, col.def); err != nil {
-			return err
-		}
-	}
-	// Legacy failed rows predate stage isolation: mark both stages failed so
-	// existing poison remains until an admin reset or successful stage rewrite.
-	_, err := startupExecContext(ctx, db, `
-UPDATE subtitle_task
-SET extract_status='failed',
-    recognize_status='failed',
-    extract_message=COALESCE(extract_message, message),
-    recognize_message=COALESCE(recognize_message, message)
-WHERE status='failed'
-  AND COALESCE(extract_status,'pending')='pending'
-  AND COALESCE(recognize_status,'pending')='pending'`)
-	return err
-}
-
-type sqliteStartupLockEntry struct {
-	gate chan struct{}
-	refs int
-}
-
-var sqliteStartupLocks = struct {
-	sync.Mutex
-	entries map[string]*sqliteStartupLockEntry
-}{entries: make(map[string]*sqliteStartupLockEntry)}
-
-var sqliteStartupPrivateMemorySequence atomic.Uint64
-
-func sqliteStartupLockIdentity(dsn string) string {
-	raw := strings.TrimSpace(dsn)
-	if strings.EqualFold(raw, ":memory:") {
-		// A plain :memory: database belongs to one connection/open. Giving each
-		// open a private key avoids serializing unrelated in-memory bootstraps.
-		return fmt.Sprintf("memory:private:%d", sqliteStartupPrivateMemorySequence.Add(1))
-	}
-	if strings.HasPrefix(strings.ToLower(raw), "file:") {
-		if sqliteURIUsesMemoryMode(raw) {
-			return "memory:named:" + canonicalSQLiteMemoryName(raw)
-		}
-		// For file-backed URIs, SQLite query options configure a connection, not
-		// the physical file. Reuse the diagnostics URI parser so escaped paths,
-		// relative paths, localhost, and UNC authorities resolve consistently.
-		return canonicalSQLiteFileLockKey(normalizeSQLiteIdentityPath(raw))
-	}
-	return canonicalSQLiteFileLockKey(raw)
-}
-
-func sqliteURIUsesMemoryMode(raw string) bool {
-	parts := strings.SplitN(raw, "?", 2)
-	if len(parts) != 2 {
-		return strings.EqualFold(parts[0], "file::memory:")
-	}
-	values, err := url.ParseQuery(parts[1])
-	if err != nil {
-		return strings.EqualFold(parts[0], "file::memory:")
-	}
-	for key, entries := range values {
-		if !strings.EqualFold(key, "mode") {
-			continue
-		}
-		for _, value := range entries {
-			if strings.EqualFold(strings.TrimSpace(value), "memory") {
-				return true
-			}
-		}
-	}
-	return strings.EqualFold(parts[0], "file::memory:")
-}
-
-func canonicalSQLiteMemoryName(raw string) string {
-	name := strings.SplitN(strings.TrimSpace(raw), "?", 2)[0]
-	name = name[len("file:"):]
-	if decoded, err := url.PathUnescape(name); err == nil {
-		name = decoded
-	}
-	name = strings.TrimSpace(name)
-	if runtime.GOOS == "windows" {
-		name = strings.ToLower(strings.ReplaceAll(name, `\`, "/"))
-	}
-	return name
-}
-
-func canonicalSQLiteFileLockKey(path string) string {
-	absolute, err := filepath.Abs(filepath.Clean(path))
-	if err != nil {
-		absolute = filepath.Clean(path)
-	}
-	absolute = filepath.Clean(absolute)
-	if runtime.GOOS == "windows" {
-		absolute = strings.ToLower(filepath.ToSlash(absolute))
-	}
-	return "file:" + absolute
-}
-func acquireSQLiteStartupLock(ctx context.Context, path string) (func(), error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	key := sqliteStartupLockIdentity(path)
-	sqliteStartupLocks.Lock()
-	entry := sqliteStartupLocks.entries[key]
-	if entry == nil {
-		entry = &sqliteStartupLockEntry{gate: make(chan struct{}, 1)}
-		entry.gate <- struct{}{}
-		sqliteStartupLocks.entries[key] = entry
-	}
-	entry.refs++
-	sqliteStartupLocks.Unlock()
-	select {
-	case <-ctx.Done():
-		sqliteStartupLocks.Lock()
-		entry.refs--
-		if entry.refs == 0 {
-			delete(sqliteStartupLocks.entries, key)
-		}
-		sqliteStartupLocks.Unlock()
-		return nil, ctx.Err()
-	case <-entry.gate:
-	}
-	var once sync.Once
-	release := func() {
-		once.Do(func() {
-			entry.gate <- struct{}{}
-			sqliteStartupLocks.Lock()
-			entry.refs--
-			if entry.refs == 0 {
-				delete(sqliteStartupLocks.entries, key)
-			}
-			sqliteStartupLocks.Unlock()
-		})
-	}
-	sqliteStartupGateAcquiredHook(ctx, key)
-	if err := ctx.Err(); err != nil {
-		release()
-		return nil, err
-	}
-	return release, nil
-}
-
-func sqliteStartupLockEntryCount() int {
-	sqliteStartupLocks.Lock()
-	defer sqliteStartupLocks.Unlock()
-	return len(sqliteStartupLocks.entries)
-}
-
-var sqliteStartupLockAcquiredHook = func(context.Context, string) error { return nil }
-var sqliteStartupGateAcquiredHook = func(context.Context, string) {}
-
 func OpenSQLite(path string) (*sql.DB, error) { return OpenSQLiteContext(context.Background(), path) }
 
 func OpenSQLiteContext(ctx context.Context, path string) (opened *sql.DB, returnErr error) {
-	releaseStartup, err := acquireSQLiteStartupLock(ctx, path)
-	if err != nil {
-		return nil, err
-	}
-	defer releaseStartup()
-	if err := sqliteStartupLockAcquiredHook(ctx, path); err != nil {
-		return nil, err
-	}
 	defer func() {
 		if returnErr != nil && ctx.Err() != nil {
 			if opened != nil {
@@ -1205,26 +863,6 @@ func OpenSQLiteContext(ctx context.Context, path string) (opened *sql.DB, return
 			}
 		}
 	}
-	for _, col := range []struct{ name, def string }{
-		{"removed_at", "TIMESTAMP"},
-		{"removed_by", "TEXT NOT NULL DEFAULT ''"},
-		{"remove_reason", "TEXT NOT NULL DEFAULT ''"},
-	} {
-		if err := ensureColumnContext(ctx, db, "post_ingest_task", col.name, col.def); err != nil {
-			if !strings.Contains(err.Error(), "no such table") {
-				_ = db.Close()
-				return nil, fmt.Errorf("migrate post_ingest_task.%s: %w", col.name, err)
-			}
-		}
-	}
-	if err := ensureEncryptAdminAuditSchema(ctx, db); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("migrate media_encrypt_admin_audit: %w", err)
-	}
-	if err := withStartupBusyRetry(ctx, func() error { return migrateIngestEntry(ctx, db) }); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("ingest entry migration: %w", err)
-	}
 	if err := withStartupBusyRetry(ctx, func() error { return migrateIngestPublication(ctx, db) }); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("ingest publication migration: %w", err)
@@ -1243,24 +881,6 @@ func OpenSQLiteContext(ctx context.Context, path string) (opened *sql.DB, return
 	_, _ = startupExecContext(ctx, db, `ALTER TABLE library ADD COLUMN image_providers TEXT DEFAULT 'tmdb,omdb,embedded,screen_grabber'`)
 	_, _ = startupExecContext(ctx, db, `ALTER TABLE library ADD COLUMN metadata_refresh_policy TEXT DEFAULT 'never'`)
 	_, _ = startupExecContext(ctx, db, `ALTER TABLE library ADD COLUMN preview_extract INTEGER DEFAULT 0`)
-	for _, column := range []string{"subtitle_extract", "atrack_extract", "subtitle_recognize", "keyframe_extract", "ai_analysis"} {
-		if err := ensureLibraryProcessingColumnContext(ctx, db, column); err != nil {
-			_ = db.Close()
-			return nil, fmt.Errorf("migrate library.%s: %w", column, err)
-		}
-	}
-	// Phase 5: ensure media-typed processing columns
-	for _, column := range []string{"lyric_recognize", "audio_analysis", "photo_classify", "photo_geocode", "photo_face", "image_ocr", "document_convert", "document_fulltext"} {
-		if err := ensureLibraryProcessingColumnContext(ctx, db, column); err != nil {
-			_ = db.Close()
-			return nil, fmt.Errorf("migrate library.%s: %w", column, err)
-		}
-	}
-	if err := ensureSubtitleTaskStageColumns(ctx, db); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("migrate subtitle_task stages: %w", err)
-	}
-	_, _ = startupExecContext(ctx, db, `ALTER TABLE post_ingest_task ADD COLUMN run_now_expires TIMESTAMP`)
 	_, _ = startupExecContext(ctx, db, `ALTER TABLE library ADD COLUMN drm_enabled INTEGER DEFAULT 0`)
 	_, _ = startupExecContext(ctx, db, `ALTER TABLE library ADD COLUMN encryption_mode TEXT DEFAULT 'drm'`)
 	_, _ = startupExecContext(ctx, db, `ALTER TABLE library ADD COLUMN cleanup_local_source_after_package INTEGER DEFAULT 0`)
@@ -1576,26 +1196,6 @@ func OpenSQLiteContext(ctx context.Context, path string) (opened *sql.DB, return
 		_ = db.Close()
 		return nil, fmt.Errorf("media relationship migration: %w", err)
 	}
-	// Apply scheduler schema migration for unified media task orchestration.
-	if err := withStartupBusyRetry(ctx, func() error { return migrateSchedulerSchema(ctx, db) }); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("scheduler schema migration: %w", err)
-	}
-	// Add scheduler admission metadata columns (source_class, library_id, resource_profile) to post_ingest_task.
-	if err := withStartupBusyRetry(ctx, func() error { return migratePostIngestTaskSourceMetadata(ctx, db) }); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("post_ingest_task source metadata migration: %w", err)
-	}
-	// Apply Phase 4 task control schema migration (projection, abort, audit, batch).
-	if err := withStartupBusyRetry(ctx, func() error { return migrateTaskControlSchema(ctx, db) }); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("task control schema migration: %w", err)
-	}
-	// Apply Phase 5 orchestration migration (node_key, capability_subtask, document/ai tables).
-	if err := withStartupBusyRetry(ctx, func() error { return migrateOrchestrationPhase5(ctx, db) }); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("orchestration phase 5 migration: %w", err)
-	}
 	// Apply enterprise migrations registered via RegisterEnterpriseMigration.
 	// In the community build this slice is empty; commercial init() functions
 	// append migrations for pretranscode/license tables before main runs.
@@ -1610,10 +1210,6 @@ func OpenSQLiteContext(ctx context.Context, path string) (opened *sql.DB, return
 		}
 	}
 	if len(enterpriseMigrations) > 0 {
-		if err := withStartupBusyRetry(ctx, func() error { return migrateIngestEntry(ctx, db) }); err != nil {
-			_ = db.Close()
-			return nil, fmt.Errorf("ingest entry migration: %w", err)
-		}
 		if err := withStartupBusyRetry(ctx, func() error { return migrateIngestPublication(ctx, db) }); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("enterprise publication migration: %w", err)

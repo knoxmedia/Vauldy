@@ -6,15 +6,17 @@ import (
 	"knox-media/internal/store"
 )
 
+func publicationColumnExistsTx(ctx context.Context, q store.SQLExecutor, table, column string) (bool, error) {
+	var count int
+	if err := q.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM pragma_table_info(%q) WHERE name=?`, table), column).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 // CancelRunTx records an explicit whole-run cancellation before fencing all
 // outstanding work. The caller owns the transaction so intent and work
 // cancellation commit or roll back together.
-//
-// Post-ingest plaintext temps for cancelled waiting/running tasks are released
-// after the cancel statements succeed. Release uses media/generation/task
-// identity (not lease_owner) because this path nulls the lease. If the outer
-// transaction later rolls back, temps may already be gone — preferred over
-// orphaning on successful commit; a subsequent claim rematerializes.
 func CancelRunTx(ctx context.Context, tx store.SQLExecutor, runID int64, reason string) (bool, error) {
 	if tx == nil || runID <= 0 || reason == "" {
 		return false, fmt.Errorf("publication cancel: invalid transaction, run, or reason")
@@ -27,30 +29,6 @@ func CancelRunTx(ctx context.Context, tx store.SQLExecutor, runID int64, reason 
 	if err != nil || n == 0 {
 		return false, err
 	}
-
-	// Capture identities before lease_owner is cleared.
-	rows, err := tx.QueryContext(ctx, `SELECT id, media_id, generation FROM post_ingest_task WHERE ingest_run_id=? AND status IN ('waiting','running')`, runID)
-	if err != nil {
-		return false, err
-	}
-	type attempt struct{ taskID, mediaID, generation int64 }
-	var attempts []attempt
-	for rows.Next() {
-		var a attempt
-		if err := rows.Scan(&a.taskID, &a.mediaID, &a.generation); err != nil {
-			_ = rows.Close()
-			return false, err
-		}
-		attempts = append(attempts, a)
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return false, err
-	}
-	if err := rows.Close(); err != nil {
-		return false, err
-	}
-
 	statements := []struct {
 		query string
 		args  []any
@@ -58,19 +36,68 @@ func CancelRunTx(ctx context.Context, tx store.SQLExecutor, runID int64, reason 
 		{`UPDATE media_ingest_step SET status='cancelled',last_error=CASE WHEN last_error='' THEN ? ELSE last_error END,lease_owner=NULL,lease_until=NULL,finished_at=COALESCE(finished_at,CURRENT_TIMESTAMP),updated_at=CURRENT_TIMESTAMP WHERE run_id=? AND status IN ('waiting','running')`, []any{reason, runID}},
 		{`UPDATE post_ingest_task SET status='cancelled',last_error=CASE WHEN last_error='' THEN ? ELSE last_error END,lease_owner=NULL,lease_until=NULL,finished_at=COALESCE(finished_at,CURRENT_TIMESTAMP),updated_at=CURRENT_TIMESTAMP WHERE ingest_run_id=? AND status IN ('waiting','running')`, []any{reason, runID}},
 		{`UPDATE scrape_task SET status='cancelled',message=CASE WHEN COALESCE(message,'')='' THEN ? ELSE message END,lease_owner=NULL,lease_until=NULL,finished_at=COALESCE(finished_at,CURRENT_TIMESTAMP) WHERE ingest_run_id=? AND status IN ('waiting','running')`, []any{reason, runID}},
-		{`UPDATE pretranscode_rendition_job SET status='cancelled',error_message=CASE WHEN COALESCE(error_message,'')='' THEN ? ELSE error_message END,lease_owner=NULL,lease_until=NULL,completed_at=COALESCE(completed_at,CURRENT_TIMESTAMP) WHERE task_id IN (SELECT id FROM transcode_task WHERE ingest_run_id=?) AND status IN ('waiting','running')`, []any{reason, runID}},
-		{`UPDATE transcode_task SET status='cancelled',error_message=CASE WHEN COALESCE(error_message,'')='' THEN ? ELSE error_message END,lease_owner=NULL,lease_until=NULL,completed_at=COALESCE(completed_at,CURRENT_TIMESTAMP) WHERE ingest_run_id=? AND status IN ('waiting','running','paused')`, []any{reason, runID}},
+	}
+	jobsExist, err := publicationTableExistsTx(ctx, tx, "pretranscode_rendition_job")
+	if err != nil {
+		return false, err
+	}
+	if jobsExist {
+		statements = append(statements, struct {
+			query string
+			args  []any
+		}{`UPDATE pretranscode_rendition_job SET status='cancelled',error_message=CASE WHEN COALESCE(error_message,'')='' THEN ? ELSE error_message END,lease_owner=NULL,lease_until=NULL,completed_at=COALESCE(completed_at,CURRENT_TIMESTAMP) WHERE task_id IN (SELECT id FROM transcode_task WHERE ingest_run_id=?) AND status IN ('waiting','running')`, []any{reason, runID}})
+	}
+	transcodeExists, err := publicationTableExistsTx(ctx, tx, "transcode_task")
+	if err != nil {
+		return false, err
+	}
+	if transcodeExists {
+		completedAt, err := publicationColumnExistsTx(ctx, tx, "transcode_task", "completed_at")
+		if err != nil {
+			return false, err
+		}
+		leaseOwner, err := publicationColumnExistsTx(ctx, tx, "transcode_task", "lease_owner")
+		if err != nil {
+			return false, err
+		}
+		query := `UPDATE transcode_task SET status='cancelled'`
+		if leaseOwner {
+			query += `,lease_owner=NULL,lease_until=NULL`
+		}
+		if completedAt {
+			query += `,completed_at=COALESCE(completed_at,CURRENT_TIMESTAMP)`
+		}
+		hasError, err := publicationColumnExistsTx(ctx, tx, "transcode_task", "error_message")
+		if err != nil {
+			return false, err
+		}
+		args := []any{}
+		if hasError {
+			query += `,error_message=CASE WHEN COALESCE(error_message,'')='' THEN ? ELSE error_message END`
+			args = append(args, reason)
+		}
+		ingestLinked, err := publicationColumnExistsTx(ctx, tx, "transcode_task", "ingest_run_id")
+		if err != nil {
+			return false, err
+		}
+		if ingestLinked {
+			query += ` WHERE ingest_run_id=? AND status IN ('waiting','running','paused')`
+			args = append(args, runID)
+		} else {
+			query += ` WHERE 0`
+		}
+		statements = append(statements, struct {
+			query string
+			args  []any
+		}{query, args})
 	}
 	for _, stmt := range statements {
 		if _, err = tx.ExecContext(ctx, stmt.query, stmt.args...); err != nil {
 			return false, err
 		}
 	}
-	if err = FinalizeNodeTransitionTx(ctx, tx, runID); err != nil {
+	if err = AggregateTx(ctx, tx, runID); err != nil {
 		return false, err
-	}
-	for _, a := range attempts {
-		invokePostIngestTempRelease(a.mediaID, a.generation, a.taskID)
 	}
 	return true, nil
 }
@@ -81,6 +108,14 @@ func CancelRunTx(ctx context.Context, tx store.SQLExecutor, runID int64, reason 
 func CancelRunForRequiredStepTx(ctx context.Context, tx store.SQLExecutor, runID, stepID, taskID int64, reason string) (bool, error) {
 	if tx == nil || runID <= 0 || stepID <= 0 || taskID <= 0 || reason == "" {
 		return false, fmt.Errorf("publication cancel target: invalid transaction, run, step, task, or reason")
+	}
+	taskTypeExists, err := publicationColumnExistsTx(ctx, tx, "transcode_task", "task_type")
+	if err != nil {
+		return false, err
+	}
+	if !taskTypeExists {
+		// Community builds have no prepare/task_type surface.
+		return false, nil
 	}
 	var valid int
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(

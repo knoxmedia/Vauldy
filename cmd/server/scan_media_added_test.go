@@ -92,7 +92,7 @@ func TestScan100MediaEnqueuesWithoutFFmpegOrGoroutineFanout(t *testing.T) {
 	if err := rows.Close(); err != nil {
 		t.Fatal(err)
 	}
-	wantSteps := []string{"atrack_extract", "encrypt", "media_visible", "poster", "preview", "scrape", "subtitle_extract"}
+	wantSteps := []string{"encrypt", "poster", "preview", "scrape", "subtitle"}
 	sort.Strings(wantSteps)
 	if len(got) != len(wantSteps) {
 		t.Fatalf("step types=%v want %v", got, wantSteps)
@@ -102,7 +102,7 @@ func TestScan100MediaEnqueuesWithoutFFmpegOrGoroutineFanout(t *testing.T) {
 			t.Fatalf("step=%s rows=%d want 100", step, got[step])
 		}
 	}
-	assertPostIngestOwnership(t, db, result.TaskID, 500)
+	assertPostIngestOwnership(t, db, result.TaskID, 400)
 	assertPerMediaPublicationLinks(t, db, libraryID, result.TaskID)
 	deadline := time.Now().Add(2 * time.Second)
 	for runtime.NumGoroutine() > before+5 && time.Now().Before(deadline) {
@@ -144,7 +144,7 @@ func assertPostIngestOwnership(t *testing.T, db *sql.DB, taskID int64, want int)
 	if total != want || owned != want {
 		t.Fatalf("rows=%d owned=%d want %d", total, owned, want)
 	}
-	for _, typ := range []postingest.TaskType{postingest.TaskPoster, postingest.TaskPreview, postingest.TaskSubtitle, postingest.TaskAtrack, postingest.TaskEncrypt} {
+	for _, typ := range []postingest.TaskType{postingest.TaskPoster, postingest.TaskPreview, postingest.TaskSubtitle, postingest.TaskEncrypt} {
 		var count, typeOwned int
 		if err := db.QueryRow(`SELECT COUNT(*),COALESCE(SUM(CASE WHEN scan_task_id=? THEN 1 ELSE 0 END),0) FROM post_ingest_task WHERE task_type=?`, taskID, typ).Scan(&count, &typeOwned); err != nil {
 			t.Fatal(err)
@@ -157,8 +157,8 @@ func assertPostIngestOwnership(t *testing.T, db *sql.DB, taskID int64, want int)
 
 func assertPerMediaPublicationLinks(t *testing.T, db *sql.DB, libraryID, taskID int64) {
 	t.Helper()
-	wantSteps := map[string]bool{"poster": true, "scrape": true, "preview": true, "subtitle_extract": true, "atrack_extract": true, "encrypt": true, "media_visible": true}
-	wantQueue := map[string]bool{"poster": true, "preview": true, "subtitle": true, "atrack": true, "encrypt": true}
+	wantSteps := map[string]bool{"poster": true, "scrape": true, "preview": true, "subtitle": true, "encrypt": true}
+	wantQueue := map[string]bool{"poster": true, "preview": true, "subtitle": true, "encrypt": true}
 	rows, err := db.Query(`SELECT id FROM media WHERE library_id=? ORDER BY id`, libraryID)
 	if err != nil {
 		t.Fatal(err)
@@ -217,26 +217,8 @@ func assertPerMediaPublicationLinks(t *testing.T, db *sql.DB, libraryID, taskID 
 				_ = queueRows.Close()
 				t.Fatal(err)
 			}
-			if qMediaID != mediaID || qRunID != runID || qStepID <= 0 || qGeneration != generation || qTaskID != taskID || runMediaID != mediaID || stepRunID != runID || stepMediaID != mediaID || stepGeneration != generation {
+			if qMediaID != mediaID || qRunID != runID || qStepID <= 0 || qGeneration != generation || qTaskID != taskID || runMediaID != mediaID || stepRunID != runID || stepMediaID != mediaID || stepGeneration != generation || taskType != stepType {
 				t.Fatalf("media %d invalid queue link", mediaID)
-			}
-			switch stepType {
-			case "subtitle_extract":
-				if taskType != "subtitle" {
-					t.Fatalf("media %d subtitle_extract queue type=%s", mediaID, taskType)
-				}
-			case "atrack_extract":
-				if taskType != "atrack" {
-					t.Fatalf("media %d atrack_extract queue type=%s", mediaID, taskType)
-				}
-			case "keyframe_extract":
-				if taskType != "keyframe" {
-					t.Fatalf("media %d keyframe_extract queue type=%s", mediaID, taskType)
-				}
-			default:
-				if taskType != stepType {
-					t.Fatalf("media %d queue type=%s step=%s", mediaID, taskType, stepType)
-				}
 			}
 			queued[taskType] = true
 		}
@@ -294,10 +276,6 @@ func TestRestartRecoversStartupQueueAndResumesPublication(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err = tx.Commit(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = db.Exec(`UPDATE post_ingest_task SET max_attempts=2 WHERE ingest_run_id=? AND task_type='poster';
-UPDATE media_ingest_step SET max_attempts=2 WHERE run_id=? AND step_type='poster'`, run.ID, run.ID); err != nil {
 		t.Fatal(err)
 	}
 	oldQueue := postingest.NewQueue(db, "before-restart", nil)
@@ -363,86 +341,5 @@ func TestScannerCallbackRegressionUsesCallbacksField(t *testing.T) {
 	added, err := sc.ScanLibraryFoldersWithContextAndCallbacks(context.Background(), libraryID, []string{root}, scanner.ScanCallbacks{OnMediaAdded: func(context.Context, int64, string, string) error { calls++; return nil }})
 	if err != nil || added != 1 || calls != 1 {
 		t.Fatalf("added=%d calls=%d err=%v", added, calls, err)
-	}
-}
-
-type phase1ScanExec publication.StepType
-
-func (a phase1ScanExec) TaskType() publication.StepType                 { return publication.StepType(a) }
-func (phase1ScanExec) Execute(context.Context, int64) error             { return nil }
-
-type phase1ScanRegistry map[publication.StepType]publication.ExecutableTaskAdapter
-
-func (r phase1ScanRegistry) Adapter(step publication.StepType) (publication.ExecutableTaskAdapter, bool) {
-	a, ok := r[step]
-	return a, ok
-}
-
-func TestScanLibraryClosureDrivenPlanIncludesRecognitionGraph(t *testing.T) {
-	db, err := store.OpenSQLite(filepath.Join(t.TempDir(), "phase1-closure-scan.sqlite"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "closure.mp4"), []byte("video"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	res, err := db.Exec(`INSERT INTO library(name,type,path,subtitle_recognize,ai_analysis,encrypted_assets_enabled) VALUES('closure','video',?,1,1,1)`, root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	libraryID, _ := res.LastInsertId()
-	adapters := phase1ScanRegistry{
-		publication.StepSubtitleRecognize: phase1ScanExec(publication.StepSubtitleRecognize),
-		publication.StepAIAnalysis:        phase1ScanExec(publication.StepAIAnalysis),
-	}
-	planner := publication.NewPlanner(publication.PlanOptions{
-		EncryptGlobal:             true,
-		ExecutableAdapters:        adapters,
-		EncryptedSourceStrategies: publication.DefaultEncryptedSourceStrategies(),
-	})
-	sc := &scanner.Scanner{DB: db, SkipHash: true, ProbePath: func(context.Context, int64, string) (*ffprobe.Summary, error) {
-		return &ffprobe.Summary{}, nil
-	}}
-	coordinator, err := scancoord.New(db, scancoord.Options{
-		LeaseDuration: time.Minute, HeartbeatInterval: 20 * time.Second,
-		OwnerInstanceID: "phase1-closure", Scanner: sc,
-		OnMediaDiscoveredTx: scancoord.MediaDiscoveredTxFunc(postingest.NewScanMediaDiscoveredTxCallback(planner)),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	result, err := coordinator.Submit(context.Background(), scancoord.ScanRequest{LibraryID: libraryID, Source: scancoord.SourceManual, Roots: []string{root}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	waitForScanTask(t, db, result.TaskID)
-
-	rows, err := db.Query(`SELECT step_type,COUNT(*) FROM media_ingest_step GROUP BY step_type`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := map[string]int{}
-	for rows.Next() {
-		var step string
-		var count int
-		if err := rows.Scan(&step, &count); err != nil {
-			t.Fatal(err)
-		}
-		got[step] = count
-	}
-	_ = rows.Close()
-	for _, want := range []string{"poster", "encrypt", "scrape", "subtitle_extract", "atrack_extract", "subtitle_recognize", "ai_analysis", "media_visible"} {
-		if got[want] != 1 {
-			t.Fatalf("step=%s count=%d want 1 (got=%v)", want, got[want], got)
-		}
-	}
-	var edgeCount int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM media_ingest_step_dependency d
-JOIN media_ingest_step child ON child.id=d.step_id
-JOIN media_ingest_step parent ON parent.id=d.depends_on_step_id
-WHERE child.step_type='ai_analysis' AND parent.step_type='subtitle_recognize' AND d.dependency_kind='success'`).Scan(&edgeCount); err != nil || edgeCount != 1 {
-		t.Fatalf("ai<-recognize edge count=%d err=%v", edgeCount, err)
 	}
 }

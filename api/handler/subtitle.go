@@ -11,7 +11,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"knox-media/internal/postingest"
 	"knox-media/internal/subtitle"
 )
 
@@ -97,11 +96,9 @@ func (h *Handler) ProcessMediaSubtitles(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
 		return
 	}
-	reset := subtitleEnsureTx(id)
-	result, err := enqueueExplicitPostIngest(c.Request.Context(), h.App.DB, id, postingest.TaskSubtitle, false, reset, nil)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	if err := h.Subtitle.ProcessMedia(c.Request.Context(), id); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusAccepted, gin.H{"ok": true, "queued": result.Queued(), "action": result})
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }

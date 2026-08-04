@@ -1,14 +1,12 @@
 package handler
 
 import (
-	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -107,10 +105,6 @@ func TestEncryptTaskAdminCRUDAndEnqueue(t *testing.T) {
 	if wReset.Code != http.StatusOK {
 		t.Fatalf("reset status=%d body=%s", wReset.Code, wReset.Body.String())
 	}
-	var round int
-	if err := db.QueryRow(`SELECT retry_round FROM post_ingest_task WHERE id=?`, taskID).Scan(&round); err != nil || round != 1 {
-		t.Fatalf("handler reset round=%d err=%v", round, err)
-	}
 
 	if _, err := db.Exec(`UPDATE post_ingest_task SET status='failed' WHERE id=?`, taskID); err != nil {
 		t.Fatal(err)
@@ -122,23 +116,5 @@ func TestEncryptTaskAdminCRUDAndEnqueue(t *testing.T) {
 	h.DeleteEncryptTask(cDel)
 	if wDel.Code != http.StatusOK {
 		t.Fatalf("delete status=%d body=%s", wDel.Code, wDel.Body.String())
-	}
-	var removedAt sql.NullString
-	if err := db.QueryRow(`SELECT removed_at FROM post_ingest_task WHERE id=?`, taskID).Scan(&removedAt); err != nil || !removedAt.Valid {
-		t.Fatalf("logical remove missing tombstone: %v %v", removedAt, err)
-	}
-	wHidden := httptest.NewRecorder()
-	cHidden, _ := gin.CreateTestContext(wHidden)
-	cHidden.Request = httptest.NewRequest(http.MethodGet, "/api/v1/encrypt/task?status=all", nil)
-	h.ListEncryptTasks(cHidden)
-	if wHidden.Code != http.StatusOK || strings.Contains(wHidden.Body.String(), idStr) {
-		t.Fatalf("default list should hide removed: status=%d body=%s", wHidden.Code, wHidden.Body.String())
-	}
-	wShown := httptest.NewRecorder()
-	cShown, _ := gin.CreateTestContext(wShown)
-	cShown.Request = httptest.NewRequest(http.MethodGet, "/api/v1/encrypt/task?status=all&include_removed=1", nil)
-	h.ListEncryptTasks(cShown)
-	if wShown.Code != http.StatusOK || !strings.Contains(wShown.Body.String(), idStr) {
-		t.Fatalf("include_removed list missing task: status=%d body=%s", wShown.Code, wShown.Body.String())
 	}
 }

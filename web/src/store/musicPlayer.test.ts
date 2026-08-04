@@ -103,8 +103,7 @@ describe("musicPlayer onTrackEnded", () => {
   });
 
   it("shuffle advances within queue", () => {
-    vi.spyOn(Math, "random").mockReturnValue(0);
-    useMusicPlayerStore.setState({ playMode: "shuffle" });
+    useMusicPlayerStore.setState({ playMode: "shuffle", shuffleMap: [2, 0, 1] });
     useMusicPlayerStore.getState().playQueue(sampleQueue, 2);
     useMusicPlayerStore.getState().onTrackEnded();
     const s = useMusicPlayerStore.getState();

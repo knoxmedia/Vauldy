@@ -2,7 +2,6 @@ import axios from "axios";
 import { message } from "antd";
 import type { PlayerPrefs } from "../lib/playerPrefs";
 import type { PlaybackEvidencePayload, PlaybackProgressResult } from "../lib/playbackEvidence";
-import type { LibraryProcessingChoices, LibraryProcessingOptionName } from "../lib/libraryProcessingOptions";
 import { proxyImageSrc } from "../lib/imageUrl";
 import { useAuthStore, type UserRole } from "../store/auth";
 
@@ -50,15 +49,6 @@ api.interceptors.response.use(
   }
 );
 
-export type LibraryProcessingOptions = {
-  explicit: LibraryProcessingChoices;
-  effective: LibraryProcessingChoices;
-  provenance: {
-    explicit: LibraryProcessingOptionName[];
-    dependency_added: LibraryProcessingOptionName[];
-  };
-};
-
 export type Library = {
   id: number;
   name: string;
@@ -69,12 +59,6 @@ export type Library = {
   enabled?: number;
   realtime_monitor?: number;
   preview_extract?: number;
-  subtitle_extract?: number;
-  atrack_extract?: number;
-  subtitle_recognize?: number;
-  keyframe_extract?: number;
-  ai_analysis?: number;
-  processing_options?: LibraryProcessingOptions;
   drm_enabled?: number;
   encryption_mode?: "standard" | "powerdrm" | "drm";
   cleanup_local_source_after_package?: number;
@@ -393,11 +377,6 @@ export async function createLibrary(payload: {
   enabled?: number;
   realtime_monitor?: number;
   preview_extract?: number;
-  subtitle_extract?: number;
-  atrack_extract?: number;
-  subtitle_recognize?: number;
-  keyframe_extract?: number;
-  ai_analysis?: number;
   drm_enabled?: number;
   encryption_mode?: "standard" | "powerdrm" | "drm";
   cleanup_local_source_after_package?: number;
@@ -425,11 +404,6 @@ export async function updateLibrary(
     enabled?: number;
     realtime_monitor?: number;
     preview_extract?: number;
-    subtitle_extract?: number;
-    atrack_extract?: number;
-    subtitle_recognize?: number;
-    keyframe_extract?: number;
-    ai_analysis?: number;
     drm_enabled?: number;
     encryption_mode?: "standard" | "powerdrm" | "drm";
     cleanup_local_source_after_package?: number;
@@ -2086,6 +2060,8 @@ export type AdminOverview = {
     cpu_percent: number;
     memory_percent: number;
     disk_percent: number;
+    transcode_task_count: number;
+    media_total: number;
   };
   system: {
     cpu_count: number;
@@ -2110,6 +2086,45 @@ export type AdminOverview = {
     message: string;
     created_at: string;
   }>;
+  post_ingest_queue: {
+    by_status: Record<string, number>;
+    by_type: Record<string, Record<string, number>>;
+    oldest_waiting_seconds: number;
+    expired_lease_count: number;
+  };
+  task_alignment: {
+    by_type: Record<string, Record<string, number>>;
+  };
+  running_post_ingest_tasks: Array<{
+    id: number;
+    media_id: number;
+    task_type: string;
+    type: string;
+    scan_task_id: number | null;
+    attempts: number;
+    attempt: number;
+    max_attempts: number;
+    run_seconds: number;
+    started_at: string;
+    lease_owner: string;
+    lease_until: string;
+    lease_expires: string;
+  }>;
+  scan_leases: Array<{
+    library_id: number;
+    scan_task_id: number;
+    owner_id: string;
+    lease_until: string;
+    expired: boolean;
+  }>;
+  resource_budget: {
+    global_limit: number;
+    global_used: number;
+    poster_limit: number;
+    poster_used: number;
+    preview_limit: number;
+    preview_used: number;
+  };
   sqlite_metrics: {
     scope: string;
     persistent: false;
@@ -2120,6 +2135,7 @@ export type AdminOverview = {
     log_failures: number;
     dropped_logs: number;
   };
+  publication_policy: PublicationPolicyDiagnostic[];
 };
 
 export async function fetchAdminOverview(signal?: AbortSignal) {

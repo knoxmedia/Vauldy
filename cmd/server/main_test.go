@@ -3,15 +3,18 @@ package main
 import (
 	"context"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"knox-media/internal/buildinfo"
 	"knox-media/internal/config"
 	"knox-media/internal/postingest"
-	taskscheduler "knox-media/internal/scheduler"
 	"knox-media/internal/store"
 )
 
@@ -71,16 +74,15 @@ func TestSharedResourceControlAssemblyMainOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	src := string(data)
-	// Assembly markers in main.go are Chinese; keep English meaning aligned with order.
 	markers := []string{
-		"// (1) 打开 SQLite、记录构建/库身份信息，并写入默认用户。",
-		"// (2) 密钥库/派生资产存储，以及转码、预览、字幕等域内 Worker。",
-		"// (3) 入库后处理：能力矩阵、队列、入队器、七类适配器、分发器；企业模块与 Publication V2 启动编排。",
-		"// (4) 媒体库扫描器与进程级扫描协调器（租约、心跳、发现回调）。",
-		"// (5) 后台阶段对账协程，并组装 Handler 依赖注入包。",
-		"// (6) 注入依赖并创建 HTTP API 路由引擎。",
-		"// (7) 目录监控：通过同一扫描协调器提交增量扫描（放在最后启动）。",
-		"// (8) 启动 HTTP 服务；根 context 取消后按序关停各子系统。",
+		"// (1) Database, metrics, and validated configuration.",
+		"// (2) Vault, derived storage, and domain workers.",
+		"// (3) Shared post-ingest queue, enqueuer, seven adapters, and dispatcher.",
+		"// (4) Scanner dependencies and the process-wide scan coordinator.",
+		"// (5) Admin overview uses the shared resource-control instances.",
+		"// (6) Handler dependencies are injected into the API router.",
+		"// (7) Monitor submits through the same coordinator and starts last.",
+		"// (8) Root cancellation stops monitor, scans, and dispatcher.",
 	}
 	previous := -1
 	for _, marker := range markers {
@@ -111,83 +113,6 @@ func TestMainUsesThumbnailAdapterWithoutLegacyEnsure(t *testing.T) {
 	}
 	if strings.Contains(src, "generatePhotoVariantsOnScan") || strings.Contains(src, "imagethumb.Ensure") {
 		t.Fatal("server retains legacy direct thumbnail publication")
-	}
-}
-
-func TestMainDoesNotStartKickPendingPlaintextCleanups(t *testing.T) {
-	data, err := os.ReadFile("main.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(data), "KickPendingPlaintextCleanups") {
-		t.Fatal("main still starts legacy KickPendingPlaintextCleanups goroutine")
-	}
-}
-
-func TestMainWiresRetirementWorkerBeforeClaimers(t *testing.T) {
-	mainSrc, err := os.ReadFile("main.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	startupSrc, err := os.ReadFile("startup_recovery.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	main := string(mainSrc)
-	startup := string(startupSrc)
-	if !strings.Contains(startup, "retirement.ReconcileStartup(") {
-		t.Fatal("startup recovery missing retirement.ReconcileStartup")
-	}
-	workerAt := strings.Index(main, "retirement.RunWorkerLoop(")
-	if workerAt < 0 {
-		workerAt = strings.Index(main, "RunWorkerLoop(")
-	}
-	reconcilerAt := strings.Index(main, "retirement.RunReconciler(")
-	if reconcilerAt < 0 {
-		reconcilerAt = strings.Index(main, "RunReconciler(")
-	}
-	claimerAt := strings.Index(main, "dispatcher.Start(serverCtx)")
-	bgAt := strings.Index(main, "background := &handler.BackgroundGroup{}")
-	if workerAt < 0 || reconcilerAt < 0 || claimerAt < 0 || bgAt < 0 {
-		t.Fatalf("missing retirement wiring markers worker=%d reconciler=%d claimer=%d bg=%d", workerAt, reconcilerAt, claimerAt, bgAt)
-	}
-	if bgAt > claimerAt {
-		t.Fatal("background group must be created before claimers so retirement can register first")
-	}
-	if workerAt > claimerAt || reconcilerAt > claimerAt {
-		t.Fatal("retirement worker/reconciler must start before dispatcher claimers")
-	}
-}
-
-func TestMainWiresRetirementActiveConsumerCallback(t *testing.T) {
-	data, err := os.ReadFile("main.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	src := string(data)
-	if !strings.Contains(src, "retirement.SetDefaultActiveConsumer(") {
-		t.Fatal("main must register default ActiveConsumer for barrier recompute")
-	}
-	defaultAt := strings.Index(src, "retirement.SetDefaultActiveConsumer(")
-	workerAt := strings.Index(src, "retirementWorker := &retirement.Worker{")
-	if defaultAt < 0 || workerAt < 0 || defaultAt > workerAt {
-		t.Fatal("SetDefaultActiveConsumer must run before retirement worker construction")
-	}
-	seamsAt := strings.Index(src[workerAt:], "Seams: retirement.CrashSeams{")
-	if seamsAt < 0 {
-		t.Fatal("retirement worker missing CrashSeams")
-	}
-	seamsBlock := src[workerAt+seamsAt:]
-	end := strings.Index(seamsBlock, "},")
-	if end < 0 {
-		end = len(seamsBlock)
-	}
-	seamsBlock = seamsBlock[:end]
-	if !strings.Contains(seamsBlock, "ActiveConsumer:") || !strings.Contains(seamsBlock, "storage.HasActivePlaintextConsumer(") {
-		t.Fatal("main must wire HasActivePlaintextConsumer into CrashSeams.ActiveConsumer")
-	}
-	if !strings.Contains(src[defaultAt:workerAt], "storage.HasActivePlaintextConsumer(") {
-		t.Fatal("SetDefaultActiveConsumer must use HasActivePlaintextConsumer")
 	}
 }
 
@@ -228,88 +153,11 @@ func TestGracefulShutdownAssemblyUsesSignalsAndHTTPServer(t *testing.T) {
 	}
 }
 
-func TestMainInlinesDispatcherOptionsWiring(t *testing.T) {
-	data, err := os.ReadFile("main.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	src := string(data)
-	// After migration, dispatcher options are inlined rather than calling buildDispatcherOptions.
-	if strings.Contains(src, "buildDispatcherOptions") {
-		t.Fatal("buildDispatcherOptions must be removed after scheduler migration")
-	}
-	for _, required := range []string{
-		"postingest.DefaultDispatcherOptions()",
-		"OwnerID =",
-		"SubtitleTimeoutRealtimeFactor",
-	} {
-		if !strings.Contains(src, required) {
-			t.Fatalf("main missing inline dispatcher wiring %q", required)
-		}
-	}
-}
-
-func TestBuildSchedulerPolicyMergesConfig(t *testing.T) {
-	cfg := &config.Config{Scheduler: config.SchedulerConfig{
-		Concurrency: map[string]int{"poster": 4, "preview": 3},
-		Resources:   map[string]int{"cpu": 8, "gpu": 2},
-	}}
-	p, err := buildSchedulerPolicy(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if p.TypeConcurrency["poster"] != 4 {
-		t.Fatalf("poster=%d want 4", p.TypeConcurrency["poster"])
-	}
-	if p.TypeConcurrency["preview"] != 3 {
-		t.Fatalf("preview=%d want 3", p.TypeConcurrency["preview"])
-	}
-	if p.ResourceCapacity["cpu"] != 8 {
-		t.Fatalf("cpu=%d want 8", p.ResourceCapacity["cpu"])
-	}
-	if _, ok := p.ResourceCapacity["gpu"]; !ok || p.ResourceCapacity["gpu"] != 2 {
-		t.Fatalf("gpu=%v want 2", p.ResourceCapacity["gpu"])
-	}
-	if p.AgingIntervalSec <= 0 || p.AgingStep <= 0 || p.RunNowAmount <= 0 || p.RunNowTTLSec <= 0 {
-		t.Fatalf("default priority tuning not applied: %+v", p)
-	}
-}
-
-func TestActivateSchedulerPolicyCreatesActiveRevision(t *testing.T) {
-	db, err := store.OpenSQLite(filepath.Join(t.TempDir(), "sched.sqlite"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	cfg := &config.Config{Scheduler: config.SchedulerConfig{
-		Concurrency: map[string]int{"poster": 2},
-		Resources:   map[string]int{"cpu": 4},
-	}}
-	p, err := buildSchedulerPolicy(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := activateSchedulerPolicy(context.Background(), db, p); err != nil {
-		t.Fatal(err)
-	}
-	st := taskscheduler.NewStore(db)
-	rev, err := st.GetActivePolicyRevision(context.Background())
-	if err != nil {
-		t.Fatalf("get active revision: %v", err)
-	}
-	if rev == nil {
-		t.Fatal("no active revision after activation")
-	}
-	// Re-activation preserves the existing active revision.
-	if err := activateSchedulerPolicy(context.Background(), db, p); err != nil {
-		t.Fatal(err)
-	}
-	rev2, err := st.GetActivePolicyRevision(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rev2 == nil || rev2.ID != rev.ID {
-		t.Fatalf("re-activation changed revision: %d -> %v", rev.ID, rev2)
+func TestBuildDispatcherOptionsMapsPostIngestConfig(t *testing.T) {
+	cfg := &config.Config{PostIngest: config.PostIngestConfig{MaxConcurrent: 3, PosterMaxConcurrent: 1, PreviewMaxConcurrent: 2, SubtitleMaxConcurrent: 1, SubtitleTimeoutRealtimeFactor: 1.5}}
+	got := buildDispatcherOptions(cfg, "owner")
+	if got.OwnerID != "owner" || got.Global != 3 || got.Poster != 1 || got.Preview != 2 || got.Subtitle != 1 || got.SubtitleTimeoutRealtimeFactor != 1.5 {
+		t.Fatalf("options=%+v", got)
 	}
 }
 
@@ -490,14 +338,10 @@ func TestMainWiresOneSharedPublicationCapabilityRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !hasOneUnconditionalPosterRepairAST(string(data)) {
+		t.Fatal(`publicationSteps literal must contain exact capability "poster_repair" once, adjacent after "poster", and feed exactly one NewCapabilityMatrix call`)
+	}
 	src := string(data)
-	constructor := strings.Index(src, "publicationCapabilities := publication.NewCapabilityMatrix(publicationSteps)")
-	if constructor < 0 {
-		t.Fatal("missing process publication capability registry")
-	}
-	if !hasOneUnconditionalPosterRepair(src, constructor) {
-		t.Fatal(`publicationSteps composite literal must contain exact capability "poster_repair" once, adjacent to "poster"`)
-	}
 	for _, required := range []string{"postingest.NewQueue(db, queueOwner, sqliteMetrics, publicationCapabilities)", "PublicationCapabilities: publicationCapabilities", "Capabilities: publicationCapabilities"} {
 		if !strings.Contains(src, required) {
 			t.Fatalf("missing shared registry wiring %q", required)
@@ -505,52 +349,119 @@ func TestMainWiresOneSharedPublicationCapabilityRegistry(t *testing.T) {
 	}
 }
 
-func hasOneUnconditionalPosterRepair(src string, constructor int) bool {
-	const declaration = "publicationSteps := []string{"
-	steps := strings.Index(src, declaration)
-	if steps < 0 || steps >= constructor {
+func hasOneUnconditionalPosterRepairAST(src string) bool {
+	file, err := parser.ParseFile(token.NewFileSet(), "main.go", src, parser.AllErrors)
+	if err != nil {
 		return false
 	}
-	literalStart := steps + len(declaration)
-	literalEnd := strings.Index(src[literalStart:constructor], "}")
-	if literalEnd < 0 {
+	var mainBody *ast.BlockStmt
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if ok && fn.Name.Name == "main" && fn.Recv == nil {
+			mainBody = fn.Body
+			break
+		}
+	}
+	if mainBody == nil {
 		return false
 	}
-	literal := src[literalStart : literalStart+literalEnd]
-	const token = `"poster_repair"`
-	if strings.Count(literal, token) != 1 || !strings.Contains(literal, `"poster", "poster_repair"`) {
+	var steps []string
+	declarations := 0
+	constructors := 0
+	ast.Inspect(mainBody, func(node ast.Node) bool {
+		switch n := node.(type) {
+		case *ast.AssignStmt:
+			for i, lhs := range n.Lhs {
+				ident, ok := lhs.(*ast.Ident)
+				if !ok || ident.Name != "publicationSteps" || n.Tok != token.DEFINE || i >= len(n.Rhs) {
+					continue
+				}
+				literal, ok := n.Rhs[i].(*ast.CompositeLit)
+				if !ok || !isStringSliceType(literal.Type) {
+					continue
+				}
+				declarations++
+				steps = steps[:0]
+				for _, element := range literal.Elts {
+					basic, ok := element.(*ast.BasicLit)
+					if !ok || basic.Kind != token.STRING {
+						return true
+					}
+					value, err := strconv.Unquote(basic.Value)
+					if err != nil {
+						return true
+					}
+					steps = append(steps, value)
+				}
+			}
+		case *ast.CallExpr:
+			selector, ok := n.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			pkg, pkgOK := selector.X.(*ast.Ident)
+			if pkgOK && pkg.Name == "publication" && selector.Sel.Name == "NewCapabilityMatrix" && len(n.Args) == 1 {
+				arg, ok := n.Args[0].(*ast.Ident)
+				if ok && arg.Name == "publicationSteps" {
+					constructors++
+				}
+			}
+		}
+		return true
+	})
+	if declarations != 1 || constructors != 1 {
 		return false
 	}
-	return !strings.Contains(src[literalStart+literalEnd+1:constructor], token)
+	posterRepair := 0
+	adjacent := false
+	for i, step := range steps {
+		if step == "poster_repair" {
+			posterRepair++
+			adjacent = i > 0 && steps[i-1] == "poster"
+		}
+	}
+	return posterRepair == 1 && adjacent
+}
+
+func isStringSliceType(expr ast.Expr) bool {
+	array, ok := expr.(*ast.ArrayType)
+	if !ok || array.Len != nil {
+		return false
+	}
+	ident, ok := array.Elt.(*ast.Ident)
+	return ok && ident.Name == "string"
 }
 
 func TestPublicationStepsPosterRepairMustBeUniqueAndUnconditional(t *testing.T) {
-	const constructor = "publicationCapabilities := publication.NewCapabilityMatrix(publicationSteps)"
+	wrap := func(body string) string { return "package main\nfunc main() {\n" + body + "\n}" }
 	for _, tc := range []struct {
 		name string
-		src  string
+		body string
 		want bool
 	}{
-		{name: "valid", src: `publicationSteps := []string{"poster", "poster_repair", "thumbnail"}
-	if coreiface.IngestPreparePlannerHandle() != nil {
-		publicationSteps = append(publicationSteps, "prepare")
-	}
-	` + constructor, want: true},
-		{name: "conditional append", src: `publicationSteps := []string{"poster", "thumbnail"}
-	if coreiface.IngestPreparePlannerHandle() != nil {
-		publicationSteps = append(publicationSteps, "poster_repair", "prepare")
-	}
-	` + constructor, want: false},
-		{name: "duplicate literal", src: `publicationSteps := []string{"poster", "poster_repair", "poster_repair", "thumbnail"}
-	if coreiface.IngestPreparePlannerHandle() != nil {
-		publicationSteps = append(publicationSteps, "prepare")
-	}
-	` + constructor, want: false},
+		{name: "valid", body: `publicationSteps := []string{"poster", "poster_repair", "thumbnail"}
+		if ready() { publicationSteps = append(publicationSteps, "prepare") }
+		publicationCapabilities := publication.NewCapabilityMatrix(publicationSteps)
+		_ = publicationCapabilities`, want: true},
+		{name: "comment and decoy string", body: `publicationSteps := []string{"poster", "thumbnail"}
+		_ = "publicationSteps := []string{\"poster\", \"poster_repair\"}"
+		// publication.NewCapabilityMatrix(publicationSteps) with "poster_repair"
+		publicationCapabilities := publication.NewCapabilityMatrix(publicationSteps)
+		_ = publicationCapabilities`, want: false},
+		{name: "conditional append only", body: `publicationSteps := []string{"poster", "thumbnail"}
+		if ready() { publicationSteps = append(publicationSteps, "poster_repair", "prepare") }
+		publicationCapabilities := publication.NewCapabilityMatrix(publicationSteps)
+		_ = publicationCapabilities`, want: false},
+		{name: "duplicate literal", body: `publicationSteps := []string{"poster", "poster_repair", "poster_repair", "thumbnail"}
+		publicationCapabilities := publication.NewCapabilityMatrix(publicationSteps)
+		_ = publicationCapabilities`, want: false},
+		{name: "duplicate constructor", body: `publicationSteps := []string{"poster", "poster_repair", "thumbnail"}
+		_ = publication.NewCapabilityMatrix(publicationSteps)
+		_ = publication.NewCapabilityMatrix(publicationSteps)`, want: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := hasOneUnconditionalPosterRepair(tc.src, strings.Index(tc.src, constructor))
-			if got != tc.want {
-				t.Fatalf("hasOneUnconditionalPosterRepair()=%v want %v", got, tc.want)
+			if got := hasOneUnconditionalPosterRepairAST(wrap(tc.body)); got != tc.want {
+				t.Fatalf("hasOneUnconditionalPosterRepairAST()=%v want %v", got, tc.want)
 			}
 		})
 	}

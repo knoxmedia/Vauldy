@@ -1,10 +1,7 @@
 package handler
 
 import (
-	"context"
 	"database/sql"
-
-	"knox-media/internal/postingest"
 	"net/http"
 	"strconv"
 
@@ -82,13 +79,11 @@ func (h *Handler) RetryPreviewTask(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "preview extract is disabled for this library"})
 		return
 	}
-	reset := func(ctx context.Context, tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `INSERT INTO preview_task(media_id,status,updated_at) VALUES(?,'waiting',CURRENT_TIMESTAMP) ON CONFLICT(media_id) DO UPDATE SET status='waiting',error_message=NULL,updated_at=CURRENT_TIMESTAMP`, mediaID)
-		return err
-	}
-	if _, err := enqueueExplicitPostIngest(c.Request.Context(), h.App.DB, mediaID, postingest.TaskPreview, false, reset, nil); err != nil {
+	_, _ = h.App.DB.Exec(`UPDATE preview_task SET status='waiting', error_message=NULL, updated_at=CURRENT_TIMESTAMP WHERE media_id = ?`, mediaID)
+	info, err := h.PreviewWorker.Ensure(c.Request.Context(), mediaID, filePath.String, duration.Int64)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"ok": true, "status": "waiting"})
+	c.JSON(http.StatusOK, gin.H{"ok": true, "status": info.Status})
 }

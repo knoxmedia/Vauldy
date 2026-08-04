@@ -93,7 +93,7 @@ func TestRepairLegacyPhotoMissingThumbnailPlansPreservingRepair(t *testing.T) {
 	if err != nil || n != 1 {
 		t.Fatalf("repaired=%d err=%v", n, err)
 	}
-	if got := photoRepairSteps(t, db, id); !reflect.DeepEqual(got, []StepType{StepThumbnail, StepMediaVisible, StepScrape}) {
+	if got := photoRepairSteps(t, db, id); !reflect.DeepEqual(got, []StepType{StepThumbnail, StepScrape}) {
 		t.Fatalf("steps=%v", got)
 	}
 	var generation, preserve, policy int
@@ -101,7 +101,7 @@ func TestRepairLegacyPhotoMissingThumbnailPlansPreservingRepair(t *testing.T) {
 	if err = db.QueryRow(`SELECT m.ingest_generation,m.publication_state,m.published_at,m.publication_error,r.reason,r.preserve_visibility,r.policy_version FROM media m JOIN media_ingest_run r ON r.media_id=m.id WHERE m.id=?`, id).Scan(&generation, &state, &afterPublished, &afterError, &reason, &preserve, &policy); err != nil {
 		t.Fatal(err)
 	}
-	if generation != 1 || state != "published" || afterPublished != publishedAt || afterError != oldError || reason != "repair" || preserve != 1 || policy != CurrentPolicyVersion {
+	if generation != 1 || state != "published" || afterPublished != publishedAt || afterError != oldError || reason != "repair" || preserve != 1 || policy != PolicyV2 {
 		t.Fatalf("gen=%d state=%s dates=%q/%q errors=%q/%q reason=%s preserve=%d policy=%d", generation, state, publishedAt, afterPublished, oldError, afterError, reason, preserve, policy)
 	}
 }
@@ -125,11 +125,11 @@ func TestRepairLegacyPhotoNewEncryptionPlansThumbnailThenEncrypt(t *testing.T) {
 	if err != nil || n != 1 {
 		t.Fatalf("repaired=%d err=%v", n, err)
 	}
-	if got := photoRepairSteps(t, db, id); !reflect.DeepEqual(got, []StepType{StepThumbnail, StepEncrypt, StepMediaVisible, StepScrape}) {
+	if got := photoRepairSteps(t, db, id); !reflect.DeepEqual(got, []StepType{StepThumbnail, StepEncrypt, StepScrape}) {
 		t.Fatalf("steps=%v", got)
 	}
 	var deps int
-	if err = db.QueryRow(`SELECT COUNT(*) FROM media_ingest_step_dependency d JOIN media_ingest_step s ON s.id=d.step_id JOIN media_ingest_step p ON p.id=d.depends_on_step_id WHERE s.media_id=? AND s.step_type='encrypt' AND p.step_type='thumbnail' AND d.dependency_kind='success'`, id).Scan(&deps); err != nil || deps != 1 {
+	if err = db.QueryRow(`SELECT COUNT(*) FROM media_ingest_step_dependency d JOIN media_ingest_step s ON s.id=d.step_id JOIN media_ingest_step p ON p.id=d.depends_on_step_id WHERE s.media_id=? AND s.step_type='encrypt' AND p.step_type='thumbnail' AND d.dependency_kind='step_done'`, id).Scan(&deps); err != nil || deps != 1 {
 		t.Fatalf("deps=%d err=%v", deps, err)
 	}
 }

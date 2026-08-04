@@ -55,7 +55,6 @@ import { useFavoriteFolderMenuRecents } from "../lib/useFavoriteFolderMenuRecent
 import { readRecentPlaylists, rememberPlaylistAdded, type RecentPlaylistEntry } from "../lib/recentPlaylists";
 import { useMusicPlayerStore } from "../store/musicPlayer";
 import { useT } from "../i18n";
-import { linkAbortSignal } from "../lib/abortSignal";
 import styles from "./Browse.module.css";
 import musicStyles from "./MusicBrowse.module.css";
 
@@ -96,7 +95,6 @@ type Props = {
   libraryId: number;
   libraryName?: string;
   onEmpty?: () => void;
-  signal?: AbortSignal;
 };
 
 function readViewMode(): ViewMode {
@@ -109,7 +107,7 @@ function readViewMode(): ViewMode {
   return "grid";
 }
 
-export default function MusicBrowse({ libraryId, libraryName, onEmpty, signal }: Props) {
+export default function MusicBrowse({ libraryId, libraryName, onEmpty }: Props) {
   const nav = useNavigate();
   const t = useT();
   const [tab, setTab] = useState<MusicTab>("albums");
@@ -168,15 +166,14 @@ export default function MusicBrowse({ libraryId, libraryName, onEmpty, signal }:
 
   useEffect(() => {
     let cancelled = false;
-    const linked = linkAbortSignal(signal);
     (async () => {
       setLoading(true);
       try {
         const [albumRows, artistRows, genreRows, trackRows] = await Promise.all([
-          fetchLibraryAlbums(libraryId, linked.controller.signal),
-          fetchLibraryArtists(libraryId, linked.controller.signal),
-          fetchLibraryGenres(libraryId, linked.controller.signal),
-          fetchLibraryTracks(libraryId, linked.controller.signal),
+          fetchLibraryAlbums(libraryId),
+          fetchLibraryArtists(libraryId),
+          fetchLibraryGenres(libraryId),
+          fetchLibraryTracks(libraryId),
         ]);
         if (cancelled) return;
         if (albumRows.length === 0 && trackRows.length === 0 && !onEmptyCalledRef.current) {
@@ -195,10 +192,8 @@ export default function MusicBrowse({ libraryId, libraryName, onEmpty, signal }:
     })();
     return () => {
       cancelled = true;
-      linked.controller.abort();
-      linked.cleanup();
     };
-  }, [libraryId, signal, t]);
+  }, [libraryId, t]);
 
   const needle = q.trim().toLowerCase();
 

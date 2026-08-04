@@ -61,11 +61,11 @@ func TestScanLibraryFoldersTV(t *testing.T) {
 	t.Parallel()
 	db := newTVScannerTestDB(t)
 	root := filepath.Join(t.TempDir(), "TV")
-	showDir := filepath.Join(root, "\u5267\u96c6A", "Season 01")
+	showDir := filepath.Join(root, "剧集A", "Season 01")
 	if err := os.MkdirAll(showDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(showDir, "\u5267\u96c6A - S01E01.mp4"), []byte("v"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(showDir, "剧集A - S01E01.mp4"), []byte("v"), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 
@@ -89,12 +89,12 @@ func TestScanLibraryFoldersTV(t *testing.T) {
 func TestScanLibraryFoldersChineseFlatEpisodes(t *testing.T) {
 	t.Parallel()
 	db := newTVScannerTestDB(t)
-	root := filepath.Join(t.TempDir(), "movies", "\u7535\u89c6\u5267")
-	showDir := filepath.Join(root, "\u53bb\u6709\u98ce\u7684\u5730\u65b9")
+	root := filepath.Join(t.TempDir(), "movies", "电视剧")
+	showDir := filepath.Join(root, "去有风的地方")
 	if err := os.MkdirAll(showDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	for _, name := range []string{"\u53bb\u6709\u98ce\u7684\u5730\u65b9\u7b2c1\u96c6.mp4", "\u53bb\u6709\u98ce\u7684\u5730\u65b9\u7b2c2\u96c6.mp4"} {
+	for _, name := range []string{"去有风的地方第1集.mp4", "去有风的地方第2集.mp4"} {
 		if err := os.WriteFile(filepath.Join(showDir, name), []byte("v"), 0o644); err != nil {
 			t.Fatalf("write: %v", err)
 		}

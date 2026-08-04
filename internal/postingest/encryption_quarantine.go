@@ -46,10 +46,6 @@ func defaultEncryptionFileOps() encryptionFileOps {
 	return encryptionFileOps{syncFile: func(f *os.File) error { return f.Sync() }, syncDir: syncEncryptionDir, remove: os.Remove, rename: os.Rename}
 }
 
-// encryptionFileOpsForCleanup is the post-commit plaintext cleanup seam. Tests
-// replace it to inject cleanup failures without failing encryption completion.
-var encryptionFileOpsForCleanup = defaultEncryptionFileOps
-
 func encryptionRename(ops encryptionFileOps, oldpath, newpath string) error {
 	if ops.rename != nil {
 		return ops.rename(oldpath, newpath)

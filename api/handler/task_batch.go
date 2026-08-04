@@ -8,7 +8,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"knox-media/api/middleware"
 	"knox-media/internal/postingest"
 )
 
@@ -120,7 +119,7 @@ func (h *Handler) batchSubtitleCancel(ctx context.Context, mediaID int64) error 
 			if qerr := h.App.DB.QueryRowContext(ctx, `SELECT status FROM post_ingest_task WHERE id=?`, taskID).Scan(&cur); qerr == nil {
 				if cur == postingest.StatusCancelled || cur == postingest.StatusFailed || cur == postingest.StatusDone {
 					_, _ = h.App.DB.ExecContext(ctx, `
-UPDATE subtitle_task SET status='pending',extract_status='pending',recognize_status='pending',extract_message=NULL,recognize_message=NULL,started_at=NULL,finished_at=NULL,message='cancelled by admin',updated_at=CURRENT_TIMESTAMP WHERE media_id=?`, mediaID)
+UPDATE subtitle_task SET status='pending',started_at=NULL,finished_at=NULL,message='cancelled by admin',updated_at=CURRENT_TIMESTAMP WHERE media_id=?`, mediaID)
 					return nil
 				}
 			}
@@ -128,7 +127,7 @@ UPDATE subtitle_task SET status='pending',extract_status='pending',recognize_sta
 		return err
 	}
 	_, _ = h.App.DB.ExecContext(ctx, `
-UPDATE subtitle_task SET status='pending',extract_status='pending',recognize_status='pending',extract_message=NULL,recognize_message=NULL,started_at=NULL,finished_at=NULL,message='cancelled by admin',updated_at=CURRENT_TIMESTAMP WHERE media_id=?`, mediaID)
+UPDATE subtitle_task SET status='pending',started_at=NULL,finished_at=NULL,message='cancelled by admin',updated_at=CURRENT_TIMESTAMP WHERE media_id=?`, mediaID)
 	return nil
 }
 
@@ -148,7 +147,7 @@ func (h *Handler) batchSubtitleRunNow(ctx context.Context, mediaID int64) error 
 			return err
 		}
 		_, _ = h.App.DB.ExecContext(ctx, `
-UPDATE subtitle_task SET status='pending',extract_status='pending',recognize_status='pending',extract_message=NULL,recognize_message=NULL,message=NULL,updated_at=CURRENT_TIMESTAMP WHERE media_id=?`, mediaID)
+UPDATE subtitle_task SET status='pending',message=NULL,updated_at=CURRENT_TIMESTAMP WHERE media_id=?`, mediaID)
 		return nil
 	case postingest.StatusRunning:
 		return fmt.Errorf("subtitle task is already running")
@@ -193,12 +192,12 @@ func (h *Handler) BatchEncryptTasks(c *gin.Context) {
 		var err error
 		switch action {
 		case "retry":
-			err = h.Queue.AdminResetEncrypt(c.Request.Context(), id, middleware.UserID(c))
+			err = h.Queue.AdminResetEncrypt(c.Request.Context(), id)
 			if err == nil {
 				_ = h.Queue.AdminBumpWaiting(c.Request.Context(), id)
 			}
 		case "delete":
-			err = h.Queue.AdminRemoveEncrypt(c.Request.Context(), id, middleware.UserID(c))
+			err = h.Queue.AdminRemoveEncrypt(c.Request.Context(), id)
 		case "cancel", "stop":
 			if h.Dispatcher != nil {
 				h.Dispatcher.CancelTask(id)
@@ -213,7 +212,7 @@ func (h *Handler) BatchEncryptTasks(c *gin.Context) {
 				}
 			}
 		case "run_now", "run-now":
-			err = h.batchEncryptRunNow(c.Request.Context(), id, middleware.UserID(c))
+			err = h.batchEncryptRunNow(c.Request.Context(), id)
 		default:
 			c.JSON(http.StatusBadRequest, gin.H{"error": "action must be retry, delete, cancel, or run_now"})
 			return
@@ -229,7 +228,7 @@ func (h *Handler) BatchEncryptTasks(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": okCount, "failed": len(ids) - okCount, "results": results})
 }
 
-func (h *Handler) batchEncryptRunNow(ctx context.Context, id, actorID int64) error {
+func (h *Handler) batchEncryptRunNow(ctx context.Context, id int64) error {
 	var status postingest.Status
 	err := h.App.DB.QueryRowContext(ctx, `SELECT status FROM post_ingest_task WHERE id=? AND task_type='encrypt'`, id).Scan(&status)
 	if err != nil {
@@ -241,7 +240,7 @@ func (h *Handler) batchEncryptRunNow(ctx context.Context, id, actorID int64) err
 	case postingest.StatusRunning:
 		return fmt.Errorf("encrypt task is already running")
 	default:
-		if err := h.Queue.AdminResetEncrypt(ctx, id, actorID); err != nil {
+		if err := h.Queue.AdminResetEncrypt(ctx, id); err != nil {
 			return err
 		}
 		return h.Queue.AdminBumpWaiting(ctx, id)
@@ -312,8 +311,9 @@ func (h *Handler) batchTranscodeCancel(id int64) error {
 func (h *Handler) batchTranscodeRetry(id int64) error {
 	var taskType string
 	if err := h.App.DB.QueryRow(`SELECT COALESCE(task_type,'batch') FROM transcode_task WHERE id=?`, id).Scan(&taskType); err == nil && taskType == "pretranscode" {
+		// Commercial builds inject a real handle; community always gets nil.
 		mod := pretranscodeModule()
-		if mod == nil {
+		if mod == nil || mod.Task == nil {
 			return fmt.Errorf("pretranscode module not available")
 		}
 		return mod.Task.RetryTask(id)

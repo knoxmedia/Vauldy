@@ -14,7 +14,6 @@ import (
 
 	"knox-media/internal/config"
 	"knox-media/internal/postingest"
-	taskscheduler "knox-media/internal/scheduler"
 	"knox-media/internal/storage"
 	"knox-media/internal/store"
 
@@ -197,28 +196,18 @@ func run(parent context.Context, options Options) (result Result, returnErr erro
 	owner := "stress-dispatcher"
 	queue := postingest.NewQueue(db, owner, metrics)
 	executor := &recordingExecutor{delay: options.ExecutorDelay, seen: make(map[string]int)}
-	policy := taskscheduler.PolicyDefaults()
-	if err := policy.Validate(); err != nil {
-		return result, fmt.Errorf("scheduler policy: %w", err)
-	}
-	if err := activateSchedulerPolicyForStress(ctx, db, &policy); err != nil {
-		return result, fmt.Errorf("activate scheduler policy: %w", err)
-	}
-	svc := taskscheduler.NewService(db)
-	svc.SetPolicy(policy)
-	queue.SetSchedulerPolicy(&policy)
 	dispatcherOptions := postingest.DefaultDispatcherOptions()
 	dispatcherOptions.OwnerID = owner
 	dispatcherOptions.PollInterval = 5 * time.Millisecond
 	dispatcherOptions.HeartbeatInterval = time.Second
 	dispatcherOptions.ExecutorStopGrace = time.Second
-	dispatcher, err := postingest.NewDispatcher(queue, executor, dispatcherOptions, svc)
+	dispatcher, err := postingest.NewDispatcher(queue, executor, dispatcherOptions)
 	if err != nil {
 		return result, fmt.Errorf("new dispatcher: %w", err)
 	}
-	result.GlobalLimit = sumPostIngestLimits(policy)
-	result.PosterLimit = policy.TypeConcurrency["poster"] + policy.TypeConcurrency["poster_repair"]
-	result.PreviewLimit = policy.TypeConcurrency["preview"]
+	result.GlobalLimit = dispatcherOptions.Global
+	result.PosterLimit = dispatcherOptions.Poster
+	result.PreviewLimit = dispatcherOptions.Preview
 
 	dispatchCtx, stopDispatcher := context.WithCancel(ctx)
 	dispatchDone := make(chan error, 1)
@@ -326,7 +315,7 @@ func run(parent context.Context, options Options) (result Result, returnErr erro
 
 	go func() { dispatchDone <- dispatcher.Start(dispatchCtx) }()
 
-	expected := options.Media * 6
+	expected := options.Media * 5
 	poll := time.NewTicker(10 * time.Millisecond)
 	defer poll.Stop()
 	for {
@@ -395,37 +384,8 @@ func validateResult(result Result, expected int, busyBeforeStable, busyAfterStab
 	return nil
 }
 
-// sumPostIngestLimits totals the effective post-ingest family concurrency for
-// the stress result's global budget.
-func sumPostIngestLimits(p taskscheduler.Policy) int {
-	var total int
-	for _, typ := range []string{"poster", "poster_repair", "thumbnail", "preview", "keyframe", "subtitle", "subtitle_recognize", "ai_analysis", "atrack", "encrypt"} {
-		total += p.TypeConcurrency[typ]
-	}
-	return total
-}
-
-// activateSchedulerPolicyForStress persists the policy as the active DB
-// revision when none is active, mirroring server startup wiring.
-func activateSchedulerPolicyForStress(ctx context.Context, db *sql.DB, p *taskscheduler.Policy) error {
-	st := taskscheduler.NewStore(db)
-	if active, err := st.GetActivePolicyRevision(ctx); err == nil && active != nil {
-		return nil
-	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return err
-	}
-	raw, err := taskscheduler.EncodePolicyJSON(*p)
-	if err != nil {
-		return err
-	}
-	rev, err := st.CreatePolicyRevision(ctx, 1, nil, raw, "stress", "stress run defaults", "stress")
-	if err != nil {
-		return err
-	}
-	return st.ActivatePolicyRevision(ctx, rev.ID, -1)
-}
-
-func loadDuplicateTasks(ctx context.Context, db *sql.DB) (duplicates, total int, err error) {	err = db.QueryRowContext(ctx, `
+func loadDuplicateTasks(ctx context.Context, db *sql.DB) (duplicates, total int, err error) {
+	err = db.QueryRowContext(ctx, `
 		SELECT COUNT(*) - COUNT(DISTINCT printf('%d:%s',media_id,task_type)), COUNT(*)
 		FROM post_ingest_task`).Scan(&duplicates, &total)
 	return duplicates, total, err

@@ -12,21 +12,21 @@ import (
 )
 
 type adminUserBody struct {
-	Username          string               `json:"username"`
-	Password          string               `json:"password"`
-	Role              string               `json:"role"`
-	CanManage         *int                 `json:"can_manage"`
-	CanPlay           *int                 `json:"can_play"`
-	CanDownload       *int                 `json:"can_download"`
-	CanAccessFeatures *int                 `json:"can_access_features"`
-	LibraryScope      string               `json:"library_scope"`
-	LibraryIDs        []int64              `json:"library_ids"`
-	LibraryFolders    map[string][]string  `json:"library_folders"`
-	ParentalEnabled   *int                 `json:"parental_enabled"`
-	ParentalMaxRating string               `json:"parental_max_rating"`
-	ParentalPIN       string               `json:"parental_pin"`
-	AllowedTimeStart  string               `json:"allowed_time_start"`
-	AllowedTimeEnd    string               `json:"allowed_time_end"`
+	Username          string  `json:"username"`
+	Password          string  `json:"password"`
+	Role              string  `json:"role"`
+	CanManage         *int    `json:"can_manage"`
+	CanPlay           *int    `json:"can_play"`
+	CanDownload       *int    `json:"can_download"`
+	CanAccessFeatures *int    `json:"can_access_features"`
+	LibraryScope      string  `json:"library_scope"`
+	LibraryIDs        []int64 `json:"library_ids"`
+	LibraryFolders    map[string][]string `json:"library_folders"`
+	ParentalEnabled   *int    `json:"parental_enabled"`
+	ParentalMaxRating string  `json:"parental_max_rating"`
+	ParentalPIN       string  `json:"parental_pin"`
+	AllowedTimeStart  string  `json:"allowed_time_start"`
+	AllowedTimeEnd    string  `json:"allowed_time_end"`
 	ParentalPlans     []parentalAccessPlan `json:"parental_plans"`
 }
 
@@ -61,7 +61,7 @@ func (h *Handler) ListUsersAdmin(c *gin.Context) {
 			"id": id, "username": username, "role": role,
 			"can_manage": canManage, "can_play": canPlay, "can_download": canDownload, "can_access_features": canAccessFeatures,
 			"library_scope": libraryScope, "library_ids": libraryIDs,
-			"library_folders":  libraryFolders,
+			"library_folders": libraryFolders,
 			"parental_enabled": parentalEnabled, "parental_max_rating": parentalMaxRating,
 			"allowed_time_start": allowedTimeStart, "allowed_time_end": allowedTimeEnd,
 			"parental_plans": parentalPlans,
@@ -510,3 +510,4 @@ func verifyPinHash(hash string, pin string) bool {
 	}
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(pin)) == nil
 }
+

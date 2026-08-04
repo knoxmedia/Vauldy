@@ -13,14 +13,12 @@ import SeriesEditModal from "../components/SeriesEditModal";
 import { fetchSeriesEpisodeMediaOrder } from "../lib/seriesEpisodeOrder";
 import { storeSeriesPlaySession } from "../lib/seriesPlayback";
 import { useT, type TranslateFn } from "../i18n";
-import { linkAbortSignal } from "../lib/abortSignal";
 import styles from "./Browse.module.css";
 
 type Props = {
   libraryId: number;
   libraryName?: string;
   onEmpty?: () => void;
-  signal?: AbortSignal;
 };
 
 function fmtEpisodeCount(n: number | undefined, t: TranslateFn): string {
@@ -28,7 +26,7 @@ function fmtEpisodeCount(n: number | undefined, t: TranslateFn): string {
   return t("pages.series_browse.episode_count", { count: n });
 }
 
-export default function SeriesBrowse({ libraryId, libraryName, onEmpty, signal }: Props) {
+export default function SeriesBrowse({ libraryId, libraryName, onEmpty }: Props) {
   const nav = useNavigate();
   const t = useT();
   const [rows, setRows] = useState<SeriesSummary[]>([]);
@@ -40,11 +38,10 @@ export default function SeriesBrowse({ libraryId, libraryName, onEmpty, signal }
 
   useEffect(() => {
     let cancelled = false;
-    const linked = linkAbortSignal(signal);
     (async () => {
       setLoading(true);
       try {
-        const items = await fetchLibrarySeries(libraryId, linked.controller.signal);
+        const items = await fetchLibrarySeries(libraryId);
         if (cancelled) return;
         if (items.length === 0) {
           onEmpty?.();
@@ -59,10 +56,8 @@ export default function SeriesBrowse({ libraryId, libraryName, onEmpty, signal }
     })();
     return () => {
       cancelled = true;
-      linked.controller.abort();
-      linked.cleanup();
     };
-  }, [libraryId, onEmpty, signal]);
+  }, [libraryId, onEmpty]);
 
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();

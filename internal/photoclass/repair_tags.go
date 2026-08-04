@@ -1,12 +1,9 @@
 package photoclass
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 	"strings"
-
-	"knox-media/internal/store"
 )
 
 // RepairLibraryPhotoTags rewrites garbled photo tags in meta_json to canonical UTF-8 names.
@@ -58,7 +55,7 @@ func RepairLibraryPhotoTags(db *sql.DB, libraryID int64) (int, error) {
 		if err != nil {
 			continue
 		}
-		if err := store.UpdateMediaMetaAndPhotoTime(context.Background(), db, id, merged); err != nil {
+		if _, err := db.Exec(`UPDATE media SET meta_json = ? WHERE id = ?`, merged, id); err != nil {
 			continue
 		}
 		updated++

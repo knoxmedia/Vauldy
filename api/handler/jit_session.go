@@ -426,13 +426,13 @@ func (h *Handler) buildTranscodeConfig(s *session.Session, startTime float64) se
 	encoder := txSettings.EffectiveHWEncoderID()
 	useHW := txSettings.EnableHardwareEncoding && encoder != hwenc.Libx264
 	return session.TranscodeConfig{
-		SourcePath:    s.SourcePath,
-		Bitrate:       s.Bitrate,
-		Resolution:    s.Resolution,
-		AudioCodec:    strings.ToLower(strings.TrimSpace(audioCodec.String)),
-		StartTime:     startTime,
-		X264Preset:    txSettings.InstantX264Preset(),
-		CRF:           txSettings.InstantCRF(),
+		SourcePath: s.SourcePath,
+		Bitrate:    s.Bitrate,
+		Resolution: s.Resolution,
+		AudioCodec: strings.ToLower(strings.TrimSpace(audioCodec.String)),
+		StartTime:  startTime,
+		X264Preset: txSettings.InstantX264Preset(),
+		CRF:        txSettings.InstantCRF(),
 		UseHWEncoding: useHW,
 		VideoEncoder:  encoder,
 	}

@@ -110,11 +110,6 @@ func (s *AssetEncryptor) encryptMedia(ctx context.Context, mediaID int64, manual
 	if !manual && encLib != 1 {
 		return nil
 	}
-	if cleanupPlain == 1 {
-		if _, err := lookupEncryptionRetirementIdentity(ctx, s.DB, mediaID, generation); err != nil {
-			return err
-		}
-	}
 	plainPath := strings.TrimSpace(filePath)
 	if plainPath == "" {
 		if manual {
@@ -246,9 +241,6 @@ func (s *AssetEncryptor) encryptMedia(ctx context.Context, mediaID int64, manual
 	`, mediaID, generation); err != nil {
 		return err
 	}
-	if err := upsertManualEncryptRetirementTx(ctx, tx, mediaID, generation, plainPath, output, cleanupPlain == 1); err != nil {
-		return err
-	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
@@ -257,7 +249,9 @@ func (s *AssetEncryptor) encryptMedia(ctx context.Context, mediaID int64, manual
 		_ = os.Remove(output.BackupPath)
 	}
 	persistPlainMD5AfterEncrypt(s.DB, mediaID, plainPath)
-	// Authoritative plaintext deletion is owned by retirement; never os.Remove the source here.
+	if cleanupPlain == 1 {
+		cleanupPlaintextAfterEncrypt(s.DB, mediaID, plainPath)
+	}
 	if remuxed && ft == "video" {
 		markKeyframeReindex(s.DB, mediaID)
 	}

@@ -86,7 +86,11 @@ func (h *Handler) UploadSingle(c *gin.Context) {
 	if lid != nil && lid.Valid {
 		lib = lid.Int64
 	}
-	res, err := h.insertUploadedMedia(c.Request.Context(), lib, fileID, title, dest, ft, dur, w, hh, br, nullStr(md5), format, metaJSON)
+	res, err := h.App.DB.Exec(`
+		INSERT INTO media (library_id, file_id, title, file_path, file_type, duration, width, height, bitrate, md5, format, meta_json, status)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')`,
+		lib, fileID, title, dest, ft, dur, w, hh, br, nullStr(md5), format, metaJSON,
+	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -96,9 +100,10 @@ func (h *Handler) UploadSingle(c *gin.Context) {
 	if ft == "video" {
 		go h.KickIngestJITPrepare(mid)
 	}
-	_ = h.EnqueuePostIngestForNewMedia(mid, ft)
+	h.EnqueuePostIngestForNewMedia(mid, ft)
 	c.JSON(http.StatusOK, gin.H{"id": mid, "file_id": fileID, "path": dest, "md5": md5})
 }
+
 
 func (h *Handler) insertUploadedMedia(ctx context.Context, libraryID any, fileID, title, filePath, fileType string, duration, width, height, bitrate, md5, format any, metaJSON string) (sql.Result, error) {
 	sort := store.MediaSortInsertValues(time.Now(), metaJSON, fileType == "image")
@@ -108,7 +113,6 @@ func (h *Handler) insertUploadedMedia(ctx context.Context, libraryID any, fileID
 		libraryID, fileID, title, filePath, fileType, duration, width, height, bitrate, md5, format, metaJSON,
 		sort.CreatedAt, sort.PhotoTakenAt, sort.PhotoPlaceID)
 }
-
 func nullStr(s string) any {
 	if s == "" {
 		return nil
@@ -211,7 +215,11 @@ func (h *Handler) UploadMerge(c *gin.Context) {
 	if body.LibraryID != nil {
 		lib = *body.LibraryID
 	}
-	res, err := h.insertUploadedMedia(c.Request.Context(), lib, fileID, title, path, ft, dur, w, hh, br, nullStr(md5), format, metaJSON)
+	res, err := h.App.DB.Exec(`
+		INSERT INTO media (library_id, file_id, title, file_path, file_type, duration, width, height, bitrate, md5, format, meta_json, status)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')`,
+		lib, fileID, title, path, ft, dur, w, hh, br, nullStr(md5), format, metaJSON,
+	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -221,7 +229,7 @@ func (h *Handler) UploadMerge(c *gin.Context) {
 	if ft == "video" {
 		go h.KickIngestJITPrepare(mid)
 	}
-	_ = h.EnqueuePostIngestForNewMedia(mid, ft)
+	h.EnqueuePostIngestForNewMedia(mid, ft)
 	c.JSON(http.StatusOK, gin.H{"id": mid, "file_id": fileID, "path": path, "sha256": sha, "md5": md5})
 }
 

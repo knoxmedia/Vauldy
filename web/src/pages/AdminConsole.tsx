@@ -1,4 +1,4 @@
-import { Alert, Button, Card, Col, Progress, Row, Space, Statistic, Table, Tag, Tooltip } from "antd";
+import { Alert, Button, Card, Col, Empty, Progress, Row, Space, Statistic, Table, Tag, Tooltip } from "antd";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ReloadOutlined } from "@ant-design/icons";
 import { fetchAdminOverview, type AdminOverview } from "../api/client";
@@ -8,20 +8,39 @@ import { useAuthStore } from "../store/auth";
 
 type EffectGeneration = { id: number; active: boolean; hasFirstData: boolean };
 
+const ALIGNED_QUEUE_TYPES = new Set(["subtitle", "preview", "atrack", "keyframe", "encrypt"]);
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/**
- * Console system-only validator: checks CPU, memory, disk, system info,
- * activities, and SQLite metrics. Task control fields (queue, leases,
- * budget, publication) are explicitly NOT validated here.
- */
-export function isAdminOverviewSystemOnly(value: unknown): value is AdminOverview {
+function isStatusCountMap(value: unknown): value is Record<string, number> {
+  return isRecord(value) && Object.values(value).every((count) => typeof count === "number");
+}
+
+function isTypeStatusCountMap(value: unknown): value is Record<string, Record<string, number>> {
+  return isRecord(value) && Object.values(value).every((item) => isStatusCountMap(item));
+}
+
+/** Prefer synthesized alignment counts for dual-table types; keep raw queue for other types. Omit types whose statuses are all zero. */
+export function displayQueueByType(overview: AdminOverview): Record<string, Record<string, number>> {
+  const merged: Record<string, Record<string, number>> = { ...overview.post_ingest_queue.by_type };
+  for (const type of ALIGNED_QUEUE_TYPES) {
+    const aligned = overview.task_alignment.by_type[type];
+    if (aligned) {
+      merged[type] = aligned;
+    }
+  }
+  return Object.fromEntries(
+    Object.entries(merged).filter(([, statuses]) => Object.values(statuses).some((count) => count > 0)),
+  );
+}
+
+export function isAdminOverview(value: unknown): value is AdminOverview {
   if (!isRecord(value) || !isRecord(value.monitor) || !isRecord(value.system) || !Array.isArray(value.activities)) {
     return false;
   }
-  const monitorNumbers = ["cpu_percent", "memory_percent", "disk_percent"];
+  const monitorNumbers = ["cpu_percent", "memory_percent", "disk_percent", "transcode_task_count", "media_total"];
   const systemNumbers = ["cpu_count", "memory_total"];
   const systemStrings = ["os", "database", "software_version"];
   const monitor = value.monitor;
@@ -34,17 +53,35 @@ export function isAdminOverviewSystemOnly(value: unknown): value is AdminOvervie
   if (!value.activities.every((activity) => isRecord(activity)
     && activityNumbers.every((key) => typeof activity[key] === "number")
     && activityStrings.every((key) => typeof activity[key] === "string"))) return false;
-  // SQLite metrics (system health, not task control)
+  const queue = value.post_ingest_queue;
+  const alignment = value.task_alignment;
+  const budget = value.resource_budget;
   const metrics = value.sqlite_metrics;
-  if (!isRecord(metrics)
-    || !(typeof metrics.scope === "string" && metrics.persistent === false
+  if (!isRecord(queue) || !isStatusCountMap(queue.by_status) || !isTypeStatusCountMap(queue.by_type)
+    || typeof queue.oldest_waiting_seconds !== "number" || typeof queue.expired_lease_count !== "number") return false;
+  if (!isRecord(alignment) || !isTypeStatusCountMap(alignment.by_type)) return false;
+  if (!Array.isArray(value.running_post_ingest_tasks) || !Array.isArray(value.scan_leases) || !isRecord(budget) || !isRecord(metrics)) return false;
+  const runningNumbers = ["id", "media_id", "attempts", "attempt", "max_attempts", "run_seconds"];
+  const runningStrings = ["task_type", "type", "started_at", "lease_owner", "lease_until", "lease_expires"];
+  if (!value.running_post_ingest_tasks.every((task) => isRecord(task)
+    && runningNumbers.every((key) => typeof task[key] === "number")
+    && runningStrings.every((key) => typeof task[key] === "string")
+    && (task.scan_task_id === null || typeof task.scan_task_id === "number"))) return false;
+  if (!value.scan_leases.every((lease) => isRecord(lease)
+    && ["library_id", "scan_task_id"].every((key) => typeof lease[key] === "number")
+    && ["owner_id", "lease_until"].every((key) => typeof lease[key] === "string")
+    && typeof lease.expired === "boolean")) return false;
+  if (!["global_limit", "global_used", "poster_limit", "poster_used", "preview_limit", "preview_used"].every((key) => typeof budget[key] === "number")) return false;
+  if (!(typeof metrics.scope === "string" && metrics.persistent === false
     && ["busy_retries", "busy_exhausted", "progress_batches", "log_batches", "log_failures", "dropped_logs"].every((key) => typeof metrics[key] === "number"))) return false;
-  // Reject payloads that contain task control fields (system-only console)
-  const taskControlKeys = ["post_ingest_queue", "task_alignment", "running_post_ingest_tasks", "scan_leases", "resource_budget", "publication_policy", "transcode_task_count", "media_total"];
-  for (const key of taskControlKeys) {
-    if (key in value || (key in (value.monitor as Record<string, unknown>))) return false;
-  }
-  return true;
+  if (!Array.isArray(value.publication_policy)) return false;
+  const policyNumbers = ["media_id", "run_id", "generation", "policy_version", "required_waiting", "required_failed", "optional_waiting", "optional_failed"];
+  const policyStrings = ["status", "terminal_reason", "recovery_error"];
+  return value.publication_policy.every((row) => isRecord(row)
+    && policyNumbers.every((key) => typeof row[key] === "number")
+    && policyStrings.every((key) => typeof row[key] === "string")
+    && Array.isArray(row.adapter_unavailable) && row.adapter_unavailable.every((item) => typeof item === "string")
+    && Array.isArray(row.metadata_errors) && row.metadata_errors.every((item) => typeof item === "string"));
 }
 
 export default function AdminConsolePage() {
@@ -106,7 +143,7 @@ export default function AdminConsolePage() {
       es.addEventListener("overview", (evt) => {
         try {
           const parsed: unknown = JSON.parse((evt as MessageEvent).data);
-          if (!isAdminOverviewSystemOnly(parsed) || !mountedRef.current || !owner.active || generationRef.current !== owner) return;
+          if (!isAdminOverview(parsed) || !mountedRef.current || !owner.active || generationRef.current !== owner) return;
           owner.hasFirstData = true;
           setOverview(parsed);
           setOverviewLoading(false);
@@ -114,7 +151,7 @@ export default function AdminConsolePage() {
           setStreamConnected(true);
           if (requestRef.current?.generation === owner.id) requestRef.current.controller.abort();
         } catch {
-          // Ignore malformed events
+          // Ignore malformed events and keep waiting for REST or a valid SSE snapshot.
         }
       });
       es.onerror = () => {
@@ -150,8 +187,6 @@ export default function AdminConsolePage() {
           action={<Button size="small" onClick={retryOverview}>{t("common.retry")}</Button>}
         />
       ) : null}
-
-      {/* System Monitor: CPU, Memory, Disk only */}
       <Card
         title={t("pages.admin_console.system_monitor")}
         loading={overviewLoading}
@@ -170,10 +205,10 @@ export default function AdminConsolePage() {
           <Col xs={24} md={12} lg={8}><Card size="small"><Statistic title={t("pages.admin_console.cpu_usage")} value={overview?.monitor.cpu_percent ?? 0} precision={1} suffix="%" /><Progress percent={Number((overview?.monitor.cpu_percent ?? 0).toFixed(1))} size="small" /></Card></Col>
           <Col xs={24} md={12} lg={8}><Card size="small"><Statistic title={t("pages.admin_console.memory_usage")} value={overview?.monitor.memory_percent ?? 0} precision={1} suffix="%" /><Progress percent={Number((overview?.monitor.memory_percent ?? 0).toFixed(1))} size="small" /></Card></Col>
           <Col xs={24} md={12} lg={8}><Card size="small"><Statistic title={t("pages.admin_console.disk_usage")} value={overview?.monitor.disk_percent ?? 0} precision={1} suffix="%" /><Progress percent={Number((overview?.monitor.disk_percent ?? 0).toFixed(1))} size="small" /></Card></Col>
+          <Col xs={24} md={12} lg={8}><Card size="small"><Statistic title={t("pages.admin_console.transcode_tasks")} value={overview?.monitor.transcode_task_count ?? 0} /></Card></Col>
+          <Col xs={24} md={12} lg={8}><Card size="small"><Statistic title={t("pages.admin_console.media_total")} value={overview?.monitor.media_total ?? 0} /></Card></Col>
         </Row>
       </Card>
-
-      {/* System Info: CPU count, memory, OS, database, version */}
       <Card title={t("pages.admin_console.system_info")} loading={overviewLoading}>
         <Row gutter={16}>
           <Col xs={24} md={12} lg={8}><Statistic title={t("pages.admin_console.cpu_count")} value={overview?.system.cpu_count ?? 0} /></Col>
@@ -184,14 +219,60 @@ export default function AdminConsolePage() {
         </Row>
       </Card>
 
-      {/* SQLite health (system scope only) */}
-      <Card title={t("pages.admin_console.sqlite_metrics")} loading={overviewLoading} extra={<Tag color="blue">{t("pages.admin_console.sqlite_process_scope")}</Tag>}>
-        <Row gutter={[16, 16]}>
-          {(["busy_retries", "busy_exhausted", "progress_batches", "log_batches", "log_failures", "dropped_logs"] as const).map((metric) => <Col xs={12} md={8} key={metric}><Statistic title={t(`pages.admin_console.${metric}`)} value={overview?.sqlite_metrics[metric] ?? 0} /></Col>)}
-        </Row>
+      <Card title={t("pages.admin_console.resource_control")} loading={overviewLoading}>
+        <Space direction="vertical" size="large" style={{ width: "100%" }}>
+          <Row gutter={[16, 16]}>
+            <Col xs={24} lg={12}>
+              <Card size="small" title={t("pages.admin_console.queue_by_status")}>
+                {overview && Object.keys(overview.post_ingest_queue.by_status).length ? (
+                  <Space wrap>{Object.entries(overview.post_ingest_queue.by_status).sort(([a], [b]) => a.localeCompare(b)).map(([status, count]) => <Tag key={status}>{status}: {count}</Tag>)}</Space>
+                ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />}
+              </Card>
+            </Col>
+            <Col xs={24} lg={12}>
+              <Card size="small" title={t("pages.admin_console.queue_by_type")} styles={{ body: { maxHeight: 72, overflowY: "auto" } }}>
+                {overview && Object.keys(displayQueueByType(overview)).length ? (
+                  <Space wrap>{Object.entries(displayQueueByType(overview)).sort(([a], [b]) => a.localeCompare(b)).flatMap(([type, statuses]) => Object.entries(statuses).sort(([a], [b]) => a.localeCompare(b)).map(([status, count]) => <Tag key={`${type}-${status}`}>{type} / {status}: {count}</Tag>))}</Space>
+                ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />}
+              </Card>
+            </Col>
+          </Row>
+          <Row gutter={[16, 16]}>
+            <Col xs={24} md={12}><Statistic title={t("pages.admin_console.oldest_waiting_seconds")} value={overview?.post_ingest_queue.oldest_waiting_seconds ?? 0} suffix={t("pages.admin_console.seconds")} /></Col>
+            <Col xs={24} md={12}><Statistic title={t("pages.admin_console.expired_lease_count")} value={overview?.post_ingest_queue.expired_lease_count ?? 0} /></Col>
+          </Row>
+          <Card size="small" title={t("pages.admin_console.running_post_ingest_tasks")}>
+            <Table rowKey="id" size="small" pagination={false} scroll={{ x: 1200 }} dataSource={(overview?.running_post_ingest_tasks ?? []).slice(0, 50)} columns={[
+              { title: t("pages.admin_console.col_task_id"), dataIndex: "id" },
+              { title: t("pages.admin_console.col_media_id"), dataIndex: "media_id" },
+              { title: t("pages.admin_console.col_task_type"), dataIndex: "task_type" },
+              { title: t("pages.admin_console.col_scan_task_id"), dataIndex: "scan_task_id", render: (value: number | null) => value ?? "-" },
+              { title: t("pages.admin_console.col_attempt"), render: (_, row) => `${row.attempts} / ${row.max_attempts}` },
+              { title: t("pages.admin_console.col_run_seconds"), dataIndex: "run_seconds" },
+              { title: t("pages.admin_console.col_started_at"), dataIndex: "started_at", render: renderServerDateTime },
+              { title: t("pages.admin_console.col_lease_owner"), dataIndex: "lease_owner" },
+              { title: t("pages.admin_console.col_lease_until"), dataIndex: "lease_until", render: renderServerDateTime },
+            ]} />
+          </Card>
+          <Card size="small" title={t("pages.admin_console.scan_leases")}>
+            <Table rowKey="library_id" size="small" pagination={false} scroll={{ x: 700 }} dataSource={overview?.scan_leases ?? []} columns={[
+              { title: t("pages.admin_console.col_library_id"), dataIndex: "library_id" },
+              { title: t("pages.admin_console.col_scan_task_id"), dataIndex: "scan_task_id" },
+              { title: t("pages.admin_console.col_owner_id"), dataIndex: "owner_id" },
+              { title: t("pages.admin_console.col_lease_until"), dataIndex: "lease_until", render: renderServerDateTime },
+              { title: t("pages.admin_console.col_status"), dataIndex: "expired", render: (expired: boolean) => <Tag color={expired ? "red" : "green"}>{expired ? t("pages.admin_console.expired") : t("pages.admin_console.active")}</Tag> },
+            ]} />
+          </Card>
+          <Row gutter={[16, 16]}>
+            {(["global", "poster", "preview"] as const).map((kind) => <Col xs={24} md={8} key={kind}><Card size="small"><Statistic title={t(`pages.admin_console.budget_${kind}`)} value={`${overview?.resource_budget[`${kind}_used`] ?? 0} / ${overview?.resource_budget[`${kind}_limit`] ?? 0}`} /></Card></Col>)}
+          </Row>
+          <Card size="small" title={t("pages.admin_console.sqlite_metrics")} extra={<Tag color="blue">{t("pages.admin_console.sqlite_process_scope")}</Tag>}>
+            <Row gutter={[16, 16]}>
+              {(["busy_retries", "busy_exhausted", "progress_batches", "log_batches", "log_failures", "dropped_logs"] as const).map((metric) => <Col xs={12} md={8} key={metric}><Statistic title={t(`pages.admin_console.${metric}`)} value={overview?.sqlite_metrics[metric] ?? 0} /></Col>)}
+            </Row>
+          </Card>
+        </Space>
       </Card>
-
-      {/* Current Activities */}
       <Card title={t("pages.admin_console.current_activities")} loading={overviewLoading}>
         <Table rowKey="id" pagination={{ pageSize: 10 }} dataSource={overview?.activities ?? []} columns={[
           { title: t("pages.admin_console.col_time"), dataIndex: "created_at", width: 180, render: renderServerDateTime },

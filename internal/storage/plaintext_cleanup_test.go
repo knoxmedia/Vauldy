@@ -2,7 +2,7 @@ package storage
 
 import (
 	"os"
-	"strings"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -45,6 +45,20 @@ func TestPlaintextConsumersBusyJITHook(t *testing.T) {
 	}
 }
 
+func TestRemovePlaintextFile(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "clip.mp4")
+	if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := removePlaintextFile(p); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Fatal("expected file removed")
+	}
+}
+
 func TestWaitForPlaintextConsumersReturnsWhenIdle(t *testing.T) {
 	db, err := store.OpenSQLite(":memory:")
 	if err != nil {
@@ -56,40 +70,5 @@ func TestWaitForPlaintextConsumersReturnsWhenIdle(t *testing.T) {
 	WaitForPlaintextConsumers(db, 1, 5*time.Second)
 	if time.Since(start) > 2*time.Second {
 		t.Fatal("expected immediate return when no consumers")
-	}
-}
-
-func TestPlaintextCleanupRetainsOnlyActiveConsumerPredicate(t *testing.T) {
-	data, err := os.ReadFile("plaintext_cleanup.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	src := string(data)
-	for _, banned := range []string{
-		"func KickPendingPlaintextCleanups",
-		"func schedulePlaintextCleanup",
-		"func cleanupPlaintextAfterEncrypt",
-		"func removePlaintextFile",
-	} {
-		if strings.Contains(src, banned) {
-			t.Fatalf("plaintext_cleanup still exports scheduling/deletion helper %q", banned)
-		}
-	}
-	if !strings.Contains(src, "func HasActivePlaintextConsumer") {
-		t.Fatal("Must retain HasActivePlaintextConsumer for retirement barrier")
-	}
-	if !strings.Contains(src, "func SetMediaPlaintextBusy") {
-		t.Fatal("Must retain SetMediaPlaintextBusy for JIT callback")
-	}
-}
-
-func TestHasActivePlaintextConsumerExported(t *testing.T) {
-	db, err := store.OpenSQLite(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if HasActivePlaintextConsumer(db, 1) {
-		t.Fatal("expected idle")
 	}
 }

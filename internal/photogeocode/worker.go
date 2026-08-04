@@ -9,7 +9,6 @@ import (
 
 	"knox-media/internal/keystore"
 	"knox-media/internal/photoparse"
-	"knox-media/internal/store"
 )
 
 // Worker resolves GPS locations for photo library images asynchronously.
@@ -17,8 +16,8 @@ type Worker struct {
 	DB    *sql.DB
 	Vault *keystore.Vault
 	Geo   *Service
-	mu    sync.Mutex
-	busy  map[int64]bool
+	mu   sync.Mutex
+	busy map[int64]bool
 }
 
 func NewWorker(db *sql.DB, vault *keystore.Vault, geo *Service) *Worker {
@@ -175,7 +174,7 @@ func (w *Worker) Process(ctx context.Context, mediaID int64) error {
 		w.Geo.EnrichMeta(&meta)
 	}
 	merged := photoparse.MergePhotoMetaJSON(metaJSON, meta)
-	if err := store.UpdateMediaMetaAndPhotoTime(ctx, w.DB, mediaID, merged); err != nil {
+	if _, err := w.DB.Exec(`UPDATE media SET meta_json = ? WHERE id = ?`, merged, mediaID); err != nil {
 		w.fail(mediaID, err.Error())
 		return err
 	}
