@@ -123,6 +123,8 @@ type ProjectionRow struct {
 	CreatedAt        time.Time        `json:"created_at"`
 	UpdatedAt        time.Time        `json:"updated_at"`
 	MediaID          *int64           `json:"media_id,omitempty"`
+	MediaTitle       string           `json:"media_title,omitempty"`
+	MediaFilePath    string           `json:"media_file_path,omitempty"`
 	LibraryID        *int64           `json:"library_id,omitempty"`
 	Admission        *AdmissionInfo   `json:"admission,omitempty"`
 	OwnerLease       *OwnerLeaseInfo  `json:"owner_lease,omitempty"`
@@ -151,6 +153,8 @@ type RawTaskRow struct {
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
 	MediaID          *int64
+	MediaTitle       string
+	MediaFilePath    string
 	LibraryID        *int64
 	Owner            string
 	LeaseUntil       *time.Time
@@ -382,6 +386,8 @@ func (b *ProjectionBuilder) normalize(raw *RawTaskRow, kind string) *ProjectionR
 		CreatedAt:        raw.CreatedAt,
 		UpdatedAt:        raw.UpdatedAt,
 		MediaID:          raw.MediaID,
+		MediaTitle:       raw.MediaTitle,
+		MediaFilePath:    raw.MediaFilePath,
 		LibraryID:        raw.LibraryID,
 		TerminalReason:   raw.TerminalReason,
 		Tombstone:        raw.Tombstone,
@@ -452,7 +458,9 @@ func (a *OracleAdapter) Read(ctx context.Context, tx *sql.Tx, id int64) (*RawTas
 		       COALESCE(base_priority,0), available_at, created_at, updated_at,
 		       media_id, library_id,
 		       removed_at, COALESCE(removed_by,''), COALESCE(remove_reason,''),
-		       COALESCE(run_now_expires, NULL) AS run_now_expires
+		       COALESCE(run_now_expires, NULL) AS run_now_expires,
+		       COALESCE((SELECT title FROM media m WHERE m.id = post_ingest_task.media_id),''),
+		       COALESCE((SELECT file_path FROM media m WHERE m.id = post_ingest_task.media_id),'')
 		FROM post_ingest_task WHERE id=?`, id)
 	return scanOracleRow(row, id)
 }
@@ -471,7 +479,7 @@ func scanOracleRow(row *sql.Row, id int64) (*RawTaskRow, error) {
 		&r.BasePriority, &availableAt, &r.CreatedAt, &r.UpdatedAt,
 		&mediaID, &libraryID,
 		&removedAt, &r.RemovedBy, &r.RemoveReason,
-		&runNowExpires); err != nil {
+		&runNowExpires, &r.MediaTitle, &r.MediaFilePath); err != nil {
 		return nil, err
 	}
 	if removedAt.Valid {

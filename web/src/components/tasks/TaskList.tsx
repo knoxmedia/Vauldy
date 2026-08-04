@@ -198,6 +198,25 @@ export function TaskList({ taskType, filter: extFilter, removed, onSelectRow, on
       render: (v: string) => <Tag style={{ margin: 0 }}>{v}</Tag>,
     },
     {
+      title: t("tasks.control.col_media"),
+      key: "media",
+      width: 240,
+      ellipsis: true,
+      render: (_: unknown, r: ProjectionRow) =>
+        r.media_id ? (
+          <span style={{ fontSize: 12, display: "inline-flex", alignItems: "center", gap: 6, maxWidth: "100%" }}>
+            <span style={{ color: "#888", fontFamily: "monospace", flexShrink: 0 }}>#{r.media_id}</span>
+            {r.media_title && (
+              <span style={{ color: "#d9d9d9", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {r.media_title}
+              </span>
+            )}
+          </span>
+        ) : (
+          <span style={{ color: "#555" }}>-</span>
+        ),
+    },
+    {
       title: t("tasks.control.col_status"),
       dataIndex: "normalized_status",
       key: "status",

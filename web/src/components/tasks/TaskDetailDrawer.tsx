@@ -224,6 +224,21 @@ export function TaskDetailDrawer({ taskId, onClose, onActionSuccess }: TaskDetai
             <Descriptions.Item label={t("tasks.control.detail_source_id")}>
               <span style={{ fontFamily: "monospace" }}>{row.source_id}</span>
             </Descriptions.Item>
+            <Descriptions.Item label={t("tasks.control.detail_media")}>
+              {row.media_id ? (
+                <span>
+                  <span style={{ fontFamily: "monospace", color: "#1677ff" }}>#{row.media_id}</span>
+                  {row.media_title && <span style={{ marginLeft: 8 }}>{row.media_title}</span>}
+                  {row.media_file_path && (
+                    <div style={{ fontSize: 12, color: "#888", marginTop: 2, wordBreak: "break-all" }}>
+                      {row.media_file_path}
+                    </div>
+                  )}
+                </span>
+              ) : (
+                <span style={{ color: "#555" }}>-</span>
+              )}
+            </Descriptions.Item>
             <Descriptions.Item label={t("tasks.control.detail_priority")}>
               {row.base_priority}
               {row.effective_priority !== row.base_priority && (

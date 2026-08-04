@@ -63,6 +63,17 @@ func createMutationTestSchema(t *testing.T, db *sql.DB) error {
 			removed_at TIMESTAMP,
 			removed_by TEXT NOT NULL DEFAULT '',
 			remove_reason TEXT NOT NULL DEFAULT ''
+		)		`,
+		`CREATE TABLE media (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			library_id INTEGER,
+			file_id TEXT UNIQUE,
+			title TEXT,
+			original_title TEXT,
+			file_path TEXT,
+			file_type TEXT,
+			status TEXT DEFAULT 'active',
+			publication_state TEXT NOT NULL DEFAULT 'published'
 		)`,
 		`CREATE TABLE task_projection_revision (
 			task_identity TEXT PRIMARY KEY,

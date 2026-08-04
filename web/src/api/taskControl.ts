@@ -55,6 +55,8 @@ export interface ProjectionRow {
   created_at: string;
   updated_at: string;
   media_id?: number;
+  media_title?: string;
+  media_file_path?: string;
   library_id?: number;
   admission?: AdmissionInfo;
   owner_lease?: OwnerLeaseInfo;

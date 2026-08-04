@@ -211,7 +211,9 @@ func (q *QueryService) List(ctx context.Context, filter QueryFilter, cursor stri
 		COALESCE(base_priority,0), available_at, created_at, updated_at,
 		media_id, library_id,
 		removed_at, COALESCE(removed_by,''), COALESCE(remove_reason,''),
-		COALESCE(run_now_expires, NULL) AS run_now_expires
+		COALESCE(run_now_expires, NULL) AS run_now_expires,
+		COALESCE((SELECT title FROM media m WHERE m.id = post_ingest_task.media_id),''),
+		COALESCE((SELECT file_path FROM media m WHERE m.id = post_ingest_task.media_id),'')
 	FROM post_ingest_task` + where + ` ORDER BY COALESCE(base_priority,0) DESC, id ASC LIMIT ?`
 	args = append(args, limit+1)
 
@@ -379,7 +381,7 @@ func scanOracleRowSimple(rows *sql.Rows) (RawTaskRow, error) {
 		&r.BasePriority, &availableAt, &r.CreatedAt, &r.UpdatedAt,
 		&mediaID, &libraryID,
 		&removedAt, &r.RemovedBy, &r.RemoveReason,
-		&runNowExpires); err != nil {
+		&runNowExpires, &r.MediaTitle, &r.MediaFilePath); err != nil {
 		return r, err
 	}
 	r.TaskType = typ

@@ -45,6 +45,17 @@ func setupProjectionTestDB(t *testing.T) (*sql.DB, *ProjectionBuilder) {
 			base_priority INTEGER NOT NULL DEFAULT 0,
 			library_id INTEGER,
 			run_now_expires TIMESTAMP
+		)		`,
+		`CREATE TABLE media (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			library_id INTEGER,
+			file_id TEXT UNIQUE,
+			title TEXT,
+			original_title TEXT,
+			file_path TEXT,
+			file_type TEXT,
+			status TEXT DEFAULT 'active',
+			publication_state TEXT NOT NULL DEFAULT 'published'
 		)`,
 		`CREATE TABLE task_projection_sequence (
 			singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),

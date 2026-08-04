@@ -43,6 +43,17 @@ func setupStreamTestDB(t *testing.T) (*sql.DB, *ProjectionBuilder) {
 			run_now_expires TIMESTAMP,
 			finished_at TIMESTAMP,
 			started_at TIMESTAMP
+		)		`,
+		`CREATE TABLE media (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			library_id INTEGER,
+			file_id TEXT UNIQUE,
+			title TEXT,
+			original_title TEXT,
+			file_path TEXT,
+			file_type TEXT,
+			status TEXT DEFAULT 'active',
+			publication_state TEXT NOT NULL DEFAULT 'published'
 		)`,
 		`CREATE TABLE task_abort_intent (
 			task_identity TEXT PRIMARY KEY,
