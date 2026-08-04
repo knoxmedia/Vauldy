@@ -130,7 +130,7 @@ func TestServePhotoFaceThumbIsServeOnlyOnCacheMiss(t *testing.T) {
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
-	if w.Header().Get("X-Thumbnail-Pending") != "1" || w.Header().Get("Retry-After") != "5" {
+	if w.Header().Get("X-Knox-Thumbnail-Pending") != "1" || w.Header().Get("Retry-After") != "5" {
 		t.Fatalf("pending headers=%v", w.Header())
 	}
 	after, _ := snapshotFiles(preview)
@@ -253,7 +253,7 @@ func TestServePhotoFaceThumbMissingRelationIsNotRetryable(t *testing.T) {
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status=%d", w.Code)
 	}
-	if got := w.Header().Get("X-Thumbnail-Pending"); got != "" {
+	if got := w.Header().Get("X-Knox-Thumbnail-Pending"); got != "" {
 		t.Fatalf("pending=%q", got)
 	}
 	if got := w.Header().Get("Retry-After"); got != "" {

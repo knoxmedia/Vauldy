@@ -29,10 +29,10 @@ func (h *Handler) DocumentPreviewInfo(c *gin.Context) {
 	}
 	office := doctrans.IsOfficeDocument(path, format)
 	resp := gin.H{
-		"id":              id,
-		"format":          format,
-		"needs_preview":   office,
-		"preview_ready":   false,
+		"id":                 id,
+		"format":             format,
+		"needs_preview":      office,
+		"preview_ready":      false,
 		"conversion_enabled": h.App.Config.DocTransEnabled(),
 	}
 	if !office {
@@ -78,7 +78,7 @@ func (h *Handler) ServeDocumentPreview(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "preview conversion not supported for this format"})
 		return
 	}
-	workPath, cleanup, err := storage.MaterializePlaintextTemp(h.App.DB, h.KeyVault, id, path)
+	workPath, cleanup, err := storage.MaterializePlaintextTempUnsafeLegacy(h.App.DB, h.KeyVault, id, path)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

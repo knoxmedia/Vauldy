@@ -671,3 +671,24 @@ func TestWithImmediateConnTxDefinitiveSQLErrorRetainsConnectionWithoutRollback(t
 		t.Fatalf("closed connections=%d want connection retained", got)
 	}
 }
+
+func TestImmediateOutcomeReportsBodyStarted(t *testing.T) {
+	db := openImmediateTxTestDB(t)
+	want := errors.New("body")
+	out, err := WithImmediateConnTx(context.Background(), db, func(ImmediateConnTx) error { return want })
+	if !errors.Is(err, want) {
+		t.Fatal(err)
+	}
+	if !out.BodyStarted || out.CommitAttempted {
+		t.Fatalf("outcome=%+v", out)
+	}
+}
+
+func TestImmediateOutcomeBeginFailureBodyNotStarted(t *testing.T) {
+	testDriver := &immediateRollbackTestDriver{beginErr: errors.New("begin failed")}
+	db := openImmediateRollbackTestDB(t, testDriver)
+	out, _ := WithImmediateConnTx(context.Background(), db, func(ImmediateConnTx) error { t.Fatal("body called"); return nil })
+	if out.BodyStarted {
+		t.Fatalf("outcome=%+v", out)
+	}
+}

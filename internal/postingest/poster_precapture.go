@@ -206,7 +206,7 @@ func FinalizeCapturedPoster(ctx context.Context, db *sql.DB, captured CapturedPo
 		if n, _ := result.RowsAffected(); n != 1 {
 			return errors.New("precapture finalize: stale poster task")
 		}
-		return publication.AggregateTx(ctx, tx, captured.RunID)
+		return publication.FinalizeNodeTransitionTx(ctx, tx, captured.RunID)
 	})
 	if err == nil {
 		_ = os.Remove(captured.StageDir)

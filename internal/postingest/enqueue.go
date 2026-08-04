@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"knox-media/internal/config"
+	"encoding/json"
 	"knox-media/internal/publication"
 	"knox-media/internal/store"
 	"knox-media/internal/taskalign"
@@ -39,13 +40,15 @@ func (e *Enqueuer) EnqueueMedia(ctx context.Context, mediaID int64, scanTaskID *
 
 	var dbFileType string
 	var duration int64
-	var previewExtract int
+	var previewExtract, encryptedAssets int
+	var libraryID int64
 	err := e.DB.QueryRowContext(ctx, `
 SELECT COALESCE(m.file_type,''), COALESCE(m.duration,0),
-       COALESCE(l.preview_extract,0)
+       COALESCE(l.preview_extract,0), COALESCE(l.encrypted_assets_enabled,0),
+       m.library_id
 FROM media m
 JOIN library l ON l.id=m.library_id
-WHERE m.id=?`, mediaID).Scan(&dbFileType, &duration, &previewExtract)
+WHERE m.id=?`, mediaID).Scan(&dbFileType, &duration, &previewExtract, &encryptedAssets, &libraryID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, permanentEnqueueError("media not found")
 	}
@@ -70,6 +73,9 @@ WHERE m.id=?`, mediaID).Scan(&dbFileType, &duration, &previewExtract)
 		}
 		if e.Config.ATrackAutoOnScan() {
 			planned = append(planned, TaskAtrack)
+		}
+		if e.Config.EncryptedAssetsEnabled() && encryptedAssets == 1 {
+			planned = append(planned, TaskEncrypt)
 		}
 	}
 	_ = duration
@@ -100,10 +106,16 @@ WHERE s.id=?`, mediaID, *scanTaskID).Scan(&exists)
 			}
 		}
 		for _, typ := range planned {
+			profile := publication.ResourceProfile{PolicyVersion: publication.CurrentPolicyVersion, LibraryID: libraryID}
+			profileJSON, err := json.Marshal(profile)
+			if err != nil {
+				return fmt.Errorf("encode resource profile: %w", err)
+			}
+			const scanSourceClass = 200 // manual scan
 			if _, err := tx.ExecContext(ctx, `
-INSERT INTO post_ingest_task (media_id,scan_task_id,generation,task_type,max_attempts)
-SELECT ?,?,COALESCE(ingest_generation,0),?,? FROM media WHERE id=?
-ON CONFLICT(media_id,generation,task_type) DO NOTHING`, mediaID, scanTaskID, typ, publication.DefaultMaxAttempts(string(typ)), mediaID); err != nil {
+INSERT INTO post_ingest_task (media_id,scan_task_id,task_type,max_attempts,source_class,base_priority,library_id,resource_profile_version,resource_profile_json)
+VALUES (?,?,?,?,?,?,?,?,?)
+ON CONFLICT(media_id,generation,task_type) DO NOTHING`, mediaID, scanTaskID, typ, publication.DefaultMaxAttempts(string(typ)), scanSourceClass, scanSourceClass, libraryID, publication.CurrentPolicyVersion, string(profileJSON)); err != nil {
 				return err
 			}
 			if err := taskalign.EnsureDomainWaiting(ctx, tx, string(typ), mediaID); err != nil {

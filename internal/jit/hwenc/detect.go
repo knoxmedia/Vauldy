@@ -2,6 +2,7 @@
 package hwenc
 
 import (
+	"knox-media/internal/processmetrics"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -129,7 +130,7 @@ func listAvailableHWAccel(encoders string, ctx hwDetectContext) []string {
 }
 
 func ffmpegEncodersLower(ffmpegPath string) (string, bool) {
-	out, err := exec.Command(ffmpegPath, "-hide_banner", "-encoders").CombinedOutput()
+	out, err := processmetrics.NewFFmpegCommand(ffmpegPath, "-hide_banner", "-encoders").CombinedOutput()
 	if err != nil {
 		return "", false
 	}

@@ -55,15 +55,15 @@ func (h *Handler) ListFavoriteFolders(c *gin.Context) {
 	}
 	rows, err := h.App.DB.Query(`
 		SELECT f.id, f.name, f.description, f.created_at, f.updated_at,
-			(SELECT COUNT(*) FROM favorite_folder_item ffi JOIN media m ON m.id=ffi.media_id WHERE ffi.folder_id = f.id AND m.publication_state IN ('published','degraded')) AS item_count,
-			(SELECT ffi.media_id FROM favorite_folder_item ffi JOIN media m ON m.id=ffi.media_id
-			 WHERE ffi.folder_id = f.id AND m.publication_state IN ('published','degraded') ORDER BY ffi.sort_order ASC, ffi.id ASC LIMIT 1) AS first_media_id,
+			(SELECT COUNT(*) FROM favorite_folder_item WHERE folder_id = f.id) AS item_count,
+			(SELECT ffi.media_id FROM favorite_folder_item ffi
+			 WHERE ffi.folder_id = f.id ORDER BY ffi.sort_order ASC, ffi.id ASC LIMIT 1) AS first_media_id,
 			(SELECT COALESCE(
 				NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.poster')), ''),
 				NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.extra.poster')), '')
 			) FROM favorite_folder_item ffi
 			 JOIN media m ON m.id = ffi.media_id
-			 WHERE ffi.folder_id = f.id AND m.publication_state IN ('published','degraded') ORDER BY ffi.sort_order ASC, ffi.id ASC LIMIT 1) AS cover_url
+			 WHERE ffi.folder_id = f.id ORDER BY ffi.sort_order ASC, ffi.id ASC LIMIT 1) AS cover_url
 		FROM favorite_folder f
 		WHERE f.user_id = ?
 		ORDER BY f.updated_at DESC
@@ -128,7 +128,7 @@ func (h *Handler) attachFavoriteFolderPreviews(folders []favoriteFolderResp) []f
 			) AS poster_url
 		FROM favorite_folder_item ffi
 		JOIN media m ON m.id = ffi.media_id
-		WHERE ffi.folder_id IN (%s) AND m.publication_state IN ('published','degraded')
+		WHERE ffi.folder_id IN (%s)
 		ORDER BY ffi.folder_id, ffi.sort_order ASC, ffi.id ASC`, placeholders)
 	rows, err := h.App.DB.Query(q, args...)
 	if err != nil {
@@ -200,7 +200,7 @@ func (h *Handler) GetFavoriteFolder(c *gin.Context) {
 			) AS poster_url
 		FROM favorite_folder_item fi
 		JOIN media m ON m.id = fi.media_id
-		WHERE fi.folder_id = ? AND m.publication_state IN ('published','degraded')
+		WHERE fi.folder_id = ?
 		ORDER BY fi.sort_order ASC, fi.id ASC`, fid)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})

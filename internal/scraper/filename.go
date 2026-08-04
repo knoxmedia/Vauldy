@@ -17,26 +17,26 @@ var (
 	// [yyh3d.com] pure-domain site tags.
 	siteTagRE = regexp.MustCompile(`(?i)\[[a-z0-9][a-z0-9\-]*\.[a-z]{2,}(?:\.[a-z]{2,})?\]`)
 	// [电影天堂www.dytt8899.com] and similar CN release-site prefixes.
-	siteBracketRE      = regexp.MustCompile(`(?i)\[[^\]]*(?:www\.|\.com|\.net|\.cn|\.cc|dytt|ygdy|dy2018|mp4ba|xunlei|btbtd|6vhao|renren|gaoqing|高清下载|电影网|影视网|资源网|天堂|影视)[^\]]*\]`)
-	cjkTitleRunRE      = regexp.MustCompile(`[\p{Han}][\p{Han}\d：:·・]*[\p{Han}\d]?`)
-	leadingAwardRE     = regexp.MustCompile(`^\s*\d{1,3}\s*[届集期]\s*[\.\-_\s]*`)
-	chineseAdRE        = regexp.MustCompile(`[【（\[(][^【】()\[\]（）]*(?:Q裙|Q群|V信|微信|QQ|公众号|十万度|推广)[^【】()\[\]（）]*[】）\])]`)
-	chineseBookTitleRE = regexp.MustCompile(`《([^《》]+)》`)
-	chineseYearRangeRE = regexp.MustCompile(`((?:19|20)\d{2})\s*[\-–—~～]\s*((?:19|20)\d{2})`)
-	yearInNameRE       = regexp.MustCompile(`(?:^|[^0-9])((?:19|20)\d{2})(?:[^0-9]|$)`)
-	latinTitleRunRE    = regexp.MustCompile(`[A-Za-z][A-Za-z0-9 '&:,\.\-]*[A-Za-z0-9]`)
-	episodeMarkerRE    = regexp.MustCompile(`(?i)\bS\d{1,2}E\d{1,3}\b`)
+	siteBracketRE = regexp.MustCompile(`(?i)\[[^\]]*(?:www\.|\.com|\.net|\.cn|\.cc|dytt|ygdy|dy2018|mp4ba|xunlei|btbtd|6vhao|renren|gaoqing|高清下载|电影网|影视网|资源网|天堂|影视)[^\]]*\]`)
+	cjkTitleRunRE     = regexp.MustCompile(`[\p{Han}][\p{Han}\d：:·・]*[\p{Han}\d]?`)
+	leadingAwardRE    = regexp.MustCompile(`^\s*\d{1,3}\s*[届集期]\s*[\.\-_\s]*`)
+	chineseAdRE         = regexp.MustCompile(`[【（\[(][^【】()\[\]（）]*(?:Q裙|Q群|V信|微信|QQ|公众号|十万度|推广)[^【】()\[\]（）]*[】）\])]`)
+	chineseBookTitleRE  = regexp.MustCompile(`《([^《》]+)》`)
+	chineseYearRangeRE  = regexp.MustCompile(`((?:19|20)\d{2})\s*[\-–—~～]\s*((?:19|20)\d{2})`)
+	yearInNameRE        = regexp.MustCompile(`(?:^|[^0-9])((?:19|20)\d{2})(?:[^0-9]|$)`)
+	latinTitleRunRE     = regexp.MustCompile(`[A-Za-z][A-Za-z0-9 '&:,\.\-]*[A-Za-z0-9]`)
+	episodeMarkerRE     = regexp.MustCompile(`(?i)\bS\d{1,2}E\d{1,3}\b`)
 	// 489155.com@ style release-site prefixes before the actual title.
 	siteAtPrefixRE = regexp.MustCompile(`(?i)^\s*\d+(?:\.[a-z0-9][-a-z0-9]*)*@`)
 	// Leading 【ai增强】 / [tag] release metadata before title.
 	leadingReleaseBracketRE = regexp.MustCompile(`^(?:\s*[【\[（(][^【】()\[\]（）]{0,60}[】\]\)）]\s*)+`)
-	knownMediaExtRE         = regexp.MustCompile(`(?i)\.(mkv|mp4|avi|mov|wmv|flv|webm|m4v|ts|m2ts|mp3|flac|aac|wav|mka|ogg|oga|wma|ape|alac)$`)
-	trailingVideoTagRE      = regexp.MustCompile(`(?i)[\s._\-]+(?:hd|bd|uhd|br|dvd|webrip|web-?dl|bluray|remux|tc|cam|ts|scr|rip|4k|8k|1080p|2160p|1440p|720p|480p|576p|540p|x264|x265|hevc|h\.?264|h\.?265|aac|dts|ac3|truehd|atmos|10bit|8bit)(?:[\s._\-]*[\p{Han}a-z0-9]+)*$`)
-	trailingCNReleaseRE     = regexp.MustCompile(`[\s._\-]+(?:国[英粤印韩日]双[语字]|中[英日韩]双[字语]|国[语粤]中字|[简繁]体中字|双语字幕|中文字幕|双字幕|双音轨|内封中字|内嵌中字|外挂字幕|听译字幕)(?:[\s._\-]*(?:国[英粤印韩日]双[语字]|中[英日韩]双[字语]|国[语粤]中字|[简繁]体中字|双语字幕|中文字幕|双字幕|双音轨))*$`)
-	trailingCNEditionRE     = regexp.MustCompile(`[\s._\-]+(?:高清|超清|蓝光|原盘|未删减|完整|修复|导演剪辑|加长|抢先|枪版|剧场|典藏|纪念|特效|终极|收藏)(?:版)?$`)
+	knownMediaExtRE = regexp.MustCompile(`(?i)\.(mkv|mp4|avi|mov|wmv|flv|webm|m4v|ts|m2ts|mp3|flac|aac|wav|mka|ogg|oga|wma|ape|alac)$`)
+	trailingVideoTagRE = regexp.MustCompile(`(?i)[\s._\-]+(?:hd|bd|uhd|br|dvd|webrip|web-?dl|bluray|remux|tc|cam|ts|scr|rip|4k|8k|1080p|2160p|1440p|720p|480p|576p|540p|x264|x265|hevc|h\.?264|h\.?265|aac|dts|ac3|truehd|atmos|10bit|8bit)(?:[\s._\-]*[\p{Han}a-z0-9]+)*$`)
+	trailingCNReleaseRE = regexp.MustCompile(`[\s._\-]+(?:国[英粤印韩日]双[语字]|中[英日韩]双[字语]|国[语粤]中字|[简繁]体中字|双语字幕|中文字幕|双字幕|双音轨|内封中字|内嵌中字|外挂字幕|听译字幕)(?:[\s._\-]*(?:国[英粤印韩日]双[语字]|中[英日韩]双[字语]|国[语粤]中字|[简繁]体中字|双语字幕|中文字幕|双字幕|双音轨))*$`)
+	trailingCNEditionRE = regexp.MustCompile(`[\s._\-]+(?:高清|超清|蓝光|原盘|未删减|完整|修复|导演剪辑|加长|抢先|枪版|剧场|典藏|纪念|特效|终极|收藏)(?:版)?$`)
 )
 
-// ParseMediaFilename extracts search title/year from release filenames.
+// ParseMediaFilename extracts search title/year from release filenames (nowen-video style).
 func ParseMediaFilename(filename string) ParsedMediaTitle {
 	out := ParsedMediaTitle{}
 	if strings.TrimSpace(filename) == "" {

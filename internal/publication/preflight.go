@@ -78,12 +78,12 @@ func PreflightPublicationV2(ctx context.Context, db *sql.DB, planner *Planner, r
 	if len(libs) > 0 && (!planner.options.EncryptGlobal || !registry.Available(string(StepEncrypt))) {
 		return nil, errors.New("publication v2 preflight: encrypted library requires executable encrypt capability")
 	}
+	warnings := []string{}
 	for _, lib := range libs {
 		if err = resources.ValidateEncryptedLibrary(ctx, db, lib); err != nil {
-			return nil, fmt.Errorf("publication v2 preflight: encrypted library %d: %w", lib.ID, err)
+			warnings = append(warnings, fmt.Sprintf("encrypted_library_unavailable:%d:%v", lib.ID, err))
 		}
 	}
-	warnings := []string{}
 	var preview, prepare int
 	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM library WHERE COALESCE(preview_extract,0)=1`).Scan(&preview)
 	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM library WHERE COALESCE(jit_prepare_on_ingest,0)=1`).Scan(&prepare)

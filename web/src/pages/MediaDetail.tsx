@@ -71,6 +71,7 @@ import {
   removeFavorite,
   savePlaybackProgress,
   type MediaMatchListUpdate,
+  optimizationAssetRecorded,
 } from "../api/client";
 import AddToFavoriteFolderPickerModal from "../components/AddToFavoriteFolderPickerModal";
 import AddToPlaylistModal from "../components/AddToPlaylistModal";
@@ -82,6 +83,8 @@ import { readRecentPlaylists, rememberPlaylistAdded } from "../lib/recentPlaylis
 import ToolbarPlayIcon from "../components/ToolbarPlayIcon";
 import { isAdminRole, useAuthStore } from "../store/auth";
 import { tGlobal, useT } from "../i18n";
+import VideoOptimizationModal from "../components/VideoOptimizationModal";
+import { useLicenseStatus } from "../enterprise";
 import styles from "./MediaDetail.module.css";
 
 type AudioTrackInfo = {
@@ -802,6 +805,8 @@ export default function MediaDetailPage() {
   const [playlistModalOpen, setPlaylistModalOpen] = useState(false);
   const [favoriteFolderModalOpen, setFavoriteFolderModalOpen] = useState(false);
   const [matchModalOpen, setMatchModalOpen] = useState(false);
+  const [optimizationModalOpen, setOptimizationModalOpen] = useState(false);
+  const { status: licenseStatus } = useLicenseStatus();
   const [recentPlaylistMenu, setRecentPlaylistMenu] = useState(readRecentPlaylists);
   const { recentFavoriteFolders, rememberFolderMenuAdded } = useFavoriteFolderMenuRecents();
   const fileInfoRef = useRef<HTMLElement | null>(null);
@@ -1212,9 +1217,13 @@ export default function MediaDetailPage() {
           }
         },
         onGetInfo: scrollToFileInfo,
+        onOpenOptimization: licenseStatus?.pretranscode
+          ? () => setOptimizationModalOpen(true)
+          : undefined,
+        optimizationAvailable: detail.file_type === "video" && optimizationAssetRecorded(detail),
       },
     );
-  }, [detail, nav, recentPlaylistMenu, recentFavoriteFolders, rememberFolderMenuAdded, reloadDetail, scrollToFileInfo, t]);
+  }, [detail, nav, recentPlaylistMenu, recentFavoriteFolders, rememberFolderMenuAdded, reloadDetail, scrollToFileInfo, licenseStatus, t]);
 
   if (loading) {
     return (
@@ -1865,6 +1874,17 @@ export default function MediaDetailPage() {
           open={matchModalOpen}
           onClose={() => setMatchModalOpen(false)}
           onMatched={applyMatchUpdate}
+        />
+      ) : null}
+      {detail ? (
+        <VideoOptimizationModal
+          mediaId={detail.id}
+          mediaTitle={detail.title}
+          open={optimizationModalOpen}
+          onClose={() => setOptimizationModalOpen(false)}
+          onOptimized={() => {
+            // Optionally refresh pretranscode info
+          }}
         />
       ) : null}
     </div>

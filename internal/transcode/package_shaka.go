@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"knox-media/internal/processmetrics"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -71,7 +72,7 @@ func (w *PackageWorker) runShakaCMAF(ctx context.Context, taskID, mediaID int64,
 			"-an", vOut,
 		}
 		logDRMf(taskID, mediaID, "shaka pre-encode start: rung=%s cmd=%s %s", r.Name, w.FFmpegPath, strings.Join(fargs, " "))
-		fcmd := exec.CommandContext(ctx, w.FFmpegPath, fargs...)
+		fcmd := processmetrics.NewFFmpegCommandContext(ctx, w.FFmpegPath, fargs...)
 		var fstderr bytes.Buffer
 		fcmd.Stderr = &fstderr
 		fcmd.Stdout = &fstderr
@@ -91,7 +92,7 @@ func (w *PackageWorker) runShakaCMAF(ctx context.Context, taskID, mediaID int64,
 			"-f", "mp4", aPath,
 		}
 		logDRMf(taskID, mediaID, "shaka audio extract start: cmd=%s %s", w.FFmpegPath, strings.Join(aargs, " "))
-		acmd := exec.CommandContext(ctx, w.FFmpegPath, aargs...)
+		acmd := processmetrics.NewFFmpegCommandContext(ctx, w.FFmpegPath, aargs...)
 		var st bytes.Buffer
 		acmd.Stderr = &st
 		acmd.Stdout = &st

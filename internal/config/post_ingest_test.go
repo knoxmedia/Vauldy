@@ -119,3 +119,28 @@ func TestShippedConfigsParseAsYAML(t *testing.T) {
 		}
 	}
 }
+
+// TestPostIngestLegacyTranslationPreservesExistingLimits asserts that legacy
+// post_ingest explicit values are translated to scheduler concurrency when the
+// scheduler section is absent, preserving the operator's configured limits.
+func TestPostIngestLegacyTranslationPreservesExistingLimits(t *testing.T) {
+	yaml := "post_ingest:\n  max_concurrent: 4\n  poster_max_concurrent: 2\n  preview_max_concurrent: 1\n  subtitle_max_concurrent: 1\n  subtitle_timeout_realtime_factor: 2.0\n"
+	path := filepath.Join(t.TempDir(), "config.yml")
+	if err := os.WriteFile(path, []byte(yaml), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// poster should get poster_max_concurrent (2), not max_concurrent (4).
+	if c.Scheduler.Concurrency["poster"] != 2 {
+		t.Fatalf("poster=%d want 2", c.Scheduler.Concurrency["poster"])
+	}
+	if c.Scheduler.Concurrency["preview"] != 1 {
+		t.Fatalf("preview=%d want 1", c.Scheduler.Concurrency["preview"])
+	}
+	if c.Scheduler.Concurrency["subtitle"] != 1 {
+		t.Fatalf("subtitle=%d want 1", c.Scheduler.Concurrency["subtitle"])
+	}
+}

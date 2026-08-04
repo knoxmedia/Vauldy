@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"knox-media/internal/scancoord"
 	"net/http"
 	"strconv"
 	"strings"
@@ -231,7 +232,7 @@ func (h *Handler) executeScheduledTask(ctx context.Context, taskType string, pay
 		if libraryID <= 0 {
 			return "", fmt.Errorf("payload.library_id required")
 		}
-		taskID, runningTaskID, err := h.startLibraryScanTask(ctx, libraryID, "schedule")
+		taskID, runningTaskID, err := h.startLibraryScanTask(ctx, libraryID, string(scancoord.SourceScheduled))
 		if err != nil {
 			return "", err
 		}
@@ -240,14 +241,14 @@ func (h *Handler) executeScheduledTask(ctx context.Context, taskType string, pay
 		}
 		return fmt.Sprintf("已启动扫描任务 #%d", taskID), nil
 	case "scrape_run":
-		if !h.isScrapeEnabled(context.Background()) {
+		if !h.isScrapeEnabled(ctx) {
 			return "刮削已禁用，跳过执行", nil
 		}
 		limit := anyToInt(payload["limit"])
 		if limit <= 0 {
 			limit = scrapeWorkerBatchMax
 		}
-		done, failed := h.runScrapeTasksWithLimit(context.Background(), nil, limit)
+		done, failed := h.runScrapeTasksWithLimit(ctx, nil, limit)
 		return fmt.Sprintf("刮削执行完成：成功 %d，失败 %d", done, failed), nil
 	case "transcode_cleanup_failed_before":
 		days := anyToInt(payload["days"])
@@ -306,15 +307,13 @@ func (h *Handler) executeScheduledTask(ctx context.Context, taskType string, pay
 		n, err := h.enqueueScheduledPostIngest(ctx, postingest.TaskAtrack, libID, limit)
 		return fmt.Sprintf("音轨任务已入队：%d", n), err
 	case "keyframe_process":
-		if h.KeyframeWorker == nil {
-			return "", fmt.Errorf("keyframe worker disabled")
-		}
 		limit := anyToInt(payload["limit"])
 		if limit <= 0 {
 			limit = 10
 		}
-		done, failed := h.KeyframeWorker.RunBatch(limit)
-		return fmt.Sprintf("关键帧提取完成：成功 %d，失败 %d", done, failed), nil
+		libID := int64(anyToInt(payload["library_id"]))
+		n, err := h.enqueueScheduledPostIngest(ctx, postingest.TaskKeyframe, libID, limit)
+		return fmt.Sprintf("?????????%d", n), err
 	case "lyric_process":
 		if h.LyricWorker == nil {
 			return "", fmt.Errorf("lyric worker disabled")
@@ -323,7 +322,7 @@ func (h *Handler) executeScheduledTask(ctx context.Context, taskType string, pay
 		if limit <= 0 {
 			limit = 20
 		}
-		done, failed := h.LyricWorker.RunBatch(context.Background(), limit)
+		done, failed := h.LyricWorker.RunBatch(ctx, limit)
 		return fmt.Sprintf("歌词识别完成：成功 %d，失败 %d", done, failed), nil
 	default:
 		return "", fmt.Errorf("unsupported task_type: %s", taskType)

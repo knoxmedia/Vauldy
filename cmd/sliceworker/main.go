@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"knox-media/internal/processmetrics"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -112,8 +113,8 @@ func (w *SliceWorker) ffprobeCommand(args ...string) *exec.Cmd {
 	return cmd
 }
 
-func (w *SliceWorker) ffmpegCommand(args ...string) *exec.Cmd {
-	cmd := exec.Command(w.ffmpeg, args...)
+func (w *SliceWorker) ffmpegCommand(args ...string) *processmetrics.FFmpegCommand {
+	cmd := processmetrics.NewFFmpegCommand(w.ffmpeg, args...)
 	if dir := toolBinDir(w.ffmpeg); dir != "" {
 		cmd.Dir = dir
 	}
@@ -165,7 +166,7 @@ func formatToolExit(tool string, input string, err error, stderr string) error {
 
 // SliceQueueKey is the durable Redis LIST used to queue slice tasks. Keep RPUSH-LPOP semantics
 // so messages survive worker restarts (unlike pubsub, which silently drops messages when no
-// subscriber is connected at publish time — root cause of "video:meta status stuck on slicing").
+// subscriber is connected at publish time (root cause of video metadata remaining stuck on slicing).
 const SliceQueueKey = "slice:jobs:queue"
 
 // SliceQueueLegacyChannel is kept for backwards compatibility: external pubsub subscribers can
@@ -238,8 +239,7 @@ func (w *SliceWorker) Start() {
 // stale (no heartbeat for >SliceStaleAfter). On hit it resets status to "" and re-enqueues
 // the task, so a request that arrived during a worker outage will eventually succeed.
 //
-// 这是修复 "video:meta status 一直是 slicing" 卡死的关键：即便切片任务因为 pubsub 丢失或
-// worker 重启而被遗忘，也能在 30s 内自愈。
+// This recovery loop lets jobs heal after pubsub loss or a worker restart.
 func (w *SliceWorker) recoverStaleSlicing(ctx context.Context) {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
@@ -323,7 +323,7 @@ func parseInt(v interface{}) int64 {
 func (w *SliceWorker) processSliceTask(task *models.SliceTask) {
 	logger := w.logger.With(zap.String("file_id", task.FileID))
 
-	// 防重复：如果已经完成切片，直接跳过。
+	// Avoid duplicate work when slicing has already completed.
 	ctx := context.Background()
 	status, _ := w.redis.HGet(ctx, "video:meta:"+task.FileID, "status").Result()
 	if status == "ready" {
@@ -349,7 +349,7 @@ func (w *SliceWorker) processSliceTask(task *models.SliceTask) {
 
 	w.beatSlicing(task.FileID, time.Now().Unix(), false)
 
-	// 1. 元数据（流信息、时长）—— ffprobe -show_streams/-show_format，秒级返回。
+	// Read stream metadata and duration without decoding video frames.
 	videoInfo, err := w.analyzeVideoFast(videoPath)
 	if err != nil {
 		logger.Error("Failed to analyze video", zap.Error(err))
@@ -358,7 +358,7 @@ func (w *SliceWorker) processSliceTask(task *models.SliceTask) {
 	}
 	w.beatSlicing(task.FileID, time.Now().Unix(), false)
 
-	// 2. 生成视频分段索引（固定 6s 网格，不再对齐源片关键帧）
+	// Build a fixed six-second segment grid.
 	index, err := w.generateSegmentIndex(task.FileID, videoInfo)
 	if err != nil {
 		logger.Error("Failed to generate segment index", zap.Error(err))
@@ -379,7 +379,7 @@ func (w *SliceWorker) processSliceTask(task *models.SliceTask) {
 		zap.Int("video_segments", len(index.VideoSegments)),
 	)
 
-	// 3. 预取后续切片（continuous HLS 模式下跳过，由 long-running ffmpeg 处理）。
+	// Preheat later segments unless continuous HLS owns the long-running ffmpeg process.
 	if !w.noPreheat {
 		if err := preheat.EnqueueInitialSegments(context.Background(), w.redis, task.FileID, len(index.VideoSegments), "2000k"); err != nil {
 			logger.Warn("JIT preheat enqueue failed", zap.Error(err))
@@ -387,8 +387,7 @@ func (w *SliceWorker) processSliceTask(task *models.SliceTask) {
 	}
 }
 
-// analyzeVideoFast 只执行 -show_format/-show_streams，不解码任何视频帧；秒级返回。
-// 关键帧 PTS 由调用方决定是否后台异步提取并缓存。
+// analyzeVideoFast reads stream and format metadata without decoding frames.
 func (w *SliceWorker) analyzeVideoFast(videoPath string) (*VideoInfo, error) {
 	cmd := w.ffprobeCommand(
 		"-v", "error",
@@ -453,15 +452,11 @@ func (w *SliceWorker) generateSegmentIndex(fileID string, info *VideoInfo) (*mod
 		UpdatedAt: time.Now(),
 	}
 
-	// 根据固定时长生成视频切片（不再对齐源片关键帧）。
-	// 原因：转码（re-encode）时编码器使用自己的 GOP 节奏（-g 48 = ~2s @24fps），
+	// Use a fixed segment grid because re-encoded GOP timing is independent of source keyframes.
 	// 源片的关键帧位置对转码输出的 TS 分片无意义。对齐源关键帧反而导致：
-	//   - 密集 GOP 源片 → 大量 1s 短段 → SourceBuffer 溢出
-	//   - 段边界与编码器输出 GOP 不一致 → 播放器首帧解码失败 / glitch
-	// 固定 6s 网格保证每段内至少 3 个 GOP（2s × 3 = 6s），播放器可平滑解码。
-	// Passthrough（-c:v copy）模式不受影响：sliceworker 不知道最终是 copy 还是 re-encode，
-	// 但 transcodeworker passthrough 时会用 -ss/-t 精确截取，关键帧对齐由 ffmpeg 保证。
-	segmentDuration := 3.0
+	// Dense source GOPs must not create many tiny segments.
+	// Stable segment boundaries also avoid decoder glitches between output GOPs.
+	segmentDuration := 6.0
 	currentTime := 0.0
 	segID := 0
 
@@ -496,10 +491,9 @@ func (w *SliceWorker) generateSegmentIndex(fileID string, info *VideoInfo) (*mod
 		segID++
 	}
 
-	// 音频不再单独物理切片：transcodeworker 直接把音频与视频混流到同一段 .ts 中（与 Jellyfin/Emby 一致），
-	// 避免长片 sliceAudio 阶段长时间占用 ffmpeg 拖慢首播。索引仍记录虚拟音频段，便于后续 audio-only 输出。
+	// Audio is muxed with video by transcodeworker; retain virtual audio segment metadata.
 	if strings.TrimSpace(info.AudioCodec) != "" {
-		// 当视频段已对齐关键帧时复用其时间轴，确保音视频在同一时刻分段。
+		// Reuse the video timeline so audio and video share segment boundaries.
 		for _, vs := range index.VideoSegments {
 			index.AudioSegments = append(index.AudioSegments, models.AudioSegmentInfo{
 				ID:        vs.ID,
@@ -524,7 +518,7 @@ func stderrTail(s string, max int) string {
 	if max <= 0 || len(s) <= max {
 		return s
 	}
-	const pref = "…(stderr tail)\n"
+	const pref = "...(stderr tail)\n"
 	if max <= len(pref) {
 		return s[len(s)-max:]
 	}
@@ -580,7 +574,7 @@ func trimSliceErrDetail(s string) string {
 	if len(s) <= maxSliceErrStored {
 		return s
 	}
-	const pref = "…"
+	const pref = "...\n"
 	return pref + s[len(s)-(maxSliceErrStored-len(pref)):]
 }
 
@@ -603,9 +597,8 @@ func (w *SliceWorker) getVideoPath(fileID string) (string, error) {
 	return path, nil
 }
 
-// beatSlicing 写入 slicing_started_at + slicing_heartbeat_at，让 recoverStaleSlicing
-// 与 scheduler.waitForSlicingComplete 知道任务还活着。withStartedAt=true 时同时刷新起点，
-// 用于任务首次接管。
+// beatSlicing writes heartbeat state used by stale-scan recovery.
+// withStartedAt also records the initial ownership timestamp.
 func (w *SliceWorker) beatSlicing(fileID string, ts int64, withStartedAt bool) {
 	if w == nil || w.redis == nil || strings.TrimSpace(fileID) == "" {
 		return

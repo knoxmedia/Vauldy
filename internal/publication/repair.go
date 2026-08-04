@@ -274,13 +274,6 @@ func stepEvidenceTx(ctx context.Context, tx *sql.Tx, mediaID int64, step StepTyp
 	case StepEncrypt:
 		return encryptionEvidenceTx(ctx, tx, mediaID)
 	case StepPrepare:
-		hasTaskType, err := publicationColumnExistsTx(ctx, tx, "transcode_task", "task_type")
-		if err != nil {
-			return false, err
-		}
-		if !hasTaskType {
-			return false, nil
-		}
 		query = `SELECT EXISTS(SELECT 1 FROM transcode_task WHERE file_id=(SELECT file_id FROM media WHERE id=?) AND task_type='pretranscode' AND status='done')`
 	default:
 		return false, fmt.Errorf("unknown step %q", step)
@@ -548,7 +541,7 @@ func exactRepairEvidenceTx(ctx context.Context, tx *sql.Tx, mediaID int64, step 
 	if err != nil || ok || step != StepPoster {
 		return ok, err
 	}
-	// Scan precapture stores a zero content hash for speed. After encrypt
+	// Scan precapture stores path|size|mtime|sha256:0… for speed. After encrypt
 	// cleanup the plaintext is gone and repair binds the journal's real hash;
 	// accept placeholder/precapture poster evidence when identity matches and
 	// artifact refs still validate.

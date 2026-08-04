@@ -84,39 +84,11 @@ updated_at=CURRENT_TIMESTAMP WHERE id=?`, supersededTerminalReason, newGeneratio
 			args  []any
 		}{"cancel pretranscode jobs", `UPDATE pretranscode_rendition_job SET status='cancelled',lease_owner=NULL,lease_until=NULL,completed_at=COALESCE(completed_at,CURRENT_TIMESTAMP) WHERE task_id IN (SELECT id FROM transcode_task WHERE ingest_run_id=? AND generation=?) AND status IN ('waiting','running')`, []any{runID, oldGeneration}})
 	}
-	transcodeExists, err := publicationTableExistsTx(ctx, tx, "transcode_task")
-	if err != nil {
-		return fmt.Errorf("publication supersede: inspect transcode table: %w", err)
-	}
-	if transcodeExists {
-		ingestLinked, err := publicationColumnExistsTx(ctx, tx, "transcode_task", "ingest_run_id")
-		if err != nil {
-			return err
-		}
-		if ingestLinked {
-			completedAt, err := publicationColumnExistsTx(ctx, tx, "transcode_task", "completed_at")
-			if err != nil {
-				return err
-			}
-			leaseOwner, err := publicationColumnExistsTx(ctx, tx, "transcode_task", "lease_owner")
-			if err != nil {
-				return err
-			}
-			query := `UPDATE transcode_task SET status='cancelled'`
-			if leaseOwner {
-				query += `,lease_owner=NULL,lease_until=NULL`
-			}
-			if completedAt {
-				query += `,completed_at=COALESCE(completed_at,CURRENT_TIMESTAMP)`
-			}
-			query += ` WHERE ingest_run_id=? AND generation=? AND status IN ('waiting','running')`
-			statements = append(statements, struct {
-				label string
-				query string
-				args  []any
-			}{"cancel transcode tasks", query, []any{runID, oldGeneration}})
-		}
-	}
+	statements = append(statements, struct {
+		label string
+		query string
+		args  []any
+	}{"cancel transcode tasks", `UPDATE transcode_task SET status='cancelled',lease_owner=NULL,lease_until=NULL,completed_at=COALESCE(completed_at,CURRENT_TIMESTAMP) WHERE ingest_run_id=? AND generation=? AND status IN ('waiting','running')`, []any{runID, oldGeneration}})
 	for _, statement := range statements {
 		if err = execSupersedeTx(ctx, tx, statement.label, statement.query, statement.args...); err != nil {
 			return err

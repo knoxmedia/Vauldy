@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"knox-media/internal/scheduler"
 	"knox-media/internal/storage"
 
 	_ "modernc.org/sqlite"
@@ -89,9 +90,10 @@ func TestAdapterSetRejectsUnknownAndNilAdapter(t *testing.T) {
 		name string
 		set  AdapterSet
 		task Task
+		kind FailureKind
 	}{
-		{"unknown", AdapterSet{}, Task{Type: TaskType("bogus")}},
-		{"nil", AdapterSet{}, Task{Type: TaskPoster}},
+		{"unknown", AdapterSet{}, Task{Type: TaskType("bogus")}, FailurePermanent},
+		{"nil", AdapterSet{}, Task{Type: TaskPoster}, FailureRetryable},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -100,11 +102,36 @@ func TestAdapterSetRejectsUnknownAndNilAdapter(t *testing.T) {
 			if !errors.As(err, &classified) {
 				t.Fatalf("error %T %v is not ClassifiedError", err, err)
 			}
-			if classified.Kind != FailurePermanent {
-				t.Fatalf("kind=%v want permanent", classified.Kind)
+			if classified.Kind != tt.kind {
+				t.Fatalf("kind=%v want %v", classified.Kind, tt.kind)
 			}
 			if classified.Err == nil {
 				t.Fatal("classified cause is nil")
+			}
+		})
+	}
+}
+
+func TestMissingWorkerIsAdmissionBlockerNotPermanent(t *testing.T) {
+	db := task11AdapterDB(t)
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{"preview", NewPreviewAdapter(db, nil).Execute(context.Background(), Task{ID: 1, MediaID: 41, Type: TaskPreview})},
+		{"keyframe", NewKeyframeAdapter(db, nil).Execute(context.Background(), Task{ID: 1, MediaID: 41, Type: TaskKeyframe})},
+		{"atrack", NewAtrackAdapter(db, nil).Execute(context.Background(), Task{ID: 1, MediaID: 41, Type: TaskAtrack})},
+		{"subtitle", NewSubtitleAdapter(db, nil).Execute(context.Background(), Task{ID: 1, MediaID: 41, Type: TaskSubtitle})},
+		{"recognize", NewSubtitleRecognizeAdapter(db, nil).Execute(context.Background(), Task{ID: 1, MediaID: 41, Type: TaskSubtitleRecognize})},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var ce ClassifiedError
+			if !errors.As(tc.err, &ce) || ce.Kind != FailureRetryable {
+				t.Fatalf("err=%v want retryable admission blocker", tc.err)
+			}
+			if strings.Contains(strings.ToLower(tc.err.Error()), "skip") {
+				t.Fatal("worker absence must not skip")
 			}
 		})
 	}
@@ -276,7 +303,13 @@ func (s *recordingSubtitleService) EnsurePendingSubtitleTask(id int64) error {
 	s.mediaID = id
 	return s.err
 }
-func (s *recordingSubtitleService) ProcessMedia(ctx context.Context, id int64) error {
+func (s *recordingSubtitleService) ExtractMedia(ctx context.Context, id int64) error {
+	s.processCalls++
+	s.ctx = ctx
+	s.mediaID = id
+	return s.err
+}
+func (s *recordingSubtitleService) RecognizeMedia(ctx context.Context, id int64) error {
 	s.processCalls++
 	s.ctx = ctx
 	s.mediaID = id
@@ -321,6 +354,30 @@ INSERT INTO media(id,library_id,file_path,file_type) VALUES(41,3,'video.mp4','vi
 		t.Fatal(err)
 	}
 	return db
+}
+
+func TestSubtitleRecognizeAndAIAnalysisAdapters(t *testing.T) {
+	db := task11AdapterDB(t)
+	svc := &recordingSubtitleService{}
+	ctx := context.WithValue(context.Background(), struct{ name string }{"ctx"}, "same")
+	if err := NewSubtitleRecognizeAdapter(db, svc).Execute(ctx, Task{ID: 7, MediaID: 41, Type: TaskSubtitleRecognize}); err != nil {
+		t.Fatal(err)
+	}
+	if svc.ensureCalls != 1 || svc.processCalls != 1 || svc.mediaID != 41 {
+		t.Fatalf("recognize ensure=%d process=%d media=%d", svc.ensureCalls, svc.processCalls, svc.mediaID)
+	}
+	// Successful recognition with no usable text artifact → AI no-op success (not permanent).
+	if err := NewAIAnalysisAdapter(db).Execute(context.Background(), Task{ID: 9, MediaID: 41, Type: TaskAIAnalysis}); err != nil {
+		t.Fatalf("ai empty recognition should no-op, err=%v", err)
+	}
+	vtt := filepath.Join(t.TempDir(), "ready.vtt")
+	if err := os.WriteFile(vtt, []byte("WEBVTT\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = db.Exec(`INSERT INTO media_subtitle(media_id,status,vtt_path) VALUES(41,'ready',?)`, vtt)
+	if err := NewAIAnalysisAdapter(db).Execute(context.Background(), Task{ID: 9, MediaID: 41, Type: TaskAIAnalysis}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestSubtitleAdapter_EnsuresDomainTaskAndPassesContext(t *testing.T) {
@@ -607,7 +664,7 @@ func TestEncryptAdapter_ClassifiesErrorsAndAlreadyEncryptedAsSuccess(t *testing.
 		{"bad type", Task{ID: 1, MediaID: 41, Type: TaskPoster}, &recordingEncryptor{}, FailurePermanent, false},
 		{"bad task id", Task{MediaID: 41, Type: TaskEncrypt}, &recordingEncryptor{}, FailurePermanent, false},
 		{"bad media id", Task{ID: 1, Type: TaskEncrypt}, &recordingEncryptor{}, FailurePermanent, false},
-		{"nil encryptor", Task{ID: 1, MediaID: 41, Type: TaskEncrypt}, nil, FailurePermanent, false},
+		{"nil encryptor", Task{ID: 1, MediaID: 41, Type: TaskEncrypt}, nil, FailureRetryable, false},
 		{"already", Task{ID: 1, MediaID: 41, Type: TaskEncrypt}, &recordingEncryptor{err: storage.ErrAlreadyEncrypted}, FailureRetryable, true},
 		{"temporary", Task{ID: 1, MediaID: 41, Type: TaskEncrypt}, &recordingEncryptor{err: errors.New("temporarily locked")}, FailureRetryable, false},
 	} {
@@ -752,5 +809,107 @@ func TestEncryptAdapter_EncryptedRecordQueryErrorPropagates(t *testing.T) {
 	err := NewEncryptAdapter(e).Execute(context.Background(), Task{ID: 7, MediaID: 41, Type: TaskEncrypt})
 	if err == nil || e.calls != 0 {
 		t.Fatalf("err=%v calls=%d", err, e.calls)
+	}
+}
+
+// TestAdapterRegistrySchedulerProfiles asserts that every task type handled by
+// AdapterSet.pick has a corresponding scheduler registry entry with valid
+// resource requests and exactly one profile version.
+func TestAdapterRegistrySchedulerProfiles(t *testing.T) {
+	set := AdapterSet{}
+	types := []TaskType{TaskPoster, TaskPosterRepair, TaskThumbnail, TaskPreview, TaskKeyframe, TaskSubtitle, TaskSubtitleRecognize, TaskAIAnalysis, TaskAtrack, TaskEncrypt}
+	for _, typ := range types {
+		t.Run(string(typ), func(t *testing.T) {
+			desc, err := set.SchedulerProfile(typ)
+			if err != nil {
+				t.Fatalf("SchedulerProfile(%q): %v", typ, err)
+			}
+			if desc.TaskType != string(typ) {
+				t.Fatalf("TaskType=%q want %q", desc.TaskType, typ)
+			}
+			if desc.Family == "" {
+				t.Fatal("empty family")
+			}
+			if desc.ProfileVersion < 1 {
+				t.Fatalf("ProfileVersion=%d want >=1", desc.ProfileVersion)
+			}
+			if len(desc.Resources) == 0 {
+				t.Fatal("no resource requests")
+			}
+			for rk, count := range desc.Resources {
+				if count < 0 {
+					t.Fatalf("resource %q count=%d want >=0", rk, count)
+				}
+			}
+		})
+	}
+}
+
+// TestAdapterSchedulerProfileUnknownType asserts that an unsupported task type
+// returns an error from SchedulerProfile.
+func TestAdapterSchedulerProfileUnknownType(t *testing.T) {
+	set := AdapterSet{}
+	_, err := set.SchedulerProfile(TaskType("nonexistent_task_xyz"))
+	if err == nil {
+		t.Fatal("expected error for unknown task type")
+	}
+}
+
+// TestAdapterSchedulerFallbackProfile asserts that a GPU-capable task type
+// declares a CPU-heavy fallback profile: strictly more CPU than the primary
+// profile and no GPU request.
+func TestAdapterSchedulerFallbackProfile(t *testing.T) {
+	set := AdapterSet{}
+	primary, err := set.SchedulerProfile(TaskSubtitleRecognize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fallback, err := set.SchedulerFallbackProfile(TaskSubtitleRecognize)
+	if err != nil {
+		t.Fatalf("SchedulerFallbackProfile(%q): %v", TaskSubtitleRecognize, err)
+	}
+	if len(fallback) == 0 {
+		t.Fatal("fallback profile has no resource requests")
+	}
+	if fallback[scheduler.CPU] <= primary.Resources[scheduler.CPU] {
+		t.Fatalf("fallback CPU=%d want strictly more than primary CPU=%d", fallback[scheduler.CPU], primary.Resources[scheduler.CPU])
+	}
+	if _, hasGPU := fallback[scheduler.GPU]; hasGPU {
+		t.Fatal("fallback profile must not request GPU")
+	}
+	if err := scheduler.ValidateResourceRequest(fallback); err != nil {
+		t.Fatalf("fallback profile invalid: %v", err)
+	}
+}
+
+// TestAdapterSchedulerFallbackProfileUnsupported asserts that task types whose
+// primary adapter is not GPU-capable have no CPU fallback profile.
+func TestAdapterSchedulerFallbackProfileUnsupported(t *testing.T) {
+	set := AdapterSet{}
+	types := []TaskType{TaskPoster, TaskPosterRepair, TaskThumbnail, TaskPreview, TaskKeyframe, TaskSubtitle, TaskAIAnalysis, TaskAtrack, TaskEncrypt}
+	for _, typ := range types {
+		if _, err := set.SchedulerFallbackProfile(typ); err == nil {
+			t.Fatalf("SchedulerFallbackProfile(%q): expected error for non-GPU type", typ)
+		}
+	}
+}
+
+// TestAdapterSchedulerProfileResourceKindsValid asserts that all resource kinds
+// in adapter profiles are from the known set.
+func TestAdapterSchedulerProfileResourceKindsValid(t *testing.T) {
+	set := AdapterSet{}
+	types := []TaskType{TaskPoster, TaskPreview, TaskKeyframe, TaskSubtitle, TaskSubtitleRecognize, TaskAIAnalysis, TaskAtrack, TaskEncrypt}
+	for _, typ := range types {
+		desc, err := set.SchedulerProfile(typ)
+		if err != nil {
+			t.Fatalf("SchedulerProfile(%q): %v", typ, err)
+		}
+		for rk := range desc.Resources {
+			switch rk {
+			case "cpu", "gpu", "disk_read", "disk_write", "network", "external_process":
+			default:
+				t.Fatalf("type %q has unknown resource kind %q", typ, rk)
+			}
+		}
 	}
 }

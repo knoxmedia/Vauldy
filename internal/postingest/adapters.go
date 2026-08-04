@@ -15,6 +15,7 @@ import (
 	"knox-media/internal/keyframe"
 	"knox-media/internal/preview"
 	"knox-media/internal/publication"
+	"knox-media/internal/scheduler"
 	"knox-media/internal/storage"
 	"knox-media/internal/store"
 	"knox-media/internal/subtitle"
@@ -34,64 +35,90 @@ type Adapter interface {
 	Execute(context.Context, Task) error
 }
 
+// SchedulerProfile returns the scheduler Descriptor for the given task type,
+// or an error if the type is not supported by this adapter set.
+func (s AdapterSet) SchedulerProfile(taskType TaskType) (scheduler.Descriptor, error) {
+	name := string(taskType)
+	desc, ok := scheduler.Registry[name]
+	if !ok {
+		return scheduler.Descriptor{}, fmt.Errorf("no scheduler profile for task type %q", taskType)
+	}
+	return desc, nil
+}
+
+// SchedulerFallbackProfile returns the CPU-heavy fallback resource request for
+// a task type whose primary adapter may request GPU capacity. GPU initialization
+// failure fences the original reservation and re-admits with this profile; the
+// fallback is a fresh admission and never mutates tokens under a running
+// reservation. Types without a GPU-capable adapter return an error.
+func (s AdapterSet) SchedulerFallbackProfile(taskType TaskType) (scheduler.ResourceRequest, error) {
+	switch taskType {
+	case TaskSubtitleRecognize:
+		return scheduler.ResourceRequest{scheduler.CPU: 2, scheduler.DiskRead: 1, scheduler.DiskWrite: 1}, nil
+	default:
+		return nil, fmt.Errorf("no CPU fallback profile for task type %q", taskType)
+	}
+}
+
 type AdapterSet struct {
-	Poster    Adapter
-	Thumbnail Adapter
-	Preview   Adapter
-	Keyframe  Adapter
-	Subtitle  Adapter
-	Atrack    Adapter
-	Encrypt   Adapter
+	Poster            Adapter
+	Thumbnail         Adapter
+	Preview           Adapter
+	Keyframe          Adapter
+	Subtitle          Adapter
+	SubtitleRecognize Adapter
+	AIAnalysis        Adapter
+	Atrack            Adapter
+	Encrypt           Adapter
+}
+
+func (s AdapterSet) pick(typ TaskType) Adapter {
+	switch typ {
+	case TaskPoster, TaskPosterRepair:
+		return s.Poster
+	case TaskThumbnail:
+		return s.Thumbnail
+	case TaskPreview:
+		return s.Preview
+	case TaskKeyframe:
+		return s.Keyframe
+	case TaskSubtitle:
+		return s.Subtitle
+	case TaskSubtitleRecognize:
+		return s.SubtitleRecognize
+	case TaskAIAnalysis:
+		return s.AIAnalysis
+	case TaskAtrack:
+		return s.Atrack
+	case TaskEncrypt:
+		return s.Encrypt
+	default:
+		return nil
+	}
 }
 
 func (s AdapterSet) Execute(ctx context.Context, task Task) error {
-	var adapter Adapter
 	switch task.Type {
-	case TaskPoster, TaskPosterRepair:
-		adapter = s.Poster
-	case TaskThumbnail:
-		adapter = s.Thumbnail
-	case TaskPreview:
-		adapter = s.Preview
-	case TaskKeyframe:
-		adapter = s.Keyframe
-	case TaskSubtitle:
-		adapter = s.Subtitle
-	case TaskAtrack:
-		adapter = s.Atrack
-	case TaskEncrypt:
-		adapter = s.Encrypt
+	case TaskPoster, TaskPosterRepair, TaskThumbnail, TaskPreview, TaskKeyframe, TaskSubtitle, TaskSubtitleRecognize, TaskAIAnalysis, TaskAtrack, TaskEncrypt:
 	default:
 		return ClassifiedError{Kind: FailurePermanent, Err: fmt.Errorf("post-ingest adapter: unsupported task type %q", task.Type)}
 	}
+	adapter := s.pick(task.Type)
 	if adapter == nil {
-		return ClassifiedError{Kind: FailurePermanent, Err: fmt.Errorf("post-ingest adapter: adapter for task type %q is not configured", task.Type)}
+		return unavailableWorkerError(task.Type, fmt.Sprintf("adapter for task type %q is not configured", task.Type))
 	}
 	return adapter.Execute(ctx, task)
 }
 
 func (s AdapterSet) ExecuteWithResult(ctx context.Context, task Task) (ExecutionResult, error) {
-	var adapter Adapter
 	switch task.Type {
-	case TaskPoster, TaskPosterRepair:
-		adapter = s.Poster
-	case TaskThumbnail:
-		adapter = s.Thumbnail
-	case TaskPreview:
-		adapter = s.Preview
-	case TaskKeyframe:
-		adapter = s.Keyframe
-	case TaskSubtitle:
-		adapter = s.Subtitle
-	case TaskAtrack:
-		adapter = s.Atrack
-	case TaskEncrypt:
-		adapter = s.Encrypt
+	case TaskPoster, TaskPosterRepair, TaskThumbnail, TaskPreview, TaskKeyframe, TaskSubtitle, TaskSubtitleRecognize, TaskAIAnalysis, TaskAtrack, TaskEncrypt:
 	default:
 		return ExecutionResult{Completion: CompleteThroughQueue}, ClassifiedError{Kind: FailurePermanent, Err: fmt.Errorf("post-ingest adapter: unsupported task type %q", task.Type)}
 	}
+	adapter := s.pick(task.Type)
 	if adapter == nil {
-		return ExecutionResult{Completion: CompleteThroughQueue}, ClassifiedError{Kind: FailurePermanent, Err: fmt.Errorf("post-ingest adapter: adapter for task type %q is not configured", task.Type)}
+		return ExecutionResult{Completion: CompleteThroughQueue}, unavailableWorkerError(task.Type, fmt.Sprintf("adapter for task type %q is not configured", task.Type))
 	}
 	if atomic, ok := adapter.(resultExecutor); ok {
 		return atomic.ExecuteWithResult(ctx, task)
@@ -135,7 +162,7 @@ func (a *domainAdapter) Execute(ctx context.Context, task Task) error {
 		return permanentAdapterError(a.typ, "invalid media id")
 	}
 	if a.worker == nil {
-		return permanentAdapterError(a.typ, "worker is not configured")
+		return unavailableWorkerError(a.typ, "worker is not configured")
 	}
 	var duration int64
 	if err := a.db.QueryRowContext(ctx, `SELECT COALESCE(duration,0) FROM media WHERE id=?`, task.MediaID).Scan(&duration); err != nil {
@@ -182,6 +209,12 @@ func (a *domainAdapter) typeName() TaskType {
 func permanentAdapterError(typ TaskType, message string) error {
 	return ClassifiedError{Kind: FailurePermanent, Err: fmt.Errorf("%s adapter: %s", typ, message)}
 }
+
+// unavailableWorkerError is an admission blocker: temporary missing executor capacity
+// must return the task to waiting/retry, never permanent skip/fail.
+func unavailableWorkerError(typ TaskType, message string) error {
+	return ClassifiedError{Kind: FailureRetryable, Err: fmt.Errorf("%s adapter: %s", typ, message)}
+}
 func validateAdapterLease(ctx context.Context, db *sql.DB, task Task) error {
 	if strings.TrimSpace(task.LeaseOwner) == "" {
 		return nil
@@ -218,20 +251,22 @@ func validateAdapterLeaseTx(ctx context.Context, tx *sql.Tx, task Task) error {
 	return err
 }
 
-type subtitleService interface {
+type subtitleExtractService interface {
 	EnsurePendingSubtitleTask(int64) error
-	ProcessMedia(context.Context, int64) error
+	ExtractMedia(context.Context, int64) error
+}
+
+type subtitleRecognizeService interface {
+	EnsurePendingSubtitleTask(int64) error
+	RecognizeMedia(context.Context, int64) error
 }
 
 type subtitleAdapter struct {
 	db  *sql.DB
-	svc subtitleService
+	svc subtitleExtractService
 }
 
-func NewSubtitleAdapter(db *sql.DB, svc interface {
-	EnsurePendingSubtitleTask(int64) error
-	ProcessMedia(context.Context, int64) error
-}) Adapter {
+func NewSubtitleAdapter(db *sql.DB, svc subtitleExtractService) Adapter {
 	return &subtitleAdapter{db: db, svc: svc}
 }
 
@@ -243,7 +278,7 @@ func (a *subtitleAdapter) Execute(ctx context.Context, task Task) error {
 		return err
 	}
 	if a.svc == nil {
-		return permanentAdapterError(TaskSubtitle, "service is not configured")
+		return unavailableWorkerError(TaskSubtitle, "service is not configured")
 	}
 	var fileType string
 	if err := a.db.QueryRowContext(ctx, `SELECT COALESCE(file_type,'') FROM media WHERE id=?`, task.MediaID).Scan(&fileType); err != nil {
@@ -272,7 +307,81 @@ func (a *subtitleAdapter) Execute(ctx context.Context, task Task) error {
 	ctx = subtitle.WithCommitGuard(ctx, guard)
 	txGuard := func(guardCtx context.Context, tx *sql.Tx) error { return validateAdapterLeaseTx(guardCtx, tx, task) }
 	ctx = subtitle.WithCommitGuardTx(ctx, txGuard)
-	if err := a.svc.ProcessMedia(ctx, task.MediaID); err != nil {
+	if err := a.svc.ExtractMedia(ctx, task.MediaID); err != nil {
+		return err
+	}
+	return validateAdapterLease(ctx, a.db, task)
+}
+
+type subtitleRecognizeAdapter struct {
+	db  *sql.DB
+	svc subtitleRecognizeService
+}
+
+func NewSubtitleRecognizeAdapter(db *sql.DB, svc subtitleRecognizeService) Adapter {
+	return &subtitleRecognizeAdapter{db: db, svc: svc}
+}
+
+func (a *subtitleRecognizeAdapter) Execute(ctx context.Context, task Task) error {
+	if a == nil || a.db == nil {
+		return permanentAdapterError(TaskSubtitleRecognize, "database is not configured")
+	}
+	if err := validateBasicAdapterTask(task, TaskSubtitleRecognize); err != nil {
+		return err
+	}
+	if a.svc == nil {
+		return unavailableWorkerError(TaskSubtitleRecognize, "service is not configured")
+	}
+	var fileType string
+	if err := a.db.QueryRowContext(ctx, `SELECT COALESCE(file_type,'') FROM media WHERE id=?`, task.MediaID).Scan(&fileType); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return permanentAdapterError(TaskSubtitleRecognize, "media not found")
+		}
+		return err
+	}
+	if !strings.EqualFold(strings.TrimSpace(fileType), "video") {
+		return permanentAdapterError(TaskSubtitleRecognize, "subtitle recognition requires video media")
+	}
+	if err := validateAdapterLease(ctx, a.db, task); err != nil {
+		return err
+	}
+	if err := a.svc.EnsurePendingSubtitleTask(task.MediaID); err != nil {
+		return err
+	}
+	guard := func(guardCtx context.Context) error { return validateAdapterLease(guardCtx, a.db, task) }
+	ctx = subtitle.WithCommitGuard(ctx, guard)
+	txGuard := func(guardCtx context.Context, tx *sql.Tx) error { return validateAdapterLeaseTx(guardCtx, tx, task) }
+	ctx = subtitle.WithCommitGuardTx(ctx, txGuard)
+	if err := a.svc.RecognizeMedia(ctx, task.MediaID); err != nil {
+		return err
+	}
+	return validateAdapterLease(ctx, a.db, task)
+}
+
+// aiAnalysisAdapter is the Phase 1 minimal text/subtitle-result analysis adapter.
+// It does not decompose media; it only inspects ready subtitle/text results.
+type aiAnalysisAdapter struct {
+	db *sql.DB
+}
+
+func NewAIAnalysisAdapter(db *sql.DB) Adapter {
+	return &aiAnalysisAdapter{db: db}
+}
+
+func (a *aiAnalysisAdapter) Execute(ctx context.Context, task Task) error {
+	if a == nil || a.db == nil {
+		return permanentAdapterError(TaskAIAnalysis, "database is not configured")
+	}
+	if err := validateBasicAdapterTask(task, TaskAIAnalysis); err != nil {
+		return err
+	}
+	if err := validateAdapterLease(ctx, a.db, task); err != nil {
+		return err
+	}
+	// Empty successful recognition (no usable subtitle/text) is a no-op success.
+	// Permanent failures are reserved for real executor/validation errors above.
+	_, err := usableSubtitleOutput(ctx, a.db, task.MediaID)
+	if err != nil {
 		return err
 	}
 	return validateAdapterLease(ctx, a.db, task)
@@ -300,7 +409,7 @@ func (a *atrackAdapter) Execute(ctx context.Context, task Task) error {
 		return err
 	}
 	if a.worker == nil {
-		return permanentAdapterError(TaskAtrack, "worker is not configured")
+		return unavailableWorkerError(TaskAtrack, "worker is not configured")
 	}
 	var libraryID int64
 	var catalog, fileType string
@@ -500,7 +609,7 @@ func (a *encryptAdapter) ExecuteWithResult(ctx context.Context, task Task) (Exec
 		return ordinary, err
 	}
 	if a == nil || a.enc == nil {
-		return ordinary, permanentAdapterError(TaskEncrypt, "encryptor is not configured")
+		return ordinary, unavailableWorkerError(TaskEncrypt, "encryptor is not configured")
 	}
 	dbp, hasDB := a.enc.(encryptionDBProvider)
 	stager, canStage := a.enc.(mediaEncryptionStager)
@@ -587,7 +696,7 @@ func classifyEncryptError(err error) error {
 	return ClassifiedError{Kind: FailureRetryable, Err: err}
 }
 func insertEncryptionStageJournal(ctx context.Context, db *sql.DB, task Task, s storage.StagedMediaEncryption) error {
-	_, err := db.ExecContext(ctx, `INSERT INTO media_encryption_stage_journal(stage_id,task_id,attempt,media_id,run_id,step_id,generation,owner_token,source_path,source_fingerprint,enc_path,wrapped_dek,iv,enc_sha256,enc_size,cleanup_plaintext,state) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'staged') ON CONFLICT(stage_id) DO NOTHING`, s.StageID, task.ID, task.Attempts, task.MediaID, *task.RunID, *task.StepID, task.Generation, task.LeaseOwner, s.OriginalPath, s.SourceFingerprint, s.EncPath, s.WrappedDEK, s.IV, s.SHA256, s.Size, boolInt(s.CleanupPlaintext))
+	_, err := db.ExecContext(ctx, `INSERT INTO media_encryption_stage_journal(stage_id,task_id,retry_round,attempt,media_id,run_id,step_id,generation,owner_token,source_path,source_fingerprint,enc_path,wrapped_dek,iv,enc_sha256,enc_size,cleanup_plaintext,state) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'staged') ON CONFLICT(stage_id) DO NOTHING`, s.StageID, task.ID, task.RetryRound, task.Attempts, task.MediaID, *task.RunID, *task.StepID, task.Generation, task.LeaseOwner, s.OriginalPath, s.SourceFingerprint, s.EncPath, s.WrappedDEK, s.IV, s.SHA256, s.Size, boolInt(s.CleanupPlaintext))
 	return err
 }
 func boolInt(v bool) int {
@@ -599,7 +708,7 @@ func boolInt(v bool) int {
 func loadJournalEncryptionStage(ctx context.Context, db *sql.DB, task Task) (storage.StagedMediaEncryption, error) {
 	var s storage.StagedMediaEncryption
 	var cleanup int
-	err := db.QueryRowContext(ctx, `SELECT stage_id,media_id,source_path,source_fingerprint,enc_path,wrapped_dek,iv,enc_sha256,enc_size,cleanup_plaintext FROM media_encryption_stage_journal WHERE task_id=? AND attempt=? AND media_id=? AND run_id=? AND step_id=? AND generation=? AND owner_token=? AND state IN ('staged','quarantining','quarantined')`, task.ID, task.Attempts, task.MediaID, *task.RunID, *task.StepID, task.Generation, task.LeaseOwner).Scan(&s.StageID, &s.MediaID, &s.OriginalPath, &s.SourceFingerprint, &s.EncPath, &s.WrappedDEK, &s.IV, &s.SHA256, &s.Size, &cleanup)
+	err := db.QueryRowContext(ctx, `SELECT stage_id,media_id,source_path,source_fingerprint,enc_path,wrapped_dek,iv,enc_sha256,enc_size,cleanup_plaintext FROM media_encryption_stage_journal WHERE task_id=? AND retry_round=? AND attempt=? AND media_id=? AND run_id=? AND step_id=? AND generation=? AND owner_token=? AND state IN ('staged','quarantining','quarantined')`, task.ID, task.RetryRound, task.Attempts, task.MediaID, *task.RunID, *task.StepID, task.Generation, task.LeaseOwner).Scan(&s.StageID, &s.MediaID, &s.OriginalPath, &s.SourceFingerprint, &s.EncPath, &s.WrappedDEK, &s.IV, &s.SHA256, &s.Size, &cleanup)
 	if err != nil {
 		return s, err
 	}
@@ -632,8 +741,16 @@ func commitEncryptionStage(ctx context.Context, db *sql.DB, task Task, s storage
 	if preflightErr != nil {
 		return preflightErr
 	}
+	var policyVersion int
+	if err := db.QueryRowContext(ctx, `SELECT COALESCE(policy_version,1) FROM media_ingest_run WHERE id=?`, *task.RunID).Scan(&policyVersion); err != nil {
+		return err
+	}
+	handoff := encryptionUsesRetirementHandoff(policyVersion)
 	quarantinePath := ""
-	if !alreadySelected {
+	// New policy generations leave plaintext present and hand cleanup to retirement.
+	// Legacy generations keep the quarantine-before-commit state machine; staged/
+	// quarantined recovery remains for those in-flight journals.
+	if !alreadySelected && encryptionQuarantinesBeforeCommit(policyVersion) {
 		quarantinePath, preflightErr = reserveEncryptionQuarantine(ctx, db, task, s, quarantineRoot, seams)
 		if preflightErr != nil {
 			return preflightErr
@@ -655,15 +772,26 @@ func commitEncryptionStage(ctx context.Context, db *sql.DB, task Task, s storage
 	if err != nil || encSize != s.Size || !strings.EqualFold(encHash, s.SHA256) || s.WrappedDEK == "" || s.IV == "" {
 		return errors.New("encrypt commit staged identity invalid")
 	}
-	quarantineHash := ""
-	if !alreadySelected {
-		quarantineHash, err = encryptionCommitFileSHA256(quarantinePath)
-		if err != nil {
-			return err
+	if !alreadySelected && quarantinePath != "" {
+		quarantineHash, hashErr := encryptionCommitFileSHA256(quarantinePath)
+		if hashErr != nil {
+			return hashErr
 		}
 		sourceHash := s.SourceFingerprint[strings.LastIndex(s.SourceFingerprint, "sha256:")+7:]
 		if !strings.EqualFold(quarantineHash, sourceHash) {
 			return errors.New("quarantine source hash mismatch")
+		}
+	}
+	if !alreadySelected && handoff {
+		if _, statErr := os.Stat(s.OriginalPath); statErr != nil {
+			return fmt.Errorf("encrypt handoff source missing: %w", statErr)
+		}
+		fp, fpErr := encryptionSourceFingerprint(s.OriginalPath)
+		if fpErr != nil {
+			return fpErr
+		}
+		if err = errOrMismatch(nil, fp, s.SourceFingerprint); err != nil {
+			return err
 		}
 	}
 
@@ -673,7 +801,7 @@ func commitEncryptionStage(ctx context.Context, db *sql.DB, task Task, s storage
 		if err := tx.QueryRowContext(ctx, guard, task.ID, task.MediaID, task.Generation, task.RetryRound, *task.RunID, *task.StepID, task.LeaseOwner, task.Attempts).Scan(&selected); err != nil {
 			return ClassifiedError{Kind: FailureShutdown, Err: fmt.Errorf("encrypt commit stale fence: %w", err)}
 		}
-		if !alreadySelected {
+		if !alreadySelected && quarantinePath != "" {
 			if err := verifyDurableQuarantine(ctx, tx, task, s, quarantinePath); err != nil {
 				return err
 			}
@@ -708,17 +836,31 @@ func commitEncryptionStage(ctx context.Context, db *sql.DB, task Task, s storage
 			return err
 		}
 		_, _ = tx.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='committed',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state IN ('staged','quarantined')`, s.StageID)
+		if handoff {
+			if err = upsertEncryptionRetirementIntentTx(ctx, tx, task, s, ""); err != nil {
+				return err
+			}
+		}
 		if err = finishEncryptionLifecycleTx(ctx, tx, task); err != nil {
 			return err
 		}
-		return publication.AggregateTx(ctx, tx, *task.RunID)
+		return publication.FinalizeNodeTransitionTx(ctx, tx, *task.RunID)
 	})
 	if err == nil {
-		outcome, cleanupErr := cleanupCommittedEncryptionPlaintext(quarantineRoot, task.MediaID, task.Generation, s.StageID, quarantinePath, defaultEncryptionFileOps())
-		if updateErr := recordCommittedCleanupOutcome(ctx, db, s.StageID, outcome, cleanupErr); updateErr != nil {
-			return updateErr
+		if handoff {
+			// Cleanup failures must never fail encryption: retirement owns blockers.
+			marker := "verified_committed"
+			if s.CleanupPlaintext {
+				marker = "retirement_handoff"
+			}
+			_, _ = db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET recovery_error=?,next_retry_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='committed'`, marker, s.StageID)
+			return nil
 		}
-		return cleanupErr
+		// Encryption is already committed/done. Cleanup errors are journaled for
+		// recovery and must not fail the encrypt task/queue path.
+		outcome, cleanupErr := cleanupCommittedEncryptionPlaintext(quarantineRoot, task.MediaID, task.Generation, s.StageID, quarantinePath, encryptionFileOpsForCleanup())
+		_ = recordCommittedCleanupOutcome(ctx, db, s.StageID, outcome, cleanupErr)
+		return nil
 	}
 	var uncertain *store.ImmediateCommitError
 	if !errors.As(err, &uncertain) {
@@ -795,12 +937,6 @@ func cleanupUnreferencedEncryptionStage(ctx context.Context, db *sql.DB, s stora
 	}
 	_, _ = db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='quarantined',recovery_error='cleaned_unreferenced',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state IN ('staged','quarantined')`, s.StageID)
 	return nil
-}
-func cleanupPlaintextAfterCommittedEncryption(db *sql.DB, s storage.StagedMediaEncryption) {
-	var n int
-	if db.QueryRow(`SELECT COUNT(*) FROM media m JOIN media_encrypted_assets a ON a.media_id=m.id AND a.enc_path=m.file_path AND a.enc_path=? WHERE m.id=?`, s.EncPath, s.MediaID).Scan(&n) == nil && n == 1 {
-		_ = os.Remove(s.OriginalPath)
-	}
 }
 func finishEncryptionLifecycleTx(ctx context.Context, tx store.SQLExecutor, task Task) error {
 	res, err := tx.ExecContext(ctx, `UPDATE post_ingest_task SET status='done',lease_owner=NULL,lease_until=NULL,last_error='',finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='running' AND lease_owner=? AND attempts=? AND retry_round=?`, task.ID, task.LeaseOwner, task.Attempts, task.RetryRound)
