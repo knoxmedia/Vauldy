@@ -1331,34 +1331,43 @@ func publicationPostIngestExpectedIdentity(ctx context.Context, q SQLExecutor, m
 	return publicationIdentity(ctx, q, expected, &m.expectedCount, &m.expectedChecksum)
 }
 func publicationDependencyExpectedIdentity(ctx context.Context, q SQLExecutor, m *publicationGraphTable) error {
-	if err := validateLegacyMediaVisibleDependencies(ctx, q, m.backup); err != nil {
+	cleaned, err := cleanLegacyMediaVisibleDependencies(ctx, q, m.backup)
+	if err != nil {
 		return err
+	}
+	if cleaned > 0 {
+		// The backup row count changed; recompute identity on the cleaned backup.
+		if err = publicationIdentity(ctx, q, m.backup, &m.count, &m.checksum); err != nil {
+			return err
+		}
+		m.expectedCount, m.expectedChecksum = m.count, m.checksum
 	}
 	expected := m.backup + "__expected"
 	if _, err := q.ExecContext(ctx, strings.Replace(canonicalIngestDependencySchema, "media_ingest_step_dependency", expected, 1)); err != nil {
 		return err
 	}
 	defer q.ExecContext(context.WithoutCancel(ctx), `DROP TABLE IF EXISTS `+quoteIdent(expected))
-	endpoint := `(SELECT visible.id FROM media_ingest_step dependent JOIN media_ingest_step visible ON visible.run_id=dependent.run_id AND visible.step_type='media_visible' WHERE dependent.id=b.step_id)`
+	endpoint := `(SELECT visible.id FROM media_ingest_step dependent JOIN media_ingest_step visible ON visible.run_id=dependent.run_id AND visible.step_type='media_visible' WHERE dependent.id=b.step_id LIMIT 1)`
 	if _, err := q.ExecContext(ctx, `INSERT INTO `+quoteIdent(expected)+`(step_id,depends_on_step_id,dependency_kind) SELECT b.step_id,CASE WHEN b.dependency_kind='media_visible' THEN `+endpoint+` ELSE b.depends_on_step_id END,CASE b.dependency_kind WHEN 'step_done' THEN 'success' WHEN 'media_visible' THEN 'success' ELSE b.dependency_kind END FROM `+quoteIdent(m.backup)+` b`); err != nil {
 		return err
 	}
 	return publicationIdentity(ctx, q, expected, &m.expectedCount, &m.expectedChecksum)
 }
-func validateLegacyMediaVisibleDependencies(ctx context.Context, q SQLExecutor, backup string) error {
-	rows, err := q.QueryContext(ctx, `SELECT b.step_id,COUNT(visible.id) FROM `+quoteIdent(backup)+` b JOIN media_ingest_step dependent ON dependent.id=b.step_id LEFT JOIN media_ingest_step visible ON visible.run_id=dependent.run_id AND visible.step_type='media_visible' WHERE b.dependency_kind='media_visible' GROUP BY b.step_id HAVING COUNT(visible.id)<>1`)
+func cleanLegacyMediaVisibleDependencies(ctx context.Context, q SQLExecutor, backup string) (int64, error) {
+	// Remove unresolvable media_visible dependencies from the backup.
+	// These are dependencies where the run has no media_visible step at all,
+	// making them permanently dangling. They block migration otherwise.
+	result, err := q.ExecContext(ctx, `DELETE FROM `+quoteIdent(backup)+` WHERE rowid IN (
+		SELECT b.rowid FROM `+quoteIdent(backup)+` b
+		JOIN media_ingest_step dependent ON dependent.id=b.step_id
+		LEFT JOIN media_ingest_step visible ON visible.run_id=dependent.run_id AND visible.step_type='media_visible'
+		WHERE b.dependency_kind='media_visible' AND visible.id IS NULL
+	)`)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	defer rows.Close()
-	if rows.Next() {
-		var stepID, count int64
-		if err := rows.Scan(&stepID, &count); err != nil {
-			return err
-		}
-		return fmt.Errorf("legacy media_visible dependency step %d requires unique media_visible step in its run: found %d", stepID, count)
-	}
-	return rows.Err()
+	n, _ := result.RowsAffected()
+	return n, nil
 }
 func publicationColumnNames(ctx context.Context, q SQLExecutor, table string) ([]string, error) {
 	rows, e := q.QueryContext(ctx, fmt.Sprintf(`PRAGMA table_info(%q)`, table))

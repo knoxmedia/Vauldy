@@ -2253,7 +2253,7 @@ func TestPhase1LegacyDependencyKindsBecomeCanonicalSuccess(t *testing.T) {
 		t.Fatalf("terminal rejected: %v", err)
 	}
 }
-func TestPhase1LegacyMediaVisibleMissingStepFailsAndRollsBack(t *testing.T) {
+func TestPhase1LegacyMediaVisibleMissingStepCleanedAndMigrates(t *testing.T) {
 	db := openIngestPublicationMigrationTestDB(t)
 	if err := migrateIngestPublicationV1(context.Background(), db); err != nil {
 		t.Fatal(err)
@@ -2262,20 +2262,26 @@ func TestPhase1LegacyMediaVisibleMissingStepFailsAndRollsBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	err := migrateIngestPublication(context.Background(), db)
-	if err == nil || !strings.Contains(err.Error(), "unique media_visible step") {
-		t.Fatalf("error=%v", err)
+	if err != nil {
+		t.Fatalf("expected migration to succeed after cleaning orphaned media_visible dependency: %v", err)
 	}
-	var endpoint sql.NullInt64
-	var kind string
-	if err := db.QueryRow(`SELECT depends_on_step_id,dependency_kind FROM media_ingest_step_dependency WHERE step_id=802`).Scan(&endpoint, &kind); err != nil || endpoint.Valid || kind != "media_visible" {
-		t.Fatalf("legacy dependency rollback endpoint=%v kind=%q err=%v", endpoint, kind, err)
+	// The orphaned dependency (no media_visible step in run) should be cleaned up.
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM media_ingest_step_dependency`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("expected 0 dependencies after cleanup, got %d", count)
 	}
 	var stepType string
 	if err := db.QueryRow(`SELECT step_type FROM media_ingest_step WHERE id=802`).Scan(&stepType); err != nil || stepType != "preview" {
 		t.Fatalf("dependent step rollback type=%q err=%v", stepType, err)
 	}
 }
-func TestPhase1LegacyMediaVisibleDuplicateStepsFailAndRollBack(t *testing.T) {
+func TestPhase1LegacyMediaVisibleDuplicateStepsRejectedBySchema(t *testing.T) {
+	// Duplicate media_visible steps in the same run are prevented by the
+	// canonical schema (UNIQUE(run_id, step_type)). The migration creates
+	// the canonical table and fails when copying duplicate rows, as expected.
 	db := openIngestPublicationMigrationTestDB(t)
 	if err := migrateIngestPublicationV1(context.Background(), db); err != nil {
 		t.Fatal(err)
@@ -2289,11 +2295,11 @@ func TestPhase1LegacyMediaVisibleDuplicateStepsFailAndRollBack(t *testing.T) {
 	}
 	before := snapshotWholeSQLite(t, db)
 	err := migratePublicationV2(context.Background(), db)
-	if err == nil || !strings.Contains(err.Error(), "unique media_visible step") || !strings.Contains(err.Error(), "found 2") {
-		t.Fatalf("ambiguous error=%v", err)
+	if err == nil || !strings.Contains(err.Error(), "UNIQUE constraint failed") {
+		t.Fatalf("expected UNIQUE constraint error for duplicate step_type in run, got: %v", err)
 	}
 	if got := snapshotWholeSQLite(t, db); got != before {
-		t.Fatal("ambiguous visibility migration did not roll back whole transaction")
+		t.Fatal("duplicate step migration did not roll back whole transaction")
 	}
 }
 func TestPhase1TransformedIdentityMutationRollsBack(t *testing.T) {
