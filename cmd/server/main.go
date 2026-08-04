@@ -759,6 +759,7 @@ func loadSystemOptionsTranscodeSettings(db *sql.DB) transcode.Settings {
 func buildTaskControl(db *sql.DB) *handler.TaskControl {
 	registry := taskcontrol.NewRegistry()
 	projection := taskcontrol.NewProjectionBuilder(db, registry)
+	projection.RegisterAdapter(taskcontrol.NewOracleAdapter(db))
 	stream := taskcontrol.NewStreamBroker(db, projection, taskcontrol.StreamBrokerConfig{})
 	return handler.NewTaskControl(db, registry, projection, stream)
 }
