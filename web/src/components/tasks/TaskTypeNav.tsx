@@ -6,6 +6,8 @@ export interface TaskTypeNavProps {
   registry: Registry;
   activeType: string;
   onSelect: (type: string) => void;
+  /** Per-type task counts (removed excluded). Types with a zero count are hidden. */
+  typeCounts?: Record<string, number>;
 }
 
 interface FlatTabItem {
@@ -22,13 +24,14 @@ function formatTypeName(type: string): string {
     .join(" ");
 }
 
-function flattenTabs(registry: Registry, t: (k: string) => string): FlatTabItem[] {
+function flattenTabs(registry: Registry, typeCounts: Record<string, number> | undefined, t: (k: string) => string): FlatTabItem[] {
   const tabs: FlatTabItem[] = [];
   tabs.push({ key: "overview", label: t("tasks.control.tab_overview"), available: true });
 
   for (const group of registry.groups) {
     if (!group.types || group.types.length === 0) continue;
     for (const spec of group.types) {
+      if (typeCounts && typeCounts[spec.type] === 0) continue;
       tabs.push({
         key: spec.type,
         label: formatTypeName(spec.type),
@@ -41,9 +44,9 @@ function flattenTabs(registry: Registry, t: (k: string) => string): FlatTabItem[
   return tabs;
 }
 
-export function TaskTypeNav({ registry, activeType, onSelect }: TaskTypeNavProps) {
+export function TaskTypeNav({ registry, activeType, onSelect, typeCounts }: TaskTypeNavProps) {
   const t = useT();
-  const tabs = useMemo(() => flattenTabs(registry, tGlobal), [registry]);
+  const tabs = useMemo(() => flattenTabs(registry, typeCounts, tGlobal), [registry, typeCounts]);
 
   const activeIndex = tabs.findIndex((tab) => tab.key === activeType);
   const safeIndex = activeIndex >= 0 ? activeIndex : 0;

@@ -212,6 +212,27 @@ describe("TaskTypeNav", () => {
     expect(screen.getByRole("tablist")).toBeInTheDocument();
   });
 
+  it("hides tabs whose type count is zero", () => {
+    const reg = makeRegistry([overviewGroup, videoGroup]);
+    render(
+      <MemoryRouter>
+        <TaskTypeNav
+          registry={reg}
+          activeType="overview"
+          onSelect={() => {}}
+          typeCounts={{ transcode: 3, optimize: 0 }}
+        />
+      </MemoryRouter>,
+    );
+
+    const tabs = screen.getByRole("tablist");
+    const allTabs = within(tabs).getAllByRole("tab");
+    // overview + transcode = 2 tabs; optimize (count 0) is hidden
+    expect(allTabs.length).toBe(2);
+    expect(screen.getByRole("tab", { name: /transcode/i })).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: /optimize/i })).not.toBeInTheDocument();
+  });
+
   it("triggers onSelect when a tab button is clicked", () => {
     const reg = makeRegistry([overviewGroup, videoGroup]);
     const onSelect = vi.fn();
