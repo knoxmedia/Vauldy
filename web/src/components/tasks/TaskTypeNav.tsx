@@ -31,7 +31,9 @@ function flattenTabs(registry: Registry, typeCounts: Record<string, number> | un
   for (const group of registry.groups) {
     if (!group.types || group.types.length === 0) continue;
     for (const spec of group.types) {
-      if (typeCounts && typeCounts[spec.type] === 0) continue;
+      // When counts are available, hide types with no tasks: a zero count,
+      // or a type the overview does not track (e.g. unavailable types).
+      if (typeCounts && (typeCounts[spec.type] === 0 || typeCounts[spec.type] === undefined)) continue;
       tabs.push({
         key: spec.type,
         label: formatTypeName(spec.type),

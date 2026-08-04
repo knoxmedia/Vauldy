@@ -233,6 +233,41 @@ describe("TaskTypeNav", () => {
     expect(screen.queryByRole("tab", { name: /optimize/i })).not.toBeInTheDocument();
   });
 
+  it("hides unavailable types not tracked by the overview counts", () => {
+    const reg = makeRegistry([overviewGroup, imageGroup]);
+    render(
+      <MemoryRouter>
+        <TaskTypeNav
+          registry={reg}
+          activeType="overview"
+          onSelect={() => {}}
+          typeCounts={{ photo_classify: 1 }}
+        />
+      </MemoryRouter>,
+    );
+
+    const tabs = screen.getByRole("tablist");
+    const allTabs = within(tabs).getAllByRole("tab");
+    // overview + photo_classify = 2 tabs; image_ocr is unavailable and not
+    // tracked by type_counts, so it is hidden
+    expect(allTabs.length).toBe(2);
+    expect(screen.getByRole("tab", { name: /photo classify/i })).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: /image ocr/i })).not.toBeInTheDocument();
+  });
+
+  it("shows every type when counts are not yet available", () => {
+    const reg = makeRegistry([overviewGroup, imageGroup]);
+    render(
+      <MemoryRouter>
+        <TaskTypeNav registry={reg} activeType="overview" onSelect={() => {}} />
+      </MemoryRouter>,
+    );
+
+    // Without typeCounts every registered type tab is rendered
+    expect(screen.getByRole("tab", { name: /photo classify/i })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /image ocr/i })).toBeInTheDocument();
+  });
+
   it("triggers onSelect when a tab button is clicked", () => {
     const reg = makeRegistry([overviewGroup, videoGroup]);
     const onSelect = vi.fn();
