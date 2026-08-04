@@ -502,6 +502,7 @@ func nullIngestItem(id int64) any {
 func queueBacked(step StepType) bool {
 	switch step {
 	case StepPoster, StepThumbnail, StepPreview, StepKeyframe, StepSubtitle, StepAtrack, StepEncrypt, StepSubtitleExtract, StepAtrackExtract, StepSubtitleRecognize, StepKeyframeExtract, StepAIAnalysis,
+		StepScrape, StepPrepare,
 		StepLyricRecognize, StepAudioAnalysis, StepPhotoClassify, StepPhotoGeocode, StepPhotoFace, StepImageOCR, StepDocumentConvert, StepDocumentFulltext:
 		return true
 	default:
