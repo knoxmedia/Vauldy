@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { TaskActions } from "../TaskActions";
 
 const mockFetchActions = vi.fn();
@@ -19,17 +19,19 @@ describe("TaskActions", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockFetchActions.mockResolvedValue({ status: "ok" });
   });
 
   it("renders only true server actions", () => {
     render(<TaskActions taskId="test:1" actions={allActions} />);
 
-    expect(screen.getByText("Abort")).toBeInTheDocument();
-    expect(screen.getByText("Remove")).toBeInTheDocument();
-    expect(screen.getByText("Reset")).toBeInTheDocument();
-    expect(screen.getByText("Run Now")).toBeInTheDocument();
-    expect(screen.queryByText("Skip")).not.toBeInTheDocument();
-    expect(screen.queryByText("Reopen")).not.toBeInTheDocument();
+    // Buttons rendered with i18n text
+    expect(screen.getByText(/中止|action_abort/)).toBeInTheDocument();
+    expect(screen.getByText(/移除|action_remove/)).toBeInTheDocument();
+    expect(screen.getByText(/重置|action_reset/)).toBeInTheDocument();
+    expect(screen.getByText(/立即运行|action_run_now/)).toBeInTheDocument();
+    expect(screen.queryByText(/跳过|action_skip/)).toBeNull();
+    expect(screen.queryByText(/重新打开|action_reopen/)).toBeNull();
   });
 
   it("returns null when no actions are allowed", () => {
@@ -39,21 +41,36 @@ describe("TaskActions", () => {
     expect(container.innerHTML).toBe("");
   });
 
-  it("shows reason prompt for remove action", () => {
+  it("shows reason prompt for remove action", async () => {
     render(<TaskActions taskId="test:1" actions={allActions} />);
 
-    fireEvent.click(screen.getByText("Remove"));
-    expect(screen.getByPlaceholderText(/reason for remove/i)).toBeInTheDocument();
+    const removeBtn = screen.getByText(/移除|action_remove/);
+    fireEvent.click(removeBtn);
+
+    // Should show reason input field
+    await waitFor(() => {
+      const input = document.querySelector("input");
+      expect(input).toBeInTheDocument();
+    });
   });
 
-  it("calls action API on confirm", async () => {
+  it("calls action API after popconfirm", async () => {
     mockFetchActions.mockResolvedValue({ status: "ok", action: "abort", task_id: "test:1" });
     render(<TaskActions taskId="test:1" actions={allActions} />);
 
-    fireEvent.click(screen.getByText("Abort"));
-    // Abort doesn't need a reason, so it should dispatch immediately
-    await screen.findByText("Abort"); // Re-renders
+    // Click "Abort" which now shows a Popconfirm
+    const abortBtn = screen.getByText(/中止|action_abort/);
+    fireEvent.click(abortBtn);
 
-    expect(mockFetchActions).toHaveBeenCalled();
+    // Find and click the OK button in the popover
+    await waitFor(() => {
+      const okBtn = document.querySelector(".ant-popconfirm .ant-btn-primary");
+      expect(okBtn).toBeInTheDocument();
+      fireEvent.click(okBtn!);
+    });
+
+    await waitFor(() => {
+      expect(mockFetchActions).toHaveBeenCalled();
+    });
   });
 });

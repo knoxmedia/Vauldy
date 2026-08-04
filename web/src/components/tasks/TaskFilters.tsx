@@ -1,5 +1,7 @@
 import { useCallback } from "react";
+import { Select, Space } from "antd";
 import type { TaskControlFilter } from "../../lib/taskControlFilters";
+import { useT } from "../../i18n";
 
 export interface TaskFiltersProps {
   filter: TaskControlFilter;
@@ -7,93 +9,58 @@ export interface TaskFiltersProps {
 }
 
 const STATUS_OPTIONS = [
-  { value: "", label: "All statuses" },
-  { value: "waiting", label: "Waiting" },
-  { value: "running", label: "Running" },
-  { value: "done", label: "Done" },
-  { value: "failed", label: "Failed" },
-  { value: "cancelled", label: "Cancelled" },
-  { value: "skipped", label: "Skipped" },
-];
+  { value: "", label_key: "all_statuses" },
+  { value: "waiting", label_key: "status_waiting" },
+  { value: "running", label_key: "status_running" },
+  { value: "done", label_key: "status_done" },
+  { value: "failed", label_key: "status_failed" },
+  { value: "cancelled", label_key: "status_cancelled" },
+  { value: "skipped", label_key: "status_skipped" },
+] as const;
 
 const REMOVED_OPTIONS = [
-  { value: "exclude", label: "Active only" },
-  { value: "include", label: "Include removed" },
-  { value: "only", label: "Removed only" },
-];
+  { value: "exclude", label_key: "active_only" },
+  { value: "include", label_key: "include_removed" },
+  { value: "only", label_key: "removed_only" },
+] as const;
 
 export function TaskFilters({ filter, onChange }: TaskFiltersProps) {
+  const t = useT();
+
   const handleStatusChange = useCallback(
-    (e: React.ChangeEvent<HTMLSelectElement>) => {
-      onChange({ ...filter, status: e.target.value || undefined });
+    (value: string) => {
+      onChange({ ...filter, status: value || undefined });
     },
     [filter, onChange],
   );
 
   const handleRemovedChange = useCallback(
-    (e: React.ChangeEvent<HTMLSelectElement>) => {
-      onChange({ ...filter, removed: e.target.value || undefined });
+    (value: string) => {
+      onChange({ ...filter, removed: value || undefined });
     },
     [filter, onChange],
   );
 
   return (
-    <div
-      style={{
-        display: "flex",
-        gap: 12,
-        alignItems: "center",
-        marginBottom: 16,
-        flexWrap: "wrap",
-      }}
-      role="group"
-      aria-label="Task filters"
-    >
-      <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "#aaa" }}>
-        Status:
-        <select
-          value={filter.status ?? ""}
-          onChange={handleStatusChange}
-          style={{
-            padding: "4px 8px",
-            background: "#1a1a1a",
-            color: "#d9d9d9",
-            border: "1px solid #303030",
-            borderRadius: 4,
-            fontSize: 13,
-          }}
-          aria-label="Filter by status"
-        >
-          {STATUS_OPTIONS.map((opt) => (
-            <option key={opt.value} value={opt.value}>
-              {opt.label}
-            </option>
-          ))}
-        </select>
-      </label>
-
-      <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "#aaa" }}>
-        Removed:
-        <select
-          value={filter.removed ?? "exclude"}
-          onChange={handleRemovedChange}
-          style={{
-            padding: "4px 8px",
-            background: "#1a1a1a",
-            color: "#d9d9d9",
-            border: "1px solid #303030",
-            borderRadius: 4,
-            fontSize: 13,
-          }}
-          aria-label="Filter by removed state"
-        >
-          {REMOVED_OPTIONS.map((opt) => (
-            <option key={opt.value} value={opt.value}>
-              {opt.label}
-            </option>
-          ))}
-        </select>
-      </label>
-    </div>
+    <Space size={8} style={{ marginBottom: 12 }}>
+      <Select
+        value={filter.status ?? ""}
+        onChange={handleStatusChange}
+        style={{ width: 140 }}
+        size="small"
+        options={[
+          ...STATUS_OPTIONS.map((o) => ({ value: o.value, label: t(`tasks.control.${o.label_key}`) })),
+        ]}
+      />
+      <Select
+        value={filter.removed ?? "exclude"}
+        onChange={handleRemovedChange}
+        style={{ width: 160 }}
+        size="small"
+        options={[
+          ...REMOVED_OPTIONS.map((o) => ({ value: o.value, label: t(`tasks.control.${o.label_key}`) })),
+        ]}
+      />
+    </Space>
   );
 }

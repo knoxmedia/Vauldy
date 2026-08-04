@@ -1,6 +1,16 @@
 import { useCallback, useState } from "react";
+import { Button, Space, Input, message, Popconfirm } from "antd";
+import {
+  StopOutlined,
+  DeleteOutlined,
+  ReloadOutlined,
+  RiseOutlined,
+  ForwardOutlined,
+  UnlockOutlined,
+} from "@ant-design/icons";
 import type { AllowedActions, ProjectionRow, BatchResult } from "../../api/taskControl";
 import { fetchTaskControlActions } from "../../api/taskControl";
+import { useT, tGlobal } from "../../i18n";
 
 export interface TaskActionsProps {
   taskId: string;
@@ -14,6 +24,15 @@ export interface TaskActionsProps {
 
 type PendingAction = "abort" | "remove" | "reset" | "run_now" | "skip" | "reopen" | null;
 
+const ACTION_ICONS: Record<string, React.ReactNode> = {
+  abort: <StopOutlined />,
+  remove: <DeleteOutlined />,
+  reset: <ReloadOutlined />,
+  run_now: <RiseOutlined />,
+  skip: <ForwardOutlined />,
+  reopen: <UnlockOutlined />,
+};
+
 export function TaskActions({
   taskId,
   actions,
@@ -23,16 +42,15 @@ export function TaskActions({
   onSuccess,
   onConflict,
 }: TaskActionsProps) {
+  const t = useT();
   const [pending, setPending] = useState<PendingAction>(null);
   const [reason, setReason] = useState("");
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [showReason, setShowReason] = useState(false);
 
   const handleAction = useCallback(
     async (action: string) => {
       setPending(action as PendingAction);
-      setError(null);
 
       if (needsReason(action)) {
         setShowReason(true);
@@ -50,21 +68,19 @@ export function TaskActions({
   const handleConfirm = useCallback(async () => {
     if (!pending) return;
     if (needsReason(pending) && !reason.trim()) {
-      setError("Reason is required");
+      message.warning(tGlobal("tasks.control.reason_required"));
       return;
     }
     await executeAction(pending, reason);
     setPending(null);
     setShowReason(false);
     setReason("");
-    setError(null);
   }, [pending, reason]);
 
   const handleCancel = useCallback(() => {
     setPending(null);
     setShowReason(false);
     setReason("");
-    setError(null);
   }, []);
 
   const executeAction = useCallback(
@@ -85,11 +101,11 @@ export function TaskActions({
         const ax = err as { response?: { status?: number; data?: { error?: string; message?: string; row?: ProjectionRow } } };
         if (ax.response?.status === 409) {
           onConflict?.(
-            ax.response.data?.message || "Conflict",
+            ax.response.data?.message || tGlobal("tasks.control.conflict"),
             ax.response.data?.row,
           );
         } else {
-          setError(ax.response?.data?.message || "Action failed");
+          message.error(ax.response?.data?.message || tGlobal("tasks.control.action_failed", { action }));
         }
       } finally {
         setLoading(false);
@@ -98,101 +114,84 @@ export function TaskActions({
     [taskId, revision, generation, retryRound, onSuccess, onConflict],
   );
 
-  const actionButtons = [
-    { key: "abort", label: "Abort", icon: "⏹", show: actions.abort, color: "#faad14" },
-    { key: "remove", label: "Remove", icon: "🗑", show: actions.remove, color: "#ff4d4f" },
-    { key: "reset", label: "Reset", icon: "↻", show: actions.reset, color: "#1677ff" },
-    { key: "run_now", label: "Run Now", icon: "⚡", show: actions.run_now, color: "#52c41a" },
-    { key: "skip", label: "Skip", icon: "⏭", show: actions.skip, color: "#888" },
-    { key: "reopen", label: "Reopen", icon: "🔓", show: actions.reopen, color: "#1677ff" },
+  const actionDefs = [
+    { key: "abort", label: t("tasks.control.action_abort"), show: actions.abort },
+    { key: "remove", label: t("tasks.control.action_remove"), show: actions.remove },
+    { key: "reset", label: t("tasks.control.action_reset"), show: actions.reset },
+    { key: "run_now", label: t("tasks.control.action_run_now"), show: actions.run_now },
+    { key: "skip", label: t("tasks.control.action_skip"), show: actions.skip },
+    { key: "reopen", label: t("tasks.control.action_reopen"), show: actions.reopen },
   ].filter((b) => b.show);
 
-  if (actionButtons.length === 0) return null;
+  const CONFIRM_KEYS: Record<string, string> = {
+    abort: "confirm_abort",
+    remove: "confirm_remove",
+    reset: "confirm_reset",
+    run_now: "confirm_run_now",
+    skip: "confirm_skip",
+    reopen: "confirm_reopen",
+  };
+
+  if (actionDefs.length === 0) return null;
 
   return (
-    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+    <Space size={4} wrap>
       {pending !== null && showReason ? (
-        <div style={{ display: "flex", gap: 8, alignItems: "center", width: "100%" }}>
-          <input
-            type="text"
+        <Space size={8}>
+          <Input
+            size="small"
             value={reason}
             onChange={(e) => setReason(e.target.value)}
-            placeholder={`Reason for ${pending}`}
-            style={{
-              flex: 1,
-              padding: "4px 8px",
-              background: "#1a1a1a",
-              color: "#d9d9d9",
-              border: `1px solid ${error ? "#ff4d4f" : "#303030"}`,
-              borderRadius: 4,
-              fontSize: 13,
-            }}
-            aria-label="Reason"
+            placeholder={t("tasks.control.reason_placeholder", { action: t(`tasks.control.action_${pending}`) })}
+            style={{ width: 200 }}
             autoFocus
           />
-          <button
-            onClick={handleConfirm}
-            disabled={loading}
-            style={{
-              padding: "4px 12px",
-              background: "#1677ff",
-              color: "#fff",
-              border: "none",
-              borderRadius: 4,
-              cursor: "pointer",
-              fontSize: 13,
-            }}
-          >
-            Confirm
-          </button>
-          <button
-            onClick={handleCancel}
-            style={{
-              padding: "4px 12px",
-              background: "#1a1a1a",
-              color: "#aaa",
-              border: "1px solid #303030",
-              borderRadius: 4,
-              cursor: "pointer",
-              fontSize: 13,
-            }}
-          >
-            Cancel
-          </button>
-        </div>
+          <Button size="small" type="primary" onClick={handleConfirm} loading={loading}>
+            {t("tasks.control.confirm")}
+          </Button>
+          <Button size="small" onClick={handleCancel}>
+            {t("tasks.control.cancel")}
+          </Button>
+        </Space>
       ) : (
         <>
-          {actionButtons.map((btn) => (
-            <button
-              key={btn.key}
-              onClick={() => handleAction(btn.key)}
-              disabled={loading || pending !== null}
-              title={btn.label}
-              style={{
-                padding: "3px 10px",
-                background: pending === btn.key ? `${btn.color}22` : "#1a1a1a",
-                color: btn.color,
-                border: `1px solid ${pending === btn.key ? btn.color : "#303030"}`,
-                borderRadius: 4,
-                cursor: "pointer",
-                fontSize: 12,
-                display: "flex",
-                alignItems: "center",
-                gap: 4,
-                opacity: loading && pending !== btn.key ? 0.5 : 1,
-              }}
-            >
-              <span>{btn.icon}</span>
-              <span>{btn.label}</span>
-            </button>
-          ))}
+          {actionDefs.map((btn) => {
+            const buttonNode = (
+              <Button
+                key={btn.key}
+                size="small"
+                icon={ACTION_ICONS[btn.key]}
+                type={pending === btn.key ? "primary" : "default"}
+                disabled={loading || pending !== null}
+                title={btn.label}
+              >
+                {btn.label}
+              </Button>
+            );
+
+            if (needsReason(btn.key)) {
+              return (
+                <span key={btn.key} onClick={() => handleAction(btn.key)}>
+                  {buttonNode}
+                </span>
+              );
+            }
+
+            return (
+              <Popconfirm
+                key={btn.key}
+                title={t(`tasks.control.${CONFIRM_KEYS[btn.key]}`)}
+                onConfirm={() => { setPending(btn.key as PendingAction); executeAction(btn.key, btn.key); }}
+                okText={t("tasks.control.confirm")}
+                cancelText={t("tasks.control.cancel")}
+              >
+                {buttonNode}
+              </Popconfirm>
+            );
+          })}
         </>
       )}
-
-      {error && !showReason && (
-        <div style={{ width: "100%", color: "#ff4d4f", fontSize: 12, marginTop: 4 }}>{error}</div>
-      )}
-    </div>
+    </Space>
   );
 }
 
@@ -200,7 +199,7 @@ function needsReason(action: string): boolean {
   return ["remove", "reset", "reopen"].includes(action);
 }
 
-// Batch action helpers for Task 14
+// Batch action helpers
 export interface BatchActionState {
   batchItems: string[];
   operationId: string;

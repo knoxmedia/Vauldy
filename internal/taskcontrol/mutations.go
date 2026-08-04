@@ -201,7 +201,7 @@ func (s *MutateService) AbortRequest(ctx context.Context, p AbortRequestParams) 
 
 		// Write audit
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO task_audit (task_identity, actor_id, action, reason, prev_status, new_status)
+			`INSERT INTO task_control_audit (task_identity, actor_id, action, reason, previous_status, new_status)
 			 VALUES (?, ?, 'abort_request', ?, 'running', 'running')`,
 			p.TaskIdentity, p.ActorID, p.Reason); err != nil {
 			return err
@@ -262,7 +262,7 @@ func (s *MutateService) AbortAcknowledge(ctx context.Context, p AbortAckParams) 
 
 		// Write audit
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO task_audit (task_identity, actor_id, action, reason, prev_status, new_status)
+			`INSERT INTO task_control_audit (task_identity, actor_id, action, reason, previous_status, new_status)
 			 VALUES (?, 0, 'abort_acknowledge', 'worker_ack', 'running', 'cancelled')`,
 			p.TaskIdentity); err != nil {
 			return err
@@ -301,7 +301,7 @@ func (s *MutateService) AbortTimeout(ctx context.Context, p AbortTimeoutParams) 
 		}
 
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO task_audit (task_identity, actor_id, action, reason, prev_status, new_status)
+			`INSERT INTO task_control_audit (task_identity, actor_id, action, reason, previous_status, new_status)
 			 VALUES (?, 0, 'abort_timeout', 'timeout', 'running', 'running')`,
 			p.TaskIdentity); err != nil {
 			return err
@@ -381,7 +381,7 @@ func (s *MutateService) FencedLeaseRecovery(ctx context.Context, p FencedRecover
 		}
 
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO task_audit (task_identity, actor_id, action, reason, prev_status, new_status)
+			`INSERT INTO task_control_audit (task_identity, actor_id, action, reason, previous_status, new_status)
 			 VALUES (?, ?, 'fenced_recovery', ?, 'running', 'cancelled')`,
 			p.TaskIdentity, p.ActorID, p.Reason); err != nil {
 			return err
@@ -440,7 +440,7 @@ func (s *MutateService) Cancel(ctx context.Context, p CancelParams) error {
 		}
 
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO task_audit (task_identity, actor_id, action, reason, prev_status, new_status)
+			`INSERT INTO task_control_audit (task_identity, actor_id, action, reason, previous_status, new_status)
 			 VALUES (?, ?, 'cancel', ?, 'waiting', 'cancelled')`,
 			p.TaskIdentity, p.ActorID, p.Reason); err != nil {
 			return err
@@ -485,7 +485,7 @@ func (s *MutateService) Remove(ctx context.Context, p RemoveParams) error {
 		if removedAt.Valid {
 			// Still write audit for the replay
 			if _, err := tx.ExecContext(ctx,
-				`INSERT INTO task_audit (task_identity, actor_id, action, reason, prev_status, new_status)
+				`INSERT INTO task_control_audit (task_identity, actor_id, action, reason, previous_status, new_status)
 				 VALUES (?, ?, 'remove_replay', ?, ?, ?)`,
 				p.TaskIdentity, p.ActorID, p.Reason, status, status); err != nil {
 				return err
@@ -518,7 +518,7 @@ func (s *MutateService) Remove(ctx context.Context, p RemoveParams) error {
 				return fmt.Errorf("%w: remove race for running task", ErrInvalidOperation)
 			}
 			if _, err := tx.ExecContext(ctx,
-				`INSERT INTO task_audit (task_identity, actor_id, action, reason, prev_status, new_status)
+				`INSERT INTO task_control_audit (task_identity, actor_id, action, reason, previous_status, new_status)
 				 VALUES (?, ?, 'remove_abort_request', ?, 'running', 'running')`,
 				p.TaskIdentity, p.ActorID, p.Reason); err != nil {
 				return err
@@ -545,7 +545,7 @@ func (s *MutateService) Remove(ctx context.Context, p RemoveParams) error {
 		}
 
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO task_audit (task_identity, actor_id, action, reason, prev_status, new_status)
+			`INSERT INTO task_control_audit (task_identity, actor_id, action, reason, previous_status, new_status)
 			 VALUES (?, ?, 'remove', ?, ?, ?)`,
 			p.TaskIdentity, p.ActorID, p.Reason, status, newStatus); err != nil {
 			return err
@@ -630,7 +630,7 @@ func (s *MutateService) Reset(ctx context.Context, p ResetParams) error {
 
 		// Write audit
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO task_audit (task_identity, actor_id, action, reason, prev_status, new_status, revision)
+			`INSERT INTO task_control_audit (task_identity, actor_id, action, reason, previous_status, new_status, new_retry_round)
 			 VALUES (?, ?, 'reset', ?, ?, 'waiting', ?)`,
 			p.TaskIdentity, p.ActorID, p.Reason, status, nextRound); err != nil {
 			return err
@@ -710,7 +710,7 @@ func (s *MutateService) Reopen(ctx context.Context, p ReopenParams) error {
 
 		// Write audit
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO task_audit (task_identity, actor_id, action, reason, prev_status, new_status, revision)
+			`INSERT INTO task_control_audit (task_identity, actor_id, action, reason, previous_status, new_status, new_retry_round)
 			 VALUES (?, ?, 'reopen', ?, 'skipped', 'waiting', ?)`,
 			p.TaskIdentity, p.ActorID, p.Reason, nextRound); err != nil {
 			return err
@@ -774,7 +774,7 @@ func (s *MutateService) RunNow(ctx context.Context, p RunNowParams) error {
 		}
 
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO task_audit (task_identity, actor_id, action, reason, prev_status, new_status)
+			`INSERT INTO task_control_audit (task_identity, actor_id, action, reason, previous_status, new_status)
 			 VALUES (?, ?, 'run_now', ?, 'waiting', 'waiting')`,
 			p.TaskIdentity, p.ActorID, p.Reason); err != nil {
 			return err
@@ -827,7 +827,7 @@ func (s *MutateService) Skip(ctx context.Context, p SkipParams) error {
 		}
 
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO task_audit (task_identity, actor_id, action, reason, prev_status, new_status)
+			`INSERT INTO task_control_audit (task_identity, actor_id, action, reason, previous_status, new_status)
 			 VALUES (?, ?, 'skip', ?, 'waiting', 'skipped')`,
 			p.TaskIdentity, p.ActorID, p.Reason); err != nil {
 			return err
@@ -1097,7 +1097,7 @@ func CancelInTx(ctx context.Context, tx store.ImmediateConnTx, taskIdentity stri
 		return err
 	}
 	_, err = tx.ExecContext(ctx,
-		`INSERT INTO task_audit (task_identity, actor_id, action, reason, prev_status, new_status)
+		`INSERT INTO task_control_audit (task_identity, actor_id, action, reason, previous_status, new_status)
 		 VALUES (?, ?, 'cancel', ?, 'waiting', 'cancelled')`, taskIdentity, actorID, reason)
 	return err
 }
@@ -1140,7 +1140,7 @@ func RemoveInTx(ctx context.Context, tx store.ImmediateConnTx, taskIdentity stri
 		return err
 	}
 	_, err = tx.ExecContext(ctx,
-		`INSERT INTO task_audit (task_identity, actor_id, action, reason, prev_status, new_status)
+		`INSERT INTO task_control_audit (task_identity, actor_id, action, reason, previous_status, new_status)
 		 VALUES (?, ?, 'remove', ?, ?, ?)`, taskIdentity, actorID, reason, status, newStatus)
 	return err
 }
@@ -1168,7 +1168,7 @@ func ResetInTx(ctx context.Context, tx store.ImmediateConnTx, taskIdentity strin
 		return err
 	}
 	_, err = tx.ExecContext(ctx,
-		`INSERT INTO task_audit (task_identity, actor_id, action, reason, prev_status, new_status)
+		`INSERT INTO task_control_audit (task_identity, actor_id, action, reason, previous_status, new_status)
 		 VALUES (?, ?, 'reset', ?, ?, 'waiting')`, taskIdentity, actorID, reason, status)
 	return err
 }
@@ -1197,7 +1197,7 @@ func RunNowInTx(ctx context.Context, tx store.ImmediateConnTx, taskIdentity stri
 		return err
 	}
 	_, err = tx.ExecContext(ctx,
-		`INSERT INTO task_audit (task_identity, actor_id, action, reason, prev_status, new_status)
+		`INSERT INTO task_control_audit (task_identity, actor_id, action, reason, previous_status, new_status)
 		 VALUES (?, ?, 'run_now', ?, 'waiting', 'waiting')`, taskIdentity, actorID, reason)
 	return err
 }
@@ -1221,7 +1221,7 @@ func SkipInTx(ctx context.Context, tx store.ImmediateConnTx, taskIdentity string
 		return err
 	}
 	_, err = tx.ExecContext(ctx,
-		`INSERT INTO task_audit (task_identity, actor_id, action, reason, prev_status, new_status)
+		`INSERT INTO task_control_audit (task_identity, actor_id, action, reason, previous_status, new_status)
 		 VALUES (?, ?, 'skip', ?, 'waiting', 'skipped')`, taskIdentity, actorID, reason)
 	return err
 }
@@ -1252,7 +1252,7 @@ func ReopenInTx(ctx context.Context, tx store.ImmediateConnTx, taskIdentity stri
 		return err
 	}
 	_, err = tx.ExecContext(ctx,
-		`INSERT INTO task_audit (task_identity, actor_id, action, reason, prev_status, new_status)
+		`INSERT INTO task_control_audit (task_identity, actor_id, action, reason, previous_status, new_status)
 		 VALUES (?, ?, 'reopen', ?, 'skipped', 'waiting')`, taskIdentity, actorID, reason)
 	return err
 }

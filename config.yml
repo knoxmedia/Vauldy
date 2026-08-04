@@ -75,24 +75,37 @@ encrypted_assets:
 # Optional post-ingest concurrency overrides; omitted values use CPU-based defaults.
 
 # post_ingest:
+
 #   max_concurrent: 4
+
 #   poster_max_concurrent: 2
+
 #   preview_max_concurrent: 1
+
 #   subtitle_max_concurrent: 1
+
 #   subtitle_timeout_realtime_factor: 2.0
+
 # Ingest worker concurrency; independent of post_ingest.max_concurrent.
+
 # Default 3; valid range [1,32]. Omit to use compiled default.
 
 # ingest:
+
 #   max_concurrent: 3
 scan:
   file_hash_on_scan: false
   fast_ffprobe: true
   # file_extensions:           # optional; omit category = built-in defaults; listed category = full replace
+
   #   video: [.mp4, .m4v, .mkv, .webm, .avi, .mov, .wmv, .flv, .f4v, .mpeg, .mpg, .mpe, .m2v, .mpv, .ts, .m2ts, .mts, .tp, .trp, .vob, .mod, .tod, .3gp, .3g2, .ogv, .divx, .xvid, .asf, .rm, .rmvb, .mxf, .wtv, .dvr-ms]
+
   #   audio: [.mp3, .flac, .wav, .aac, .ogg, .oga, .opus, .m4a, .wma, .aiff, .aif, .ape, .wv, .mka, .ac3, .eac3, .dts, .dtshd, .mp2, .amr, .ra, .tak, .tta, .caf, .dsf, .dff]
+
   #   image: [.jpg, .jpeg, .png, .gif, .webp, .bmp, .heic, .heif, .tif, .tiff, .svg, .cr2, .nef, .arw, .dng, .raf, .orf, .rw2]
+
   #   document: [.pdf, .doc, .docx, .xls, .xlsx, .ppt, .pptx, .txt, .md, .mdx, .html, .htm, .csv, .rtf, .epub, .mobi, .azw, .azw3]
+
   # Synchronous poster capture during scan (seconds). Default 120. Set 0 to disable.
   precapture_poster_timeout_seconds: 120
 # Sidecar scan (srt/ass/ssa/vtt/sub), embedded extract to WebVTT, optional ASR.
@@ -150,8 +163,8 @@ photo_face:
   batch_limit: 0
   poll_interval_seconds: 0
   failed_retry_minutes: 0
-  thumbnail_repair_batch: 32
-  thumbnail_repair_audit_hours: 24
+  thumbnail_repair_batch: 0
+  thumbnail_repair_audit_hours: 0
 # Office document preview via LibreOffice headless (DOC/DOCX/XLS/XLSX/PPT/PPTX -> PDF).
 
 doc_trans:
@@ -180,33 +193,63 @@ cors:
   allow_origins:
     - "*"
 # Unified scheduler (Phase 3+). Omit all keys to use compiled defaults.
+
 # Zero concurrency = paused; zero resource = unavailable.
+
 # Legacy post_ingest limits are translated when scheduler.concurrency is absent.
+
 # scheduler:
+
 #   concurrency:
+
 #     ingest: 3
+
 #     metadata: 3
+
 #     scan: 1
+
 #     scrape: 6
+
 #     poster: 3
+
 #     preview: 2
+
 #     encrypt: 1
+
 #     atrack: 2
+
 #     subtitle_recognize: 1
+
 #     keyframe: 3
+
 #     prepare: 1
+
 #     doc_convert: 2
+
 #     ai_analysis: 3
+
 #   resources:
+
 #     cpu: 0           # 0 = unlimited (no global CPU budget)
+
 #     gpu: 0
+
 #     disk_read: 0
+
 #     disk_write: 0
+
 #     network: 0
+
 #     external_process: 0
+
 #   providers: {}      # provider:<id> tokens, e.g. "provider:openai": 5
+
 #   priority:
+
 #     aging_interval_sec: 300   # seconds between aging steps
+
 #     aging_step: 1             # priority increment per interval
+
 #     run_now_amount: 100       # run-now priority boost
+
 #     run_now_ttl_sec: 600      # run-now boost duration

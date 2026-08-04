@@ -1,5 +1,6 @@
 import { useCallback, useMemo } from "react";
 import type { Registry } from "../../api/taskControl";
+import { useT, tGlobal } from "../../i18n";
 
 export interface TaskTypeNavProps {
   registry: Registry;
@@ -14,16 +15,19 @@ interface FlatTabItem {
   available: boolean;
 }
 
-function flattenTabs(registry: Registry): FlatTabItem[] {
-  const tabs: FlatTabItem[] = [];
+function formatTypeName(type: string): string {
+  return type
+    .split("_")
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+}
 
-  // Overview is always first
-  tabs.push({ key: "overview", label: "Overview", available: true });
+function flattenTabs(registry: Registry, t: (k: string) => string): FlatTabItem[] {
+  const tabs: FlatTabItem[] = [];
+  tabs.push({ key: "overview", label: t("tasks.control.tab_overview"), available: true });
 
   for (const group of registry.groups) {
     if (!group.types || group.types.length === 0) continue;
-    // Add a separator for the group
-    // Then add each type as a tab
     for (const spec of group.types) {
       tabs.push({
         key: spec.type,
@@ -37,17 +41,11 @@ function flattenTabs(registry: Registry): FlatTabItem[] {
   return tabs;
 }
 
-function formatTypeName(type: string): string {
-  return type
-    .split("_")
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(" ");
-}
-
 export function TaskTypeNav({ registry, activeType, onSelect }: TaskTypeNavProps) {
-  const tabs = useMemo(() => flattenTabs(registry), [registry]);
+  const t = useT();
+  const tabs = useMemo(() => flattenTabs(registry, tGlobal), [registry]);
 
-  const activeIndex = tabs.findIndex((t) => t.key === activeType);
+  const activeIndex = tabs.findIndex((tab) => tab.key === activeType);
   const safeIndex = activeIndex >= 0 ? activeIndex : 0;
 
   const handleKeyDown = useCallback(
@@ -81,7 +79,7 @@ export function TaskTypeNav({ registry, activeType, onSelect }: TaskTypeNavProps
     return (
       <div role="tablist" aria-label="Task types">
         <div role="tab" aria-selected={false}>
-          No task types available
+          {t("tasks.control.no_tasks")}
         </div>
       </div>
     );
@@ -90,7 +88,7 @@ export function TaskTypeNav({ registry, activeType, onSelect }: TaskTypeNavProps
   return (
     <nav
       role="tablist"
-      aria-label="Task type navigation"
+      aria-label={t("tasks.control.page_title")}
       onKeyDown={handleKeyDown}
       style={{
         display: "flex",
@@ -125,7 +123,7 @@ export function TaskTypeNav({ registry, activeType, onSelect }: TaskTypeNavProps
               whiteSpace: "nowrap",
               transition: "border-color 0.2s, color 0.2s",
             }}
-            title={tab.groupLabel ? `${tab.groupLabel}: ${tab.label}` : tab.label}
+            title={tab.groupLabel ? `${tab.groupLabel} · ${tab.label}` : tab.label}
           >
             {tab.label}
           </button>

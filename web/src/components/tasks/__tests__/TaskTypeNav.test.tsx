@@ -81,9 +81,10 @@ describe("TaskTypeNav", () => {
       </MemoryRouter>,
     );
 
-    const tabs = screen.getByRole("tablist");
-    const overviewTab = within(tabs).getByRole("tab", { name: /overview/i });
-    expect(overviewTab).toBeInTheDocument();
+    expect(screen.getByRole("tablist")).toBeTruthy();
+    // First tab should be overview, identified by its id
+    const overviewTab = document.getElementById("task-tab-overview");
+    expect(overviewTab).toBeTruthy();
     expect(overviewTab).toHaveAttribute("aria-selected", "true");
   });
 
@@ -97,9 +98,8 @@ describe("TaskTypeNav", () => {
 
     const tabs = screen.getByRole("tablist");
     const allTabs = within(tabs).getAllByRole("tab");
-    // "overview", "transcode" (-> "Transcode"), "optimize" (-> "Optimize")
-    const tabLabels = allTabs.map((t) => t.textContent);
     // Group label should not be among tab elements
+    const tabLabels = allTabs.map((t) => t.textContent);
     expect(tabLabels).not.toContain("tasks.group.video");
   });
 
@@ -119,9 +119,7 @@ describe("TaskTypeNav", () => {
     // Available types should render their display names
     expect(screen.getByRole("tab", { name: /transcode/i })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: /optimize/i })).toBeInTheDocument();
-    // photo_classify -> "Photo Classify"
     expect(screen.getByRole("tab", { name: /photo classify/i })).toBeInTheDocument();
-    // image_ocr -> "Image Ocr" (unavailable, still renders)
     expect(screen.getByRole("tab", { name: /image ocr/i })).toBeInTheDocument();
   });
 
@@ -211,7 +209,6 @@ describe("TaskTypeNav", () => {
       </MemoryRouter>,
     );
 
-    // Should still render a tablist even if empty
     expect(screen.getByRole("tablist")).toBeInTheDocument();
   });
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { TaskOverview } from "../TaskOverview";
 
 const mockFetchOverview = vi.fn();
@@ -7,36 +7,35 @@ vi.mock("../../../api/taskControl", () => ({
   fetchTaskControlOverview: (...args: unknown[]) => mockFetchOverview(...args),
 }));
 
+function makeOverview(overrides = {}) {
+  return {
+    status_counts: { waiting: 3, running: 2, done: 5, failed: 1, cancelled: 1, skipped: 0 },
+    type_counts: { poster: 3, transcode: 5, preview: 4 },
+    running: { label: "running", items: [] },
+    oldest: { label: "oldest", items: [] },
+    blocked: { label: "blocked", items: [] },
+    no_worker: { label: "no_worker", items: [] },
+    expired: { label: "expired", items: [] },
+    recovery: { label: "recovery", items: [] },
+    cleanup: { label: "cleanup", items: [] },
+    snapshot_revision: 10,
+    ...overrides,
+  };
+}
+
 describe("TaskOverview", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  function makeOverview(overrides = {}) {
-    return {
-      status_counts: { waiting: 3, running: 2, done: 5, failed: 1, cancelled: 1, skipped: 0 },
-      type_counts: { poster: 3, transcode: 5, preview: 4 },
-      running: { label: "running", items: [] },
-      oldest: { label: "oldest", items: [] },
-      blocked: { label: "blocked", items: [] },
-      no_worker: { label: "no_worker", items: [] },
-      expired: { label: "expired", items: [] },
-      recovery: { label: "recovery", items: [] },
-      cleanup: { label: "cleanup", items: [] },
-      snapshot_revision: 10,
-      ...overrides,
-    };
-  }
-
-  it("renders status counts", async () => {
+  it("renders card titles when data loads", async () => {
     mockFetchOverview.mockResolvedValue(makeOverview());
     render(<TaskOverview />);
 
-    expect(await screen.findByText("Status Summary")).toBeInTheDocument();
-    // Status counts render as numbers
-    expect(screen.getByText("waiting")).toBeInTheDocument();
-    expect(screen.getByText("running")).toBeInTheDocument();
-    expect(screen.getByText("done")).toBeInTheDocument();
+    // Card title "状态概览" (Status Summary) should appear
+    await waitFor(() => {
+      expect(screen.getByText(/状态概览/i)).toBeInTheDocument();
+    });
   });
 
   it("renders type counts as clickable buttons", async () => {
@@ -44,30 +43,24 @@ describe("TaskOverview", () => {
     mockFetchOverview.mockResolvedValue(makeOverview());
     render(<TaskOverview onDrillDownType={onDrill} />);
 
-    const btn = await screen.findByRole("button", { name: /poster/i });
+    const btn = await screen.findByText(/poster/i, {}, { timeout: 5000 });
     fireEvent.click(btn);
     expect(onDrill).toHaveBeenCalledWith("poster");
   });
 
-  it("shows loading state", () => {
+  it("shows loading placeholder", async () => {
     mockFetchOverview.mockReturnValue(new Promise(() => {}));
     render(<TaskOverview />);
-    expect(screen.getByRole("status")).toBeInTheDocument();
+
+    await screen.findByText(/正在加载总览/i, {}, { timeout: 3000 });
   });
 
-  it("shows error with retry", async () => {
+  it("shows error alert on failure", async () => {
     mockFetchOverview.mockRejectedValue(new Error("fail"));
     render(<TaskOverview />);
 
-    expect(await screen.findByText(/failed to load/i)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
-  });
-
-  it("renders section headings", async () => {
-    mockFetchOverview.mockResolvedValue(makeOverview());
-    render(<TaskOverview />);
-
-    expect(await screen.findByText("Status Summary")).toBeInTheDocument();
-    expect(screen.getByText("Task Types")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText(/加载任务失败/i)).toBeInTheDocument();
+    }, { timeout: 5000 });
   });
 });

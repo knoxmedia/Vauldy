@@ -55,16 +55,17 @@ func setupStreamTestDB(t *testing.T) (*sql.DB, *ProjectionBuilder) {
 			revision INTEGER NOT NULL UNIQUE,
 			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
-		`CREATE TABLE task_audit (
+		`CREATE TABLE task_control_audit (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			task_identity TEXT NOT NULL DEFAULT '',
+			task_type TEXT NOT NULL DEFAULT '',
 			actor_id INTEGER NOT NULL DEFAULT 0,
 			actor_name TEXT NOT NULL DEFAULT '',
 			action TEXT NOT NULL DEFAULT '',
 			reason TEXT NOT NULL DEFAULT '',
-			prev_status TEXT NOT NULL DEFAULT '',
+			previous_status TEXT NOT NULL DEFAULT '',
 			new_status TEXT NOT NULL DEFAULT '',
-			revision INTEGER NOT NULL DEFAULT 0,
+			new_retry_round INTEGER NOT NULL DEFAULT 0,
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`INSERT INTO task_projection_sequence(singleton_id, next_revision) VALUES(1, 1)`,

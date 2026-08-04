@@ -3833,7 +3833,7 @@ const taskAbortIntentSchema = `CREATE TABLE IF NOT EXISTS task_abort_intent (
 const taskControlAuditSchema = `CREATE TABLE IF NOT EXISTS task_control_audit (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     task_identity TEXT NOT NULL,
-    task_type TEXT NOT NULL,
+    task_type TEXT NOT NULL DEFAULT '',
     action TEXT NOT NULL,
     actor_id INTEGER NOT NULL DEFAULT 0,
     actor_name TEXT NOT NULL DEFAULT '',
@@ -3899,6 +3899,15 @@ func migrateTaskControlSchema(ctx context.Context, db *sql.DB) error {
 	}
 	if _, err := db.ExecContext(ctx, taskAbortIntentSchema); err != nil {
 		return fmt.Errorf("task_abort_intent: %w", err)
+	}
+	// Fix task_control_audit schema: task_type needs DEFAULT ''
+	// Only recreate when table is empty (production: all writes hit task_audit, not task_control_audit).
+	// When test data exists (non-zero count), CREATE IF NOT EXISTS below is a no-op.
+	var auditRowCount int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM task_control_audit`).Scan(&auditRowCount); err == nil && auditRowCount == 0 {
+		if _, err := db.ExecContext(ctx, `DROP TABLE IF EXISTS task_control_audit`); err != nil {
+			return fmt.Errorf("task_control_audit drop: %w", err)
+		}
 	}
 	if _, err := db.ExecContext(ctx, taskControlAuditSchema); err != nil {
 		return fmt.Errorf("task_control_audit: %w", err)

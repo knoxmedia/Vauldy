@@ -1,12 +1,11 @@
 import { useEffect, useState, useCallback } from "react";
+import { Button, Alert } from "antd";
 import { TaskTypeNav } from "../components/tasks/TaskTypeNav";
 import { TaskList } from "../components/tasks/TaskList";
-import { TaskFilters } from "../components/tasks/TaskFilters";
 import { TaskOverview } from "../components/tasks/TaskOverview";
 import { TaskDetailDrawer } from "../components/tasks/TaskDetailDrawer";
 import { fetchTaskControlRegistry } from "../api/taskControl";
 import type { Registry } from "../api/taskControl";
-import type { TaskControlFilter } from "../lib/taskControlFilters";
 import { useT } from "../i18n";
 
 export default function TaskManagerPage() {
@@ -16,8 +15,9 @@ export default function TaskManagerPage() {
   const [registryError, setRegistryError] = useState(false);
 
   const [activeType, setActiveType] = useState("overview");
-  const [filter, setFilter] = useState<TaskControlFilter>({});
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+
+  const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -45,12 +45,7 @@ export default function TaskManagerPage() {
 
   const handleTypeSelect = useCallback((type: string) => {
     setActiveType(type);
-    setFilter({});
     setSelectedTaskId(null);
-  }, []);
-
-  const handleFilterChange = useCallback((newFilter: TaskControlFilter) => {
-    setFilter(newFilter);
   }, []);
 
   const handleSelectRow = useCallback((taskId: string) => {
@@ -66,6 +61,10 @@ export default function TaskManagerPage() {
     setSelectedTaskId(null);
   }, []);
 
+  const handleActionSuccess = useCallback(() => {
+    setRefreshKey((k) => k + 1);
+  }, []);
+
   const allTypeKeys = registry
     ? [
         "overview",
@@ -76,41 +75,36 @@ export default function TaskManagerPage() {
   const validActiveType = allTypeKeys.includes(activeType) ? activeType : "overview";
 
   return (
-    <main role="main" aria-label={t("pages.task_manager.page_title")}>
+    <main role="main" aria-label={t("tasks.control.page_title")}>
       <h1 style={{ fontSize: 20, fontWeight: 600, marginBottom: 16, color: "#d9d9d9" }}>
-        {t("pages.task_manager.page_title")}
+        {t("tasks.control.page_title")}
       </h1>
 
       {registryLoading && (
         <div style={{ padding: 40, textAlign: "center", color: "#888" }}>
-          Loading registry...
+          {t("tasks.control.loading_registry")}
         </div>
       )}
 
       {registryError && (
-        <div style={{ padding: 40, textAlign: "center" }}>
-          <p style={{ color: "#ff4d4f" }}>Failed to load task registry</p>
-          <button
-            onClick={() => {
+        <Alert
+          type="error"
+          showIcon
+          message={t("tasks.control.load_failed_registry")}
+          style={{ marginBottom: 16 }}
+          action={
+            <Button size="small" onClick={() => {
               setRegistryError(false);
               setRegistryLoading(true);
               fetchTaskControlRegistry()
                 .then(setRegistry)
                 .catch(() => setRegistryError(true))
                 .finally(() => setRegistryLoading(false));
-            }}
-            style={{
-              padding: "6px 16px",
-              background: "#1677ff",
-              color: "#fff",
-              border: "none",
-              borderRadius: 4,
-              cursor: "pointer",
-            }}
-          >
-            Retry
-          </button>
-        </div>
+            }}>
+              {t("tasks.control.retry")}
+            </Button>
+          }
+        />
       )}
 
       {registry && !registryLoading && (
@@ -138,12 +132,11 @@ export default function TaskManagerPage() {
               id={`task-panel-${validActiveType}`}
               aria-labelledby={`task-tab-${validActiveType}`}
             >
-              <TaskFilters filter={filter} onChange={handleFilterChange} />
               <TaskList
-                key={`${validActiveType}-${JSON.stringify(filter)}`}
+                key={`${validActiveType}-${refreshKey}`}
                 taskType={validActiveType}
-                filter={filter}
                 onSelectRow={handleSelectRow}
+                onActionSuccess={handleActionSuccess}
               />
             </div>
           )}
@@ -151,6 +144,7 @@ export default function TaskManagerPage() {
           <TaskDetailDrawer
             taskId={selectedTaskId}
             onClose={handleCloseDetail}
+            onActionSuccess={handleActionSuccess}
           />
         </>
       )}

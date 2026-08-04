@@ -93,16 +93,17 @@ func createMutationTestSchema(t *testing.T, db *sql.DB) error {
 			PRIMARY KEY (operation_id, task_identity, action),
 			FOREIGN KEY (operation_id) REFERENCES task_batch_operation(operation_id) ON DELETE RESTRICT
 		)`,
-		`CREATE TABLE task_audit (
+		`CREATE TABLE task_control_audit (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			task_identity TEXT NOT NULL DEFAULT '',
+			task_type TEXT NOT NULL DEFAULT '',
 			actor_id INTEGER NOT NULL DEFAULT 0,
 			actor_name TEXT NOT NULL DEFAULT '',
 			action TEXT NOT NULL DEFAULT '',
 			reason TEXT NOT NULL DEFAULT '',
-			prev_status TEXT NOT NULL DEFAULT '',
+			previous_status TEXT NOT NULL DEFAULT '',
 			new_status TEXT NOT NULL DEFAULT '',
-			revision INTEGER NOT NULL DEFAULT 0,
+			new_retry_round INTEGER NOT NULL DEFAULT 0,
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE TABLE media_ingest_run (
@@ -1306,7 +1307,7 @@ func TestBatchActorReasonAudit(t *testing.T) {
 
 	// Check audit was written
 	var count int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM task_audit WHERE task_identity=? AND actor_id=42 AND action='cancel'`, taskID).Scan(&count); err != nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM task_control_audit WHERE task_identity=? AND actor_id=42 AND action='cancel'`, taskID).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
 	if count < 1 {
