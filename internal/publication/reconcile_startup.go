@@ -110,6 +110,9 @@ func ValidateAggregateCurrentPolicy(ctx context.Context, db *sql.DB, adapters ..
 	if _, err := ReconcileOrphanFailedQueueState(ctx, db); err != nil {
 		return fmt.Errorf("publication current-policy startup reconcile orphan failed queues: %w", err)
 	}
+	if _, err := ReconcileSupersededQueueTasks(ctx, db); err != nil {
+		return fmt.Errorf("publication current-policy startup reconcile superseded queues: %w", err)
+	}
 	if _, err := ReconcileVisibleMediaSteps(ctx, db); err != nil {
 		return fmt.Errorf("publication current-policy startup reconcile visible media steps: %w", err)
 	}
@@ -600,6 +603,48 @@ WHERE status IN ('waiting','failed') AND ingest_step_id IN (
 		changed += int(n)
 	}
 	return changed, nil
+}
+
+// ReconcileSupersededQueueTasks cancels post-ingest queue executions that still
+// reference a superseded plan run. Such tasks belong to an obsolete generation
+// and can never be claimed (claim eligibility requires a non-superseded run),
+// so leaving them waiting only accumulates phantom pending tasks.
+func ReconcileSupersededQueueTasks(ctx context.Context, db *sql.DB) (int, error) {
+	if db == nil {
+		return 0, errors.New("publication superseded queue reconcile: database is required")
+	}
+	changed := 0
+	const reason = "cancelled: superseded plan generation"
+	_, err := store.WithImmediateConnTx(ctx, db, func(tx store.ImmediateConnTx) error {
+		res, execErr := tx.ExecContext(ctx, `UPDATE post_ingest_task SET
+status='cancelled',lease_owner=NULL,lease_until=NULL,
+last_error=CASE WHEN TRIM(COALESCE(last_error,''))='' THEN ? ELSE last_error END,
+finished_at=COALESCE(finished_at,CURRENT_TIMESTAMP),updated_at=CURRENT_TIMESTAMP
+WHERE status IN ('waiting','running') AND removed_at IS NULL AND ingest_run_id IN (
+  SELECT r.id FROM media_ingest_run r
+  WHERE (r.superseded_at IS NOT NULL OR r.superseded_by_generation IS NOT NULL)
+)`, reason)
+		if execErr != nil {
+			return execErr
+		}
+		n, _ := res.RowsAffected()
+		changed += int(n)
+		stepRes, execErr := tx.ExecContext(ctx, `UPDATE media_ingest_step SET
+status='cancelled',lease_owner=NULL,lease_until=NULL,
+last_error=CASE WHEN TRIM(COALESCE(last_error,''))='' THEN ? ELSE last_error END,
+finished_at=COALESCE(finished_at,CURRENT_TIMESTAMP),updated_at=CURRENT_TIMESTAMP
+WHERE status IN ('waiting','running') AND run_id IN (
+  SELECT r.id FROM media_ingest_run r
+  WHERE (r.superseded_at IS NOT NULL OR r.superseded_by_generation IS NOT NULL)
+)`, reason)
+		if execErr != nil {
+			return execErr
+		}
+		n2, _ := stepRes.RowsAffected()
+		changed += int(n2)
+		return nil
+	})
+	return changed, err
 }
 
 type stepValidationRow struct {

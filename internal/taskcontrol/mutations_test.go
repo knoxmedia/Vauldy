@@ -1208,6 +1208,36 @@ INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation
 	}
 }
 
+func TestResetRejectsSupersededRun(t *testing.T) {
+	db := openLinkedMutationTestDB(t)
+	svc := NewMutateService(db)
+	_, err := db.Exec(`
+INSERT INTO library(name,type,path) VALUES('taskcontrol-superseded','video','/taskcontrol-superseded');
+INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state) VALUES(1,1,'linked-superseded','video',2,'published');
+INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version,superseded_at,superseded_by_generation,finished_at) VALUES(40,1,1,'scan','cancelled','{}',3,CURRENT_TIMESTAMP,2,CURRENT_TIMESTAMP);
+INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status,attempts,max_attempts,last_error,retry_round) VALUES
+ (41,40,1,1,'poster',1,'failed',1,1,'context deadline exceeded',0);
+INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status,attempts,max_attempts,retry_round,last_error) VALUES
+ (400,1,40,41,1,'poster','failed',1,1,0,'context deadline exceeded');`)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	taskID := BuildIdentity("orchestration", 400)
+	err = svc.Reset(context.Background(), ResetParams{TaskIdentity: taskID, ActorID: 1, Reason: "retry"})
+	if !errors.Is(err, ErrSuperseded) {
+		t.Fatalf("expected ErrSuperseded, got %v", err)
+	}
+
+	var status string
+	if err := db.QueryRow(`SELECT status FROM post_ingest_task WHERE id=400`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "failed" {
+		t.Fatalf("task must not be reset for superseded run, got %s", status)
+	}
+}
+
 func assertLinkedTerminalPropagation(t *testing.T, db *sql.DB, sourceStepID, dependentStepID, sourceTaskID, dependentTaskID int64, wantSource string) {
 	t.Helper()
 	var queueSource, stepSource, queueDependent, stepDependent string

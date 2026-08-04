@@ -144,6 +144,7 @@ var (
 	ErrRetryRoundMismatch  = errors.New("taskcontrol: retry round mismatch")
 	ErrAlreadyRemoved      = errors.New("taskcontrol: task already removed")
 	ErrNotAI               = errors.New("taskcontrol: not an AI analysis task")
+	ErrSuperseded          = errors.New("taskcontrol: task belongs to a superseded plan run")
 	ErrBatchTooLarge       = errors.New("taskcontrol: batch exceeds 200 items")
 	ErrBatchInvalidUUID    = errors.New("taskcontrol: operation_id must be a valid UUID")
 	ErrBatchActionMismatch = errors.New("taskcontrol: operation action mismatch")
@@ -619,6 +620,22 @@ func (s *MutateService) Reset(ctx context.Context, p ResetParams) error {
 		// Must be terminal
 		if !isTerminalStatus(status) {
 			return fmt.Errorf("%w: cannot reset non-terminal task (%s)", ErrNotTerminal, status)
+		}
+
+		// A task that belongs to a superseded plan run can never be claimed
+		// again; resetting it would leave it stuck in waiting forever.
+		if ingestRunID.Valid {
+			var supersededAt sql.NullTime
+			var supersededBy sql.NullInt64
+			if err := tx.QueryRowContext(ctx,
+				`SELECT superseded_at, superseded_by_generation FROM media_ingest_run WHERE id=?`,
+				ingestRunID.Int64).Scan(&supersededAt, &supersededBy); err != nil {
+				if !errors.Is(err, sql.ErrNoRows) {
+					return err
+				}
+			} else if supersededAt.Valid || supersededBy.Valid {
+				return fmt.Errorf("%w: run %d replaced by generation %v", ErrSuperseded, ingestRunID.Int64, supersededBy.Int64)
+			}
 		}
 
 		nextRound := int(retryRound) + 1
@@ -1327,6 +1344,19 @@ func ResetInTx(ctx context.Context, tx store.ImmediateConnTx, taskIdentity strin
 	}
 	if !isTerminalStatus(status) {
 		return fmt.Errorf("%w: cannot reset non-terminal (%s)", ErrNotTerminal, status)
+	}
+	if ingestRunID.Valid {
+		var supersededAt sql.NullTime
+		var supersededBy sql.NullInt64
+		if err := tx.QueryRowContext(ctx,
+			`SELECT superseded_at, superseded_by_generation FROM media_ingest_run WHERE id=?`,
+			ingestRunID.Int64).Scan(&supersededAt, &supersededBy); err != nil {
+			if !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+		} else if supersededAt.Valid || supersededBy.Valid {
+			return fmt.Errorf("%w: run %d replaced by generation %d", ErrSuperseded, ingestRunID.Int64, supersededBy.Int64)
+		}
 	}
 	nextRound := int(retryRound) + 1
 	_, err = tx.ExecContext(ctx,

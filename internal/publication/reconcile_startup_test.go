@@ -247,6 +247,64 @@ UPDATE media SET publication_state='failed',publication_error='required step exh
 	}
 }
 
+func TestReconcileSupersededQueueTasksCancelsWaitingAndRunning(t *testing.T) {
+	db := openPlannerTestDB(t)
+	_, mid, scan := seedPlannerMedia(t, db, "video", 0, 0, 0)
+	run := planAndCommit(t, db, NewPlanner(PlanOptions{}), NewMedia{MediaID: mid, ScanTaskID: scan, FileType: "video"})
+	if _, err := db.Exec(`UPDATE media_ingest_run SET status='published',finished_at=CURRENT_TIMESTAMP,superseded_at=CURRENT_TIMESTAMP,superseded_by_generation=99 WHERE id=?`, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	var stepID int64
+	if err := db.QueryRow(`SELECT id FROM media_ingest_step WHERE run_id=? AND step_type='poster'`, run.ID).Scan(&stepID); err != nil {
+		t.Fatal(err)
+	}
+	var posterTaskID int64
+	if err := db.QueryRow(`SELECT id FROM post_ingest_task WHERE ingest_step_id=?`, stepID).Scan(&posterTaskID); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := ReconcileSupersededQueueTasks(context.Background(), db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n < 1 {
+		t.Fatalf("expected at least 1 changed, got %d", n)
+	}
+
+	var taskStatus string
+	if err := db.QueryRow(`SELECT status FROM post_ingest_task WHERE id=?`, posterTaskID).Scan(&taskStatus); err != nil {
+		t.Fatal(err)
+	}
+	if taskStatus != "cancelled" {
+		t.Fatalf("superseded queue task status=%s want cancelled", taskStatus)
+	}
+
+	var stepStatus string
+	if err := db.QueryRow(`SELECT status FROM media_ingest_step WHERE id=?`, stepID).Scan(&stepStatus); err != nil {
+		t.Fatal(err)
+	}
+	if stepStatus != "cancelled" {
+		t.Fatalf("superseded step status=%s want cancelled", stepStatus)
+	}
+}
+
+func TestReconcileSupersededQueueTasksLeavesCurrentRun(t *testing.T) {
+	db := openPlannerTestDB(t)
+	_, mid, scan := seedPlannerMedia(t, db, "video", 0, 0, 0)
+	run := planAndCommit(t, db, NewPlanner(PlanOptions{}), NewMedia{MediaID: mid, ScanTaskID: scan, FileType: "video"})
+
+	if _, err := ReconcileSupersededQueueTasks(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	var waiting int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM post_ingest_task WHERE ingest_run_id=? AND status='waiting'`, run.ID).Scan(&waiting); err != nil {
+		t.Fatal(err)
+	}
+	if waiting == 0 {
+		t.Fatal("current run waiting tasks must not be cancelled")
+	}
+}
+
 func TestValidateCurrentV2RejectsExactQueueSemanticMismatches(t *testing.T) {
 	cases := []struct{ name, mutation string }{
 		{"post task type", `UPDATE post_ingest_task SET task_type='encrypt' WHERE task_type='poster'`},
