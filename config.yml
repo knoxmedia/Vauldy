@@ -1,0 +1,255 @@
+server:
+  host: "0.0.0.0"
+  port: 8200
+  mode: "release" # debug | release
+# Web UI branding (sidebar title, browser tab, favicon).
+
+branding:
+  app_name: "Knox-Media"
+  # Optional custom favicon (.svg/.png/.ico), path relative to this file or absolute.
+
+  favicon_path: ""
+  # When true, JIT master playlist may emit EXT-X-MEDIA TYPE=AUDIO for pre-extracted audio tracks.
+
+  # This saves transcode cost (video TS is video-only) but requires the player to support multi-audio HLS.
+
+  # Safari supports this natively; Chromium/Firefox need xgplayer-hls (which may have partial support).
+
+  # Default: true.
+  hls_multi_audio_enabled: false
+data:
+  dir: "./data"
+  db: "./data/knox-media.db"
+  transcode: "./data/transcode"
+  preview: "./data/preview"
+  subtitle: "./data/subtitles"
+  upload: "./data/upload"
+  chunks: "./data/upload/chunks"
+  static: "./data/static"
+security:
+  jwt_secret: "change-me-in-production-use-long-random-string"
+  token_hours: 168
+# Bundled binaries under media/tools/ (Windows .exe). Run server with cwd = media/, or use absolute paths.
+
+# Re-fetch after clone: pwsh -File tools/download_media_tools.ps1
+ffmpeg:
+  ffprobe_path: "tools/ffmpeg/bin/ffprobe.exe"
+  ffmpeg_path: "tools/ffmpeg/bin/ffmpeg.exe"
+# CENC fMP4 HLS: Shaka first, then ffmpeg fallback. Empty shaka path skips Shaka.
+
+drm_packaging:
+  engine_order:
+    - shaka
+    - ffmpeg
+  shaka_packager_path: "tools/shaka-packager/packager.exe"
+  segment_seconds: 4
+drm:
+  widevine:
+    enabled: false
+    # When true with private_module_url set, playback plan includes widevine_service_cert_url (Shaka serverCertificateUri).
+
+    # Default false: omit URL so CDM negotiates cert in-band via LICENSE POST (0x08 0x04).
+    emit_service_cert_url: false
+    # Private compliant WV module endpoint (local/private deployment)
+
+    # Example: "http://127.0.0.1:9001/widevine/license"
+    private_module_url: "http://127.0.0.1:8080/license"
+    private_module_token: ""
+    private_module_timeout_seconds: 8
+  powerdrm:
+    enabled: true
+# Web playback plan: player_engine_order (powerplayer | shaka | xgplayer). Omitted entries use server defaults.
+
+playback:
+  engines:
+    progressive_hls: ["powerplayer", "xgplayer"] # native + clear HLS (hls, jit_hls, hls_aes_128)
+    hls_powerdrm: ["powerplayer"]
+    drm: ["powerplayer", "shaka", "xgplayer"] # Widevine/FairPlay HLS or DASH
+# Knox 9527 envelope encryption at rest (per-library encrypted_assets_enabled).
+
+encrypted_assets:
+  enabled: true
+  cleanup_plaintext_default: false
+# Library scan: default skips full-file MD5 (very slow) and uses shorter ffprobe analysis.
+
+# Optional post-ingest concurrency overrides; omitted values use CPU-based defaults.
+
+# post_ingest:
+
+#   max_concurrent: 4
+
+#   poster_max_concurrent: 2
+
+#   preview_max_concurrent: 1
+
+#   subtitle_max_concurrent: 1
+
+#   subtitle_timeout_realtime_factor: 2.0
+
+# Ingest worker concurrency; independent of post_ingest.max_concurrent.
+
+# Default 3; valid range [1,32]. Omit to use compiled default.
+
+# ingest:
+
+#   max_concurrent: 3
+scan:
+  file_hash_on_scan: false
+  fast_ffprobe: true
+  # file_extensions:           # optional; omit category = built-in defaults; listed category = full replace
+
+  #   video: [.mp4, .m4v, .mkv, .webm, .avi, .mov, .wmv, .flv, .f4v, .mpeg, .mpg, .mpe, .m2v, .mpv, .ts, .m2ts, .mts, .tp, .trp, .vob, .mod, .tod, .3gp, .3g2, .ogv, .divx, .xvid, .asf, .rm, .rmvb, .mxf, .wtv, .dvr-ms]
+
+  #   audio: [.mp3, .flac, .wav, .aac, .ogg, .oga, .opus, .m4a, .wma, .aiff, .aif, .ape, .wv, .mka, .ac3, .eac3, .dts, .dtshd, .mp2, .amr, .ra, .tak, .tta, .caf, .dsf, .dff]
+
+  #   image: [.jpg, .jpeg, .png, .gif, .webp, .bmp, .heic, .heif, .tif, .tiff, .svg, .cr2, .nef, .arw, .dng, .raf, .orf, .rw2]
+
+  #   document: [.pdf, .doc, .docx, .xls, .xlsx, .ppt, .pptx, .txt, .md, .mdx, .html, .htm, .csv, .rtf, .epub, .mobi, .azw, .azw3]
+
+  # Synchronous poster capture during scan (seconds). Default 120. Set 0 to disable.
+  precapture_poster_timeout_seconds: 120
+# Sidecar scan (srt/ass/ssa/vtt/sub), embedded extract to WebVTT, optional ASR.
+
+subtitle:
+  # When true, a new video discovered by library scan gets a pending subtitle_task (default: true).
+  auto_on_scan: true
+  asr:
+    provider: shell
+    engine: faster-whisper
+    model: base
+    language: zh
+    device: ""
+    whisper_path: tools/recognition/.venv/Scripts/whisper.exe
+    extra_args: []
+    shell: cd /d "{output_dir}" && "tools/recognition/.venv/Scripts/python.exe" "tools/asr/asr_to_vtt.py" --input "{input}" --output-vtt "{output_vtt}"
+  graphical_ocr:
+    enabled: true
+    tesseract_path: tesseract
+    tessdata_prefix: ""
+    languages: chi_sim+eng
+    python_path: tools/recognition/.venv/Scripts/python.exe
+    script_path: tools/subtitle_ocr/bitmap_subtitle_ocr.py
+    pgsrip_path: tools/recognition/.venv/Scripts/pgsrip.exe
+    mkvextract_path: ""
+    mkvmerge_path: ""
+  ai_proofread: true
+# Audio track extraction: separate audio from video on library scan.
+
+atrack:
+  # When true, a new video discovered by library scan gets a waiting atrack_task (default: true).
+  auto_on_scan: false
+# Lyric recognition: ASR 鈫?VTT 鈫?LRC for music library audio tracks.
+
+lyric:
+  # When true, a new audio track in a music library without lyrics gets a pending lyric_task (default: true).
+  auto_on_scan: true
+# Photo AI classification for photo libraries (heuristic + optional ONNX).
+
+photo_classify:
+  auto_on_scan: true
+  engine: auto
+  python_path: tools/recognition/.venv/Scripts/python.exe
+  script_path: tools/photo_classify/classify.py
+  model_path: tools/photo_classify/models/mobilenetv2-7.onnx
+  labels_path: tools/photo_classify/imagenet_labels.txt
+# Face detection and person clustering for photo libraries (InsightFace).
+
+photo_face:
+  auto_on_scan: true
+  python_path: tools/recognition/.venv/Scripts/python.exe
+  script_path: tools/photo_face/detect.py
+  similarity_threshold: 0.45
+  max_concurrent: 0
+  batch_limit: 0
+  poll_interval_seconds: 0
+  failed_retry_minutes: 0
+  thumbnail_repair_batch: 0
+  thumbnail_repair_audit_hours: 0
+# Office document preview via LibreOffice headless (DOC/DOCX/XLS/XLSX/PPT/PPTX -> PDF).
+
+doc_trans:
+  enabled: true
+  engine_order:
+    - office
+    - wps
+    - libreoffice
+  libreoffice_path: E:\Projects\PowerCOM\Knox\media\tools\doctran\LibreOfficePortable\App\libreoffice\program\soffice.exe
+  soffice_path: E:\Projects\PowerCOM\Knox\media\tools\doctran\LibreOfficePortable\App\libreoffice\program\soffice.exe
+  office_path: ""
+  wps_path: C:\Program Files (x86)\WPS Office\12.1.0.18276\office6
+  cache_dir: ""
+  cache_ttl_days: 30
+  timeout_seconds: 600
+# Just-in-time transcode options.
+
+jit:
+  # When true, use a single long-running ffmpeg process that outputs HLS segments
+
+  # via -f segment muxer (instead of one ffmpeg per segment). Reduces overhead and
+
+  # avoids keyframe bursts at segment boundaries. Default: true.
+  continuous_hls_enabled: true
+cors:
+  allow_origins:
+    - "*"
+# Unified scheduler (Phase 3+). Omit all keys to use compiled defaults.
+
+# Zero concurrency = paused; zero resource = unavailable.
+
+# Legacy post_ingest limits are translated when scheduler.concurrency is absent.
+
+# scheduler:
+
+#   concurrency:
+
+#     ingest: 3
+
+#     metadata: 3
+
+#     scan: 1
+
+#     scrape: 6
+
+#     poster: 3
+
+#     preview: 2
+
+#     encrypt: 1
+
+#     atrack: 2
+
+#     subtitle_recognize: 1
+
+#     keyframe: 3
+
+#     prepare: 1
+
+#     doc_convert: 2
+
+#     ai_analysis: 3
+
+#   resources:
+
+#     cpu: 0           # 0 = unlimited (no global CPU budget)
+
+#     gpu: 0
+
+#     disk_read: 0
+
+#     disk_write: 0
+
+#     network: 0
+
+#     external_process: 0
+
+#   providers: {}      # provider:<id> tokens, e.g. "provider:openai": 5
+
+#   priority:
+
+#     aging_interval_sec: 300   # seconds between aging steps
+
+#     aging_step: 1             # priority increment per interval
+
+#     run_now_amount: 100       # run-now priority boost
+
+#     run_now_ttl_sec: 600      # run-now boost duration

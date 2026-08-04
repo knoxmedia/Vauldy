@@ -2,8 +2,6 @@ package storage
 
 import (
 	"database/sql"
-	"log"
-	"os"
 	"strings"
 	"time"
 )
@@ -14,6 +12,18 @@ var mediaPlaintextBusy func(mediaID int64) bool
 // SetMediaPlaintextBusy registers a callback that reports active plaintext readers (e.g. JIT).
 func SetMediaPlaintextBusy(fn func(mediaID int64) bool) {
 	mediaPlaintextBusy = fn
+}
+
+// HasActivePlaintextConsumer reports whether preview/package/keyframe work or a
+// registered JIT session still holds the plaintext source for mediaID.
+// Retirement barrier uses this read-only predicate; deletion belongs to retirement.
+func HasActivePlaintextConsumer(db *sql.DB, mediaID int64) bool {
+	return plaintextConsumersBusy(db, mediaID)
+}
+
+// LibraryWantsPlaintextCleanup reports the library cleanup_plaintext policy.
+func LibraryWantsPlaintextCleanup(db *sql.DB, mediaID int64) bool {
+	return libraryWantsPlainCleanup(db, mediaID)
 }
 
 func plaintextConsumersBusy(db *sql.DB, mediaID int64) bool {
@@ -51,7 +61,7 @@ func plaintextConsumersBusy(db *sql.DB, mediaID int64) bool {
 }
 
 // WaitForPlaintextConsumers blocks until preview/package/keyframe tasks and live JIT sessions
-// finish, or timeout elapses.
+// finish, or timeout elapses. Used before encryption starts; does not delete sources.
 func WaitForPlaintextConsumers(db *sql.DB, mediaID int64, timeout time.Duration) {
 	if db == nil || mediaID <= 0 {
 		return
@@ -63,56 +73,6 @@ func WaitForPlaintextConsumers(db *sql.DB, mediaID int64, timeout time.Duration)
 		}
 		time.Sleep(2 * time.Second)
 	}
-}
-
-func removePlaintextFile(path string) error {
-	const attempts = 8
-	for i := 0; i < attempts; i++ {
-		err := os.Remove(path)
-		if err == nil || os.IsNotExist(err) {
-			return nil
-		}
-		if i == attempts-1 {
-			return err
-		}
-		time.Sleep(time.Duration(i+1) * time.Second)
-	}
-	return nil
-}
-
-func cleanupPlaintextAfterEncrypt(db *sql.DB, mediaID int64, plainPath string) {
-	plainPath = strings.TrimSpace(plainPath)
-	if plainPath == "" {
-		return
-	}
-	WaitForPlaintextConsumers(db, mediaID, 10*time.Minute)
-	if err := removePlaintextFile(plainPath); err != nil {
-		log.Printf("asset encrypt: cleanup plain media=%d path=%s err=%v", mediaID, plainPath, err)
-		schedulePlaintextCleanup(db, mediaID, plainPath)
-		return
-	}
-	log.Printf("asset encrypt: removed plaintext media=%d path=%s", mediaID, plainPath)
-}
-
-func schedulePlaintextCleanup(db *sql.DB, mediaID int64, plainPath string) {
-	go func() {
-		const maxAttempts = 40 // ~20 minutes at 30s
-		for attempt := 0; attempt < maxAttempts; attempt++ {
-			time.Sleep(30 * time.Second)
-			if !libraryWantsPlainCleanup(db, mediaID) {
-				return
-			}
-			if _, err := os.Stat(plainPath); os.IsNotExist(err) {
-				return
-			}
-			WaitForPlaintextConsumers(db, mediaID, 2*time.Minute)
-			if err := removePlaintextFile(plainPath); err == nil {
-				log.Printf("asset encrypt: removed plaintext media=%d path=%s (deferred)", mediaID, plainPath)
-				return
-			}
-		}
-		log.Printf("asset encrypt: cleanup plain gave up media=%d path=%s", mediaID, plainPath)
-	}()
 }
 
 func libraryWantsPlainCleanup(db *sql.DB, mediaID int64) bool {
@@ -127,41 +87,4 @@ func libraryWantsPlainCleanup(db *sql.DB, mediaID int64) bool {
 		WHERE m.id = ?
 	`, mediaID).Scan(&cleanup)
 	return err == nil && cleanup == 1
-}
-
-// KickPendingPlaintextCleanups retries plaintext deletion for encrypted media whose library
-// still has cleanup enabled but the source file was left on disk (e.g. Windows file lock).
-func KickPendingPlaintextCleanups(db *sql.DB) {
-	if db == nil {
-		return
-	}
-	rows, err := db.Query(`
-		SELECT e.media_id, e.plain_path
-		FROM media_encrypted_assets e
-		JOIN media m ON m.id = e.media_id
-		JOIN library l ON l.id = m.library_id
-		WHERE e.status = 'encrypted'
-		  AND COALESCE(l.encrypted_assets_cleanup_plaintext, 0) = 1
-		  AND TRIM(COALESCE(e.plain_path, '')) != ''
-	`)
-	if err != nil {
-		log.Printf("asset encrypt: pending plaintext cleanup query: %v", err)
-		return
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var mediaID int64
-		var plainPath string
-		if err := rows.Scan(&mediaID, &plainPath); err != nil {
-			continue
-		}
-		plainPath = strings.TrimSpace(plainPath)
-		if plainPath == "" {
-			continue
-		}
-		if _, err := os.Stat(plainPath); os.IsNotExist(err) {
-			continue
-		}
-		schedulePlaintextCleanup(db, mediaID, plainPath)
-	}
 }

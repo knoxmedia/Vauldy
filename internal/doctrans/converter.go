@@ -59,7 +59,64 @@ func (c *Converter) cacheRoot() string {
 	return filepath.Join("data", "preview", "documents", "convert")
 }
 
+// ConvertToPDF converts sourcePath to a PDF in the provided stagingDir using
+// the configured engine priority. This is the primitive called by the durable
+// documenttask worker; it does NOT hold process-local media locks (the scheduler
+// and documenttask store manage concurrency and lease fencing).
+func (c *Converter) ConvertToPDF(ctx context.Context, sourcePath, stagingDir string) (string, error) {
+	if c == nil || !docTransEnabled(c.Config) {
+		return "", fmt.Errorf("document conversion disabled")
+	}
+	if !IsOfficeFormat(sourcePath) {
+		return "", fmt.Errorf("not an office document")
+	}
+	if _, err := os.Stat(sourcePath); err != nil {
+		return "", fmt.Errorf("source missing: %w", err)
+	}
+	if err := os.MkdirAll(stagingDir, 0o755); err != nil {
+		return "", err
+	}
+
+	outPDF := filepath.Join(stagingDir, "preview.pdf")
+
+	timeoutSec := c.Config.TimeoutSeconds
+	if timeoutSec <= 0 {
+		timeoutSec = 180
+	}
+	cctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
+	defer cancel()
+
+	order := engineOrderFromConfig(c.Config)
+	var lastErr error
+	for _, kind := range order {
+		st := engineStatusFor(c.MediaRoot, c.Config, kind)
+		if !st.Available {
+			lastErr = fmt.Errorf("%s: %s", kind, st.Message)
+			continue
+		}
+		converted, err := convertWithEngine(cctx, c.MediaRoot, c.Config, kind, sourcePath, stagingDir)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if st, err := os.Stat(converted); err != nil || st.IsDir() || st.Size() == 0 {
+			lastErr = fmt.Errorf("%s: empty output", kind)
+			continue
+		}
+		if err := copyFile(converted, outPDF); err != nil {
+			return "", err
+		}
+		return outPDF, nil
+	}
+	if lastErr != nil {
+		return "", fmt.Errorf("all engines failed: %w", lastErr)
+	}
+	return "", fmt.Errorf("no conversion engine available")
+}
+
 // EnsurePreviewPDF converts source to PDF if needed and returns the PDF path.
+// Deprecated: Use the durable ConvertToPDF worker path instead; this method
+// retains process-local locking for backward compatibility with the legacy HTTP handler.
 func (c *Converter) EnsurePreviewPDF(ctx context.Context, mediaID int64, sourcePath string, sourceMtime int64) (string, error) {
 	if c == nil || !docTransEnabled(c.Config) {
 		return "", fmt.Errorf("document conversion disabled")

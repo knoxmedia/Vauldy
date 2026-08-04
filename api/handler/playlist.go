@@ -54,8 +54,8 @@ func (h *Handler) ListPlaylists(c *gin.Context) {
 	rows, err := h.App.DB.Query(`
 		SELECT p.id, p.name, p.description, p.poster_url, p.background_url, p.logo_url, p.square_art_url,
 			p.created_at, p.updated_at,
-			(SELECT COUNT(*) FROM playlist_item pi JOIN media m ON m.id=pi.media_id WHERE pi.playlist_id = p.id AND m.publication_state IN ('published','degraded')) AS item_count,
-			(SELECT pi.media_id FROM playlist_item pi JOIN media m ON m.id=pi.media_id WHERE pi.playlist_id = p.id AND m.publication_state IN ('published','degraded')
+			(SELECT COUNT(*) FROM playlist_item WHERE playlist_id = p.id) AS item_count,
+			(SELECT pi.media_id FROM playlist_item pi WHERE pi.playlist_id = p.id
 			 ORDER BY pi.sort_order ASC, pi.id ASC LIMIT 1) AS first_media_id
 		FROM playlist p
 		WHERE p.user_id = ?
@@ -140,7 +140,7 @@ func (h *Handler) GetPlaylist(c *gin.Context) {
 			m.title, m.file_type, m.duration, m.width, m.height
 		FROM playlist_item pi
 		JOIN media m ON m.id = pi.media_id
-		WHERE pi.playlist_id = ? AND m.publication_state IN ('published','degraded')
+		WHERE pi.playlist_id = ?
 		ORDER BY pi.sort_order ASC`, pid)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})

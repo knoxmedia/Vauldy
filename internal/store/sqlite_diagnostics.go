@@ -51,32 +51,6 @@ func normalizeSQLiteIdentityPath(dsn string) string {
 	return normalizeSQLiteIdentityPathForOS(dsn, runtime.GOOS, cwd)
 }
 
-func isMemorySQLitePath(path string) bool {
-	raw := strings.TrimSpace(path)
-	if strings.EqualFold(raw, ":memory:") {
-		return true
-	}
-	if !strings.HasPrefix(strings.ToLower(raw), "file:") {
-		return false
-	}
-	if strings.EqualFold(strings.SplitN(raw, "?", 2)[0], "file::memory:") {
-		return true
-	}
-	parts := strings.SplitN(raw, "?", 2)
-	if len(parts) != 2 {
-		return false
-	}
-	values, err := url.ParseQuery(parts[1])
-	if err != nil {
-		return false
-	}
-	for key, vals := range values {
-		if strings.EqualFold(key, "mode") && len(vals) > 0 && strings.EqualFold(strings.TrimSpace(vals[0]), "memory") {
-			return true
-		}
-	}
-	return false
-}
 func normalizeSQLiteIdentityPathForOS(dsn, goos, cwd string) string {
 	raw := strings.TrimSpace(dsn)
 	if isMemorySQLitePath(raw) {

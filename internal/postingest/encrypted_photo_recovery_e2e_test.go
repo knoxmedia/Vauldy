@@ -79,8 +79,10 @@ func TestEncryptedPhotoRecoveryRealAdaptersEndToEnd(t *testing.T) {
 	if filepath.Ext(selected) != ".enc" || state != "published" || journal != "committed" || evidence != 1 {
 		t.Fatalf("selected=%s state=%s journal=%s evidence=%d", selected, state, journal, evidence)
 	}
-	if _, e = os.Stat(source); !os.IsNotExist(e) {
-		t.Fatalf("plaintext remains: %v", e)
+	// Encryption completion hands plaintext cleanup to retirement; without an
+	// explicit cleanup request the source must remain present.
+	if _, e = os.Stat(source); e != nil {
+		t.Fatalf("plaintext should remain after encryption handoff: %v", e)
 	}
 	if n, e := publication.RepairLegacyMedia(context.Background(), db, publication.NewPlanner(publication.PlanOptions{EncryptGlobal: true}), 10); e != nil || n != 0 {
 		t.Fatalf("restart repair=%d err=%v", n, e)

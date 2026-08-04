@@ -47,28 +47,14 @@ func resolveWebBundle() webBundle {
 	return webBundle{}
 }
 
-// resolveWebDistDisk returns web/dist from cwd, walking up parent directories,
-// or next to the running executable.
+// resolveWebDistDisk returns web/dist from cwd or next to the running executable.
 func resolveWebDistDisk() string {
-	var candidates []string
-	// Walk up from cwd (up to 5 levels) so running from cmd/server/ still finds web/dist.
-	if cwd, err := os.Getwd(); err == nil {
-		dir := cwd
-		for i := 0; i < 5; i++ {
-			candidates = append(candidates, filepath.Join(dir, "web", "dist"))
-			parent := filepath.Dir(dir)
-			if parent == dir {
-				break
-			}
-			dir = parent
-		}
-	}
+	candidates := []string{"web/dist"}
 	if exe, err := os.Executable(); err == nil {
 		dir := filepath.Dir(exe)
 		candidates = append(candidates,
 			filepath.Join(dir, "web", "dist"),
 			filepath.Join(dir, "..", "web", "dist"),
-			filepath.Join(dir, "..", "..", "web", "dist"),
 		)
 	}
 	for _, c := range candidates {

@@ -1,10 +1,6 @@
 /data/
-cmd/server/data/
 *.exe
 *.db
-*.db-shm
-*.db-wal
-*.salt
 *.7z
 bin/
 **/__pycache__/
@@ -15,3 +11,5 @@ internal/webembed/dist/
 tools/doctran/LibreOfficePortable/
 tools/doctran/fixtures/
 
+
+.worktrees/

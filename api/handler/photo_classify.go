@@ -66,7 +66,7 @@ func (h *Handler) ListPhotoCategories(c *gin.Context) {
 	rows, err := h.App.DB.Query(`
 		SELECT COALESCE(json_extract(meta_json, '$.photo.tags'), '[]')
 		FROM media
-		WHERE library_id = ? AND file_type = 'image' AND status = 'active' AND publication_state IN ('published','degraded')
+		WHERE library_id = ? AND file_type = 'image' AND status = 'active'
 	`, libraryID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})

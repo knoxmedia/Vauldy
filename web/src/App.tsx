@@ -70,6 +70,7 @@ import { LyricProofreadDialog } from "./components/LyricProofreadDialog";
 import { useMusicPlayerStore } from "./store/musicPlayer";
 import { useBrandingStore, useAppName } from "./store/branding";
 import { useT } from "./i18n";
+import { LibraryRequestScopeProvider } from "./lib/libraryRequestScope";
 
 const { Header, Content, Sider } = Layout;
 
@@ -224,6 +225,7 @@ function MainShell() {
   })();
 
   return (
+    <LibraryRequestScopeProvider>
     <Layout className="app-shell" style={{ background: "#000" }}>
       <ProfileSync />
       {!isImmersiveRoute && mode !== "hidden" && (
@@ -471,6 +473,7 @@ function MainShell() {
         <LyricProofreadDialog />
       </Layout>
     </Layout>
+    </LibraryRequestScopeProvider>
   );
 }
 

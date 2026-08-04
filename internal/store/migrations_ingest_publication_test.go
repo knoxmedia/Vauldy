@@ -57,6 +57,9 @@ INSERT INTO post_ingest_task(id,media_id,scan_task_id,task_type,status) VALUES(3
 	if err != nil {
 		t.Fatalf("create legacy schema: %v", err)
 	}
+	if err := migrateIngestEntry(context.Background(), db); err != nil {
+		t.Fatalf("create entry schema: %v", err)
+	}
 	return db
 }
 
@@ -533,6 +536,87 @@ func TestScrapeTaskNearCurrentSchemaMissingConstraintsIsRebuilt(t *testing.T) {
 	}
 }
 
+func TestMigrateIngestPublicationAcceptsScrapeSkippedAndPreservesRows(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if _, err := db.Exec(`CREATE TABLE scrape_task (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ media_id INTEGER NOT NULL,
+ task_type TEXT DEFAULT 'media',
+ source TEXT DEFAULT 'auto',
+ query TEXT,
+ year INTEGER,
+ status TEXT DEFAULT 'waiting',
+ progress INTEGER DEFAULT 0,
+ fail_count INTEGER DEFAULT 0,
+ available_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+ message TEXT,
+ created_by INTEGER DEFAULT 0,
+ ingest_run_id INTEGER,
+ ingest_step_id INTEGER,
+ generation INTEGER,
+ retry_round INTEGER NOT NULL DEFAULT 0 CHECK(retry_round >= 0),
+ lease_owner TEXT,
+ lease_until TIMESTAMP,
+ created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+ started_at TIMESTAMP,
+ finished_at TIMESTAMP,
+ priority INTEGER NOT NULL DEFAULT 0,
+ FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE,
+ CHECK (status IN ('waiting','running','done','failed','abandoned','cancelled')),
+ UNIQUE(ingest_run_id,ingest_step_id,generation)
+)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`CREATE INDEX idx_scrape_task_claim ON scrape_task(status,lease_until,created_at)`,
+		`CREATE INDEX idx_scrape_task_ingest ON scrape_task(ingest_run_id,ingest_step_id,generation)`,
+		`CREATE INDEX idx_scrape_task_media ON scrape_task(media_id,created_at)`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`INSERT INTO scrape_task(id,media_id,task_type,source,status,progress,fail_count,message,created_by,retry_round) VALUES(72,20,'media','auto','waiting',11,2,'preserve-me',9,3)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO scrape_task(media_id,status) VALUES(20,'skipped')`); err == nil {
+		t.Fatal("legacy scrape CHECK unexpectedly accepted skipped")
+	}
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	var status, message string
+	var progress, failCount, round int
+	if err := db.QueryRow(`SELECT status,progress,fail_count,message,retry_round FROM scrape_task WHERE id=72`).Scan(&status, &progress, &failCount, &message, &round); err != nil {
+		t.Fatal(err)
+	}
+	if status != "waiting" || progress != 11 || failCount != 2 || message != "preserve-me" || round != 3 {
+		t.Fatalf("preserved=%s/%d/%d/%s/%d", status, progress, failCount, message, round)
+	}
+	if _, err := db.Exec(`UPDATE scrape_task SET status='skipped',message='dep-skip',finished_at=CURRENT_TIMESTAMP WHERE id=72`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT status,message FROM scrape_task WHERE id=72`).Scan(&status, &message); err != nil {
+		t.Fatal(err)
+	}
+	if status != "skipped" || message != "dep-skip" {
+		t.Fatalf("skipped=%s/%s", status, message)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	cols, err := ingestPublicationColumns(context.Background(), tx, "scrape_task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := scrapeTaskPublicationSchemaCurrent(context.Background(), tx, cols)
+	if err != nil || !current {
+		t.Fatalf("schema current=%v err=%v", current, err)
+	}
+}
+
 func TestScrapeTaskWrongNamedIndexesAreRebuiltWithExactColumns(t *testing.T) {
 	db := openIngestPublicationMigrationTestDB(t)
 	if err := migrateIngestPublication(context.Background(), db); err != nil {
@@ -740,7 +824,7 @@ func TestMigrateIngestPublicationV2ExactSchemaRejectsDrift(t *testing.T) {
 	if err := migrateIngestPublication(context.Background(), db); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`DROP INDEX idx_ingest_dependency_visible; CREATE INDEX idx_ingest_dependency_visible ON media_ingest_step_dependency(step_id)`); err != nil {
+	if _, err := db.Exec(`ALTER TABLE media_ingest_step_dependency ADD COLUMN drift TEXT`); err != nil {
 		t.Fatal(err)
 	}
 	if err := migrateIngestPublication(context.Background(), db); err == nil {
@@ -824,7 +908,7 @@ func installCompletePublicationFaultFixture(t *testing.T, db *sql.DB) {
 		`INSERT INTO pretranscode_task_meta(task_id,preset_id,output_format,encryption_mode,priority,output_path,ingest_jobs_snapshot_json) VALUES(73,1,'hls','aes128','high','meta-output','{"jobs":[1]}')`,
 		`INSERT INTO pretranscode_rendition_job(id,task_id,rendition_id,rendition_name,status,progress,output_path,error_message,encoder_used,started_at,created_at,available_at,lease_owner,lease_until,config_snapshot_json) VALUES(74,73,2,'720p','running',66,'job-output','job-error','nvenc','2029-01-01','2029-01-01','2030-01-01','job-owner','2030-01-02','{"job":1}')`,
 		canonicalIngestDependencySchema,
-		`INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(70,70,'step_done')`,
+		`INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(70,70,'success')`,
 		canonicalIngestEvidenceSchema,
 		`INSERT INTO media_ingest_evidence(id,run_id,step_id,media_id,generation,kind,source_fingerprint,artifact_refs_json,reason,verified_at,stage_id) VALUES(75,1,70,20,1,'poster','fp','{"path":"x"}','fixture','2029-01-01','stage-75')`,
 		canonicalAssetStageJournalSchema,
@@ -890,13 +974,13 @@ func TestMigrateIngestPublicationV2ManagedConstraintsBehavior(t *testing.T) {
 	runID, _ := res.LastInsertId()
 	res, _ = db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status) VALUES(?,20,1,'poster',1,'done')`, runID)
 	stepID, _ := res.LastInsertId()
-	if _, err := db.Exec(`INSERT INTO media_ingest_run(media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(21,1,'scan','processing','{}',3)`); err == nil {
+	if _, err := db.Exec(`INSERT INTO media_ingest_run(media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(21,1,'scan','processing','{}',99)`); err == nil {
 		t.Fatal("invalid policy accepted")
 	}
-	if _, err := db.Exec(`INSERT INTO media_ingest_step_dependency(step_id,dependency_kind) VALUES(?,'step_done')`, stepID); err == nil {
+	if _, err := db.Exec(`INSERT INTO media_ingest_step_dependency(step_id,dependency_kind) VALUES(?,'success')`, stepID); err == nil {
 		t.Fatal("dependency null edge accepted")
 	}
-	if _, err := db.Exec(`INSERT INTO media_ingest_step_dependency(step_id,dependency_kind) VALUES(?,'media_visible'),(?,'media_visible')`, stepID, stepID); err == nil {
+	if _, err := db.Exec(`INSERT INTO media_ingest_step_dependency(step_id,dependency_kind) VALUES(?,'success'),(?,'success')`, stepID, stepID); err == nil {
 		t.Fatal("duplicate visible dependency accepted")
 	}
 	if _, err := db.Exec(`INSERT INTO media_ingest_evidence(run_id,step_id,media_id,generation,kind,source_fingerprint,artifact_refs_json,verified_at,stage_id) VALUES(?,?,20,1,'poster','fp','bad',CURRENT_TIMESTAMP,'stage')`, runID, stepID); err == nil {
@@ -1258,9 +1342,6 @@ func TestSplitPublicationSQLClausesRejectsUnterminatedLexicalForms(t *testing.T)
 }
 
 func TestMigrateIngestPublicationV2EnterpriseManagedIndexesCreatedOnce(t *testing.T) {
-	if !storeEnterprisePrepareReady(t) {
-		t.Skip("enterprise prepare tables unavailable in community build")
-	}
 	db, err := OpenSQLite(":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -1272,7 +1353,7 @@ func TestMigrateIngestPublicationV2EnterpriseManagedIndexesCreatedOnce(t *testin
 	if err = migrateIngestPublication(context.Background(), db); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"idx_post_ingest_claim", "idx_post_ingest_scan", "idx_post_ingest_run", "idx_post_ingest_step", "idx_scrape_task_claim", "idx_scrape_task_ingest", "idx_scrape_task_media", "idx_pretranscode_job_status", "idx_pretranscode_job_task", "idx_ingest_dependency_visible", "idx_asset_stage_recovery"} {
+	for _, name := range []string{"idx_post_ingest_claim", "idx_post_ingest_scan", "idx_post_ingest_run", "idx_post_ingest_step", "idx_scrape_task_claim", "idx_scrape_task_ingest", "idx_scrape_task_media", "idx_pretranscode_job_status", "idx_pretranscode_job_task", "idx_asset_stage_recovery"} {
 		var n int
 		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?`, name).Scan(&n); err != nil || n != 1 {
 			t.Fatalf("managed index %s count=%d err=%v", name, n, err)
@@ -1281,9 +1362,6 @@ func TestMigrateIngestPublicationV2EnterpriseManagedIndexesCreatedOnce(t *testin
 }
 
 func TestMigrateIngestPublicationV2PreservesCustomIndexOnEveryGraphTableOnce(t *testing.T) {
-	if !storeEnterprisePrepareReady(t) {
-		t.Skip("enterprise prepare tables unavailable in community build")
-	}
 	db, err := OpenSQLite(":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -1760,7 +1838,7 @@ func TestMigrateIngestPublicationV2UpgradesFullD725EnterpriseGraph(t *testing.T)
 	if err := migratePublicationV2(context.Background(), db); err != nil {
 		t.Fatal(err)
 	}
-	for _, table := range publicationGraphOrder {
+	for _, table := range []string{"media_ingest_step", "post_ingest_task", "scrape_task", "transcode_task", "pretranscode_task_meta", "pretranscode_rendition_job", "media_ingest_step_dependency", "media_ingest_evidence", "media_asset_stage_journal", "poster_repair_stage", "media_encryption_stage_journal"} {
 		if !tableExists(context.Background(), db, table) {
 			t.Fatalf("d725 graph table missing: %s", table)
 		}
@@ -1780,20 +1858,32 @@ func TestMigrateIngestPublicationV2UpgradesFullD725EnterpriseGraph(t *testing.T)
 	}
 	after := publicationTableDigests(t, db)
 	for table, want := range before {
-		if table == "transcode_task" || table == "post_ingest_task" {
+		if table == "transcode_task" || table == "post_ingest_task" || table == "media_ingest_step_dependency" {
 			continue
 		}
 		if after[table] != want {
 			t.Fatalf("%s digest changed: got=%s want=%s", table, after[table], want)
 		}
 	}
+	var dependencyKind string
+	if err := db.QueryRow(`SELECT dependency_kind FROM media_ingest_step_dependency WHERE step_id=70 AND depends_on_step_id=70`).Scan(&dependencyKind); err != nil || dependencyKind != "success" {
+		t.Fatalf("legacy dependency transform kind=%q err=%v", dependencyKind, err)
+	}
+	var visibleEdges int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM media_ingest_step_dependency WHERE step_id=70 AND depends_on_step_id=76 AND dependency_kind='success'`).Scan(&visibleEdges); err != nil || visibleEdges != 1 {
+		t.Fatalf("visibility edge count=%d err=%v", visibleEdges, err)
+	}
 	if before["transcode_task"] == after["transcode_task"] {
 		t.Fatal("transcode digest did not reflect media_id transform")
 	}
-	for _, table := range []string{"media_ingest_step", "post_ingest_task", "scrape_task", "pretranscode_task_meta", "pretranscode_rendition_job", "media_ingest_step_dependency", "media_ingest_evidence", "media_asset_stage_journal"} {
+	for _, table := range []string{"media_ingest_run", "media_ingest_step", "post_ingest_task", "scrape_task", "pretranscode_task_meta", "pretranscode_rendition_job", "media_ingest_step_dependency", "media_ingest_evidence", "media_asset_stage_journal"} {
 		var count int
-		if err := db.QueryRow(`SELECT COUNT(*) FROM ` + quoteIdent(table)).Scan(&count); err != nil || count != 1 {
-			t.Fatalf("%s rows=%d err=%v", table, count, err)
+		want := 1
+		if table == "media_ingest_step" || table == "media_ingest_step_dependency" {
+			want = 2
+		}
+		if err := db.QueryRow(`SELECT COUNT(*) FROM ` + quoteIdent(table)).Scan(&count); err != nil || count != want {
+			t.Fatalf("%s rows=%d want=%d err=%v", table, count, want, err)
 		}
 	}
 	assertNoForeignKeyViolations(t, db)
@@ -1801,7 +1891,7 @@ func TestMigrateIngestPublicationV2UpgradesFullD725EnterpriseGraph(t *testing.T)
 	if err := db.QueryRow(`SELECT media_id FROM transcode_task WHERE id=73`).Scan(&mediaID); err != nil || mediaID != 20 {
 		t.Fatalf("transcode media transform=%d err=%v", mediaID, err)
 	}
-	for _, table := range publicationGraphOrder {
+	for _, table := range []string{"media_ingest_step", "post_ingest_task", "scrape_task", "transcode_task", "pretranscode_task_meta", "pretranscode_rendition_job", "media_ingest_step_dependency", "media_ingest_evidence", "media_asset_stage_journal", "poster_repair_stage", "media_encryption_stage_journal"} {
 		var n int
 		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?`, `custom_fault_`+table).Scan(&n); err != nil || n != 1 {
 			t.Fatalf("custom index %s count=%d err=%v", table, n, err)
@@ -1851,7 +1941,7 @@ func installFullD725EnterpriseGraph(t *testing.T, db *sql.DB) {
 	for _, stmt := range []string{
 		`CREATE TABLE media_ingest_run(id INTEGER PRIMARY KEY AUTOINCREMENT,media_id INTEGER NOT NULL,generation INTEGER NOT NULL CHECK(generation>0),scan_task_id INTEGER,reason TEXT NOT NULL CHECK(reason IN ('scan','repair','manual_retry')),status TEXT NOT NULL CHECK(status IN ('processing','published','degraded','failed','cancelled')),preserve_visibility INTEGER NOT NULL DEFAULT 0 CHECK(preserve_visibility IN (0,1)),config_snapshot_json TEXT NOT NULL CHECK(json_valid(config_snapshot_json)),error_message TEXT NOT NULL DEFAULT '',created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,finished_at TIMESTAMP,FOREIGN KEY(media_id) REFERENCES media(id) ON DELETE CASCADE,FOREIGN KEY(scan_task_id) REFERENCES scan_task(id) ON DELETE SET NULL,UNIQUE(media_id,generation),UNIQUE(id,media_id,generation))`,
 		`CREATE INDEX idx_media_ingest_run_status_updated ON media_ingest_run(status,updated_at)`, `CREATE INDEX idx_media_ingest_run_scan_status ON media_ingest_run(scan_task_id,status)`,
-		`CREATE TABLE media_ingest_step(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id INTEGER NOT NULL,media_id INTEGER NOT NULL,generation INTEGER NOT NULL CHECK(generation>0),step_type TEXT NOT NULL CHECK(step_type IN ('poster','scrape','preview','keyframe','subtitle','atrack','encrypt','prepare','thumbnail')),required INTEGER NOT NULL CHECK(required IN (0,1)),status TEXT NOT NULL CHECK(status IN ('waiting','running','done','skipped','failed','cancelled')),attempts INTEGER NOT NULL DEFAULT 0,max_attempts INTEGER NOT NULL DEFAULT 3,available_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,lease_owner TEXT,lease_until TIMESTAMP,last_error TEXT NOT NULL DEFAULT '',started_at TIMESTAMP,finished_at TIMESTAMP,created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,FOREIGN KEY(run_id) REFERENCES media_ingest_run(id) ON DELETE CASCADE,FOREIGN KEY(media_id) REFERENCES media(id) ON DELETE CASCADE,FOREIGN KEY(media_id,generation) REFERENCES media_ingest_run(media_id,generation),FOREIGN KEY(run_id,media_id,generation) REFERENCES media_ingest_run(id,media_id,generation),UNIQUE(run_id,step_type),UNIQUE(id,media_id,generation))`,
+		`CREATE TABLE media_ingest_step(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id INTEGER NOT NULL,media_id INTEGER NOT NULL,generation INTEGER NOT NULL CHECK(generation>0),step_type TEXT NOT NULL CHECK(step_type IN ('poster','scrape','preview','keyframe','subtitle','atrack','encrypt','prepare','thumbnail','media_visible')),required INTEGER NOT NULL CHECK(required IN (0,1)),status TEXT NOT NULL CHECK(status IN ('waiting','running','done','skipped','failed','cancelled')),attempts INTEGER NOT NULL DEFAULT 0,max_attempts INTEGER NOT NULL DEFAULT 3,available_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,lease_owner TEXT,lease_until TIMESTAMP,last_error TEXT NOT NULL DEFAULT '',started_at TIMESTAMP,finished_at TIMESTAMP,created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,FOREIGN KEY(run_id) REFERENCES media_ingest_run(id) ON DELETE CASCADE,FOREIGN KEY(media_id) REFERENCES media(id) ON DELETE CASCADE,FOREIGN KEY(media_id,generation) REFERENCES media_ingest_run(media_id,generation),FOREIGN KEY(run_id,media_id,generation) REFERENCES media_ingest_run(id,media_id,generation),UNIQUE(run_id,step_type),UNIQUE(id,media_id,generation))`,
 		d725PostIngestTaskDDL,
 		`CREATE INDEX idx_post_ingest_claim ON post_ingest_task(status,available_at,lease_until,created_at)`, `CREATE INDEX custom_fault_post_ingest_task ON post_ingest_task(id,status)`,
 		d725ScrapeTaskDDL,
@@ -1860,10 +1950,10 @@ func installFullD725EnterpriseGraph(t *testing.T, db *sql.DB) {
 		`CREATE TABLE transcode_preset(id INTEGER PRIMARY KEY)`, `CREATE TABLE preset_rendition(id INTEGER PRIMARY KEY)`,
 		d725PretranscodeMetaDDL, `CREATE INDEX custom_fault_pretranscode_task_meta ON pretranscode_task_meta(task_id,priority)`,
 		d725PretranscodeJobDDL, `CREATE INDEX idx_pretranscode_job_status ON pretranscode_rendition_job(status,created_at)`, `CREATE INDEX idx_pretranscode_job_task ON pretranscode_rendition_job(task_id)`, `CREATE INDEX custom_fault_pretranscode_rendition_job ON pretranscode_rendition_job(id,status)`,
-		canonicalIngestDependencySchema, `CREATE UNIQUE INDEX idx_ingest_dependency_visible ON media_ingest_step_dependency(step_id) WHERE dependency_kind='media_visible'`, `CREATE INDEX custom_fault_media_ingest_step_dependency ON media_ingest_step_dependency(step_id,dependency_kind)`,
+		`CREATE TABLE media_ingest_step_dependency(step_id INTEGER NOT NULL REFERENCES media_ingest_step(id) ON DELETE CASCADE,depends_on_step_id INTEGER REFERENCES media_ingest_step(id) ON DELETE CASCADE,dependency_kind TEXT NOT NULL CHECK(dependency_kind IN ('step_done','media_visible')),CHECK((dependency_kind='step_done' AND depends_on_step_id IS NOT NULL) OR (dependency_kind='media_visible' AND depends_on_step_id IS NULL)),UNIQUE(step_id,dependency_kind,depends_on_step_id))`, `CREATE INDEX custom_fault_media_ingest_step_dependency ON media_ingest_step_dependency(step_id,dependency_kind)`,
 		canonicalIngestEvidenceSchema, `CREATE INDEX custom_fault_media_ingest_evidence ON media_ingest_evidence(id,kind)`, canonicalAssetStageJournalSchema, `CREATE INDEX idx_asset_stage_recovery ON media_asset_stage_journal(state,updated_at)`, `CREATE INDEX custom_fault_media_asset_stage_journal ON media_asset_stage_journal(stage_id,state)`, canonicalPosterRepairStageSchema, publicationManagedIndexes["poster_repair_stage"]["idx_poster_repair_stage_recovery"], `CREATE INDEX custom_fault_poster_repair_stage ON poster_repair_stage(stage_id,state)`, canonicalEncryptionStageJournalSchema, publicationManagedIndexes["media_encryption_stage_journal"]["idx_encryption_stage_recovery"], `CREATE INDEX custom_fault_media_encryption_stage_journal ON media_encryption_stage_journal(stage_id,state)`,
 		`CREATE INDEX custom_fault_media_ingest_step ON media_ingest_step(id,status)`,
-		`INSERT INTO transcode_preset VALUES(1)`, `INSERT INTO preset_rendition VALUES(2)`, `INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json) VALUES(1,20,1,'repair','processing','{"d725":1}')`, `INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status,attempts,lease_owner,lease_until,last_error) VALUES(70,1,20,1,'prepare',1,'running',2,'step-owner','2030-01-02','step-error')`, `INSERT INTO post_ingest_task(id,media_id,scan_task_id,ingest_run_id,ingest_step_id,generation,task_type,status,attempts,lease_owner,lease_until,last_error) VALUES(71,20,10,1,70,1,'poster','running',2,'post-owner','2030-01-02','post-error')`, `INSERT INTO scrape_task(id,media_id,status,progress,fail_count,ingest_run_id,ingest_step_id,generation,lease_owner,lease_until,message,created_by,created_at,started_at) VALUES(72,20,'running',37,2,1,70,1,'scrape-owner','2030-01-02','scrape-error',9,'2029-01-01','2029-01-02')`, `INSERT INTO transcode_task(id,file_id,status,progress,error_message,output_path,task_type,ingest_run_id,ingest_step_id,generation,media_id,lease_owner,lease_until) VALUES(73,'d725-file','running',55,'transcode-error','output','pretranscode',1,70,1,NULL,'transcode-owner','2030-01-02')`, `INSERT INTO pretranscode_task_meta VALUES(73,1,'hls','aes128','high','meta-output','{"jobs":[1]}')`, `INSERT INTO pretranscode_rendition_job(id,task_id,rendition_id,rendition_name,status,progress,lease_owner,lease_until,config_snapshot_json) VALUES(74,73,2,'720p','running',66,'job-owner','2030-01-02','{"job":1}')`, `INSERT INTO media_ingest_step_dependency VALUES(70,70,'step_done')`, `INSERT INTO media_ingest_evidence(id,run_id,step_id,media_id,generation,kind,source_fingerprint,artifact_refs_json,verified_at,stage_id) VALUES(75,1,70,20,1,'poster','fp','{}','2029-01-01','stage-75')`, `INSERT INTO media_asset_stage_journal(stage_id,media_id,run_id,step_id,generation,owner_token,source_fingerprint,artifact_kind,state,staged_path,hashes_sizes_json) VALUES('stage-75',20,1,70,1,'owner','fp','poster','staged','path','{}')`, legacyPublicationFillMediaTriggerSQL,
+		`INSERT INTO transcode_preset VALUES(1)`, `INSERT INTO preset_rendition VALUES(2)`, `INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json) VALUES(1,20,1,'repair','processing','{"d725":1}')`, `INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status,attempts,lease_owner,lease_until,last_error) VALUES(70,1,20,1,'prepare',1,'running',2,'step-owner','2030-01-02','step-error'),(76,1,20,1,'media_visible',1,'done',0,NULL,NULL,'')`, `INSERT INTO post_ingest_task(id,media_id,scan_task_id,ingest_run_id,ingest_step_id,generation,task_type,status,attempts,lease_owner,lease_until,last_error) VALUES(71,20,10,1,70,1,'poster','running',2,'post-owner','2030-01-02','post-error')`, `INSERT INTO scrape_task(id,media_id,status,progress,fail_count,ingest_run_id,ingest_step_id,generation,lease_owner,lease_until,message,created_by,created_at,started_at) VALUES(72,20,'running',37,2,1,70,1,'scrape-owner','2030-01-02','scrape-error',9,'2029-01-01','2029-01-02')`, `INSERT INTO transcode_task(id,file_id,status,progress,error_message,output_path,task_type,ingest_run_id,ingest_step_id,generation,media_id,lease_owner,lease_until) VALUES(73,'d725-file','running',55,'transcode-error','output','pretranscode',1,70,1,NULL,'transcode-owner','2030-01-02')`, `INSERT INTO pretranscode_task_meta VALUES(73,1,'hls','aes128','high','meta-output','{"jobs":[1]}')`, `INSERT INTO pretranscode_rendition_job(id,task_id,rendition_id,rendition_name,status,progress,lease_owner,lease_until,config_snapshot_json) VALUES(74,73,2,'720p','running',66,'job-owner','2030-01-02','{"job":1}')`, `INSERT INTO media_ingest_step_dependency VALUES(70,70,'step_done'),(70,NULL,'media_visible')`, `INSERT INTO media_ingest_evidence(id,run_id,step_id,media_id,generation,kind,source_fingerprint,artifact_refs_json,verified_at,stage_id) VALUES(75,1,70,20,1,'poster','fp','{}','2029-01-01','stage-75')`, `INSERT INTO media_asset_stage_journal(stage_id,media_id,run_id,step_id,generation,owner_token,source_fingerprint,artifact_kind,state,staged_path,hashes_sizes_json) VALUES('stage-75',20,1,70,1,'owner','fp','poster','staged','path','{}')`, legacyPublicationFillMediaTriggerSQL,
 	} {
 		if _, err := db.Exec(stmt); err != nil {
 			t.Fatalf("d725 fixture %q: %v", stmt, err)
@@ -2084,7 +2174,7 @@ func TestMigrationCreatesDedicatedEncryptionStageJournal(t *testing.T) {
 	if err = db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='media_encryption_stage_journal'`).Scan(&sqlText); err != nil {
 		t.Fatal(err)
 	}
-	for _, clause := range []string{"wrapped_dek", "source_fingerprint", "quarantine_path", "UNIQUE(task_id,attempt)", "CHECK(state IN ('staged','quarantining','quarantined','restored','committed','failed_closed'))"} {
+	for _, clause := range []string{"wrapped_dek", "source_fingerprint", "quarantine_path", "retry_round INTEGER NOT NULL DEFAULT 0", "UNIQUE(task_id,retry_round,attempt)", "CHECK(state IN ('staged','quarantining','quarantined','restored','committed','failed_closed'))"} {
 		if !strings.Contains(sqlText, clause) {
 			t.Fatalf("schema missing %q: %s", clause, sqlText)
 		}
@@ -2094,6 +2184,413 @@ func TestMigrationCreatesDedicatedEncryptionStageJournal(t *testing.T) {
 	}
 }
 
+func TestPhase1LegacyPostIngestJournalAndIndexSurviveCanonicalGraphRebuild(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if err := migrateIngestPublicationV1(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json) VALUES(601,20,1,'scan','processing','{}');
+INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(602,601,20,1,'encrypt',1,'done');
+INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status,retry_round,priority) VALUES(603,20,601,602,1,'encrypt','done',7,41);
+CREATE INDEX custom_legacy_post_ingest ON post_ingest_task(id,retry_round,priority);
+CREATE TABLE media_encryption_stage_journal(stage_id TEXT PRIMARY KEY,task_id INTEGER NOT NULL,attempt INTEGER NOT NULL,media_id INTEGER NOT NULL,run_id INTEGER NOT NULL,step_id INTEGER NOT NULL,generation INTEGER NOT NULL,owner_token TEXT NOT NULL,source_path TEXT NOT NULL,quarantine_path TEXT NOT NULL DEFAULT '',source_fingerprint TEXT NOT NULL,enc_path TEXT NOT NULL,wrapped_dek TEXT NOT NULL,iv TEXT NOT NULL,enc_sha256 TEXT NOT NULL,enc_size INTEGER NOT NULL CHECK(enc_size>0),cleanup_plaintext INTEGER NOT NULL DEFAULT 0 CHECK(cleanup_plaintext IN (0,1)),state TEXT NOT NULL CHECK(state IN ('staged','quarantining','quarantined','restored','committed','failed_closed')),recovery_error TEXT NOT NULL DEFAULT '',recovery_attempts INTEGER NOT NULL DEFAULT 0 CHECK(recovery_attempts>=0),next_retry_at TIMESTAMP,created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,UNIQUE(task_id,attempt),UNIQUE(stage_id,media_id,generation),FOREIGN KEY(task_id) REFERENCES post_ingest_task(id) ON DELETE CASCADE,FOREIGN KEY(run_id,media_id,generation) REFERENCES media_ingest_run(id,media_id,generation) ON DELETE CASCADE,FOREIGN KEY(step_id,media_id,generation) REFERENCES media_ingest_step(id,media_id,generation) ON DELETE CASCADE);
+INSERT INTO media_encryption_stage_journal(stage_id,task_id,attempt,media_id,run_id,step_id,generation,owner_token,source_path,source_fingerprint,enc_path,wrapped_dek,iv,enc_sha256,enc_size,state) VALUES('legacy-journal',603,2,20,601,602,1,'owner','source','fp','enc','wrapped','iv','sha',1,'committed')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	var round, priority int
+	if err := db.QueryRow(`SELECT retry_round,priority FROM post_ingest_task WHERE id=603`).Scan(&round, &priority); err != nil || round != 7 || priority != 41 {
+		t.Fatalf("task identity round=%d priority=%d err=%v", round, priority, err)
+	}
+	if err := db.QueryRow(`SELECT retry_round FROM media_encryption_stage_journal WHERE stage_id='legacy-journal'`).Scan(&round); err != nil || round != 0 {
+		t.Fatalf("journal round=%d err=%v", round, err)
+	}
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='custom_legacy_post_ingest'`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("custom index=%d err=%v", n, err)
+	}
+	if _, err := db.Exec(`DELETE FROM post_ingest_task WHERE id=603`); err == nil {
+		t.Fatal("journal FK did not restrict task deletion")
+	}
+}
+
+func TestPhase1LegacyDependencyKindsBecomeCanonicalSuccess(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if err := migrateIngestPublicationV1(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json) VALUES(701,20,1,'scan','processing','{}'); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(702,701,20,1,'poster',0,'done'),(703,701,20,1,'preview',0,'waiting'),(704,701,20,1,'media_visible',1,'done'); CREATE TABLE media_ingest_step_dependency(step_id INTEGER NOT NULL REFERENCES media_ingest_step(id) ON DELETE CASCADE,depends_on_step_id INTEGER REFERENCES media_ingest_step(id) ON DELETE CASCADE,dependency_kind TEXT NOT NULL CHECK(dependency_kind IN ('step_done','media_visible')),CHECK((dependency_kind='step_done' AND depends_on_step_id IS NOT NULL) OR (dependency_kind='media_visible' AND depends_on_step_id IS NULL)),UNIQUE(step_id,dependency_kind,depends_on_step_id)); INSERT INTO media_ingest_step_dependency VALUES(703,702,'step_done'),(703,NULL,'media_visible')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.Query(`SELECT depends_on_step_id,dependency_kind FROM media_ingest_step_dependency WHERE step_id=703 ORDER BY depends_on_step_id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var endpoint int
+		var kind string
+		if err := rows.Scan(&endpoint, &kind); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, fmt.Sprintf("%d/%s", endpoint, kind))
+	}
+	if strings.Join(got, ",") != "702/success,704/success" {
+		t.Fatalf("dependencies=%v", got)
+	}
+	for _, kind := range []string{"step_done", "media_visible", "unknown"} {
+		if _, err := db.Exec(`INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(703,702,?)`, kind); err == nil {
+			t.Fatalf("canonical kind %q accepted", kind)
+		}
+	}
+	if _, err := db.Exec(`INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(703,702,'terminal')`); err != nil {
+		t.Fatalf("terminal rejected: %v", err)
+	}
+}
+func TestPhase1LegacyMediaVisibleMissingStepCleanedAndMigrates(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if err := migrateIngestPublicationV1(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json) VALUES(801,20,1,'scan','processing','{}'); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(802,801,20,1,'preview',0,'waiting'); CREATE TABLE media_ingest_step_dependency(step_id INTEGER NOT NULL REFERENCES media_ingest_step(id) ON DELETE CASCADE,depends_on_step_id INTEGER REFERENCES media_ingest_step(id) ON DELETE CASCADE,dependency_kind TEXT NOT NULL CHECK(dependency_kind IN ('step_done','media_visible')),CHECK((dependency_kind='step_done' AND depends_on_step_id IS NOT NULL) OR (dependency_kind='media_visible' AND depends_on_step_id IS NULL)),UNIQUE(step_id,dependency_kind,depends_on_step_id)); INSERT INTO media_ingest_step_dependency VALUES(802,NULL,'media_visible')`); err != nil {
+		t.Fatal(err)
+	}
+	err := migrateIngestPublication(context.Background(), db)
+	if err != nil {
+		t.Fatalf("expected migration to succeed after cleaning orphaned media_visible dependency: %v", err)
+	}
+	// The orphaned dependency (no media_visible step in run) should be cleaned up.
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM media_ingest_step_dependency`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("expected 0 dependencies after cleanup, got %d", count)
+	}
+	var stepType string
+	if err := db.QueryRow(`SELECT step_type FROM media_ingest_step WHERE id=802`).Scan(&stepType); err != nil || stepType != "preview" {
+		t.Fatalf("dependent step rollback type=%q err=%v", stepType, err)
+	}
+}
+func TestPhase1LegacyMediaVisibleDuplicateStepsRejectedBySchema(t *testing.T) {
+	// Duplicate media_visible steps in the same run are prevented by the
+	// canonical schema (UNIQUE(run_id, step_type)). The migration creates
+	// the canonical table and fails when copying duplicate rows, as expected.
+	db := openIngestPublicationMigrationTestDB(t)
+	if err := migrateIngestPublicationV1(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	legacyStepSchema := strings.Replace(mediaIngestStepSchema, "UNIQUE(run_id,step_type),", "", 1)
+	if _, err := db.Exec(`PRAGMA foreign_keys=OFF; DROP TABLE media_ingest_step; ` + legacyStepSchema + `; CREATE UNIQUE INDEX legacy_step_type_unique_partial ON media_ingest_step(run_id,step_type) WHERE 0; PRAGMA foreign_keys=ON`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json) VALUES(811,20,1,'scan','processing','{}'); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(812,811,20,1,'preview',0,'waiting'),(813,811,20,1,'media_visible',1,'done'),(814,811,20,1,'media_visible',1,'done'); CREATE TABLE media_ingest_step_dependency(step_id INTEGER NOT NULL REFERENCES media_ingest_step(id) ON DELETE CASCADE,depends_on_step_id INTEGER REFERENCES media_ingest_step(id) ON DELETE CASCADE,dependency_kind TEXT NOT NULL CHECK(dependency_kind IN ('step_done','media_visible')),CHECK((dependency_kind='step_done' AND depends_on_step_id IS NOT NULL) OR (dependency_kind='media_visible' AND depends_on_step_id IS NULL)),UNIQUE(step_id,dependency_kind,depends_on_step_id)); INSERT INTO media_ingest_step_dependency VALUES(812,NULL,'media_visible')`); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotWholeSQLite(t, db)
+	err := migratePublicationV2(context.Background(), db)
+	if err == nil || !strings.Contains(err.Error(), "UNIQUE constraint failed") {
+		t.Fatalf("expected UNIQUE constraint error for duplicate step_type in run, got: %v", err)
+	}
+	if got := snapshotWholeSQLite(t, db); got != before {
+		t.Fatal("duplicate step migration did not roll back whole transaction")
+	}
+}
+func TestPhase1TransformedIdentityMutationRollsBack(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate string
+	}{
+		{"post retry priority", `UPDATE post_ingest_task SET retry_round=retry_round+1,priority=priority+1 WHERE id=603`},
+		{"dependency endpoint kind", `UPDATE media_ingest_step_dependency SET depends_on_step_id=703,dependency_kind='terminal' WHERE step_id=703`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openIngestPublicationMigrationTestDB(t)
+			if err := migrateIngestPublicationV1(context.Background(), db); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json) VALUES(701,20,1,'scan','processing','{}'); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(702,701,20,1,'poster',0,'done'),(703,701,20,1,'preview',0,'waiting'); INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status,retry_round,priority) VALUES(603,20,701,702,1,'poster','done',7,41); CREATE TABLE media_ingest_step_dependency(step_id INTEGER NOT NULL REFERENCES media_ingest_step(id) ON DELETE CASCADE,depends_on_step_id INTEGER REFERENCES media_ingest_step(id) ON DELETE CASCADE,dependency_kind TEXT NOT NULL CHECK(dependency_kind IN ('step_done','media_visible')),CHECK((dependency_kind='step_done' AND depends_on_step_id IS NOT NULL) OR (dependency_kind='media_visible' AND depends_on_step_id IS NULL)),UNIQUE(step_id,dependency_kind,depends_on_step_id)); INSERT INTO media_ingest_step_dependency VALUES(703,702,'step_done')`); err != nil {
+				t.Fatal(err)
+			}
+			old := publicationMigrationTestHook
+			publicationMigrationTestHook = func(stage publicationMigrationStage) error {
+				if stage == publicationStageAfterCopy {
+					_, err := publicationMigrationMutationExecutor.ExecContext(context.Background(), tc.mutate)
+					return err
+				}
+				return nil
+			}
+			t.Cleanup(func() { publicationMigrationTestHook = old })
+			if err := migrateIngestPublication(context.Background(), db); err == nil {
+				t.Fatal("transformed corruption accepted")
+			}
+			var round, priority, endpoint int
+			var kind string
+			if err := db.QueryRow(`SELECT retry_round,priority FROM post_ingest_task WHERE id=603`).Scan(&round, &priority); err != nil || round != 7 || priority != 41 {
+				t.Fatalf("task rollback round=%d priority=%d err=%v", round, priority, err)
+			}
+			if err := db.QueryRow(`SELECT depends_on_step_id,dependency_kind FROM media_ingest_step_dependency WHERE step_id=703`).Scan(&endpoint, &kind); err != nil || endpoint != 702 || kind != "step_done" {
+				t.Fatalf("dependency rollback endpoint=%d kind=%q err=%v", endpoint, kind, err)
+			}
+		})
+	}
+}
+func TestPhase1RetirementAddsPackageOwnershipIndex(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if _, err := db.Exec(`CREATE TABLE package_task(id INTEGER PRIMARY KEY,media_id INTEGER NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	var unique int
+	if err := db.QueryRow(`SELECT "unique" FROM pragma_index_list('package_task') WHERE name='idx_package_task_id_media'`).Scan(&unique); err != nil || unique != 1 {
+		t.Fatalf("package ownership index unique=%d err=%v", unique, err)
+	}
+}
+
+func TestPhase1PlaintextRetirementBasisIntegrity(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json) VALUES(901,20,1,'scan','processing','{}'); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(902,901,20,1,'encrypt',1,'done'); INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(903,20,901,902,1,'encrypt','done'); INSERT INTO media_encryption_stage_journal(stage_id,task_id,attempt,media_id,run_id,step_id,generation,owner_token,source_path,source_fingerprint,enc_path,wrapped_dek,iv,enc_sha256,enc_size,state) VALUES('basis-stage',903,1,20,901,902,1,'owner','source','fp','enc','dek','iv','sha',1,'committed'); CREATE TABLE package_task(id INTEGER PRIMARY KEY,media_id INTEGER NOT NULL,pipeline_type TEXT NOT NULL,status TEXT,UNIQUE(id,media_id)); INSERT INTO package_task(id,media_id,pipeline_type,status) VALUES(904,20,'cmaf_drm','done'),(905,21,'cmaf_drm','done')`); err != nil {
+		t.Fatal(err)
+	}
+	valid := `INSERT INTO media_plaintext_retirement(media_id,run_id,generation,source_path,source_fingerprint,basis_kind,basis_id,encryption_stage_id,package_task_id,state,quarantine_evidence_json) VALUES(20,901,1,'source','fp',?,?,?,?,'blocked','{}')`
+	cases := []struct {
+		name, args string
+		wantErr    bool
+	}{
+		{"valid encryption", "'encryption',1,'basis-stage',NULL", false},
+		{"valid package", "'package',904,NULL,904", false},
+		{"missing encryption", "'encryption',999,'missing-stage',NULL", true},
+		{"missing package", "'package',999,NULL,999", true},
+		{"kind ref mismatch", "'encryption',1,NULL,904", true},
+		{"package identity mismatch", "'package',999,NULL,904", true},
+		{"encryption ownership mismatch", "'encryption',1,'wrong-media-stage',NULL", true},
+		{"package media mismatch", "'package',905,NULL,905", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := db.Exec(strings.Replace(valid, "?,?,?,?", tc.args, 1))
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err=%v", err)
+			}
+			if err == nil {
+				_, _ = db.Exec(`DELETE FROM media_plaintext_retirement`)
+			}
+		})
+	}
+	if _, err := db.Exec(`INSERT INTO media_plaintext_retirement(media_id,run_id,generation,source_path,source_fingerprint,basis_kind,basis_id,encryption_stage_id,package_task_id,state,quarantine_evidence_json) VALUES(20,901,1,'source','fp','encryption',1,'basis-stage',NULL,'blocked','{}')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DELETE FROM media_encryption_stage_journal WHERE stage_id='basis-stage'`); err == nil {
+		t.Fatal("referenced encryption basis deleted")
+	}
+	if _, err := db.Exec(`DELETE FROM media_plaintext_retirement`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO media_plaintext_retirement(media_id,run_id,generation,source_path,source_fingerprint,basis_kind,basis_id,encryption_stage_id,package_task_id,state,quarantine_evidence_json) VALUES(20,901,1,'source','fp','package',904,NULL,904,'blocked','{}')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DELETE FROM package_task WHERE id=904`); err == nil {
+		t.Fatal("referenced package basis deleted")
+	}
+}
+func TestPhase1ProjectionSchemaRejectsExactDrift(t *testing.T) {
+	for _, tc := range []struct{ table, canonical, drift string }{
+		{"media_plan_completion", canonicalPlanCompletionSchema, "CHECK(total_count>=0)"},
+		{"media_plaintext_retirement", canonicalPlaintextRetirementSchema, "CHECK(basis_id>0)"},
+		{"media_plaintext_retirement_attempt", canonicalPlaintextRetirementAttemptSchema, "CHECK(attempt>0)"},
+	} {
+		t.Run(tc.table, func(t *testing.T) {
+			db := openIngestPublicationMigrationTestDB(t)
+			if err := migrateIngestPublication(context.Background(), db); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`PRAGMA foreign_keys=OFF; DROP TABLE ` + quoteIdent(tc.table)); err != nil {
+				t.Fatal(err)
+			}
+			drifted := strings.Replace(tc.canonical, tc.drift, strings.Replace(tc.drift, ">0", ">=0", 1), 1)
+			if tc.table == "media_plan_completion" {
+				drifted = strings.Replace(tc.canonical, tc.drift, "CHECK(total_count>-1)", 1)
+			}
+			if _, err := db.Exec(drifted); err != nil {
+				t.Fatal(err)
+			}
+			if err := migrateIngestPublication(context.Background(), db); err == nil {
+				t.Fatal("drifted projection schema accepted")
+			}
+		})
+	}
+}
+
+func TestOpenSQLiteFreshPublicationSchemaMatchesCanonical(t *testing.T) {
+	db, err := OpenSQLite(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	for table, canonical := range map[string]string{
+		"media_ingest_run":       canonicalMediaIngestRunV2Schema(),
+		"media_ingest_step":      func() string {
+			var count int
+			if err := conn.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='document_artifact'`).Scan(&count); err == nil && count > 0 {
+				return canonicalMediaIngestStepPhase5Schema()
+			}
+			return strings.Replace(mediaIngestStepSchema, "CREATE TABLE IF NOT EXISTS", "CREATE TABLE", 1)
+		}(),
+		"post_ingest_task":                   strings.Replace(postIngestTaskPublicationSchema, "post_ingest_task_new", "post_ingest_task", 1),
+		"media_ingest_step_dependency":       canonicalIngestDependencySchema,
+		"media_encryption_stage_journal":     canonicalEncryptionStageJournalSchema,
+		"media_plan_completion":              canonicalPlanCompletionSchema,
+		"media_plaintext_retirement":         canonicalPlaintextRetirementSchema,
+		"media_plaintext_retirement_attempt": canonicalPlaintextRetirementAttemptSchema,
+		"media_ingest_optional_retry_audit":  canonicalOptionalRetryAuditSchema,
+	} {
+		if err := exactPublicationTable(context.Background(), conn, table, canonical); err != nil {
+			t.Fatalf("fresh %s: %v", table, err)
+		}
+	}
+	cols, err := publicationColumns(context.Background(), conn, "media_ingest_step")
+	if err != nil || !cols["retry_round"] {
+		t.Fatalf("media_ingest_step.retry_round missing: %v %v", cols["retry_round"], err)
+	}
+	auditCols, err := publicationColumns(context.Background(), conn, "media_ingest_optional_retry_audit")
+	if err != nil || !auditCols["task_id"] {
+		t.Fatalf("audit task_id missing: %v %v", auditCols["task_id"], err)
+	}
+}
+
+func TestMigrateIngestPublicationPreservesStepRetryRound(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json) VALUES(801,20,1,'scan','processing','{}'); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status,retry_round,attempts) VALUES(802,801,20,1,'preview',0,'failed',5,9); INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status,retry_round,attempts) VALUES(803,20,801,802,1,'preview','failed',5,9); INSERT INTO media_ingest_optional_retry_audit(media_id,run_id,step_id,task_id,generation,task_family,task_type,actor_id,reason,previous_queue_status,previous_step_status,previous_attempts,previous_queue_error,previous_step_error,retry_round) VALUES(20,801,802,803,1,'post_ingest','preview',1,'keep','failed','failed',9,'q','s',5)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	var stepRound, attempts, taskID int
+	var family string
+	if err := db.QueryRow(`SELECT retry_round,attempts FROM media_ingest_step WHERE id=802`).Scan(&stepRound, &attempts); err != nil || stepRound != 5 || attempts != 9 {
+		t.Fatalf("step round=%d attempts=%d err=%v", stepRound, attempts, err)
+	}
+	if err := db.QueryRow(`SELECT task_id,task_family FROM media_ingest_optional_retry_audit WHERE step_id=802 AND retry_round=5`).Scan(&taskID, &family); err != nil || taskID != 803 || family != "post_ingest" {
+		t.Fatalf("audit task=%d family=%s err=%v", taskID, family, err)
+	}
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := exactPublicationTable(context.Background(), conn, "media_ingest_step", strings.Replace(mediaIngestStepSchema, "CREATE TABLE IF NOT EXISTS", "CREATE TABLE", 1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := exactPublicationTable(context.Background(), conn, "media_ingest_optional_retry_audit", canonicalOptionalRetryAuditSchema); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPhase1ProjectionSchemaExactValidation(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	for table, canonical := range map[string]string{"media_plan_completion": canonicalPlanCompletionSchema, "media_plaintext_retirement": canonicalPlaintextRetirementSchema, "media_plaintext_retirement_attempt": canonicalPlaintextRetirementAttemptSchema} {
+		if err := exactPublicationTable(context.Background(), conn, table, canonical); err != nil {
+			t.Fatalf("%s: %v", table, err)
+		}
+		for name, ddl := range publicationManagedIndexes[table] {
+			if err := requirePublicationIndex(context.Background(), conn, table, name, ddl, 0, 0); err != nil {
+				t.Fatalf("%s/%s: %v", table, name, err)
+			}
+		}
+	}
+	if err := requirePublicationFKSet(context.Background(), conn, "media_plan_completion", "media_ingest_run:run_id,media_id,generation:id,media_id,generation:cascade"); err != nil {
+		t.Fatal(err)
+	}
+	if err := requirePublicationFKSet(context.Background(), conn, "media_plaintext_retirement", "media:media_id:id:restrict", "media_ingest_run:run_id,media_id,generation:id,media_id,generation:restrict", "media_encryption_stage_journal:encryption_stage_id,media_id,generation:stage_id,media_id,generation:restrict", "package_task:package_task_id,media_id:id,media_id:restrict"); err != nil {
+		t.Fatal(err)
+	}
+	if err := requirePublicationFKSet(context.Background(), conn, "media_plaintext_retirement_attempt", "media_plaintext_retirement:retirement_id:id:restrict"); err != nil {
+		t.Fatal(err)
+	}
+}
+func TestPhase1ExpandedGraphAndRetirementSchema(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(301,20,1,'scan','processing','{}',3)`); err != nil {
+		t.Fatalf("policy v3: %v", err)
+	}
+	stepTypes := []string{"poster", "scrape", "preview", "keyframe", "subtitle", "atrack", "encrypt", "prepare", "thumbnail", "package", "pretranscode", "metadata", "media_visible", "subtitle_extract", "atrack_extract", "subtitle_recognize", "keyframe_extract", "ai_analysis"}
+	var ids []int64
+	for _, typ := range stepTypes {
+		res, err := db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status) VALUES(301,20,1,?,0,'skipped')`, typ)
+		if err != nil {
+			t.Fatalf("step %q: %v", typ, err)
+		}
+		id, _ := res.LastInsertId()
+		ids = append(ids, id)
+	}
+	if _, err := db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status) VALUES(301,20,1,'unknown',0,'waiting')`); err == nil {
+		t.Fatal("unknown step accepted")
+	}
+	for _, typ := range []string{"subtitle_extract", "atrack_extract", "subtitle_recognize", "keyframe_extract", "ai_analysis", "package", "pretranscode", "metadata", "media_visible"} {
+		if _, err := db.Exec(`INSERT INTO post_ingest_task(media_id,ingest_run_id,generation,task_type,status) VALUES(20,301,1,?,'skipped')`, typ); err != nil {
+			t.Fatalf("task %q: %v", typ, err)
+		}
+	}
+	if _, err := db.Exec(`INSERT INTO post_ingest_task(media_id,ingest_run_id,generation,task_type,status) VALUES(20,301,1,'unknown','waiting')`); err == nil {
+		t.Fatal("unknown task accepted")
+	}
+	for _, kind := range []string{"success", "terminal"} {
+		if _, err := db.Exec(`INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(?,?,?)`, ids[1], ids[0], kind); err != nil {
+			t.Fatalf("dependency %q: %v", kind, err)
+		}
+	}
+	if _, err := db.Exec(`INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(?,?,'unknown')`, ids[1], ids[0]); err == nil {
+		t.Fatal("unknown dependency accepted")
+	}
+	for _, table := range []string{"media_plan_completion", "media_plaintext_retirement", "media_plaintext_retirement_attempt"} {
+		var n int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&n); err != nil || n != 1 {
+			t.Fatalf("%s count=%d err=%v", table, n, err)
+		}
+	}
+	if _, err := db.Exec(`CREATE TABLE package_task(id INTEGER PRIMARY KEY,media_id INTEGER NOT NULL,UNIQUE(id,media_id)); INSERT INTO package_task VALUES(1,20); INSERT INTO media_plan_completion(run_id,media_id,generation,all_terminal,total_count,terminal_count,done_count,skipped_count,failed_count,cancelled_count) VALUES(301,20,1,1,4,4,1,1,1,1);
+INSERT INTO media_plaintext_retirement(id,media_id,run_id,generation,source_path,source_fingerprint,basis_kind,basis_id,encryption_stage_id,package_task_id,retry_round,state,quarantine_evidence_json) VALUES(302,20,301,1,'source','fp','package',1,NULL,1,0,'blocked','{}');
+INSERT INTO media_plaintext_retirement_attempt(retirement_id,retry_round,attempt,outcome) VALUES(302,0,1,'started')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE media_plaintext_retirement SET state='unknown' WHERE id=302`); err == nil {
+		t.Fatal("unknown retirement state accepted")
+	}
+	if _, err := db.Exec(`INSERT INTO media_plaintext_retirement_attempt(retirement_id,retry_round,attempt,outcome) VALUES(302,0,1,'started')`); err == nil {
+		t.Fatal("duplicate retirement attempt accepted")
+	}
+}
 func TestEncryptionJournalCreationRollsBackWithPublicationMigration(t *testing.T) {
 	db := openIngestPublicationMigrationTestDB(t)
 	old := publicationMigrationTestHook
@@ -2331,6 +2828,30 @@ func TestScrapeClaimColumnsUncertainCommitReconcilesPostcondition(t *testing.T) 
 	}
 }
 
+func TestPostIngestCurrentSchemaIncludesSkippedAndDoesNotRewrite(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	var before string
+	if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='post_ingest_task'`).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	whole := snapshotWholeSQLite(t, db)
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	var after string
+	if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='post_ingest_task'`).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Fatalf("post_ingest_task rewritten\nbefore=%s\nafter=%s", before, after)
+	}
+	if got := snapshotWholeSQLite(t, db); got != whole {
+		t.Fatal("repeat migration changed whole schema snapshot")
+	}
+}
 func TestMigrationCommitErrorWithActiveTransactionRollsBack(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "active-commit.db")
 	db := openIngestPublicationMigrationTestDBPath(t, path)
@@ -2508,19 +3029,1143 @@ func TestMigrationCommittedCleanupTimeoutReturnsFatalAndDiscards(t *testing.T) {
 	}
 }
 
-
-
-func storeEnterprisePrepareReady(t *testing.T) bool {
-	t.Helper()
-	db, err := OpenSQLite(":memory:")
-	if err != nil {
-		t.Fatalf("open: %v", err)
+func TestMigrationSlowCommitDoesNotConsumeCleanupTimeout(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "slow-commit-cleanup.db")
+	db := openIngestPublicationMigrationTestDBPath(t, path)
+	db.SetMaxOpenConns(2)
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatal(err)
 	}
-	defer db.Close()
-	var meta, jobs int
-	if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='pretranscode_task_meta'), EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='pretranscode_rendition_job')`).Scan(&meta, &jobs); err != nil {
-		t.Fatalf("inspect: %v", err)
+	installLegacyAssetStageJournal(t, db)
+	oldCommit, oldValidate, oldTimeout := publicationMigrationCommit, publicationMigrationPostCommitValidation, publicationMigrationCleanupTimeout
+	publicationMigrationCleanupTimeout = 40 * time.Millisecond
+	publicationMigrationCommit = func(ctx context.Context, conn *sql.Conn) error {
+		time.Sleep(80 * time.Millisecond) // longer than cleanup budget; must not starve post-commit work
+		_, err := conn.ExecContext(ctx, `COMMIT`)
+		return err
 	}
-	return meta == 1 && jobs == 1
+	publicationMigrationPostCommitValidation = func(context.Context, *sql.Conn) error { return nil }
+	t.Cleanup(func() {
+		publicationMigrationCommit, publicationMigrationPostCommitValidation, publicationMigrationCleanupTimeout = oldCommit, oldValidate, oldTimeout
+	})
+	if err := migrateIngestPublication(context.Background(), db); err != nil {
+		t.Fatalf("slow COMMIT must not expire post-commit cleanup: %v", err)
+	}
 }
 
+func TestMigrateIngestPublicationAcceptsEntryReasons(t *testing.T) {
+	db, err := OpenSQLite(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err = db.Exec(`INSERT INTO library(id,name,type,path) VALUES(910,'l','movie','/l'); INSERT INTO media(id,library_id,file_id) VALUES(911,910,'f'); INSERT INTO ingest_item(id,submission_key,source,library_id,canonical_path,path_key,state,lease_owner,lease_until) VALUES(912,'s','upload',910,'/l/f','/l/f','running','worker','2099-01-01')`); err != nil {
+		t.Fatal(err)
+	}
+	for i, reason := range []string{"event", "upload", "source_replaced"} {
+		if _, err := db.Exec(`INSERT INTO media_ingest_run(media_id,generation,ingest_item_id,reason,status,config_snapshot_json) VALUES(?,?,?,?,?,?)`, 911, i+1, 912, reason, "processing", "{}"); err != nil {
+			t.Fatalf("reason %s: %v", reason, err)
+		}
+	}
+}
+
+func TestMigrateIngestPublicationUpgradesExactPhase1RunPreservingData(t *testing.T) {
+	db := openIngestPublicationMigrationTestDB(t)
+	if err := migrateIngestPublicationV1(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,error_message) VALUES(940,20,1,'repair','processing','{"phase":1}','keep')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migratePublicationV2(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	var reason, message string
+	var linkage sql.NullInt64
+	if err := db.QueryRow(`SELECT reason,error_message,ingest_item_id FROM media_ingest_run WHERE id=940`).Scan(&reason, &message, &linkage); err != nil {
+		t.Fatal(err)
+	}
+	if reason != "repair" || message != "keep" || linkage.Valid {
+		t.Fatalf("upgrade changed run reason=%q error=%q link=%v", reason, message, linkage)
+	}
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := exactPublicationTable(context.Background(), conn, "media_ingest_run", canonicalMediaIngestRunV2Schema()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMigrateIngestPublicationRebuildPreservesIngestItemLinkage(t *testing.T) {
+	db, err := OpenSQLite(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err = db.Exec(`INSERT INTO library(id,name,type,path) VALUES(950,'l','movie','/l'); INSERT INTO media(id,library_id,file_id) VALUES(951,950,'rebuild'); INSERT INTO ingest_item(id,submission_key,source,library_id,canonical_path,path_key,state) VALUES(952,'rebuild','upload',950,'/l/f','/l/f','done'); INSERT INTO media_ingest_run(id,media_id,generation,ingest_item_id,reason,status,config_snapshot_json) VALUES(953,951,1,952,'upload','published','{}')`); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err = conn.ExecContext(context.Background(), `PRAGMA foreign_keys=OFF`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = conn.ExecContext(context.Background(), `BEGIN IMMEDIATE`); err != nil {
+		t.Fatal(err)
+	}
+	graph, err := backupPublicationGraph(context.Background(), conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = dropPublicationGraph(context.Background(), conn, graph); err != nil {
+		t.Fatal(err)
+	}
+	if err = createPublicationParents(context.Background(), conn, graph); err != nil {
+		t.Fatal(err)
+	}
+	if err = createPublicationChildren(context.Background(), conn, graph); err != nil {
+		t.Fatal(err)
+	}
+	if err = restorePublicationIndexes(context.Background(), conn, graph); err != nil {
+		t.Fatal(err)
+	}
+	if err = copyPublicationGraph(context.Background(), conn, graph); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = conn.ExecContext(context.Background(), `COMMIT`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = conn.ExecContext(context.Background(), `PRAGMA foreign_keys=ON`); err != nil {
+		t.Fatal(err)
+	}
+	var link sql.NullInt64
+	if err := conn.QueryRowContext(context.Background(), `SELECT ingest_item_id FROM media_ingest_run WHERE id=953`).Scan(&link); err != nil || !link.Valid || link.Int64 != 952 {
+		t.Fatalf("rebuild link=%v err=%v", link, err)
+	}
+	if _, err := conn.ExecContext(context.Background(), `DELETE FROM ingest_item WHERE id=952`); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.QueryRowContext(context.Background(), `SELECT ingest_item_id FROM media_ingest_run WHERE id=953`).Scan(&link); err != nil || link.Valid {
+		t.Fatalf("post-delete link=%v err=%v", link, err)
+	}
+}
+
+// --- Scheduler migration tests ---
+
+func openSchedulerMigrationTestDB(t *testing.T) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err = db.Exec(`PRAGMA foreign_keys=ON`); err != nil {
+		t.Fatal(err)
+	}
+	return db
+}
+
+func TestSchedulerMigrationCreatesCanonicalTables(t *testing.T) {
+	db := openSchedulerMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateSchedulerSchema(ctx, db); err != nil {
+		t.Fatalf("migrateSchedulerSchema: %v", err)
+	}
+	for _, table := range []string{
+		"scheduler_policy_revision",
+		"scheduler_control",
+		"scheduler_fairness",
+		"scheduler_reservation",
+		"scheduler_audit",
+	} {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&count); err != nil {
+			t.Fatalf("check table %s: %v", table, err)
+		}
+		if count != 1 {
+			t.Fatalf("table %s missing: count=%d", table, count)
+		}
+	}
+}
+
+func TestSchedulerMigrationExactPolicyRevisionSchema(t *testing.T) {
+	db := openSchedulerMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateSchedulerSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	expected := map[string]string{
+		"id":                 "INTEGER",
+		"schema_version":     "INTEGER",
+		"parent_revision_id": "INTEGER",
+		"policy_json":        "TEXT",
+		"author":             "TEXT",
+		"reason":             "TEXT",
+		"validation_hash":    "TEXT",
+		"is_active":          "INTEGER",
+		"created_at":         "TIMESTAMP",
+		"activated_at":       "TIMESTAMP",
+	}
+	rows, err := db.Query(`PRAGMA table_info("scheduler_policy_revision")`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	got := map[string]bool{}
+	for rows.Next() {
+		var cid, nn, pk int
+		var name, typ string
+		var d sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &nn, &d, &pk); err != nil {
+			t.Fatal(err)
+		}
+		got[strings.ToLower(name)] = true
+		if wantTyp, ok := expected[strings.ToLower(name)]; ok {
+			if !strings.Contains(strings.ToUpper(typ), wantTyp) {
+				t.Errorf("column %s type=%s want=%s", name, typ, wantTyp)
+			}
+		} else {
+			t.Errorf("unexpected column %s", name)
+		}
+	}
+	for col := range expected {
+		if !got[strings.ToLower(col)] {
+			t.Errorf("scheduler_policy_revision missing column %s", col)
+		}
+	}
+	assertNoForeignKeyViolations(t, db)
+}
+
+func TestSchedulerMigrationReservationSchema(t *testing.T) {
+	db := openSchedulerMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateSchedulerSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	expected := map[string]string{
+		"id":                 "INTEGER",
+		"execution_id":       "TEXT",
+		"task_type":          "TEXT",
+		"reserved_units":     "INTEGER",
+		"policy_revision_id": "INTEGER",
+		"status":             "TEXT",
+		"lease_until":        "TIMESTAMP",
+		"released_at":        "TIMESTAMP",
+		"release_reason":     "TEXT",
+		"released_by":        "TEXT",
+		"created_at":         "TIMESTAMP",
+		"updated_at":         "TIMESTAMP",
+	}
+	rows, err := db.Query(`PRAGMA table_info("scheduler_reservation")`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	got := map[string]bool{}
+	for rows.Next() {
+		var cid, nn, pk int
+		var name, typ string
+		var d sql.NullString
+		rows.Scan(&cid, &name, &typ, &nn, &d, &pk)
+		got[strings.ToLower(name)] = true
+		if wantTyp, ok := expected[strings.ToLower(name)]; ok {
+			if !strings.Contains(strings.ToUpper(typ), wantTyp) {
+				t.Errorf("column %s type=%s want=%s", name, typ, wantTyp)
+			}
+		}
+	}
+	for col := range expected {
+		if !got[strings.ToLower(col)] {
+			t.Errorf("scheduler_reservation missing column %s", col)
+		}
+	}
+}
+
+func TestSchedulerMigrationIndexesExist(t *testing.T) {
+	db := openSchedulerMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateSchedulerSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	indexes := []string{
+		"idx_scheduler_active_policy",
+		"idx_scheduler_reservation_status",
+		"idx_scheduler_reservation_task_type",
+		"idx_scheduler_audit_created",
+	}
+	for _, idx := range indexes {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?`, idx).Scan(&count); err != nil {
+			t.Fatalf("check index %s: %v", idx, err)
+		}
+		if count != 1 {
+			t.Fatalf("index %s missing", idx)
+		}
+	}
+}
+
+func TestSchedulerMigrationActivePolicySingleton(t *testing.T) {
+	db := openSchedulerMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateSchedulerSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	// Insert two policy revisions
+	if _, err := db.ExecContext(ctx, `INSERT INTO scheduler_policy_revision(schema_version,policy_json,author,reason,validation_hash,is_active) VALUES(1,'{}','a','r1','h1',0)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO scheduler_policy_revision(schema_version,policy_json,author,reason,validation_hash,is_active) VALUES(2,'{}','a','r2','h2',1)`); err != nil {
+		t.Fatal(err)
+	}
+	// Second active should fail (singleton constraint)
+	if _, err := db.ExecContext(ctx, `INSERT INTO scheduler_policy_revision(schema_version,policy_json,author,reason,validation_hash,is_active) VALUES(3,'{}','a','r3','h3',1)`); err == nil {
+		t.Fatal("inserted second active policy revision")
+	}
+}
+
+func TestSchedulerMigrationControlStateModes(t *testing.T) {
+	db := openSchedulerMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateSchedulerSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range []string{"paused", "draining", "running"} {
+		if _, err := db.ExecContext(ctx, `INSERT OR REPLACE INTO scheduler_control(task_type,state) VALUES(?,?)`, "test", state); err != nil {
+			t.Fatalf("insert control state %q: %v", state, err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `INSERT OR REPLACE INTO scheduler_control(task_type,state) VALUES('test','invalid')`); err == nil {
+		t.Fatal("invalid control state accepted")
+	}
+}
+
+func TestSchedulerMigrationReservationPositiveUnits(t *testing.T) {
+	db := openSchedulerMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateSchedulerSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO scheduler_policy_revision(schema_version,policy_json,author,reason,validation_hash) VALUES(1,'{}','a','r','h')`); err != nil {
+		t.Fatal(err)
+	}
+	// zero units
+	if _, err := db.ExecContext(ctx, `INSERT INTO scheduler_reservation(execution_id,task_type,reserved_units,policy_revision_id,status) VALUES('z','t',0,1,'active')`); err == nil {
+		t.Fatal("zero reserved_units accepted")
+	}
+	// negative units
+	if _, err := db.ExecContext(ctx, `INSERT INTO scheduler_reservation(execution_id,task_type,reserved_units,policy_revision_id,status) VALUES('n','t',-1,1,'active')`); err == nil {
+		t.Fatal("negative reserved_units accepted")
+	}
+}
+
+func TestSchedulerMigrationReservationReleaseEvidence(t *testing.T) {
+	db := openSchedulerMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateSchedulerSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO scheduler_policy_revision(schema_version,policy_json,author,reason,validation_hash) VALUES(1,'{}','a','r','h')`); err != nil {
+		t.Fatal(err)
+	}
+	// Released reservation without release evidence should fail
+	if _, err := db.ExecContext(ctx, `INSERT INTO scheduler_reservation(execution_id,task_type,reserved_units,policy_revision_id,status,released_at) VALUES('r1','t',1,1,'released',CURRENT_TIMESTAMP)`); err == nil {
+		t.Fatal("released reservation without release evidence accepted")
+	}
+	// Active reservation with release evidence should fail
+	if _, err := db.ExecContext(ctx, `INSERT INTO scheduler_reservation(execution_id,task_type,reserved_units,policy_revision_id,status,release_reason,released_by) VALUES('a1','t',1,1,'active','done','w')`); err == nil {
+		t.Fatal("active reservation with release evidence accepted")
+	}
+}
+
+func TestSchedulerMigrationUniqueExecutionID(t *testing.T) {
+	db := openSchedulerMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateSchedulerSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO scheduler_policy_revision(schema_version,policy_json,author,reason,validation_hash) VALUES(1,'{}','a','r','h')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO scheduler_reservation(execution_id,task_type,reserved_units,policy_revision_id,status) VALUES('dup','t',1,1,'active')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO scheduler_reservation(execution_id,task_type,reserved_units,policy_revision_id,status) VALUES('dup','t',2,1,'active')`); err == nil {
+		t.Fatal("duplicate execution_id accepted")
+	}
+}
+
+func TestSchedulerMigrationForeignKeyRecovery(t *testing.T) {
+	db := openSchedulerMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateSchedulerSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO scheduler_policy_revision(schema_version,policy_json,author,reason,validation_hash) VALUES(1,'{}','a','r','h')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO scheduler_reservation(execution_id,task_type,reserved_units,policy_revision_id,status) VALUES('fk1','t',1,1,'active')`); err != nil {
+		t.Fatal(err)
+	}
+	// Deleting policy revision with active reservation should fail
+	if _, err := db.ExecContext(ctx, `DELETE FROM scheduler_policy_revision WHERE id=1`); err == nil {
+		t.Fatal("deleted policy revision with active reservations")
+	}
+	assertNoForeignKeyViolations(t, db)
+}
+
+func TestSchedulerMigrationIdempotent(t *testing.T) {
+	db := openSchedulerMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateSchedulerSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	// Second run should succeed (idempotent)
+	if err := migrateSchedulerSchema(ctx, db); err != nil {
+		t.Fatalf("repeat migration: %v", err)
+	}
+	// Verify tables still exist
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='scheduler_reservation'`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("repeat migration lost tables: count=%d err=%v", count, err)
+	}
+}
+
+func TestSchedulerMigrationOldQueueRowSurvival(t *testing.T) {
+	db := openSchedulerMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateSchedulerSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	// Insert data and verify it survives repeated migration
+	if _, err := db.ExecContext(ctx, `INSERT INTO scheduler_policy_revision(schema_version,policy_json,author,reason,validation_hash) VALUES(1,'{}','a','r','h')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateSchedulerSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	var author string
+	if err := db.QueryRow(`SELECT author FROM scheduler_policy_revision WHERE id=1`).Scan(&author); err != nil || author != "a" {
+		t.Fatalf("old data lost: author=%q err=%v", author, err)
+	}
+}
+
+func TestSchedulerMigrationFaultRollback(t *testing.T) {
+	db := openSchedulerMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateSchedulerSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO scheduler_policy_revision(schema_version,policy_json,author,reason,validation_hash) VALUES(1,'{}','a','r','h')`); err != nil {
+		tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM scheduler_policy_revision`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("rolled-back data persisted: rows=%d", count)
+	}
+}
+
+func TestSchedulerMigrationExactSchemaValidation(t *testing.T) {
+	db := openSchedulerMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateSchedulerSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := exactPublicationTable(ctx, conn, "scheduler_policy_revision", strings.Replace(SchedulerPolicyRevisionSchema, "CREATE TABLE IF NOT EXISTS", "CREATE TABLE", 1)); err != nil {
+		conn.Close()
+		t.Fatalf("exact policy revision schema: %v", err)
+	}
+	if err := exactPublicationTable(ctx, conn, "scheduler_control", strings.Replace(SchedulerControlSchema, "CREATE TABLE IF NOT EXISTS", "CREATE TABLE", 1)); err != nil {
+		conn.Close()
+		t.Fatalf("exact control schema: %v", err)
+	}
+	if err := exactPublicationTable(ctx, conn, "scheduler_fairness", strings.Replace(SchedulerFairnessSchema, "CREATE TABLE IF NOT EXISTS", "CREATE TABLE", 1)); err != nil {
+		conn.Close()
+		t.Fatalf("exact fairness schema: %v", err)
+	}
+	if err := exactPublicationTable(ctx, conn, "scheduler_reservation", strings.Replace(SchedulerReservationSchema, "CREATE TABLE IF NOT EXISTS", "CREATE TABLE", 1)); err != nil {
+		conn.Close()
+		t.Fatalf("exact reservation schema: %v", err)
+	}
+	if err := exactPublicationTable(ctx, conn, "scheduler_audit", strings.Replace(SchedulerAuditSchema, "CREATE TABLE IF NOT EXISTS", "CREATE TABLE", 1)); err != nil {
+		conn.Close()
+		t.Fatalf("exact audit schema: %v", err)
+	}
+	conn.Close()
+	assertNoForeignKeyViolations(t, db)
+}
+
+// --- Phase 4 task control migration tests ---
+
+func openTaskControlMigrationTestDB(t *testing.T) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err = db.Exec(`PRAGMA foreign_keys=ON;
+CREATE TABLE library (id INTEGER PRIMARY KEY);
+CREATE TABLE scan_task (id INTEGER PRIMARY KEY, library_id INTEGER NOT NULL, FOREIGN KEY(library_id) REFERENCES library(id));
+CREATE TABLE media (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, library_id INTEGER, file_id TEXT UNIQUE,
+ FOREIGN KEY(library_id) REFERENCES library(id)
+);
+CREATE TABLE post_ingest_task (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, media_id INTEGER NOT NULL, scan_task_id INTEGER,
+ task_type TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'waiting', attempts INTEGER NOT NULL DEFAULT 0,
+ max_attempts INTEGER NOT NULL DEFAULT 3, available_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ lease_owner TEXT, lease_until TIMESTAMP, last_error TEXT NOT NULL DEFAULT '',
+ created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ started_at TIMESTAMP, finished_at TIMESTAMP, retry_round INTEGER NOT NULL DEFAULT 0 CHECK(retry_round >= 0),
+ priority INTEGER NOT NULL DEFAULT 0, removed_at TIMESTAMP, removed_by TEXT NOT NULL DEFAULT '',
+ remove_reason TEXT NOT NULL DEFAULT '',
+ FOREIGN KEY(media_id) REFERENCES media(id) ON DELETE CASCADE,
+ FOREIGN KEY(scan_task_id) REFERENCES scan_task(id) ON DELETE SET NULL,
+ UNIQUE(media_id,task_type),
+ CHECK(task_type IN ('poster','preview','keyframe','subtitle','atrack','encrypt','subtitle_extract','subtitle_recognize','atrack_extract','keyframe_extract','ai_analysis','thumbnail','package','pretranscode','metadata','media_visible')),
+ CHECK(status IN ('waiting','running','done','failed','cancelled'))
+);
+CREATE INDEX idx_post_ingest_claim ON post_ingest_task(status,available_at,lease_until,created_at);
+INSERT INTO library(id) VALUES(1);
+INSERT INTO scan_task(id,library_id) VALUES(10,1);
+INSERT INTO media(id,library_id,file_id) VALUES(20,1,'file-a');
+INSERT INTO post_ingest_task(id,media_id,scan_task_id,task_type,status) VALUES(30,20,10,'poster','done');
+INSERT INTO post_ingest_task(id,media_id,scan_task_id,task_type,status,attempts) VALUES(31,20,10,'keyframe','waiting',2);`); err != nil {
+		t.Fatalf("create legacy schema: %v", err)
+	}
+	return db
+}
+
+func TestTaskControlMigrationCreatesCanonicalTables(t *testing.T) {
+	db := openTaskControlMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateTaskControlSchema(ctx, db); err != nil {
+		t.Fatalf("migrateTaskControlSchema: %v", err)
+	}
+	for _, table := range []string{
+		"task_projection_sequence",
+		"task_projection_revision",
+		"task_abort_intent",
+		"task_control_audit",
+		"task_batch_operation",
+		"task_batch_item",
+	} {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&count); err != nil {
+			t.Fatalf("check table %s: %v", table, err)
+		}
+		if count != 1 {
+			t.Fatalf("table %s missing: count=%d", table, count)
+		}
+	}
+}
+
+func TestTaskControlMigrationProjectionSequenceSchema(t *testing.T) {
+	db := openTaskControlMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateTaskControlSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	expected := map[string]string{
+		"singleton_id":  "INTEGER",
+		"next_revision": "INTEGER",
+	}
+	rows, err := db.Query(`PRAGMA table_info("task_projection_sequence")`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	got := map[string]bool{}
+	for rows.Next() {
+		var cid, nn, pk int
+		var name, typ string
+		var d sql.NullString
+		rows.Scan(&cid, &name, &typ, &nn, &d, &pk)
+		got[strings.ToLower(name)] = true
+		if wantTyp, ok := expected[strings.ToLower(name)]; ok {
+			if !strings.Contains(strings.ToUpper(typ), wantTyp) {
+				t.Errorf("column %s type=%s want=%s", name, typ, wantTyp)
+			}
+		} else {
+			t.Errorf("unexpected column %s in task_projection_sequence", name)
+		}
+	}
+	for col := range expected {
+		if !got[strings.ToLower(col)] {
+			t.Errorf("task_projection_sequence missing column %s", col)
+		}
+	}
+
+	// Verify singleton constraint: only id=1 allowed
+	if _, err := db.ExecContext(ctx, `INSERT INTO task_projection_sequence(singleton_id, next_revision) VALUES(2, 100)`); err == nil {
+		t.Fatal("inserted non-singleton sequence row")
+	}
+}
+
+func TestTaskControlMigrationProjectionRevisionSchema(t *testing.T) {
+	db := openTaskControlMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateTaskControlSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	expected := map[string]string{
+		"task_identity": "TEXT",
+		"revision":      "INTEGER",
+		"updated_at":    "TIMESTAMP",
+	}
+	rows, err := db.Query(`PRAGMA table_info("task_projection_revision")`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	got := map[string]bool{}
+	for rows.Next() {
+		var cid, nn, pk int
+		var name, typ string
+		var d sql.NullString
+		rows.Scan(&cid, &name, &typ, &nn, &d, &pk)
+		got[strings.ToLower(name)] = true
+	}
+	for col := range expected {
+		if !got[strings.ToLower(col)] {
+			t.Errorf("task_projection_revision missing column %s", col)
+		}
+	}
+
+	// Verify revision uniqueness using an unallocated revision
+	var nextRev int64
+	if err := db.QueryRow(`SELECT next_revision FROM task_projection_sequence WHERE singleton_id=1`).Scan(&nextRev); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO task_projection_revision(task_identity, revision) VALUES('a', ?)`, nextRev); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO task_projection_revision(task_identity, revision) VALUES('b', ?)`, nextRev); err == nil {
+		t.Fatal("duplicate revision accepted")
+	}
+}
+
+func TestTaskControlMigrationAbortIntentSchema(t *testing.T) {
+	db := openTaskControlMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateTaskControlSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	expected := map[string]string{
+		"task_identity":        "TEXT",
+		"requested_at":         "TIMESTAMP",
+		"requested_by":         "TEXT",
+		"reason":               "TEXT",
+		"owner_fence":          "TEXT",
+		"deadline":             "TIMESTAMP",
+		"acknowledged_at":      "TIMESTAMP",
+		"outcome":              "TEXT",
+		"recovery_required_at": "TIMESTAMP",
+	}
+	rows, err := db.Query(`PRAGMA table_info("task_abort_intent")`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	got := map[string]bool{}
+	for rows.Next() {
+		var cid, nn, pk int
+		var name, typ string
+		var d sql.NullString
+		rows.Scan(&cid, &name, &typ, &nn, &d, &pk)
+		got[strings.ToLower(name)] = true
+	}
+	for col := range expected {
+		if !got[strings.ToLower(col)] {
+			t.Errorf("task_abort_intent missing column %s", col)
+		}
+	}
+
+	// Verify upsert behaves as expected
+	if _, err := db.ExecContext(ctx, `INSERT OR REPLACE INTO task_abort_intent(task_identity, reason) VALUES('test-task', 'admin abort')`); err != nil {
+		t.Fatalf("insert abort intent: %v", err)
+	}
+	var reason string
+	if err := db.QueryRow(`SELECT reason FROM task_abort_intent WHERE task_identity='test-task'`).Scan(&reason); err != nil || reason != "admin abort" {
+		t.Fatalf("abort intent not persisted: reason=%q err=%v", reason, err)
+	}
+}
+
+func TestTaskControlMigrationControlAuditSchema(t *testing.T) {
+	db := openTaskControlMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateTaskControlSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	expected := map[string]string{
+		"id":                    "INTEGER",
+		"task_identity":         "TEXT",
+		"task_type":             "TEXT",
+		"action":                "TEXT",
+		"actor_id":              "INTEGER",
+		"actor_name":            "TEXT",
+		"reason":                "TEXT",
+		"previous_status":       "TEXT",
+		"previous_revision":     "INTEGER",
+		"previous_generation":   "INTEGER",
+		"previous_retry_round":  "INTEGER",
+		"new_status":            "TEXT",
+		"new_revision":          "INTEGER",
+		"new_retry_round":       "INTEGER",
+		"operation_id":          "TEXT",
+		"outcome_code":          "TEXT",
+		"metadata_json":         "TEXT",
+		"created_at":            "TIMESTAMP",
+	}
+	rows, err := db.Query(`PRAGMA table_info("task_control_audit")`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	got := map[string]bool{}
+	for rows.Next() {
+		var cid, nn, pk int
+		var name, typ string
+		var d sql.NullString
+		rows.Scan(&cid, &name, &typ, &nn, &d, &pk)
+		got[strings.ToLower(name)] = true
+	}
+	for col := range expected {
+		if !got[strings.ToLower(col)] {
+			t.Errorf("task_control_audit missing column %s", col)
+		}
+	}
+
+	// Verify JSON default constraint
+	if _, err := db.ExecContext(ctx, `INSERT INTO task_control_audit(task_identity, task_type, action) VALUES('t','poster','reset')`); err != nil {
+		t.Fatalf("insert audit with defaults: %v", err)
+	}
+	var metadataJSON string
+	if err := db.QueryRow(`SELECT metadata_json FROM task_control_audit WHERE id=1`).Scan(&metadataJSON); err != nil || metadataJSON != "{}" {
+		t.Fatalf("metadata_json default: got=%q err=%v", metadataJSON, err)
+	}
+	// Invalid JSON should be rejected
+	if _, err := db.ExecContext(ctx, `INSERT INTO task_control_audit(task_identity, task_type, action, metadata_json) VALUES('t2','poster','reset','invalid')`); err == nil {
+		t.Fatal("invalid metadata_json accepted")
+	}
+}
+
+func TestTaskControlMigrationBatchOperationSchema(t *testing.T) {
+	db := openTaskControlMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateTaskControlSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	expected := map[string]string{
+		"operation_id":    "TEXT",
+		"action":          "TEXT",
+		"actor_id":        "INTEGER",
+		"reason":          "TEXT",
+		"requested_count": "INTEGER",
+		"created_at":      "TIMESTAMP",
+		"completed_at":    "TIMESTAMP",
+	}
+	rows, err := db.Query(`PRAGMA table_info("task_batch_operation")`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	got := map[string]bool{}
+	for rows.Next() {
+		var cid, nn, pk int
+		var name, typ string
+		var d sql.NullString
+		rows.Scan(&cid, &name, &typ, &nn, &d, &pk)
+		got[strings.ToLower(name)] = true
+	}
+	for col := range expected {
+		if !got[strings.ToLower(col)] {
+			t.Errorf("task_batch_operation missing column %s", col)
+		}
+	}
+
+	// Verify requested_count >= 0
+	if _, err := db.ExecContext(ctx, `INSERT INTO task_batch_operation(operation_id, action, requested_count) VALUES('op1','reset',-1)`); err == nil {
+		t.Fatal("negative requested_count accepted")
+	}
+}
+
+func TestTaskControlMigrationBatchItemSchema(t *testing.T) {
+	db := openTaskControlMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateTaskControlSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	expected := map[string]string{
+		"operation_id":     "TEXT",
+		"task_identity":    "TEXT",
+		"action":           "TEXT",
+		"request_revision": "INTEGER",
+		"ok":               "INTEGER",
+		"outcome_code":     "TEXT",
+		"result_revision":  "INTEGER",
+		"result_json":      "TEXT",
+		"created_at":       "TIMESTAMP",
+	}
+	rows, err := db.Query(`PRAGMA table_info("task_batch_item")`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	got := map[string]bool{}
+	for rows.Next() {
+		var cid, nn, pk int
+		var name, typ string
+		var d sql.NullString
+		rows.Scan(&cid, &name, &typ, &nn, &d, &pk)
+		got[strings.ToLower(name)] = true
+	}
+	for col := range expected {
+		if !got[strings.ToLower(col)] {
+			t.Errorf("task_batch_item missing column %s", col)
+		}
+	}
+}
+
+func TestTaskControlMigrationBatchItemOperationFK(t *testing.T) {
+	db := openTaskControlMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateTaskControlSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+
+	// Insert without parent operation should fail
+	if _, err := db.ExecContext(ctx, `INSERT INTO task_batch_item(operation_id, task_identity, action, ok) VALUES('no-parent','t1','reset',1)`); err == nil {
+		t.Fatal("inserted batch item without parent operation")
+	}
+}
+
+func TestTaskControlMigrationBatchOperationUniqueness(t *testing.T) {
+	db := openTaskControlMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateTaskControlSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := db.ExecContext(ctx, `INSERT INTO task_batch_operation(operation_id, action) VALUES('op-dup','reset')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO task_batch_operation(operation_id, action) VALUES('op-dup','reset')`); err == nil {
+		t.Fatal("duplicate operation_id accepted")
+	}
+}
+
+func TestTaskControlMigrationIndexesExist(t *testing.T) {
+	db := openTaskControlMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateTaskControlSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	indexes := []string{
+		"idx_task_control_audit_task",
+		"idx_task_control_audit_operation",
+	}
+	for _, idx := range indexes {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?`, idx).Scan(&count); err != nil {
+			t.Fatalf("check index %s: %v", idx, err)
+		}
+		if count != 1 {
+			t.Fatalf("index %s missing", idx)
+		}
+	}
+}
+
+func TestTaskControlMigrationSequenceMonotonicity(t *testing.T) {
+	db := openTaskControlMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateTaskControlSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+
+	var initial int64
+	if err := db.QueryRow(`SELECT next_revision FROM task_projection_sequence WHERE singleton_id=1`).Scan(&initial); err != nil {
+		t.Fatal(err)
+	}
+	if initial < 1 {
+		t.Fatalf("initial next_revision = %d, want >= 1", initial)
+	}
+
+	// Advance sequence and verify monotonicity
+	if _, err := db.ExecContext(ctx, `UPDATE task_projection_sequence SET next_revision = next_revision + 5 WHERE singleton_id=1`); err != nil {
+		t.Fatal(err)
+	}
+	var updated int64
+	if err := db.QueryRow(`SELECT next_revision FROM task_projection_sequence WHERE singleton_id=1`).Scan(&updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated != initial+5 {
+		t.Fatalf("sequence not monotonic: initial=%d updated=%d", initial, updated)
+	}
+}
+
+func TestTaskControlMigrationSeedRevision(t *testing.T) {
+	db := openTaskControlMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateTaskControlSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify revisions are seeded for existing post_ingest_task rows.
+	// We inserted two rows: id=30 (status=done) and id=31 (status=waiting).
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM task_projection_revision`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count < 2 {
+		t.Fatalf("expected >=2 seeded revisions, got %d", count)
+	}
+
+	// Verify deterministic ordering: orchestration:30 < orchestration:31
+	var rev30, rev31 int64
+	if err := db.QueryRow(`SELECT revision FROM task_projection_revision WHERE task_identity='orchestration:30'`).Scan(&rev30); err != nil {
+		t.Fatalf("missing revision for orchestration:30: %v", err)
+	}
+	if err := db.QueryRow(`SELECT revision FROM task_projection_revision WHERE task_identity='orchestration:31'`).Scan(&rev31); err != nil {
+		t.Fatalf("missing revision for orchestration:31: %v", err)
+	}
+	if rev30 >= rev31 {
+		t.Fatalf("revisions not in deterministic order: 30=%d 31=%d", rev30, rev31)
+	}
+
+	// Each revision must be unique
+	rows, err := db.Query(`SELECT revision, COUNT(*) FROM task_projection_revision GROUP BY revision HAVING COUNT(*) > 1`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		t.Fatal("duplicate revision found")
+	}
+}
+
+func TestTaskControlMigrationLegacyRowPreservation(t *testing.T) {
+	db := openTaskControlMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateTaskControlSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+
+	// Legacy post_ingest_task rows survive the migration unchanged.
+	var status string
+	if err := db.QueryRow(`SELECT status FROM post_ingest_task WHERE id=30`).Scan(&status); err != nil || status != "done" {
+		t.Fatalf("legacy row 30 lost: status=%q err=%v", status, err)
+	}
+	var attempts int
+	if err := db.QueryRow(`SELECT attempts FROM post_ingest_task WHERE id=31`).Scan(&attempts); err != nil || attempts != 2 {
+		t.Fatalf("legacy row 31 lost: attempts=%d err=%v", attempts, err)
+	}
+}
+
+func TestTaskControlMigrationIdempotent(t *testing.T) {
+	db := openTaskControlMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateTaskControlSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	// Second run should succeed.
+	if err := migrateTaskControlSchema(ctx, db); err != nil {
+		t.Fatalf("repeat migration: %v", err)
+	}
+	// Tables still exist.
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='task_projection_revision'`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("repeat migration lost tables: count=%d err=%v", count, err)
+	}
+	// Revision count unchanged.
+	var revCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM task_projection_revision`).Scan(&revCount); err != nil {
+		t.Fatal(err)
+	}
+	if revCount < 2 {
+		t.Fatalf("revisions lost on repeat: count=%d", revCount)
+	}
+}
+
+func TestTaskControlMigrationFaultRollback(t *testing.T) {
+	db := openTaskControlMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateTaskControlSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify transaction rollback works on batch_item FK
+	if _, err := db.ExecContext(ctx, `INSERT INTO task_batch_operation(operation_id, action) VALUES('rb-test','reset')`); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO task_batch_item(operation_id, task_identity, action, ok) VALUES('rb-test','t1','reset',1)`); err != nil {
+		tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	var itemCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM task_batch_item WHERE operation_id='rb-test'`).Scan(&itemCount); err != nil {
+		t.Fatal(err)
+	}
+	if itemCount != 0 {
+		t.Fatalf("rolled-back batch item persisted: rows=%d", itemCount)
+	}
+}
+
+func TestTaskControlMigrationReopenIdempotence(t *testing.T) {
+	db := openTaskControlMigrationTestDB(t)
+	ctx := context.Background()
+	// Run schema migration multiple times
+	if err := migrateTaskControlSchema(ctx, db); err != nil {
+		t.Fatalf("first migration: %v", err)
+	}
+	if err := migrateTaskControlSchema(ctx, db); err != nil {
+		t.Fatalf("reopen migration: %v", err)
+	}
+
+	// Schema should be identical after reopen
+	for _, table := range []string{
+		"task_projection_sequence",
+		"task_projection_revision",
+		"task_abort_intent",
+		"task_control_audit",
+		"task_batch_operation",
+		"task_batch_item",
+	} {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&count); err != nil {
+			t.Fatalf("table %s after reopen: %v", table, err)
+		}
+		if count != 1 {
+			t.Fatalf("table %s missing after reopen", table)
+		}
+	}
+
+	// Audit append-only: records inserted before reopen are preserved
+	if _, err := db.ExecContext(ctx, `INSERT INTO task_control_audit(task_identity, task_type, action) VALUES('t-reopen','poster','reset')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateTaskControlSchema(ctx, db); err != nil {
+		t.Fatalf("reopen after audit insert: %v", err)
+	}
+	var auditCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM task_control_audit WHERE task_identity='t-reopen'`).Scan(&auditCount); err != nil || auditCount != 1 {
+		t.Fatalf("audit record lost after reopen: count=%d err=%v", auditCount, err)
+	}
+}
+
+func TestTaskControlMigrationFreshSchemaEquivalence(t *testing.T) {
+	// Open a brand new DB and run migration
+	db1 := openTaskControlMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateTaskControlSchema(ctx, db1); err != nil {
+		t.Fatal(err)
+	}
+
+	// Open a second brand new DB and run migration
+	db2, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db2.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db2.Close() })
+	if _, err = db2.Exec(`PRAGMA foreign_keys=ON;
+CREATE TABLE library (id INTEGER PRIMARY KEY);
+CREATE TABLE scan_task (id INTEGER PRIMARY KEY, library_id INTEGER NOT NULL, FOREIGN KEY(library_id) REFERENCES library(id));
+CREATE TABLE media (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, library_id INTEGER, file_id TEXT UNIQUE,
+ FOREIGN KEY(library_id) REFERENCES library(id)
+);
+CREATE TABLE post_ingest_task (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, media_id INTEGER NOT NULL, scan_task_id INTEGER,
+ task_type TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'waiting', attempts INTEGER NOT NULL DEFAULT 0,
+ max_attempts INTEGER NOT NULL DEFAULT 3, available_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ lease_owner TEXT, lease_until TIMESTAMP, last_error TEXT NOT NULL DEFAULT '',
+ created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ started_at TIMESTAMP, finished_at TIMESTAMP, retry_round INTEGER NOT NULL DEFAULT 0 CHECK(retry_round >= 0),
+ priority INTEGER NOT NULL DEFAULT 0, removed_at TIMESTAMP, removed_by TEXT NOT NULL DEFAULT '',
+ remove_reason TEXT NOT NULL DEFAULT '',
+ FOREIGN KEY(media_id) REFERENCES media(id) ON DELETE CASCADE,
+ FOREIGN KEY(scan_task_id) REFERENCES scan_task(id) ON DELETE SET NULL,
+ UNIQUE(media_id,task_type),
+ CHECK(task_type IN ('poster','preview','keyframe','subtitle','atrack','encrypt','subtitle_extract','subtitle_recognize','atrack_extract','keyframe_extract','ai_analysis','thumbnail','package','pretranscode','metadata','media_visible')),
+ CHECK(status IN ('waiting','running','done','failed','cancelled'))
+);
+INSERT INTO library(id) VALUES(1);
+INSERT INTO scan_task(id,library_id) VALUES(10,1);
+INSERT INTO media(id,library_id,file_id) VALUES(20,1,'file-a');
+INSERT INTO post_ingest_task(id,media_id,scan_task_id,task_type,status) VALUES(30,20,10,'poster','done');`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateTaskControlSchema(ctx, db2); err != nil {
+		t.Fatal(err)
+	}
+
+	// Compare table lists
+	for _, table := range []string{
+		"task_projection_sequence",
+		"task_projection_revision",
+		"task_abort_intent",
+		"task_control_audit",
+		"task_batch_operation",
+		"task_batch_item",
+	} {
+		var c1, c2 int
+		if err := db1.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&c1); err != nil {
+			t.Fatal(err)
+		}
+		if err := db2.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&c2); err != nil {
+			t.Fatal(err)
+		}
+		if c1 != c2 {
+			t.Errorf("fresh schema mismatch for %s: db1=%d db2=%d", table, c1, c2)
+		}
+	}
+	assertNoForeignKeyViolations(t, db2)
+}
+
+func TestTaskControlBatchItemCompositePK(t *testing.T) {
+	db := openTaskControlMigrationTestDB(t)
+	ctx := context.Background()
+	if err := migrateTaskControlSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO task_batch_operation(operation_id, action) VALUES('pk-test','reset')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO task_batch_item(operation_id, task_identity, action, ok) VALUES('pk-test','t1','reset',1)`); err != nil {
+		t.Fatal(err)
+	}
+	// Duplicate composite PK should fail
+	if _, err := db.ExecContext(ctx, `INSERT INTO task_batch_item(operation_id, task_identity, action, ok) VALUES('pk-test','t1','reset',0)`); err == nil {
+		t.Fatal("duplicate composite PK accepted")
+	}
+}

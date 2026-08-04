@@ -18,7 +18,7 @@ func TestTVGETReturns500OnRowScanErrorsWithoutPartialResponse(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	_, err = db.Exec(`INSERT INTO library(id,name,type,path) VALUES(801,'tv','tv','E:/tv'); INSERT INTO series(id,library_id,title,title_norm,year) VALUES(8100,801,'Bad','bad','not-a-number'); INSERT INTO season(id,tv_id,season_num) VALUES(8101,8100,1); INSERT INTO episode(id,season_id,episode_num) VALUES(8102,8101,1); INSERT INTO media(id,library_id,file_id,title,file_path,file_type,status,publication_state) VALUES(8103,801,'v','V','E:/tv/v.mkv','video','active','published'); INSERT INTO episode_media(episode_id,media_id) VALUES(8102,8103)`)
+	_, err = db.Exec(`INSERT INTO library(id,name,type,path) VALUES(801,'tv','tv','E:/tv'); INSERT INTO series(id,library_id,title,title_norm,year) VALUES(8100,801,'Bad','bad','not-a-number')`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +40,7 @@ func TestGetSeriesNestedSeasonScanErrorReturns500(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	_, err = db.Exec(`INSERT INTO library(id,name,type,path) VALUES(901,'tv','tv','E:/tv');INSERT INTO series(id,library_id,title,title_norm) VALUES(9100,901,'Show','show');INSERT INTO season(id,tv_id,season_num) VALUES(9101,9100,'bad'); INSERT INTO episode(id,season_id,episode_num) VALUES(9102,9101,1); INSERT INTO media(id,library_id,file_id,title,file_path,file_type,status,publication_state) VALUES(9103,901,'v','V','E:/tv/v.mkv','video','active','published'); INSERT INTO episode_media(episode_id,media_id) VALUES(9102,9103)`)
+	_, err = db.Exec(`INSERT INTO library(id,name,type,path) VALUES(901,'tv','tv','E:/tv');INSERT INTO series(id,library_id,title,title_norm) VALUES(9100,901,'Show','show');INSERT INTO season(id,tv_id,season_num) VALUES(9101,9100,'bad')`)
 	if err != nil {
 		t.Fatal(err)
 	}

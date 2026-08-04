@@ -178,7 +178,7 @@ func TestSyncSidecarsMatchAndGenerate(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(workDir, "movie.en.srt"), []byte("1\n00:00:00,000 --> 00:00:01,000\nhello\n"), 0o644); err != nil {
 		t.Fatalf("write srt: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(workDir, "movie.zh.vtt"), []byte("WEBVTT\n\n00:00:00.000 --> 00:00:01.000\n浣犲ソ\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(workDir, "movie.zh.vtt"), []byte("WEBVTT\n\n00:00:00.000 --> 00:00:01.000\n你好\n"), 0o644); err != nil {
 		t.Fatalf("write vtt: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(workDir, "other.en.srt"), []byte("x"), 0o644); err != nil {
@@ -378,15 +378,130 @@ func TestSyncSidecarsVobSubOCR(t *testing.T) {
 	if err := db.QueryRow(`SELECT source_kind, status, lang, vtt_path FROM media_subtitle WHERE media_id = ? LIMIT 1`, 303).Scan(&kind, &status, &lang, &vtt); err != nil {
 		t.Fatalf("query ocr row: %v", err)
 	}
-	if kind != "external_ocr" || status != "ready" {
-		t.Fatalf("unexpected row kind=%s status=%s", kind, status)
+	if kind != "external_ocr" || status != "pending_ocr" {
+		t.Fatalf("unexpected extract row kind=%s status=%s", kind, status)
 	}
 	if lang != "zh" {
 		t.Fatalf("lang=%s want zh", lang)
 	}
+	if err := s.recognizePendingOCR(context.Background(), 303, videoPath); err != nil {
+		t.Fatalf("recognizePendingOCR: %v", err)
+	}
+	if err := db.QueryRow(`SELECT source_kind, status, lang, vtt_path FROM media_subtitle WHERE media_id = ? LIMIT 1`, 303).Scan(&kind, &status, &lang, &vtt); err != nil {
+		t.Fatalf("query recognized row: %v", err)
+	}
+	if kind != "external_ocr" || status != "ready" {
+		t.Fatalf("unexpected recognize row kind=%s status=%s", kind, status)
+	}
 	if _, err := os.Stat(vtt); err != nil {
 		t.Fatalf("vtt missing: %v", err)
 	}
+}
+
+func TestExtractMediaDoesNotInvokeASR(t *testing.T) {
+	db := newSubtitleTestDB(t)
+	_, err := db.Exec(`
+CREATE TABLE media (id INTEGER PRIMARY KEY, file_path TEXT, file_type TEXT);
+CREATE TABLE subtitle_task (
+  media_id INTEGER PRIMARY KEY, status TEXT, message TEXT,
+  extract_status TEXT DEFAULT 'pending', recognize_status TEXT DEFAULT 'pending',
+  extract_message TEXT, recognize_message TEXT,
+  created_at TIMESTAMP, started_at TIMESTAMP, finished_at TIMESTAMP, updated_at TIMESTAMP
+);`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	work := t.TempDir()
+	video := filepath.Join(work, "movie.mp4")
+	sidecar := filepath.Join(work, "movie.vtt")
+	if err := os.WriteFile(video, []byte("video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sidecar, []byte("WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nhi\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = db.Exec(`INSERT INTO media(id,file_path,file_type) VALUES(401,?, 'video')`, video)
+	s := &Service{
+		DB: db, SubtitleDir: filepath.Join(work, "subs"), FFmpegPath: "ffmpeg", FFprobePath: writeMockFFprobeEmptyStreams(t, t.TempDir()),
+		ASR: ASRConfig{Provider: "shell", Shell: `echo WEBVTT> {output_vtt}`},
+	}
+	if err := s.ExtractMedia(context.Background(), 401); err != nil {
+		t.Fatalf("ExtractMedia: %v", err)
+	}
+	var asrCount, readyCount int
+	_ = db.QueryRow(`SELECT COUNT(1) FROM media_subtitle WHERE media_id=401 AND source_kind='asr'`).Scan(&asrCount)
+	_ = db.QueryRow(`SELECT COUNT(1) FROM media_subtitle WHERE media_id=401 AND status='ready'`).Scan(&readyCount)
+	if asrCount != 0 {
+		t.Fatalf("extraction invoked ASR rows=%d", asrCount)
+	}
+	if readyCount == 0 {
+		t.Fatal("expected extracted sidecar ready without ASR")
+	}
+}
+
+func TestRecognizeMediaRunsASRWithoutReExtract(t *testing.T) {
+	db := newSubtitleTestDB(t)
+	_, err := db.Exec(`
+CREATE TABLE media (id INTEGER PRIMARY KEY, file_path TEXT, file_type TEXT);
+CREATE TABLE subtitle_task (
+  media_id INTEGER PRIMARY KEY, status TEXT, message TEXT,
+  extract_status TEXT DEFAULT 'pending', recognize_status TEXT DEFAULT 'pending',
+  extract_message TEXT, recognize_message TEXT,
+  created_at TIMESTAMP, started_at TIMESTAMP, finished_at TIMESTAMP, updated_at TIMESTAMP
+);`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	work := t.TempDir()
+	video := filepath.Join(work, "movie.mp4")
+	if err := os.WriteFile(video, []byte("video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = db.Exec(`INSERT INTO media(id,file_path,file_type) VALUES(402,?, 'video')`, video)
+	shellCmd := `echo WEBVTT> {output_vtt}`
+	if runtime.GOOS != "windows" {
+		shellCmd = writeASRScriptAndCommand(t, t.TempDir())
+	}
+	s := &Service{
+		DB: db, SubtitleDir: filepath.Join(work, "subs"),
+		FFmpegPath:  writeMockFFmpegTouchOutput(t, t.TempDir()),
+		FFprobePath: writeMockFFprobeEmptyStreams(t, t.TempDir()),
+		ASR:         ASRConfig{Provider: "shell", Shell: shellCmd},
+	}
+	if err := s.RecognizeMedia(context.Background(), 402); err != nil {
+		t.Fatalf("RecognizeMedia: %v", err)
+	}
+	var status string
+	if err := db.QueryRow(`SELECT status FROM media_subtitle WHERE media_id=402 AND dedupe_key='asr:auto'`).Scan(&status); err != nil {
+		t.Fatalf("asr row: %v", err)
+	}
+	if status != "ready" {
+		t.Fatalf("status=%s", status)
+	}
+	// Recognition must not invent sidecar discoveries; only ASR artifact.
+	var sidecarCount int
+	_ = db.QueryRow(`SELECT COUNT(1) FROM media_subtitle WHERE media_id=402 AND source_kind LIKE 'external%'`).Scan(&sidecarCount)
+	if sidecarCount != 0 {
+		t.Fatalf("recognition re-extracted sidecars=%d", sidecarCount)
+	}
+}
+
+func writeMockFFprobeEmptyStreams(t *testing.T, dir string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		path := filepath.Join(dir, "ffprobe-mock.bat")
+		content := "@echo off\r\necho {\"streams\":[]}\r\n"
+		if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	path := filepath.Join(dir, "ffprobe-mock")
+	content := "#!/bin/sh\necho '{\"streams\":[]}'\n"
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 func TestCopyOrWriteVTT(t *testing.T) {
@@ -446,7 +561,7 @@ func TestSubtitleStreamsHonorsCancelledContext(t *testing.T) {
 
 func TestProcessMediaReturnsSavedFailedError(t *testing.T) {
 	db := newSubtitleTestDB(t)
-	_, _ = db.Exec(`CREATE TABLE subtitle_task(media_id INTEGER UNIQUE,status TEXT,message TEXT,created_at TEXT,started_at TEXT,finished_at TEXT,updated_at TEXT); CREATE TABLE media(id INTEGER PRIMARY KEY,file_type TEXT,file_path TEXT); INSERT INTO subtitle_task(media_id,status,message) VALUES(41,'failed','saved subtitle failure')`)
+	_, _ = db.Exec(`CREATE TABLE subtitle_task(media_id INTEGER UNIQUE,status TEXT,message TEXT,extract_status TEXT DEFAULT 'pending',recognize_status TEXT DEFAULT 'pending',extract_message TEXT,recognize_message TEXT,created_at TEXT,started_at TEXT,finished_at TEXT,updated_at TEXT); CREATE TABLE media(id INTEGER PRIMARY KEY,file_type TEXT,file_path TEXT); INSERT INTO subtitle_task(media_id,status,message,extract_status,recognize_status,extract_message,recognize_message) VALUES(41,'failed','saved subtitle failure','failed','failed','saved subtitle failure','saved subtitle failure')`)
 	s := &Service{DB: db}
 	err := s.ProcessMedia(context.Background(), 41)
 	if err == nil || !strings.Contains(err.Error(), "saved subtitle failure") {
@@ -458,7 +573,7 @@ func TestProcessMediaRunningWriteFailureStopsProcessing(t *testing.T) {
 	db := newSubtitleTestDB(t)
 	video := filepath.Join(t.TempDir(), "video.mp4")
 	_ = os.WriteFile(video, []byte("x"), 0644)
-	_, _ = db.Exec(`CREATE TABLE subtitle_task(media_id INTEGER UNIQUE,status TEXT,message TEXT,created_at TEXT,started_at TEXT,finished_at TEXT,updated_at TEXT); CREATE TABLE media(id INTEGER PRIMARY KEY,file_type TEXT,file_path TEXT); INSERT INTO media(id,file_type,file_path) VALUES(41,'video',?)`, video)
+	_, _ = db.Exec(`CREATE TABLE subtitle_task(media_id INTEGER UNIQUE,status TEXT,message TEXT,extract_status TEXT DEFAULT 'pending',recognize_status TEXT DEFAULT 'pending',extract_message TEXT,recognize_message TEXT,created_at TEXT,started_at TEXT,finished_at TEXT,updated_at TEXT); CREATE TABLE media(id INTEGER PRIMARY KEY,file_type TEXT,file_path TEXT); INSERT INTO media(id,file_type,file_path) VALUES(41,'video',?)`, video)
 	_, _ = db.Exec(`CREATE TRIGGER reject_subtitle_running BEFORE INSERT ON subtitle_task BEGIN SELECT RAISE(FAIL,'reject running'); END`)
 	s := &Service{DB: db, SubtitleDir: t.TempDir(), FFprobePath: "ffprobe"}
 	err := s.ProcessMedia(context.Background(), 41)
@@ -471,7 +586,7 @@ func TestProcessMediaDoneWriteFailureIsReturned(t *testing.T) {
 	db := newSubtitleTestDB(t)
 	video := filepath.Join(t.TempDir(), "video.mp4")
 	_ = os.WriteFile(video, []byte("x"), 0644)
-	_, _ = db.Exec(`CREATE TABLE subtitle_task(media_id INTEGER UNIQUE,status TEXT,message TEXT,created_at TEXT,started_at TEXT,finished_at TEXT,updated_at TEXT); CREATE TABLE media(id INTEGER PRIMARY KEY,file_type TEXT,file_path TEXT); INSERT INTO media(id,file_type,file_path) VALUES(41,'video',?); INSERT INTO subtitle_task(media_id,status) VALUES(41,'pending')`, video)
+	_, _ = db.Exec(`CREATE TABLE subtitle_task(media_id INTEGER UNIQUE,status TEXT,message TEXT,extract_status TEXT DEFAULT 'pending',recognize_status TEXT DEFAULT 'pending',extract_message TEXT,recognize_message TEXT,created_at TEXT,started_at TEXT,finished_at TEXT,updated_at TEXT); CREATE TABLE media(id INTEGER PRIMARY KEY,file_type TEXT,file_path TEXT); INSERT INTO media(id,file_type,file_path) VALUES(41,'video',?); INSERT INTO subtitle_task(media_id,status) VALUES(41,'pending')`, video)
 	_, _ = db.Exec(`CREATE TRIGGER reject_subtitle_done BEFORE UPDATE OF status ON subtitle_task WHEN NEW.status='done' BEGIN SELECT RAISE(FAIL,'reject done'); END`)
 	s := &Service{DB: db, SubtitleDir: t.TempDir(), FFprobePath: writeProbeNoStreams(t)}
 	err := s.ProcessMedia(context.Background(), 41)
@@ -516,7 +631,7 @@ func TestMarkSubtitleReadyMissingRowIsFatal(t *testing.T) {
 
 func TestProcessMediaStaleGuardDoesNotWriteRunning(t *testing.T) {
 	db := newSubtitleTestDB(t)
-	_, _ = db.Exec(`CREATE TABLE subtitle_task(media_id INTEGER UNIQUE,status TEXT,message TEXT,started_at TEXT,finished_at TEXT,updated_at TEXT); CREATE TABLE media(id INTEGER PRIMARY KEY,file_type TEXT,file_path TEXT); INSERT INTO subtitle_task(media_id,status) VALUES(41,'pending')`)
+	_, _ = db.Exec(`CREATE TABLE subtitle_task(media_id INTEGER UNIQUE,status TEXT,message TEXT,extract_status TEXT DEFAULT 'pending',recognize_status TEXT DEFAULT 'pending',extract_message TEXT,recognize_message TEXT,started_at TEXT,finished_at TEXT,updated_at TEXT); CREATE TABLE media(id INTEGER PRIMARY KEY,file_type TEXT,file_path TEXT); INSERT INTO subtitle_task(media_id,status) VALUES(41,'pending')`)
 	stale := errors.New("stale generation")
 	ctx := WithCommitGuard(context.Background(), func(context.Context) error { return stale })
 	s := &Service{DB: db}
@@ -532,7 +647,7 @@ func TestProcessMediaStaleGuardDoesNotWriteRunning(t *testing.T) {
 }
 func TestProcessMediaStaleCleanupDoesNotOverwriteRunning(t *testing.T) {
 	db := newSubtitleTestDB(t)
-	_, _ = db.Exec(`CREATE TABLE subtitle_task(media_id INTEGER UNIQUE,status TEXT,message TEXT,started_at TEXT,finished_at TEXT,updated_at TEXT); CREATE TABLE media(id INTEGER PRIMARY KEY,file_type TEXT,file_path TEXT); INSERT INTO subtitle_task(media_id,status) VALUES(41,'pending')`)
+	_, _ = db.Exec(`CREATE TABLE subtitle_task(media_id INTEGER UNIQUE,status TEXT,message TEXT,extract_status TEXT DEFAULT 'pending',recognize_status TEXT DEFAULT 'pending',extract_message TEXT,recognize_message TEXT,started_at TEXT,finished_at TEXT,updated_at TEXT); CREATE TABLE media(id INTEGER PRIMARY KEY,file_type TEXT,file_path TEXT); INSERT INTO subtitle_task(media_id,status) VALUES(41,'pending')`)
 	calls := 0
 	stale := errors.New("stale generation")
 	ctx := WithCommitGuard(context.Background(), func(context.Context) error {

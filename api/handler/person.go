@@ -22,26 +22,26 @@ func personToJSON(p *caststore.Person) gin.H {
 		return gin.H{}
 	}
 	return gin.H{
-		"id":            p.ID,
-		"name":          textencoding.FixMetadataString(p.Name),
-		"name_norm":     p.NameNorm,
-		"english_name":  textencoding.FixMetadataString(p.EnglishName),
-		"gender":        p.Gender,
-		"birth_date":    p.BirthDate,
-		"birth_place":   textencoding.FixMetadataString(p.BirthPlace),
-		"nationality":   textencoding.FixMetadataString(p.Nationality),
-		"occupations":   p.Occupations,
-		"biography":     textencoding.FixMetadataString(p.Biography),
-		"avatar_url":    p.AvatarURL,
-		"aliases":       p.Aliases,
-		"scraped":       p.Scraped,
-		"scraped_at":    p.ScrapedAt,
-		"tmdb_id":       p.TMDBID,
-		"imdb_id":       p.IMDBID,
-		"douban_id":     p.DoubanID,
-		"work_count":    p.WorkCount,
-		"created_at":    p.CreatedAt,
-		"updated_at":    p.UpdatedAt,
+		"id":           p.ID,
+		"name":         textencoding.FixMetadataString(p.Name),
+		"name_norm":    p.NameNorm,
+		"english_name": textencoding.FixMetadataString(p.EnglishName),
+		"gender":       p.Gender,
+		"birth_date":   p.BirthDate,
+		"birth_place":  textencoding.FixMetadataString(p.BirthPlace),
+		"nationality":  textencoding.FixMetadataString(p.Nationality),
+		"occupations":  p.Occupations,
+		"biography":    textencoding.FixMetadataString(p.Biography),
+		"avatar_url":   p.AvatarURL,
+		"aliases":      p.Aliases,
+		"scraped":      p.Scraped,
+		"scraped_at":   p.ScrapedAt,
+		"tmdb_id":      p.TMDBID,
+		"imdb_id":      p.IMDBID,
+		"douban_id":    p.DoubanID,
+		"work_count":   p.WorkCount,
+		"created_at":   p.CreatedAt,
+		"updated_at":   p.UpdatedAt,
 	}
 }
 
@@ -109,19 +109,19 @@ func (h *Handler) GetPerson(c *gin.Context) {
 }
 
 type createPersonBody struct {
-	Name         string   `json:"name"`
-	EnglishName  string   `json:"english_name"`
-	Gender       *int     `json:"gender"`
-	BirthDate    string   `json:"birth_date"`
-	BirthPlace   string   `json:"birth_place"`
-	Nationality  string   `json:"nationality"`
-	Occupations  []string `json:"occupations"`
-	Biography    string   `json:"biography"`
-	AvatarURL    string   `json:"avatar_url"`
-	Aliases      string   `json:"aliases"`
-	TMDBID       string   `json:"tmdb_id"`
-	IMDBID       string   `json:"imdb_id"`
-	DoubanID     string   `json:"douban_id"`
+	Name        string   `json:"name"`
+	EnglishName string   `json:"english_name"`
+	Gender      *int     `json:"gender"`
+	BirthDate   string   `json:"birth_date"`
+	BirthPlace  string   `json:"birth_place"`
+	Nationality string   `json:"nationality"`
+	Occupations []string `json:"occupations"`
+	Biography   string   `json:"biography"`
+	AvatarURL   string   `json:"avatar_url"`
+	Aliases     string   `json:"aliases"`
+	TMDBID      string   `json:"tmdb_id"`
+	IMDBID      string   `json:"imdb_id"`
+	DoubanID    string   `json:"douban_id"`
 }
 
 // CreatePerson adds a new cast/crew person (admin).
@@ -273,11 +273,11 @@ func (h *Handler) ListPersonCollaborators(c *gin.Context) {
 	items := make([]gin.H, 0, len(collabs))
 	for _, col := range collabs {
 		items = append(items, gin.H{
-			"person_id":            col.PersonID,
-			"name":                 textencoding.FixMetadataString(col.Name),
-			"avatar_url":           col.AvatarURL,
-			"collaboration_count":  col.CollaborationCount,
-			"recent_movie_titles":  col.RecentMovieTitles,
+			"person_id":           col.PersonID,
+			"name":                textencoding.FixMetadataString(col.Name),
+			"avatar_url":          col.AvatarURL,
+			"collaboration_count": col.CollaborationCount,
+			"recent_movie_titles": col.RecentMovieTitles,
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"items": items})
@@ -648,7 +648,7 @@ func (h *Handler) RescrapeAllMediaCredits(c *gin.Context) {
 	defer rows.Close()
 
 	type mediaMeta struct {
-		ID      int64
+		ID       int64
 		MetaJSON string
 	}
 	var items []mediaMeta
@@ -692,11 +692,11 @@ func (h *Handler) RescrapeAllMediaCredits(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"ok":        true,
-		"imported":  imported,
-		"skipped":   skipped,
-		"failed":    failed,
-		"total":     len(items),
+		"ok":       true,
+		"imported": imported,
+		"skipped":  skipped,
+		"failed":   failed,
+		"total":    len(items),
 	})
 }
 

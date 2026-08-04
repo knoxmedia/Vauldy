@@ -48,6 +48,7 @@ import {
 import { languageOptions, resolveLocale, useT, type TranslateFn } from "../i18n";
 import { defaultPlayerPrefs, normalizePlayerPrefs } from "../lib/playerPrefs";
 import { useAuthStore } from "../store/auth";
+import { enterpriseSystemTabItems } from "../enterprise";
 
 function defaultSystemOptions(): SystemOptions {
   return {
@@ -1678,6 +1679,11 @@ export default function SystemOptionsPage() {
           { key: "photo-classify", label: t("system_options.tab.photo_classify"), children: tabPhotoClassify },
           { key: "photo-face", label: t("system_options.tab.photo_face"), children: tabPhotoFace },
           { key: "doc-trans", label: t("system_options.tab.doc_trans"), children: tabDocTrans },
+          ...enterpriseSystemTabItems.map((it) => ({
+            key: it.key,
+            label: t(it.label),
+            children: it.element,
+          })),
         ]}
       />
     </Card>

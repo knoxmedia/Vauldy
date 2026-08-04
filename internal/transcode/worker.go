@@ -6,15 +6,14 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"knox-media/internal/processmetrics"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
-
 )
 
 type Rendition struct {
@@ -153,10 +152,9 @@ func (w *Worker) StartWaiting(ctx context.Context, limit int) int {
 			continue
 		}
 		started++
-		id, fp, q := taskID, filePath, quality
-		go func() {
-			_ = w.RunTask(context.Background(), id, fp, q)
-		}()
+		if err := w.RunTask(ctx, taskID, filePath, quality); err != nil && ctx.Err() != nil {
+			return started
+		}
 	}
 	return started
 }
@@ -301,7 +299,7 @@ func (w *Worker) transcodeRendition(ctx context.Context, taskID int64, inputPath
 	x264Preset := w.loadSettings().EffectiveBackgroundPreset()
 	try := func(enc EncoderBackend) (stderrOut string, err error) {
 		args := append(append(append([]string{}, prefix...), w.encoderArgsFor(enc, vf, r.VideoRate, x264Preset)...), suffix...)
-		cmd := exec.CommandContext(ctx, w.FFmpegPath, args...)
+		cmd := processmetrics.NewFFmpegCommandContext(ctx, w.FFmpegPath, args...)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		err = cmd.Run()

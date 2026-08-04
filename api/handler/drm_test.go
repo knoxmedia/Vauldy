@@ -31,12 +31,11 @@ func newDRMHandlerForTest(t *testing.T) *Handler {
 	if _, err := db.Exec(`INSERT INTO library (id, name, type, path) VALUES (1, 'lib', 'movie', 'E:/videos')`); err != nil {
 		t.Fatalf("insert library: %v", err)
 	}
-	if _, err := db.Exec(`INSERT INTO media (id, library_id, file_id, file_path, publication_state) VALUES (1, 1, 'f-1', 'E:/videos/a.mp4', 'published')`); err != nil {
-		t.Fatalf("insert media: %v", err)
+	if _, err := db.Exec(`INSERT INTO user (id, username, password, role, can_play, library_scope) VALUES (1, 'drm-user', 'x', 'user', 1, 'all')`); err != nil {
+		t.Fatalf("insert user: %v", err)
 	}
-	// License handlers load the authenticated user's permission profile.
-	if _, err := db.Exec(`INSERT INTO user(id,username,password,role,can_play,library_scope) VALUES(1,'drm-user','x','user',1,'all')`); err != nil {
-		t.Fatalf("insert drm user: %v", err)
+	if _, err := db.Exec(`INSERT INTO media (id, library_id, file_id, file_path) VALUES (1, 1, 'f-1', 'E:/videos/a.mp4')`); err != nil {
+		t.Fatalf("insert media: %v", err)
 	}
 	drmDir := filepath.Join(t.TempDir(), "drm")
 	if err := os.MkdirAll(drmDir, 0o755); err != nil {

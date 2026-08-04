@@ -15,6 +15,7 @@ import (
 	"knox-media/api/middleware"
 	"knox-media/internal/playcompletion"
 	"knox-media/internal/scraper"
+	"knox-media/internal/storage"
 	"knox-media/internal/store"
 	"knox-media/internal/textencoding"
 )
@@ -52,13 +53,13 @@ func (h *Handler) listMediaObserved(c *gin.Context, afterBatch func(mediaListSta
 		}
 	}
 	spec, err := parseMediaListSpec(c, profile, listUID)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
 	spec.IncludeUnpublished = includeUnpublished
 	if includeUnpublished {
 		spec.PublicationState = publicationState
+	}
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
 	}
 	if spec.LibraryID != nil && spec.RestrictLibraries {
 		if _, ok := profile.AllowedLibraryIDs[*spec.LibraryID]; !ok {
@@ -81,6 +82,7 @@ func (h *Handler) listMediaObserved(c *gin.Context, afterBatch func(mediaListSta
 	}
 	items := make([]gin.H, 0, len(rows))
 	for _, row := range rows {
+		optimizationAssetRecorded := row.OptimizationAssetRecorded.Int64 == 1
 		item := gin.H{
 			"id": row.ID, "library_id": row.LibraryID.Int64, "file_id": row.FileID.String,
 			"title": row.Title.String, "original_title": row.OriginalTitle.String, "file_path": row.FilePath.String,
@@ -88,8 +90,9 @@ func (h *Handler) listMediaObserved(c *gin.Context, afterBatch func(mediaListSta
 			"bitrate": row.Bitrate.Int64, "format": row.Format.String, "status": row.Status.String, "created_at": row.CreatedAt.String,
 			"last_play_at": row.LastPlayAt.String, "completed": row.PlayCompleted.Int64, "release_date": row.ReleaseDate.String, "year": row.ReleaseYear.Int64,
 			"poster_url": row.PosterURL.String, "backdrop_url": row.BackdropURL.String, "scraped": row.Scraped.Int64 == 1,
-			"encrypted_asset": row.EncryptedAsset.Int64 == 1,
-			"photo_taken_at":  row.PhotoTakenAt.String, "photo_tags": row.PhotoTags, "photo_tag_ids": row.PhotoTagIDs,
+			"encrypted_asset": row.EncryptedAsset.Int64 == 1, "optimization_asset_recorded": optimizationAssetRecorded,
+			"optimization_available": optimizationAssetRecorded,
+			"photo_taken_at":         row.PhotoTakenAt.String, "photo_tags": row.PhotoTags, "photo_tag_ids": row.PhotoTagIDs,
 			"music_album_id": row.MusicAlbumID.Int64, "music_album_title": textencoding.FixMetadataString(row.MusicAlbumTitle.String),
 			"music_artist":      textencoding.FixMetadataString(row.MusicArtist.String),
 			"publication_state": row.PublicationState.String,
@@ -143,15 +146,19 @@ func (h *Handler) GetMedia(c *gin.Context) {
 	row := h.App.DB.QueryRow(`
 		SELECT m.id, m.library_id, m.file_id, m.title, m.original_title, m.file_path, m.file_type,
 		       m.duration, m.width, m.height, m.bitrate, m.md5, m.format, m.meta_json, m.status, m.created_at,
-		       m.publication_state, m.published_at, m.publication_error, m.ingest_generation
+		       m.publication_state, m.published_at, m.publication_error, m.ingest_generation,
+		       CASE WHEN mea.status='encrypted' OR lower(m.file_path) LIKE '%.enc' THEN 1 ELSE 0 END,
+		       `+optimizationAssetRecordedSQL+`
 		FROM media m
+		LEFT JOIN library l ON l.id=m.library_id
+		LEFT JOIN media_encrypted_assets mea ON mea.media_id=m.id
 		WHERE m.id = ? AND `+mediaPublicationVisibilityPredicate("m", false), id)
 	var libID sql.NullInt64
 	var fileID, title, orig, path, ftype, md5, format, meta, status, created sql.NullString
 	var publicationState, publishedAt, publicationError sql.NullString
 	var dur, w, hei, br sql.NullInt64
-	var mid, ingestGeneration int64
-	if err := row.Scan(&mid, &libID, &fileID, &title, &orig, &path, &ftype, &dur, &w, &hei, &br, &md5, &format, &meta, &status, &created, &publicationState, &publishedAt, &publicationError, &ingestGeneration); err != nil {
+	var mid, encryptedAsset, optimizationRecorded, ingestGeneration int64
+	if err := row.Scan(&mid, &libID, &fileID, &title, &orig, &path, &ftype, &dur, &w, &hei, &br, &md5, &format, &meta, &status, &created, &publicationState, &publishedAt, &publicationError, &ingestGeneration, &encryptedAsset, &optimizationRecorded); err != nil {
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 			return
@@ -159,12 +166,20 @@ func (h *Handler) GetMedia(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	optimizationSourceAvailable := false
+	if strings.EqualFold(ftype.String, "video") {
+		optimizationSourceAvailable = storage.PlaintextSourceAvailable(h.App.DB, mid, libID.Int64, path.String)
+	}
 	item := gin.H{
 		"id": mid, "library_id": libID.Int64, "file_id": fileID.String,
 		"title": title.String, "original_title": orig.String, "file_path": path.String,
 		"file_type": ftype.String, "duration": dur.Int64, "width": w.Int64, "height": hei.Int64,
 		"bitrate": br.Int64, "md5": md5.String, "format": format.String, "meta_json": meta.String,
 		"status": status.String, "created_at": created.String, "publication_state": publicationState.String,
+		"encrypted_asset":               encryptedAsset == 1,
+		"optimization_asset_recorded":   optimizationRecorded == 1,
+		"optimization_available":        optimizationRecorded == 1,
+		"optimization_source_available": optimizationSourceAvailable,
 	}
 	if middleware.IsAdmin(c) {
 		item["published_at"] = publishedAt.String
@@ -269,6 +284,8 @@ func (h *Handler) ScrapeMedia(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	var existing sql.NullString
+	_ = h.App.DB.QueryRow(`SELECT meta_json FROM media WHERE id = ?`, id).Scan(&existing)
 	query := scraper.NormalizeTitle(title.String)
 	if query == "" {
 		query = title.String
@@ -423,14 +440,20 @@ func (h *Handler) ToggleWatched(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
 		return
 	}
+	if _, ok := h.requireMediaAccess(c, id, true); !ok {
+		return
+	}
+	if middleware.IsAPIClient(c) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "API client credentials cannot sync user progress"})
+		return
+	}
 	userID := middleware.UserID(c)
 	if userID <= 0 {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
 	progress := playcompletion.Store{DB: h.App.DB, Now: h.PlayCompletionNow}
-	watched := c.Request.Method == http.MethodPut
-	if watched {
+	if c.Request.Method == http.MethodPut {
 		err = progress.MarkWatched(c.Request.Context(), userID, id)
 	} else {
 		err = progress.MarkUnwatched(c.Request.Context(), userID, id)
@@ -439,5 +462,5 @@ func (h *Handler) ToggleWatched(c *gin.Context) {
 		writePlaybackStoreError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"ok": true, "watched": watched})
+	c.JSON(http.StatusOK, gin.H{"ok": true, "watched": c.Request.Method == http.MethodPut})
 }

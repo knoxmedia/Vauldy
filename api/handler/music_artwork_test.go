@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -29,7 +30,7 @@ func TestServeAlbumArtworkServesCachedFile(t *testing.T) {
 
 	_, _ = db.Exec(`INSERT INTO library (id, name, type, path, enabled) VALUES (1, 'music', 'music', ?, 1)`, dir)
 	_, _ = db.Exec(`INSERT INTO user (id, username, password, role, can_play, library_scope) VALUES (2, 'admin', 'x', 'admin', 1, 'all')`)
-	_, _ = db.Exec(`INSERT INTO music_album (id, library_id, title, title_norm, artwork_path) VALUES (1, 1, 'Album', 'album', ?); INSERT INTO media(id,library_id,file_id,title,file_path,file_type,status,publication_state) VALUES(10,1,'track','Track',?,'audio','active','published'); INSERT INTO music_track(album_id,media_id,title) VALUES(1,10,'Track')`, art, filepath.Join(dir, "track.mp3"))
+	_, _ = db.Exec(`INSERT INTO music_album (id, library_id, title, title_norm, artwork_path) VALUES (1, 1, 'Album', 'album', ?)`, art)
 
 	h := &Handler{App: &app.App{DB: db}, runningScans: map[int64]scanRuntime{}}
 	w := httptest.NewRecorder()
@@ -89,5 +90,53 @@ func TestAlbumArtworkCandidatePathsIncludesPlainDir(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("candidates=%v want %q", paths, cover)
+	}
+}
+
+func TestServeAlbumArtworkMissingStoredPathIsServeOnly(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, writes := openPhotoGETWriteCountingDB(t)
+	root := t.TempDir()
+	albumDir := filepath.Join(root, "Artist", "Album")
+	if err := os.MkdirAll(albumDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	track := filepath.Join(albumDir, "track.flac")
+	cover := filepath.Join(albumDir, "cover.jpg")
+	if err := os.WriteFile(track, []byte("audio"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cover, []byte("lazy-cover"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := db.Exec(`INSERT INTO library(id,name,type,path) VALUES(2,'music','music',?); INSERT INTO music_album(id,library_id,title,title_norm) VALUES(40,2,'Album','album'); INSERT INTO media(id,library_id,file_id,title,file_path,file_type,status) VALUES(50,2,'a','Track',?,'audio','active'); INSERT INTO music_track(album_id,media_id,title,sort_order) VALUES(40,50,'Track',1)`, root, track)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := snapshotFiles(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writes.Store(0)
+	h := &Handler{App: &app.App{DB: db}}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/album/40/artwork", nil)
+	c.Params = gin.Params{{Key: "id", Value: "40"}}
+	setUserCtx(c, 2, "admin", "admin")
+	h.ServeAlbumArtwork(c)
+	c.Writer.WriteHeaderNow()
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status=%d body=%q", w.Code, w.Body.String())
+	}
+	if got := writes.Load(); got != 0 {
+		t.Fatalf("writes=%d", got)
+	}
+	after, err := snapshotFiles(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(before) != fmt.Sprint(after) {
+		t.Fatalf("files changed before=%v after=%v", before, after)
 	}
 }
