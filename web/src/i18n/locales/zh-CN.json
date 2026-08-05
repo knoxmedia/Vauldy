@@ -2600,7 +2600,7 @@
       "confirm": "确认",
       "cancel": "取消",
       "batch_selected": "已选 {count} 项",
-      "batch_clear": "清除",
+      "batch_clear": "取消选择",
       "batch_abort": "批量中止",
       "batch_remove": "批量移除",
       "batch_reset": "批量重置",

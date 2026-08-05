@@ -541,7 +541,11 @@ func (w *Worker) runRenditionJob(parent context.Context, job *claimedJob, p *Pre
 		w.failJob(job, "output file missing after ffmpeg success", encoder)
 		return
 	}
-	if _, err := w.finalizeJobAndTaskTx(ctx, *job, renditionJobTerminal{Status: "done", Progress: 100, OutputPath: built.OutFile, Encoder: encoder}); err != nil {
+	terminal := renditionJobTerminal{Status: "done", Progress: 100, OutputPath: built.OutFile, Encoder: encoder}
+	if err := retryTerminalFinalize(func(finalizeCtx context.Context) error {
+		_, finalizeErr := w.finalizeJobAndTaskTx(finalizeCtx, *job, terminal)
+		return finalizeErr
+	}); err != nil {
 		log.Printf("pretranscode job %d finalize failed: %v", job.ID, err)
 	}
 }
@@ -733,6 +737,49 @@ type renditionJobTerminal struct {
 	OutputPath   string
 	ErrorMessage string
 	Encoder      string
+}
+
+const terminalFinalizeTimeout = 5 * time.Second
+
+var terminalFinalizeBackoff = []time.Duration{25 * time.Millisecond, 75 * time.Millisecond, 150 * time.Millisecond}
+
+// retryTerminalFinalize gives a successful FFmpeg run a bounded opportunity to
+// persist its terminal state without inheriting cancellation from execution or
+// lease contexts. Only SQLite contention is retried; ownership loss and all
+// other failures are returned immediately.
+func retryTerminalFinalize(finalize func(context.Context) error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), terminalFinalizeTimeout)
+	defer cancel()
+
+	var err error
+	for attempt := 0; ; attempt++ {
+		err = finalize(ctx)
+		if err == nil {
+			return nil
+		}
+		if errors.Is(err, ErrJobOwnershipLost) || !isTransientTerminalFinalizeError(err) || attempt >= len(terminalFinalizeBackoff) {
+			return err
+		}
+		timer := time.NewTimer(terminalFinalizeBackoff[attempt])
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func isTransientTerminalFinalizeError(err error) bool {
+	if err == nil || errors.Is(err, ErrJobOwnershipLost) {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "database is locked") ||
+		strings.Contains(message, "database table is locked") ||
+		strings.Contains(message, "database schema is locked") ||
+		strings.Contains(message, "sqlite_busy") ||
+		strings.Contains(message, "sqlite_locked")
 }
 
 // finalizeJobAndTaskTx persists one running rendition's terminal payload and,

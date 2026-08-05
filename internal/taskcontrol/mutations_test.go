@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 
@@ -64,6 +65,10 @@ func createMutationTestSchema(t *testing.T, db *sql.DB) error {
 			removed_by TEXT NOT NULL DEFAULT '',
 			remove_reason TEXT NOT NULL DEFAULT ''
 		)		`,
+		`CREATE TABLE transcode_task (
+			id INTEGER PRIMARY KEY,
+			status TEXT NOT NULL DEFAULT 'waiting'
+		)`,
 		`CREATE TABLE media (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			library_id INTEGER,
@@ -661,28 +666,83 @@ func TestRemoveNeverDeletesSource(t *testing.T) {
 	}
 }
 
-func TestRemoveRequestsAbortForCancellableRunning(t *testing.T) {
+func TestRemoveRunningTombstonesAndConvergesOnAbortAcknowledge(t *testing.T) {
 	db := openMutationTestDB(t)
 	svc := NewMutateService(db)
 	id := insertRunningTask(t, db, "transcode")
 	taskID := BuildIdentity("orchestration", id)
+	notified := make(chan int64, 1)
+	svc.SetAbortNotifier(func(taskID int64) { notified <- taskID })
 
-	err := svc.Remove(context.Background(), RemoveParams{
+	if err := svc.Remove(context.Background(), RemoveParams{
 		TaskIdentity: taskID,
-		ActorID:      1,
+		ActorID:      7,
 		Reason:       "force remove",
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatalf("remove running: %v", err)
 	}
 
-	// Should have persisted an abort intent
-	var abortReq sql.NullTime
-	if err := db.QueryRow(`SELECT requested_at FROM task_abort_intent WHERE task_identity='orchestration:' || ?`, id).Scan(&abortReq); err != nil {
+	var status, leaseOwner, removedBy, removeReason string
+	var leaseUntil, removedAt, requestedAt, acknowledgedAt sql.NullTime
+	var intentOutcome, auditAction string
+	if err := db.QueryRow(`SELECT t.status,t.lease_owner,t.lease_until,t.removed_at,t.removed_by,t.remove_reason,
+		i.requested_at,i.acknowledged_at,i.outcome
+		FROM post_ingest_task t JOIN task_abort_intent i ON i.task_identity=? WHERE t.id=?`, taskID, id).
+		Scan(&status, &leaseOwner, &leaseUntil, &removedAt, &removedBy, &removeReason, &requestedAt, &acknowledgedAt, &intentOutcome); err != nil {
 		t.Fatal(err)
 	}
-	if !abortReq.Valid {
-		t.Error("abort intent should be set when removing running task")
+	if status != "running" || leaseOwner != "test-owner/uuid" || !leaseUntil.Valid {
+		t.Fatalf("running lease changed: status=%q owner=%q until=%v", status, leaseOwner, leaseUntil.Valid)
+	}
+	if !removedAt.Valid || removedBy != "7" || removeReason != "force remove" {
+		t.Fatalf("tombstone time=%v by=%q reason=%q", removedAt.Valid, removedBy, removeReason)
+	}
+	if !requestedAt.Valid || acknowledgedAt.Valid || intentOutcome != "" {
+		t.Fatalf("abort intent requested=%v acknowledged=%v outcome=%q", requestedAt.Valid, acknowledgedAt.Valid, intentOutcome)
+	}
+	var visible int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM post_ingest_task WHERE id=? AND removed_at IS NULL`, id).Scan(&visible); err != nil {
+		t.Fatal(err)
+	}
+	if visible != 0 {
+		t.Fatal("removed=exclude should hide the running task immediately")
+	}
+	if err := db.QueryRow(`SELECT action FROM task_control_audit WHERE task_identity=? ORDER BY id DESC LIMIT 1`, taskID).Scan(&auditAction); err != nil {
+		t.Fatal(err)
+	}
+	if auditAction != "remove_abort_request" {
+		t.Fatalf("audit action=%q", auditAction)
+	}
+	select {
+	case got := <-notified:
+		if got != id {
+			t.Fatalf("notified task=%d want=%d", got, id)
+		}
+	default:
+		t.Fatal("abort notifier did not fire after remove commit")
+	}
+
+	if err := svc.Remove(context.Background(), RemoveParams{TaskIdentity: taskID, ActorID: 7, Reason: "force remove"}); err != nil {
+		t.Fatalf("idempotent remove replay: %v", err)
+	}
+	select {
+	case got := <-notified:
+		t.Fatalf("remove replay unexpectedly notified task %d", got)
+	default:
+	}
+
+	if err := svc.AbortAcknowledge(context.Background(), AbortAckParams{
+		TaskIdentity: taskID,
+		OwnerFence:   "test-owner/uuid",
+	}); err != nil {
+		t.Fatalf("abort acknowledge: %v", err)
+	}
+	if err := db.QueryRow(`SELECT status,removed_at,removed_by,remove_reason FROM post_ingest_task WHERE id=?`, id).
+		Scan(&status, &removedAt, &removedBy, &removeReason); err != nil {
+		t.Fatal(err)
+	}
+	if status != "cancelled" || !removedAt.Valid || removedBy != "7" || removeReason != "force remove" {
+		t.Fatalf("ack result status=%q tombstone=%v by=%q reason=%q", status, removedAt.Valid, removedBy, removeReason)
 	}
 }
 
@@ -820,18 +880,34 @@ func TestResetNonTerminalFails(t *testing.T) {
 func TestStaleRevisionReturnsLatestRow(t *testing.T) {
 	db := openMutationTestDB(t)
 	svc := NewMutateService(db)
-	id := insertTestTask(t, db, "transcode", "failed", 0)
+	id := insertTestTask(t, db, "transcode", "failed", 3)
 	taskID := BuildIdentity("orchestration", id)
+	if _, err := db.Exec(`INSERT INTO task_projection_revision(task_identity,revision) VALUES(?, 12)`, taskID); err != nil {
+		t.Fatal(err)
+	}
 
 	err := svc.Reset(context.Background(), ResetParams{
 		TaskIdentity:     taskID,
 		ActorID:          1,
 		Reason:           "retry",
-		ExpectedRevision: 999, // stale revision
+		ExpectedRevision: 11,
 	})
-	// Stale revision should return the latest row without error (no mutation but returns current state)
-	if err != nil {
-		t.Fatalf("stale revision should return latest row: %v", err)
+	if !errors.Is(err, ErrStaleRevision) {
+		t.Fatalf("reset error=%v, want ErrStaleRevision", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "expected rev 11, got 12") {
+		t.Fatalf("stale revision details missing: %v", err)
+	}
+	var status string
+	var retryRound, audits int
+	if err := db.QueryRow(`SELECT status,retry_round FROM post_ingest_task WHERE id=?`, id).Scan(&status, &retryRound); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM task_control_audit WHERE task_identity=? AND action='reset'`, taskID).Scan(&audits); err != nil {
+		t.Fatal(err)
+	}
+	if status != "failed" || retryRound != 3 || audits != 0 {
+		t.Fatalf("stale reset mutated state: status=%q retry_round=%d audits=%d", status, retryRound, audits)
 	}
 }
 
@@ -2174,5 +2250,94 @@ func TestAbortRequestRejectsNonOrchestrationIdentity(t *testing.T) {
 	}
 	if intents != 0 || audits != 0 || len(notified) != 0 {
 		t.Fatalf("intents=%d audits=%d notified=%v", intents, audits, notified)
+	}
+}
+
+func TestAbortRequestUsesRegisteredExternalHandler(t *testing.T) {
+	db := openMutationTestDB(t)
+	svc := NewMutateService(db)
+	const id int64 = 91
+	identity := BuildIdentity("transcode_task", id)
+	if _, err := db.Exec(`INSERT INTO transcode_task(id,status) VALUES(?, 'running')`, id); err != nil {
+		t.Fatal(err)
+	}
+	var calledID int64
+	svc.SetExternalAbortHandler("transcode_task", func(ctx context.Context, gotID int64) error {
+		calledID = gotID
+		_, err := db.ExecContext(ctx, `UPDATE transcode_task SET status='cancelled' WHERE id=? AND status='running'`, gotID)
+		return err
+	})
+
+	if err := svc.AbortRequest(context.Background(), AbortRequestParams{
+		TaskIdentity: identity, ActorID: 17, Reason: "stop pretranscode",
+	}); err != nil {
+		t.Fatalf("AbortRequest: %v", err)
+	}
+	if calledID != id {
+		t.Fatalf("handler id = %d, want %d", calledID, id)
+	}
+	var status string
+	if err := db.QueryRow(`SELECT status FROM transcode_task WHERE id=?`, id).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "cancelled" {
+		t.Fatalf("status = %q, want cancelled", status)
+	}
+	var action, previous, next string
+	if err := db.QueryRow(`SELECT action,previous_status,new_status FROM task_control_audit WHERE task_identity=?`, identity).Scan(&action, &previous, &next); err != nil {
+		t.Fatal(err)
+	}
+	if action != "abort" || previous != "running" || next != "cancelled" {
+		t.Fatalf("audit=(%q,%q,%q)", action, previous, next)
+	}
+	var intents int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM task_abort_intent WHERE task_identity=?`, identity).Scan(&intents); err != nil {
+		t.Fatal(err)
+	}
+	if intents != 0 {
+		t.Fatalf("external abort created %d durable intents", intents)
+	}
+}
+
+func TestAbortRequestPropagatesExternalHandlerError(t *testing.T) {
+	db := openMutationTestDB(t)
+	svc := NewMutateService(db)
+	want := errors.New("cancel failed")
+	svc.SetExternalAbortHandler("transcode_task", func(context.Context, int64) error { return want })
+	err := svc.AbortRequest(context.Background(), AbortRequestParams{
+		TaskIdentity: BuildIdentity("transcode_task", 3), ActorID: 17, Reason: "stop",
+	})
+	if !errors.Is(err, want) {
+		t.Fatalf("error=%v want callback error", err)
+	}
+	var audits int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM task_control_audit`).Scan(&audits); err != nil {
+		t.Fatal(err)
+	}
+	if audits != 0 {
+		t.Fatalf("callback failure wrote %d audits", audits)
+	}
+}
+
+func TestExternalRemoveRoutesHandlerAndDoesNotUseBatchTransaction(t *testing.T) {
+	db := openMutationTestDB(t)
+	svc := NewMutateService(db)
+	var gotID int64
+	svc.SetExternalOperationHandler("transcode_task", "remove", func(_ context.Context, id int64) error {
+		gotID = id
+		return nil
+	})
+	if err := svc.Remove(context.Background(), RemoveParams{TaskIdentity: "transcode_task:81", ActorID: 7, Reason: "operator cleanup"}); err != nil {
+		t.Fatalf("external remove: %v", err)
+	}
+	if gotID != 81 {
+		t.Fatalf("handler id=%d want 81", gotID)
+	}
+	var batchRows int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM task_batch_operation`).Scan(&batchRows); err != nil {
+		t.Fatal(err)
+	}
+	if batchRows != 0 {
+		t.Fatalf("external single remove unexpectedly created %d batch operations", batchRows)
 	}
 }

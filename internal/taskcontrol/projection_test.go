@@ -57,6 +57,30 @@ func setupProjectionTestDB(t *testing.T) (*sql.DB, *ProjectionBuilder) {
 			status TEXT DEFAULT 'active',
 			publication_state TEXT NOT NULL DEFAULT 'published'
 		)`,
+		`CREATE TABLE transcode_task (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			file_id TEXT,
+			quality TEXT,
+			status TEXT DEFAULT 'waiting',
+			progress INTEGER DEFAULT 0,
+			error_message TEXT,
+			output_path TEXT,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			task_type TEXT NOT NULL DEFAULT 'batch',
+			started_at TIMESTAMP,
+			completed_at TIMESTAMP,
+			preset_id INTEGER,
+			ingest_run_id INTEGER,
+			ingest_step_id INTEGER,
+			generation INTEGER,
+			media_id INTEGER,
+			lease_owner TEXT,
+			lease_until TIMESTAMP,
+			retry_round INTEGER NOT NULL DEFAULT 0
+		)`,
+		`CREATE TABLE pretranscode_task_meta (
+			task_id INTEGER PRIMARY KEY
+		)`,
 		`CREATE TABLE task_projection_sequence (
 			singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
 			next_revision INTEGER NOT NULL DEFAULT 1 CHECK (next_revision >= 1)
@@ -85,6 +109,7 @@ func setupProjectionTestDB(t *testing.T) (*sql.DB, *ProjectionBuilder) {
 	}
 	builder := NewProjectionBuilder(db, NewRegistry())
 	builder.RegisterAdapter(NewOracleAdapter(db))
+	builder.RegisterAdapter(NewTranscodeAdapter(db))
 	return db, builder
 }
 
@@ -415,8 +440,8 @@ func TestProjectionRetryRound(t *testing.T) {
 	defer db.Close()
 
 	id := insertOracleTask(t, db, "encrypt", "running", map[string]any{
-		"retry_round": 3,
-		"attempts":    1,
+		"retry_round":  3,
+		"attempts":     1,
 		"max_attempts": 5,
 	})
 	taskID := BuildIdentity("orchestration", id)

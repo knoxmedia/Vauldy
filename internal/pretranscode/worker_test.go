@@ -582,3 +582,37 @@ func exactClaimedJob(t *testing.T, db *sql.DB, jobID, taskID int64, jobOwner str
 	}
 	return claimedJob{ID: jobID, TaskID: taskID, Owner: jobOwner, Parent: p, RetryRound: jobRound}
 }
+
+func TestRetryTerminalFinalizeConvergesAfterTransientFailure(t *testing.T) {
+	attempts := 0
+	err := retryTerminalFinalize(func(ctx context.Context) error {
+		attempts++
+		if ctx.Err() != nil {
+			t.Fatalf("finalize context already canceled: %v", ctx.Err())
+		}
+		if attempts == 1 {
+			return errors.New("database is locked (5) (SQLITE_BUSY)")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("retry terminal finalize: %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts=%d want 2", attempts)
+	}
+}
+
+func TestRetryTerminalFinalizeDoesNotRetryOwnershipLoss(t *testing.T) {
+	attempts := 0
+	err := retryTerminalFinalize(func(context.Context) error {
+		attempts++
+		return ErrJobOwnershipLost
+	})
+	if !errors.Is(err, ErrJobOwnershipLost) {
+		t.Fatalf("err=%v", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts=%d want 1", attempts)
+	}
+}

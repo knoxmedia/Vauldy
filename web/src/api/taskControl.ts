@@ -68,6 +68,7 @@ export interface ProjectionRow {
   dependencies?: DependencyInfo[];
   resources?: string[];
   projection_error?: string;
+  allowed_actions: AllowedActions;
 }
 
 export interface SourceMapping {
@@ -263,7 +264,8 @@ export function isProjectionRow(v: unknown): v is ProjectionRow {
     isNumber(v.effective_priority) &&
     isString(v.created_at) &&
     isString(v.updated_at) &&
-    isBoolean(v.tombstone)
+    isBoolean(v.tombstone) &&
+    isAllowedActions(v.allowed_actions)
   );
 }
 

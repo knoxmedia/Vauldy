@@ -2602,7 +2602,7 @@
       "confirm": "Confirm",
       "cancel": "Cancel",
       "batch_selected": "{count} selected",
-      "batch_clear": "Clear",
+      "batch_clear": "Clear selection",
       "batch_abort": "Batch Abort",
       "batch_remove": "Batch Remove",
       "batch_reset": "Batch Reset",

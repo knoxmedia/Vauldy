@@ -248,7 +248,7 @@ func TestRegistrySourceMappingsCoversPhase1To3Names(t *testing.T) {
 		"atrack_extract":      {"post_ingest_task:atrack", "post_ingest_task:atrack_extract", "atrack_task:"},
 		"encrypt":             {"post_ingest_task:encrypt"},
 		"package":             {"post_ingest_task:package", "package_task:"},
-		"pretranscode":        {"post_ingest_task:pretranscode"},
+		"pretranscode":        {"transcode_task:pretranscode"},
 		"metadata_scrape":     {"post_ingest_task:metadata", "scrape_task:"},
 		"ai_analysis":         {"post_ingest_task:ai_analysis"},
 		"transcode":           {"transcode_task:"},

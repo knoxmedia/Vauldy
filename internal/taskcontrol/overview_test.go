@@ -293,3 +293,44 @@ func TestOverviewSnapshotRevisionSet(t *testing.T) {
 		t.Errorf("snapshot_revision should be >= 0, got %d", overview.SnapshotRev)
 	}
 }
+
+func TestOverviewIncludesRunningPretranscode(t *testing.T) {
+	db, builder := setupProjectionTestDB(t)
+	defer db.Close()
+	orchestrationID := insertOracleTask(t, db, "poster", "running", map[string]any{"media_id": int64(88)})
+	if _, err := db.Exec(`INSERT INTO media(id,library_id,file_id,title,file_path) VALUES(88,9,'overview-file','Overview title','/media/overview.mp4');
+		INSERT INTO transcode_task(file_id,status,task_type,media_id) VALUES('overview-file','running','pretranscode',NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	var transcodeID int64
+	if err := db.QueryRow(`SELECT id FROM transcode_task WHERE file_id='overview-file'`).Scan(&transcodeID); err != nil {
+		t.Fatal(err)
+	}
+	overview, err := NewOverviewBuilder(builder).Compute(context.Background())
+	if err != nil {
+		t.Fatalf("Compute: %v", err)
+	}
+	if overview.TypeCounts["pretranscode"] != 1 {
+		t.Errorf("pretranscode type count = %d, want 1", overview.TypeCounts["pretranscode"])
+	}
+	if overview.StatusCounts.Running != 2 {
+		t.Errorf("running count = %d, want 2", overview.StatusCounts.Running)
+	}
+	want := map[string]bool{
+		BuildIdentity("orchestration", orchestrationID): false,
+		BuildIdentity("transcode_task", transcodeID):    false,
+	}
+	for _, item := range overview.Running.Items {
+		if seen, ok := want[item.TaskID]; ok {
+			if seen {
+				t.Fatalf("duplicate running task %s", item.TaskID)
+			}
+			want[item.TaskID] = true
+		}
+	}
+	for identity, seen := range want {
+		if !seen {
+			t.Errorf("running overview missing %s", identity)
+		}
+	}
+}

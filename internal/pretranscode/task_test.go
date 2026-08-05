@@ -561,3 +561,69 @@ func TestLinkedManagementDeletionAPIsRejectWithoutMutation(t *testing.T) {
 		})
 	}
 }
+
+func TestGetMediaOptimizationStatusValidatesDoneArtifacts(t *testing.T) {
+	db := newTestDB(t)
+	root := t.TempDir()
+	preset, err := (&PresetService{DB: db}).CreatePreset(CreatePresetInput{
+		Name: "artifact-status", OutputFormat: "hls", VideoCodec: "libx264", AudioCodec: "aac", AudioBitrate: "128k",
+		Renditions: []Rendition{
+			{Name: "720p", Height: 720, VideoBitrate: "2800k"},
+			{Name: "1080p", Height: 1080, VideoBitrate: "5000k"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mediaID := seedVideo(t, db, root, "fid-artifact-status", "Artifacts")
+	svc := &TaskService{DB: db, TranscodeDir: root}
+	taskIDs, err := svc.CreateTask([]int64{mediaID}, preset.ID, "normal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := svc.ListRenditionJobs(taskIDs[0])
+	if err != nil || len(jobs) != 2 {
+		t.Fatalf("jobs=%+v err=%v", jobs, err)
+	}
+
+	validDir := filepath.Join(root, "valid-720p")
+	if err = os.MkdirAll(validDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	validManifest := filepath.Join(validDir, "master.m3u8")
+	if err = os.WriteFile(validManifest, []byte("#EXTM3U"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(validDir, "segment000.ts"), []byte("segment"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	missingManifest := filepath.Join(root, "missing-1080p", "master.m3u8")
+
+	for _, job := range jobs {
+		outputPath := missingManifest
+		if job.RenditionName == "720p" {
+			outputPath = validManifest
+		}
+		if _, err = db.Exec(`UPDATE pretranscode_rendition_job SET status='done',progress=100,output_path=?,completed_at=CURRENT_TIMESTAMP WHERE id=?`, outputPath, job.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	status, err := svc.GetMediaOptimizationStatus(mediaID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(status.OptimizedRenditions) != 1 {
+		t.Fatalf("optimized=%+v", status.OptimizedRenditions)
+	}
+	if got := status.OptimizedRenditions[0].RenditionName; got != "720p" {
+		t.Fatalf("rendition=%q want 720p", got)
+	}
+	var done int
+	if err = db.QueryRow(`SELECT COUNT(1) FROM pretranscode_rendition_job WHERE task_id=? AND status='done'`, taskIDs[0]).Scan(&done); err != nil {
+		t.Fatal(err)
+	}
+	if done != 2 {
+		t.Fatalf("GET mutated done rows: %d", done)
+	}
+}

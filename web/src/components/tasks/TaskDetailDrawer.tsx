@@ -122,7 +122,7 @@ export function TaskDetailDrawer({ taskId, onClose, onActionSuccess }: TaskDetai
           borderBottom: "1px solid #303030",
         }}
       >
-        <Tooltip title={t("tasks.control.action_abort")}>
+        {row?.allowed_actions?.abort && <Tooltip title={t("tasks.control.action_abort")}>
           <Popconfirm
             title={t("tasks.control.confirm_abort")}
             onConfirm={() => executeAction("abort")}
@@ -133,8 +133,8 @@ export function TaskDetailDrawer({ taskId, onClose, onActionSuccess }: TaskDetai
               {t("tasks.control.action_abort")}
             </Button>
           </Popconfirm>
-        </Tooltip>
-        <Tooltip title={t("tasks.control.action_reset")}>
+        </Tooltip>}
+        {row?.allowed_actions?.reset && <Tooltip title={t("tasks.control.action_reset")}>
           <Popconfirm
             title={t("tasks.control.confirm_reset")}
             onConfirm={() => executeAction("reset")}
@@ -145,8 +145,8 @@ export function TaskDetailDrawer({ taskId, onClose, onActionSuccess }: TaskDetai
               {t("tasks.control.action_reset")}
             </Button>
           </Popconfirm>
-        </Tooltip>
-        <Tooltip title={t("tasks.control.action_run_now")}>
+        </Tooltip>}
+        {row?.allowed_actions?.run_now && <Tooltip title={t("tasks.control.action_run_now")}>
           <Popconfirm
             title={t("tasks.control.confirm_run_now")}
             onConfirm={() => executeAction("run_now")}
@@ -157,8 +157,8 @@ export function TaskDetailDrawer({ taskId, onClose, onActionSuccess }: TaskDetai
               {t("tasks.control.action_run_now")}
             </Button>
           </Popconfirm>
-        </Tooltip>
-        <Tooltip title={t("tasks.control.action_skip")}>
+        </Tooltip>}
+        {row?.allowed_actions?.skip && <Tooltip title={t("tasks.control.action_skip")}>
           <Popconfirm
             title={t("tasks.control.confirm_skip")}
             onConfirm={() => executeAction("skip")}
@@ -169,8 +169,8 @@ export function TaskDetailDrawer({ taskId, onClose, onActionSuccess }: TaskDetai
               {t("tasks.control.action_skip")}
             </Button>
           </Popconfirm>
-        </Tooltip>
-        <Tooltip title={t("tasks.control.action_remove")}>
+        </Tooltip>}
+        {row?.allowed_actions?.remove && <Tooltip title={t("tasks.control.action_remove")}>
           <Popconfirm
             title={t("tasks.control.confirm_remove")}
             onConfirm={() => executeAction("remove")}
@@ -181,8 +181,8 @@ export function TaskDetailDrawer({ taskId, onClose, onActionSuccess }: TaskDetai
               {t("tasks.control.action_remove")}
             </Button>
           </Popconfirm>
-        </Tooltip>
-        <Tooltip title={t("tasks.control.action_reopen")}>
+        </Tooltip>}
+        {row?.allowed_actions?.reopen && <Tooltip title={t("tasks.control.action_reopen")}>
           <Popconfirm
             title={t("tasks.control.confirm_reopen")}
             onConfirm={() => executeAction("reopen")}
@@ -193,7 +193,7 @@ export function TaskDetailDrawer({ taskId, onClose, onActionSuccess }: TaskDetai
               {t("tasks.control.action_reopen")}
             </Button>
           </Popconfirm>
-        </Tooltip>
+        </Tooltip>}
       </div>
 
       {detail && row && !loading && (

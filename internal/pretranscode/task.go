@@ -786,13 +786,17 @@ func (s *TaskService) GetMediaOptimizationStatus(mediaID int64) (*MediaOptimizat
 		if err := rows.Scan(&r.RenditionJobID, &r.RenditionName, &r.OutputFormat, &r.PresetName, &r.CompletedAt, &outputPath); err != nil {
 			return nil, err
 		}
-		if outputPath != "" {
-			r.FileSize, _ = dirSize(RenditionSizePath(outputPath, r.OutputFormat))
+		if !validRenditionArtifact(outputPath, r.OutputFormat) {
+			continue
 		}
+		r.FileSize, _ = dirSize(RenditionSizePath(outputPath, r.OutputFormat))
 		// Parse resolution from rendition name (e.g., "720p" -> "1280x720", portrait -> "720x1280")
 		r.Resolution = resolutionFromRendition(r.RenditionName, width, height)
 		r.Bitrate = bitrateFromName(r.RenditionName)
 		status.OptimizedRenditions = append(status.OptimizedRenditions, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	// Get running tasks (including failed ones so user sees error details)

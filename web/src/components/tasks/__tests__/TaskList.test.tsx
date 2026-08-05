@@ -32,6 +32,7 @@ function makeRow(id: number, overrides: Partial<ProjectionRow> = {}): Projection
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     tombstone: false,
+    allowed_actions: { abort: false, remove: false, reset: false, run_now: false, skip: false, reopen: false },
     ...overrides,
   };
 }
@@ -168,4 +169,58 @@ describe("TaskList", () => {
       expect(alert).toBeInTheDocument();
     });
   });
+  it("renders only server-allowed row actions", async () => {
+    mockFetchTaskControlList.mockResolvedValue({ items: [makeRow(9, { source_kind: "scan_task", task_id: "scan_task:9", normalized_status: "running", raw_status: "running", allowed_actions: { abort: true, remove: false, reset: false, run_now: false, skip: false, reopen: false } })], total: 1, has_more: false, truncated: false, snapshot_revision: 1 });
+    render(<TaskList {...defaultProps} />);
+    await screen.findByText("scan_task:9");
+    expect(document.querySelector(".anticon-stop")).toBeInTheDocument();
+    expect(document.querySelector(".anticon-reload")).not.toBeInTheDocument();
+  });
+
+  it("clear-selection only deselects and uses the correct label", async () => {
+    mockFetchTaskControlList.mockResolvedValue({ items: [makeRow(1)], total: 1, has_more: false, truncated: false, snapshot_revision: 1 });
+    render(<TaskList {...defaultProps} />);
+    await screen.findByText("orchestration:1");
+    fireEvent.click(document.querySelector('tbody input[type="checkbox"]')!);
+    const clear = document.querySelector(".anticon-clear")!.closest("button")!;
+    fireEvent.mouseEnter(clear);
+    expect(await screen.findByText("\u53d6\u6d88\u9009\u62e9")).toBeInTheDocument();
+    fireEvent.click(clear);
+    expect(mockFetchTaskControlActions).not.toHaveBeenCalled();
+    expect(mockFetchTaskControlBatch).not.toHaveBeenCalled();
+  });
+
+  it("removes selected eligible external rows through single-action calls", async () => {
+    const rows = [1, 2].map((id) => makeRow(id, {
+      task_id: `transcode_task:${id}`, source_kind: "transcode_task", task_type: "pretranscode",
+      normalized_status: "cancelled", raw_status: "cancelled",
+      allowed_actions: { abort: false, remove: true, reset: false, run_now: false, skip: false, reopen: false },
+    }));
+    mockFetchTaskControlList.mockResolvedValue({ items: rows, total: 2, has_more: false, truncated: false, snapshot_revision: 1 });
+    render(<TaskList {...defaultProps} taskType="pretranscode" />);
+    await screen.findByText("transcode_task:1");
+    fireEvent.click(document.querySelector('thead input[type="checkbox"]')!);
+    const batchDelete = Array.from(document.querySelectorAll(".anticon-delete"))
+      .map((icon) => icon.closest("button")!)
+      .find((button) => !button.closest("tbody"))!;
+    fireEvent.click(batchDelete);
+    await waitFor(() => expect(document.querySelector(".ant-popconfirm-buttons .ant-btn-primary")).toBeInTheDocument());
+    fireEvent.click(document.querySelector(".ant-popconfirm-buttons .ant-btn-primary")!);
+    await waitFor(() => expect(mockFetchTaskControlActions).toHaveBeenCalledTimes(2));
+    expect(mockFetchTaskControlActions).toHaveBeenNthCalledWith(1, "transcode_task:1", { action: "remove", reason: "batch remove" });
+    expect(mockFetchTaskControlActions).toHaveBeenNthCalledWith(2, "transcode_task:2", { action: "remove", reason: "batch remove" });
+    expect(mockFetchTaskControlBatch).not.toHaveBeenCalled();
+    await waitFor(() => expect(mockFetchTaskControlList).toHaveBeenCalledTimes(2));
+  });
+
+  it("hides batch remove when an external selection is not removable", async () => {
+    const removable = makeRow(1, { task_id: "transcode_task:1", source_kind: "transcode_task", normalized_status: "cancelled", raw_status: "cancelled", allowed_actions: { abort: false, remove: true, reset: false, run_now: false, skip: false, reopen: false } });
+    const linked = makeRow(2, { task_id: "transcode_task:2", source_kind: "transcode_task", normalized_status: "cancelled", raw_status: "cancelled" });
+    mockFetchTaskControlList.mockResolvedValue({ items: [removable, linked], total: 2, has_more: false, truncated: false, snapshot_revision: 1 });
+    render(<TaskList {...defaultProps} taskType="pretranscode" />);
+    await screen.findByText("transcode_task:1");
+    document.querySelectorAll('tbody input[type="checkbox"]').forEach((box) => fireEvent.click(box));
+    expect(document.querySelectorAll(".anticon-delete")).toHaveLength(1);
+  });
+
 });

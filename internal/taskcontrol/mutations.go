@@ -155,14 +155,95 @@ var (
 // =============================================================================
 
 // MutateService performs idempotent, audited mutations on task rows.
+type ExternalOperationHandler func(context.Context, int64) error
+type ExternalOperationAvailability func(*ProjectionRow) bool
+
+type externalOperationRegistration struct {
+	handler      ExternalOperationHandler
+	availability ExternalOperationAvailability
+}
+
 type MutateService struct {
-	db            *sql.DB
-	abortNotifier func(taskID int64)
+	db               *sql.DB
+	abortNotifier    func(taskID int64)
+	externalHandlers map[string]map[string]externalOperationRegistration
 }
 
 // NewMutateService creates a new MutateService.
 func NewMutateService(db *sql.DB) *MutateService {
-	return &MutateService{db: db}
+	return &MutateService{db: db, externalHandlers: make(map[string]map[string]externalOperationRegistration)}
+}
+
+// SetExternalOperationHandler registers a safe operation for a non-orchestration source.
+func (s *MutateService) SetExternalOperationHandler(kind, operation string, handler ExternalOperationHandler, availability ...ExternalOperationAvailability) {
+	if kind == "" || kind == "orchestration" || kind == "post_ingest_task" || operation == "" {
+		return
+	}
+	if s.externalHandlers[kind] == nil {
+		s.externalHandlers[kind] = make(map[string]externalOperationRegistration)
+	}
+	if handler == nil {
+		delete(s.externalHandlers[kind], operation)
+		return
+	}
+	var predicate ExternalOperationAvailability
+	if len(availability) > 0 {
+		predicate = availability[0]
+	}
+	s.externalHandlers[kind][operation] = externalOperationRegistration{handler: handler, availability: predicate}
+}
+
+// SetExternalAbortHandler preserves the existing registration API.
+func (s *MutateService) SetExternalAbortHandler(kind string, handler ExternalOperationHandler) {
+	s.SetExternalOperationHandler(kind, "abort", handler)
+}
+
+func (s *MutateService) externalOperation(ctx context.Context, identity, operation string) error {
+	kind, id, err := parseIdentity(identity)
+	if err != nil {
+		return err
+	}
+	registration := s.externalHandlers[kind][operation]
+	if registration.handler == nil {
+		return fmt.Errorf("%w: no %s handler for source kind %s", ErrInvalidOperation, operation, kind)
+	}
+	return registration.handler(ctx, id)
+}
+
+// AllowedActions resolves policy and actually registered operation handlers.
+func (s *MutateService) AllowedActions(row *ProjectionRow) AllowedActions {
+	if row == nil {
+		return AllowedActions{}
+	}
+	if row.SourceKind == "orchestration" {
+		return ComputeActions(row, WithAITask(row.TaskType == "ai_analysis"))
+	}
+	h := s.externalHandlers[row.SourceKind]
+	available := func(operation string) bool {
+		registration := h[operation]
+		return registration.handler != nil && (registration.availability == nil || registration.availability(row))
+	}
+	return AllowedActions{
+		Abort:  row.NormalizedStatus == StatusRunning && available("abort"),
+		Reset:  row.NormalizedStatus.IsTerminal() && available("reset"),
+		RunNow: row.NormalizedStatus == StatusWaiting && available("run_now"),
+		Remove: row.NormalizedStatus.IsTerminal() && row.RemovedAt == nil && !row.Tombstone && available("remove"),
+	}
+}
+
+func requireOrchestration(identity string) (int64, error) {
+	kind, id, err := parseIdentity(identity)
+	if err != nil {
+		return 0, err
+	}
+	if kind != "orchestration" {
+		return 0, fmt.Errorf("%w: operation requires orchestration identity, got %s", ErrInvalidOperation, kind)
+	}
+	return id, nil
+}
+
+func requireOrchestrationIdentityFromParams(identity string) (int64, error) {
+	return requireOrchestration(identity)
 }
 
 // SetAbortNotifier installs the callback used to signal an in-process worker.
@@ -175,7 +256,7 @@ func (s *MutateService) notifyAbort(taskIdentity string) {
 	if s.abortNotifier == nil {
 		return
 	}
-	_, id, err := parseIdentity(taskIdentity)
+	id, err := requireOrchestration(taskIdentity)
 	if err == nil {
 		s.abortNotifier(id)
 	}
@@ -202,6 +283,27 @@ func upsertAbortIntentTx(ctx context.Context, tx store.ImmediateConnTx, taskIden
 // AbortRequest persists a durable abort intent before signaling the worker.
 // The queue row stays running until the worker acknowledges it.
 func (s *MutateService) AbortRequest(ctx context.Context, p AbortRequestParams) error {
+	if p.TaskIdentity == "" || p.ActorID <= 0 || p.Reason == "" {
+		return fmt.Errorf("%w: actor and reason required", ErrInvalidOperation)
+	}
+	kind, id, err := parseIdentity(p.TaskIdentity)
+	if err != nil {
+		return err
+	}
+	if kind != "orchestration" {
+		handler := s.externalHandlers[kind]["abort"].handler
+		if handler == nil {
+			return fmt.Errorf("%w: no abort handler for source kind %s", ErrInvalidOperation, kind)
+		}
+		if err := handler(ctx, id); err != nil {
+			return err
+		}
+		_, err = s.db.ExecContext(ctx, `INSERT INTO task_control_audit
+			(task_identity, actor_id, action, reason, previous_status, new_status)
+			VALUES (?, ?, 'abort', ?, 'running', 'cancelled')`, p.TaskIdentity, p.ActorID, p.Reason)
+		return err
+	}
+
 	outcome, err := store.WithImmediateConnTx(ctx, s.db, func(tx store.ImmediateConnTx) error {
 		return AbortRequestInTx(ctx, tx, p.TaskIdentity, p.ActorID, p.Reason)
 	})
@@ -218,6 +320,9 @@ func (s *MutateService) AbortRequest(ctx context.Context, p AbortRequestParams) 
 // It atomically commits cancelled status, clears temporary resources, and
 // propagates dependency/plan/retirement state.
 func (s *MutateService) AbortAcknowledge(ctx context.Context, p AbortAckParams) error {
+	if _, err := requireOrchestrationIdentityFromParams(p.TaskIdentity); err != nil {
+		return err
+	}
 	if p.TaskIdentity == "" || p.OwnerFence == "" {
 		return fmt.Errorf("%w: task identity and owner fence required", ErrInvalidOperation)
 	}
@@ -279,6 +384,9 @@ func (s *MutateService) AbortAcknowledge(ctx context.Context, p AbortAckParams) 
 // AbortTimeout marks the task as requiring recovery after an abort timeout.
 // The task stays running while its durable intent is marked for recovery.
 func (s *MutateService) AbortTimeout(ctx context.Context, p AbortTimeoutParams) error {
+	if _, err := requireOrchestrationIdentityFromParams(p.TaskIdentity); err != nil {
+		return err
+	}
 	if p.TaskIdentity == "" {
 		return fmt.Errorf("%w: task identity required", ErrInvalidOperation)
 	}
@@ -308,6 +416,9 @@ func (s *MutateService) AbortTimeout(ctx context.Context, p AbortTimeoutParams) 
 // It commits cancelled and releases reservations exactly once.
 // Active leases and uncertain ownership are rejected.
 func (s *MutateService) FencedLeaseRecovery(ctx context.Context, p FencedRecoveryParams) error {
+	if _, err := requireOrchestrationIdentityFromParams(p.TaskIdentity); err != nil {
+		return err
+	}
 	if p.TaskIdentity == "" {
 		return fmt.Errorf("%w: task identity required", ErrInvalidOperation)
 	}
@@ -402,6 +513,9 @@ func (s *MutateService) FencedLeaseRecovery(ctx context.Context, p FencedRecover
 // Cancel marks a non-running task as cancelled. Running tasks must go through
 // AbortRequest -> AbortAcknowledge.
 func (s *MutateService) Cancel(ctx context.Context, p CancelParams) error {
+	if _, err := requireOrchestrationIdentityFromParams(p.TaskIdentity); err != nil {
+		return err
+	}
 	if p.TaskIdentity == "" || p.ActorID <= 0 || p.Reason == "" {
 		return fmt.Errorf("%w: actor and reason required", ErrInvalidOperation)
 	}
@@ -464,6 +578,13 @@ func (s *MutateService) Remove(ctx context.Context, p RemoveParams) error {
 	if p.TaskIdentity == "" || p.ActorID <= 0 || p.Reason == "" {
 		return fmt.Errorf("%w: actor and reason required", ErrInvalidOperation)
 	}
+	kind, _, err := parseIdentity(p.TaskIdentity)
+	if err != nil {
+		return err
+	}
+	if kind != "orchestration" {
+		return s.externalOperation(ctx, p.TaskIdentity, "remove")
+	}
 
 	runningAbort := false
 	outcome, err := store.WithImmediateConnTx(ctx, s.db, func(tx store.ImmediateConnTx) error {
@@ -497,7 +618,7 @@ func (s *MutateService) Remove(ctx context.Context, p RemoveParams) error {
 		if p.ExpectedRevision > 0 {
 			var currentRev int64
 			if err := tx.QueryRowContext(ctx,
-				`SELECT COALESCE(rev,0) FROM task_projection_revision WHERE task_identity=?`,
+				`SELECT COALESCE(revision,0) FROM task_projection_revision WHERE task_identity=?`,
 				p.TaskIdentity).Scan(&currentRev); err != nil && !errors.Is(err, sql.ErrNoRows) {
 				return err
 			}
@@ -505,7 +626,8 @@ func (s *MutateService) Remove(ctx context.Context, p RemoveParams) error {
 				return fmt.Errorf("%w: expected rev %d, got %d", ErrStaleRevision, p.ExpectedRevision, currentRev)
 			}
 		}
-		// For running tasks, request abort instead of immediate remove
+		// Running work remains leased and running until cooperative abort
+		// acknowledgement, but the tombstone takes effect immediately.
 		if status == "running" {
 			var ownerFence string
 			if err := tx.QueryRowContext(ctx, `SELECT COALESCE(lease_owner,'') FROM post_ingest_task WHERE id=? AND status='running'`, id).Scan(&ownerFence); err != nil {
@@ -516,6 +638,16 @@ func (s *MutateService) Remove(ctx context.Context, p RemoveParams) error {
 			}
 			if err := upsertAbortIntentTx(ctx, tx, p.TaskIdentity, ownerFence, p.ActorID, p.Reason); err != nil {
 				return err
+			}
+			result, err := tx.ExecContext(ctx,
+				`UPDATE post_ingest_task SET removed_at=CURRENT_TIMESTAMP, removed_by=?, remove_reason=?,
+				 updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='running' AND removed_at IS NULL`,
+				fmt.Sprintf("%d", p.ActorID), p.Reason, id)
+			if err != nil {
+				return err
+			}
+			if n, _ := result.RowsAffected(); n != 1 {
+				return fmt.Errorf("%w: remove race", ErrInvalidOperation)
 			}
 			runningAbort = true
 			if _, err := tx.ExecContext(ctx,
@@ -579,6 +711,13 @@ func (s *MutateService) Reset(ctx context.Context, p ResetParams) error {
 	if p.TaskIdentity == "" || p.ActorID <= 0 || p.Reason == "" {
 		return fmt.Errorf("%w: actor and reason required", ErrInvalidOperation)
 	}
+	kind, _, err := parseIdentity(p.TaskIdentity)
+	if err != nil {
+		return err
+	}
+	if kind != "orchestration" {
+		return s.externalOperation(ctx, p.TaskIdentity, "reset")
+	}
 
 	outcome, err := store.WithImmediateConnTx(ctx, s.db, func(tx store.ImmediateConnTx) error {
 		_, id, err := parseIdentity(p.TaskIdentity)
@@ -605,8 +744,7 @@ func (s *MutateService) Reset(ctx context.Context, p ResetParams) error {
 				return err
 			}
 			if currentRev > 0 && currentRev != p.ExpectedRevision {
-				// Stale revision: return current state without mutation
-				return nil
+				return fmt.Errorf("%w: expected rev %d, got %d", ErrStaleRevision, p.ExpectedRevision, currentRev)
 			}
 		}
 		// Validate generation
@@ -696,6 +834,9 @@ func isTerminalStatus(s string) bool {
 // AI retry round, leaves DAG topology/identity/provenance unchanged,
 // marks plan nonterminal, recomputes retirement barrier, and audits actor/reason.
 func (s *MutateService) Reopen(ctx context.Context, p ReopenParams) error {
+	if _, err := requireOrchestrationIdentityFromParams(p.TaskIdentity); err != nil {
+		return err
+	}
 	if p.TaskIdentity == "" || p.ActorID <= 0 || p.Reason == "" {
 		return fmt.Errorf("%w: actor and reason required", ErrInvalidOperation)
 	}
@@ -768,6 +909,13 @@ func (s *MutateService) RunNow(ctx context.Context, p RunNowParams) error {
 	if p.TaskIdentity == "" || p.ActorID <= 0 || p.Reason == "" {
 		return fmt.Errorf("%w: actor and reason required", ErrInvalidOperation)
 	}
+	kind, _, err := parseIdentity(p.TaskIdentity)
+	if err != nil {
+		return err
+	}
+	if kind != "orchestration" {
+		return s.externalOperation(ctx, p.TaskIdentity, "run_now")
+	}
 
 	outcome, err := store.WithImmediateConnTx(ctx, s.db, func(tx store.ImmediateConnTx) error {
 		_, id, err := parseIdentity(p.TaskIdentity)
@@ -828,6 +976,9 @@ func (s *MutateService) RunNow(ctx context.Context, p RunNowParams) error {
 
 // Skip requires policy and propagates dependency impossibility atomically.
 func (s *MutateService) Skip(ctx context.Context, p SkipParams) error {
+	if _, err := requireOrchestrationIdentityFromParams(p.TaskIdentity); err != nil {
+		return err
+	}
 	if p.TaskIdentity == "" || p.ActorID <= 0 || p.Reason == "" {
 		return fmt.Errorf("%w: actor and reason required", ErrInvalidOperation)
 	}
@@ -1253,7 +1404,7 @@ func AbortRequestInTx(ctx context.Context, tx store.ImmediateConnTx, taskIdentit
 	return err
 }
 func CancelInTx(ctx context.Context, tx store.ImmediateConnTx, taskIdentity string, actorID int64, reason string) error {
-	_, id, err := parseIdentity(taskIdentity)
+	id, err := requireOrchestration(taskIdentity)
 	if err != nil {
 		return err
 	}
@@ -1278,7 +1429,7 @@ func CancelInTx(ctx context.Context, tx store.ImmediateConnTx, taskIdentity stri
 }
 
 func RemoveInTx(ctx context.Context, tx store.ImmediateConnTx, taskIdentity string, actorID int64, reason string, expectedRev int64) error {
-	_, id, err := parseIdentity(taskIdentity)
+	id, err := requireOrchestration(taskIdentity)
 	if err != nil {
 		return err
 	}
@@ -1294,7 +1445,7 @@ func RemoveInTx(ctx context.Context, tx store.ImmediateConnTx, taskIdentity stri
 		var rev int64
 		_ = tx.QueryRowContext(ctx, `SELECT COALESCE(revision,0) FROM task_projection_revision WHERE task_identity=?`, taskIdentity).Scan(&rev)
 		if rev > 0 && rev != expectedRev {
-			return fmt.Errorf("%w", ErrStaleRevision)
+			return fmt.Errorf("%w: expected rev %d, got %d", ErrStaleRevision, expectedRev, rev)
 		}
 	}
 	if status == "running" {
@@ -1308,6 +1459,16 @@ func RemoveInTx(ctx context.Context, tx store.ImmediateConnTx, taskIdentity stri
 		if err := upsertAbortIntentTx(ctx, tx, taskIdentity, ownerFence, actorID, reason); err != nil {
 			return err
 		}
+		result, err := tx.ExecContext(ctx,
+			`UPDATE post_ingest_task SET removed_at=CURRENT_TIMESTAMP, removed_by=?, remove_reason=?,
+			 updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='running' AND removed_at IS NULL`,
+			fmt.Sprintf("%d", actorID), reason, id)
+		if err != nil {
+			return err
+		}
+		if n, _ := result.RowsAffected(); n != 1 {
+			return fmt.Errorf("%w: remove race", ErrInvalidOperation)
+		}
 		_, err = tx.ExecContext(ctx, `INSERT INTO task_control_audit
 			(task_identity, actor_id, action, reason, previous_status, new_status)
 			VALUES (?, ?, 'remove_abort_request', ?, 'running', 'running')`, taskIdentity, actorID, reason)
@@ -1319,7 +1480,7 @@ func RemoveInTx(ctx context.Context, tx store.ImmediateConnTx, taskIdentity stri
 	}
 	_, err = tx.ExecContext(ctx,
 		`UPDATE post_ingest_task SET status=?, removed_at=CURRENT_TIMESTAMP, removed_by=?, remove_reason=?,
-		 lease_owner='', lease_until=NULL, finished_at=COALESCE(finished_at,CURRENT_TIMESTAMP)
+		 lease_owner='', lease_until=NULL, finished_at=COALESCE(finished_at,CURRENT_TIMESTAMP), updated_at=CURRENT_TIMESTAMP
 		 WHERE id=? AND removed_at IS NULL`,
 		newStatus, fmt.Sprintf("%d", actorID), reason, id)
 	if err != nil {
@@ -1332,7 +1493,7 @@ func RemoveInTx(ctx context.Context, tx store.ImmediateConnTx, taskIdentity stri
 }
 
 func ResetInTx(ctx context.Context, tx store.ImmediateConnTx, taskIdentity string, actorID int64, reason string) error {
-	_, id, err := parseIdentity(taskIdentity)
+	id, err := requireOrchestration(taskIdentity)
 	if err != nil {
 		return err
 	}
@@ -1379,7 +1540,7 @@ func ResetInTx(ctx context.Context, tx store.ImmediateConnTx, taskIdentity strin
 }
 
 func RunNowInTx(ctx context.Context, tx store.ImmediateConnTx, taskIdentity string, actorID int64, reason string) error {
-	_, id, err := parseIdentity(taskIdentity)
+	id, err := requireOrchestration(taskIdentity)
 	if err != nil {
 		return err
 	}
@@ -1408,7 +1569,7 @@ func RunNowInTx(ctx context.Context, tx store.ImmediateConnTx, taskIdentity stri
 }
 
 func SkipInTx(ctx context.Context, tx store.ImmediateConnTx, taskIdentity string, actorID int64, reason string) error {
-	_, id, err := parseIdentity(taskIdentity)
+	id, err := requireOrchestration(taskIdentity)
 	if err != nil {
 		return err
 	}
@@ -1432,7 +1593,7 @@ func SkipInTx(ctx context.Context, tx store.ImmediateConnTx, taskIdentity string
 }
 
 func ReopenInTx(ctx context.Context, tx store.ImmediateConnTx, taskIdentity string, actorID int64, reason string) error {
-	_, id, err := parseIdentity(taskIdentity)
+	id, err := requireOrchestration(taskIdentity)
 	if err != nil {
 		return err
 	}

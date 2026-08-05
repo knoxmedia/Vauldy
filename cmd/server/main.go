@@ -45,7 +45,7 @@ import (
 	"knox-media/internal/monitor"
 	"knox-media/internal/photoclass"
 	"knox-media/internal/postingest"
-	_ "knox-media/internal/pretranscode"
+	"knox-media/internal/pretranscode"
 	"knox-media/internal/preview"
 	"knox-media/internal/publication"
 	"knox-media/internal/retirement"
@@ -509,7 +509,7 @@ func main() {
 		LyricWorker: lyricWorker, PhotoClassifyWorker: photoClassifyWorker, DocCoverWorker: docCoverWorker,
 		KeyVault: keyVault, AssetEncryptor: assetEnc, DerivedStore: derivedStore, PublicationPlanner: publicationPlanner, PublicationCapabilities: publicationCapabilities,
 		SchedulerAdmin: schedulerService,
-		TaskCtrl:       buildTaskControl(db, dispatcher),
+		TaskCtrl:       buildTaskControl(db, dispatcher, coordinator),
 	}
 
 	// (6) 注入依赖并创建 HTTP API 路由引擎。
@@ -756,14 +756,31 @@ func loadSystemOptionsTranscodeSettings(db *sql.DB) transcode.Settings {
 	return transcode.SettingsFromOptionsJSON(raw.String)
 }
 
-func buildTaskControl(db *sql.DB, dispatcher *postingest.Dispatcher) *handler.TaskControl {
+func buildTaskControl(db *sql.DB, dispatcher *postingest.Dispatcher, coordinator *scancoord.Coordinator) *handler.TaskControl {
 	registry := taskcontrol.NewRegistry()
 	projection := taskcontrol.NewProjectionBuilder(db, registry)
 	projection.RegisterAdapter(taskcontrol.NewOracleAdapter(db))
+	projection.RegisterAdapter(taskcontrol.NewTranscodeAdapter(db))
+	projection.RegisterAdapter(taskcontrol.NewScrapeAdapter(db))
+	projection.RegisterAdapter(taskcontrol.NewScanAdapter(db))
 	stream := taskcontrol.NewStreamBroker(db, projection, taskcontrol.StreamBrokerConfig{})
 	control := handler.NewTaskControl(db, registry, projection, stream)
+	projection.SetActionResolver(control.Mutations.AllowedActions)
+	if coordinator != nil {
+		control.Mutations.SetExternalAbortHandler("scan_task", func(ctx context.Context, id int64) error { _, err := coordinator.Cancel(ctx, id); return err })
+	}
 	if dispatcher != nil {
 		control.Mutations.SetAbortNotifier(dispatcher.CancelTask)
+	}
+	if module := pretranscode.ActiveModule(); module != nil && module.Task != nil {
+		control.Mutations.SetExternalAbortHandler("transcode_task", func(ctx context.Context, id int64) error {
+			return module.Task.CancelTask(id)
+		})
+		control.Mutations.SetExternalOperationHandler("transcode_task", "remove", func(ctx context.Context, id int64) error {
+			return module.Task.DeleteTask(id)
+		}, func(row *taskcontrol.ProjectionRow) bool { return !row.Linked })
+	} else {
+		log.Printf("task control: pretranscode module unavailable; transcode_task abort disabled")
 	}
 	return control
 }

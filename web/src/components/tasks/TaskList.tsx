@@ -149,21 +149,45 @@ export function TaskList({ taskType, filter: extFilter, removed, onSelectRow, on
   const executeBatchAction = useCallback(
     async (action: string) => {
       if (selectedRowKeys.length === 0) return;
+      const selected = (state.data?.items ?? []).filter((row) => selectedRowKeys.includes(row.task_id));
+      const allOrchestration = selected.length === selectedRowKeys.length && selected.every((row) => row.source_kind === "orchestration");
+      const allExternalRemove = action === "remove" && selected.length === selectedRowKeys.length
+        && selected.every((row) => row.source_kind !== "orchestration" && row.allowed_actions?.remove);
+      if (!allOrchestration && !allExternalRemove) return;
+
       setActionPending(true);
       try {
-        const batchParams = {
-          operation_id: crypto.randomUUID(),
-          action,
-          reason: `batch ${action}`,
-          items: selectedRowKeys.map((id) => ({ task_identity: String(id) })),
-        };
-        const result: BatchResult = await fetchTaskControlBatch(batchParams);
+        let succeeded = 0;
+        let failed = 0;
+        const successfulIDs: React.Key[] = [];
+        if (allExternalRemove) {
+          for (const row of selected) {
+            try {
+              await fetchTaskControlActions(row.task_id, { action: "remove", reason: "batch remove" });
+              succeeded++;
+              successfulIDs.push(row.task_id);
+            } catch {
+              failed++;
+            }
+          }
+          setSelectedRowKeys((keys) => keys.filter((key) => !successfulIDs.includes(key)));
+        } else {
+          const batchParams = {
+            operation_id: crypto.randomUUID(),
+            action,
+            reason: `batch ${action}`,
+            items: selected.map((row) => ({ task_identity: row.task_id })),
+          };
+          const result: BatchResult = await fetchTaskControlBatch(batchParams);
+          succeeded = result.succeeded;
+          failed = result.failed;
+          setSelectedRowKeys([]);
+        }
         message.info(
-          `${tGlobal("tasks.control.batch_result_title")}: ${result.succeeded} ${tGlobal("tasks.control.batch_succeeded")}, ${result.failed} ${tGlobal("tasks.control.batch_failed")}`
+          `${tGlobal("tasks.control.batch_result_title")}: ${succeeded} ${tGlobal("tasks.control.batch_succeeded")}, ${failed} ${tGlobal("tasks.control.batch_failed")}`
         );
-        setSelectedRowKeys([]);
-        onActionSuccess?.();
-        void load(cursorRef.current, localStatus, localRemoved);
+        if (succeeded > 0) onActionSuccess?.();
+        await load(cursorRef.current, localStatus, localRemoved);
       } catch (err: unknown) {
         const ax = err as { response?: { data?: { message?: string } } };
         message.error(ax.response?.data?.message || tGlobal("tasks.control.action_failed", { action }));
@@ -171,7 +195,7 @@ export function TaskList({ taskType, filter: extFilter, removed, onSelectRow, on
         setActionPending(false);
       }
     },
-    [selectedRowKeys, load, localStatus, localRemoved, onActionSuccess],
+    [selectedRowKeys, state.data?.items, load, localStatus, localRemoved, onActionSuccess],
   );
 
   const rowSelection: TableRowSelection<ProjectionRow> = {
@@ -270,7 +294,7 @@ export function TaskList({ taskType, filter: extFilter, removed, onSelectRow, on
       fixed: "right",
       render: (_: unknown, r: ProjectionRow) => (
         <Space size={2}>
-          <Tooltip title={t("tasks.control.action_abort")}>
+          {r.allowed_actions?.abort && <Tooltip title={t("tasks.control.action_abort")}>
             <Popconfirm
               title={t("tasks.control.confirm_abort")}
               onConfirm={() => executeSingleAction(r.task_id, "abort", "abort")}
@@ -280,8 +304,8 @@ export function TaskList({ taskType, filter: extFilter, removed, onSelectRow, on
             >
               <Button size="small" icon={<StopOutlined />} disabled={actionPending} />
             </Popconfirm>
-          </Tooltip>
-          <Tooltip title={t("tasks.control.action_reset")}>
+          </Tooltip>}
+          {r.allowed_actions?.reset && <Tooltip title={t("tasks.control.action_reset")}>
             <Popconfirm
               title={t("tasks.control.confirm_reset")}
               onConfirm={() => executeSingleAction(r.task_id, "reset", "reset")}
@@ -291,8 +315,8 @@ export function TaskList({ taskType, filter: extFilter, removed, onSelectRow, on
             >
               <Button size="small" icon={<ReloadOutlined />} disabled={actionPending} />
             </Popconfirm>
-          </Tooltip>
-          <Tooltip title={t("tasks.control.action_run_now")}>
+          </Tooltip>}
+          {r.allowed_actions?.run_now && <Tooltip title={t("tasks.control.action_run_now")}>
             <Popconfirm
               title={t("tasks.control.confirm_run_now")}
               onConfirm={() => executeSingleAction(r.task_id, "run_now", "run_now")}
@@ -302,8 +326,8 @@ export function TaskList({ taskType, filter: extFilter, removed, onSelectRow, on
             >
               <Button size="small" icon={<RiseOutlined />} disabled={actionPending} />
             </Popconfirm>
-          </Tooltip>
-          <Tooltip title={t("tasks.control.action_skip")}>
+          </Tooltip>}
+          {r.allowed_actions?.skip && <Tooltip title={t("tasks.control.action_skip")}>
             <Popconfirm
               title={t("tasks.control.confirm_skip")}
               onConfirm={() => executeSingleAction(r.task_id, "skip", "skip")}
@@ -313,8 +337,8 @@ export function TaskList({ taskType, filter: extFilter, removed, onSelectRow, on
             >
               <Button size="small" icon={<ForwardOutlined />} disabled={actionPending} />
             </Popconfirm>
-          </Tooltip>
-          <Tooltip title={t("tasks.control.action_remove")}>
+          </Tooltip>}
+          {r.allowed_actions?.remove && <Tooltip title={t("tasks.control.action_remove")}>
             <Popconfirm
               title={t("tasks.control.confirm_remove")}
               onConfirm={() => executeSingleAction(r.task_id, "remove", "remove")}
@@ -324,8 +348,8 @@ export function TaskList({ taskType, filter: extFilter, removed, onSelectRow, on
             >
               <Button size="small" icon={<DeleteOutlined />} disabled={actionPending} />
             </Popconfirm>
-          </Tooltip>
-          <Tooltip title={t("tasks.control.action_reopen")}>
+          </Tooltip>}
+          {r.allowed_actions?.reopen && <Tooltip title={t("tasks.control.action_reopen")}>
             <Popconfirm
               title={t("tasks.control.confirm_reopen")}
               onConfirm={() => executeSingleAction(r.task_id, "reopen", "reopen")}
@@ -335,7 +359,7 @@ export function TaskList({ taskType, filter: extFilter, removed, onSelectRow, on
             >
               <Button size="small" icon={<UnlockOutlined />} disabled={actionPending} />
             </Popconfirm>
-          </Tooltip>
+          </Tooltip>}
         </Space>
       ),
     },
@@ -343,6 +367,16 @@ export function TaskList({ taskType, filter: extFilter, removed, onSelectRow, on
 
   const items = state.data?.items ?? [];
   const total = state.data?.total ?? 0;
+  const selectedRows = items.filter((row) => selectedRowKeys.includes(row.task_id));
+  const batchAllowed = (action: keyof ProjectionRow["allowed_actions"]) => {
+    if (selectedRows.length !== selectedRowKeys.length || selectedRows.length === 0) return false;
+    if (selectedRows.every((row) => row.source_kind === "orchestration")) {
+      return selectedRows.every((row) => row.allowed_actions?.[action]);
+    }
+    return action === "remove" && selectedRows.every(
+      (row) => row.source_kind !== "orchestration" && row.allowed_actions?.remove,
+    );
+  };
 
   return (
     <div>
@@ -376,7 +410,7 @@ export function TaskList({ taskType, filter: extFilter, removed, onSelectRow, on
               <Tooltip title={t("tasks.control.batch_clear")}>
                 <Button size="small" icon={<ClearOutlined />} onClick={() => setSelectedRowKeys([])} />
               </Tooltip>
-              <Tooltip title={t("tasks.control.batch_abort")}>
+              {batchAllowed("abort") && <Tooltip title={t("tasks.control.batch_abort")}>
                 <Popconfirm
                   title={`${t("tasks.control.confirm_abort")} (${selectedRowKeys.length})`}
                   onConfirm={() => executeBatchAction("abort")}
@@ -385,8 +419,8 @@ export function TaskList({ taskType, filter: extFilter, removed, onSelectRow, on
                 >
                   <Button size="small" icon={<StopOutlined />} loading={actionPending} />
                 </Popconfirm>
-              </Tooltip>
-              <Tooltip title={t("tasks.control.batch_reset")}>
+              </Tooltip>}
+              {batchAllowed("reset") && <Tooltip title={t("tasks.control.batch_reset")}>
                 <Popconfirm
                   title={`${t("tasks.control.confirm_reset")} (${selectedRowKeys.length})`}
                   onConfirm={() => executeBatchAction("reset")}
@@ -395,8 +429,8 @@ export function TaskList({ taskType, filter: extFilter, removed, onSelectRow, on
                 >
                   <Button size="small" icon={<ReloadOutlined />} loading={actionPending} />
                 </Popconfirm>
-              </Tooltip>
-              <Tooltip title={t("tasks.control.batch_skip")}>
+              </Tooltip>}
+              {batchAllowed("skip") && <Tooltip title={t("tasks.control.batch_skip")}>
                 <Popconfirm
                   title={`${t("tasks.control.confirm_skip")} (${selectedRowKeys.length})`}
                   onConfirm={() => executeBatchAction("skip")}
@@ -405,8 +439,8 @@ export function TaskList({ taskType, filter: extFilter, removed, onSelectRow, on
                 >
                   <Button size="small" icon={<ForwardOutlined />} loading={actionPending} />
                 </Popconfirm>
-              </Tooltip>
-              <Tooltip title={t("tasks.control.batch_remove")}>
+              </Tooltip>}
+              {batchAllowed("remove") && <Tooltip title={t("tasks.control.batch_remove")}>
                 <Popconfirm
                   title={`${t("tasks.control.confirm_remove")} (${selectedRowKeys.length})`}
                   onConfirm={() => executeBatchAction("remove")}
@@ -415,8 +449,8 @@ export function TaskList({ taskType, filter: extFilter, removed, onSelectRow, on
                 >
                   <Button size="small" icon={<DeleteOutlined />} loading={actionPending} />
                 </Popconfirm>
-              </Tooltip>
-              <Tooltip title={t("tasks.control.batch_run_now")}>
+              </Tooltip>}
+              {batchAllowed("run_now") && <Tooltip title={t("tasks.control.batch_run_now")}>
                 <Popconfirm
                   title={`${t("tasks.control.confirm_run_now")} (${selectedRowKeys.length})`}
                   onConfirm={() => executeBatchAction("run_now")}
@@ -425,7 +459,7 @@ export function TaskList({ taskType, filter: extFilter, removed, onSelectRow, on
                 >
                   <Button size="small" icon={<RiseOutlined />} loading={actionPending} />
                 </Popconfirm>
-              </Tooltip>
+              </Tooltip>}
             </Space>
           )}
         </div>

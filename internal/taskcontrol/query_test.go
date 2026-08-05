@@ -471,10 +471,10 @@ func TestQueryDetailIncludesAttempts(t *testing.T) {
 	defer db.Close()
 
 	id := insertOracleTask(t, db, "thumbnail", "running", map[string]any{
-		"attempts":      3,
-		"max_attempts":  5,
-		"last_error":    "timeout",
-		"lease_owner":   "worker-1",
+		"attempts":     3,
+		"max_attempts": 5,
+		"last_error":   "timeout",
+		"lease_owner":  "worker-1",
 	})
 	taskID := BuildIdentity("orchestration", id)
 
@@ -640,6 +640,120 @@ func TestQueryTotalMatchesAllPages(t *testing.T) {
 		cursor = result.NextCursor
 		if result.NextCursor == "" {
 			break
+		}
+	}
+}
+
+func TestQueryPretranscodeUsesTranscodeSource(t *testing.T) {
+	db, builder := setupProjectionTestDB(t)
+	defer db.Close()
+
+	if _, err := db.Exec(`INSERT INTO media(id,library_id,file_id,title,file_path) VALUES(42,7,'standalone-file','Standalone title','/media/standalone.mp4')`); err != nil {
+		t.Fatal(err)
+	}
+	result, err := db.Exec(`INSERT INTO transcode_task(file_id,status,task_type,media_id,lease_owner) VALUES('standalone-file','running','pretranscode',NULL,'optimizer')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := result.LastInsertId()
+	qs := NewQueryService(builder)
+
+	total, err := qs.Total(context.Background(), QueryFilter{TaskType: "pretranscode", Status: "running"})
+	if err != nil {
+		t.Fatalf("Total: %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("pretranscode total = %d, want 1", total)
+	}
+
+	list, err := qs.List(context.Background(), QueryFilter{TaskType: "pretranscode", Status: "running"}, "", 10)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list.Items) != 1 {
+		t.Fatalf("items = %d, want 1", len(list.Items))
+	}
+	item := list.Items[0]
+	wantIdentity := BuildIdentity("transcode_task", id)
+	if item.TaskID != wantIdentity || item.SourceKind != "transcode_task" {
+		t.Errorf("identity = %q source = %q, want %q/transcode_task", item.TaskID, item.SourceKind, wantIdentity)
+	}
+	if item.TaskType != "pretranscode" || item.NormalizedStatus != StatusRunning {
+		t.Errorf("type/status = %q/%q", item.TaskType, item.NormalizedStatus)
+	}
+	if item.MediaID == nil || *item.MediaID != 42 || item.MediaTitle != "Standalone title" || item.MediaFilePath != "/media/standalone.mp4" || item.LibraryID == nil || *item.LibraryID != 7 {
+		t.Errorf("media metadata not resolved: %+v", item)
+	}
+
+	detail, err := qs.Detail(context.Background(), wantIdentity)
+	if err != nil {
+		t.Fatalf("Detail: %v", err)
+	}
+	if detail == nil || detail.Row.TaskID != wantIdentity {
+		t.Fatalf("detail identity mismatch: %+v", detail)
+	}
+}
+
+func TestQueryTranscodeClassificationDisjointWithLegacyMetadata(t *testing.T) {
+	db, builder := setupProjectionTestDB(t)
+	defer db.Close()
+
+	insertTask := func(taskType string) int64 {
+		t.Helper()
+		result, err := db.Exec(`INSERT INTO transcode_task(status,task_type) VALUES('waiting',?)`, taskType)
+		if err != nil {
+			t.Fatalf("insert transcode task %q: %v", taskType, err)
+		}
+		id, err := result.LastInsertId()
+		if err != nil {
+			t.Fatalf("last insert id: %v", err)
+		}
+		return id
+	}
+
+	explicitID := insertTask(" PreTranscode ")
+	legacyID := insertTask("batch")
+	regularID := insertTask("batch")
+	if _, err := db.Exec(`INSERT INTO pretranscode_task_meta(task_id) VALUES(?)`, legacyID); err != nil {
+		t.Fatalf("insert legacy pretranscode metadata: %v", err)
+	}
+
+	qs := NewQueryService(builder)
+	pretranscode, err := qs.List(context.Background(), QueryFilter{TaskType: "pretranscode"}, "", 10)
+	if err != nil {
+		t.Fatalf("list pretranscode: %v", err)
+	}
+	transcode, err := qs.List(context.Background(), QueryFilter{TaskType: "transcode"}, "", 10)
+	if err != nil {
+		t.Fatalf("list transcode: %v", err)
+	}
+
+	if pretranscode.Total != 2 || len(pretranscode.Items) != 2 {
+		t.Fatalf("pretranscode total/items = %d/%d, want 2/2", pretranscode.Total, len(pretranscode.Items))
+	}
+	if transcode.Total != 1 || len(transcode.Items) != 1 {
+		t.Fatalf("transcode total/items = %d/%d, want 1/1", transcode.Total, len(transcode.Items))
+	}
+
+	pretranscodeIDs := map[int64]bool{}
+	for _, item := range pretranscode.Items {
+		pretranscodeIDs[item.SourceID] = true
+		if item.TaskType != "pretranscode" {
+			t.Errorf("pretranscode list projected task %d as %q", item.SourceID, item.TaskType)
+		}
+	}
+	if !pretranscodeIDs[explicitID] || !pretranscodeIDs[legacyID] || pretranscodeIDs[regularID] {
+		t.Errorf("pretranscode IDs = %v, want explicit %d and legacy %d only", pretranscodeIDs, explicitID, legacyID)
+	}
+	for _, item := range transcode.Items {
+		if pretranscodeIDs[item.SourceID] {
+			t.Errorf("source ID %d appears in both lists", item.SourceID)
+		}
+		if item.SourceID != regularID {
+			t.Errorf("transcode source ID = %d, want %d", item.SourceID, regularID)
+		}
+		if item.TaskType != "transcode" {
+			t.Errorf("transcode list projected task %d as %q", item.SourceID, item.TaskType)
 		}
 	}
 }
