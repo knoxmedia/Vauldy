@@ -690,7 +690,8 @@ func ensureScrapeTaskPublicationSchema(ctx context.Context, tx *sql.Tx) error {
 		return err
 	}
 	if current {
-		return nil
+		_, err = tx.ExecContext(ctx, `UPDATE scrape_task SET generation=NULL WHERE ingest_run_id IS NULL AND ingest_step_id IS NULL AND generation=0`)
+		return err
 	}
 	var exists int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='scrape_task'`).Scan(&exists); err != nil {
@@ -745,7 +746,8 @@ SELECT id,media_id,task_type,source,query,year,status,progress,COALESCE(fail_cou
 			return err
 		}
 	}
-	return nil
+	_, err = tx.ExecContext(ctx, `UPDATE scrape_task SET generation=NULL WHERE ingest_run_id IS NULL AND ingest_step_id IS NULL AND generation=0`)
+	return err
 }
 
 var publicationMigrationMu sync.Mutex

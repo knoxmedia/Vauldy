@@ -837,3 +837,31 @@ func TestClaimWithAdmissionNoPolicyFallsThrough(t *testing.T) {
 		t.Fatalf("expected nil AdmissionResult without policy, got %+v", result)
 	}
 }
+
+func TestScrapeLegacyGenerationZeroEligibleAndLinkedProtected(t *testing.T) {
+	db := openEligibilityDB(t)
+	if _, err := db.Exec(`INSERT INTO library(name,type,path) VALUES('l','video','/l');
+INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state) VALUES(10,1,'f','video',1,'processing');
+INSERT INTO scrape_task(id,media_id,status,generation) VALUES(40,10,'waiting',0),(41,10,'waiting',1)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		id   int64
+		want bool
+	}{{40, true}, {41, false}} {
+		var got bool
+		if err := db.QueryRow(`SELECT `+LinkedClaimEligibilitySQL("q")+` FROM scrape_task q WHERE q.id=?`, tc.id).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != tc.want {
+			t.Errorf("task %d eligible=%v want=%v", tc.id, got, tc.want)
+		}
+	}
+	claim, err := ClaimEligible(context.Background(), db, ClaimRequest{Family: QueueScrape, TaskType: "scrape", Owner: "legacy", QueueID: func() *int64 { v := int64(40); return &v }(), Registry: NewCapabilityMatrix([]string{"scrape"})})
+	if err != nil || claim == nil {
+		t.Fatalf("claim=%+v err=%v", claim, err)
+	}
+	if claim.RunID.Valid || claim.StepID.Valid || !claim.Generation.Valid || claim.Generation.Int64 != 0 {
+		t.Fatalf("legacy claim identity=%+v", claim)
+	}
+}

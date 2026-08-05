@@ -137,6 +137,14 @@ func AggregateTx(ctx context.Context, tx store.SQLExecutor, runID int64) error {
 	if _, err := tx.ExecContext(ctx, `UPDATE media_ingest_run SET status=?,error_message=CASE WHEN ?='cancelled' THEN error_message WHEN ? IN ('degraded','failed') THEN ? ELSE '' END,finished_at=CASE WHEN ? IN ('published','degraded','failed','cancelled') THEN COALESCE(finished_at,CURRENT_TIMESTAMP) ELSE NULL END WHERE id=?`, next, next, next, diagnostic, next, runID); err != nil {
 		return err
 	}
+	if next == "failed" || next == "cancelled" {
+		if err := convergeTerminalRunTx(ctx, tx, runID, generation, next); err != nil {
+			return err
+		}
+		if err := RecomputePlanCompletionTx(ctx, tx, runID); err != nil {
+			return err
+		}
+	}
 	var current int64
 	if err := tx.QueryRowContext(ctx, `SELECT ingest_generation FROM media WHERE id=?`, mediaID).Scan(&current); err != nil {
 		return err

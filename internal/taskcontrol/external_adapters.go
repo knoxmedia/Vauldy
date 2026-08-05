@@ -3,6 +3,7 @@ package taskcontrol
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"strings"
 )
 
@@ -14,8 +15,8 @@ func (*ScrapeAdapter) Kind() string              { return "scrape_task" }
 func (a *ScrapeAdapter) Read(ctx context.Context, tx *sql.Tx, id int64) (*RawTaskRow, error) {
 	r := &RawTaskRow{SourceKind: a.Kind(), SourceID: id, TaskType: "metadata_scrape", MaxAttempts: 3}
 	var avail, lease, started, finished sql.NullTime
-	var mediaID, libraryID, generation sql.NullInt64
-	err := tx.QueryRowContext(ctx, `SELECT q.id,COALESCE(q.status,'waiting'),COALESCE(q.fail_count,0),COALESCE(q.retry_round,0),COALESCE(q.priority,0),q.available_at,q.created_at,q.created_at,q.media_id,m.library_id,q.generation,COALESCE(q.lease_owner,''),q.lease_until,COALESCE(q.message,''),COALESCE(m.title,''),COALESCE(m.file_path,''),q.started_at,q.finished_at FROM scrape_task q LEFT JOIN media m ON m.id=q.media_id WHERE q.id=?`, id).Scan(&r.SourceID, &r.RawStatus, &r.Attempt, &r.RetryRound, &r.BasePriority, &avail, &r.CreatedAt, &r.UpdatedAt, &mediaID, &libraryID, &generation, &r.Owner, &lease, &r.TerminalReason, &r.MediaTitle, &r.MediaFilePath, &started, &finished)
+	var mediaID, libraryID, generation, runID, stepID sql.NullInt64
+	err := tx.QueryRowContext(ctx, `SELECT q.id,COALESCE(q.status,'waiting'),COALESCE(q.fail_count,0),COALESCE(q.retry_round,0),COALESCE(q.priority,0),q.available_at,q.created_at,q.created_at,q.media_id,m.library_id,q.generation,q.ingest_run_id,q.ingest_step_id,COALESCE(q.lease_owner,''),q.lease_until,COALESCE(q.message,''),COALESCE(m.title,''),COALESCE(m.file_path,''),q.started_at,q.finished_at FROM scrape_task q LEFT JOIN media m ON m.id=q.media_id WHERE q.id=?`, id).Scan(&r.SourceID, &r.RawStatus, &r.Attempt, &r.RetryRound, &r.BasePriority, &avail, &r.CreatedAt, &r.UpdatedAt, &mediaID, &libraryID, &generation, &runID, &stepID, &r.Owner, &lease, &r.TerminalReason, &r.MediaTitle, &r.MediaFilePath, &started, &finished)
 	if err != nil {
 		return nil, err
 	}
@@ -33,6 +34,21 @@ func (a *ScrapeAdapter) Read(ctx context.Context, tx *sql.Tx, id int64) (*RawTas
 	}
 	if generation.Valid {
 		r.Generation = generation.Int64
+	}
+	standalone := !runID.Valid && !stepID.Valid && (!generation.Valid || generation.Int64 == 0)
+	r.Linked = !standalone
+	if r.Linked && runID.Valid && stepID.Valid && generation.Valid && generation.Int64 > 0 && mediaID.Valid {
+		var mediaGeneration, required int64
+		var superseded int
+		err := tx.QueryRowContext(ctx, `SELECT m.ingest_generation,s.required,CASE WHEN ir.superseded_at IS NOT NULL OR ir.superseded_by_generation IS NOT NULL THEN 1 ELSE 0 END FROM media m JOIN media_ingest_run ir ON ir.id=? AND ir.media_id=m.id AND ir.generation=? JOIN media_ingest_step s ON s.id=? AND s.run_id=ir.id AND s.media_id=m.id AND s.generation=ir.generation WHERE m.id=?`, runID.Int64, generation.Int64, stepID.Int64, mediaID.Int64).Scan(&mediaGeneration, &required, &superseded)
+		if err == nil {
+			r.LinkValid = true
+			r.LinkOptional = required == 0
+			r.LinkCurrent = mediaGeneration == generation.Int64 && superseded == 0
+			r.LinkStale = !r.LinkCurrent
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
 	}
 	return r, nil
 }

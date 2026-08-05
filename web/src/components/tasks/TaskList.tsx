@@ -66,12 +66,20 @@ export function TaskList({ taskType, filter: extFilter, removed, onSelectRow, on
   const [actionPending, setActionPending] = useState(false);
   const [localStatus, setLocalStatus] = useState<string>("");
   const [localRemoved, setLocalRemoved] = useState<string>(removed ?? "exclude");
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
 
-  const cursorRef = useRef<string>("");
+  const cursorHistoryRef = useRef<Map<number, string>>(new Map([[1, ""]]));
+  const currentPageRef = useRef(1);
+  const pageSizeRef = useRef(50);
+  const localStatusRef = useRef("");
+  const localRemovedRef = useRef(removed ?? "exclude");
+  const requestSequenceRef = useRef(0);
   const mountedRef = useRef(true);
 
   const load = useCallback(
-    async (cursor: string, status?: string, removedVal?: string) => {
+    async (page: number, cursor: string, status?: string, removedVal?: string, limit?: number) => {
+      const requestSequence = ++requestSequenceRef.current;
       setState((s) => ({ ...s, loading: true, error: null }));
       try {
         const result = await fetchTaskControlList({
@@ -80,48 +88,89 @@ export function TaskList({ taskType, filter: extFilter, removed, onSelectRow, on
           removed: removedVal ?? removed ?? extFilter?.removed ?? "exclude",
           library_id: extFilter?.library_id,
           generation: extFilter?.generation,
-          cursor: cursor || undefined,
-          limit: 50,
+          ...(cursor ? { cursor } : {}),
+          limit: limit ?? pageSizeRef.current,
         });
-        if (!mountedRef.current) return;
+        if (!mountedRef.current || requestSequence !== requestSequenceRef.current) return;
+
+        if (page > 1 && result.items.length === 0) {
+          const previousPage = Math.max(1, page - 1);
+          const previousCursor = cursorHistoryRef.current.get(previousPage) ?? "";
+          currentPageRef.current = previousPage;
+          setCurrentPage(previousPage);
+          void load(previousPage, previousCursor, status, removedVal, limit);
+          return;
+        }
+
         setState({ loading: false, error: null, data: result });
-        cursorRef.current = result.next_cursor ?? "";
+        if (result.has_more && result.next_cursor) {
+          cursorHistoryRef.current.set(page + 1, result.next_cursor);
+        } else {
+          for (const knownPage of cursorHistoryRef.current.keys()) {
+            if (knownPage > page) cursorHistoryRef.current.delete(knownPage);
+          }
+        }
       } catch {
-        if (!mountedRef.current) return;
+        if (!mountedRef.current || requestSequence !== requestSequenceRef.current) return;
         setState((s) => ({ ...s, loading: false, error: tGlobal("tasks.control.load_failed") }));
       }
     },
-    [taskType, extFilter, removed],
+    [taskType, extFilter?.status, extFilter?.removed, extFilter?.library_id, extFilter?.generation, removed],
   );
+
+  const resetPagination = useCallback((status?: string, removedVal?: string, limit?: number) => {
+    cursorHistoryRef.current = new Map([[1, ""]]);
+    currentPageRef.current = 1;
+    setCurrentPage(1);
+    setSelectedRowKeys([]);
+    void load(1, "", status, removedVal, limit);
+  }, [load]);
 
   useEffect(() => {
     mountedRef.current = true;
-    cursorRef.current = "";
-    void load("");
-    return () => { mountedRef.current = false; };
-  }, [load]);
+    if (removed !== undefined) {
+      localRemovedRef.current = removed;
+      setLocalRemoved(removed);
+    }
+    resetPagination(localStatusRef.current, localRemovedRef.current);
+    return () => {
+      mountedRef.current = false;
+      requestSequenceRef.current++;
+    };
+  }, [resetPagination, removed]);
 
   const handleStatusChange = useCallback((val: string) => {
+    localStatusRef.current = val;
     setLocalStatus(val);
-    cursorRef.current = "";
-    void load("", val, localRemoved);
-  }, [load, localRemoved]);
+    resetPagination(val, localRemovedRef.current);
+  }, [resetPagination]);
 
   const handleRemovedChange = useCallback((val: string) => {
+    localRemovedRef.current = val;
     setLocalRemoved(val);
-    cursorRef.current = "";
-    void load("", localStatus, val);
-  }, [load, localStatus]);
+    resetPagination(localStatusRef.current, val);
+  }, [resetPagination]);
 
   const handleTableChange = useCallback(
     (pagination: { current?: number; pageSize?: number }) => {
-      const page = pagination.current || 1;
-      if (page === 1) {
-        cursorRef.current = "";
-        void load("");
+      const nextPageSize = pagination.pageSize ?? pageSizeRef.current;
+      if (nextPageSize !== pageSizeRef.current) {
+        pageSizeRef.current = nextPageSize;
+        setPageSize(nextPageSize);
+        resetPagination(localStatusRef.current, localRemovedRef.current, nextPageSize);
+        return;
       }
+
+      const page = pagination.current ?? 1;
+      if (page === currentPageRef.current) return;
+      const cursor = cursorHistoryRef.current.get(page);
+      if (cursor === undefined) return;
+      currentPageRef.current = page;
+      setCurrentPage(page);
+      setSelectedRowKeys([]);
+      void load(page, cursor, localStatusRef.current, localRemovedRef.current);
     },
-    [load],
+    [load, resetPagination],
   );
 
   const executeSingleAction = useCallback(
@@ -131,7 +180,12 @@ export function TaskList({ taskType, filter: extFilter, removed, onSelectRow, on
         await fetchTaskControlActions(taskId, { action, reason });
         message.success(tGlobal("tasks.control.action_success", { action }));
         onActionSuccess?.();
-        void load(cursorRef.current, localStatus, localRemoved);
+        if (action === "remove") {
+          resetPagination(localStatusRef.current, localRemovedRef.current);
+        } else {
+          const page = currentPageRef.current;
+          void load(page, cursorHistoryRef.current.get(page) ?? "", localStatusRef.current, localRemovedRef.current);
+        }
       } catch (err: unknown) {
         const ax = err as { response?: { status?: number; data?: { message?: string } } };
         if (ax.response?.status === 409) {
@@ -143,7 +197,7 @@ export function TaskList({ taskType, filter: extFilter, removed, onSelectRow, on
         setActionPending(false);
       }
     },
-    [load, localStatus, localRemoved, onActionSuccess],
+    [load, resetPagination, onActionSuccess],
   );
 
   const executeBatchAction = useCallback(
@@ -151,23 +205,27 @@ export function TaskList({ taskType, filter: extFilter, removed, onSelectRow, on
       if (selectedRowKeys.length === 0) return;
       const selected = (state.data?.items ?? []).filter((row) => selectedRowKeys.includes(row.task_id));
       const allOrchestration = selected.length === selectedRowKeys.length && selected.every((row) => row.source_kind === "orchestration");
-      const allExternalRemove = action === "remove" && selected.length === selectedRowKeys.length
-        && selected.every((row) => row.source_kind !== "orchestration" && row.allowed_actions?.remove);
-      if (!allOrchestration && !allExternalRemove) return;
+      const externalKinds = new Set(selected.map((row) => row.source_kind));
+      const allExternal = selected.length === selectedRowKeys.length && externalKinds.size === 1
+        && selected.every((row) => row.source_kind !== "orchestration" && row.allowed_actions?.[action as keyof ProjectionRow["allowed_actions"]]);
+      if (!allOrchestration && !allExternal) return;
 
       setActionPending(true);
       try {
         let succeeded = 0;
         let failed = 0;
         const successfulIDs: React.Key[] = [];
-        if (allExternalRemove) {
+        let firstError = "";
+        if (allExternal) {
           for (const row of selected) {
             try {
-              await fetchTaskControlActions(row.task_id, { action: "remove", reason: "batch remove" });
+              await fetchTaskControlActions(row.task_id, { action, reason: `batch ${action}` });
               succeeded++;
               successfulIDs.push(row.task_id);
-            } catch {
+            } catch (err: unknown) {
               failed++;
+              const ax = err as { response?: { data?: { message?: string; error?: string } }; message?: string };
+              firstError ||= ax.response?.data?.message || ax.response?.data?.error || ax.message || "";
             }
           }
           setSelectedRowKeys((keys) => keys.filter((key) => !successfulIDs.includes(key)));
@@ -183,11 +241,16 @@ export function TaskList({ taskType, filter: extFilter, removed, onSelectRow, on
           failed = result.failed;
           setSelectedRowKeys([]);
         }
-        message.info(
-          `${tGlobal("tasks.control.batch_result_title")}: ${succeeded} ${tGlobal("tasks.control.batch_succeeded")}, ${failed} ${tGlobal("tasks.control.batch_failed")}`
-        );
+        const summary = `${tGlobal("tasks.control.batch_result_title")}: ${succeeded} ${tGlobal("tasks.control.batch_succeeded")}, ${failed} ${tGlobal("tasks.control.batch_failed")}`;
+        if (failed > 0 && firstError) message.error(`${summary}: ${firstError}`);
+        else message.info(summary);
         if (succeeded > 0) onActionSuccess?.();
-        await load(cursorRef.current, localStatus, localRemoved);
+        if (action === "remove" && succeeded > 0) {
+          resetPagination(localStatusRef.current, localRemovedRef.current);
+        } else {
+          const page = currentPageRef.current;
+          await load(page, cursorHistoryRef.current.get(page) ?? "", localStatusRef.current, localRemovedRef.current);
+        }
       } catch (err: unknown) {
         const ax = err as { response?: { data?: { message?: string } } };
         message.error(ax.response?.data?.message || tGlobal("tasks.control.action_failed", { action }));
@@ -195,7 +258,7 @@ export function TaskList({ taskType, filter: extFilter, removed, onSelectRow, on
         setActionPending(false);
       }
     },
-    [selectedRowKeys, state.data?.items, load, localStatus, localRemoved, onActionSuccess],
+    [selectedRowKeys, state.data?.items, load, resetPagination, onActionSuccess],
   );
 
   const rowSelection: TableRowSelection<ProjectionRow> = {
@@ -370,12 +433,9 @@ export function TaskList({ taskType, filter: extFilter, removed, onSelectRow, on
   const selectedRows = items.filter((row) => selectedRowKeys.includes(row.task_id));
   const batchAllowed = (action: keyof ProjectionRow["allowed_actions"]) => {
     if (selectedRows.length !== selectedRowKeys.length || selectedRows.length === 0) return false;
-    if (selectedRows.every((row) => row.source_kind === "orchestration")) {
-      return selectedRows.every((row) => row.allowed_actions?.[action]);
-    }
-    return action === "remove" && selectedRows.every(
-      (row) => row.source_kind !== "orchestration" && row.allowed_actions?.remove,
-    );
+    const sourceKind = selectedRows[0].source_kind;
+    if (!selectedRows.every((row) => row.source_kind === sourceKind)) return false;
+    return selectedRows.every((row) => row.allowed_actions?.[action]);
   };
 
   return (
@@ -471,7 +531,10 @@ export function TaskList({ taskType, filter: extFilter, removed, onSelectRow, on
           showIcon
           title={state.error}
           style={{ marginBottom: 12 }}
-          action={<Button size="small" onClick={() => load("", localStatus, localRemoved)}>{t("tasks.control.retry")}</Button>}
+          action={<Button size="small" onClick={() => {
+            const page = currentPageRef.current;
+            void load(page, cursorHistoryRef.current.get(page) ?? "", localStatusRef.current, localRemovedRef.current);
+          }}>{t("tasks.control.retry")}</Button>}
         />
       )}
 
@@ -484,7 +547,9 @@ export function TaskList({ taskType, filter: extFilter, removed, onSelectRow, on
         size="small"
         scroll={{ x: 900 }}
         pagination={{
-          defaultPageSize: 50,
+          current: currentPage,
+          total,
+          pageSize,
           showSizeChanger: true,
           pageSizeOptions: ["20", "50", "100"],
           showTotal: (t, range) => `${range[0]}-${range[1]} / ${t}`,

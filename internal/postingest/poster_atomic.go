@@ -177,7 +177,7 @@ func currentPosterEvidence(ctx context.Context, db *sql.DB, task Task, sourcePat
 	if err = db.QueryRowContext(ctx, `SELECT meta_json FROM media WHERE id=?`, task.MediaID).Scan(&meta); err != nil {
 		return false, "", err
 	}
-	return posterInMeta(decodePosterMeta(meta)) == v.URL, current, nil
+	return generatedPosterCommittedInMeta(decodePosterMeta(meta), task.MediaID, v.URL), current, nil
 }
 
 // cachedPosterSourceFingerprint returns a source fingerprint without reading the
@@ -799,6 +799,40 @@ func validatePosterTaskTx(ctx context.Context, tx store.SQLExecutor, task Task) 
 	return err
 }
 
+func durableScrapedPosterPointer(url string) bool {
+	return strings.HasPrefix(strings.TrimSpace(url), "/metadata/library/")
+}
+
+func replaceableGeneratedPosterPointer(url string, mediaID int64) bool {
+	url = strings.TrimSpace(url)
+	if url == storage.PlainPosterURL(mediaID) || url == storage.DerivedPosterAPIPath(mediaID) {
+		return true
+	}
+	return strings.HasPrefix(url, "/uploads/posters/generation-") ||
+		strings.HasPrefix(url, "/uploads/posters/objects/sha256/")
+}
+
+func shouldInstallGeneratedPoster(current string, mediaID int64, replace bool) bool {
+	current = strings.TrimSpace(current)
+	return current == "" || (replace && replaceableGeneratedPosterPointer(current, mediaID))
+}
+
+// generatedPosterCommittedInMeta keeps display selection separate from generated
+// evidence. A non-generated selection is accepted only when this commit recorded
+// its exact generated fallback; arbitrary URLs are never evidence by themselves.
+func generatedPosterCommittedInMeta(root map[string]any, mediaID int64, generatedURL string) bool {
+	selected := posterInMeta(root)
+	if selected == generatedURL {
+		return true
+	}
+	scrape, _ := root["scrape"].(map[string]any)
+	extra, _ := scrape["extra"].(map[string]any)
+	if stringValue(extra["generated_poster"]) != generatedURL {
+		return false
+	}
+	return durableScrapedPosterPointer(selected) || (selected != "" && !replaceableGeneratedPosterPointer(selected, mediaID))
+}
+
 func persistPosterMetaTx(ctx context.Context, tx store.SQLExecutor, mediaID int64, url, source string, replace bool) ([]string, error) {
 	var current string
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(meta_json,'') FROM media WHERE id=?`, mediaID).Scan(&current); err != nil {
@@ -808,19 +842,26 @@ func persistPosterMetaTx(ctx context.Context, tx store.SQLExecutor, mediaID int6
 	scrape := mapValue(root, "scrape")
 	extra := mapValue(scrape, "extra")
 	var old []string
-	for _, v := range []any{scrape["poster"], extra["poster"]} {
-		if p := stringValue(v); p != "" && p != url {
-			old = append(old, p)
+	selectedGenerated := false
+	for _, slot := range []map[string]any{scrape, extra} {
+		prior := stringValue(slot["poster"])
+		if !shouldInstallGeneratedPoster(prior, mediaID, replace) {
+			continue
 		}
+		if prior != "" && prior != url {
+			old = append(old, prior)
+		}
+		slot["poster"] = url
+		selectedGenerated = true
 	}
-	if replace || stringValue(scrape["poster"]) == "" {
-		scrape["poster"] = url
-	}
-	if replace || stringValue(extra["poster"]) == "" {
-		extra["poster"] = url
-	}
-	if strings.TrimSpace(source) != "" && (replace || stringValue(extra["local_poster_source"]) == "") {
-		extra["local_poster_source"] = source
+	// These fields describe the generated fallback, independently of which
+	// scraped/provider artwork remains selected for display.
+	extra["generated_poster"] = url
+	if strings.TrimSpace(source) != "" {
+		extra["generated_poster_source"] = source
+		if selectedGenerated && posterInMeta(root) == url && (replace || stringValue(extra["local_poster_source"]) == "") {
+			extra["local_poster_source"] = source
+		}
 	}
 	raw, err := json.Marshal(root)
 	if err != nil {
@@ -848,7 +889,7 @@ func verifyCommittedPosterTx(ctx context.Context, tx store.SQLExecutor, task Tas
 	if err = tx.QueryRowContext(ctx, `SELECT meta_json FROM media WHERE id=?`, task.MediaID).Scan(&meta); err != nil {
 		return err
 	}
-	if posterInMeta(decodePosterMeta(meta)) != staged.URL {
+	if !generatedPosterCommittedInMeta(decodePosterMeta(meta), task.MediaID, staged.URL) {
 		return fmt.Errorf("poster commit: metadata pointer differs")
 	}
 	return nil
@@ -870,7 +911,7 @@ func reconcilePosterCommitState(ctx context.Context, db *sql.DB, task Task, stag
 		if err != nil {
 			return posterCommitUnknown, err
 		}
-		if state == "committed" && posterInMeta(decodePosterMeta(meta)) == staged.URL {
+		if state == "committed" && generatedPosterCommittedInMeta(decodePosterMeta(meta), task.MediaID, staged.URL) {
 			size, hash, e := hashPath(staged.Path)
 			if e == nil && size == staged.Size && hash == staged.Hash {
 				return posterCommitExact, nil

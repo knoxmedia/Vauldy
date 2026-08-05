@@ -155,7 +155,14 @@ var (
 // =============================================================================
 
 // MutateService performs idempotent, audited mutations on task rows.
-type ExternalOperationHandler func(context.Context, int64) error
+type ExternalOperationRequest struct {
+	ID       int64
+	Identity string
+	ActorID  int64
+	Reason   string
+}
+
+type ExternalOperationHandler func(context.Context, ExternalOperationRequest) error
 type ExternalOperationAvailability func(*ProjectionRow) bool
 
 type externalOperationRegistration struct {
@@ -175,7 +182,15 @@ func NewMutateService(db *sql.DB) *MutateService {
 }
 
 // SetExternalOperationHandler registers a safe operation for a non-orchestration source.
-func (s *MutateService) SetExternalOperationHandler(kind, operation string, handler ExternalOperationHandler, availability ...ExternalOperationAvailability) {
+func (s *MutateService) SetExternalOperationHandler(kind, operation string, handler func(context.Context, int64) error, availability ...ExternalOperationAvailability) {
+	var wrapped ExternalOperationHandler
+	if handler != nil {
+		wrapped = func(ctx context.Context, req ExternalOperationRequest) error { return handler(ctx, req.ID) }
+	}
+	s.SetExternalOperationRequestHandler(kind, operation, wrapped, availability...)
+}
+
+func (s *MutateService) SetExternalOperationRequestHandler(kind, operation string, handler ExternalOperationHandler, availability ...ExternalOperationAvailability) {
 	if kind == "" || kind == "orchestration" || kind == "post_ingest_task" || operation == "" {
 		return
 	}
@@ -194,11 +209,11 @@ func (s *MutateService) SetExternalOperationHandler(kind, operation string, hand
 }
 
 // SetExternalAbortHandler preserves the existing registration API.
-func (s *MutateService) SetExternalAbortHandler(kind string, handler ExternalOperationHandler) {
+func (s *MutateService) SetExternalAbortHandler(kind string, handler func(context.Context, int64) error) {
 	s.SetExternalOperationHandler(kind, "abort", handler)
 }
 
-func (s *MutateService) externalOperation(ctx context.Context, identity, operation string) error {
+func (s *MutateService) externalOperation(ctx context.Context, identity, operation string, actorID int64, reason string) error {
 	kind, id, err := parseIdentity(identity)
 	if err != nil {
 		return err
@@ -207,7 +222,7 @@ func (s *MutateService) externalOperation(ctx context.Context, identity, operati
 	if registration.handler == nil {
 		return fmt.Errorf("%w: no %s handler for source kind %s", ErrInvalidOperation, operation, kind)
 	}
-	return registration.handler(ctx, id)
+	return registration.handler(ctx, ExternalOperationRequest{ID: id, Identity: identity, ActorID: actorID, Reason: reason})
 }
 
 // AllowedActions resolves policy and actually registered operation handlers.
@@ -227,7 +242,7 @@ func (s *MutateService) AllowedActions(row *ProjectionRow) AllowedActions {
 		Abort:  row.NormalizedStatus == StatusRunning && available("abort"),
 		Reset:  row.NormalizedStatus.IsTerminal() && available("reset"),
 		RunNow: row.NormalizedStatus == StatusWaiting && available("run_now"),
-		Remove: row.NormalizedStatus.IsTerminal() && row.RemovedAt == nil && !row.Tombstone && available("remove"),
+		Remove: (row.NormalizedStatus.IsTerminal() || row.NormalizedStatus == StatusWaiting) && row.RemovedAt == nil && !row.Tombstone && available("remove"),
 	}
 }
 
@@ -295,7 +310,7 @@ func (s *MutateService) AbortRequest(ctx context.Context, p AbortRequestParams) 
 		if handler == nil {
 			return fmt.Errorf("%w: no abort handler for source kind %s", ErrInvalidOperation, kind)
 		}
-		if err := handler(ctx, id); err != nil {
+		if err := handler(ctx, ExternalOperationRequest{ID: id, Identity: p.TaskIdentity, ActorID: p.ActorID, Reason: p.Reason}); err != nil {
 			return err
 		}
 		_, err = s.db.ExecContext(ctx, `INSERT INTO task_control_audit
@@ -583,7 +598,7 @@ func (s *MutateService) Remove(ctx context.Context, p RemoveParams) error {
 		return err
 	}
 	if kind != "orchestration" {
-		return s.externalOperation(ctx, p.TaskIdentity, "remove")
+		return s.externalOperation(ctx, p.TaskIdentity, "remove", p.ActorID, p.Reason)
 	}
 
 	runningAbort := false
@@ -703,7 +718,7 @@ func (s *MutateService) Remove(ctx context.Context, p RemoveParams) error {
 // Reset (Monotonic Retry)
 // =============================================================================
 
-// Reset increments retry_round N→N+1, preserves attempt history, creates/reopens
+// Reset increments retry_round N鈫扤+1, preserves attempt history, creates/reopens
 // waiting execution, clears only obsolete lease fields, validates generation/
 // source strategy/dependencies, recomputes downstream/plan/retirement state,
 // and writes revision/audit atomically.
@@ -716,7 +731,7 @@ func (s *MutateService) Reset(ctx context.Context, p ResetParams) error {
 		return err
 	}
 	if kind != "orchestration" {
-		return s.externalOperation(ctx, p.TaskIdentity, "reset")
+		return s.externalOperation(ctx, p.TaskIdentity, "reset", p.ActorID, p.Reason)
 	}
 
 	outcome, err := store.WithImmediateConnTx(ctx, s.db, func(tx store.ImmediateConnTx) error {
@@ -914,7 +929,7 @@ func (s *MutateService) RunNow(ctx context.Context, p RunNowParams) error {
 		return err
 	}
 	if kind != "orchestration" {
-		return s.externalOperation(ctx, p.TaskIdentity, "run_now")
+		return s.externalOperation(ctx, p.TaskIdentity, "run_now", p.ActorID, p.Reason)
 	}
 
 	outcome, err := store.WithImmediateConnTx(ctx, s.db, func(tx store.ImmediateConnTx) error {
@@ -1063,7 +1078,7 @@ func syncLinkedStepTerminalTx(ctx context.Context, tx store.ImmediateConnTx, run
 	return nil
 }
 
-// resetLinkedStepTx reopens a linked ingest step after a terminal→waiting reset
+// resetLinkedStepTx reopens a linked ingest step after a terminal鈫抴aiting reset
 // so its orchestration task becomes claimable again. The step returns to
 // waiting with its attempts and lease cleared. A required barrier step also
 // reopens its ingest run to processing (and, for non-preserve runs, returns the

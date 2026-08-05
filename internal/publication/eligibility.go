@@ -321,7 +321,7 @@ func familyLegacySQL(f QueueFamily, alias string) string {
 	if f == QueuePostIngest {
 		return fmt.Sprintf("(%s.ingest_run_id IS NULL AND %s.ingest_step_id IS NULL AND %s.generation=0)", alias, alias, alias)
 	}
-	return fmt.Sprintf("(%s.ingest_run_id IS NULL AND %s.ingest_step_id IS NULL AND %s.generation IS NULL)", alias, alias, alias)
+	return fmt.Sprintf("(%s.ingest_run_id IS NULL AND %s.ingest_step_id IS NULL AND COALESCE(%s.generation,0)=0)", alias, alias, alias)
 }
 
 // SelectFamilyCandidateTx returns the best eligible candidate id for a claim
@@ -594,7 +594,7 @@ func claimByOwner(ctx context.Context, db *sql.DB, f QueueFamily, owner string) 
 
 // LinkedClaimEligibilitySQL is the canonical linked-or-legacy dependency predicate.
 func LinkedClaimEligibilitySQL(alias string) string {
-	return fmt.Sprintf(`((%[1]s.ingest_run_id IS NULL AND %[1]s.ingest_step_id IS NULL AND %[1]s.generation IS NULL) OR (%s))`, alias, linkedEligibilitySQL(alias))
+	return fmt.Sprintf(`((%[1]s.ingest_run_id IS NULL AND %[1]s.ingest_step_id IS NULL AND COALESCE(%[1]s.generation,0)=0) OR (%s))`, alias, linkedEligibilitySQL(alias))
 }
 
 // ClaimWithAdmission orchestrates a claim admission inside one BEGIN IMMEDIATE

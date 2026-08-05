@@ -26,12 +26,13 @@ import (
 	"knox-media/internal/preview"
 	"knox-media/internal/publication"
 	"knox-media/internal/scancoord"
+	taskscheduler "knox-media/internal/scheduler"
 	"knox-media/internal/scraper"
 	"knox-media/internal/storage"
 	"knox-media/internal/subtitle"
+	"knox-media/internal/taskcontrol"
 	"knox-media/internal/transcode"
 	"knox-media/internal/upload"
-	taskscheduler "knox-media/internal/scheduler"
 )
 
 type ScanCoordinator interface {
@@ -71,6 +72,7 @@ type Dependencies struct {
 	PublicationCapabilities coreiface.CapabilityRegistry
 	SchedulerAdmin          *taskscheduler.Service
 	TaskCtrl                *TaskControl
+	ScrapeController        *taskcontrol.ScrapeTaskController
 }
 
 type Handler struct {
@@ -97,6 +99,7 @@ type Handler struct {
 	PublicationCapabilities coreiface.CapabilityRegistry
 	SchedulerAdmin          *taskscheduler.Service
 	TaskCtrl                *TaskControl
+	ScrapeController        *taskcontrol.ScrapeTaskController
 	Queue                   *postingest.Queue
 	PostIngestEnqueuer      PostIngestEnqueuer
 	Dispatcher              *postingest.Dispatcher
@@ -112,7 +115,8 @@ type Handler struct {
 	libraryPreviewRefresh   func(context.Context, int64) error
 	libraryPreviewScheduler *libraryPreviewScheduler
 	scanMu                  sync.Mutex
-	scrapeRunMu             sync.Mutex
+	scrapeRunOnce           sync.Once
+	scrapeRunSem            chan struct{}
 	scrapeWithConfig        func(string, string, scraper.Config) (*scraper.ScrapeResult, error)
 	scrapeAfterStage        func(scrapeClaim, metadatalib.StagedScrapeArtwork)
 	runningScans            map[int64]scanRuntime
@@ -126,8 +130,8 @@ func New(a *app.App, deps Dependencies) *Handler {
 		PhotoClassifyWorker: deps.PhotoClassifyWorker, DocCoverWorker: deps.DocCoverWorker, KeyVault: deps.KeyVault,
 		AssetEncryptor: deps.AssetEncryptor, DerivedStore: deps.DerivedStore, PublicationPlanner: deps.PublicationPlanner, PublicationCapabilities: deps.PublicationCapabilities, Queue: deps.Queue,
 		PostIngestEnqueuer: deps.PostIngest, Dispatcher: deps.Dispatcher, AdminOverviewBuilder: deps.AdminOverviewBuilder, ScanCoordinator: deps.Coordinator,
-		SchedulerAdmin: deps.SchedulerAdmin, TaskCtrl: deps.TaskCtrl,
-		runningScans:   map[int64]scanRuntime{}, Background: deps.Background, ServerContext: deps.ServerContext,
+		SchedulerAdmin: deps.SchedulerAdmin, TaskCtrl: deps.TaskCtrl, ScrapeController: deps.ScrapeController,
+		runningScans: map[int64]scanRuntime{}, Background: deps.Background, ServerContext: deps.ServerContext,
 	}
 	if deps.ServerContext != nil && deps.Background != nil {
 		h.libraryPreviewScheduler = newLibraryPreviewScheduler(deps.ServerContext, deps.Background, libraryPreviewMaxConcurrent, libraryPreviewMaxPending, h.runLibraryPreviewRefresh)

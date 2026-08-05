@@ -1939,6 +1939,12 @@
       "section_metadata_policy": "Metadata policy"
     },
     "scrape_config": {
+      "enabled_label": "Metadata scraping",
+      "enabled_help": "Enable automatic processing of queued metadata refresh tasks.",
+      "status_enabled": "Enabled",
+      "status_disabled": "Disabled",
+      "enabled_success": "Metadata scraping enabled",
+      "disabled_success": "Metadata scraping disabled",
       "load_failed": "Failed to load configuration",
       "save_failed": "Save failed",
       "save_success_key": "{name} API Key saved",

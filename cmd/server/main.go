@@ -498,6 +498,7 @@ func main() {
 	background.Go(serverCtx, func(ctx context.Context) {
 		postingest.RunPosterStageReconciler(ctx, db, postingest.PosterRecoveryRoots{Upload: cfg.Data.Upload, Derived: filepath.Join(cfg.Data.Dir, ".derived")}, time.Minute, 100, func(err error) { log.Printf("poster stage reconcile: %v", err) })
 	}) // 封面阶段状态对账
+	scrapeController := taskcontrol.NewScrapeTaskController(db, publicationCapabilities)
 	deps := handler.Dependencies{
 		ServerContext: serverCtx, Background: background, StartupReady: startupReady,
 		Coordinator: coordinator, Queue: postIngestQueue, PostIngest: postIngestEnqueuer, Dispatcher: dispatcher, AdminOverviewBuilder: func() handler.OverviewBuilder {
@@ -509,7 +510,7 @@ func main() {
 		LyricWorker: lyricWorker, PhotoClassifyWorker: photoClassifyWorker, DocCoverWorker: docCoverWorker,
 		KeyVault: keyVault, AssetEncryptor: assetEnc, DerivedStore: derivedStore, PublicationPlanner: publicationPlanner, PublicationCapabilities: publicationCapabilities,
 		SchedulerAdmin: schedulerService,
-		TaskCtrl:       buildTaskControl(db, dispatcher, coordinator),
+		TaskCtrl:       buildTaskControl(db, dispatcher, coordinator, scrapeController), ScrapeController: scrapeController,
 	}
 
 	// (6) 注入依赖并创建 HTTP API 路由引擎。
@@ -756,7 +757,7 @@ func loadSystemOptionsTranscodeSettings(db *sql.DB) transcode.Settings {
 	return transcode.SettingsFromOptionsJSON(raw.String)
 }
 
-func buildTaskControl(db *sql.DB, dispatcher *postingest.Dispatcher, coordinator *scancoord.Coordinator) *handler.TaskControl {
+func buildTaskControl(db *sql.DB, dispatcher *postingest.Dispatcher, coordinator *scancoord.Coordinator, scrapeController *taskcontrol.ScrapeTaskController) *handler.TaskControl {
 	registry := taskcontrol.NewRegistry()
 	projection := taskcontrol.NewProjectionBuilder(db, registry)
 	projection.RegisterAdapter(taskcontrol.NewOracleAdapter(db))
@@ -766,8 +767,16 @@ func buildTaskControl(db *sql.DB, dispatcher *postingest.Dispatcher, coordinator
 	stream := taskcontrol.NewStreamBroker(db, projection, taskcontrol.StreamBrokerConfig{})
 	control := handler.NewTaskControl(db, registry, projection, stream)
 	projection.SetActionResolver(control.Mutations.AllowedActions)
+	if scrapeController != nil {
+		control.Mutations.SetExternalOperationRequestHandler("scrape_task", "abort", scrapeController.Abort, taskcontrol.ScrapeAbortAction)
+		control.Mutations.SetExternalOperationRequestHandler("scrape_task", "reset", scrapeController.Reset, taskcontrol.ScrapeResetAction)
+		control.Mutations.SetExternalOperationRequestHandler("scrape_task", "remove", scrapeController.Remove, taskcontrol.ScrapeRemoveAction)
+	}
 	if coordinator != nil {
-		control.Mutations.SetExternalAbortHandler("scan_task", func(ctx context.Context, id int64) error { _, err := coordinator.Cancel(ctx, id); return err })
+		scanController := taskcontrol.NewScanTaskController(db, coordinator)
+		control.Mutations.SetExternalOperationRequestHandler("scan_task", "abort", scanController.Abort, taskcontrol.ScanAbortAction)
+		control.Mutations.SetExternalOperationRequestHandler("scan_task", "reset", scanController.Reset, taskcontrol.ScanResetAction)
+		control.Mutations.SetExternalOperationRequestHandler("scan_task", "remove", scanController.Remove, taskcontrol.ScanRemoveAction)
 	}
 	if dispatcher != nil {
 		control.Mutations.SetAbortNotifier(dispatcher.CancelTask)

@@ -94,7 +94,7 @@ describe("TaskList", () => {
     render(<TaskList {...defaultProps} />);
 
     await waitFor(() => {
-      expect(screen.queryByText(/100/)).toBeInTheDocument();
+      expect(screen.queryAllByText(/100/).length).toBeGreaterThan(0);
     });
   });
 
@@ -221,6 +221,111 @@ describe("TaskList", () => {
     await screen.findByText("transcode_task:1");
     document.querySelectorAll('tbody input[type="checkbox"]').forEach((box) => fireEvent.click(box));
     expect(document.querySelectorAll(".anticon-delete")).toHaveLength(1);
+  });
+
+
+  it.each([
+    ["waiting", { abort: false, remove: true, reset: false, run_now: false, skip: false, reopen: false }, ".anticon-delete"],
+    ["running", { abort: true, remove: false, reset: false, run_now: false, skip: false, reopen: false }, ".anticon-stop"],
+    ["failed", { abort: false, remove: true, reset: true, run_now: false, skip: false, reopen: false }, ".anticon-reload"],
+  ])("exposes scrape batch action for %s standalone rows", async (status, allowed, selector) => {
+    const rows = [1, 2].map((id) => makeRow(id, { task_id: `scrape_task:${id}`, source_kind: "scrape_task", task_type: "metadata_scrape", normalized_status: status as ProjectionRow["normalized_status"], raw_status: status, allowed_actions: allowed }));
+    mockFetchTaskControlList.mockResolvedValue({ items: rows, total: 2, has_more: false, truncated: false, snapshot_revision: 1 });
+    render(<TaskList {...defaultProps} taskType="metadata_scrape" />);
+    await screen.findByText("scrape_task:1");
+    fireEvent.click(document.querySelector('thead input[type="checkbox"]')!);
+    const batchButton = Array.from(document.querySelectorAll(selector)).map((icon) => icon.closest("button")!).find((button) => !button.closest("tbody"))!;
+    expect(batchButton).toBeTruthy();
+    fireEvent.click(batchButton);
+    await waitFor(() => expect(document.querySelector(".ant-popconfirm-buttons .ant-btn-primary")).toBeInTheDocument());
+    fireEvent.click(document.querySelector(".ant-popconfirm-buttons .ant-btn-primary")!);
+    await waitFor(() => expect(mockFetchTaskControlActions).toHaveBeenCalledTimes(2));
+    expect(mockFetchTaskControlBatch).not.toHaveBeenCalled();
+  });
+
+  it("exposes reset and remove batches for failed scan rows", async () => {
+    const allowed = { abort: false, remove: true, reset: true, run_now: false, skip: false, reopen: false };
+    const rows = [1, 2].map((id) => makeRow(id, { task_id: `scan_task:${id}`, source_kind: "scan_task", task_type: "scan", normalized_status: "failed", raw_status: "failed", allowed_actions: allowed }));
+    mockFetchTaskControlList.mockResolvedValue({ items: rows, total: 2, has_more: false, truncated: false, snapshot_revision: 1 });
+    render(<TaskList {...defaultProps} taskType="scan" />);
+    await screen.findByText("scan_task:1");
+    fireEvent.click(document.querySelector('thead input[type="checkbox"]')!);
+    const outsideRows = (selector: string) => Array.from(document.querySelectorAll(selector)).filter((icon) => !icon.closest("tbody"));
+    expect(outsideRows(".anticon-reload")).toHaveLength(1);
+    expect(outsideRows(".anticon-delete")).toHaveLength(1);
+  });
+
+  it("hides external batch actions for mixed source selection", async () => {
+    const allowed = { abort: false, remove: true, reset: false, run_now: false, skip: false, reopen: false };
+    const rows = [makeRow(1, { task_id: "scrape_task:1", source_kind: "scrape_task", task_type: "metadata_scrape", allowed_actions: allowed }), makeRow(2, { task_id: "transcode_task:2", source_kind: "transcode_task", task_type: "metadata_scrape", allowed_actions: allowed })];
+    mockFetchTaskControlList.mockResolvedValue({ items: rows, total: 2, has_more: false, truncated: false, snapshot_revision: 1 });
+    render(<TaskList {...defaultProps} taskType="metadata_scrape" />);
+    await screen.findByText("scrape_task:1");
+    fireEvent.click(document.querySelector('thead input[type="checkbox"]')!);
+    expect(Array.from(document.querySelectorAll(".anticon-delete")).filter((icon) => !icon.closest("tbody"))).toHaveLength(0);
+  });
+
+  it("reports the first external batch error and retains failed selections", async () => {
+    const rows = [1, 2].map((id) => makeRow(id, {
+      task_id: `scrape_task:${id}`, source_kind: "scrape_task", task_type: "metadata_scrape",
+      normalized_status: "failed", raw_status: "failed",
+      allowed_actions: { abort: false, remove: true, reset: true, run_now: false, skip: false, reopen: false },
+    }));
+    mockFetchTaskControlList.mockResolvedValue({ items: rows, total: 2, has_more: false, truncated: false, snapshot_revision: 1 });
+    mockFetchTaskControlActions.mockResolvedValueOnce({ status: "ok" }).mockRejectedValueOnce({ response: { data: { message: "linked task protected" } } });
+    render(<TaskList {...defaultProps} taskType="metadata_scrape" />);
+    await screen.findByText("scrape_task:1");
+    fireEvent.click(document.querySelector('thead input[type="checkbox"]')!);
+    const batchDelete = Array.from(document.querySelectorAll(".anticon-delete")).map((icon) => icon.closest("button")!).find((button) => !button.closest("tbody"))!;
+    fireEvent.click(batchDelete);
+    await waitFor(() => expect(document.querySelector(".ant-popconfirm-buttons .ant-btn-primary")).toBeInTheDocument());
+    fireEvent.click(document.querySelector(".ant-popconfirm-buttons .ant-btn-primary")!);
+    expect(await screen.findByText(/linked task protected/)).toBeInTheDocument();
+    await waitFor(() => expect(mockFetchTaskControlList).toHaveBeenCalledTimes(2));
+  });
+
+  it("uses the saved cursor for page 2 and no cursor when returning to page 1", async () => {
+    mockFetchTaskControlList
+      .mockResolvedValueOnce({ items: [makeRow(1)], total: 100, has_more: true, next_cursor: "page-2-cursor", truncated: false, snapshot_revision: 1 })
+      .mockResolvedValueOnce({ items: [makeRow(51)], total: 100, has_more: false, truncated: false, snapshot_revision: 1 })
+      .mockResolvedValueOnce({ items: [makeRow(1)], total: 100, has_more: true, next_cursor: "page-2-cursor", truncated: false, snapshot_revision: 1 });
+
+    render(<TaskList {...defaultProps} />);
+    await screen.findByText("orchestration:1");
+
+    fireEvent.click(document.querySelector(".ant-pagination-next button")!);
+    await screen.findByText("orchestration:51");
+    expect(mockFetchTaskControlList).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      cursor: "page-2-cursor",
+      limit: 50,
+    }));
+
+    fireEvent.click(document.querySelector(".ant-pagination-prev button")!);
+    await waitFor(() => expect(mockFetchTaskControlList).toHaveBeenCalledTimes(3));
+    expect(mockFetchTaskControlList.mock.calls[2][0]).not.toHaveProperty("cursor");
+    expect(mockFetchTaskControlList.mock.calls[2][0]).toEqual(expect.objectContaining({ limit: 50 }));
+  });
+
+  it("resets to page 1 without a cursor when page size changes", async () => {
+    mockFetchTaskControlList
+      .mockResolvedValueOnce({ items: [makeRow(1)], total: 100, has_more: true, next_cursor: "page-2-cursor", truncated: false, snapshot_revision: 1 })
+      .mockResolvedValueOnce({ items: [makeRow(51)], total: 100, has_more: false, truncated: false, snapshot_revision: 1 })
+      .mockResolvedValueOnce({ items: [makeRow(1)], total: 100, has_more: true, next_cursor: "new-page-2-cursor", truncated: false, snapshot_revision: 1 });
+
+    render(<TaskList {...defaultProps} />);
+    await screen.findByText("orchestration:1");
+    fireEvent.click(document.querySelector(".ant-pagination-next button")!);
+    await screen.findByText("orchestration:51");
+
+    const sizeChanger = document.querySelector(".ant-pagination .ant-select-content")!;
+    fireEvent.mouseDown(sizeChanger);
+    await waitFor(() => expect(document.querySelector('.ant-select-item-option[title^="20"]')).toBeInTheDocument());
+    fireEvent.click(document.querySelector('.ant-select-item-option[title^="20"]')!);
+
+    await waitFor(() => expect(mockFetchTaskControlList).toHaveBeenCalledTimes(3));
+    expect(mockFetchTaskControlList.mock.calls[2][0]).not.toHaveProperty("cursor");
+    expect(mockFetchTaskControlList.mock.calls[2][0]).toEqual(expect.objectContaining({ limit: 20 }));
+    expect(document.querySelector(".ant-pagination-item-active")?.textContent).toBe("1");
   });
 
 });

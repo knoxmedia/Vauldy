@@ -5,6 +5,7 @@ import {
   Modal,
   Space,
   Spin,
+  Switch,
   Table,
   Tag,
   Typography,
@@ -81,6 +82,7 @@ export default function ScrapeConfigPage() {
   const [infoProvider, setInfoProvider] = useState<ProviderInfo | null>(null);
   const [testResults, setTestResults] = useState<Record<string, ProviderTestState>>({});
   const [testingProvider, setTestingProvider] = useState<string | null>(null);
+  const [savingEnabled, setSavingEnabled] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -153,6 +155,23 @@ export default function ScrapeConfigPage() {
     }
   };
 
+
+  const toggleEnabled = async (enabled: boolean) => {
+    if (!cfg) return;
+    const previous = cfg.enabled;
+    const nextEnabled = enabled ? 1 : 0;
+    setCfg({ ...cfg, enabled: nextEnabled });
+    setSavingEnabled(true);
+    try {
+      await saveScrapeConfig({ enabled: nextEnabled, providers: cfg.providers ?? [], image_sources: cfg.image_sources ?? [], api_keys: apiKeys });
+      message.success(t(enabled ? "pages.scrape_config.enabled_success" : "pages.scrape_config.disabled_success"));
+    } catch {
+      setCfg({ ...cfg, enabled: previous });
+      message.error(t("pages.scrape_config.save_failed"));
+    } finally {
+      setSavingEnabled(false);
+    }
+  };
   const dataSource: TableRow[] = PROVIDER_OPTIONS.map((p) => ({
     key: p.value,
     value: p.value,
@@ -233,6 +252,18 @@ export default function ScrapeConfigPage() {
 
   return (
     <div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, marginBottom: 16 }}>
+        <div>
+          <Typography.Text strong>{t("pages.scrape_config.enabled_label")}</Typography.Text>
+          <Typography.Text type="secondary" style={{ display: "block", marginTop: 4 }}>
+            {t("pages.scrape_config.enabled_help")}
+          </Typography.Text>
+        </div>
+        <Space>
+          <Tag color={cfg?.enabled === 1 ? "green" : "default"}>{t(cfg?.enabled === 1 ? "pages.scrape_config.status_enabled" : "pages.scrape_config.status_disabled")}</Tag>
+          <Switch checked={cfg?.enabled === 1} loading={savingEnabled} disabled={!cfg || loading} onChange={(checked) => void toggleEnabled(checked)} aria-label={t("pages.scrape_config.enabled_label")} />
+        </Space>
+      </div>
       <Table
         rowKey="key"
         loading={loading}

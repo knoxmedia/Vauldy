@@ -849,3 +849,29 @@ func TestReconcileCompletedPostIngestDomainWorkRejectsWeakOrStaleEvidence(t *tes
 		})
 	}
 }
+
+func TestValidateAggregateCurrentPolicyConvergesExistingFailedRun(t *testing.T) {
+	db := openPlannerTestDB(t)
+	_, mediaID, scanID := seedPlannerMedia(t, db, "video", 1, 0, 0)
+	run := planAndCommit(t, db, NewPlanner(PlanOptions{SubtitleAuto: true}), NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
+	if _, err := db.Exec(`UPDATE media_ingest_run SET status='failed',finished_at=CURRENT_TIMESTAMP,error_message='poster: context deadline exceeded' WHERE id=?;
+UPDATE media SET publication_state='failed',publication_error='poster: context deadline exceeded' WHERE id=?;
+UPDATE media_ingest_step SET status=CASE WHEN step_type='poster' THEN 'failed' ELSE 'waiting' END,last_error=CASE WHEN step_type='poster' THEN 'context deadline exceeded' ELSE '' END,finished_at=CASE WHEN step_type='poster' THEN CURRENT_TIMESTAMP ELSE NULL END WHERE run_id=?;
+UPDATE post_ingest_task SET status=CASE WHEN task_type='poster' THEN 'failed' ELSE 'waiting' END,last_error=CASE WHEN task_type='poster' THEN 'context deadline exceeded' ELSE '' END,finished_at=CASE WHEN task_type='poster' THEN CURRENT_TIMESTAMP ELSE NULL END WHERE ingest_run_id=?;
+UPDATE scrape_task SET status='waiting',progress=0,message='',finished_at=NULL WHERE ingest_run_id=?`, run.ID, mediaID, run.ID, run.ID, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateAggregateCurrentPolicy(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	assertTerminalRunConverged(t, db, run.ID)
+	var eligible int
+	if err := db.QueryRow(`SELECT
+ (SELECT COUNT(*) FROM post_ingest_task q JOIN media_ingest_run r ON r.id=q.ingest_run_id WHERE q.ingest_run_id=? AND q.status='waiting' AND r.status='processing')+
+ (SELECT COUNT(*) FROM scrape_task q JOIN media_ingest_run r ON r.id=q.ingest_run_id WHERE q.ingest_run_id=? AND q.status='waiting' AND r.status='processing')`, run.ID, run.ID).Scan(&eligible); err != nil {
+		t.Fatal(err)
+	}
+	if eligible != 0 {
+		t.Fatalf("eligible terminal-run tasks=%d", eligible)
+	}
+}

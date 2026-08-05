@@ -1938,6 +1938,12 @@
       "section_metadata_policy": "元数据策略"
     },
     "scrape_config": {
+      "enabled_label": "元数据刮削",
+      "enabled_help": "启用后将自动处理队列中的元数据刷新任务。",
+      "status_enabled": "已启用",
+      "status_disabled": "已停用",
+      "enabled_success": "元数据刮削已启用",
+      "disabled_success": "元数据刮削已停用",
       "load_failed": "加载配置失败",
       "save_failed": "保存失败",
       "save_success_key": "{name} API Key 已保存",

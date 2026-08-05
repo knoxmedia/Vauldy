@@ -852,3 +852,33 @@ func TestCopyFingerprintContextStopsAfterCancellation(t *testing.T) {
 		t.Fatal("reader was not called")
 	}
 }
+
+func TestRepairLegacyMediaAcceptsMetadataLibraryPosterPointer(t *testing.T) {
+	db := openRepairTestDB(t)
+	mediaID, _ := seedCompliantEncryptedVideoEvidence(t, db)
+	if _, err := db.Exec(`UPDATE library SET encrypted_assets_enabled=0 WHERE id=(SELECT library_id FROM media WHERE id=?)`, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	local := fmt.Sprintf("/metadata/library/00/%02x/%d/poster.jpg", mediaID&0xff, mediaID)
+	meta := fmt.Sprintf(`{"scrape":{"poster":%q,"extra":{"poster":%q}}}`, local, local)
+	if _, err := db.Exec(`UPDATE media SET meta_json=? WHERE id=?`, meta, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	if repaired, err := RepairLegacyMedia(context.Background(), db, NewPlanner(PlanOptions{}), 4); err != nil || repaired != 0 {
+		t.Fatalf("repaired=%d err=%v", repaired, err)
+	}
+	var after string
+	if err := db.QueryRow(`SELECT meta_json FROM media WHERE id=?`, mediaID).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if after != meta {
+		t.Fatalf("poster changed after repair: %s", after)
+	}
+	var repairs int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM media_ingest_run WHERE media_id=? AND reason='repair'`, mediaID).Scan(&repairs); err != nil {
+		t.Fatal(err)
+	}
+	if repairs != 0 {
+		t.Fatalf("repair runs=%d", repairs)
+	}
+}

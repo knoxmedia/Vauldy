@@ -138,6 +138,10 @@ type ProjectionRow struct {
 	ProjectionError   string           `json:"projection_error,omitempty"`
 	AllowedActions    AllowedActions   `json:"allowed_actions"`
 	Linked            bool             `json:"-"`
+	LinkValid         bool             `json:"-"`
+	LinkCurrent       bool             `json:"-"`
+	LinkStale         bool             `json:"-"`
+	LinkOptional      bool             `json:"-"`
 }
 
 // RawTaskRow is a raw row read from a source table.
@@ -168,6 +172,10 @@ type RawTaskRow struct {
 	ExecutionID    string
 	RunNowExpires  *time.Time
 	Linked         bool
+	LinkValid      bool
+	LinkCurrent    bool
+	LinkStale      bool
+	LinkOptional   bool
 }
 
 // SourceAdapter reads raw task rows from a Phase 1-3 source table.
@@ -417,6 +425,10 @@ func (b *ProjectionBuilder) normalize(raw *RawTaskRow, kind string) *ProjectionR
 		RemovedBy:         raw.RemovedBy,
 		RemoveReason:      raw.RemoveReason,
 		Linked:            raw.Linked,
+		LinkValid:         raw.LinkValid,
+		LinkCurrent:       raw.LinkCurrent,
+		LinkStale:         raw.LinkStale,
+		LinkOptional:      raw.LinkOptional,
 	}
 
 	if raw.Owner != "" {
