@@ -759,8 +759,10 @@ func isLocallyManagedPosterURL(u string) bool {
 func validateRepairEvidenceRefsTx(ctx context.Context, tx *sql.Tx, mediaID int64, step StepType, raw string) (bool, error) {
 	if step == StepPoster {
 		var evidence struct {
-			Path, URL, SHA256 string
-			Size              int64
+			Path   string `json:"path"`
+			URL    string `json:"url"`
+			SHA256 string `json:"sha256"`
+			Size   int64  `json:"size"`
 		}
 		if json.Unmarshal([]byte(raw), &evidence) != nil || !validFileHash(evidence.Path, evidence.Size, evidence.SHA256) {
 			return false, nil

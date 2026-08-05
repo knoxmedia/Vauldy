@@ -170,35 +170,45 @@ type updateImageBody struct {
 }
 
 func (h *Handler) enqueueScrapeTask(mediaID int64, createdBy int64, source string) {
+	h.enqueueScrapeTaskResult(mediaID, createdBy, source)
+}
+
+// enqueueScrapeTaskResult returns whether a new (or reset) task was created.
+func (h *Handler) enqueueScrapeTaskResult(mediaID int64, createdBy int64, source string) bool {
 	if mediaID <= 0 {
-		return
+		return false
 	}
 	if source == "" {
 		source = "auto"
 	}
-	// Manual scrape: re-queue an abandoned task instead of creating a duplicate row.
+	// Manual scrape: reset a previously terminal task instead of creating a
+	// duplicate row. Historical failed/abandoned rows block new inserts via
+	// UNIQUE; silently skipping them leaves the user with no visible work.
 	if source != "auto" && source != "auto-scan" {
 		res, _ := h.App.DB.Exec(
 			`UPDATE scrape_task SET status='waiting', fail_count=0, progress=0, message='', finished_at=NULL, started_at=NULL, source=?, created_by=?
-			 WHERE media_id = ? AND status = 'abandoned'`,
+			 WHERE media_id = ? AND status IN ('abandoned','failed')`,
 			source, createdBy, mediaID,
 		)
 		if n, _ := res.RowsAffected(); n > 0 {
-			return
+			return true
 		}
 	}
+	// Only 'waiting' and 'running' tasks block creation; a terminal row would
+	// have been reset above for manual sources.
 	var exists int
 	_ = h.App.DB.QueryRow(
-		`SELECT COUNT(1) FROM scrape_task WHERE media_id = ? AND status IN ('waiting','running','failed','abandoned')`,
+		`SELECT COUNT(1) FROM scrape_task WHERE media_id = ? AND status IN ('waiting','running')`,
 		mediaID,
 	).Scan(&exists)
 	if exists > 0 {
-		return
+		return false
 	}
-	_, _ = h.App.DB.Exec(
+	_, err := h.App.DB.Exec(
 		`INSERT INTO scrape_task (media_id, source, status, progress, created_by) VALUES (?, ?, 'waiting', 0, ?)`,
 		mediaID, source, createdBy,
 	)
+	return err == nil
 }
 
 func (h *Handler) GetScrapeConfig(c *gin.Context) {
@@ -319,12 +329,8 @@ func (h *Handler) CreateScrapeTasks(c *gin.Context) {
 	uid := middleware.UserID(c)
 	created := 0
 	for _, mid := range body.MediaIDs {
-		before := created
-		h.enqueueScrapeTask(mid, uid, body.Source)
-		var n int
-		_ = h.App.DB.QueryRow(`SELECT COUNT(1) FROM scrape_task WHERE media_id = ?`, mid).Scan(&n)
-		if n > 0 {
-			created = before + 1
+		if h.enqueueScrapeTaskResult(mid, uid, body.Source) {
+			created++
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true, "created": created})

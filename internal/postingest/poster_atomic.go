@@ -107,7 +107,7 @@ func (a *PosterAdapter) ExecuteWithResult(ctx context.Context, task Task) (Execu
 		if task.RunID != nil {
 			_ = a.DB.QueryRowContext(ctx, `SELECT reason FROM media_ingest_run WHERE id=? AND media_id=? AND generation=?`, *task.RunID, task.MediaID, task.Generation).Scan(&reason)
 		}
-		if reason == string(publication.PlanReasonRepair) {
+		if reason == string(publication.PlanReasonRepair) || reason == string(publication.PlanReasonManualRetry) {
 			fp, err = publication.SourceIdentityFingerprint(input)
 		} else {
 			fp, err = cachedPosterSourceFingerprint(ctx, a.DB, task.MediaID, input)
