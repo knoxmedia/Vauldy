@@ -102,6 +102,19 @@ func (a *PosterAdapter) ExecuteWithResult(ctx context.Context, task Task) (Execu
 	if err = a.validateLease(ctx, task); err != nil {
 		return ordinary, err
 	}
+	// A re-submitted encrypted media has no plaintext to decode, so the runner
+	// cannot regenerate a poster from the source. When the media already owns a
+	// durable poster artifact, complete the step by recording evidence against
+	// it instead of failing while ffmpeg tries to decode an .enc source.
+	if task.Type == TaskPoster && task.StepID != nil {
+		reused, reuseErr := a.maybeReuseExistingPoster(ctx, task, input)
+		if reuseErr != nil {
+			return ordinary, reuseErr
+		}
+		if reused {
+			return ExecutionResult{Completion: AlreadyCommittedAtomically}, nil
+		}
+	}
 	if fp == "" {
 		var reason string
 		if task.RunID != nil {
@@ -634,6 +647,136 @@ func commitStagedPoster(ctx context.Context, db *sql.DB, task Task, staged Stage
 	defer cancel()
 	_ = cleanupPosterPaths(cleanupCtx, db, replaced, staged.Path)
 	return nil
+}
+
+// maybeReuseExistingPoster completes a poster step against a durable poster
+// asset the media already owns when the ingest source can no longer produce
+// one. Encrypted media whose original plaintext was cleaned up cannot be
+// decoded by ffmpeg, so regenerating a poster would fail; reusing the existing
+// artifact keeps the step idempotent for re-submitted runs.
+func (a *PosterAdapter) maybeReuseExistingPoster(ctx context.Context, task Task, sourcePath string) (bool, error) {
+	if task.Type != TaskPoster || task.StepID == nil || task.RunID == nil {
+		return false, nil
+	}
+	if !isEncryptedArtifactSource(sourcePath) {
+		return false, nil
+	}
+	stepID := *task.StepID
+	var existing string
+	err := a.DB.QueryRowContext(ctx, `SELECT stage_id FROM media_ingest_evidence WHERE step_id=? AND kind='poster'`, stepID).Scan(&existing)
+	if err == nil {
+		// This step already committed a poster evidence; currentPosterEvidence
+		// owns completion for that state.
+		return false, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return false, err
+	}
+	var encPath, meta string
+	err = a.DB.QueryRowContext(ctx, `SELECT COALESCE(d.enc_path,''),COALESCE(m.meta_json,'') FROM media_derived_assets d JOIN media m ON m.id=d.media_id WHERE d.media_id=? AND d.artifact_kind='poster' AND d.logical_name='poster.jpg' ORDER BY d.id DESC LIMIT 1`, task.MediaID).Scan(&encPath, &meta)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	encPath = strings.TrimSpace(encPath)
+	if encPath == "" || !usableEncryptedPosterFile(encPath) {
+		return false, nil
+	}
+	if !mediaMetaSelectsPoster(decodePosterMeta(meta), task.MediaID) {
+		return false, nil
+	}
+	if err := a.commitReusedPosterStep(ctx, task, encPath, sourcePath); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// commitReusedPosterStep durably completes a poster step whose evidence points
+// at an existing derived poster artifact. It mirrors the finalization of
+// commitStagedPoster (stage journal, evidence, queue/step fences, and node
+// transition) without generating a new artifact.
+func (a *PosterAdapter) commitReusedPosterStep(ctx context.Context, task Task, encPath, sourcePath string) error {
+	stepID := int64(0)
+	if task.StepID != nil {
+		stepID = *task.StepID
+	}
+	size, hash, err := hashPath(encPath)
+	if err != nil {
+		return err
+	}
+	// The encrypted artifact cannot change under a re-submitted run, so an
+	// identity fingerprint (path|size|mtime with zero digest) is sufficient and
+	// avoids re-hashing a multi-GB encrypted source.
+	fp, err := publication.SourceIdentityFingerprint(sourcePath)
+	if err != nil {
+		return err
+	}
+	stageID := uuid.NewString()
+	url := storage.DerivedPosterAPIPath(task.MediaID)
+	refs, _ := json.Marshal(map[string]any{
+		"path": encPath, "url": url, "source": "reused",
+		"size": size, "sha256": hash, "generation": task.Generation, "stage_id": stageID,
+	})
+	_, err = withImmediatePosterTx(ctx, a.DB, func(tx store.ImmediateConnTx) error {
+		if _, e := tx.ExecContext(ctx, `INSERT INTO media_asset_stage_journal(stage_id,media_id,run_id,step_id,generation,owner_token,source_fingerprint,artifact_kind,state,original_path,staged_path,hashes_sizes_json) VALUES(?,?,?,?,?,?,?,'poster','committed',?,?,?)`, stageID, task.MediaID, *task.RunID, stepID, task.Generation, task.LeaseOwner, fp, sourcePath, encPath, string(refs)); e != nil {
+			return e
+		}
+		if _, e := tx.ExecContext(ctx, `INSERT INTO media_ingest_evidence(run_id,step_id,media_id,generation,kind,source_fingerprint,artifact_refs_json,reason,verified_at,stage_id) VALUES(?,?,?,?,'poster',?,?,'reused',CURRENT_TIMESTAMP,?)`, *task.RunID, stepID, task.MediaID, task.Generation, fp, string(refs), stageID); e != nil {
+			return e
+		}
+		result, e := tx.ExecContext(ctx, `UPDATE post_ingest_task SET status='done',lease_owner=NULL,lease_until=NULL,last_error='',finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='running' AND lease_owner=? AND attempts=? AND retry_round=?`, task.ID, task.LeaseOwner, task.Attempts, task.RetryRound)
+		if e != nil {
+			return e
+		}
+		n, _ := result.RowsAffected()
+		if n != 1 {
+			return fmt.Errorf("poster reuse: queue fence lost")
+		}
+		result, e = tx.ExecContext(ctx, `UPDATE media_ingest_step SET status='done',lease_owner=NULL,lease_until=NULL,last_error='',finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='running' AND lease_owner=? AND attempts=?`, stepID, task.LeaseOwner, task.Attempts)
+		if e != nil {
+			return e
+		}
+		n, _ = result.RowsAffected()
+		if n != 1 {
+			return fmt.Errorf("poster reuse: step fence lost")
+		}
+		return publication.FinalizeNodeTransitionTx(ctx, tx, *task.RunID)
+	})
+	return err
+}
+
+// isEncryptedArtifactSource reports whether a poster source path is an
+// encrypted artifact, i.e. the original plaintext has been cleaned up and the
+// file cannot be decoded by ffmpeg.
+func isEncryptedArtifactSource(path string) bool {
+	return strings.HasSuffix(strings.ToLower(strings.TrimSpace(path)), ".enc")
+}
+
+// usableEncryptedPosterFile reports whether a derived poster artifact exists,
+// is a non-empty regular file, and is readable.
+func usableEncryptedPosterFile(path string) bool {
+	st, err := os.Stat(path)
+	if err != nil || st.IsDir() || st.Size() == 0 {
+		return false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	return f.Close() == nil
+}
+
+// mediaMetaSelectsPoster reports whether the media metadata still selects a
+// durable local poster (the derived API URL, the legacy plain URL, or a scraped
+// artwork pointer stored under /metadata/library/).
+func mediaMetaSelectsPoster(root map[string]any, mediaID int64) bool {
+	selected := posterInMeta(root)
+	if selected == "" {
+		return false
+	}
+	return selected == storage.DerivedPosterAPIPath(mediaID) || selected == storage.PlainPosterURL(mediaID) || durableScrapedPosterPointer(selected)
 }
 
 func cleanupCorruptStagedPoster(ctx context.Context, db *sql.DB, task Task, staged StagedPoster, roots PosterRecoveryRoots) {
