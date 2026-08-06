@@ -52,6 +52,12 @@ const DefaultMaxAttempts = 5
 // DefaultLeaseTTL is the worker lease duration.
 const DefaultLeaseTTL = 60 * time.Second
 
+// DefaultExecuteTimeout bounds one worker retirement attempt so a single slow
+// file (large SHA256 on slow storage) cannot stall the whole cleanup queue.
+// On timeout the attempt regresses to retryable_failed with backoff and the
+// worker moves on to other due rows.
+const DefaultExecuteTimeout = 10 * time.Minute
+
 // Identity fences a retirement attempt to media/generation/retry/attempt.
 type Identity struct {
 	RetirementID      int64

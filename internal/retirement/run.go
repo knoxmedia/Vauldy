@@ -13,7 +13,16 @@ func RunReconciler(ctx context.Context, db *sql.DB, opts RecoveryOptions, interv
 		interval = time.Minute
 	}
 	run := func() {
-		if err := ReconcileStartup(ctx, db, opts); err != nil && report != nil && !errors.Is(err, context.Canceled) {
+		rctx := ctx
+		var cancel context.CancelFunc
+		if opts.Timeout > 0 {
+			rctx, cancel = context.WithTimeout(ctx, opts.Timeout)
+		}
+		err := ReconcileStartup(rctx, db, opts)
+		if cancel != nil {
+			cancel()
+		}
+		if err != nil && report != nil && !errors.Is(err, context.Canceled) {
 			report(err)
 		}
 	}

@@ -28,7 +28,9 @@ type CrashSeams struct {
 	QuarantineRoot       string
 	MaxAttempts          int
 	LeaseTTL             time.Duration
+	ExecuteTimeout       time.Duration
 	ActiveConsumer       ActiveConsumerFunc
+	Fingerprint          func(context.Context, string) (string, error)
 	Now                  func() time.Time
 	OnRenew              func()
 }
@@ -59,6 +61,20 @@ func (s CrashSeams) leaseTTL() time.Duration {
 		return s.LeaseTTL
 	}
 	return DefaultLeaseTTL
+}
+
+func (s CrashSeams) executeTimeout() time.Duration {
+	if s.ExecuteTimeout > 0 {
+		return s.ExecuteTimeout
+	}
+	return DefaultExecuteTimeout
+}
+
+func (s CrashSeams) fingerprint(ctx context.Context, path string) (string, error) {
+	if s.Fingerprint != nil {
+		return s.Fingerprint(ctx, path)
+	}
+	return fingerprintFileCtx(ctx, path)
 }
 
 func (s CrashSeams) ops() FileOps {
@@ -148,11 +164,21 @@ WHERE id=? AND lease_owner=? AND state IN ('ready','quarantining','quarantined',
 }
 
 // Execute runs one full quarantine→delete→verify attempt under the owned lease.
+// The file-work portion (barrier/fingerprint hashing, quarantine move, delete) is
+// bounded by Seams.ExecuteTimeout so one slow task cannot stall the whole queue;
+// DB state transitions keep the caller's ctx so rollback always succeeds.
 func (w *Worker) Execute(ctx context.Context, row Row) error {
 	if w == nil || w.DB == nil {
 		return ErrInvalidIdentity
 	}
-	current, err := LoadRow(ctx, w.DB, row.RetirementID)
+	dbCtx := ctx
+	fileCtx := ctx
+	if timeout := w.Seams.executeTimeout(); timeout > 0 {
+		var cancel context.CancelFunc
+		fileCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	current, err := LoadRow(dbCtx, w.DB, row.RetirementID)
 	if err != nil {
 		return err
 	}
@@ -180,64 +206,74 @@ func (w *Worker) Execute(ctx context.Context, row Row) error {
 		if err := validateResumeEvidence(root, current, id); err != nil {
 			return w.failClosedOperatorAttempt(ctx, current, row.LeaseOwner, err.Error(), err)
 		}
-		return w.executeFromQuarantined(ctx, current, row.LeaseOwner, root, id)
+		return w.executeFromQuarantined(dbCtx, fileCtx, current, row.LeaseOwner, root, id)
 	}
 
-	barrier := EvaluateBarrier(ctx, w.DB, current, BarrierOptions{ActiveConsumer: w.Seams.ActiveConsumer})
+	barrierOpts := BarrierOptions{ActiveConsumer: w.Seams.ActiveConsumer}
+	if w.Seams.Fingerprint != nil {
+		fn := w.Seams.Fingerprint
+		barrierOpts.Fingerprint = func(path string) (string, error) { return fn(fileCtx, path) }
+	}
+	barrier := EvaluateBarrier(fileCtx, w.DB, current, barrierOpts)
 	if !barrier.Eligible {
-		_, _ = w.DB.ExecContext(ctx, `
+		if fileCtx.Err() != nil {
+			// Execution window expired mid-evaluation: regress for retry instead
+			// of parking the row as blocked until a future barrier recompute.
+			return w.failAttempt(dbCtx, current, row.LeaseOwner, fileCtx.Err())
+		}
+		_, _ = w.DB.ExecContext(dbCtx, `
 UPDATE media_plaintext_retirement
 SET state='blocked', blocker_code=?, lease_owner=NULL, lease_until=NULL, updated_at=CURRENT_TIMESTAMP
 WHERE id=? AND lease_owner=?`, string(barrier.Blocker), current.RetirementID, row.LeaseOwner)
 		return fmt.Errorf("%w: %s", ErrBarrierBlocked, barrier.Blocker)
 	}
 
-	if err := w.renewOrFail(ctx, row); err != nil {
-		return w.failAttempt(ctx, current, row.LeaseOwner, err)
+	if err := w.renewOrFail(dbCtx, row); err != nil {
+		return w.failAttempt(dbCtx, current, row.LeaseOwner, err)
 	}
-	if err := w.markQuarantining(ctx, current, row.LeaseOwner, id, root); err != nil {
-		return w.failAttempt(ctx, current, row.LeaseOwner, err)
+	if err := w.markQuarantining(dbCtx, current, row.LeaseOwner, id, root); err != nil {
+		return w.failAttempt(dbCtx, current, row.LeaseOwner, err)
 	}
 	current.State = StateQuarantining
 
 	if w.Seams.BeforeMove != nil {
 		if err := w.Seams.BeforeMove(); err != nil {
-			return w.failAttempt(ctx, current, row.LeaseOwner, err)
+			return w.failAttempt(dbCtx, current, row.LeaseOwner, err)
 		}
 	}
-	if err := w.renewOrFail(ctx, row); err != nil {
-		return w.failAttempt(ctx, current, row.LeaseOwner, err)
+	if err := w.renewOrFail(dbCtx, row); err != nil {
+		return w.failAttempt(dbCtx, current, row.LeaseOwner, err)
 	}
-	qPath, qFP, err := MoveToQuarantine(current.SourcePath, root, id, w.Seams.ops())
+	qPath, qFP, err := MoveToQuarantine(fileCtx, current.SourcePath, root, id, w.Seams.ops())
 	if err != nil {
-		return w.failAttempt(ctx, current, row.LeaseOwner, err)
+		return w.failAttempt(dbCtx, current, row.LeaseOwner, err)
 	}
 	current.QuarantinePath = qPath
 	current.QuarantineFingerprint = qFP
 	if w.Seams.AfterMove != nil {
 		if err := w.Seams.AfterMove(); err != nil {
-			return w.failAttempt(ctx, current, row.LeaseOwner, err)
+			return w.failAttempt(dbCtx, current, row.LeaseOwner, err)
 		}
 	}
-	if err := w.renewOrFail(ctx, row); err != nil {
-		return w.failAttempt(ctx, current, row.LeaseOwner, err)
+	if err := w.renewOrFail(dbCtx, row); err != nil {
+		return w.failAttempt(dbCtx, current, row.LeaseOwner, err)
 	}
 	if w.Seams.BeforeStateCommit != nil {
 		if err := w.Seams.BeforeStateCommit(); err != nil {
-			return w.failAttempt(ctx, current, row.LeaseOwner, err)
+			return w.failAttempt(dbCtx, current, row.LeaseOwner, err)
 		}
 	}
-	if err := w.markQuarantined(ctx, current, row.LeaseOwner, qPath, qFP); err != nil {
-		return w.failAttempt(ctx, current, row.LeaseOwner, err)
+	if err := w.markQuarantined(dbCtx, current, row.LeaseOwner, qPath, qFP); err != nil {
+		return w.failAttempt(dbCtx, current, row.LeaseOwner, err)
 	}
 	current.State = StateQuarantined
 	if w.Seams.AfterStateCommit != nil {
 		if err := w.Seams.AfterStateCommit(); err != nil {
-			return w.failAttempt(ctx, current, row.LeaseOwner, err)
+			return w.failAttempt(dbCtx, current, row.LeaseOwner, err)
 		}
 	}
 
-	return w.executeFromQuarantined(ctx, current, row.LeaseOwner, root, id)
+	return w.executeFromQuarantined(dbCtx, fileCtx, current, row.LeaseOwner, root, id)
 }
 
 func canResumeDelete(row Row) bool {
@@ -292,7 +328,7 @@ func (w *Worker) renewOrFail(ctx context.Context, row Row) error {
 	return nil
 }
 
-func (w *Worker) executeFromQuarantined(ctx context.Context, current Row, owner, root string, id Identity) error {
+func (w *Worker) executeFromQuarantined(ctx context.Context, fileCtx context.Context, current Row, owner, root string, id Identity) error {
 	leaseRow := Row{Identity: Identity{RetirementID: current.RetirementID}, LeaseOwner: owner}
 
 	qPath := strings.TrimSpace(current.QuarantinePath)
@@ -328,7 +364,7 @@ func (w *Worker) executeFromQuarantined(ctx context.Context, current Row, owner,
 		return w.failAttempt(ctx, current, owner, err)
 	}
 	if pathExists(qPath) {
-		if err := DeleteQuarantine(root, qPath, qFP, id, w.Seams.ops()); err != nil {
+		if err := DeleteQuarantine(fileCtx, root, qPath, qFP, id, w.Seams.ops()); err != nil {
 			return w.failAttempt(ctx, current, owner, err)
 		}
 	}

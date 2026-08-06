@@ -7,8 +7,9 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
-	"knox-media/internal/storage"
+	"knox-media/internal/publication"
 	"knox-media/internal/store"
 )
 
@@ -18,6 +19,9 @@ type RecoveryOptions struct {
 	FileOps        FileOps
 	Seams          CrashSeams
 	MaxAttempts    int
+	// Timeout bounds one reconciliation pass so a slow interrupted file cannot
+	// stall the periodic reconciler or startup recovery indefinitely.
+	Timeout time.Duration
 }
 
 // ReconcileStartup repairs interrupted retirement rows idempotently.
@@ -34,6 +38,7 @@ SELECT id,media_id,run_id,generation,source_path,source_fingerprint,basis_kind,b
        COALESCE(quarantine_evidence_json,'{}')
 FROM media_plaintext_retirement
 WHERE state IN ('quarantining','quarantined','deleting','retryable_failed')
+  AND (lease_owner IS NULL OR lease_owner='' OR lease_until IS NULL OR lease_until < CURRENT_TIMESTAMP)
 ORDER BY id`)
 	if err != nil {
 		return err
@@ -160,19 +165,31 @@ func reconcileQuarantining(ctx context.Context, db *sql.DB, row Row, id Identity
 		if err := ValidateQuarantinePath(root, qPath, id); err != nil {
 			return failClosedOperator(ctx, db, row, err.Error())
 		}
-		fp := strings.TrimSpace(row.QuarantineFingerprint)
-		if fp == "" {
-			var e error
-			fp, e = fingerprintOrEmpty(qPath)
-			if e != nil || fp == "" {
-				return failClosedOperator(ctx, db, row, fmt.Sprintf("startup: quarantine fingerprint unavailable: %v", e))
+	fp := strings.TrimSpace(row.QuarantineFingerprint)
+	if fp == "" {
+		var e error
+		fp, e = fingerprintOrEmpty(ctx, qPath)
+		if e != nil {
+			if ctx.Err() != nil {
+				return ctx.Err() // pass expired: leave row for a later pass
 			}
-		} else {
-			got, e := fingerprintOrEmpty(qPath)
-			if e != nil || got != fp {
-				return failClosedOperator(ctx, db, row, "startup: quarantine fingerprint mismatch")
-			}
+			return failClosedOperator(ctx, db, row, fmt.Sprintf("startup: quarantine fingerprint unavailable: %v", e))
 		}
+		if fp == "" {
+			return failClosedOperator(ctx, db, row, "startup: quarantine fingerprint unavailable")
+		}
+	} else {
+		got, e := fingerprintOrEmpty(ctx, qPath)
+		if e != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return failClosedOperator(ctx, db, row, fmt.Sprintf("startup: quarantine fingerprint unavailable: %v", e))
+		}
+		if got != fp {
+			return failClosedOperator(ctx, db, row, "startup: quarantine fingerprint mismatch")
+		}
+	}
 		if err := commitQuarantinedState(ctx, db, row, qPath, fp); err != nil {
 			return err
 		}
@@ -190,16 +207,19 @@ func reconcileQuarantining(ctx context.Context, db *sql.DB, row Row, id Identity
 func reconcileAmbiguousBothPresent(ctx context.Context, db *sql.DB, row Row, id Identity, root, qPath string, ops FileOps) error {
 	// Require fingerprint compare; never delete without validated root+fingerprint.
 	// Never call ops.Remove directly (may be nil on partial FileOps).
-	srcFP, err1 := fingerprintOrEmpty(row.SourcePath)
-	qFP, err2 := fingerprintOrEmpty(qPath)
+	srcFP, err1 := fingerprintOrEmpty(ctx, row.SourcePath)
+	qFP, err2 := fingerprintOrEmpty(ctx, qPath)
 	if err1 != nil || err2 != nil || srcFP == "" || qFP == "" {
+		if ctx.Err() != nil {
+			return ctx.Err() // pass expired: leave ambiguous row for a later pass
+		}
 		return failClosedOperator(ctx, db, row, "startup: ambiguous quarantining; fingerprint compare unavailable")
 	}
 	if srcFP != qFP {
 		return failClosedOperator(ctx, db, row, "startup: ambiguous quarantining fingerprint mismatch")
 	}
 	// Duplicate of source under quarantine: safe remove only via validated DeleteQuarantine.
-	if err := DeleteQuarantine(root, qPath, qFP, id, ops); err != nil {
+	if err := DeleteQuarantine(ctx, root, qPath, qFP, id, ops); err != nil {
 		return failClosedOperator(ctx, db, row, fmt.Sprintf("startup: ambiguous duplicate unsafe to delete: %v", err))
 	}
 	return resetInterrupted(ctx, db, row, DefaultMaxAttempts, "startup: ambiguous duplicate quarantine removed")
@@ -216,10 +236,13 @@ func continueFromQuarantined(ctx context.Context, db *sql.DB, row Row, id Identi
 func continueFromDeleting(ctx context.Context, db *sql.DB, row Row, id Identity, root string, ops FileOps, maxAttempts int) error {
 	qPath := strings.TrimSpace(row.QuarantinePath)
 	if qPath != "" && pathExists(qPath) {
-		if err := DeleteQuarantine(root, qPath, row.QuarantineFingerprint, id, ops); err != nil {
+		if err := DeleteQuarantine(ctx, root, qPath, row.QuarantineFingerprint, id, ops); err != nil {
 			// Never delete on ErrUnsafeQuarantinePath via weak substring match.
 			if errors.Is(err, ErrUnsafeQuarantinePath) || errors.Is(err, ErrFingerprintMismatch) {
 				return failClosedOperator(ctx, db, row, err.Error())
+			}
+			if ctx.Err() != nil {
+				return ctx.Err() // pass expired: leave row for a later pass
 			}
 			return resetInterrupted(ctx, db, row, maxAttempts, err.Error())
 		}
@@ -341,17 +364,19 @@ func pathExists(p string) bool {
 	return err == nil
 }
 
-func fingerprintOrEmpty(path string) (string, error) {
-	return fingerprintPath(path)
+func fingerprintOrEmpty(ctx context.Context, path string) (string, error) {
+	return fingerprintPath(ctx, path)
 }
 
-func fingerprintPath(path string) (string, error) {
-	return quarantineFingerprint(path)
+func fingerprintPath(ctx context.Context, path string) (string, error) {
+	return quarantineFingerprint(ctx, path)
 }
 
-func quarantineFingerprint(path string) (string, error) {
+func quarantineFingerprint(ctx context.Context, path string) (string, error) {
 	// local wrapper keeps storage import out of recovery hot path tests when stubbing
-	return loadFingerprint(path)
+	return loadFingerprint(ctx, path)
 }
 
-var loadFingerprint = storage.EncryptionSourceFingerprint
+var loadFingerprint = func(ctx context.Context, path string) (string, error) {
+	return publication.SourceFingerprintContext(ctx, path)
+}

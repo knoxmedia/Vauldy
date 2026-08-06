@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -60,7 +61,17 @@ func recoverStartupRetirement(ctx context.Context, db *sql.DB, opts retirement.R
 	if db == nil {
 		return fmt.Errorf("startup recovery: database is required")
 	}
-	if err := retirement.ReconcileStartup(ctx, db, opts); err != nil {
+	rctx := ctx
+	var cancel context.CancelFunc
+	if opts.Timeout > 0 {
+		rctx, cancel = context.WithTimeout(ctx, opts.Timeout)
+		defer cancel()
+	}
+	if err := retirement.ReconcileStartup(rctx, db, opts); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			log.Printf("startup recovery: retirement reconcile exceeded %s; continuing startup", opts.Timeout)
+			return nil
+		}
 		return fmt.Errorf("startup recovery: retirement: %w", err)
 	}
 	return nil

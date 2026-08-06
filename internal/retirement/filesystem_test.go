@@ -1,6 +1,7 @@
 package retirement
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -37,7 +38,7 @@ func TestFilesystemQuarantineIdentityAndFingerprint(t *testing.T) {
 	}
 	_ = os.Remove(path)
 
-	qPath, qFP, err := MoveToQuarantine(src, qRoot, id, FileOps{})
+	qPath, qFP, err := MoveToQuarantine(context.Background(), src, qRoot, id, FileOps{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +62,7 @@ func TestFilesystemRejectsSymlinkSource(t *testing.T) {
 		t.Skip("symlink not supported:", err)
 	}
 	id := Identity{MediaID: 1, Generation: 1, RetirementID: 1, Attempt: 1}
-	_, _, err := MoveToQuarantine(link, filepath.Join(root, "q"), id, FileOps{})
+	_, _, err := MoveToQuarantine(context.Background(), link, filepath.Join(root, "q"), id, FileOps{})
 	if err == nil {
 		t.Fatal("expected symlink rejection")
 	}
@@ -77,7 +78,7 @@ func TestFilesystemCrashSeamsAroundMoveDeleteVerify(t *testing.T) {
 
 	ops := defaultFileOps()
 	ops.AfterMove = func() error { return boom }
-	qPath, qFP, err := MoveToQuarantine(src, qRoot, id, ops)
+	qPath, qFP, err := MoveToQuarantine(context.Background(), src, qRoot, id, ops)
 	if !errors.Is(err, boom) {
 		t.Fatalf("after move: %v", err)
 	}
@@ -85,7 +86,7 @@ func TestFilesystemCrashSeamsAroundMoveDeleteVerify(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = DeleteQuarantine(qRoot, qPath, qFP, id, FileOps{})
+	err = DeleteQuarantine(context.Background(), qRoot, qPath, qFP, id, FileOps{})
 	if err != nil {
 		// AfterMove crash returns empty fingerprint; compute from file for cleanup assertion.
 		if qFP == "" && pathExists(qPath) {
@@ -93,7 +94,7 @@ func TestFilesystemCrashSeamsAroundMoveDeleteVerify(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			err = DeleteQuarantine(qRoot, qPath, qFP, id, FileOps{})
+			err = DeleteQuarantine(context.Background(), qRoot, qPath, qFP, id, FileOps{})
 		}
 	}
 	if err != nil {
@@ -110,11 +111,11 @@ func TestFilesystemFingerprintMismatchBlocksDelete(t *testing.T) {
 	writeFile(t, src, []byte("one"))
 	qRoot := filepath.Join(root, "q")
 	id := Identity{MediaID: 1, Generation: 1, RetirementID: 1, Attempt: 1}
-	qPath, _, err := MoveToQuarantine(src, qRoot, id, FileOps{})
+	qPath, _, err := MoveToQuarantine(context.Background(), src, qRoot, id, FileOps{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = DeleteQuarantine(qRoot, qPath, "wrong-fp", id, FileOps{}); !errors.Is(err, ErrFingerprintMismatch) {
+	if err = DeleteQuarantine(context.Background(), qRoot, qPath, "wrong-fp", id, FileOps{}); !errors.Is(err, ErrFingerprintMismatch) {
 		t.Fatalf("err=%v", err)
 	}
 }
@@ -125,11 +126,11 @@ func TestFilesystemEmptyExpectedFingerprintBlocksDelete(t *testing.T) {
 	writeFile(t, src, []byte("one"))
 	qRoot := filepath.Join(root, "q")
 	id := Identity{MediaID: 1, Generation: 1, RetirementID: 1, Attempt: 1}
-	qPath, _, err := MoveToQuarantine(src, qRoot, id, FileOps{})
+	qPath, _, err := MoveToQuarantine(context.Background(), src, qRoot, id, FileOps{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = DeleteQuarantine(qRoot, qPath, "", id, FileOps{}); !errors.Is(err, ErrUnsafeQuarantinePath) {
+	if err = DeleteQuarantine(context.Background(), qRoot, qPath, "", id, FileOps{}); !errors.Is(err, ErrUnsafeQuarantinePath) {
 		t.Fatalf("empty fingerprint must not authorize delete: %v", err)
 	}
 	if _, err = os.Stat(qPath); err != nil {

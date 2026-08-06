@@ -38,7 +38,7 @@ func TestRecoveryInterruptedQuarantiningAfterMove(t *testing.T) {
 	db := openRetirementDB(t)
 	fx := seedEligibleEncryptionFixture(t, db)
 	id := identityFor(fx, 1)
-	qPath, qFP, err := MoveToQuarantine(fx.SourcePath, fx.QuarantineRoot, id, FileOps{})
+	qPath, qFP, err := MoveToQuarantine(context.Background(), fx.SourcePath, fx.QuarantineRoot, id, FileOps{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestRecoveryInterruptedQuarantinedAndDeleting(t *testing.T) {
 	db := openRetirementDB(t)
 	fx := seedEligibleEncryptionFixture(t, db)
 	id := identityFor(fx, 2)
-	qPath, qFP, err := MoveToQuarantine(fx.SourcePath, fx.QuarantineRoot, id, FileOps{})
+	qPath, qFP, err := MoveToQuarantine(context.Background(), fx.SourcePath, fx.QuarantineRoot, id, FileOps{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestRecoveryDeletingPartial(t *testing.T) {
 	db := openRetirementDB(t)
 	fx := seedEligibleEncryptionFixture(t, db)
 	id := identityFor(fx, 1)
-	qPath, qFP, err := MoveToQuarantine(fx.SourcePath, fx.QuarantineRoot, id, FileOps{})
+	qPath, qFP, err := MoveToQuarantine(context.Background(), fx.SourcePath, fx.QuarantineRoot, id, FileOps{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,6 +1,7 @@
 package retirement
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"syscall"
 
+	"knox-media/internal/publication"
 	"knox-media/internal/storage"
 )
 
@@ -161,7 +163,7 @@ func ResolveQuarantineRoot(sourcePath, preferredRoot string) string {
 }
 
 // MoveToQuarantine renames (or same-volume copy-fallback refused for EXDEV) source into the reserved path.
-func MoveToQuarantine(source, root string, id Identity, ops FileOps) (quarantinePath, quarantineFingerprint string, err error) {
+func MoveToQuarantine(ctx context.Context, source, root string, id Identity, ops FileOps) (quarantinePath, quarantineFingerprint string, err error) {
 	if ops.Rename == nil {
 		ops = defaultFileOps()
 	}
@@ -207,20 +209,24 @@ func MoveToQuarantine(source, root string, id Identity, ops FileOps) (quarantine
 			return target, "", e
 		}
 	}
-	fp, e := fingerprintFile(target)
+	fp, e := fingerprintFileCtx(ctx, target)
 	if e != nil {
 		return target, "", e
 	}
 	return target, fp, nil
 }
 
+func fingerprintFileCtx(ctx context.Context, path string) (string, error) {
+	return publication.SourceFingerprintContext(ctx, path)
+}
+
 func fingerprintFile(path string) (string, error) {
-	return storage.EncryptionSourceFingerprint(path)
+	return fingerprintFileCtx(context.Background(), path)
 }
 
 // DeleteQuarantine removes the quarantined file after path/fingerprint validation.
 // Empty expectedFingerprint never authorizes delete (fail closed).
-func DeleteQuarantine(root, path, expectedFingerprint string, id Identity, ops FileOps) error {
+func DeleteQuarantine(ctx context.Context, root, path, expectedFingerprint string, id Identity, ops FileOps) error {
 	if ops.Remove == nil {
 		ops = defaultFileOps()
 	}
@@ -230,7 +236,7 @@ func DeleteQuarantine(root, path, expectedFingerprint string, id Identity, ops F
 	if err := ValidateQuarantinePath(root, path, id); err != nil {
 		return err
 	}
-	got, err := fingerprintFile(path)
+	got, err := fingerprintFileCtx(ctx, path)
 	if err != nil {
 		return err
 	}
@@ -292,15 +298,33 @@ func RestoreQuarantine(quarantinePath, sourcePath, root string, id Identity, ops
 	return syncParents(ops, quarantinePath, sourcePath)
 }
 
-func fileSHA256(path string) (string, error) {
+func fileSHA256Ctx(ctx context.Context, path string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
 	h := sha256.New()
-	if _, err = io.Copy(h, f); err != nil {
-		return "", err
+	buf := make([]byte, 256*1024)
+	for {
+		n, rerr := f.Read(buf)
+		if n > 0 {
+			if _, werr := h.Write(buf[:n]); werr != nil {
+				return "", werr
+			}
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			return "", rerr
+		}
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }

@@ -28,11 +28,16 @@ func defaultStrategies(reg publication.EncryptedSourceRegistry) publication.Encr
 	return publication.DefaultEncryptedSourceStrategies()
 }
 
-func defaultFingerprint(fn func(string) (string, error)) func(string) (string, error) {
+func defaultFingerprint(fn func(string) (string, error)) func(context.Context, string) (string, error) {
 	if fn != nil {
-		return fn
+		return func(ctx context.Context, path string) (string, error) {
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
+			return fn(path)
+		}
 	}
-	return storage.EncryptionSourceFingerprint
+	return fingerprintFileCtx
 }
 
 // EvaluateBarrier is the authoritative eligibility check for one retirement row.
@@ -135,7 +140,7 @@ FROM media_ingest_step WHERE run_id=? AND generation=?`, row.RunID, row.Generati
 		}
 	}
 	if checkPath == strings.TrimSpace(row.SourcePath) {
-		got, err := fpFn(checkPath)
+		got, err := fpFn(ctx, checkPath)
 		if err != nil {
 			return BarrierResult{Blocker: BlockerFingerprintFence, Detail: formatErr("fingerprint", err)}
 		}
@@ -147,7 +152,7 @@ FROM media_ingest_step WHERE run_id=? AND generation=?`, row.RunID, row.Generati
 		if qfp == "" {
 			return BarrierResult{Blocker: BlockerFingerprintFence, Detail: "quarantine fingerprint missing"}
 		}
-		got, err := fpFn(checkPath)
+		got, err := fpFn(ctx, checkPath)
 		if err != nil || got != qfp {
 			return BarrierResult{Blocker: BlockerFingerprintFence, Detail: "quarantine fingerprint mismatch"}
 		}
@@ -203,7 +208,7 @@ WHERE stage_id=? AND media_id=? AND generation=?`, row.EncryptionStageID, row.Me
 			return BarrierResult{Blocker: BlockerCiphertextUnreadable, Detail: fmt.Sprintf("enc_size got=%d want=%d", st.Size(), encSize)}
 		}
 		if sha := strings.TrimSpace(encSHA); sha != "" {
-			got, hashErr := fileSHA256(encPath)
+			got, hashErr := fileSHA256Ctx(ctx, encPath)
 			if hashErr != nil || got != sha {
 				return BarrierResult{Blocker: BlockerCiphertextUnreadable, Detail: "enc_sha256 mismatch"}
 			}

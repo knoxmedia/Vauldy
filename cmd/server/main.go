@@ -333,7 +333,7 @@ func main() {
 	}) // 决定新媒体应排队哪些发布阶段
 
 	startupReady := make(chan struct{}) // 关闭后表示可接受扫描/监控等提交源
-	startupRoots := StartupRecoveryRoots{Encryption: postingest.EncryptionRecoveryRoots{Quarantine: assetEnc.EncryptionPrivateRoot(), Resolver: assetEnc}, Thumbnail: postingest.ThumbnailRecoveryRoots{Preview: filepath.Join(cfg.Data.Preview, "photos"), Derived: filepath.Join(cfg.Data.Dir, ".derived")}, Poster: postingest.PosterRecoveryRoots{Upload: cfg.Data.Upload, Derived: filepath.Join(cfg.Data.Dir, ".derived")}, ScrapeArtwork: cfg.Data.MetadataLibrary, Retirement: retirement.RecoveryOptions{QuarantineRoot: filepath.Join(cfg.Data.Dir, ".quarantine", "retirement")}}
+	startupRoots := StartupRecoveryRoots{Encryption: postingest.EncryptionRecoveryRoots{Quarantine: assetEnc.EncryptionPrivateRoot(), Resolver: assetEnc}, Thumbnail: postingest.ThumbnailRecoveryRoots{Preview: filepath.Join(cfg.Data.Preview, "photos"), Derived: filepath.Join(cfg.Data.Dir, ".derived")}, Poster: postingest.PosterRecoveryRoots{Upload: cfg.Data.Upload, Derived: filepath.Join(cfg.Data.Dir, ".derived")}, ScrapeArtwork: cfg.Data.MetadataLibrary, Retirement: retirement.RecoveryOptions{QuarantineRoot: filepath.Join(cfg.Data.Dir, ".quarantine", "retirement"), Timeout: 10 * time.Minute}}
 	enterpriseCtx, enterpriseCancel := context.WithCancel(serverCtx)
 	defer enterpriseCancel()
 	for _, mod := range coreiface.EnterpriseModules {
@@ -356,6 +356,7 @@ func main() {
 		Seams: retirement.CrashSeams{
 			QuarantineRoot: startupRoots.Retirement.QuarantineRoot,
 			ActiveConsumer: func(mediaID int64) bool { return storage.HasActivePlaintextConsumer(db, mediaID) },
+			ExecuteTimeout: 10 * time.Minute,
 		},
 	}
 	// Publication V2 启动：预检 → 恢复产物/租约 → 迁移 V1 → 校验 → 启动分发器/企业 Worker → 放开提交源。
