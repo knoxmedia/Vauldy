@@ -875,3 +875,71 @@ UPDATE scrape_task SET status='waiting',progress=0,message='',finished_at=NULL W
 		t.Fatalf("eligible terminal-run tasks=%d", eligible)
 	}
 }
+
+func TestStartupRepairsLegacySnapshotDepsWhenDependencyTableEmpty(t *testing.T) {
+	db := openPlannerTestDB(t)
+	_, mediaID, scanID := seedPlannerMedia(t, db, "video", 0, 0, 0)
+	run := planAndCommit(t, db, NewPlanner(PlanOptions{}), NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
+
+	// Simulate the production-observed state (media run 3): the migration
+	// cleaned the dependency table (0 rows) and dropped the media_visible step,
+	// but historical snapshots still reference the pre-migration dependency
+	// kinds (media_visible/step_done) that no longer satisfy the current
+	// dependency_kind CHECK constraint. Before the fix this aborted startup
+	// with "cannot reconcile snapshot deps: expected 0 after repair, got 1".
+	if _, err := db.Exec(`DELETE FROM media_ingest_step_dependency`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DELETE FROM media_ingest_step WHERE run_id=? AND step_type='media_visible'`, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	var raw string
+	if err := db.QueryRow(`SELECT config_snapshot_json FROM media_ingest_run WHERE id=?`, run.ID).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	var snapshot ConfigSnapshot
+	if err := json.Unmarshal([]byte(raw), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	scrape := StepScrape
+	snapshot.PolicyVersion = PolicyV2
+	snapshot.Dependencies = []Dependency{
+		{Step: StepScrape, Kind: "media_visible"},
+		{Step: StepPreview, Kind: "media_visible"},
+		{Step: StepSubtitle, Kind: "media_visible"},
+		{Step: StepEncrypt, Kind: "step_done", DependsOn: &scrape},
+	}
+	filterVisible := func(steps []StepType) []StepType {
+		out := steps[:0]
+		for _, s := range steps {
+			if s != StepMediaVisible {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	snapshot.Steps = filterVisible(snapshot.Steps)
+	snapshot.RequiredSteps = filterVisible(snapshot.RequiredSteps)
+	snapshot.OptionalSteps = filterVisible(snapshot.OptionalSteps)
+	updated, _ := json.Marshal(snapshot)
+	if _, err := db.Exec(`UPDATE media_ingest_run SET policy_version=2,config_snapshot_json=? WHERE id=?`, string(updated), run.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ValidateAggregateCurrentV2(context.Background(), db); err != nil {
+		t.Fatalf("startup preflight failed on legacy snapshot deps: %v", err)
+	}
+
+	// The repaired snapshot must no longer reference the legacy dependency kinds.
+	var repairedRaw string
+	if err := db.QueryRow(`SELECT config_snapshot_json FROM media_ingest_run WHERE id=?`, run.ID).Scan(&repairedRaw); err != nil {
+		t.Fatal(err)
+	}
+	var repaired ConfigSnapshot
+	if err := json.Unmarshal([]byte(repairedRaw), &repaired); err != nil {
+		t.Fatal(err)
+	}
+	if len(repaired.Dependencies) != 0 {
+		t.Fatalf("snapshot dependencies not repaired: %d edges remain", len(repaired.Dependencies))
+	}
+}

@@ -706,50 +706,52 @@ func validateCurrentPolicyRun(ctx context.Context, q store.SQLExecutor, runID in
 	return validateCurrentPolicyRunMode(ctx, q, runID, false, adapters...)
 }
 func repairMediaVisibleSnapshotDeps(ctx context.Context, q store.SQLExecutor, runID int64, snapshot *ConfigSnapshot, depCount int) (int, error) {
-	// Identify media_visible dependencies in the snapshot that cannot be resolved
-	// because no media_visible step exists in the run. Strip them.
-	var hasVisibleStep int
-	if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM media_ingest_step WHERE run_id=? AND step_type='media_visible'`, runID).Scan(&hasVisibleStep); err != nil {
+	// Rebuild the snapshot dependency list from the canonical table instead of
+	// reasoning about legacy media_visible/step_done kinds. Historical snapshots
+	// reference dependencies that the migration cleaned from the table, and
+	// their kind values (media_visible, step_done) no longer match the
+	// dependency_kind CHECK constraint (success, terminal) used on disk, so any
+	// leftover edge would fail the per-edge validation below. Reconstructing
+	// from the table makes the snapshot exactly match the persisted edges.
+	rows, err := q.QueryContext(ctx, `SELECT s.step_type,d.dependency_kind,p.step_type,s.generation,p.generation FROM media_ingest_step_dependency d JOIN media_ingest_step s ON s.id=d.step_id LEFT JOIN media_ingest_step p ON p.id=d.depends_on_step_id WHERE s.run_id=? ORDER BY s.id,p.id,d.dependency_kind`, runID)
+	if err != nil {
 		return 0, err
 	}
-	repaired := 0
-	var kept []Dependency
-	for _, dep := range snapshot.Dependencies {
-		if dep.Kind == "media_visible" {
-			// media_visible deps with DependsOn set were already canonicalized.
-			// Dependencies without DependsOn (legacy NULL depends_on_step_id)
-			// are only valid if the run actually has a media_visible step.
-			if dep.DependsOn == nil && hasVisibleStep == 0 {
-				repaired++
-				continue
-			}
-			// If DependsOn is set, verify the referenced step exists.
-			if dep.DependsOn != nil {
-				var actual any
-				if err := q.QueryRowContext(ctx, `SELECT NULL FROM media_ingest_step WHERE run_id=? AND step_type=?`, runID, string(*dep.DependsOn)).Scan(&actual); err != nil {
-					// Referenced step doesn't exist; strip this dep.
-					repaired++
-					continue
-				}
-			}
+	var rebuilt []Dependency
+	for rows.Next() {
+		var dep Dependency
+		var target StepType
+		var hasTarget bool
+		var targetGeneration sql.NullInt64
+		if err = rows.Scan(&dep.Step, &dep.Kind, &target, &dep.Generation, &targetGeneration); err != nil {
+			rows.Close()
+			return 0, err
 		}
-		kept = append(kept, dep)
+		hasTarget = target != ""
+		if hasTarget {
+			dep.DependsOn = &target
+			dep.DependsOnGeneration = targetGeneration.Int64
+		}
+		rebuilt = append(rebuilt, dep)
 	}
-	if repaired == 0 {
+	if err = rows.Close(); err != nil {
+		return 0, err
+	}
+	if len(rebuilt) != depCount {
+		return 0, fmt.Errorf("cannot reconcile snapshot deps: expected %d after repair, got %d", depCount, len(rebuilt))
+	}
+	if reflect.DeepEqual(rebuilt, snapshot.Dependencies) {
 		return 0, nil
 	}
-	if len(kept) != depCount {
-		return repaired, fmt.Errorf("cannot reconcile snapshot deps: expected %d after repair, got %d", depCount, len(kept))
-	}
-	snapshot.Dependencies = kept
+	snapshot.Dependencies = rebuilt
 	raw, err := json.Marshal(snapshot)
 	if err != nil {
-		return repaired, fmt.Errorf("marshal repaired snapshot: %w", err)
+		return 0, fmt.Errorf("marshal repaired snapshot: %w", err)
 	}
 	if _, err = q.ExecContext(ctx, `UPDATE media_ingest_run SET config_snapshot_json=? WHERE id=? AND policy_version IN (2,3)`, string(raw), runID); err != nil {
-		return repaired, fmt.Errorf("persist repaired snapshot: %w", err)
+		return 0, fmt.Errorf("persist repaired snapshot: %w", err)
 	}
-	return repaired, nil
+	return 1, nil
 }
 func validateCurrentPolicyRunMode(ctx context.Context, q store.SQLExecutor, runID int64, allowRepairable bool, adapters ...ExecutableAdapterRegistry) error {
 	var raw string
@@ -838,10 +840,11 @@ func validateCurrentPolicyRunMode(ctx context.Context, q store.SQLExecutor, runI
 		return err
 	}
 	if depCount != len(snapshot.Dependencies) {
-		// The migration may have cleaned orphaned media_visible dependencies
-		// from the table but the snapshot still references them. Strip any
-		// media_visible deps that point to non-existent media_visible steps.
-		if depCount < len(snapshot.Dependencies) && allowRepairable {
+		// The migration may have cleaned orphaned dependencies from the table
+		// while legacy snapshots (media_visible/step_done kinds) still reference
+		// them. Rebuild the snapshot dependency list from the canonical table so
+		// both stay in sync.
+		if allowRepairable {
 			if repaired, repairErr := repairMediaVisibleSnapshotDeps(ctx, q, runID, &snapshot, depCount); repairErr != nil {
 				return repairErr
 			} else if repaired > 0 {
