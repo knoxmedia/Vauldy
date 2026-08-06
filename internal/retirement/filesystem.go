@@ -235,19 +235,29 @@ func fingerprintMatches(ctx context.Context, expected, path string) (bool, error
 // evaluateFingerprintFence compares a live file against a stored fingerprint.
 // Custom fingerprint functions (test seams and worker overrides) keep exact
 // string comparison so fixtures written with the same function still match. The
-// default path is algorithm-aware: imohash fingerprints are verified with
-// sampled hashing, while legacy sha256: values fall back to a full-file SHA-256
-// so rows stored before the imohash migration still pass the fence. Any hashing
-// or format error fails closed.
+// default path is algorithm-aware without ever re-reading a large file:
+// current imohash fingerprints are verified with a bounded 48KiB sample, while
+// legacy sha256: values (written before the imohash migration) are gated by
+// their recorded identity (canonical path, size, mtime) so rows predating the
+// migration cannot stall startup with a full-file SHA-256. Byte-level
+// verification of the file about to be removed still runs in DeleteQuarantine.
+// Any format error fails closed.
 func evaluateFingerprintFence(ctx context.Context, custom bool, compute func(context.Context, string) (string, error), expected, path string) (bool, error) {
-	if !custom {
-		return fingerprintMatches(ctx, expected, path)
+	if custom {
+		got, err := compute(ctx, path)
+		if err != nil {
+			return false, err
+		}
+		return got == expected, nil
 	}
-	got, err := compute(ctx, path)
-	if err != nil {
-		return false, err
+	algo, _, ok := publication.FingerprintHash(expected)
+	if !ok {
+		return false, errors.New("retirement: unrecognized stored fingerprint")
 	}
-	return got == expected, nil
+	if algo == "sha256" {
+		return publication.FingerprintIdentityMatch(ctx, expected, path)
+	}
+	return fingerprintMatches(ctx, expected, path)
 }
 
 // DeleteQuarantine removes the quarantined file after path/fingerprint validation.

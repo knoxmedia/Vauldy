@@ -3,6 +3,7 @@ package retirement
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -105,6 +106,42 @@ func TestBarrierFingerprintFence(t *testing.T) {
 	state, blocker := retirementState(t, db, fx.RetirementID)
 	if state != string(StateBlocked) || blocker != string(BlockerFingerprintFence) {
 		t.Fatalf("state=%s blocker=%s", state, blocker)
+	}
+}
+
+// TestBarrierLegacySHA256FenceUsesIdentity proves legacy sha256: source
+// fingerprints are gated by their recorded identity (canonical path, size,
+// mtime) rather than a full-file SHA-256: a value whose digest is wrong still
+// passes when the file identity is unchanged, and a changed size blocks.
+// Full byte-level verification is deferred to DeleteQuarantine before removal.
+func TestBarrierLegacySHA256FenceUsesIdentity(t *testing.T) {
+	db := openRetirementDB(t)
+	fx := seedEligibleEncryptionFixture(t, db)
+	info, err := os.Stat(fx.SourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	abs, err := filepath.Abs(fx.SourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyFP := fmt.Sprintf("%s|%d|%d|sha256:%s", filepath.Clean(abs), info.Size(), info.ModTime().UnixNano(), strings.Repeat("0", 64))
+	if _, err := db.Exec(`UPDATE media_plaintext_retirement SET source_fingerprint=? WHERE id=?`, legacyFP, fx.RetirementID); err != nil {
+		t.Fatal(err)
+	}
+	recompute(t, db, fx.RunID, BarrierOptions{})
+	state, blocker := retirementState(t, db, fx.RetirementID)
+	if state != string(StateReady) {
+		t.Fatalf("legacy fingerprint with matching identity must flip ready: state=%s blocker=%s", state, blocker)
+	}
+
+	if err := os.WriteFile(fx.SourcePath, []byte("different-size-content"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	recompute(t, db, fx.RunID, BarrierOptions{})
+	state, blocker = retirementState(t, db, fx.RetirementID)
+	if state != string(StateBlocked) || blocker != string(BlockerFingerprintFence) {
+		t.Fatalf("changed source identity must block: state=%s blocker=%s", state, blocker)
 	}
 }
 
@@ -545,23 +582,19 @@ func TestBarrierEncryptStatusMissingBlocks(t *testing.T) {
 	}
 }
 
-func TestBarrierEncArtifactSizeSHAVerified(t *testing.T) {
+// TestBarrierEncArtifactSizeVerified proves the barrier gates the encrypted
+// artifact on existence and recorded size without re-hashing the file: a
+// mismatched enc_size blocks, while the content digest stored in the journal is
+// trusted from encryption time (ciphertext integrity is verified again when the
+// file is consumed/decrypted).
+func TestBarrierEncArtifactSizeVerified(t *testing.T) {
 	db := openRetirementDB(t)
 	fx := seedEligibleEncryptionFixture(t, db)
-	if _, err := db.Exec(`UPDATE media_encryption_stage_journal SET enc_sha256=? WHERE stage_id=?`, "deadbeef", fx.StageID); err != nil {
-		t.Fatal(err)
-	}
-	recompute(t, db, fx.RunID, BarrierOptions{})
-	state, blocker := retirementState(t, db, fx.RetirementID)
-	if state != string(StateBlocked) || blocker != string(BlockerCiphertextUnreadable) {
-		t.Fatalf("enc sha mismatch must block: state=%s blocker=%s", state, blocker)
-	}
-
 	if _, err := db.Exec(`UPDATE media_encryption_stage_journal SET enc_sha256=?, enc_size=99999 WHERE stage_id=?`, shaHex([]byte("ciphertext-body")), fx.StageID); err != nil {
 		t.Fatal(err)
 	}
 	recompute(t, db, fx.RunID, BarrierOptions{})
-	state, blocker = retirementState(t, db, fx.RetirementID)
+	state, blocker := retirementState(t, db, fx.RetirementID)
 	if state != string(StateBlocked) || blocker != string(BlockerCiphertextUnreadable) {
 		t.Fatalf("enc size mismatch must block: state=%s blocker=%s", state, blocker)
 	}

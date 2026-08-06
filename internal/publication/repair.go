@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -777,6 +778,60 @@ func SourceFingerprintMatches(ctx context.Context, expected, path string) (bool,
 		return false, err
 	}
 	return got == expected, nil
+}
+
+// FingerprintIdentityMatch reports whether the file at path still matches the
+// identity prefix (canonical path, size, mtime) recorded in a SourceFingerprint
+// value without re-hashing the file. It lets the retirement barrier gate legacy
+// sha256: fingerprints (written before the imohash migration) cheaply; byte-level
+// verification still runs in the delete path before any bytes are removed.
+// A malformed or unrecognized stored value fails closed with an error.
+func FingerprintIdentityMatch(ctx context.Context, expected, path string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	identity, _, _, ok := fingerprintParts(expected)
+	if !ok || identity == "" {
+		return false, errors.New("source fingerprint: unrecognized format")
+	}
+	size, mtimeNs, idPath, ok := parseFingerprintIdentity(identity)
+	if !ok {
+		return false, errors.New("source fingerprint: malformed identity")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return false, err
+	}
+	if info.Size() != size || info.ModTime().UnixNano() != mtimeNs {
+		return false, nil
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return false, err
+	}
+	return identitiesEqual(filepath.Clean(abs), idPath), nil
+}
+
+// parseFingerprintIdentity splits the path|size|mtime identity prefix recorded
+// by SourceFingerprintContext and SourceFingerprintContextSHA256.
+func parseFingerprintIdentity(identity string) (size, mtimeNs int64, path string, ok bool) {
+	sep := strings.LastIndex(identity, "|")
+	if sep <= 0 {
+		return 0, 0, "", false
+	}
+	prev := strings.LastIndex(identity[:sep], "|")
+	if prev <= 0 {
+		return 0, 0, "", false
+	}
+	size, err := strconv.ParseInt(identity[prev+1:sep], 10, 64)
+	if err != nil {
+		return 0, 0, "", false
+	}
+	mtimeNs, err = strconv.ParseInt(identity[sep+1:], 10, 64)
+	if err != nil {
+		return 0, 0, "", false
+	}
+	return size, mtimeNs, identity[:prev], true
 }
 
 func identitiesEqual(a, b string) bool {

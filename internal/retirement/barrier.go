@@ -182,13 +182,13 @@ func evaluateEncryptionBasis(ctx context.Context, q store.SQLExecutor, row Row) 
 	if strings.TrimSpace(row.EncryptionStageID) == "" {
 		return BarrierResult{Blocker: BlockerEvidenceUnreadable, Detail: "missing encryption_stage_id"}
 	}
-	var encPath, wrapped, iv, encSHA, journalState string
+	var encPath, wrapped, iv, journalState string
 	var encSize int64
 	err := q.QueryRowContext(ctx, `
-SELECT COALESCE(enc_path,''),COALESCE(wrapped_dek,''),COALESCE(iv,''),COALESCE(enc_sha256,''),COALESCE(enc_size,0),COALESCE(state,'')
+SELECT COALESCE(enc_path,''),COALESCE(wrapped_dek,''),COALESCE(iv,''),COALESCE(enc_size,0),COALESCE(state,'')
 FROM media_encryption_stage_journal
 WHERE stage_id=? AND media_id=? AND generation=?`, row.EncryptionStageID, row.MediaID, row.Generation).
-		Scan(&encPath, &wrapped, &iv, &encSHA, &encSize, &journalState)
+		Scan(&encPath, &wrapped, &iv, &encSize, &journalState)
 	if err != nil {
 		return BarrierResult{Blocker: BlockerEvidenceUnreadable, Detail: formatErr("encryption journal", err)}
 	}
@@ -203,16 +203,8 @@ WHERE stage_id=? AND media_id=? AND generation=?`, row.EncryptionStageID, row.Me
 	}
 	if st, e := os.Stat(encPath); e != nil || st.IsDir() {
 		return BarrierResult{Blocker: BlockerCiphertextUnreadable, Detail: formatErr("enc_path", e)}
-	} else {
-		if encSize > 0 && st.Size() != encSize {
-			return BarrierResult{Blocker: BlockerCiphertextUnreadable, Detail: fmt.Sprintf("enc_size got=%d want=%d", st.Size(), encSize)}
-		}
-		if sha := strings.TrimSpace(encSHA); sha != "" {
-			got, hashErr := fileSHA256Ctx(ctx, encPath)
-			if hashErr != nil || got != sha {
-				return BarrierResult{Blocker: BlockerCiphertextUnreadable, Detail: "enc_sha256 mismatch"}
-			}
-		}
+	} else if encSize > 0 && st.Size() != encSize {
+		return BarrierResult{Blocker: BlockerCiphertextUnreadable, Detail: fmt.Sprintf("enc_size got=%d want=%d", st.Size(), encSize)}
 	}
 	var assetEnc, assetDEK, assetIV, assetStatus string
 	err = q.QueryRowContext(ctx, `
