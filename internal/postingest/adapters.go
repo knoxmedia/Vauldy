@@ -655,6 +655,18 @@ func (a *encryptAdapter) ExecuteWithResult(ctx context.Context, task Task) (Exec
 			if !canStage {
 				return ordinary, permanentAdapterError(TaskEncrypt, "staged encryption is not configured")
 			}
+			// A media item may already hold a valid encrypted artifact even
+			// though media.file_path no longer equals the recorded enc_path
+			// (e.g. encryption committed in an earlier generation and the user
+			// retried the ingest run, so the original plaintext is gone).
+			// Re-encrypting is impossible in that case; treat the existing
+			// artifact as success so the queue row and linked step complete
+			// instead of failing with "file does not exist".
+			if ready, readyErr := usableEncryptedOutput(ctx, db, task.MediaID); readyErr != nil {
+				return ordinary, readyErr
+			} else if ready {
+				return ordinary, nil
+			}
 			staged, err = stager.StageMediaEncryption(ctx, task.MediaID)
 			if err == nil {
 				err = insertEncryptionStageJournal(ctx, db, task, staged)

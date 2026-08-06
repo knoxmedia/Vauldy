@@ -391,6 +391,11 @@ func (q *Queue) Renew(ctx context.Context, task Task) (bool, error) {
 			}
 			n, _ := r.RowsAffected()
 			renewed = n == 1
+			if renewed && task.ExecutionID != "" {
+				if re := scheduler.RenewReservationDirect(ctx, q.db, task.ExecutionID, leaseDuration); re != nil {
+					return re
+				}
+			}
 			return nil
 		})
 		return renewed, err
@@ -419,6 +424,11 @@ func (q *Queue) Renew(ctx context.Context, task Task) (bool, error) {
 		if renewed {
 			if err := syncLinkedStepLeaseTx(ctx, tx, task.ID); err != nil {
 				return err
+			}
+			if task.ExecutionID != "" {
+				if err := scheduler.RenewReservationTx(ctx, tx, task.ExecutionID, leaseDuration); err != nil {
+					return err
+				}
 			}
 		}
 		if err := tx.Commit(); err != nil {

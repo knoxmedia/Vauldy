@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
+	"time"
 
 	"knox-media/internal/store"
 )
@@ -33,6 +35,58 @@ func ReleaseReservationTx(ctx context.Context, tx store.SQLExecutor, executionID
 		return fmt.Errorf("%w: %s", ErrReservationNotActive, executionID)
 	}
 	return nil
+}
+
+// RenewReservationTx extends the lease of an active reservation inside an open
+// transaction. A reservation that is already released or absent is a successful
+// no-op: the same execution unit may legitimately hold no reservation (e.g. a
+// legacy claim or a GPU-fallback fence). This mirrors ReleaseReservationTx's
+// exactly-once semantics so periodic task heartbeats can keep the reservation
+// alive in lockstep with the queue row.
+func RenewReservationTx(ctx context.Context, tx store.SQLExecutor, executionID string, leaseTTL time.Duration) error {
+	if strings.TrimSpace(executionID) == "" {
+		return nil
+	}
+	if leaseTTL <= 0 {
+		leaseTTL = 90 * time.Second
+	}
+	// Bind the lease deadline as a Go time value so it serializes in the same
+	// format admission uses (InsertAdmissionReservation). Using SQLite's
+	// datetime(CURRENT_TIMESTAMP,...) would store "YYYY-MM-DD HH:MM:SS" (UTC,
+	// space separator) while admission writes the driver's Go time format; the
+	// admission budget checks compare lease_until > ? as strings, so mixing
+	// formats makes renewed reservations look expired and silently disables
+	// concurrency limits.
+	renewUntil := time.Now().Add(leaseTTL)
+	result, err := tx.ExecContext(ctx,
+		`UPDATE scheduler_reservation SET lease_until=?, updated_at=CURRENT_TIMESTAMP WHERE execution_id=? AND status='active'`,
+		renewUntil, executionID)
+	if err != nil {
+		return fmt.Errorf("renew reservation: %w", err)
+	}
+	if _, err := result.RowsAffected(); err != nil {
+		return fmt.Errorf("renew reservation rows: %w", err)
+	}
+	return nil
+}
+
+// RenewReservationDirect extends the lease of an active reservation using the
+// database connection directly (outside an open transaction). Already-released
+// or absent reservations are a successful no-op, mirroring
+// ReleaseReservationTx's exactly-once semantics.
+func RenewReservationDirect(ctx context.Context, db *sql.DB, executionID string, leaseTTL time.Duration) error {
+	if strings.TrimSpace(executionID) == "" {
+		return nil
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := RenewReservationTx(ctx, tx, executionID, leaseTTL); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // GetReservationTx returns a reservation by execution id within an open

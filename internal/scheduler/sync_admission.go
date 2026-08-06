@@ -257,10 +257,13 @@ func HeartbeatSync(ctx context.Context, db *sql.DB, executionID string, leaseTTL
 	if leaseTTL <= 0 {
 		leaseTTL = 90 * time.Second
 	}
-	modifier := fmt.Sprintf("+%d seconds", int64(leaseTTL/time.Second))
+	// Bind the lease deadline as a Go time so it serializes in the same format
+	// admission writes; string comparison in budget checks (lease_until > ?)
+	// requires a uniform timestamp format.
+	renewUntil := time.Now().Add(leaseTTL)
 	result, err := db.ExecContext(ctx,
-		`UPDATE scheduler_reservation SET lease_until=datetime(CURRENT_TIMESTAMP, ?), updated_at=CURRENT_TIMESTAMP WHERE execution_id=? AND status='active'`,
-		modifier, executionID)
+		`UPDATE scheduler_reservation SET lease_until=?, updated_at=CURRENT_TIMESTAMP WHERE execution_id=? AND status='active'`,
+		renewUntil, executionID)
 	if err != nil {
 		return fmt.Errorf("sync heartbeat: %w", err)
 	}
