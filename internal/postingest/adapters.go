@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"knox-media/internal/atrack"
@@ -611,6 +612,12 @@ func (a *encryptAdapter) ExecuteWithResult(ctx context.Context, task Task) (Exec
 	if a == nil || a.enc == nil {
 		return ordinary, unavailableWorkerError(TaskEncrypt, "encryptor is not configured")
 	}
+	// Long-running encryption is progress-driven: while the resume checkpoint
+	// offset advances, the task reports progress so the dispatcher never
+	// cancels it on wall clock alone. A stalled encryption (no checkpoint for
+	// ProgressIdleTimeout) is force-cancelled by the heartbeat loop instead.
+	stopProgress := a.watchEncryptProgress(ctx, task.MediaID)
+	defer stopProgress()
 	dbp, hasDB := a.enc.(encryptionDBProvider)
 	stager, canStage := a.enc.(mediaEncryptionStager)
 	if !hasDB || dbp.EncryptionDB() == nil {
@@ -674,6 +681,19 @@ func (a *encryptAdapter) ExecuteWithResult(ctx context.Context, task Task) (Exec
 		}
 	}
 	if err != nil {
+		// loadSelectedEncryptionStage matched the encrypted asset record but
+		// fingerprinting the original plaintext failed because the plaintext
+		// was already cleaned up by the earlier encryption commit. For a
+		// re-submitted media that already holds a valid encrypted artifact this
+		// is not an error: complete the step without re-encrypting. Any other
+		// source-path error is surfaced unchanged.
+		if isMissingSourcePathError(err) {
+			if ready, readyErr := usableEncryptedOutput(ctx, db, task.MediaID); readyErr != nil {
+				return ordinary, readyErr
+			} else if ready {
+				return ordinary, nil
+			}
+		}
 		return ordinary, classifyEncryptError(err)
 	}
 	rootProvider, ok := a.enc.(encryptionPrivateRootProvider)
@@ -695,6 +715,45 @@ func (a *encryptAdapter) ExecuteWithResult(ctx context.Context, task Task) (Exec
 	}
 	return ExecutionResult{Completion: AlreadyCommittedAtomically}, nil
 }
+
+// watchEncryptProgress reports forward progress while the media's encryption
+// resume checkpoint advances. The dispatcher uses the reported progress to keep
+// long-running encryption tasks alive; when the checkpoint stops advancing for
+// ProgressIdleTimeout the task is force-cancelled as stalled.
+func (a *encryptAdapter) watchEncryptProgress(ctx context.Context, mediaID int64) func() {
+	dbp, ok := a.enc.(encryptionDBProvider)
+	if !ok || dbp.EncryptionDB() == nil {
+		return func() {}
+	}
+	db := dbp.EncryptionDB()
+	done := make(chan struct{})
+	var once sync.Once
+	stop := func() { once.Do(func() { close(done) }) }
+	go func() {
+		lastOffset := int64(-1)
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-done:
+				return
+			case <-ticker.C:
+				var offset int64
+				if err := db.QueryRowContext(context.WithoutCancel(ctx), `SELECT COALESCE(plain_offset,0) FROM media_encrypt_resume WHERE media_id=? ORDER BY id DESC LIMIT 1`, mediaID).Scan(&offset); err != nil {
+					continue
+				}
+				if offset > lastOffset {
+					lastOffset = offset
+					ReportProgress(ctx)
+				}
+			}
+		}
+	}()
+	return stop
+}
+
 func classifyEncryptError(err error) error {
 	if err == nil {
 		return nil
@@ -971,6 +1030,23 @@ func finishEncryptionLifecycleTx(ctx context.Context, tx store.SQLExecutor, task
 }
 func usableEncryptedOutput(ctx context.Context, db *sql.DB, mediaID int64) (bool, error) {
 	return storage.IsEncryptedAssetRecordValid(ctx, db, mediaID)
+}
+
+// isMissingSourcePathError reports whether err originates from a source path
+// that no longer exists. loadSelectedEncryptionStage computes a fingerprint of
+// the original plaintext; once encryption has committed and cleaned up the
+// plaintext, that path is gone even though the encrypted artifact is valid.
+func isMissingSourcePathError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if os.IsNotExist(err) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "cannot find the file") || strings.Contains(message, "cannot find the path") ||
+		strings.Contains(message, "getfileattributesex") || strings.Contains(message, "no such file") ||
+		strings.Contains(message, "file does not exist")
 }
 
 func isPermanentEncryptError(err error) bool {

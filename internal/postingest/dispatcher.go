@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"knox-media/internal/progressctx"
 	"knox-media/internal/scheduler"
 	"knox-media/internal/storage"
 )
@@ -38,6 +39,20 @@ func executeTask(ctx context.Context, executor Executor, task Task) (ExecutionRe
 	return ExecutionResult{Completion: CompleteThroughQueue}, executor.Execute(ctx, task)
 }
 
+// WithProgressReporter attaches a progress callback to ctx. Long-running
+// executors call ReportProgress while their underlying work advances so the
+// dispatcher can distinguish a healthy task from a stalled one.
+func WithProgressReporter(ctx context.Context, report func()) context.Context {
+	return progressctx.WithReporter(ctx, report)
+}
+
+// ReportProgress signals that the current task made forward progress. It is a
+// no-op when the context carries no reporter (e.g. tests or non-dispatcher
+// execution).
+func ReportProgress(ctx context.Context) {
+	progressctx.Report(ctx)
+}
+
 type ClassifiedError struct {
 	Kind FailureKind
 	Err  error
@@ -52,24 +67,37 @@ func (e ClassifiedError) Error() string {
 func (e ClassifiedError) Unwrap() error { return e.Err }
 
 type DispatcherOptions struct {
-	OwnerID                         string
-	SubtitleTimeoutRealtimeFactor   float64
+	OwnerID                                                         string
+	SubtitleTimeoutRealtimeFactor                                   float64
 	PollInterval, LeaseDuration, HeartbeatInterval, RecoverInterval time.Duration
-	ExecutorStopGrace               time.Duration
-	Timeouts                        map[TaskType]time.Duration
+	ExecutorStopGrace                                               time.Duration
+	// ProgressIdleTimeout bounds how long a task may run without reporting any
+	// progress. Long-running workers (encryption, preview, keyframe) report
+	// progress while they advance; a task that stops reporting for this long is
+	// considered stalled and is force-cancelled instead of waiting for the
+	// fixed wall-clock Timeouts entry.
+	ProgressIdleTimeout time.Duration
+	// MaxRuntime is the absolute upper bound for progress-driven tasks. It
+	// replaces the fixed Timeouts entry as the task-context deadline once
+	// progress reporting is active, so a healthy task never times out purely on
+	// wall clock. Zero keeps the per-task Timeouts behavior.
+	MaxRuntime time.Duration
+	Timeouts   map[TaskType]time.Duration
 }
 
 func DefaultDispatcherOptions() DispatcherOptions {
-	return DispatcherOptions{SubtitleTimeoutRealtimeFactor: 2.0, PollInterval: 250 * time.Millisecond, LeaseDuration: leaseDuration, HeartbeatInterval: 30 * time.Second, RecoverInterval: 30 * time.Second, ExecutorStopGrace: 10 * time.Second, Timeouts: map[TaskType]time.Duration{
+	return DispatcherOptions{SubtitleTimeoutRealtimeFactor: 2.0, PollInterval: 250 * time.Millisecond, LeaseDuration: leaseDuration, HeartbeatInterval: 30 * time.Second, RecoverInterval: 30 * time.Second, ExecutorStopGrace: 10 * time.Second, ProgressIdleTimeout: 15 * time.Minute, MaxRuntime: 12 * time.Hour, Timeouts: map[TaskType]time.Duration{
 		TaskPoster: 2 * time.Minute, TaskPosterRepair: 2 * time.Minute, TaskThumbnail: 2 * time.Minute, TaskPreview: 30 * time.Minute, TaskKeyframe: 30 * time.Minute, TaskSubtitle: 60 * time.Minute, TaskSubtitleRecognize: 60 * time.Minute, TaskAIAnalysis: 15 * time.Minute, TaskAtrack: 30 * time.Minute, TaskEncrypt: 120 * time.Minute,
 	}}
 }
 
 type workerState struct {
-	cancel context.CancelFunc
-	mu     sync.Mutex
-	kind   FailureKind
-	cause  error
+	cancel       context.CancelFunc
+	mu           sync.Mutex
+	kind         FailureKind
+	cause        error
+	progressSeen bool
+	lastProgress time.Time
 }
 
 func (w *workerState) stop(kind FailureKind, cause error) {
@@ -87,23 +115,48 @@ func (w *workerState) reason() (FailureKind, error) {
 	return w.kind, w.cause
 }
 
+// reportProgress records the task as making forward progress. Executors call it
+// through ReportProgress whenever their underlying work advances, so the
+// dispatcher can distinguish a healthy long-running task from a stalled one.
+func (w *workerState) reportProgress() {
+	w.mu.Lock()
+	w.progressSeen = true
+	w.lastProgress = time.Now()
+	w.mu.Unlock()
+}
+
+// progressStale reports whether a progress-reporting task has been silent for
+// longer than idle. Tasks that never report progress (short captures, subtitle
+// inference) are never considered stale: their fixed Timeouts still apply.
+func (w *workerState) progressStale(idle time.Duration) bool {
+	if idle <= 0 {
+		return false
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.progressSeen {
+		return false
+	}
+	return time.Since(w.lastProgress) > idle
+}
+
 type Dispatcher struct {
-	q                                                 *Queue
-	executor                                          Executor
-	opts                                              DispatcherOptions
-	svc                                               *scheduler.Service
-	mu                                                sync.Mutex
-	running                                           map[int64]*workerState
-	sourceLookupBudget                                time.Duration
-	sourceSize                                        func(context.Context, Task) int64
-	mediaDuration                                     func(context.Context, Task) int64
-	sourceLookups                                     chan struct{}
-	scans                                             map[int64]map[int64]*workerState
-	wg                                                sync.WaitGroup
-	startMu                                           sync.Mutex
-	started                                           bool
-	beforeRegister                                    func(Task)
-	beforeRun                                         func(Task)
+	q                  *Queue
+	executor           Executor
+	opts               DispatcherOptions
+	svc                *scheduler.Service
+	mu                 sync.Mutex
+	running            map[int64]*workerState
+	sourceLookupBudget time.Duration
+	sourceSize         func(context.Context, Task) int64
+	mediaDuration      func(context.Context, Task) int64
+	sourceLookups      chan struct{}
+	scans              map[int64]map[int64]*workerState
+	wg                 sync.WaitGroup
+	startMu            sync.Mutex
+	started            bool
+	beforeRegister     func(Task)
+	beforeRun          func(Task)
 }
 
 func NewDispatcher(q *Queue, executor Executor, opts DispatcherOptions, svc *scheduler.Service) (*Dispatcher, error) {
@@ -140,6 +193,12 @@ func NewDispatcher(q *Queue, executor Executor, opts DispatcherOptions, svc *sch
 	if opts.RecoverInterval <= 0 {
 		return nil, fmt.Errorf("Dispatcher.RecoverInterval must be positive")
 	}
+	if opts.ProgressIdleTimeout < 0 {
+		return nil, fmt.Errorf("Dispatcher.ProgressIdleTimeout must not be negative")
+	}
+	if opts.MaxRuntime < 0 {
+		return nil, fmt.Errorf("Dispatcher.MaxRuntime must not be negative")
+	}
 	for _, typ := range taskTypes {
 		if timeout, ok := opts.Timeouts[typ]; !ok || timeout <= 0 {
 			return nil, fmt.Errorf("Dispatcher.Timeouts[%s] must be positive", typ)
@@ -175,8 +234,17 @@ func sizedTaskTimeout(typ TaskType) bool {
 	return typ == TaskPoster || typ == TaskPosterRepair || typ == TaskEncrypt
 }
 
+// progressDrivenTask reports whether the task type is driven by forward-progress
+// reporting instead of a fixed wall-clock deadline: a healthy task keeps
+// reporting progress (encryption checkpoints, ffmpeg output) and therefore must
+// not be cancelled on time alone; a stalled task is force-cancelled by the
+// heartbeat loop after ProgressIdleTimeout.
+func progressDrivenTask(typ TaskType) bool {
+	return typ == TaskEncrypt || typ == TaskPreview
+}
+
 func deferredTaskTimeout(typ TaskType) bool {
-	return sizedTaskTimeout(typ) || typ == TaskSubtitle || typ == TaskSubtitleRecognize
+	return sizedTaskTimeout(typ) || progressDrivenTask(typ) || typ == TaskSubtitle || typ == TaskSubtitleRecognize
 }
 
 // subtitleTaskTimeout returns min(8h, max(base, durationSec*factor seconds)).
@@ -254,6 +322,13 @@ func (d *Dispatcher) timeoutForTask(ctx context.Context, task Task, heartbeat *t
 	base := d.opts.Timeouts[task.Type]
 	if !deferredTaskTimeout(task.Type) {
 		return base, ctx.Err() == nil
+	}
+	if d.opts.MaxRuntime > 0 && progressDrivenTask(task.Type) {
+		// Progress-driven tasks (encryption, preview) report forward progress
+		// while they advance, and the heartbeat loop force-cancels them when
+		// progress stops for ProgressIdleTimeout. MaxRuntime is only the
+		// absolute wall-clock ceiling.
+		return d.opts.MaxRuntime, ctx.Err() == nil
 	}
 	select {
 	case d.sourceLookups <- struct{}{}:
@@ -425,7 +500,7 @@ func (d *Dispatcher) launch(parent context.Context, task Task) {
 	} else {
 		lifecycleCtx, cancel = context.WithTimeout(parent, d.opts.Timeouts[task.Type])
 	}
-	state := &workerState{cancel: cancel}
+	state := &workerState{cancel: cancel, lastProgress: time.Now()}
 	d.mu.Lock()
 	d.running[task.ID] = state
 	if task.ScanTaskID != nil {
@@ -496,6 +571,9 @@ func (d *Dispatcher) runTask(parent, lifecycleCtx context.Context, task Task, st
 		taskCtx, taskCancel = context.WithTimeout(lifecycleCtx, timeout)
 	}
 	defer taskCancel()
+	// Executors report forward progress through the task context; the heartbeat
+	// loop below force-cancels tasks that stop reporting for ProgressIdleTimeout.
+	taskCtx = WithProgressReporter(taskCtx, state.reportProgress)
 	if taskCtx.Err() != nil {
 		d.failBeforeExecute(parent, task, state)
 		return
@@ -515,6 +593,10 @@ func (d *Dispatcher) runTask(parent, lifecycleCtx context.Context, task Task, st
 			execResult, execErr = outcome.result, outcome.err
 			goto finish
 		case <-heartbeat.C:
+			if d.opts.ProgressIdleTimeout > 0 && state.progressStale(d.opts.ProgressIdleTimeout) {
+				log.Printf("postingest dispatcher task %d (%s media %d) stalled: no progress for %v; force-cancelling", task.ID, task.Type, task.MediaID, d.opts.ProgressIdleTimeout)
+				state.stop(FailureRetryable, errors.New("task stalled: no progress reported"))
+			}
 			d.heartbeatTask(taskCtx, task, state)
 		case <-taskCtx.Done():
 			timer := time.NewTimer(d.opts.ExecutorStopGrace)

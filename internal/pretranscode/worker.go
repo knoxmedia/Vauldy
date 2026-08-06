@@ -55,6 +55,10 @@ type Worker struct {
 	semCPU             chan struct{}
 	semGPU             chan struct{}
 	leaseRenewInterval time.Duration
+	// progressIdleTimeout bounds how long a rendition may run without any
+	// ffmpeg progress output before it is force-cancelled as stalled. Zero
+	// disables the watchdog.
+	progressIdleTimeout time.Duration
 }
 
 // NewWorker constructs a standalone worker. MaxCPU/MaxGPU default to 4/2
@@ -78,6 +82,9 @@ func NewWorker(db *sql.DB, vault *keystore.Vault, ffmpegPath, transcodeDir strin
 		semGPU:       make(chan struct{}, maxGPU),
 		parentClaims: make(map[int64]publication.PrepareParentIdentity),
 		claimOwner:   "pretranscode-" + uuid.NewString(),
+		// A rendition that stops producing ffmpeg progress for this long is
+		// force-cancelled as stalled (SRS 6.8 progress watchdog).
+		progressIdleTimeout: 15 * time.Minute,
 		registry: func() coreiface.CapabilityRegistry {
 			if len(registries) > 0 {
 				return registries[0]
@@ -85,6 +92,13 @@ func NewWorker(db *sql.DB, vault *keystore.Vault, ffmpegPath, transcodeDir strin
 			return nil
 		}(),
 	}
+}
+
+// SetProgressIdleTimeout configures the stall watchdog. A rendition that emits
+// no ffmpeg progress for the given duration is force-cancelled as stalled. A
+// non-positive value disables the watchdog.
+func (w *Worker) SetProgressIdleTimeout(d time.Duration) {
+	w.progressIdleTimeout = d
 }
 
 // Start launches the polling loop until ctx is cancelled.
@@ -479,6 +493,34 @@ func (w *Worker) runRenditionJob(parent context.Context, job *claimedJob, p *Pre
 	durationUS := w.lookupDurationUS(job.TaskID)
 	progressDone := make(chan struct{})
 	progressErr := make(chan error, 1)
+	progressStall := newProgressStallTracker()
+	// A rendition that emits no progress output for progressIdleTimeout is
+	// force-cancelled as stalled. ffmpeg writes out_time_us lines continuously
+	// while it encodes and goes silent only when it is stuck or finished.
+	watchdogDone := make(chan struct{})
+	defer close(watchdogDone)
+	if w.progressIdleTimeout > 0 {
+		go func() {
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-watchdogDone:
+					return
+				case <-ticker.C:
+					if progressStall.stalled(w.progressIdleTimeout) {
+						msg := fmt.Sprintf("stalled: no progress output for %v", w.progressIdleTimeout)
+						log.Printf("pretranscode job %d %s", job.ID, msg)
+						w.failJob(job, msg, encoder)
+						cancel()
+						return
+					}
+				}
+			}
+		}()
+	}
 	go func() {
 		defer close(progressDone)
 		scanner := bufio.NewScanner(stdout)
@@ -486,6 +528,10 @@ func (w *Worker) runRenditionJob(parent context.Context, job *claimedJob, p *Pre
 			line := scanner.Text()
 			if strings.HasPrefix(line, "out_time_us=") {
 				v, _ := strconv.ParseInt(strings.TrimPrefix(line, "out_time_us="), 10, 64)
+				// Every progress line is liveness evidence even when the media
+				// duration is unknown, so a healthy encode is never mistaken
+				// for a stalled one by the watchdog.
+				progressStall.mark()
 				if durationUS > 0 {
 					pct := int(v * 100 / durationUS)
 					if pct < 0 {
@@ -603,6 +649,35 @@ func (w *Worker) CancelRendition(jobID int64) bool {
 	return ok
 }
 func (w *Worker) CancelParent(taskID int64) { w.CaptureParentCancellation(taskID)() }
+
+// progressStallTracker tracks the last time a rendition reported forward
+// progress, so the worker watchdog can force-cancel renditions whose ffmpeg
+// output has gone silent for longer than the configured idle timeout.
+type progressStallTracker struct {
+	mu   sync.Mutex
+	last time.Time
+}
+
+func newProgressStallTracker() *progressStallTracker {
+	return &progressStallTracker{last: time.Now()}
+}
+
+func (t *progressStallTracker) mark() {
+	t.mu.Lock()
+	t.last = time.Now()
+	t.mu.Unlock()
+}
+
+// stalled reports whether no progress was marked for longer than idle. A
+// non-positive idle disables the check.
+func (t *progressStallTracker) stalled(idle time.Duration) bool {
+	if idle <= 0 {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return time.Since(t.last) > idle
+}
 
 func (w *Worker) failJob(job *claimedJob, msg, encoder string) {
 	if _, err := w.finalizeJobAndTaskTx(context.Background(), *job, renditionJobTerminal{Status: "failed", ErrorMessage: truncate(msg, 1600), Encoder: encoder}); err != nil {

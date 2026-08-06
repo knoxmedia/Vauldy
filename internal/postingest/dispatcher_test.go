@@ -74,10 +74,10 @@ func TestDefaultDispatcherOptions(t *testing.T) {
 func TestSubtitleTaskTimeoutScalesByDuration(t *testing.T) {
 	base := 60 * time.Minute
 	cases := []struct {
-		name         string
-		durationSec  int64
-		factor       float64
-		want         time.Duration
+		name        string
+		durationSec int64
+		factor      float64
+		want        time.Duration
 	}{
 		{"zero duration uses base", 0, 2.0, base},
 		{"negative duration uses base", -1, 2.0, base},
@@ -93,6 +93,85 @@ func TestSubtitleTaskTimeoutScalesByDuration(t *testing.T) {
 				t.Fatalf("timeout=%v want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestWorkerStateProgressStale(t *testing.T) {
+	idle := 10 * time.Minute
+	st := &workerState{}
+	// A task that never reports progress is never considered stale: its fixed
+	// Timeouts still apply, so subtitle inference etc. is not force-cancelled.
+	if st.progressStale(idle) {
+		t.Fatal("task without progress reports must not be stale")
+	}
+	st.reportProgress()
+	if st.progressStale(idle) {
+		t.Fatal("freshly reported task must not be stale")
+	}
+	st.lastProgress = time.Now().Add(-2 * idle)
+	if !st.progressStale(idle) {
+		t.Fatal("task silent past idle must be stale")
+	}
+	st.reportProgress()
+	if st.progressStale(idle) {
+		t.Fatal("task must leave stale state after a new report")
+	}
+	// Zero idle disables the check entirely.
+	if (&workerState{progressSeen: true, lastProgress: time.Now().Add(-time.Hour)}).progressStale(0) {
+		t.Fatal("zero idle must disable staleness")
+	}
+}
+
+func TestProgressReporterContext(t *testing.T) {
+	var calls int
+	ctx := WithProgressReporter(context.Background(), func() { calls++ })
+	ReportProgress(ctx)
+	if calls != 1 {
+		t.Fatalf("ReportProgress calls=%d want 1", calls)
+	}
+	// No reporter attached: no-op, no panic.
+	ReportProgress(context.Background())
+	if calls != 1 {
+		t.Fatalf("ReportProgress on plain ctx calls=%d want 1", calls)
+	}
+}
+
+func TestTimeoutForTaskProgressDrivenUsesMaxRuntime(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	q := NewQueue(db, "t", nil)
+	opts := DefaultDispatcherOptions()
+	opts.MaxRuntime = 12 * time.Hour
+	svc := &scheduler.Service{}
+	d := &Dispatcher{q: q, opts: opts, svc: svc}
+	hb := time.NewTicker(time.Hour)
+	defer hb.Stop()
+	st := &workerState{cancel: func() {}}
+	// Encryption and preview are progress-driven: MaxRuntime replaces the fixed
+	// Timeouts while they report forward progress.
+	for _, typ := range []TaskType{TaskEncrypt, TaskPreview} {
+		got, proceed := d.timeoutForTask(context.Background(), Task{Type: typ}, hb, st)
+		if !proceed {
+			t.Fatalf("%s timeout must proceed", typ)
+		}
+		if got != 12*time.Hour {
+			t.Fatalf("%s timeout=%v want MaxRuntime", typ, got)
+		}
+	}
+	// Subtitle keeps its source-size based timeout.
+	got, _ := d.timeoutForTask(context.Background(), Task{Type: TaskSubtitle}, hb, st)
+	if got != 60*time.Minute {
+		t.Fatalf("subtitle timeout=%v want fixed Timeouts", got)
+	}
+	// MaxRuntime disabled restores per-task Timeouts.
+	opts.MaxRuntime = 0
+	d.opts = opts
+	got, _ = d.timeoutForTask(context.Background(), Task{Type: TaskEncrypt}, hb, st)
+	if got != 120*time.Minute {
+		t.Fatalf("encrypt timeout without MaxRuntime=%v want 120m", got)
+	}
+	got, _ = d.timeoutForTask(context.Background(), Task{Type: TaskPreview}, hb, st)
+	if got != 30*time.Minute {
+		t.Fatalf("preview timeout without MaxRuntime=%v want 30m", got)
 	}
 }
 
@@ -151,7 +230,6 @@ func TestDispatcher_PosterDeadlinesUsePreferredSourceSize(t *testing.T) {
 		{typ: TaskPoster, size: 1},
 		{typ: TaskPosterRepair, size: (2 << 30) + 1},
 		{typ: TaskPoster, path: filepath.Join(t.TempDir(), "missing.mp4")},
-		{typ: TaskPreview, size: 1},
 	}
 	for i := range fixtures {
 		f := &fixtures[i]
@@ -214,7 +292,6 @@ func TestDispatcher_PosterDeadlinesUsePreferredSourceSize(t *testing.T) {
 	wants := map[TaskType][]time.Duration{
 		TaskPoster:       {4 * time.Minute, 2 * time.Minute},
 		TaskPosterRepair: {8 * time.Minute},
-		TaskPreview:      {2 * time.Minute},
 	}
 	for range fixtures {
 		select {
@@ -1052,14 +1129,14 @@ func TestDispatcher_NonposterDeadlineStartsAtLaunch(t *testing.T) {
 func TestDispatcher_TypeTimeouts(t *testing.T) {
 	db, _ := openQueueTestDB(t)
 	q := NewQueue(db, "owner", nil)
-	ids := enqueueDispatcherTasks(t, q, 1, TaskPoster, TaskPreview)
+	ids := enqueueDispatcherTasks(t, q, 1, TaskPoster, TaskThumbnail)
 	observed := make(chan TaskType, 2)
 	exec := executorFunc(func(ctx context.Context, task Task) error { <-ctx.Done(); observed <- task.Type; return ctx.Err() })
 	o := DefaultDispatcherOptions()
 	o.OwnerID = "owner"
 	o.PollInterval = 5 * time.Millisecond
 	o.Timeouts[TaskPoster] = 20 * time.Millisecond
-	o.Timeouts[TaskPreview] = 35 * time.Millisecond
+	o.Timeouts[TaskThumbnail] = 35 * time.Millisecond
 	d := schedulerDispatcher(t, q, scheduler.PolicyDefaults(), exec, o)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -1258,12 +1335,19 @@ func TestDispatcher_RecoversExpiredLeasesPeriodically(t *testing.T) {
 func TestDispatcher_AllTypeTimeoutDeadlines(t *testing.T) {
 	db, _ := openQueueTestDB(t)
 	q := NewQueue(db, "owner", nil)
-	enqueueDispatcherTasks(t, q, 1, taskTypes...)
+	types := make([]TaskType, 0, len(taskTypes))
+	for _, typ := range taskTypes {
+		if progressDrivenTask(typ) {
+			continue // progress-driven tasks use MaxRuntime; covered separately
+		}
+		types = append(types, typ)
+	}
+	enqueueDispatcherTasks(t, q, 1, types...)
 	type observation struct {
 		typ       TaskType
 		remaining time.Duration
 	}
-	observed := make(chan observation, len(taskTypes))
+	observed := make(chan observation, len(types))
 	exec := executorFunc(func(ctx context.Context, task Task) error {
 		deadline, ok := ctx.Deadline()
 		if !ok {
@@ -1274,7 +1358,7 @@ func TestDispatcher_AllTypeTimeoutDeadlines(t *testing.T) {
 		return ctx.Err()
 	})
 	o := dispatcherOptions("owner")
-	for i, typ := range taskTypes {
+	for i, typ := range types {
 		o.Timeouts[typ] = time.Duration(300+i*20) * time.Millisecond
 	}
 	d := schedulerDispatcher(t, q, scheduler.PolicyDefaults(), exec, o)
@@ -1282,7 +1366,7 @@ func TestDispatcher_AllTypeTimeoutDeadlines(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- d.Start(ctx) }()
 	seen := map[TaskType]bool{}
-	for range taskTypes {
+	for range types {
 		select {
 		case got := <-observed:
 			want := o.Timeouts[got.typ]
@@ -1294,7 +1378,7 @@ func TestDispatcher_AllTypeTimeoutDeadlines(t *testing.T) {
 			t.Fatal("missing deadline")
 		}
 	}
-	for _, typ := range taskTypes {
+	for _, typ := range types {
 		if !seen[typ] {
 			t.Fatalf("missing %s deadline", typ)
 		}
@@ -1308,6 +1392,48 @@ func TestDispatcher_AllTypeTimeoutDeadlines(t *testing.T) {
 	})
 	cancel()
 	<-done
+}
+
+func TestDispatcher_ProgressDrivenDeadlineUsesMaxRuntime(t *testing.T) {
+	for _, typ := range []TaskType{TaskEncrypt, TaskPreview} {
+		t.Run(string(typ), func(t *testing.T) {
+			db, _ := openQueueTestDB(t)
+			q := NewQueue(db, "owner", nil)
+			insertDispatcherTask(t, q, typ, nil, "max-runtime")
+			type observation struct {
+				remaining time.Duration
+			}
+			observed := make(chan observation, 1)
+			exec := executorFunc(func(ctx context.Context, task Task) error {
+				deadline, ok := ctx.Deadline()
+				if !ok {
+					return errors.New("missing deadline")
+				}
+				observed <- observation{time.Until(deadline)}
+				return nil
+			})
+			o := dispatcherOptions("owner")
+			o.Timeouts[typ] = time.Minute
+			o.MaxRuntime = 12 * time.Hour
+			d := schedulerDispatcher(t, q, scheduler.PolicyDefaults(), exec, o)
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() { done <- d.Start(ctx) }()
+			select {
+			case got := <-observed:
+				// Progress-driven tasks get MaxRuntime as their deadline, not the
+				// fixed Timeouts, so a healthy long-running task is never
+				// cancelled on wall clock alone.
+				if got.remaining <= 0 || got.remaining > 12*time.Hour+time.Minute {
+					t.Fatalf("%s remaining=%v want near MaxRuntime", typ, got.remaining)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatalf("missing %s deadline", typ)
+			}
+			cancel()
+			<-done
+		})
+	}
 }
 
 func insertDispatcherTask(t *testing.T, q *Queue, typ TaskType, scanID *int64, suffix string) int64 {

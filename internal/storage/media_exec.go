@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"io"
@@ -79,6 +80,20 @@ func ProbePath(db *sql.DB, vault *keystore.Vault, ffprobePath string, mediaID in
 // preInput is inserted before -i (e.g. -ss for plaintext seek); postInput follows -i.
 // workDir sets cmd.Dir when non-empty (e.g. CMAF init segment output).
 func RunFFmpeg(ctx context.Context, db *sql.DB, vault *keystore.Vault, ffmpegPath string, mediaID int64, path string, startSec, durationSec float64, preInput, postInput []string, workDir string) ([]byte, error) {
+	return runFFmpeg(ctx, db, vault, ffmpegPath, mediaID, path, startSec, durationSec, preInput, postInput, workDir, nil)
+}
+
+// RunFFmpegWithLiveness is RunFFmpeg with a liveness callback: every chunk of
+// output written by the process triggers report. Long-running executors use it
+// to keep a task alive while ffmpeg makes progress. A process that stops
+// emitting output for the dispatcher's progress-idle timeout is force-cancelled
+// as stalled instead of being killed by a fixed wall-clock deadline. The output
+// bytes returned mirror CombinedOutput exactly.
+func RunFFmpegWithLiveness(ctx context.Context, db *sql.DB, vault *keystore.Vault, ffmpegPath string, mediaID int64, path string, startSec, durationSec float64, preInput, postInput []string, workDir string, report func()) ([]byte, error) {
+	return runFFmpeg(ctx, db, vault, ffmpegPath, mediaID, path, startSec, durationSec, preInput, postInput, workDir, report)
+}
+
+func runFFmpeg(ctx context.Context, db *sql.DB, vault *keystore.Vault, ffmpegPath string, mediaID int64, path string, startSec, durationSec float64, preInput, postInput []string, workDir string, report func()) ([]byte, error) {
 	in, err := OpenFFmpegInput(db, vault, mediaID, path, 0)
 	if err != nil {
 		return nil, err
@@ -105,7 +120,33 @@ func RunFFmpeg(ctx context.Context, db *sql.DB, vault *keystore.Vault, ffmpegPat
 	if stdin != nil {
 		cmd.Stdin = stdin
 	}
-	return cmd.CombinedOutput()
+	if report == nil {
+		return cmd.CombinedOutput()
+	}
+	var buf bytes.Buffer
+	liveness := &livenessWriter{buf: &buf, report: report}
+	cmd.Stdout = liveness
+	cmd.Stderr = liveness
+	if err := cmd.Run(); err != nil {
+		return buf.Bytes(), err
+	}
+	return buf.Bytes(), nil
+}
+
+// livenessWriter buffers process output while reporting each write as liveness
+// evidence, so the caller can observe that a long-running process is still
+// making progress (ffmpeg writes progress lines while it works and goes silent
+// only when it is stuck or finished).
+type livenessWriter struct {
+	buf    *bytes.Buffer
+	report func()
+}
+
+func (w *livenessWriter) Write(p []byte) (int, error) {
+	if w.report != nil && len(p) > 0 {
+		w.report()
+	}
+	return w.buf.Write(p)
 }
 
 func inputLabelAndStdin(in *FFmpegInput) (string, io.Reader) {

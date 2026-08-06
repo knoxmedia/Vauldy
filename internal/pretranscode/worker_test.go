@@ -7,9 +7,45 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"knox-media/internal/publication"
 )
+
+func TestProgressStallTracker(t *testing.T) {
+	tr := newProgressStallTracker()
+	if tr.stalled(10 * time.Minute) {
+		t.Fatal("fresh tracker must not be stalled")
+	}
+	// Zero idle disables the check.
+	tr.last = time.Now().Add(-time.Hour)
+	if tr.stalled(0) {
+		t.Fatal("zero idle must disable staleness")
+	}
+	if !tr.stalled(10 * time.Minute) {
+		t.Fatal("stale tracker must report stalled")
+	}
+	tr.mark()
+	if tr.stalled(10 * time.Minute) {
+		t.Fatal("freshly marked tracker must not be stalled")
+	}
+	tr.last = time.Now().Add(-20 * time.Minute)
+	if !tr.stalled(10 * time.Minute) {
+		t.Fatal("tracker past idle must report stalled")
+	}
+}
+
+func TestWorkerProgressIdleTimeoutDefaults(t *testing.T) {
+	db := newTestDB(t)
+	w := NewWorker(db, nil, "ffmpeg", t.TempDir(), 1, 1)
+	if w.progressIdleTimeout != 15*time.Minute {
+		t.Fatalf("default progressIdleTimeout=%v want 15m", w.progressIdleTimeout)
+	}
+	w.SetProgressIdleTimeout(2 * time.Minute)
+	if w.progressIdleTimeout != 2*time.Minute {
+		t.Fatalf("configured progressIdleTimeout=%v want 2m", w.progressIdleTimeout)
+	}
+}
 
 func TestClaimNextJobSelectsWaitingRendition(t *testing.T) {
 	db := newTestDB(t)
