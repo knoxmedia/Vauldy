@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"knox-media/internal/progressctx"
 )
 
 // TranscribeToVTT runs configured ASR on an audio/video file and writes WebVTT to outputVTT.
@@ -44,7 +46,7 @@ func (s *Service) TranscribeToVTT(ctx context.Context, mediaID int64, inputPath,
 		if root := s.toolWorkDir(); root != "" {
 			cmd.Dir = root
 		}
-		out, err := cmd.CombinedOutput()
+		out, err := runCombinedLive(cmd, func() { progressctx.Report(ctx) })
 		if err != nil {
 			return fmt.Errorf("%w: %s", err, trimBytes(out))
 		}
@@ -70,7 +72,7 @@ func (s *Service) TranscribeToVTT(ctx context.Context, mediaID int64, inputPath,
 		sh = strings.ReplaceAll(sh, "{output_vtt}", outputVTT)
 		sh = appendASRShellFlags(sh, s.ASR)
 		sh = resolveShellMediaPaths(sh, s.MediaRoot)
-		if _, err := s.runShellCommand(ctx, sh); err != nil {
+		if _, err := s.runShellCommandLive(ctx, sh); err != nil {
 			return err
 		}
 	default:

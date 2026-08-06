@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"knox-media/internal/progressctx"
 	"knox-media/internal/scraper"
 )
 
@@ -67,6 +68,7 @@ func TranslateContent(ctx context.Context, content, srcLang, targetLang string, 
 		for i := range batch {
 			cues[start+i].Text = translated[i]
 		}
+		progressctx.Report(ctx)
 	}
 	_ = ctx
 	return RenderCues(cues, format), nil

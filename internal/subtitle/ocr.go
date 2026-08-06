@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+
+	"knox-media/internal/progressctx"
 )
 
 // OCRConfig enables Tesseract-based extraction for bitmap (PGS / VobSub) subtitles.
@@ -80,7 +82,7 @@ func (s *Service) RunBitmapSubtitleOCR(ctx context.Context, mediaID int64, video
 	if p := strings.TrimSpace(s.OCR.TessdataPrefix); p != "" {
 		cmd.Env = append(cmd.Env, "TESSDATA_PREFIX="+p)
 	}
-	out, err := cmd.CombinedOutput()
+	out, err := runCombinedLive(cmd, func() { progressctx.Report(ctx) })
 	if err != nil {
 		return fmt.Errorf("%w: %s", err, trimBytes(out))
 	}
@@ -116,7 +118,7 @@ func (s *Service) RunVobSubIdxOCR(ctx context.Context, idxPath, outVtt string) e
 	if p := strings.TrimSpace(s.OCR.TessdataPrefix); p != "" {
 		cmd.Env = append(cmd.Env, "TESSDATA_PREFIX="+p)
 	}
-	out, err := cmd.CombinedOutput()
+	out, err := runCombinedLive(cmd, func() { progressctx.Report(ctx) })
 	if err != nil {
 		return fmt.Errorf("%w: %s", err, trimBytes(out))
 	}

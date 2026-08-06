@@ -146,9 +146,10 @@ func TestTimeoutForTaskProgressDrivenUsesMaxRuntime(t *testing.T) {
 	hb := time.NewTicker(time.Hour)
 	defer hb.Stop()
 	st := &workerState{cancel: func() {}}
-	// Encryption and preview are progress-driven: MaxRuntime replaces the fixed
-	// Timeouts while they report forward progress.
-	for _, typ := range []TaskType{TaskEncrypt, TaskPreview} {
+	// Every long-running executor type is progress-driven: MaxRuntime replaces
+	// the fixed Timeouts while they report forward progress.
+	for _, typ := range []TaskType{TaskEncrypt, TaskPreview, TaskSubtitle,
+		TaskSubtitleRecognize, TaskAIAnalysis, TaskKeyframe, TaskAtrack} {
 		got, proceed := d.timeoutForTask(context.Background(), Task{Type: typ}, hb, st)
 		if !proceed {
 			t.Fatalf("%s timeout must proceed", typ)
@@ -157,10 +158,10 @@ func TestTimeoutForTaskProgressDrivenUsesMaxRuntime(t *testing.T) {
 			t.Fatalf("%s timeout=%v want MaxRuntime", typ, got)
 		}
 	}
-	// Subtitle keeps its source-size based timeout.
-	got, _ := d.timeoutForTask(context.Background(), Task{Type: TaskSubtitle}, hb, st)
-	if got != 60*time.Minute {
-		t.Fatalf("subtitle timeout=%v want fixed Timeouts", got)
+	// Non-progress-driven types keep their fixed Timeouts.
+	got, _ := d.timeoutForTask(context.Background(), Task{Type: TaskThumbnail}, hb, st)
+	if got != 2*time.Minute {
+		t.Fatalf("thumbnail timeout=%v want fixed Timeouts", got)
 	}
 	// MaxRuntime disabled restores per-task Timeouts.
 	opts.MaxRuntime = 0
@@ -172,6 +173,10 @@ func TestTimeoutForTaskProgressDrivenUsesMaxRuntime(t *testing.T) {
 	got, _ = d.timeoutForTask(context.Background(), Task{Type: TaskPreview}, hb, st)
 	if got != 30*time.Minute {
 		t.Fatalf("preview timeout without MaxRuntime=%v want 30m", got)
+	}
+	got, _ = d.timeoutForTask(context.Background(), Task{Type: TaskSubtitle}, hb, st)
+	if got != 60*time.Minute {
+		t.Fatalf("subtitle timeout without MaxRuntime=%v want 60m", got)
 	}
 }
 
@@ -1395,7 +1400,9 @@ func TestDispatcher_AllTypeTimeoutDeadlines(t *testing.T) {
 }
 
 func TestDispatcher_ProgressDrivenDeadlineUsesMaxRuntime(t *testing.T) {
-	for _, typ := range []TaskType{TaskEncrypt, TaskPreview} {
+	driven := []TaskType{TaskEncrypt, TaskPreview, TaskSubtitle, TaskSubtitleRecognize,
+		TaskAIAnalysis, TaskKeyframe, TaskAtrack}
+	for _, typ := range driven {
 		t.Run(string(typ), func(t *testing.T) {
 			db, _ := openQueueTestDB(t)
 			q := NewQueue(db, "owner", nil)

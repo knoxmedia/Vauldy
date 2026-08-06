@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"knox-media/internal/keystore"
+	"knox-media/internal/progressctx"
 	"knox-media/internal/scraper"
 	"knox-media/internal/storage"
 )
@@ -452,6 +453,7 @@ func (s *Service) syncEmbedded(ctx context.Context, mediaID int64, videoPath, ou
 		if err := s.markSubtitleReady(ctx, mediaID, dedupe, filepath.Base(outPath), outPath); err != nil {
 			return err
 		}
+		progressctx.Report(ctx)
 	}
 	return nil
 }
@@ -543,6 +545,7 @@ func (s *Service) recognizePendingOCR(ctx context.Context, mediaID int64, videoP
 		if err := s.markSubtitleReady(ctx, mediaID, p.dedupe, filepath.Base(p.vtt), p.vtt); err != nil {
 			return err
 		}
+		progressctx.Report(ctx)
 	}
 	return nil
 }
@@ -583,10 +586,8 @@ func nullStr(s string) any {
 func (s *Service) extractEmbedded(ctx context.Context, mediaID int64, videoPath string, streamIndex int, outPath string) error {
 	mapArg := fmt.Sprintf("0:%d", streamIndex)
 	post := []string{"-map", mapArg, "-vn", "-an", "-c:s", "webvtt", outPath}
-	if _, err := storage.RunFFmpeg(ctx, s.DB, s.Vault, s.FFmpegPath, mediaID, videoPath, 0, 0, nil, post, ""); err != nil {
-		return err
-	}
-	return nil
+	_, err := storage.RunFFmpegWithLiveness(ctx, s.DB, s.Vault, s.FFmpegPath, mediaID, videoPath, 0, 0, nil, post, "", func() { progressctx.Report(ctx) })
+	return err
 }
 
 func (s *Service) syncSidecars(ctx context.Context, mediaID int64, videoPath, outDir string) error {
@@ -658,7 +659,7 @@ func (s *Service) syncSidecars(ctx context.Context, mediaID int64, videoPath, ou
 			}
 		} else {
 			cmd := processmetrics.NewFFmpegCommandContext(ctx, s.FFmpegPath, "-y", "-i", full, "-c:s", "webvtt", outPath)
-			out, err := cmd.CombinedOutput()
+			out, err := runFFmpegCombinedLive(cmd, func() { progressctx.Report(ctx) })
 			if err != nil {
 				if guardErr := validateCommitGuard(ctx); guardErr != nil {
 					return guardErr
@@ -672,6 +673,7 @@ func (s *Service) syncSidecars(ctx context.Context, mediaID int64, videoPath, ou
 		if err := s.markSubtitleReady(ctx, mediaID, dedupe, filepath.Base(outPath), outPath); err != nil {
 			return err
 		}
+		progressctx.Report(ctx)
 	}
 	return nil
 }
@@ -760,7 +762,7 @@ func copyOrWriteVTT(ctx context.Context, ffmpegPath, src, dst string) error {
 		return os.WriteFile(dst, b, 0o644)
 	}
 	cmd := processmetrics.NewFFmpegCommandContext(ctx, ffmpegPath, "-y", "-i", src, "-c:s", "webvtt", dst)
-	out, err := cmd.CombinedOutput()
+	out, err := runFFmpegCombinedLive(cmd, func() { progressctx.Report(ctx) })
 	if err != nil {
 		return fmt.Errorf("%w: %s", err, trimBytes(out))
 	}
@@ -799,7 +801,7 @@ func (s *Service) runASR(ctx context.Context, mediaID int64, videoPath, outDir s
 		if root := s.toolWorkDir(); root != "" {
 			cmd.Dir = root
 		}
-		out, err := cmd.CombinedOutput()
+		out, err := runCombinedLive(cmd, func() { progressctx.Report(ctx) })
 		if err != nil {
 			if guardErr := validateCommitGuard(ctx); guardErr != nil {
 				return guardErr
@@ -837,7 +839,7 @@ func (s *Service) runASR(ctx context.Context, mediaID int64, videoPath, outDir s
 		sh = strings.ReplaceAll(sh, "{output_vtt}", outPath)
 		sh = appendASRShellFlags(sh, s.ASR)
 		sh = resolveShellMediaPaths(sh, s.MediaRoot)
-		out, err := s.runShellCommand(ctx, sh)
+		out, err := s.runShellCommandLive(ctx, sh)
 		if err != nil {
 			if guardErr := validateCommitGuard(ctx); guardErr != nil {
 				return guardErr

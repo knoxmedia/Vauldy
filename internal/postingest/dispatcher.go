@@ -236,11 +236,20 @@ func sizedTaskTimeout(typ TaskType) bool {
 
 // progressDrivenTask reports whether the task type is driven by forward-progress
 // reporting instead of a fixed wall-clock deadline: a healthy task keeps
-// reporting progress (encryption checkpoints, ffmpeg output) and therefore must
-// not be cancelled on time alone; a stalled task is force-cancelled by the
-// heartbeat loop after ProgressIdleTimeout.
+// reporting progress (encryption checkpoints, ffmpeg output, OCR/ASR/LLM batch
+// completion, ffprobe packet streams) and therefore must not be cancelled on
+// time alone; a stalled task is force-cancelled by the heartbeat loop after
+// ProgressIdleTimeout. Each listed type must report progress from its executor,
+// otherwise its stall detection never activates and MaxRuntime becomes the only
+// ceiling.
 func progressDrivenTask(typ TaskType) bool {
-	return typ == TaskEncrypt || typ == TaskPreview
+	switch typ {
+	case TaskEncrypt, TaskPreview, TaskSubtitle, TaskSubtitleRecognize,
+		TaskAIAnalysis, TaskKeyframe, TaskAtrack:
+		return true
+	default:
+		return false
+	}
 }
 
 func deferredTaskTimeout(typ TaskType) bool {
