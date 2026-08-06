@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
+	"time"
 )
 
 type publicationV2StartupHooks struct {
@@ -25,14 +27,19 @@ func PreparePublicationV2Startup(ctx context.Context, hooks publicationV2Startup
 		name string
 		run  func(context.Context) error
 	}{{"artifact recovery", hooks.RecoverArtifacts}, {"lease recovery", hooks.RecoverLeases}, {"reservation reconciliation", hooks.RecoverReservations}, {"active v1 replacement", hooks.ReplaceActiveV1}, {"v2 validation/aggregation", hooks.ValidateAggregateV2}} {
+		start := time.Now()
+		log.Printf("publication v2 startup: %s starting", phase.name)
 		if err := phase.run(ctx); err != nil {
 			return nil, fmt.Errorf("publication v2 startup %s: %w", phase.name, err)
 		}
+		log.Printf("publication v2 startup: %s completed in %s", phase.name, time.Since(start))
 	}
+	start := time.Now()
 	warnings, err := hooks.Preflight(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("publication v2 startup preflight: %w", err)
 	}
+	log.Printf("publication v2 startup: preflight completed in %s", time.Since(start))
 	hooks.StartClaimers()
 	hooks.StartSubmissionSources()
 	return warnings, nil

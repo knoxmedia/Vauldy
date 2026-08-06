@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"reflect"
 	"sort"
 	"strings"
+	"time"
 
 	"knox-media/internal/store"
 )
@@ -123,40 +125,59 @@ func encryptionSelectionCompliantTx(ctx context.Context, q store.SQLExecutor, me
 	return samePath(selected, encPath) && wrapped != "" && iv != "", nil
 }
 func ValidateAggregateCurrentPolicy(ctx context.Context, db *sql.DB, adapters ...ExecutableAdapterRegistry) error {
+	totalStart := time.Now()
+	logStep := func(step string) {
+		log.Printf("publication v2 validate: %s in %s", step, time.Since(totalStart))
+	}
 	if err := validateCurrentPolicyAdmission(ctx, db, firstAdapterRegistry(adapters)); err != nil {
 		return err
 	}
+	logStep("admission validation done")
 	if err := validateLegacyV2PersistedGraphs(ctx, db); err != nil {
 		return err
 	}
+	logStep("legacy v2 graph validation done")
 	ids, err := currentPolicyRunIDs(ctx, db)
 	if err != nil {
 		return err
 	}
-	for _, id := range ids {
+	log.Printf("publication v2 validate: %d current-policy run(s)", len(ids))
+	preflightStart := time.Now()
+	for i, id := range ids {
 		if err = validateCurrentPolicyRunMode(ctx, db, id, true, firstAdapterRegistry(adapters)); err != nil {
 			return fmt.Errorf("publication current-policy startup preflight run %d: %w", id, err)
 		}
+		if (i+1)%10 == 0 || i == len(ids)-1 {
+			log.Printf("publication v2 validate: preflight %d/%d run(s) in %s", i+1, len(ids), time.Since(preflightStart))
+		}
 	}
+	logStep("run preflight done")
 	if _, err := RepairMissingQueueExecutions(ctx, db); err != nil {
 		return fmt.Errorf("publication current-policy startup repair missing queues: %w", err)
 	}
+	logStep("repair missing queue executions done")
 	if _, err := ReconcileCompletedPostIngestDomainWork(ctx, db); err != nil {
 		return fmt.Errorf("publication current-policy startup adopt completed domain work: %w", err)
 	}
+	logStep("adopt completed domain work done")
 	if _, err := RepairDesyncedQueueStepStatus(ctx, db); err != nil {
 		return fmt.Errorf("publication current-policy startup repair desynced queue/step status: %w", err)
 	}
+	logStep("repair desynced queue/step status done")
 	if _, err := ReconcileOrphanFailedQueueState(ctx, db); err != nil {
 		return fmt.Errorf("publication current-policy startup reconcile orphan failed queues: %w", err)
 	}
+	logStep("reconcile orphan failed queues done")
 	if _, err := ReconcileSupersededQueueTasks(ctx, db); err != nil {
 		return fmt.Errorf("publication current-policy startup reconcile superseded queues: %w", err)
 	}
+	logStep("reconcile superseded queues done")
 	if _, err := ReconcileVisibleMediaSteps(ctx, db); err != nil {
 		return fmt.Errorf("publication current-policy startup reconcile visible media steps: %w", err)
 	}
-	for _, id := range ids {
+	logStep("reconcile visible media steps done")
+	aggStart := time.Now()
+	for i, id := range ids {
 		_, err = store.WithImmediateConnTx(ctx, db, func(tx store.ImmediateConnTx) error {
 			if e := projectNodeTransitionTx(ctx, tx, id); e != nil {
 				return e
@@ -169,7 +190,12 @@ func ValidateAggregateCurrentPolicy(ctx context.Context, db *sql.DB, adapters ..
 		if err != nil {
 			return fmt.Errorf("publication current-policy startup validate run %d: %w", id, err)
 		}
+		if (i+1)%10 == 0 || i == len(ids)-1 {
+			log.Printf("publication v2 validate: aggregate %d/%d run(s) in %s", i+1, len(ids), time.Since(aggStart))
+		}
 	}
+	logStep("run aggregation done")
+	log.Printf("publication v2 validate: total in %s", time.Since(totalStart))
 	return nil
 }
 
