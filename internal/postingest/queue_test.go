@@ -607,23 +607,30 @@ func TestQueue_RecoverExpired(t *testing.T) {
 		scan          any
 		attempts, max int
 		expired       bool
+		nullLease     bool
 		want          Status
-	}{{scanCancelled, 1, 3, true, StatusCancelled}, {scanStatus, 1, 3, true, StatusCancelled}, {nil, 3, 3, true, StatusFailed}, {nil, 1, 3, true, StatusWaiting}, {nil, 1, 3, false, StatusRunning}} {
+	}{{scanCancelled, 1, 3, true, false, StatusCancelled}, {scanStatus, 1, 3, true, false, StatusCancelled}, {nil, 3, 3, true, false, StatusFailed}, {nil, 1, 3, true, false, StatusWaiting}, {nil, 1, 3, false, false, StatusRunning}, {nil, 3, 3, true, true, StatusFailed}, {nil, 1, 3, true, true, StatusWaiting}} {
 		mid := insertQueueMedia(t, db, libraryID, fmt.Sprintf("recover-%d", i))
 		modifier := "-1 second"
 		if !tc.expired {
 			modifier = "+1 hour"
 		}
-		res, err := db.Exec(`INSERT INTO post_ingest_task(media_id,scan_task_id,task_type,status,attempts,max_attempts,lease_owner,lease_until) VALUES (?,?,?,'running',?,?,'old',datetime(CURRENT_TIMESTAMP,?))`, mid, tc.scan, TaskPoster, tc.attempts, tc.max, modifier)
+		var res sql.Result
+		var err error
+		if tc.nullLease {
+			res, err = db.Exec(`INSERT INTO post_ingest_task(media_id,scan_task_id,task_type,status,attempts,max_attempts,lease_owner,lease_until) VALUES (?,?,?,'running',?,?,'old',NULL)`, mid, tc.scan, TaskPoster, tc.attempts, tc.max)
+		} else {
+			res, err = db.Exec(`INSERT INTO post_ingest_task(media_id,scan_task_id,task_type,status,attempts,max_attempts,lease_owner,lease_until) VALUES (?,?,?,'running',?,?,'old',datetime(CURRENT_TIMESTAMP,?))`, mid, tc.scan, TaskPoster, tc.attempts, tc.max, modifier)
+		}
 		if err != nil {
 			t.Fatal(err)
 		}
 		id, _ := res.LastInsertId()
-		rows = append(rows, row{id, tc.want, tc.expired})
+		rows = append(rows, row{id, tc.want, tc.expired || tc.nullLease})
 	}
 	n, err := NewQueue(db, "recovery", nil).RecoverExpired(context.Background())
-	if err != nil || n != 4 {
-		t.Fatalf("RecoverExpired=(%d,%v), want (4,nil)", n, err)
+	if err != nil || n != 6 {
+		t.Fatalf("RecoverExpired=(%d,%v), want (6,nil)", n, err)
 	}
 	for _, tc := range rows {
 		status, _, _, owner, lease, last, finished, _ := readTaskState(t, db, tc.id)

@@ -7,10 +7,50 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 
 	"knox-media/internal/store"
 )
+
+// planGraphsEqual reports whether two plan graphs are semantically identical.
+// Edges are unordered: the persisted edge order (read back by step id) can
+// legitimately differ from the snapshot edge order (plan construction order)
+// without changing the meaning of the graph, so edges are compared as sets.
+func planGraphsEqual(a, b PlanGraph) bool {
+	if !reflect.DeepEqual(a.Nodes, b.Nodes) {
+		return false
+	}
+	return reflect.DeepEqual(sortedPlanEdges(a.Edges), sortedPlanEdges(b.Edges))
+}
+
+func sortedPlanEdges(edges []Dependency) []Dependency {
+	out := append([]Dependency(nil), edges...)
+	sort.Slice(out, func(i, j int) bool {
+		x, y := out[i], out[j]
+		if x.Step != y.Step {
+			return x.Step < y.Step
+		}
+		if x.Generation != y.Generation {
+			return x.Generation < y.Generation
+		}
+		if x.Kind != y.Kind {
+			return x.Kind < y.Kind
+		}
+		xd, yd := "", ""
+		if x.DependsOn != nil {
+			xd = string(*x.DependsOn)
+		}
+		if y.DependsOn != nil {
+			yd = string(*y.DependsOn)
+		}
+		if xd != yd {
+			return xd < yd
+		}
+		return x.DependsOnGeneration < y.DependsOnGeneration
+	})
+	return out
+}
 
 // ReconcileStartupPublicationV2 atomically replaces active policy-v1 generations,
 // validates current v2 plans, and aggregates their required outcomes.
@@ -828,7 +868,7 @@ func validateCurrentPolicyRunMode(ctx context.Context, q store.SQLExecutor, runI
 		if loadErr != nil {
 			return loadErr
 		}
-		if !reflect.DeepEqual(persisted, snapshot.Graph) {
+		if !planGraphsEqual(persisted, snapshot.Graph) {
 			return errors.New("persisted policy v3 graph differs from snapshot")
 		}
 		if err := ValidatePlanGraph(persisted); err != nil {
@@ -965,7 +1005,7 @@ func validateCurrentPolicyAdmission(ctx context.Context, q store.SQLExecutor, ad
 		if loadErr != nil {
 			return loadErr
 		}
-		if !reflect.DeepEqual(persisted, item.snapshot.Graph) {
+		if !planGraphsEqual(persisted, item.snapshot.Graph) {
 			return fmt.Errorf("publication current-policy startup validate run %d: persisted policy v3 graph differs from snapshot", item.id)
 		}
 	}

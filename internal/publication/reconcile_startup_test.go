@@ -453,6 +453,51 @@ func TestStartupRejectsV3PersistedGraphDrift(t *testing.T) {
 	}
 }
 
+// TestStartupAcceptsPersistedV3GraphEdgeReordering guards against order-only
+// mismatches between the snapshot edge list (plan construction order) and the
+// persisted dependency rows (read back ordered by step id). When encrypt is a
+// required step its step id is smaller than the optional media_visible-linked
+// steps, so the persisted read-back order reverses the snapshot order. The
+// graph is semantically identical, so startup must accept it rather than
+// reporting "persisted policy v3 graph differs from snapshot".
+func TestStartupAcceptsPersistedV3GraphEdgeReordering(t *testing.T) {
+	db := openPlannerTestDB(t)
+	_, mid, scan := seedPlannerMedia(t, db, "video", 1, 1, 0)
+	run := planAndCommit(t, db, NewPlanner(PlanOptions{SubtitleAuto: true, EncryptGlobal: true}), NewMedia{MediaID: mid, ScanTaskID: scan, FileType: "video"})
+
+	var raw string
+	if err := db.QueryRow(`SELECT config_snapshot_json FROM media_ingest_run WHERE id=?`, run.ID).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	var snapshot ConfigSnapshot
+	if err := json.Unmarshal([]byte(raw), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := loadPersistedPlanGraph(context.Background(), db, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Graph.Edges) < 2 || len(persisted.Edges) != len(snapshot.Graph.Edges) {
+		t.Fatalf("unexpected graph size snapshot=%d persisted=%d", len(snapshot.Graph.Edges), len(persisted.Edges))
+	}
+	ordersDiffer := false
+	for i := range snapshot.Graph.Edges {
+		if snapshot.Graph.Edges[i].Step != persisted.Edges[i].Step {
+			ordersDiffer = true
+			break
+		}
+	}
+	if !ordersDiffer {
+		t.Fatalf("test setup produced identical edge order; cannot exercise reordering path")
+	}
+	if !planGraphsEqual(persisted, snapshot.Graph) {
+		t.Fatal("planGraphsEqual rejected semantically identical graph")
+	}
+	if err := ValidateAggregateCurrentV2(context.Background(), db); err != nil {
+		t.Fatalf("startup rejected order-only graph difference: %v", err)
+	}
+}
+
 func TestStartupRejectsUnavailableV3RecognitionWithoutRepair(t *testing.T) {
 	db := openPlannerTestDB(t)
 	_, mid, scan := seedPlannerMedia(t, db, "video", 0, 0, 0)

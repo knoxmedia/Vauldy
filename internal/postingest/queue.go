@@ -761,8 +761,8 @@ func (q *Queue) recoverRunning(ctx context.Context, onlyExpired bool) (int64, er
 	exhaustedMsg := "interrupted and attempts exhausted"
 	recoveryReason := "startup_interruption"
 	if onlyExpired {
-		selectSQL += ` AND lease_until<CURRENT_TIMESTAMP`
-		updateSQL += ` AND lease_until<CURRENT_TIMESTAMP`
+		selectSQL += ` AND (lease_until IS NULL OR lease_until<CURRENT_TIMESTAMP)`
+		updateSQL += ` AND (lease_until IS NULL OR lease_until<CURRENT_TIMESTAMP)`
 		reservationSelectSQL += ` AND (lease_until IS NULL OR lease_until<CURRENT_TIMESTAMP)`
 		exhaustedMsg = "lease expired and attempts exhausted"
 		recoveryReason = "expired_recovery"

@@ -48,7 +48,6 @@ const (
 
 // StartScrapeTaskLoop continuously drains waiting scrape tasks (not only via scheduled_task).
 func (h *Handler) StartScrapeTaskLoop(ctx context.Context) {
-	h.recoverExpiredScrapeTasks(ctx)
 	timer := time.NewTimer(0)
 	defer timer.Stop()
 	for {
@@ -56,6 +55,7 @@ func (h *Handler) StartScrapeTaskLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-timer.C:
+			h.recoverExpiredScrapeTasks(ctx)
 			processed := h.runScrapeWorkerOnce(ctx)
 			delay := scrapeWorkerInterval
 			if processed {
@@ -74,16 +74,16 @@ func (h *Handler) recoverExpiredScrapeTasks(ctx context.Context) {
 		return
 	}
 	if err := scrapeClaimImmediate(ctx, h.App.DB, func(tx store.ImmediateConnTx) error {
-		if _, err := tx.ExecContext(ctx, `UPDATE media_ingest_step SET status='waiting',lease_owner=NULL,lease_until=NULL,available_at=CURRENT_TIMESTAMP,last_error='recovered expired scrape lease',finished_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE status='running' AND id IN (SELECT ingest_step_id FROM scrape_task WHERE status='running' AND lease_until<CURRENT_TIMESTAMP AND COALESCE(fail_count,0)<? AND ingest_step_id IS NOT NULL)`, maxScrapeTaskFailures); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE media_ingest_step SET status='waiting',lease_owner=NULL,lease_until=NULL,available_at=CURRENT_TIMESTAMP,last_error='recovered expired scrape lease',finished_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE status='running' AND id IN (SELECT ingest_step_id FROM scrape_task WHERE status='running' AND (lease_until IS NULL OR lease_until<CURRENT_TIMESTAMP) AND COALESCE(fail_count,0)<? AND ingest_step_id IS NOT NULL)`, maxScrapeTaskFailures); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE scrape_task SET status='waiting',progress=0,message='recovered expired lease',lease_owner=NULL,lease_until=NULL,available_at=CURRENT_TIMESTAMP WHERE status='running' AND lease_until<CURRENT_TIMESTAMP AND COALESCE(fail_count,0)<?`, maxScrapeTaskFailures); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE scrape_task SET status='waiting',progress=0,message='recovered expired lease',lease_owner=NULL,lease_until=NULL,available_at=CURRENT_TIMESTAMP WHERE status='running' AND (lease_until IS NULL OR lease_until<CURRENT_TIMESTAMP) AND COALESCE(fail_count,0)<?`, maxScrapeTaskFailures); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE media_ingest_step SET status='failed',lease_owner=NULL,lease_until=NULL,last_error='exhausted retries after expired scrape leases',finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE status='running' AND id IN (SELECT ingest_step_id FROM scrape_task WHERE status='running' AND lease_until<CURRENT_TIMESTAMP AND COALESCE(fail_count,0)>=? AND ingest_step_id IS NOT NULL)`, maxScrapeTaskFailures); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE media_ingest_step SET status='failed',lease_owner=NULL,lease_until=NULL,last_error='exhausted retries after expired scrape leases',finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE status='running' AND id IN (SELECT ingest_step_id FROM scrape_task WHERE status='running' AND (lease_until IS NULL OR lease_until<CURRENT_TIMESTAMP) AND COALESCE(fail_count,0)>=? AND ingest_step_id IS NOT NULL)`, maxScrapeTaskFailures); err != nil {
 			return err
 		}
-		_, err := tx.ExecContext(ctx, `UPDATE scrape_task SET status='failed',progress=100,finished_at=CURRENT_TIMESTAMP,message='exhausted retries after expired leases',lease_owner=NULL,lease_until=NULL WHERE status='running' AND lease_until<CURRENT_TIMESTAMP AND COALESCE(fail_count,0)>=?`, maxScrapeTaskFailures)
+		_, err := tx.ExecContext(ctx, `UPDATE scrape_task SET status='failed',progress=100,finished_at=CURRENT_TIMESTAMP,message='exhausted retries after expired leases',lease_owner=NULL,lease_until=NULL WHERE status='running' AND (lease_until IS NULL OR lease_until<CURRENT_TIMESTAMP) AND COALESCE(fail_count,0)>=?`, maxScrapeTaskFailures)
 		return err
 	}); err != nil && ctx.Err() == nil {
 		log.Printf("scrape reaper: recover expired: %v", err)
