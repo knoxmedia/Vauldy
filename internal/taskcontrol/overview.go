@@ -264,7 +264,7 @@ func computeRecoveryTasks(ctx context.Context, db *sql.DB) ([]ProjectionRow, err
 			COALESCE(base_priority,0), available_at, created_at, updated_at,
 			media_id, library_id,
 			removed_at, COALESCE(removed_by,''), COALESCE(remove_reason,''),
-			COALESCE(run_now_expires, NULL)
+			run_now_expires
 		FROM post_ingest_task WHERE retry_round > 0 AND status = 'failed'
 		ORDER BY created_at DESC LIMIT 5`)
 	if err != nil {

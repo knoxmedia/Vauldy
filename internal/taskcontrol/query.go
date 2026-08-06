@@ -224,7 +224,7 @@ func (q *QueryService) List(ctx context.Context, filter QueryFilter, cursor stri
 		COALESCE(base_priority,0), available_at, created_at, updated_at,
 		media_id, library_id,
 		removed_at, COALESCE(removed_by,''), COALESCE(remove_reason,''),
-		COALESCE(run_now_expires, NULL) AS run_now_expires,
+		run_now_expires,
 		COALESCE((SELECT title FROM media m WHERE m.id = post_ingest_task.media_id),''),
 		COALESCE((SELECT file_path FROM media m WHERE m.id = post_ingest_task.media_id),'')
 	FROM post_ingest_task` + where + ` ORDER BY COALESCE(base_priority,0) DESC, id ASC LIMIT ?`

@@ -954,14 +954,12 @@ func (s *MutateService) RunNow(ctx context.Context, p RunNowParams) error {
 			return err
 		}
 		nextPri := maxPri + 1
-		// Expire run-now boost after 5 minutes
-		runNowExpires := time.Now().Add(5 * time.Minute)
 
 		result, err := tx.ExecContext(ctx,
 			`UPDATE post_ingest_task SET base_priority=?, available_at=datetime('now','-100 years'),
-			 run_now_expires=?, updated_at=CURRENT_TIMESTAMP
+			 run_now_expires=datetime('now','+5 minutes'), updated_at=CURRENT_TIMESTAMP
 			 WHERE id=? AND status='waiting'`,
-			nextPri, runNowExpires, id)
+			nextPri, id)
 		if err != nil {
 			return err
 		}
@@ -1568,12 +1566,11 @@ func RunNowInTx(ctx context.Context, tx store.ImmediateConnTx, taskIdentity stri
 	}
 	var maxPri int64
 	_ = tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(base_priority),0) FROM post_ingest_task`).Scan(&maxPri)
-	runNowExpires := time.Now().Add(5 * time.Minute)
 	_, err = tx.ExecContext(ctx,
 		`UPDATE post_ingest_task SET base_priority=?, available_at=datetime('now','-100 years'),
-		 run_now_expires=?, updated_at=CURRENT_TIMESTAMP
+		 run_now_expires=datetime('now','+5 minutes'), updated_at=CURRENT_TIMESTAMP
 		 WHERE id=? AND status='waiting'`,
-		maxPri+1, runNowExpires, id)
+		maxPri+1, id)
 	if err != nil {
 		return err
 	}
