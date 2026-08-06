@@ -7,6 +7,7 @@ require (
 	github.com/gin-gonic/gin v1.10.0
 	github.com/golang-jwt/jwt/v5 v5.2.1
 	github.com/google/uuid v1.6.0
+	github.com/kalafut/imohash v1.1.1
 	github.com/rwcarlsen/goexif v0.0.0-20190401172101-9e8deecbddbd
 	github.com/sgtdi/fswatcher v1.2.0
 	github.com/shirou/gopsutil/v3 v3.24.5
@@ -18,6 +19,7 @@ require (
 require (
 	github.com/cespare/xxhash/v2 v2.1.2 // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
+	github.com/twmb/murmur3 v1.1.5 // indirect
 	github.com/yuin/gopher-lua v1.1.1 // indirect
 	go.uber.org/multierr v1.10.0 // indirect
 )

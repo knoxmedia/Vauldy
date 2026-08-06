@@ -140,11 +140,11 @@ FROM media_ingest_step WHERE run_id=? AND generation=?`, row.RunID, row.Generati
 		}
 	}
 	if checkPath == strings.TrimSpace(row.SourcePath) {
-		got, err := fpFn(ctx, checkPath)
+		ok, err := evaluateFingerprintFence(ctx, opts.Fingerprint != nil, fpFn, row.SourceFingerprint, checkPath)
 		if err != nil {
 			return BarrierResult{Blocker: BlockerFingerprintFence, Detail: formatErr("fingerprint", err)}
 		}
-		if got != row.SourceFingerprint {
+		if !ok {
 			return BarrierResult{Blocker: BlockerFingerprintFence, Detail: "source fingerprint mismatch"}
 		}
 	} else {
@@ -152,8 +152,8 @@ FROM media_ingest_step WHERE run_id=? AND generation=?`, row.RunID, row.Generati
 		if qfp == "" {
 			return BarrierResult{Blocker: BlockerFingerprintFence, Detail: "quarantine fingerprint missing"}
 		}
-		got, err := fpFn(ctx, checkPath)
-		if err != nil || got != qfp {
+		ok, err := evaluateFingerprintFence(ctx, opts.Fingerprint != nil, fpFn, qfp, checkPath)
+		if err != nil || !ok {
 			return BarrierResult{Blocker: BlockerFingerprintFence, Detail: "quarantine fingerprint mismatch"}
 		}
 	}

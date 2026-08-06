@@ -844,12 +844,21 @@ func commitEncryptionStage(ctx context.Context, db *sql.DB, task Task, s storage
 		return errors.New("encrypt commit staged identity invalid")
 	}
 	if !alreadySelected && quarantinePath != "" {
-		quarantineHash, hashErr := encryptionCommitFileSHA256(quarantinePath)
+		algo, wantHash, fpOK := publication.FingerprintHash(s.SourceFingerprint)
+		if !fpOK || wantHash == "" {
+			return errors.New("quarantine source hash unavailable")
+		}
+		var quarantineHash string
+		var hashErr error
+		if algo == "sha256" {
+			quarantineHash, hashErr = encryptionCommitFileSHA256(quarantinePath)
+		} else {
+			quarantineHash, hashErr = fileImoHash(quarantinePath)
+		}
 		if hashErr != nil {
 			return hashErr
 		}
-		sourceHash := s.SourceFingerprint[strings.LastIndex(s.SourceFingerprint, "sha256:")+7:]
-		if !strings.EqualFold(quarantineHash, sourceHash) {
+		if !strings.EqualFold(quarantineHash, wantHash) {
 			return errors.New("quarantine source hash mismatch")
 		}
 	}

@@ -4,12 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
+	"knox-media/internal/publication"
 	"knox-media/internal/storage"
 	"knox-media/internal/store"
 )
@@ -204,11 +206,16 @@ const (
 type plaintextIdentity struct {
 	size int64
 	hash string
+	algo string
 }
 
 func plaintextIdentityFromFingerprint(fingerprint string) (plaintextIdentity, error) {
-	hashAt := strings.LastIndex(fingerprint, "|sha256:")
-	if hashAt < 0 || hashAt+8 >= len(fingerprint) {
+	algo, digest, ok := publication.FingerprintHash(fingerprint)
+	if !ok {
+		return plaintextIdentity{}, errors.New("invalid encryption source fingerprint")
+	}
+	hashAt := strings.LastIndex(fingerprint, "|"+algo+":")
+	if hashAt < 0 || hashAt+len(algo)+2 >= len(fingerprint) {
 		return plaintextIdentity{}, errors.New("invalid encryption source fingerprint")
 	}
 	prefix := fingerprint[:hashAt]
@@ -225,10 +232,10 @@ func plaintextIdentityFromFingerprint(fingerprint string) (plaintextIdentity, er
 	if err != nil || size < 0 {
 		return plaintextIdentity{}, errors.New("invalid encryption source fingerprint")
 	}
-	return plaintextIdentity{size: size, hash: fingerprint[hashAt+8:]}, nil
+	return plaintextIdentity{size: size, hash: digest, algo: algo}, nil
 }
 
-func regularPlaintextIdentity(path string) (plaintextIdentity, bool, error) {
+func regularPlaintextIdentity(path, algo string) (plaintextIdentity, bool, error) {
 	info, err := encryptionLstat(path)
 	if os.IsNotExist(err) {
 		return plaintextIdentity{}, false, nil
@@ -239,11 +246,19 @@ func regularPlaintextIdentity(path string) (plaintextIdentity, bool, error) {
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return plaintextIdentity{}, true, errUnsafeEncryptionQuarantinePath
 	}
-	hash, err := fileSHA256(path)
+	var hash string
+	switch algo {
+	case "imohash":
+		hash, err = fileImoHash(path)
+	case "sha256":
+		hash, err = fileSHA256(path)
+	default:
+		return plaintextIdentity{}, true, fmt.Errorf("unsupported encryption fingerprint algorithm %q", algo)
+	}
 	if err != nil {
 		return plaintextIdentity{}, true, err
 	}
-	return plaintextIdentity{size: info.Size(), hash: hash}, true, nil
+	return plaintextIdentity{size: info.Size(), hash: hash, algo: algo}, true, nil
 }
 
 func syncRestoredPlaintext(source, quarantine string, ops encryptionFileOps) error {
@@ -267,14 +282,14 @@ func reconcilePlaintextRestore(quarantine, source, root, fingerprint string, med
 	if err != nil {
 		return plaintextRestoreRetry, err
 	}
-	sourceID, sourceExists, err := regularPlaintextIdentity(source)
+	sourceID, sourceExists, err := regularPlaintextIdentity(source, expected.algo)
 	if err != nil {
 		return plaintextRestoreConflict, err
 	}
 	var quarantineID plaintextIdentity
 	quarantineExists := qState == quarantineLeafExists
 	if quarantineExists {
-		quarantineID, _, err = regularPlaintextIdentity(qPath)
+		quarantineID, _, err = regularPlaintextIdentity(qPath, expected.algo)
 		if err != nil {
 			return plaintextRestoreConflict, err
 		}

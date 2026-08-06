@@ -17,6 +17,8 @@ import (
 
 	"knox-media/internal/coreiface"
 	"knox-media/internal/store"
+
+	"github.com/kalafut/imohash"
 )
 
 func openRepairTestDB(t *testing.T) *sql.DB {
@@ -752,8 +754,11 @@ func TestSourceFingerprintContextPreservesFormatAndWrapperCompatibility(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	digest := sha256.Sum256(contents)
-	want := fmt.Sprintf("%s|%d|%d|sha256:%s", filepath.Clean(absolute), info.Size(), info.ModTime().UnixNano(), hex.EncodeToString(digest[:]))
+	sum, err := imohash.SumFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf("%s|%d|%d|imohash:%s", filepath.Clean(absolute), info.Size(), info.ModTime().UnixNano(), hex.EncodeToString(sum[:]))
 
 	got, err := SourceFingerprintContext(context.Background(), path)
 	if err != nil {
@@ -762,12 +767,26 @@ func TestSourceFingerprintContextPreservesFormatAndWrapperCompatibility(t *testi
 	if got != want {
 		t.Fatalf("fingerprint = %q, want %q", got, want)
 	}
+	if len(got) < len("|imohash:") || !strings.HasSuffix(got, "|imohash:"+hex.EncodeToString(sum[:])) {
+		t.Fatalf("fingerprint %q must carry an imohash: digest", got)
+	}
 	legacy, err := SourceFingerprint(path)
 	if err != nil {
 		t.Fatalf("SourceFingerprint: %v", err)
 	}
 	if legacy != got {
-		t.Fatalf("legacy fingerprint = %q, context fingerprint = %q", legacy, got)
+		t.Fatalf("legacy wrapper fingerprint = %q, context fingerprint = %q", legacy, got)
+	}
+	// The sha256 compatibility function must keep producing the pre-migration
+	// full-file digest format so stored sha256: rows can still be verified.
+	legacySHA, err := SourceFingerprintContextSHA256(context.Background(), path)
+	if err != nil {
+		t.Fatalf("SourceFingerprintContextSHA256: %v", err)
+	}
+	digest := sha256.Sum256(contents)
+	wantLegacy := fmt.Sprintf("%s|%d|%d|sha256:%s", filepath.Clean(absolute), info.Size(), info.ModTime().UnixNano(), hex.EncodeToString(digest[:]))
+	if legacySHA != wantLegacy {
+		t.Fatalf("legacy sha256 fingerprint = %q, want %q", legacySHA, wantLegacy)
 	}
 }
 
@@ -809,7 +828,12 @@ func TestSourceFingerprintContextCancelsDuringRealFileRead(t *testing.T) {
 		sourceFingerprintReadMu.Unlock()
 	})
 
-	_, err := SourceFingerprintContext(ctx, path)
+	// The imohash path only samples ~48KiB and checks the context before and
+	// after, so it cannot be interrupted mid-read. The full-file SHA-256
+	// compatibility path (used to verify legacy sha256: fingerprints) still
+	// reads through the context-aware chunked loop and must stop as soon as the
+	// context cancels.
+	_, err := SourceFingerprintContextSHA256(ctx, path)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context.Canceled", err)
 	}

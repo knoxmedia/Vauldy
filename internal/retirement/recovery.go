@@ -179,14 +179,14 @@ func reconcileQuarantining(ctx context.Context, db *sql.DB, row Row, id Identity
 			return failClosedOperator(ctx, db, row, "startup: quarantine fingerprint unavailable")
 		}
 	} else {
-		got, e := fingerprintOrEmpty(ctx, qPath)
+		ok, e := fingerprintMatches(ctx, fp, qPath)
 		if e != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
 			return failClosedOperator(ctx, db, row, fmt.Sprintf("startup: quarantine fingerprint unavailable: %v", e))
 		}
-		if got != fp {
+		if !ok {
 			return failClosedOperator(ctx, db, row, "startup: quarantine fingerprint mismatch")
 		}
 	}

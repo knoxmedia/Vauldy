@@ -17,6 +17,8 @@ import (
 
 	"knox-media/internal/scraper"
 	"knox-media/internal/store"
+
+	"github.com/kalafut/imohash"
 )
 
 // RepairLegacyMedia creates bounded, visibility-preserving ingest generations
@@ -590,8 +592,33 @@ func SourceIdentityFingerprint(path string) (string, error) {
 }
 
 // SourceFingerprintContext binds publication evidence to exact source bytes and
-// identity, stopping the full-file hash when ctx is canceled.
+// identity using a sampled imohash (16KiB from the beginning, middle, and end of
+// the file combined with file size). imohash itself has no context parameter, so
+// the caller's context is checked before and after the bounded sample read.
 func SourceFingerprintContext(ctx context.Context, path string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	digest, err := imoHashFile(ctx, path)
+	if err != nil {
+		return "", err
+	}
+	canonical, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s|%d|%d|imohash:%s", filepath.Clean(canonical), info.Size(), info.ModTime().UnixNano(), digest), nil
+}
+
+// SourceFingerprintContextSHA256 binds publication evidence to exact source
+// bytes and identity using the legacy full-file SHA-256 digest, stopping the
+// read when ctx is canceled. It exists only to verify stored sha256:-format
+// fingerprints written before the imohash migration.
+func SourceFingerprintContextSHA256(ctx context.Context, path string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -613,6 +640,23 @@ func SourceFingerprintContext(ctx context.Context, path string) (string, error) 
 		return "", err
 	}
 	return fmt.Sprintf("%s|%d|%d|sha256:%s", filepath.Clean(canonical), info.Size(), info.ModTime().UnixNano(), hex.EncodeToString(h.Sum(nil))), nil
+}
+
+// imoHashFile hashes a file with imohash's default sample parameters (16KiB x 3
+// = 48KiB total plus file size). The caller's context is checked before and
+// after the sample read so cancellation still aborts a fingerprint.
+func imoHashFile(ctx context.Context, path string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	sum, err := imohash.SumFile(path)
+	if err != nil {
+		return "", err
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(sum[:]), nil
 }
 
 var (
@@ -659,17 +703,80 @@ func hasCompleteRepairEvidenceTx(ctx context.Context, tx *sql.Tx, mediaID int64,
 // FingerprintIdentityKey returns the path|size|mtime identity prefix from a
 // SourceFingerprint-style value. It is used to reuse a previously committed
 // fingerprint without re-hashing the file when the file's identity is unchanged.
+// Both the legacy full-file sha256: and the current sampled imohash: formats are
+// recognized so rows written before the imohash migration keep matching.
 func FingerprintIdentityKey(fp string) (string, bool) {
+	identity, _, _, ok := fingerprintParts(fp)
+	return identity, ok && identity != ""
+}
+
+// FingerprintHash returns the hash algorithm name and hex digest stored in a
+// SourceFingerprint value. ok is false when the value does not use a recognized
+// format (for example a malformed or opaque placeholder value).
+func FingerprintHash(fp string) (algo, digest string, ok bool) {
+	_, algo, digest, ok = fingerprintParts(fp)
+	return algo, digest, ok
+}
+
+// fingerprintParts splits a SourceFingerprint value into its identity prefix
+// (clean-abs-path|size|mtime), the hash algorithm name, and the hex digest. The
+// rightmost recognized separator wins, so paths that themselves contain a
+// "|sha256:" or "|imohash:" substring are handled correctly.
+func fingerprintParts(fp string) (identity, algo, digest string, ok bool) {
 	fp = strings.TrimSpace(fp)
-	idx := strings.LastIndex(fp, "|sha256:")
-	if idx <= 0 {
-		return "", false
+	bestIdx := -1
+	bestSep, bestName := "", ""
+	for _, p := range [...]struct{ sep, name string }{
+		{"|sha256:", "sha256"},
+		{"|imohash:", "imohash"},
+	} {
+		if idx := strings.LastIndex(fp, p.sep); idx > bestIdx {
+			bestIdx = idx
+			bestSep, bestName = p.sep, p.name
+		}
 	}
-	return fp[:idx], true
+	if bestIdx <= 0 {
+		return "", "", "", false
+	}
+	return fp[:bestIdx], bestName, fp[bestIdx+len(bestSep):], true
 }
 
 func isPrecapturePlaceholderFingerprint(fp string) bool {
-	return strings.HasSuffix(strings.TrimSpace(fp), "|sha256:"+strings.Repeat("0", 64))
+	fp = strings.TrimSpace(fp)
+	return strings.HasSuffix(fp, "|sha256:"+strings.Repeat("0", 64)) ||
+		strings.HasSuffix(fp, "|imohash:"+strings.Repeat("0", 32))
+}
+
+// SourceFingerprintMatches reports whether the file at path matches the stored
+// fingerprint value, honoring the algorithm recorded in the fingerprint. Stored
+// sha256: values (written before the imohash migration) are verified with a
+// full-file SHA-256; imohash: values use sampled hashing. A malformed or
+// unrecognized stored value fails closed with an error.
+func SourceFingerprintMatches(ctx context.Context, expected, path string) (bool, error) {
+	expected = strings.TrimSpace(expected)
+	if expected == "" {
+		return false, nil
+	}
+	_, algo, _, ok := fingerprintParts(expected)
+	if !ok {
+		return false, errors.New("source fingerprint: unrecognized format")
+	}
+	var (
+		got string
+		err error
+	)
+	switch algo {
+	case "sha256":
+		got, err = SourceFingerprintContextSHA256(ctx, path)
+	case "imohash":
+		got, err = SourceFingerprintContext(ctx, path)
+	default:
+		return false, fmt.Errorf("source fingerprint: unsupported algorithm %q", algo)
+	}
+	if err != nil {
+		return false, err
+	}
+	return got == expected, nil
 }
 
 func identitiesEqual(a, b string) bool {

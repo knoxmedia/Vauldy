@@ -239,7 +239,9 @@ func cachedPosterSourceFingerprint(ctx context.Context, db *sql.DB, mediaID int6
 }
 
 func isPosterPlaceholderFingerprint(fp string) bool {
-	return strings.HasSuffix(strings.TrimSpace(fp), "|sha256:"+strings.Repeat("0", 64))
+	fp = strings.TrimSpace(fp)
+	return strings.HasSuffix(fp, "|sha256:"+strings.Repeat("0", 64)) ||
+		strings.HasSuffix(fp, "|imohash:"+strings.Repeat("0", 32))
 }
 
 type posterSourceSelection struct {
@@ -320,17 +322,27 @@ func parsePosterSourceFingerprint(raw, expectedPath string) (parsedSourceFingerp
 	if strings.TrimSpace(raw) == "" {
 		return parsedSourceFingerprint{}, fmt.Errorf("poster commit: missing source fingerprint")
 	}
-	digestSep := strings.LastIndex(raw, "|sha256:")
+	algo, digest, ok := publication.FingerprintHash(raw)
+	if !ok {
+		return parsedSourceFingerprint{}, fmt.Errorf("poster commit: malformed source fingerprint")
+	}
+	sep := "|" + algo + ":"
+	digestSep := strings.LastIndex(raw, sep)
 	if digestSep < 0 {
 		return parsedSourceFingerprint{}, fmt.Errorf("poster commit: malformed source fingerprint")
 	}
-	rest, digest := raw[:digestSep], raw[digestSep+len("|sha256:"):]
-	if len(digest) != 64 {
+	digest = raw[digestSep+len(sep):]
+	wantDigest := 64
+	if algo == "imohash" {
+		wantDigest = 32
+	}
+	if len(digest) != wantDigest {
 		return parsedSourceFingerprint{}, fmt.Errorf("poster commit: malformed source fingerprint")
 	}
 	if _, err := hex.DecodeString(digest); err != nil {
 		return parsedSourceFingerprint{}, fmt.Errorf("poster commit: malformed source fingerprint")
 	}
+	rest := raw[:digestSep]
 	mtimeSep := strings.LastIndex(rest, "|")
 	if mtimeSep < 0 {
 		return parsedSourceFingerprint{}, fmt.Errorf("poster commit: malformed source fingerprint")

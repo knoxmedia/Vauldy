@@ -311,7 +311,7 @@ func TestPosterStalePriorEvidenceReusesSingleSourceFingerprint(t *testing.T) {
 	if err := os.WriteFile(oldPath, []byte("stale artifact"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	oldFP := strings.Replace(posterRequest(t, db, task).SourceFingerprint, "sha256:", "sha256:"+strings.Repeat("0", 64), 1)
+	oldFP := strings.Replace(posterRequest(t, db, task).SourceFingerprint, "imohash:", "imohash:"+strings.Repeat("0", 32), 1)
 	if _, err := db.Exec(`INSERT INTO media_ingest_evidence(run_id,step_id,media_id,generation,kind,source_fingerprint,artifact_refs_json,reason,verified_at,stage_id) VALUES(?,?,?,?,'poster',?,'{}','generated',CURRENT_TIMESTAMP,?)`, *task.RunID, *task.StepID, task.MediaID, task.Generation, oldFP, oldStage); err != nil {
 		t.Fatal(err)
 	}
@@ -507,7 +507,7 @@ func TestCachedPosterSourceFingerprintFallsBackOnIdentityMismatch(t *testing.T) 
 	if calls != 1 {
 		t.Fatalf("full fingerprint calls=%d want 1", calls)
 	}
-	if !strings.Contains(got, "|sha256:") {
+	if !strings.Contains(got, "|imohash:") {
 		t.Fatalf("unexpected fingerprint=%q", got)
 	}
 }

@@ -12,6 +12,8 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
+
+	"github.com/kalafut/imohash"
 )
 
 type EncryptionStageRootResolver interface {
@@ -378,4 +380,15 @@ func fileSHA256(path string) (string, error) {
 	h := sha256.New()
 	_, err = io.Copy(h, f)
 	return hex.EncodeToString(h.Sum(nil)), err
+}
+
+// fileImoHash computes the sampled imohash of a plaintext file. It is used to
+// compare encryption-recovery identities against imohash:-format source
+// fingerprints; sha256: fingerprints keep using fileSHA256.
+func fileImoHash(path string) (string, error) {
+	sum, err := imohash.SumFile(path)
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(sum[:]), nil
 }
