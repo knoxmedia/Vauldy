@@ -15,7 +15,6 @@ import (
 	"knox-media/api/middleware"
 	"knox-media/internal/playcompletion"
 	"knox-media/internal/scraper"
-	"knox-media/internal/storage"
 	"knox-media/internal/store"
 	"knox-media/internal/textencoding"
 )
@@ -166,10 +165,8 @@ func (h *Handler) GetMedia(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	// Community build has no pretranscode module; no optimization source exists.
 	optimizationSourceAvailable := false
-	if strings.EqualFold(ftype.String, "video") {
-		optimizationSourceAvailable = storage.PlaintextSourceAvailable(h.App.DB, mid, libID.Int64, path.String)
-	}
 	item := gin.H{
 		"id": mid, "library_id": libID.Int64, "file_id": fileID.String,
 		"title": title.String, "original_title": orig.String, "file_path": path.String,

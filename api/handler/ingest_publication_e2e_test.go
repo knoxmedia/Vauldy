@@ -18,7 +18,6 @@ import (
 	"knox-media/internal/config"
 	"knox-media/internal/coreiface"
 	"knox-media/internal/postingest"
-	"knox-media/internal/pretranscode"
 	"knox-media/internal/publication"
 	"knox-media/internal/scanner"
 	"knox-media/internal/storage"
@@ -155,25 +154,6 @@ func completeScrape(t *testing.T, e *publicationE2E) {
 	}
 }
 
-func completePrepare(t *testing.T, e *publicationE2E) {
-	t.Helper()
-	worker := pretranscode.NewWorker(e.db, nil, "unused-ffmpeg", t.TempDir(), 1, 1)
-	processed := 0
-	for {
-		ok, err := worker.ProcessNext(context.Background())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !ok {
-			break
-		}
-		processed++
-	}
-	if processed == 0 {
-		t.Fatal("prepare worker processed no rendition jobs")
-	}
-}
-
 func TestNewVideoHiddenUntilRequiredIngestCompletes(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	e := newPublicationE2E(t, true)
@@ -236,7 +216,11 @@ func TestNewVideoHiddenUntilRequiredIngestCompletes(t *testing.T) {
 		got = append(got, s.Type+":"+s.Status+":"+requiredness)
 	}
 	sort.Strings(got)
-	want := []string{"atrack_extract:waiting:optional", "encrypt:waiting:required", "media_visible:waiting:optional", "poster:waiting:required", "prepare:waiting:optional", "preview:waiting:optional", "scrape:waiting:optional", "subtitle_extract:waiting:optional"}
+	want := []string{"atrack_extract:waiting:optional", "encrypt:waiting:required", "media_visible:waiting:optional", "poster:waiting:required", "preview:waiting:optional", "scrape:waiting:optional", "subtitle_extract:waiting:optional"}
+	if coreiface.IngestPreparePlannerHandle() != nil {
+		want = append(want, "prepare:waiting:optional")
+	}
+	sort.Strings(want)
 	if fmt.Sprint(got) != fmt.Sprint(want) || ingest.Run.ID != e.runID {
 		t.Fatalf("run=%d steps=%v", ingest.Run.ID, got)
 	}

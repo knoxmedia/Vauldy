@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -107,6 +108,105 @@ func TestRepairLegacyPublishedPlainVideoRevalidatesPosterEvidence(t *testing.T) 
 func TestRepairLegacyPublishedPlainVideoExactEvidenceSkips(t *testing.T) {
 	db := openRepairTestDB(t)
 	id, _, _, _ := seedPublishedPlainVideoEvidence(t, db)
+	if n, err := RepairLegacyMedia(context.Background(), db, NewPlanner(PlanOptions{}), 8); err != nil || n != 0 {
+		t.Fatalf("repair=%d err=%v", n, err)
+	}
+	if runs := repairRunCount(t, db, id); runs != 0 {
+		t.Fatalf("repair runs=%d", runs)
+	}
+}
+
+// seedFingerprintEvidence inserts a run/step/poster-evidence triple for the
+// given media at generation 1 with an explicit source fingerprint.
+func seedFingerprintEvidence(t *testing.T, db *sql.DB, mediaID int64, fp string) {
+	t.Helper()
+	if _, err := db.Exec(`INSERT INTO media_ingest_run(media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(?,1,'scan','published','{}',2)`, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	var runID int64
+	if err := db.QueryRow(`SELECT id FROM media_ingest_run WHERE media_id=? AND generation=1`, mediaID).Scan(&runID); err != nil {
+		t.Fatal(err)
+	}
+	res, err := db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status) VALUES(?,?,1,'poster',1,'done')`, runID, mediaID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stepID, _ := res.LastInsertId()
+	if _, err := db.Exec(`INSERT INTO media_ingest_evidence(run_id,step_id,media_id,generation,kind,source_fingerprint,artifact_refs_json,reason,verified_at,stage_id) VALUES(?,?,?,1,'poster',?,'{}','test',CURRENT_TIMESTAMP,'plain-stage')`, runID, stepID, mediaID, fp); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCachedRepairSourceFingerprintReusesEvidenceAcrossGenerations(t *testing.T) {
+	db := openRepairTestDB(t)
+	mediaID := seedLegacyVideo(t, db, 1, "published")
+
+	root := t.TempDir()
+	source := filepath.Join(root, "source.mp4")
+	if err := os.WriteFile(source, []byte("real media bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	abs, _ := filepath.Abs(source)
+	wantIdentity := fmt.Sprintf("%s|%d|%d", filepath.Clean(abs), info.Size(), info.ModTime().UnixNano())
+	// Deliberately wrong sha256: a full re-read would produce a different
+	// fingerprint, so returning this proves the file was not re-hashed.
+	fakeFP := wantIdentity + "|sha256:" + strings.Repeat("ab", 32)
+	seedFingerprintEvidence(t, db, mediaID, fakeFP)
+
+	got, err := cachedRepairSourceFingerprint(context.Background(), db, mediaID, 2, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != fakeFP {
+		t.Fatalf("expected cached fingerprint %q, got %q (source was re-read)", fakeFP, got)
+	}
+}
+
+func TestCachedRepairSourceFingerprintUsesIdentityPlaceholderOnMismatch(t *testing.T) {
+	db := openRepairTestDB(t)
+	mediaID := seedLegacyVideo(t, db, 1, "published")
+
+	root := t.TempDir()
+	source := filepath.Join(root, "source.mp4")
+	if err := os.WriteFile(source, []byte("real media bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Identity differs (wrong size/mtime) so the cached entry must be rejected.
+	abs, _ := filepath.Abs(source)
+	staleIdentity := fmt.Sprintf("%s|%d|%d", filepath.Clean(abs), 1, 1)
+	seedFingerprintEvidence(t, db, mediaID, staleIdentity+"|sha256:"+strings.Repeat("ab", 32))
+
+	got, err := cachedRepairSourceFingerprint(context.Background(), db, mediaID, 1, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := SourceIdentityFingerprint(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("expected identity-only fingerprint, got %q want %q", got, want)
+	}
+	if !strings.HasSuffix(got, "|sha256:"+strings.Repeat("0", 64)) {
+		t.Fatalf("fingerprint %q is not an identity placeholder", got)
+	}
+}
+
+func TestRepairLegacyPublishedPlainVideoAcceptsScrapeStagedPosterPointer(t *testing.T) {
+	db := openRepairTestDB(t)
+	id, _, _, _ := seedPublishedPlainVideoEvidence(t, db)
+	// The scrape pipeline repoints meta.scrape.poster at its own staged artwork
+	// after the poster step commits (scrape can finish after poster in a repair
+	// run). That locally-managed pointer must not invalidate the committed
+	// poster evidence, otherwise repair never converges and every startup
+	// re-hashes the full source file.
+	if _, err := db.Exec(`UPDATE media SET meta_json='{"scrape":{"poster":"/metadata/library/00/1c/28/stages/g1/scrape-1-0-1/poster.jpg"}}' WHERE id=?`, id); err != nil {
+		t.Fatal(err)
+	}
 	if n, err := RepairLegacyMedia(context.Background(), db, NewPlanner(PlanOptions{}), 8); err != nil || n != 0 {
 		t.Fatalf("repair=%d err=%v", n, err)
 	}

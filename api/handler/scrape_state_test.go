@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"knox-media/internal/publication"
 	"knox-media/internal/scraper"
 	"knox-media/internal/store"
+	"knox-media/internal/taskcontrol"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -21,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"knox-media/internal/app"
 )
 
@@ -973,6 +976,48 @@ func TestPrepareSeriesEffectsEmptyScrapePreservesEstablishedFields(t *testing.T)
 	}
 }
 
+func TestSiblingScrapePreservesCommittedPosterPointer(t *testing.T) {
+	db, mid := posterHandlerTestDB(t)
+	claim := seedAndClaimLinkedScrape(t, db, mid)
+	lid, siblingID := seedScrapeAcceptanceSeries(t, db, mid)
+	// Simulate a poster task that already committed a local poster pointer on the sibling episode.
+	_, _ = db.Exec(`UPDATE media SET meta_json='{"scrape":{"poster":"/uploads/posters/sha.jpg","title":"Show S01E02","backdrop":"/uploads/b.jpg","extra":{"poster":"/uploads/posters/sha.jpg","episode":2,"season":1,"episode_still":"https://x/still.jpg"}}}' WHERE id=?`, siblingID)
+	_, _ = db.Exec(`UPDATE library SET type='tv' WHERE id=?; UPDATE media SET file_path='Show S01E01.mkv',publication_state='published',published_at=CURRENT_TIMESTAMP WHERE id=?`, lid, mid)
+	res := &scraper.ScrapeResult{Title: "After Show", Overview: "Overview", Poster: "https://image.tmdb.org/s.jpg", Extra: map[string]any{"series_title": "After Show", "series_poster": "https://image.tmdb.org/s.jpg"}}
+	if err := completeScrapeClaimWithEffects(context.Background(), db, *claim, "auto", "q", "ok", res, scrapeCompletionEffects{LibraryID: lid}); err != nil {
+		t.Fatal(err)
+	}
+	var siblingMeta string
+	_ = db.QueryRow(`SELECT meta_json FROM media WHERE id=?`, siblingID).Scan(&siblingMeta)
+	var sibling map[string]any
+	if err := json.Unmarshal([]byte(siblingMeta), &sibling); err != nil {
+		t.Fatal(err)
+	}
+	scrapeMeta, _ := sibling["scrape"].(map[string]any)
+	if scrapeMeta == nil {
+		t.Fatalf("sibling scrape missing: %s", siblingMeta)
+	}
+	if scrapeMeta["poster"] != "/uploads/posters/sha.jpg" {
+		t.Fatalf("sibling poster was dropped: %v (meta=%s)", scrapeMeta["poster"], siblingMeta)
+	}
+	if scrapeMeta["title"] != "Show S01E02" {
+		t.Fatalf("sibling episode title was dropped: %v (meta=%s)", scrapeMeta["title"], siblingMeta)
+	}
+	extra, _ := scrapeMeta["extra"].(map[string]any)
+	if extra == nil || extra["poster"] != "/uploads/posters/sha.jpg" {
+		t.Fatalf("sibling extra poster was dropped: %v (meta=%s)", extra, siblingMeta)
+	}
+	if extra == nil || extra["episode"] != float64(2) {
+		t.Fatalf("sibling episode field was dropped: %v (meta=%s)", extra, siblingMeta)
+	}
+	if scrapeMeta["series_title"] != "Before Show" {
+		t.Fatalf("series_title not propagated: %v (meta=%s)", scrapeMeta["series_title"], siblingMeta)
+	}
+	if scrapeMeta["series_poster"] != "https://image.tmdb.org/s.jpg" {
+		t.Fatalf("series_poster not propagated: %v (meta=%s)", scrapeMeta["series_poster"], siblingMeta)
+	}
+}
+
 func TestCompleteScrapePreparationHonorsCallerDeadline(t *testing.T) {
 	db, mid := posterHandlerTestDB(t)
 	claim := seedAndClaimLinkedScrape(t, db, mid)
@@ -1005,5 +1050,186 @@ func TestScrapeClaimsUseUniqueOwnerTokens(t *testing.T) {
 	}
 	if first == nil || second == nil || first.Owner == second.Owner || first.Owner == "scrape" || second.Owner == "scrape" {
 		t.Fatalf("owners=%q/%q", first.Owner, second.Owner)
+	}
+}
+
+func TestScrapeAbortFencesFailureAndCancelsActiveWork(t *testing.T) {
+	db, mediaID := posterHandlerTestDB(t)
+	result, err := db.Exec(`INSERT INTO scrape_task(media_id,status,source) VALUES(?,'waiting','tmdb')`, mediaID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, _ := result.LastInsertId()
+	claim, err := claimScrapeTaskWithOwner(context.Background(), db, taskID)
+	if err != nil || claim == nil {
+		t.Fatalf("claim=%+v err=%v", claim, err)
+	}
+	controller := taskcontrol.NewScrapeTaskController(db)
+	workCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	unregister := controller.Register(taskID, cancel)
+	defer unregister()
+	if err := controller.Abort(context.Background(), taskcontrol.ExternalOperationRequest{ID: taskID, Identity: fmt.Sprintf("scrape_task:%d", taskID), ActorID: 1, Reason: "test abort"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-workCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("active scrape context was not cancelled")
+	}
+	if err := failScrapeClaim(context.Background(), db, *claim, "tmdb", "q", "cancelled work returned"); !errors.Is(err, ErrScrapeClaimLost) {
+		t.Fatalf("fail after abort err=%v, want claim lost", err)
+	}
+	var status, message string
+	if err := db.QueryRow(`SELECT status,message FROM scrape_task WHERE id=?`, taskID).Scan(&status, &message); err != nil {
+		t.Fatal(err)
+	}
+	if status != "cancelled" || message != "cancelled by user" {
+		t.Fatalf("status=%q message=%q", status, message)
+	}
+}
+
+func TestDirectLiteralHandlerLazilyInitializesScrapeSemaphore(t *testing.T) {
+	db, mediaID := posterHandlerTestDB(t)
+	result, err := db.Exec(`INSERT INTO scrape_task(media_id,status,source) VALUES(?,'waiting','tmdb')`, mediaID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, _ := result.LastInsertId()
+	h := &Handler{
+		App:                     &app.App{DB: db, Config: &config.Config{}},
+		PublicationCapabilities: publication.NewCapabilityMatrix([]string{"scrape"}),
+		scrapeWithConfig: func(string, string, scraper.Config) (*scraper.ScrapeResult, error) {
+			return &scraper.ScrapeResult{Title: "literal", Overview: "complete", Extra: map[string]any{}}, nil
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done, failed := h.runScrapeTasksWithLimit(ctx, []int64{taskID}, 1)
+	if done != 1 || failed != 0 {
+		t.Fatalf("done=%d failed=%d err=%v", done, failed, ctx.Err())
+	}
+}
+
+func TestStandaloneScrapePersistsRemotePosterBeforeCompletion(t *testing.T) {
+	db, mediaID := posterHandlerTestDB(t)
+	root := t.TempDir()
+	image := []byte("standalone-poster")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(image)
+	}))
+	defer srv.Close()
+	q, err := db.Exec(`INSERT INTO scrape_task(media_id,status,source) VALUES(?,'waiting','tmdb')`, mediaID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, _ := q.LastInsertId()
+	h := &Handler{
+		App:                     &app.App{DB: db, Config: &config.Config{Data: config.DataConfig{MetadataLibrary: root}}},
+		PublicationCapabilities: publication.NewCapabilityMatrix([]string{"scrape"}),
+		scrapeWithConfig: func(string, string, scraper.Config) (*scraper.ScrapeResult, error) {
+			return &scraper.ScrapeResult{Title: "durable", Poster: srv.URL + "/poster.jpg", Extra: map[string]any{"poster": srv.URL + "/poster.jpg"}}, nil
+		},
+	}
+	done, failed := h.runScrapeTasksWithLimit(context.Background(), []int64{taskID}, 1)
+	if done != 1 || failed != 0 {
+		t.Fatalf("done=%d failed=%d", done, failed)
+	}
+	var meta, status string
+	if err := db.QueryRow(`SELECT meta_json FROM media WHERE id=?`, mediaID).Scan(&meta); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT status FROM scrape_task WHERE id=?`, taskID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	res, ok := metadatalib.ScrapeResultFromMetaJSON(meta)
+	if !ok || res == nil {
+		t.Fatalf("invalid scrape metadata: %s", meta)
+	}
+	want := metadatalib.PublicURL(mediaID, "poster.jpg")
+	if status != "done" || res.Poster != want || res.Extra["poster"] != want {
+		t.Fatalf("status=%q poster=%q extra=%v want=%q", status, res.Poster, res.Extra["poster"], want)
+	}
+	got, err := os.ReadFile(filepath.Join(metadatalib.MediaDir(root, mediaID), "poster.jpg"))
+	if err != nil || !bytes.Equal(got, image) {
+		t.Fatalf("persisted poster=%q err=%v", got, err)
+	}
+}
+
+func TestStandaloneScrapeRemotePosterFailsWithoutMetadataLibrary(t *testing.T) {
+	db, mediaID := posterHandlerTestDB(t)
+	q, err := db.Exec(`INSERT INTO scrape_task(media_id,status,source) VALUES(?,'waiting','tmdb')`, mediaID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, _ := q.LastInsertId()
+	h := &Handler{
+		App:                     &app.App{DB: db, Config: &config.Config{}},
+		PublicationCapabilities: publication.NewCapabilityMatrix([]string{"scrape"}),
+		scrapeWithConfig: func(string, string, scraper.Config) (*scraper.ScrapeResult, error) {
+			return &scraper.ScrapeResult{Title: "volatile", Poster: "https://example.invalid/poster.jpg", Extra: map[string]any{}}, nil
+		},
+	}
+	done, failed := h.runScrapeTasksWithLimit(context.Background(), []int64{taskID}, 1)
+	if done != 0 || failed != 1 {
+		t.Fatalf("done=%d failed=%d", done, failed)
+	}
+	var status, message, meta string
+	if err := db.QueryRow(`SELECT status,message FROM scrape_task WHERE id=?`, taskID).Scan(&status, &message); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT meta_json FROM media WHERE id=?`, mediaID).Scan(&meta); err != nil {
+		t.Fatal(err)
+	}
+	if status != "waiting" || !strings.Contains(message, "persist scrape artwork") || strings.Contains(meta, "example.invalid") {
+		t.Fatalf("status=%q message=%q meta=%s", status, message, meta)
+	}
+}
+
+func TestCreateScrapeTasksResetsEveryStandaloneTerminalStatus(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, firstMediaID := posterHandlerTestDB(t)
+	h := &Handler{App: &app.App{DB: db}}
+	statuses := []string{"done", "skipped", "cancelled", "failed", "abandoned"}
+	mediaIDs := make([]int64, 0, len(statuses))
+	for i, status := range statuses {
+		mediaID := firstMediaID
+		if i > 0 {
+			res, err := db.Exec(`INSERT INTO media(library_id,file_id,file_path,title,file_type,status,meta_json) SELECT library_id,?,?,?,'video','active','{}' FROM media WHERE id=?`, fmt.Sprintf("refresh-%d", i), fmt.Sprintf("refresh-%d.mp4", i), fmt.Sprintf("refresh-%d", i), firstMediaID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mediaID, _ = res.LastInsertId()
+		}
+		mediaIDs = append(mediaIDs, mediaID)
+		if _, err := db.Exec(`INSERT INTO scrape_task(media_id,status,source,progress,fail_count,message,lease_owner,lease_until,started_at,finished_at) VALUES(?,?,'old',88,2,'old message','old-owner',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, mediaID, status); err != nil {
+			t.Fatal(err)
+		}
+	}
+	body, _ := json.Marshal(scrapeTaskCreateBody{MediaIDs: mediaIDs, Source: "tmdb"})
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/scrape/task", bytes.NewReader(body))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	h.CreateScrapeTasks(ctx)
+	var response struct {
+		Created int `json:"created"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Created != len(statuses) {
+		t.Fatalf("created=%d want=%d body=%s", response.Created, len(statuses), recorder.Body.String())
+	}
+	for _, mediaID := range mediaIDs {
+		var status, source, message, owner string
+		var progress, failures int
+		var started, finished sql.NullString
+		if err := db.QueryRow(`SELECT status,source,message,COALESCE(lease_owner,''),progress,fail_count,started_at,finished_at FROM scrape_task WHERE media_id=?`, mediaID).Scan(&status, &source, &message, &owner, &progress, &failures, &started, &finished); err != nil {
+			t.Fatal(err)
+		}
+		if status != "waiting" || source != "tmdb" || message != "" || owner != "" || progress != 0 || failures != 0 || started.Valid || finished.Valid {
+			t.Fatalf("media=%d reset=%q/%q/%q/%q/%d/%d/%v/%v", mediaID, status, source, message, owner, progress, failures, started.Valid, finished.Valid)
+		}
 	}
 }

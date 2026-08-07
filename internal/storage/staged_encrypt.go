@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/kalafut/imohash"
 	kcrypto "knox-media/internal/crypto"
 	"knox-media/internal/publication"
 )
@@ -410,25 +411,25 @@ func (s *AssetEncryptor) StageMediaEncryption(ctx context.Context, mediaID int64
 	}, nil
 }
 
+// EncryptionSourceFingerprint identifies plaintext source bytes with a sampled
+// imohash (16KiB from the beginning, middle, and end of the file combined with
+// file size) instead of a full-file SHA-256. The identity part of the returned
+// value matches publication.SourceFingerprintContext, so fixtures and runtime
+// comparisons stay interchangeable.
 func EncryptionSourceFingerprint(path string) (string, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return "", err
 	}
-	f, err := os.Open(path)
+	sum, err := imohash.SumFile(path)
 	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err = io.Copy(h, f); err != nil {
 		return "", err
 	}
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("%s|%d|%d|sha256:%s", filepath.Clean(abs), info.Size(), info.ModTime().UnixNano(), hex.EncodeToString(h.Sum(nil))), nil
+	return fmt.Sprintf("%s|%d|%d|imohash:%s", filepath.Clean(abs), info.Size(), info.ModTime().UnixNano(), hex.EncodeToString(sum[:])), nil
 }
 func EncryptionPathHash(path string) (int64, string, error) {
 	f, err := os.Open(path)

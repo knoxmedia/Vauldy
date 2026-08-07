@@ -253,10 +253,11 @@ func (q *Queue) ClaimAny(ctx context.Context, types []TaskType) (*Task, error) {
 		// Cheap read-only fast path: skip write-lock admission transactions when
 		// no candidate is eligible, so idle claim polls do not contend with the
 		// write transactions executors use to complete or fail tasks.
-		if ok, hintErr := publication.PostIngestCandidateHint(ctx, q.db, publication.ClaimRequest{Family: publication.QueuePostIngest, TaskTypes: requested, Owner: q.owner, Registry: q.registry, Metrics: q.metrics, SchedulerPolicy: q.schedulerPolicy}); hintErr != nil || !ok {
+		eligibleTypes, hintErr := publication.PostIngestEligibleTaskTypes(ctx, q.db, publication.ClaimRequest{Family: publication.QueuePostIngest, TaskTypes: requested, Owner: q.owner, Registry: q.registry, Metrics: q.metrics, SchedulerPolicy: q.schedulerPolicy})
+		if hintErr != nil || len(eligibleTypes) == 0 {
 			return nil, hintErr
 		}
-		for _, typ := range requested {
+		for _, typ := range eligibleTypes {
 			payload, admitResult, _, err = publication.ClaimWithAdmission(ctx, q.db, publication.ClaimRequest{Family: publication.QueuePostIngest, TaskType: typ, Owner: q.owner, Registry: q.registry, Metrics: q.metrics, SchedulerPolicy: q.schedulerPolicy})
 			if err != nil || payload != nil {
 				break
@@ -272,7 +273,6 @@ func (q *Queue) ClaimAny(ctx context.Context, types []TaskType) (*Task, error) {
 	if err != nil || task == nil {
 		return nil, err
 	}
-	q.fairnessCommit(string(task.Type), task)
 	return task, nil
 }
 func (q *Queue) Claim(ctx context.Context, typ TaskType) (*Task, error) {
@@ -298,7 +298,6 @@ func (q *Queue) Claim(ctx context.Context, typ TaskType) (*Task, error) {
 	if err != nil || task == nil {
 		return nil, err
 	}
-	q.fairnessCommit(string(typ), task)
 	return task, nil
 }
 
@@ -392,6 +391,11 @@ func (q *Queue) Renew(ctx context.Context, task Task) (bool, error) {
 			}
 			n, _ := r.RowsAffected()
 			renewed = n == 1
+			if renewed && task.ExecutionID != "" {
+				if re := scheduler.RenewReservationDirect(ctx, q.db, task.ExecutionID, leaseDuration); re != nil {
+					return re
+				}
+			}
 			return nil
 		})
 		return renewed, err
@@ -420,6 +424,11 @@ func (q *Queue) Renew(ctx context.Context, task Task) (bool, error) {
 		if renewed {
 			if err := syncLinkedStepLeaseTx(ctx, tx, task.ID); err != nil {
 				return err
+			}
+			if task.ExecutionID != "" {
+				if err := scheduler.RenewReservationTx(ctx, tx, task.ExecutionID, leaseDuration); err != nil {
+					return err
+				}
 			}
 		}
 		if err := tx.Commit(); err != nil {
@@ -762,8 +771,8 @@ func (q *Queue) recoverRunning(ctx context.Context, onlyExpired bool) (int64, er
 	exhaustedMsg := "interrupted and attempts exhausted"
 	recoveryReason := "startup_interruption"
 	if onlyExpired {
-		selectSQL += ` AND lease_until<CURRENT_TIMESTAMP`
-		updateSQL += ` AND lease_until<CURRENT_TIMESTAMP`
+		selectSQL += ` AND (lease_until IS NULL OR lease_until<CURRENT_TIMESTAMP)`
+		updateSQL += ` AND (lease_until IS NULL OR lease_until<CURRENT_TIMESTAMP)`
 		reservationSelectSQL += ` AND (lease_until IS NULL OR lease_until<CURRENT_TIMESTAMP)`
 		exhaustedMsg = "lease expired and attempts exhausted"
 		recoveryReason = "expired_recovery"
@@ -1448,13 +1457,22 @@ func (q *Queue) AdminPurgeEncrypt(ctx context.Context, id, actorID int64) error 
 			if !removedAt.Valid {
 				return fmt.Errorf("postingest queue: encrypt task %d is not tombstoned", id)
 			}
-			var journals, retirements, deps int
-			if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM media_encryption_stage_journal WHERE task_id=?`, id).Scan(&journals); err != nil {
-				return err
-			}
+		var journals, retirements, deps int
+		if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM media_encryption_stage_journal WHERE task_id=?`, id).Scan(&journals); err != nil {
+			return err
+		}
+		// The community build has no retirement module/table; treat references
+		// as absent so purge is not falsely blocked.
+		retirements = 0
+		var retirementExists int
+		if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='media_plaintext_retirement')`).Scan(&retirementExists); err != nil {
+			return err
+		}
+		if retirementExists == 1 {
 			if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM media_plaintext_retirement WHERE media_id=? AND generation=?`, mediaID, generation).Scan(&retirements); err != nil {
 				return err
 			}
+		}
 			if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM media_ingest_step_dependency d JOIN post_ingest_task p ON p.ingest_step_id=d.step_id OR p.ingest_step_id=d.depends_on_step_id WHERE p.id=?`, id).Scan(&deps); err != nil {
 				return err
 			}
@@ -1567,25 +1585,4 @@ func (q *Queue) adminMutateEncrypt(ctx context.Context, id int64, updateSQL, op 
 		return fmt.Errorf("postingest queue: task %d is not encrypt", id)
 	}
 	return fmt.Errorf("postingest queue: encrypt task %d in status %s cannot be %sed", id, status, op)
-}
-
-// fairnessCommit records the library of the claimed task so that subsequent
-// claims rotate through libraries fairly.
-func (q *Queue) fairnessCommit(taskType string, task *Task) {
-	if q.schedulerPolicy == nil || task == nil {
-		return
-	}
-	q.fairnessMu.Lock()
-	defer q.fairnessMu.Unlock()
-	if q.fairnessCursors == nil {
-		q.fairnessCursors = make(map[string]*scheduler.LibraryFairnessCursor)
-	}
-	cursor, ok := q.fairnessCursors[taskType]
-	if !ok {
-		cursor = &scheduler.LibraryFairnessCursor{TaskType: taskType}
-		q.fairnessCursors[taskType] = cursor
-	}
-	scheduler.LibraryFairnessCommit(cursor, scheduler.LibraryCandidate{
-		LibraryID: task.LibraryID,
-	})
 }

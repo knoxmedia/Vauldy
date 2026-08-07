@@ -42,23 +42,26 @@ var withImmediateScrapeTx = store.WithImmediateConnTx
 const (
 	maxScrapeTaskFailures = publication.DefaultNetworkMaxAttempts
 	scrapeWorkerInterval  = 20 * time.Second
-	scrapeWorkerBatchMin  = 5
+	scrapeDrainDelay      = 200 * time.Millisecond
 	scrapeWorkerBatchMax  = 20
 )
 
 // StartScrapeTaskLoop continuously drains waiting scrape tasks (not only via scheduled_task).
 func (h *Handler) StartScrapeTaskLoop(ctx context.Context) {
-	h.recoverExpiredScrapeTasks(ctx)
-	h.runScrapeWorkerOnce(ctx)
-	tk := time.NewTicker(scrapeWorkerInterval)
-	defer tk.Stop()
+	timer := time.NewTimer(0)
+	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-tk.C:
+		case <-timer.C:
 			h.recoverExpiredScrapeTasks(ctx)
-			h.runScrapeWorkerOnce(ctx)
+			processed := h.runScrapeWorkerOnce(ctx)
+			delay := scrapeWorkerInterval
+			if processed {
+				delay = scrapeDrainDelay
+			}
+			timer.Reset(delay)
 		}
 	}
 }
@@ -71,39 +74,43 @@ func (h *Handler) recoverExpiredScrapeTasks(ctx context.Context) {
 		return
 	}
 	if err := scrapeClaimImmediate(ctx, h.App.DB, func(tx store.ImmediateConnTx) error {
-		if _, err := tx.ExecContext(ctx, `UPDATE media_ingest_step SET status='waiting',lease_owner=NULL,lease_until=NULL,available_at=CURRENT_TIMESTAMP,last_error='recovered expired scrape lease',finished_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE status='running' AND id IN (SELECT ingest_step_id FROM scrape_task WHERE status='running' AND lease_until<CURRENT_TIMESTAMP AND COALESCE(fail_count,0)<? AND ingest_step_id IS NOT NULL)`, maxScrapeTaskFailures); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE media_ingest_step SET status='waiting',lease_owner=NULL,lease_until=NULL,available_at=CURRENT_TIMESTAMP,last_error='recovered expired scrape lease',finished_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE status='running' AND id IN (SELECT ingest_step_id FROM scrape_task WHERE status='running' AND (lease_until IS NULL OR lease_until<CURRENT_TIMESTAMP) AND COALESCE(fail_count,0)<? AND ingest_step_id IS NOT NULL)`, maxScrapeTaskFailures); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE scrape_task SET status='waiting',progress=0,message='recovered expired lease',lease_owner=NULL,lease_until=NULL,available_at=CURRENT_TIMESTAMP WHERE status='running' AND lease_until<CURRENT_TIMESTAMP AND COALESCE(fail_count,0)<?`, maxScrapeTaskFailures); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE scrape_task SET status='waiting',progress=0,message='recovered expired lease',lease_owner=NULL,lease_until=NULL,available_at=CURRENT_TIMESTAMP WHERE status='running' AND (lease_until IS NULL OR lease_until<CURRENT_TIMESTAMP) AND COALESCE(fail_count,0)<?`, maxScrapeTaskFailures); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE media_ingest_step SET status='failed',lease_owner=NULL,lease_until=NULL,last_error='exhausted retries after expired scrape leases',finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE status='running' AND id IN (SELECT ingest_step_id FROM scrape_task WHERE status='running' AND lease_until<CURRENT_TIMESTAMP AND COALESCE(fail_count,0)>=? AND ingest_step_id IS NOT NULL)`, maxScrapeTaskFailures); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE media_ingest_step SET status='failed',lease_owner=NULL,lease_until=NULL,last_error='exhausted retries after expired scrape leases',finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE status='running' AND id IN (SELECT ingest_step_id FROM scrape_task WHERE status='running' AND (lease_until IS NULL OR lease_until<CURRENT_TIMESTAMP) AND COALESCE(fail_count,0)>=? AND ingest_step_id IS NOT NULL)`, maxScrapeTaskFailures); err != nil {
 			return err
 		}
-		_, err := tx.ExecContext(ctx, `UPDATE scrape_task SET status='failed',progress=100,finished_at=CURRENT_TIMESTAMP,message='exhausted retries after expired leases',lease_owner=NULL,lease_until=NULL WHERE status='running' AND lease_until<CURRENT_TIMESTAMP AND COALESCE(fail_count,0)>=?`, maxScrapeTaskFailures)
+		_, err := tx.ExecContext(ctx, `UPDATE scrape_task SET status='failed',progress=100,finished_at=CURRENT_TIMESTAMP,message='exhausted retries after expired leases',lease_owner=NULL,lease_until=NULL WHERE status='running' AND (lease_until IS NULL OR lease_until<CURRENT_TIMESTAMP) AND COALESCE(fail_count,0)>=?`, maxScrapeTaskFailures)
 		return err
 	}); err != nil && ctx.Err() == nil {
 		log.Printf("scrape reaper: recover expired: %v", err)
 	}
 }
 
-func (h *Handler) runScrapeWorkerOnce(ctx context.Context) {
+func (h *Handler) runScrapeWorkerOnce(ctx context.Context) bool {
 	if h == nil || h.App == nil || h.App.DB == nil {
-		return
-	}
-	if !h.isScrapeEnabled(ctx) {
-		return
+		return false
 	}
 	pending := h.countPendingScrapeTasks(ctx)
+	if !h.isScrapeEnabled(ctx) {
+		if pending > 0 {
+			log.Printf("scrape worker: blocked scrape_disabled pending=%d", pending)
+		}
+		return false
+	}
 	if pending == 0 {
-		return
+		return false
 	}
-	limit := scrapeWorkerBatchLimit(pending)
-	done, failed := h.runScrapeTasksWithLimit(ctx, nil, limit)
+	done, failed := h.runScrapeTasksWithLimit(ctx, nil, 1)
 	if done+failed > 0 {
-		remaining := h.countPendingScrapeTasks(ctx)
-		log.Printf("scrape worker: processed=%d ok=%d fail=%d remaining=%d", done+failed, done, failed, remaining)
+		log.Printf("scrape worker: processed=%d ok=%d fail=%d remaining=%d", done+failed, done, failed, h.countPendingScrapeTasks(ctx))
+		return true
 	}
+	log.Printf("scrape worker: no eligible tasks pending=%d", pending)
+	return false
 }
 
 func (h *Handler) isScrapeEnabled(ctx context.Context) bool {
@@ -122,20 +129,6 @@ func (h *Handler) countPendingScrapeTasks(ctx context.Context) int {
 		  AND COALESCE(fail_count, 0) < ?`, maxScrapeTaskFailures,
 	).Scan(&n)
 	return n
-}
-
-func scrapeWorkerBatchLimit(pending int) int {
-	if pending <= 0 {
-		return scrapeWorkerBatchMin
-	}
-	limit := pending
-	if limit < scrapeWorkerBatchMin {
-		limit = scrapeWorkerBatchMin
-	}
-	if limit > scrapeWorkerBatchMax {
-		limit = scrapeWorkerBatchMax
-	}
-	return limit
 }
 
 type scrapeConfigBody struct {
@@ -170,35 +163,33 @@ type updateImageBody struct {
 }
 
 func (h *Handler) enqueueScrapeTask(mediaID int64, createdBy int64, source string) {
+	h.enqueueScrapeTaskResult(mediaID, createdBy, source)
+}
+
+// enqueueScrapeTaskResult returns whether a new (or reset) task was created.
+func (h *Handler) enqueueScrapeTaskResult(mediaID int64, createdBy int64, source string) bool {
 	if mediaID <= 0 {
-		return
+		return false
 	}
 	if source == "" {
 		source = "auto"
 	}
-	// Manual scrape: re-queue an abandoned task instead of creating a duplicate row.
+	var exists int
+	_ = h.App.DB.QueryRow(`SELECT COUNT(1) FROM scrape_task WHERE media_id=? AND status IN ('waiting','running')`, mediaID).Scan(&exists)
+	if exists > 0 {
+		return false
+	}
 	if source != "auto" && source != "auto-scan" {
-		res, _ := h.App.DB.Exec(
-			`UPDATE scrape_task SET status='waiting', fail_count=0, progress=0, message='', finished_at=NULL, started_at=NULL, source=?, created_by=?
-			 WHERE media_id = ? AND status = 'abandoned'`,
-			source, createdBy, mediaID,
-		)
+		res, _ := h.App.DB.Exec(`UPDATE scrape_task SET status='waiting',fail_count=0,progress=0,message='',lease_owner=NULL,lease_until=NULL,available_at=CURRENT_TIMESTAMP,finished_at=NULL,started_at=NULL,source=?,created_by=?,created_at=CURRENT_TIMESTAMP WHERE id=(SELECT id FROM scrape_task WHERE media_id=? AND ingest_run_id IS NULL AND ingest_step_id IS NULL AND COALESCE(generation,0)=0 AND status IN ('done','skipped','cancelled','failed','abandoned') ORDER BY id DESC LIMIT 1)`, source, createdBy, mediaID)
 		if n, _ := res.RowsAffected(); n > 0 {
-			return
+			return true
 		}
 	}
-	var exists int
-	_ = h.App.DB.QueryRow(
-		`SELECT COUNT(1) FROM scrape_task WHERE media_id = ? AND status IN ('waiting','running','failed','abandoned')`,
-		mediaID,
-	).Scan(&exists)
-	if exists > 0 {
-		return
-	}
-	_, _ = h.App.DB.Exec(
+	_, err := h.App.DB.Exec(
 		`INSERT INTO scrape_task (media_id, source, status, progress, created_by) VALUES (?, ?, 'waiting', 0, ?)`,
 		mediaID, source, createdBy,
 	)
+	return err == nil
 }
 
 func (h *Handler) GetScrapeConfig(c *gin.Context) {
@@ -312,6 +303,11 @@ func (h *Handler) CreateScrapeTasks(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	if !h.isScrapeEnabled(c.Request.Context()) {
+		log.Printf("scrape task create rejected: scrape_disabled requested=%d", len(body.MediaIDs))
+		c.JSON(http.StatusConflict, gin.H{"error": "scrape_disabled", "message": "metadata scraping is disabled"})
+		return
+	}
 	if len(body.MediaIDs) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "media_ids required"})
 		return
@@ -319,12 +315,8 @@ func (h *Handler) CreateScrapeTasks(c *gin.Context) {
 	uid := middleware.UserID(c)
 	created := 0
 	for _, mid := range body.MediaIDs {
-		before := created
-		h.enqueueScrapeTask(mid, uid, body.Source)
-		var n int
-		_ = h.App.DB.QueryRow(`SELECT COUNT(1) FROM scrape_task WHERE media_id = ?`, mid).Scan(&n)
-		if n > 0 {
-			created = before + 1
+		if h.enqueueScrapeTaskResult(mid, uid, body.Source) {
+			created++
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true, "created": created})
@@ -379,6 +371,9 @@ func claimScrapeTaskWithOwnerRegistry(ctx context.Context, db *sql.DB, taskID in
 	if err != nil || payload == nil {
 		return nil, err
 	}
+	if !payload.RunID.Valid && !payload.StepID.Valid && payload.Generation.Valid && payload.Generation.Int64 == 0 {
+		payload.Generation = sql.NullInt64{}
+	}
 	return &scrapeClaim{ID: payload.QueueID, MediaID: payload.MediaID, RunID: payload.RunID, StepID: payload.StepID, Generation: payload.Generation, Owner: payload.Owner, Attempts: payload.Attempts, MaxAttempts: payload.MaxAttempts, RetryRound: payload.RetryRound, LeaseUntil: payload.LeaseUntil}, nil
 }
 
@@ -401,12 +396,28 @@ func (h *Handler) RunScrapeTasks(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true, "done": done, "failed": failed})
 }
 
+func (h *Handler) acquireScrapeRun(ctx context.Context) (func(), bool) {
+	if h == nil || ctx == nil {
+		return nil, false
+	}
+	h.scrapeRunOnce.Do(func() { h.scrapeRunSem = make(chan struct{}, 1) })
+	select {
+	case h.scrapeRunSem <- struct{}{}:
+		return func() { <-h.scrapeRunSem }, true
+	case <-ctx.Done():
+		return nil, false
+	}
+}
+
 func (h *Handler) runScrapeTasksWithLimit(ctx context.Context, ids []int64, limit int) (int, int) {
-	if h == nil || ctx.Err() != nil {
+	if h == nil || ctx == nil || ctx.Err() != nil {
 		return 0, 0
 	}
-	h.scrapeRunMu.Lock()
-	defer h.scrapeRunMu.Unlock()
+	release, acquired := h.acquireScrapeRun(ctx)
+	if !acquired {
+		return 0, 0
+	}
+	defer release()
 
 	var taskIDs []int64
 	if len(ids) > 0 {
@@ -419,13 +430,18 @@ func (h *Handler) runScrapeTasksWithLimit(ctx context.Context, ids []int64, limi
 			  AND COALESCE(q.fail_count, 0) < ?
 			  AND %s
 			ORDER BY q.id LIMIT ?`, publication.LinkedClaimEligibilitySQL("q")), maxScrapeTaskFailures, limit)
-		if err == nil {
+		if err != nil {
+			log.Printf("scrape worker: candidate query: %v", err)
+		} else {
 			defer rows.Close()
 			for rows.Next() {
 				var id int64
 				if rows.Scan(&id) == nil {
 					taskIDs = append(taskIDs, id)
 				}
+			}
+			if err := rows.Err(); err != nil {
+				log.Printf("scrape worker: candidate rows: %v", err)
 			}
 		}
 	}
@@ -462,6 +478,10 @@ func (h *Handler) runScrapeTasksWithLimit(ctx context.Context, ids []int64, limi
 			continue
 		}
 		workCtx, stopWork := context.WithTimeout(ctx, 80*time.Second)
+		unregisterWork := func() {}
+		if h.ScrapeController != nil {
+			unregisterWork = h.ScrapeController.Register(taskID, stopWork)
+		}
 		leaseLost := make(chan struct{}, 1)
 		heartbeatDone := make(chan struct{})
 		go func(c scrapeClaim) {
@@ -485,6 +505,7 @@ func (h *Handler) runScrapeTasksWithLimit(ctx context.Context, ids []int64, limi
 			}
 		}(*claim)
 		finishWork := func() bool {
+			unregisterWork()
 			stopWork()
 			<-heartbeatDone
 			select {
@@ -530,6 +551,30 @@ func (h *Handler) runScrapeTasksWithLimit(ctx context.Context, ids []int64, limi
 		}
 
 		effects := scrapeCompletionEffects{LibraryID: libraryID}
+		standalone := !claim.RunID.Valid && !claim.StepID.Valid && (!claim.Generation.Valid || claim.Generation.Int64 == 0)
+		if standalone && metadatalib.ResultHasRemoteScrapeImages(res) {
+			remotePoster := metadatalib.ResultHasRemoteScrapePoster(res)
+			saved, persistErr := h.persistScrapeArtwork(mediaID, res)
+			if remotePoster && !metadatalib.ResultHasLocalScrapePoster(res) {
+				if persistErr == nil {
+					persistErr = errors.New("remote poster was not persisted")
+				}
+				msg := "persist scrape artwork: " + persistErr.Error()
+				if err := failScrapeClaim(ctx, h.App.DB, *claim, source, query, msg); err != nil {
+					log.Printf("fail scrape task %d: %v", taskID, err)
+				}
+				failed++
+				finishWork()
+				continue
+			}
+			if persistErr != nil {
+				log.Printf("persist optional scrape artwork media=%d saved=%d: %v", mediaID, saved, persistErr)
+				if res.Extra == nil {
+					res.Extra = map[string]any{}
+				}
+				res.Extra["artwork_persist_warning"] = persistErr.Error()
+			}
+		}
 		if claim.Generation.Valid && h.App.Config != nil {
 			stageID := fmt.Sprintf("scrape-%d-%d-%d-%d", claim.ID, claim.Attempts, claim.RetryRound, claim.Generation.Int64)
 			if staged, e := metadatalib.StageScrapeImagesDurable(workCtx, h.App.DB, h.App.Config.Data.MetadataLibrary, h.App.Config.Data.Upload, metadatalib.ScrapeStageClaim{TaskID: claim.ID, MediaID: mediaID, RunID: claim.RunID.Int64, StepID: claim.StepID.Int64, Generation: claim.Generation.Int64, LeaseOwner: claim.Owner, Attempt: claim.Attempts, RetryRound: claim.RetryRound}, stageID, res); e == nil {
@@ -1120,8 +1165,11 @@ func simpleGet(u string, headers map[string]string) ([]byte, error) {
 }
 
 func (h *Handler) persistScrapeArtwork(mediaID int64, res *scraper.ScrapeResult) (int, error) {
-	if h == nil || h.App == nil || h.App.Config == nil || res == nil || mediaID <= 0 {
+	if res == nil || mediaID <= 0 {
 		return 0, nil
+	}
+	if h == nil || h.App == nil || h.App.Config == nil {
+		return 0, errors.New("metadata library not configured")
 	}
 	return metadatalib.PersistScrapeImages(
 		h.App.Config.Data.MetadataLibrary,
@@ -1306,7 +1354,7 @@ func failScrapeTaskDB(ctx context.Context, db *sql.DB, taskID, mediaID int64, so
 }
 
 func scrapeClaimPredicate() string {
-	return `q.id=? AND q.media_id=? AND q.status='running' AND q.lease_owner=? AND q.retry_round=? AND ((q.ingest_run_id IS NULL AND q.ingest_step_id IS NULL AND q.generation IS NULL AND ?=0 AND ?=0 AND ?=0) OR (q.ingest_run_id=? AND q.ingest_step_id=? AND q.generation=? AND EXISTS(SELECT 1 FROM media_ingest_step st JOIN media_ingest_run r ON r.id=st.run_id JOIN media m ON m.id=st.media_id WHERE st.id=q.ingest_step_id AND st.run_id=q.ingest_run_id AND st.media_id=q.media_id AND st.generation=q.generation AND st.status='running' AND st.lease_owner=q.lease_owner AND st.attempts=? AND r.media_id=q.media_id AND r.generation=q.generation AND r.status IN ('processing','published','degraded') AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND m.ingest_generation=q.generation)))`
+	return `q.id=? AND q.media_id=? AND q.status='running' AND q.lease_owner=? AND q.retry_round=? AND ((q.ingest_run_id IS NULL AND q.ingest_step_id IS NULL AND COALESCE(q.generation,0)=0 AND ?=0 AND ?=0 AND ?=0) OR (q.ingest_run_id=? AND q.ingest_step_id=? AND q.generation=? AND EXISTS(SELECT 1 FROM media_ingest_step st JOIN media_ingest_run r ON r.id=st.run_id JOIN media m ON m.id=st.media_id WHERE st.id=q.ingest_step_id AND st.run_id=q.ingest_run_id AND st.media_id=q.media_id AND st.generation=q.generation AND st.status='running' AND st.lease_owner=q.lease_owner AND st.attempts=? AND r.media_id=q.media_id AND r.generation=q.generation AND r.status IN ('processing','published','degraded') AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND m.ingest_generation=q.generation)))`
 }
 func scrapeClaimArgs(c scrapeClaim) []any {
 	return []any{c.ID, c.MediaID, c.Owner, c.RetryRound, c.RunID.Int64, c.StepID.Int64, c.Generation.Int64, c.RunID.Int64, c.StepID.Int64, c.Generation.Int64, c.Attempts}

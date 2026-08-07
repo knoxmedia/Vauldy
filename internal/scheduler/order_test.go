@@ -81,6 +81,28 @@ func TestEffectivePrioritySaturatingOverflow(t *testing.T) {
 	}
 }
 
+func TestEffectivePrioritySignedSaturation(t *testing.T) {
+	if got := saturatingAdd(math.MinInt64, -1); got != math.MinInt64 {
+		t.Fatalf("negative add overflow=%d", got)
+	}
+	if got := saturatingAdd(math.MinInt64, 1); got != math.MinInt64+1 {
+		t.Fatalf("negative safe add=%d", got)
+	}
+	if got := saturatingMul(math.MinInt64, -1); got != math.MaxInt64 {
+		t.Fatalf("min * -1=%d", got)
+	}
+	if got := saturatingMul(math.MinInt64, 2); got != math.MinInt64 {
+		t.Fatalf("negative multiply overflow=%d", got)
+	}
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	policy := &Policy{AgingIntervalSec: 1, AgingStep: 2, RunNowAmount: 100}
+	if got := EffectivePriority(policy, math.MinInt64, -1, now, nil, now); got != math.MinInt64 {
+		t.Fatalf("effective underflow=%d", got)
+	}
+	if got := EffectivePriority(policy, math.MaxInt64, 1, now, nil, now); got != math.MaxInt64 {
+		t.Fatalf("effective overflow=%d", got)
+	}
+}
 func TestEffectivePriorityAgingStep(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	policy := &Policy{AgingIntervalSec: 60, AgingStep: 5, RunNowAmount: 100, RunNowTTLSec: 600}
@@ -171,35 +193,35 @@ func TestLibraryFairnessRotation(t *testing.T) {
 	}
 
 	// First pick: none served yet, should pick earliest available (library 1)
-	idx := LibraryFairnessPick(cursor, libraries, 1) // maxLookahead
+	idx, _ := LibraryFairnessPick(cursor, libraries, 1) // maxLookahead
 	if idx != 0 {
 		t.Fatalf("first pick: got idx %d, want 0 (library 1)", idx)
 	}
 	LibraryFairnessCommit(cursor, libraries[idx])
 
 	// Second pick: library 1 was just served, should pick library 2
-	idx = LibraryFairnessPick(cursor, libraries, 1)
+	idx, _ = LibraryFairnessPick(cursor, libraries, 1)
 	if idx != 1 {
 		t.Fatalf("second pick: got idx %d, want 1 (library 2)", idx)
 	}
 	LibraryFairnessCommit(cursor, libraries[idx])
 
 	// Third pick: library 2 was just served, should pick library 3
-	idx = LibraryFairnessPick(cursor, libraries, 1)
+	idx, _ = LibraryFairnessPick(cursor, libraries, 1)
 	if idx != 2 {
 		t.Fatalf("third pick: got idx %d, want 2 (library 3)", idx)
 	}
 	LibraryFairnessCommit(cursor, libraries[idx])
 
 	// Fourth pick: library 3 was just served, should wrap back to library 1
-	idx = LibraryFairnessPick(cursor, libraries, 1)
+	idx, _ = LibraryFairnessPick(cursor, libraries, 1)
 	if idx != 0 {
 		t.Fatalf("fourth pick: got idx %d, want 0 (library 1 again)", idx)
 	}
 	LibraryFairnessCommit(cursor, libraries[idx])
 
 	// Fifth pick: library 1 served again, library 2 next
-	idx = LibraryFairnessPick(cursor, libraries, 1)
+	idx, _ = LibraryFairnessPick(cursor, libraries, 1)
 	if idx != 1 {
 		t.Fatalf("fifth pick: got idx %d, want 1 (library 2)", idx)
 	}
@@ -213,12 +235,12 @@ func TestLibraryFairnessRotationDeepBacklog(t *testing.T) {
 		{LibraryID: int64Ptr(2), Priority: 0, AvailableAt: time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC), CreatedAt: time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC), ID: 2, Removed: false},
 	}
 	// Library 1 has much older tasks but after serving it, library 2 should get a turn.
-	idx := LibraryFairnessPick(cursor, libraries, 10)
+	idx, _ := LibraryFairnessPick(cursor, libraries, 10)
 	if idx != 0 {
 		t.Fatalf("deep backlog first pick: got idx %d, want 0", idx)
 	}
 	LibraryFairnessCommit(cursor, libraries[idx])
-	idx = LibraryFairnessPick(cursor, libraries, 10)
+	idx, _ = LibraryFairnessPick(cursor, libraries, 10)
 	if idx != 1 {
 		t.Fatalf("deep backlog rotation: got idx %d, want 1", idx)
 	}
@@ -228,12 +250,31 @@ func TestLibraryFairnessRotationDeepBacklog(t *testing.T) {
 	libraries = append(libraries, LibraryCandidate{
 		LibraryID: int64Ptr(3), Priority: 0, AvailableAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), ID: 3, Removed: false,
 	})
-	idx = LibraryFairnessPick(cursor, libraries, 10)
+	idx, _ = LibraryFairnessPick(cursor, libraries, 10)
 	if idx != 2 {
 		t.Fatalf("after adding library 3: got idx %d, want 2", idx)
 	}
 }
 
+func TestLibraryFairnessPickDistinctBucketsAndNoPick(t *testing.T) {
+	cursor := &LibraryFairnessCursor{TaskType: "poster"}
+	rows := []LibraryCandidate{{LibraryID: int64Ptr(1), ID: 1}, {LibraryID: int64Ptr(1), ID: 2}, {LibraryID: int64Ptr(2), ID: 3}, {LibraryID: int64Ptr(3), ID: 4}}
+	idx, ok := LibraryFairnessPick(cursor, rows, 10)
+	if !ok || idx != 0 {
+		t.Fatalf("first=(%d,%v)", idx, ok)
+	}
+	LibraryFairnessCommit(cursor, rows[idx])
+	idx, ok = LibraryFairnessPick(cursor, rows, 10)
+	if !ok || idx != 2 {
+		t.Fatalf("duplicate bucket consumed turn: (%d,%v)", idx, ok)
+	}
+	if _, ok := LibraryFairnessPick(cursor, []LibraryCandidate{{Removed: true}}, 10); ok {
+		t.Fatal("ineligible-only returned a pick")
+	}
+	if _, ok := LibraryFairnessPick(cursor, nil, 10); ok {
+		t.Fatal("empty returned a pick")
+	}
+}
 func TestLibraryFairnessSkipRemoved(t *testing.T) {
 	// Removed libraries do not consume turns.
 	cursor := &LibraryFairnessCursor{TaskType: "poster"}
@@ -245,14 +286,14 @@ func TestLibraryFairnessSkipRemoved(t *testing.T) {
 	}
 
 	// First pick should skip removed library 1, pick library 2
-	idx := LibraryFairnessPick(cursor, libraries, 10)
+	idx, _ := LibraryFairnessPick(cursor, libraries, 10)
 	if idx != 1 {
 		t.Fatalf("skip removed: got idx %d, want 1 (library 2)", idx)
 	}
 	LibraryFairnessCommit(cursor, libraries[idx])
 
 	// Next pick: library 2 served, should pick library 3
-	idx = LibraryFairnessPick(cursor, libraries, 10)
+	idx, _ = LibraryFairnessPick(cursor, libraries, 10)
 	if idx != 2 {
 		t.Fatalf("after skip: got idx %d, want 2 (library 3)", idx)
 	}
@@ -263,8 +304,8 @@ func TestLibraryFairnessNullLibraryBucket(t *testing.T) {
 	cursor := &LibraryFairnessCursor{TaskType: "encrypt"}
 
 	nullLib := LibraryCandidate{
-		LibraryID:  nil, // null library (maintenance/repair tasks)
-		Priority:   0,
+		LibraryID:   nil, // null library (maintenance/repair tasks)
+		Priority:    0,
 		AvailableAt: time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
 		CreatedAt:   time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
 		ID:          1,
@@ -272,8 +313,8 @@ func TestLibraryFairnessNullLibraryBucket(t *testing.T) {
 	}
 
 	lib2 := LibraryCandidate{
-		LibraryID:  int64Ptr(2),
-		Priority:   0,
+		LibraryID:   int64Ptr(2),
+		Priority:    0,
 		AvailableAt: time.Date(2020, 1, 2, 0, 0, 0, 0, time.UTC),
 		CreatedAt:   time.Date(2020, 1, 2, 0, 0, 0, 0, time.UTC),
 		ID:          2,
@@ -283,21 +324,21 @@ func TestLibraryFairnessNullLibraryBucket(t *testing.T) {
 	libraries := []LibraryCandidate{nullLib, lib2}
 
 	// First pick: null library (earliest)
-	idx := LibraryFairnessPick(cursor, libraries, 10)
+	idx, _ := LibraryFairnessPick(cursor, libraries, 10)
 	if idx != 0 {
 		t.Fatalf("null lib first: got idx %d, want 0", idx)
 	}
 	LibraryFairnessCommit(cursor, libraries[idx])
 
 	// Second pick: library 2
-	idx = LibraryFairnessPick(cursor, libraries, 10)
+	idx, _ = LibraryFairnessPick(cursor, libraries, 10)
 	if idx != 1 {
 		t.Fatalf("null lib rotation: got idx %d, want 1", idx)
 	}
 	LibraryFairnessCommit(cursor, libraries[idx])
 
 	// Third pick: null library again (rotation wraps)
-	idx = LibraryFairnessPick(cursor, libraries, 10)
+	idx, _ = LibraryFairnessPick(cursor, libraries, 10)
 	if idx != 0 {
 		t.Fatalf("null lib wrap: got idx %d, want 0", idx)
 	}
@@ -313,7 +354,7 @@ func TestLibraryFairnessSupersededDoesNotConsume(t *testing.T) {
 		{LibraryID: int64Ptr(3), Priority: 0, AvailableAt: time.Date(2020, 1, 3, 0, 0, 0, 0, time.UTC), CreatedAt: time.Date(2020, 1, 3, 0, 0, 0, 0, time.UTC), ID: 3, Removed: false},
 	}
 
-	idx := LibraryFairnessPick(cursor, libraries, 10)
+	idx, _ := LibraryFairnessPick(cursor, libraries, 10)
 	if idx != 1 {
 		t.Fatalf("skip superseded: got idx %d, want 1", idx)
 	}
@@ -331,14 +372,14 @@ func TestLibraryFairnessMaxLookahead(t *testing.T) {
 	}
 
 	// First pick: library 1
-	idx := LibraryFairnessPick(cursor, libraries, 10)
+	idx, _ := LibraryFairnessPick(cursor, libraries, 10)
 	if idx != 0 {
 		t.Fatalf("first: got idx %d, want 0", idx)
 	}
 	LibraryFairnessCommit(cursor, libraries[idx])
 
 	// maxLookahead 1: after library 1, next is library 2
-	idx = LibraryFairnessPick(cursor, libraries, 1)
+	idx, _ = LibraryFairnessPick(cursor, libraries, 1)
 	if idx != 1 {
 		t.Fatalf("maxLookahead 1: got idx %d, want 1", idx)
 	}

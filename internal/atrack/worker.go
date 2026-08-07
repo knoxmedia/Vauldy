@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 
 	"knox-media/internal/keystore"
+	"knox-media/internal/progressctx"
 	"knox-media/internal/storage"
 )
 
@@ -294,6 +295,8 @@ func (w *Worker) run(ctx context.Context, mediaID int64, inputPath string) (err 
 		}
 		if err := w.extractStream(ctx, mediaID, inputPath, st.Index, strings.EqualFold(st.CodecName, "aac"), streamDir, lang); err != nil {
 			errs = append(errs, fmt.Sprintf("stream %d: %v", st.Index, err))
+		} else {
+			progressctx.Report(ctx)
 		}
 	}
 	if err := ctx.Err(); err != nil {
@@ -443,7 +446,7 @@ func (w *Worker) extractStream(ctx context.Context, mediaID int64, inputPath str
 		"-hls_segment_filename", segPattern,
 		playlistPath,
 	)
-	if out, err := storage.RunFFmpeg(ctx, w.DB, w.Vault, w.FFmpegPath, mediaID, inputPath, 0, 0, nil, post, ""); err != nil {
+	if out, err := storage.RunFFmpegWithLiveness(ctx, w.DB, w.Vault, w.FFmpegPath, mediaID, inputPath, 0, 0, nil, post, "", func() { progressctx.Report(ctx) }); err != nil {
 		return fmt.Errorf("%w: %s", err, trimErr(string(out), err))
 	}
 

@@ -4,12 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
+	"knox-media/internal/publication"
 	"knox-media/internal/storage"
 	"knox-media/internal/store"
 )
@@ -104,9 +106,10 @@ func ReconcileEncryptionStages(ctx context.Context, db *sql.DB, roots Encryption
 				retErr = errors.Join(retErr, errors.New("committed encryption recovery mismatch"))
 				continue
 			}
-			// Committed encryption no longer deletes plaintext. Hand cleanup to a
-			// durable retirement intent; leave source present or already quarantined.
-			if err = handoffCommittedEncryptionRetirement(ctx, db, r.stage, r.task, r.retryRound, r.attempt, r.media, r.run, r.step, r.generation, r.source, r.fp, r.quarantine, r.cleanup == 1); err != nil {
+			// Committed encryption leaves plaintext in place; the community build
+			// has no retirement worker, so no cleanup intent is recorded. Mark the
+			// committed state as verified so recovery does not retry the stage.
+			if err = markCommittedEncryptionVerified(ctx, db, r.stage); err != nil {
 				return checked, cleaned, err
 			}
 			continue
@@ -204,11 +207,16 @@ const (
 type plaintextIdentity struct {
 	size int64
 	hash string
+	algo string
 }
 
 func plaintextIdentityFromFingerprint(fingerprint string) (plaintextIdentity, error) {
-	hashAt := strings.LastIndex(fingerprint, "|sha256:")
-	if hashAt < 0 || hashAt+8 >= len(fingerprint) {
+	algo, digest, ok := publication.FingerprintHash(fingerprint)
+	if !ok {
+		return plaintextIdentity{}, errors.New("invalid encryption source fingerprint")
+	}
+	hashAt := strings.LastIndex(fingerprint, "|"+algo+":")
+	if hashAt < 0 || hashAt+len(algo)+2 >= len(fingerprint) {
 		return plaintextIdentity{}, errors.New("invalid encryption source fingerprint")
 	}
 	prefix := fingerprint[:hashAt]
@@ -225,10 +233,10 @@ func plaintextIdentityFromFingerprint(fingerprint string) (plaintextIdentity, er
 	if err != nil || size < 0 {
 		return plaintextIdentity{}, errors.New("invalid encryption source fingerprint")
 	}
-	return plaintextIdentity{size: size, hash: fingerprint[hashAt+8:]}, nil
+	return plaintextIdentity{size: size, hash: digest, algo: algo}, nil
 }
 
-func regularPlaintextIdentity(path string) (plaintextIdentity, bool, error) {
+func regularPlaintextIdentity(path, algo string) (plaintextIdentity, bool, error) {
 	info, err := encryptionLstat(path)
 	if os.IsNotExist(err) {
 		return plaintextIdentity{}, false, nil
@@ -239,11 +247,19 @@ func regularPlaintextIdentity(path string) (plaintextIdentity, bool, error) {
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return plaintextIdentity{}, true, errUnsafeEncryptionQuarantinePath
 	}
-	hash, err := fileSHA256(path)
+	var hash string
+	switch algo {
+	case "imohash":
+		hash, err = fileImoHash(path)
+	case "sha256":
+		hash, err = fileSHA256(path)
+	default:
+		return plaintextIdentity{}, true, fmt.Errorf("unsupported encryption fingerprint algorithm %q", algo)
+	}
 	if err != nil {
 		return plaintextIdentity{}, true, err
 	}
-	return plaintextIdentity{size: info.Size(), hash: hash}, true, nil
+	return plaintextIdentity{size: info.Size(), hash: hash, algo: algo}, true, nil
 }
 
 func syncRestoredPlaintext(source, quarantine string, ops encryptionFileOps) error {
@@ -267,14 +283,14 @@ func reconcilePlaintextRestore(quarantine, source, root, fingerprint string, med
 	if err != nil {
 		return plaintextRestoreRetry, err
 	}
-	sourceID, sourceExists, err := regularPlaintextIdentity(source)
+	sourceID, sourceExists, err := regularPlaintextIdentity(source, expected.algo)
 	if err != nil {
 		return plaintextRestoreConflict, err
 	}
 	var quarantineID plaintextIdentity
 	quarantineExists := qState == quarantineLeafExists
 	if quarantineExists {
-		quarantineID, _, err = regularPlaintextIdentity(qPath)
+		quarantineID, _, err = regularPlaintextIdentity(qPath, expected.algo)
 		if err != nil {
 			return plaintextRestoreConflict, err
 		}
@@ -346,28 +362,13 @@ func recordCommittedCleanupOutcome(ctx context.Context, db *sql.DB, stageID stri
 	return err
 }
 
-func handoffCommittedEncryptionRetirement(ctx context.Context, db *sql.DB, stageID string, taskID, retryRound, attempt, mediaID, runID, stepID, generation int64, source, fingerprint, quarantinePath string, cleanup bool) error {
+func markCommittedEncryptionVerified(ctx context.Context, db *sql.DB, stageID string) error {
 	_, err := store.WithImmediateConnTx(ctx, db, func(tx store.ImmediateConnTx) error {
-		marker := "verified_committed"
-		if cleanup {
-			run, step := runID, stepID
-			task := Task{
-				ID: taskID, MediaID: mediaID, Type: TaskEncrypt, Generation: generation, RetryRound: int(retryRound),
-				RunID: &run, StepID: &step, Attempts: int(attempt),
-			}
-			staged := storage.StagedMediaEncryption{
-				StageID: stageID, MediaID: mediaID, OriginalPath: source, SourceFingerprint: fingerprint, CleanupPlaintext: true,
-			}
-			if e := upsertEncryptionRetirementIntentTx(ctx, tx, task, staged, quarantinePath); e != nil {
-				return e
-			}
-			marker = "retirement_handoff"
-		}
-		_, e := tx.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET recovery_error=?,next_retry_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='committed'`, marker, stageID)
+		_, e := tx.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET recovery_error='verified_committed',next_retry_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='committed'`, stageID)
 		return e
 	})
 	if err != nil {
-		pending := boundedRecoveryError("retirement_handoff_pending: ", err)
+		pending := boundedRecoveryError("committed_marker_pending: ", err)
 		_, updateErr := db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET recovery_error=?,recovery_attempts=recovery_attempts+1,next_retry_at=datetime(CURRENT_TIMESTAMP,'+' || min(3600,30*(1 << min(recovery_attempts,7))) || ' seconds'),updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='committed'`, pending, stageID)
 		return errors.Join(err, updateErr)
 	}

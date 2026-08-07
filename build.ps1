@@ -113,7 +113,7 @@ $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
 for ($i = 0; $i -lt $total; $i++) {
   $b = $builds[$i]
-  $name = "knox-media-$($b.OS)-$($b.Arch)$($b.Suffix)"
+  $name = "vauldy-$($b.OS)-$($b.Arch)$($b.Suffix)"
   $out = Join-Path $binDir $name
   Write-Host "[$($i+1)/$total] Building $name ..."
   Invoke-GoBuild -Output $out -GoOS $b.OS -GoArch $b.Arch

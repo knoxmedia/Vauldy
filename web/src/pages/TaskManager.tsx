@@ -4,7 +4,7 @@ import { TaskTypeNav } from "../components/tasks/TaskTypeNav";
 import { TaskList } from "../components/tasks/TaskList";
 import { TaskOverview } from "../components/tasks/TaskOverview";
 import { TaskDetailDrawer } from "../components/tasks/TaskDetailDrawer";
-import { fetchTaskControlRegistry } from "../api/taskControl";
+import { fetchTaskControlRegistry, fetchTaskControlOverview } from "../api/taskControl";
 import type { Registry } from "../api/taskControl";
 import { useT } from "../i18n";
 
@@ -13,6 +13,7 @@ export default function TaskManagerPage() {
   const [registry, setRegistry] = useState<Registry | null>(null);
   const [registryLoading, setRegistryLoading] = useState(true);
   const [registryError, setRegistryError] = useState(false);
+  const [typeCounts, setTypeCounts] = useState<Record<string, number> | null>(null);
 
   const [activeType, setActiveType] = useState("overview");
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
@@ -36,6 +37,14 @@ export default function TaskManagerPage() {
           setRegistryError(true);
           setRegistryLoading(false);
         }
+      });
+
+    fetchTaskControlOverview()
+      .then((ov) => {
+        if (!cancelled) setTypeCounts(ov.type_counts ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setTypeCounts(null);
       });
 
     return () => {
@@ -113,6 +122,7 @@ export default function TaskManagerPage() {
             registry={registry}
             activeType={validActiveType}
             onSelect={handleTypeSelect}
+            typeCounts={typeCounts ?? undefined}
           />
 
           {validActiveType === "overview" ? (

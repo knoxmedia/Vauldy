@@ -6,11 +6,53 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"reflect"
+	"sort"
 	"strings"
+	"time"
 
 	"knox-media/internal/store"
 )
+
+// planGraphsEqual reports whether two plan graphs are semantically identical.
+// Edges are unordered: the persisted edge order (read back by step id) can
+// legitimately differ from the snapshot edge order (plan construction order)
+// without changing the meaning of the graph, so edges are compared as sets.
+func planGraphsEqual(a, b PlanGraph) bool {
+	if !reflect.DeepEqual(a.Nodes, b.Nodes) {
+		return false
+	}
+	return reflect.DeepEqual(sortedPlanEdges(a.Edges), sortedPlanEdges(b.Edges))
+}
+
+func sortedPlanEdges(edges []Dependency) []Dependency {
+	out := append([]Dependency(nil), edges...)
+	sort.Slice(out, func(i, j int) bool {
+		x, y := out[i], out[j]
+		if x.Step != y.Step {
+			return x.Step < y.Step
+		}
+		if x.Generation != y.Generation {
+			return x.Generation < y.Generation
+		}
+		if x.Kind != y.Kind {
+			return x.Kind < y.Kind
+		}
+		xd, yd := "", ""
+		if x.DependsOn != nil {
+			xd = string(*x.DependsOn)
+		}
+		if y.DependsOn != nil {
+			yd = string(*y.DependsOn)
+		}
+		if xd != yd {
+			return xd < yd
+		}
+		return x.DependsOnGeneration < y.DependsOnGeneration
+	})
+	return out
+}
 
 // ReconcileStartupPublicationV2 atomically replaces active policy-v1 generations,
 // validates current v2 plans, and aggregates their required outcomes.
@@ -83,31 +125,59 @@ func encryptionSelectionCompliantTx(ctx context.Context, q store.SQLExecutor, me
 	return samePath(selected, encPath) && wrapped != "" && iv != "", nil
 }
 func ValidateAggregateCurrentPolicy(ctx context.Context, db *sql.DB, adapters ...ExecutableAdapterRegistry) error {
+	totalStart := time.Now()
+	logStep := func(step string) {
+		log.Printf("publication v2 validate: %s in %s", step, time.Since(totalStart))
+	}
 	if err := validateCurrentPolicyAdmission(ctx, db, firstAdapterRegistry(adapters)); err != nil {
 		return err
 	}
+	logStep("admission validation done")
 	if err := validateLegacyV2PersistedGraphs(ctx, db); err != nil {
 		return err
 	}
+	logStep("legacy v2 graph validation done")
 	ids, err := currentPolicyRunIDs(ctx, db)
 	if err != nil {
 		return err
 	}
-	for _, id := range ids {
+	log.Printf("publication v2 validate: %d current-policy run(s)", len(ids))
+	preflightStart := time.Now()
+	for i, id := range ids {
 		if err = validateCurrentPolicyRunMode(ctx, db, id, true, firstAdapterRegistry(adapters)); err != nil {
 			return fmt.Errorf("publication current-policy startup preflight run %d: %w", id, err)
 		}
+		if (i+1)%10 == 0 || i == len(ids)-1 {
+			log.Printf("publication v2 validate: preflight %d/%d run(s) in %s", i+1, len(ids), time.Since(preflightStart))
+		}
 	}
+	logStep("run preflight done")
 	if _, err := RepairMissingQueueExecutions(ctx, db); err != nil {
 		return fmt.Errorf("publication current-policy startup repair missing queues: %w", err)
 	}
+	logStep("repair missing queue executions done")
+	if _, err := ReconcileCompletedPostIngestDomainWork(ctx, db); err != nil {
+		return fmt.Errorf("publication current-policy startup adopt completed domain work: %w", err)
+	}
+	logStep("adopt completed domain work done")
 	if _, err := RepairDesyncedQueueStepStatus(ctx, db); err != nil {
 		return fmt.Errorf("publication current-policy startup repair desynced queue/step status: %w", err)
 	}
+	logStep("repair desynced queue/step status done")
 	if _, err := ReconcileOrphanFailedQueueState(ctx, db); err != nil {
 		return fmt.Errorf("publication current-policy startup reconcile orphan failed queues: %w", err)
 	}
-	for _, id := range ids {
+	logStep("reconcile orphan failed queues done")
+	if _, err := ReconcileSupersededQueueTasks(ctx, db); err != nil {
+		return fmt.Errorf("publication current-policy startup reconcile superseded queues: %w", err)
+	}
+	logStep("reconcile superseded queues done")
+	if _, err := ReconcileVisibleMediaSteps(ctx, db); err != nil {
+		return fmt.Errorf("publication current-policy startup reconcile visible media steps: %w", err)
+	}
+	logStep("reconcile visible media steps done")
+	aggStart := time.Now()
+	for i, id := range ids {
 		_, err = store.WithImmediateConnTx(ctx, db, func(tx store.ImmediateConnTx) error {
 			if e := projectNodeTransitionTx(ctx, tx, id); e != nil {
 				return e
@@ -120,8 +190,125 @@ func ValidateAggregateCurrentPolicy(ctx context.Context, db *sql.DB, adapters ..
 		if err != nil {
 			return fmt.Errorf("publication current-policy startup validate run %d: %w", id, err)
 		}
+		if (i+1)%10 == 0 || i == len(ids)-1 {
+			log.Printf("publication v2 validate: aggregate %d/%d run(s) in %s", i+1, len(ids), time.Since(aggStart))
+		}
 	}
+	logStep("run aggregation done")
+	log.Printf("publication v2 validate: total in %s", time.Since(totalStart))
 	return nil
+}
+
+// ReconcileVisibleMediaSteps completes stale media_visible barriers when the
+// current media and its current policy run already record durable visibility.
+func ReconcileVisibleMediaSteps(ctx context.Context, db *sql.DB) (int, error) {
+	if db == nil {
+		return 0, errors.New("publication visible media step reconcile: database is required")
+	}
+	reconciled := 0
+	_, err := store.WithImmediateConnTx(ctx, db, func(tx store.ImmediateConnTx) error {
+		res, execErr := tx.ExecContext(ctx, `
+UPDATE media_ingest_step SET
+  status='done',
+  finished_at=COALESCE(finished_at,CURRENT_TIMESTAMP),
+  updated_at=CURRENT_TIMESTAMP
+WHERE status='waiting' AND step_type='media_visible' AND id IN (
+  SELECT s.id FROM media_ingest_step s
+  JOIN media_ingest_run r ON r.id=s.run_id AND r.media_id=s.media_id AND r.generation=s.generation
+  JOIN media m ON m.id=r.media_id AND m.ingest_generation=r.generation
+  WHERE r.policy_version IN (2,3)
+    AND r.superseded_at IS NULL
+    AND r.status IN ('processing','published','degraded')
+    AND m.published_at IS NOT NULL
+    AND m.publication_state IN ('published','degraded')
+)`)
+		if execErr != nil {
+			return execErr
+		}
+		n, rowsErr := res.RowsAffected()
+		if rowsErr != nil {
+			return rowsErr
+		}
+		reconciled = int(n)
+		return nil
+	})
+	return reconciled, err
+}
+
+// ReconcileCompletedPostIngestDomainWork adopts strong preview/subtitle domain
+// completion for exact waiting executions in the current non-superseded generation.
+func ReconcileCompletedPostIngestDomainWork(ctx context.Context, db *sql.DB) (int, error) {
+	if db == nil {
+		return 0, errors.New("publication completed domain reconcile: database is required")
+	}
+	changed := 0
+	_, err := store.WithImmediateConnTx(ctx, db, func(tx store.ImmediateConnTx) error {
+		res, e := tx.ExecContext(ctx, `
+UPDATE post_ingest_task AS q SET
+  status='done',last_error='',lease_owner=NULL,lease_until=NULL,
+  finished_at=COALESCE(finished_at,CURRENT_TIMESTAMP),updated_at=CURRENT_TIMESTAMP
+WHERE q.status='waiting' AND q.task_type IN ('preview','subtitle')
+AND EXISTS (
+  SELECT 1 FROM media_ingest_step s
+  JOIN media_ingest_run r ON r.id=s.run_id
+  JOIN media m ON m.id=r.media_id AND m.ingest_generation=r.generation
+  WHERE s.id=q.ingest_step_id AND s.run_id=q.ingest_run_id
+    AND s.media_id=q.media_id AND s.generation=q.generation
+    AND r.media_id=q.media_id AND r.generation=q.generation
+    AND r.policy_version IN (2,3) AND r.superseded_at IS NULL
+    AND s.status='waiting'
+    AND ((q.task_type='preview' AND s.step_type='preview')
+      OR (q.task_type='subtitle' AND s.step_type IN ('subtitle','subtitle_extract')))
+)
+AND (
+  (q.task_type='preview' AND EXISTS (
+    SELECT 1 FROM preview_task d WHERE d.media_id=q.media_id
+      AND d.status IN ('ready','done')
+      AND (TRIM(COALESCE(d.sprite_path,''))<>'' OR TRIM(COALESCE(d.vtt_path,''))<>'')
+  ))
+  OR (q.task_type='subtitle' AND (
+    EXISTS (SELECT 1 FROM subtitle_task d WHERE d.media_id=q.media_id AND d.status='done')
+    OR EXISTS (SELECT 1 FROM media_subtitle d WHERE d.media_id=q.media_id
+      AND d.status='ready' AND TRIM(COALESCE(d.vtt_path,''))<>'')
+  ))
+)`)
+		if e != nil {
+			return e
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			changed = int(n)
+		}
+		_, e = tx.ExecContext(ctx, `
+UPDATE media_ingest_step AS s SET
+  status='done',last_error='',lease_owner=NULL,lease_until=NULL,
+  finished_at=COALESCE(finished_at,CURRENT_TIMESTAMP),updated_at=CURRENT_TIMESTAMP
+WHERE s.status='waiting' AND EXISTS (
+  SELECT 1 FROM post_ingest_task q
+  JOIN media_ingest_run r ON r.id=q.ingest_run_id
+  JOIN media m ON m.id=r.media_id AND m.ingest_generation=r.generation
+  WHERE q.ingest_step_id=s.id AND q.ingest_run_id=s.run_id
+    AND q.media_id=s.media_id AND q.generation=s.generation
+    AND r.id=s.run_id AND r.media_id=s.media_id AND r.generation=s.generation
+    AND r.policy_version IN (2,3) AND r.superseded_at IS NULL
+    AND q.status='done' AND q.task_type=CASE s.step_type
+      WHEN 'subtitle_extract' THEN 'subtitle' ELSE s.step_type END
+    AND q.task_type IN ('preview','subtitle')
+    AND (
+      (q.task_type='preview' AND EXISTS (
+        SELECT 1 FROM preview_task d WHERE d.media_id=q.media_id
+          AND d.status IN ('ready','done')
+          AND (TRIM(COALESCE(d.sprite_path,''))<>'' OR TRIM(COALESCE(d.vtt_path,''))<>'')
+      ))
+      OR (q.task_type='subtitle' AND (
+        EXISTS (SELECT 1 FROM subtitle_task d WHERE d.media_id=q.media_id AND d.status='done')
+        OR EXISTS (SELECT 1 FROM media_subtitle d WHERE d.media_id=q.media_id
+          AND d.status='ready' AND TRIM(COALESCE(d.vtt_path,''))<>'')
+      ))
+    )
+)`)
+		return e
+	})
+	return changed, err
 }
 
 // RepairDesyncedQueueStepStatus copies linked queue execution status onto the
@@ -484,6 +671,48 @@ WHERE status IN ('waiting','failed') AND ingest_step_id IN (
 	return changed, nil
 }
 
+// ReconcileSupersededQueueTasks cancels post-ingest queue executions that still
+// reference a superseded plan run. Such tasks belong to an obsolete generation
+// and can never be claimed (claim eligibility requires a non-superseded run),
+// so leaving them waiting only accumulates phantom pending tasks.
+func ReconcileSupersededQueueTasks(ctx context.Context, db *sql.DB) (int, error) {
+	if db == nil {
+		return 0, errors.New("publication superseded queue reconcile: database is required")
+	}
+	changed := 0
+	const reason = "cancelled: superseded plan generation"
+	_, err := store.WithImmediateConnTx(ctx, db, func(tx store.ImmediateConnTx) error {
+		res, execErr := tx.ExecContext(ctx, `UPDATE post_ingest_task SET
+status='cancelled',lease_owner=NULL,lease_until=NULL,
+last_error=CASE WHEN TRIM(COALESCE(last_error,''))='' THEN ? ELSE last_error END,
+finished_at=COALESCE(finished_at,CURRENT_TIMESTAMP),updated_at=CURRENT_TIMESTAMP
+WHERE status IN ('waiting','running') AND removed_at IS NULL AND ingest_run_id IN (
+  SELECT r.id FROM media_ingest_run r
+  WHERE (r.superseded_at IS NOT NULL OR r.superseded_by_generation IS NOT NULL)
+)`, reason)
+		if execErr != nil {
+			return execErr
+		}
+		n, _ := res.RowsAffected()
+		changed += int(n)
+		stepRes, execErr := tx.ExecContext(ctx, `UPDATE media_ingest_step SET
+status='cancelled',lease_owner=NULL,lease_until=NULL,
+last_error=CASE WHEN TRIM(COALESCE(last_error,''))='' THEN ? ELSE last_error END,
+finished_at=COALESCE(finished_at,CURRENT_TIMESTAMP),updated_at=CURRENT_TIMESTAMP
+WHERE status IN ('waiting','running') AND run_id IN (
+  SELECT r.id FROM media_ingest_run r
+  WHERE (r.superseded_at IS NOT NULL OR r.superseded_by_generation IS NOT NULL)
+)`, reason)
+		if execErr != nil {
+			return execErr
+		}
+		n2, _ := stepRes.RowsAffected()
+		changed += int(n2)
+		return nil
+	})
+	return changed, err
+}
+
 type stepValidationRow struct {
 	id       int64
 	typ      string
@@ -543,50 +772,52 @@ func validateCurrentPolicyRun(ctx context.Context, q store.SQLExecutor, runID in
 	return validateCurrentPolicyRunMode(ctx, q, runID, false, adapters...)
 }
 func repairMediaVisibleSnapshotDeps(ctx context.Context, q store.SQLExecutor, runID int64, snapshot *ConfigSnapshot, depCount int) (int, error) {
-	// Identify media_visible dependencies in the snapshot that cannot be resolved
-	// because no media_visible step exists in the run. Strip them.
-	var hasVisibleStep int
-	if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM media_ingest_step WHERE run_id=? AND step_type='media_visible'`, runID).Scan(&hasVisibleStep); err != nil {
+	// Rebuild the snapshot dependency list from the canonical table instead of
+	// reasoning about legacy media_visible/step_done kinds. Historical snapshots
+	// reference dependencies that the migration cleaned from the table, and
+	// their kind values (media_visible, step_done) no longer match the
+	// dependency_kind CHECK constraint (success, terminal) used on disk, so any
+	// leftover edge would fail the per-edge validation below. Reconstructing
+	// from the table makes the snapshot exactly match the persisted edges.
+	rows, err := q.QueryContext(ctx, `SELECT s.step_type,d.dependency_kind,p.step_type,s.generation,p.generation FROM media_ingest_step_dependency d JOIN media_ingest_step s ON s.id=d.step_id LEFT JOIN media_ingest_step p ON p.id=d.depends_on_step_id WHERE s.run_id=? ORDER BY s.id,p.id,d.dependency_kind`, runID)
+	if err != nil {
 		return 0, err
 	}
-	repaired := 0
-	var kept []Dependency
-	for _, dep := range snapshot.Dependencies {
-		if dep.Kind == "media_visible" {
-			// media_visible deps with DependsOn set were already canonicalized.
-			// Dependencies without DependsOn (legacy NULL depends_on_step_id)
-			// are only valid if the run actually has a media_visible step.
-			if dep.DependsOn == nil && hasVisibleStep == 0 {
-				repaired++
-				continue
-			}
-			// If DependsOn is set, verify the referenced step exists.
-			if dep.DependsOn != nil {
-				var actual any
-				if err := q.QueryRowContext(ctx, `SELECT NULL FROM media_ingest_step WHERE run_id=? AND step_type=?`, runID, string(*dep.DependsOn)).Scan(&actual); err != nil {
-					// Referenced step doesn't exist; strip this dep.
-					repaired++
-					continue
-				}
-			}
+	var rebuilt []Dependency
+	for rows.Next() {
+		var dep Dependency
+		var target StepType
+		var hasTarget bool
+		var targetGeneration sql.NullInt64
+		if err = rows.Scan(&dep.Step, &dep.Kind, &target, &dep.Generation, &targetGeneration); err != nil {
+			rows.Close()
+			return 0, err
 		}
-		kept = append(kept, dep)
+		hasTarget = target != ""
+		if hasTarget {
+			dep.DependsOn = &target
+			dep.DependsOnGeneration = targetGeneration.Int64
+		}
+		rebuilt = append(rebuilt, dep)
 	}
-	if repaired == 0 {
+	if err = rows.Close(); err != nil {
+		return 0, err
+	}
+	if len(rebuilt) != depCount {
+		return 0, fmt.Errorf("cannot reconcile snapshot deps: expected %d after repair, got %d", depCount, len(rebuilt))
+	}
+	if reflect.DeepEqual(rebuilt, snapshot.Dependencies) {
 		return 0, nil
 	}
-	if len(kept) != depCount {
-		return repaired, fmt.Errorf("cannot reconcile snapshot deps: expected %d after repair, got %d", depCount, len(kept))
-	}
-	snapshot.Dependencies = kept
+	snapshot.Dependencies = rebuilt
 	raw, err := json.Marshal(snapshot)
 	if err != nil {
-		return repaired, fmt.Errorf("marshal repaired snapshot: %w", err)
+		return 0, fmt.Errorf("marshal repaired snapshot: %w", err)
 	}
 	if _, err = q.ExecContext(ctx, `UPDATE media_ingest_run SET config_snapshot_json=? WHERE id=? AND policy_version IN (2,3)`, string(raw), runID); err != nil {
-		return repaired, fmt.Errorf("persist repaired snapshot: %w", err)
+		return 0, fmt.Errorf("persist repaired snapshot: %w", err)
 	}
-	return repaired, nil
+	return 1, nil
 }
 func validateCurrentPolicyRunMode(ctx context.Context, q store.SQLExecutor, runID int64, allowRepairable bool, adapters ...ExecutableAdapterRegistry) error {
 	var raw string
@@ -663,7 +894,7 @@ func validateCurrentPolicyRunMode(ctx context.Context, q store.SQLExecutor, runI
 		if loadErr != nil {
 			return loadErr
 		}
-		if !reflect.DeepEqual(persisted, snapshot.Graph) {
+		if !planGraphsEqual(persisted, snapshot.Graph) {
 			return errors.New("persisted policy v3 graph differs from snapshot")
 		}
 		if err := ValidatePlanGraph(persisted); err != nil {
@@ -675,10 +906,11 @@ func validateCurrentPolicyRunMode(ctx context.Context, q store.SQLExecutor, runI
 		return err
 	}
 	if depCount != len(snapshot.Dependencies) {
-		// The migration may have cleaned orphaned media_visible dependencies
-		// from the table but the snapshot still references them. Strip any
-		// media_visible deps that point to non-existent media_visible steps.
-		if depCount < len(snapshot.Dependencies) && allowRepairable {
+		// The migration may have cleaned orphaned dependencies from the table
+		// while legacy snapshots (media_visible/step_done kinds) still reference
+		// them. Rebuild the snapshot dependency list from the canonical table so
+		// both stay in sync.
+		if allowRepairable {
 			if repaired, repairErr := repairMediaVisibleSnapshotDeps(ctx, q, runID, &snapshot, depCount); repairErr != nil {
 				return repairErr
 			} else if repaired > 0 {
@@ -799,7 +1031,7 @@ func validateCurrentPolicyAdmission(ctx context.Context, q store.SQLExecutor, ad
 		if loadErr != nil {
 			return loadErr
 		}
-		if !reflect.DeepEqual(persisted, item.snapshot.Graph) {
+		if !planGraphsEqual(persisted, item.snapshot.Graph) {
 			return fmt.Errorf("publication current-policy startup validate run %d: persisted policy v3 graph differs from snapshot", item.id)
 		}
 	}

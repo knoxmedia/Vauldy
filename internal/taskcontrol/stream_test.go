@@ -42,9 +42,29 @@ func setupStreamTestDB(t *testing.T) (*sql.DB, *ProjectionBuilder) {
 			library_id INTEGER,
 			run_now_expires TIMESTAMP,
 			finished_at TIMESTAMP,
-			started_at TIMESTAMP,
-			abort_requested_at TIMESTAMP,
-			abort_timeout_recovery_required INTEGER NOT NULL DEFAULT 0
+			started_at TIMESTAMP
+		)		`,
+		`CREATE TABLE media (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			library_id INTEGER,
+			file_id TEXT UNIQUE,
+			title TEXT,
+			original_title TEXT,
+			file_path TEXT,
+			file_type TEXT,
+			status TEXT DEFAULT 'active',
+			publication_state TEXT NOT NULL DEFAULT 'published'
+		)`,
+		`CREATE TABLE task_abort_intent (
+			task_identity TEXT PRIMARY KEY,
+			requested_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			requested_by TEXT NOT NULL DEFAULT '',
+			reason TEXT NOT NULL DEFAULT '',
+			owner_fence TEXT NOT NULL DEFAULT '',
+			deadline TIMESTAMP,
+			acknowledged_at TIMESTAMP,
+			outcome TEXT NOT NULL DEFAULT '',
+			recovery_required_at TIMESTAMP
 		)`,
 		`CREATE TABLE task_projection_sequence (
 			singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
@@ -85,7 +105,7 @@ func seedStreamTasks(t *testing.T, db *sql.DB) []int64 {
 	var ids []int64
 	for i, typ := range types {
 		id := insertOracleTask(t, db, typ, "waiting", map[string]any{
-			"media_id":     int64(100 + i),
+			"media_id":      int64(100 + i),
 			"base_priority": int64((i + 1) * 10),
 		})
 		ids = append(ids, id)

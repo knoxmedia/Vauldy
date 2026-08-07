@@ -32,9 +32,11 @@ type ControlState struct {
 
 // FairnessCursor is a per-type fairness tracking record.
 type FairnessCursor struct {
-	TaskType  string
-	Cursor    time.Time
-	UpdatedAt time.Time
+	TaskType      string
+	LastLibraryID *int64
+	Initialized   bool
+	Revision      int64
+	UpdatedAt     time.Time
 }
 
 // Reservation is a lease-bound resource reservation.
@@ -285,28 +287,35 @@ func (s *Store) GetControlState(ctx context.Context, taskType string) (*ControlS
 	return &cs, nil
 }
 
-// AdvanceFairnessCursor sets or advances the fairness cursor for a task type
-// to the current time (with sub-second precision via Go's time.Now).
-func (s *Store) AdvanceFairnessCursor(ctx context.Context, taskType string) error {
-	now := time.Now()
+// AdvanceFairnessCursor records the last-served library bucket for a task type.
+// A nil library ID is the initialized synthetic null-library bucket.
+func (s *Store) AdvanceFairnessCursor(ctx context.Context, taskType string, libraryID *int64) error {
+	var library any
+	if libraryID != nil {
+		library = *libraryID
+	}
 	if _, err := s.db.ExecContext(ctx,
-		`INSERT INTO scheduler_fairness(task_type,cursor,updated_at) VALUES(?,?,?)
-		 ON CONFLICT(task_type) DO UPDATE SET cursor=?, updated_at=?`, taskType, now, now, now, now); err != nil {
+		`INSERT INTO scheduler_fairness(task_type,last_library_id,initialized,revision,updated_at) VALUES(?,?,1,1,CURRENT_TIMESTAMP)
+		 ON CONFLICT(task_type) DO UPDATE SET last_library_id=excluded.last_library_id,initialized=1,revision=scheduler_fairness.revision+1,updated_at=CURRENT_TIMESTAMP`, taskType, library); err != nil {
 		return fmt.Errorf("advance fairness cursor: %w", err)
 	}
 	return nil
 }
 
-// GetFairnessCursor returns the fairness cursor for a task type.
+// GetFairnessCursor returns the durable cursor for a task type.
 func (s *Store) GetFairnessCursor(ctx context.Context, taskType string) (*FairnessCursor, error) {
 	var fc FairnessCursor
+	var library sql.NullInt64
 	if err := s.db.QueryRowContext(ctx,
-		`SELECT task_type,cursor,updated_at FROM scheduler_fairness WHERE task_type=?`, taskType).Scan(
-		&fc.TaskType, &fc.Cursor, &fc.UpdatedAt); err != nil {
+		`SELECT task_type,last_library_id,initialized,revision,updated_at FROM scheduler_fairness WHERE task_type=?`, taskType).Scan(
+		&fc.TaskType, &library, &fc.Initialized, &fc.Revision, &fc.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, err
 		}
 		return nil, fmt.Errorf("get fairness cursor: %w", err)
+	}
+	if library.Valid {
+		fc.LastLibraryID = &library.Int64
 	}
 	return &fc, nil
 }

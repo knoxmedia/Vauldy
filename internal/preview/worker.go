@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"knox-media/internal/keystore"
+	"knox-media/internal/progressctx"
 	"knox-media/internal/storage"
 	"math"
 	"os"
@@ -30,26 +31,33 @@ type Info struct {
 
 type FFmpegRunner func(context.Context, *sql.DB, *keystore.Vault, string, int64, string, float64, float64, []string, []string, string) ([]byte, error)
 
+// FFmpegLiveRunner is FFmpegRunner with a liveness callback invoked whenever the
+// process emits output. The dispatcher uses the reported liveness to keep
+// long-running capture tasks alive while ffmpeg advances and to force-cancel
+// them when output stops.
+type FFmpegLiveRunner func(context.Context, *sql.DB, *keystore.Vault, string, int64, string, float64, float64, []string, []string, string, func()) ([]byte, error)
+
 type Worker struct {
-	DB         *sql.DB
-	Vault      *keystore.Vault
-	Derived    *storage.DerivedAssetStore
-	FFmpegPath string
-	PreviewDir string
-	mu         sync.Mutex
-	running    map[int64]bool
-	runFFmpeg  FFmpegRunner
+	DB            *sql.DB
+	Vault         *keystore.Vault
+	Derived       *storage.DerivedAssetStore
+	FFmpegPath    string
+	PreviewDir    string
+	mu            sync.Mutex
+	running       map[int64]bool
+	runFFmpeg     FFmpegRunner
+	runFFmpegLive FFmpegLiveRunner
 }
 
 func NewWorker(db *sql.DB, vault *keystore.Vault, derived *storage.DerivedAssetStore, ffmpegPath, previewDir string) *Worker {
 	return &Worker{
-		DB:         db,
-		Vault:      vault,
-		Derived:    derived,
-		PreviewDir: previewDir,
-		FFmpegPath: ffmpegPath,
-		running:    map[int64]bool{},
-		runFFmpeg:  storage.RunFFmpeg,
+		DB:            db,
+		Vault:         vault,
+		Derived:       derived,
+		PreviewDir:    previewDir,
+		FFmpegPath:    ffmpegPath,
+		running:       map[int64]bool{},
+		runFFmpegLive: storage.RunFFmpegWithLiveness,
 	}
 }
 
@@ -279,11 +287,7 @@ func (w *Worker) run(ctx context.Context, mediaID int64, inputPath string, durat
 	defer os.Remove(spriteStage)
 	defer os.Remove(vttStage)
 	filter := fmt.Sprintf("fps=1/%d,scale=240:135,tile=10x10", intervalSec)
-	runner := w.runFFmpeg
-	if runner == nil {
-		runner = storage.RunFFmpeg
-	}
-	out, err := runner(ctx, w.DB, w.Vault, w.FFmpegPath, mediaID, inputPath, 0, float64(durationSec), nil, []string{"-vf", filter, "-frames:v", "1", "-q:v", "3", spriteStage}, "")
+	out, err := w.runFFmpegOnce(ctx, mediaID, inputPath, durationSec, filter, spriteStage)
 	if err != nil {
 		return w.handleRunError(ctx, mediaID, errors.Join(err, errorFromOutput(out)))
 	}
@@ -428,6 +432,21 @@ func errorFromOutput(out []byte) error {
 		return nil
 	}
 	return errors.New(trimErr(string(out), nil))
+}
+
+// runFFmpegOnce runs the capture ffmpeg for a preview task, preferring the
+// liveness runner so a long capture keeps the task alive while ffmpeg emits
+// output and is force-cancelled when output stalls. A test-injected runFFmpeg
+// (mock) is honored unchanged.
+func (w *Worker) runFFmpegOnce(ctx context.Context, mediaID int64, inputPath string, durationSec int64, filter, spriteStage string) ([]byte, error) {
+	if w.runFFmpeg != nil {
+		return w.runFFmpeg(ctx, w.DB, w.Vault, w.FFmpegPath, mediaID, inputPath, 0, float64(durationSec), nil, []string{"-vf", filter, "-frames:v", "1", "-q:v", "3", spriteStage}, "")
+	}
+	live := w.runFFmpegLive
+	if live == nil {
+		live = storage.RunFFmpegWithLiveness
+	}
+	return live(ctx, w.DB, w.Vault, w.FFmpegPath, mediaID, inputPath, 0, float64(durationSec), nil, []string{"-vf", filter, "-frames:v", "1", "-q:v", "3", spriteStage}, "", func() { progressctx.Report(ctx) })
 }
 func (w *Worker) handleRunError(ctx context.Context, mediaID int64, err error) error {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {

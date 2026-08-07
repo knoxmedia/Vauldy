@@ -121,9 +121,11 @@ func TestSchedulerStoreControlSchema(t *testing.T) {
 func TestSchedulerStoreFairnessSchema(t *testing.T) {
 	db := openSchedulerSchemaDB(t)
 	want := map[string]string{
-		"task_type":  "TEXT",
-		"cursor":     "TIMESTAMP",
-		"updated_at": "TIMESTAMP",
+		"task_type":       "TEXT",
+		"last_library_id": "INTEGER",
+		"initialized":     "INTEGER",
+		"revision":        "INTEGER",
+		"updated_at":      "TIMESTAMP",
 	}
 	requireTableColumns(t, db, "scheduler_fairness", want)
 }
@@ -381,28 +383,26 @@ func TestSchedulerStoreFairnessCursorAdvance(t *testing.T) {
 	db := openSchedulerSchemaDB(t)
 	store := NewStore(db)
 	ctx := context.Background()
-
-	if err := store.AdvanceFairnessCursor(ctx, "ingest"); err != nil {
+	library := int64(7)
+	if err := store.AdvanceFairnessCursor(ctx, "ingest", &library); err != nil {
 		t.Fatal(err)
 	}
 	c1, err := store.GetFairnessCursor(ctx, "ingest")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c1.Cursor.IsZero() {
-		t.Fatal("cursor is zero after advance")
+	if !c1.Initialized || c1.LastLibraryID == nil || *c1.LastLibraryID != 7 || c1.Revision != 1 {
+		t.Fatalf("cursor=%+v", c1)
 	}
-
-	time.Sleep(10 * time.Millisecond)
-	if err := store.AdvanceFairnessCursor(ctx, "ingest"); err != nil {
+	if err := store.AdvanceFairnessCursor(ctx, "ingest", nil); err != nil {
 		t.Fatal(err)
 	}
 	c2, err := store.GetFairnessCursor(ctx, "ingest")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !c2.Cursor.After(c1.Cursor) {
-		t.Fatal("cursor did not advance")
+	if !c2.Initialized || c2.LastLibraryID != nil || c2.Revision != 2 {
+		t.Fatalf("null cursor=%+v", c2)
 	}
 }
 
@@ -410,19 +410,17 @@ func TestSchedulerStoreFairnessCursorPerType(t *testing.T) {
 	db := openSchedulerSchemaDB(t)
 	store := NewStore(db)
 	ctx := context.Background()
-
-	if err := store.AdvanceFairnessCursor(ctx, "ingest"); err != nil {
+	a, b := int64(1), int64(2)
+	if err := store.AdvanceFairnessCursor(ctx, "ingest", &a); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.AdvanceFairnessCursor(ctx, "scrape"); err != nil {
+	if err := store.AdvanceFairnessCursor(ctx, "scrape", &b); err != nil {
 		t.Fatal(err)
 	}
-
 	c1, _ := store.GetFairnessCursor(ctx, "ingest")
 	c2, _ := store.GetFairnessCursor(ctx, "scrape")
-
-	if c1.TaskType != "ingest" || c2.TaskType != "scrape" {
-		t.Fatalf("per-type isolation: %s %s", c1.TaskType, c2.TaskType)
+	if *c1.LastLibraryID != 1 || *c2.LastLibraryID != 2 {
+		t.Fatalf("per-type cursors: %+v %+v", c1, c2)
 	}
 }
 

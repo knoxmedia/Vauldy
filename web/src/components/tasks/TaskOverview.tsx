@@ -82,6 +82,21 @@ export function TaskOverview({ onDrillDownType, onSelectTask }: TaskOverviewProp
       render: (v: string) => <Tag style={{ margin: 0 }}>{v}</Tag>,
     },
     {
+      title: t("tasks.control.col_media"),
+      key: "media",
+      width: 220,
+      ellipsis: true,
+      render: (_: unknown, r: ProjectionRow) =>
+        r.media_id ? (
+          <span style={{ fontSize: 12 }}>
+            <span style={{ color: "#888", fontFamily: "monospace" }}>#{r.media_id}</span>
+            {r.media_title && <span style={{ marginLeft: 6, color: "#d9d9d9" }}>{r.media_title}</span>}
+          </span>
+        ) : (
+          <span style={{ color: "#555" }}>-</span>
+        ),
+    },
+    {
       title: t("tasks.control.col_status"),
       dataIndex: "normalized_status",
       key: "status",
@@ -156,15 +171,13 @@ export function TaskOverview({ onDrillDownType, onSelectTask }: TaskOverviewProp
       >
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           {Object.entries(data.type_counts)
+            .filter(([, count]) => count > 0)
             .sort(([, a], [, b]) => b - a)
             .map(([type, count]) => (
               <Button
                 key={type}
                 size="small"
-                type={count > 0 ? "default" : "text"}
-                disabled={count === 0}
                 onClick={() => onDrillDownType?.(type)}
-                style={{ color: count > 0 ? undefined : "#555" }}
               >
                 {type}
                 <span style={{ marginLeft: 6, fontWeight: 600, color: "#1677ff" }}>{count}</span>

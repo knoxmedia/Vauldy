@@ -86,6 +86,53 @@ INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation
 	}
 }
 
+func TestPostIngestEligibleTaskTypesPreservesRequestOrder(t *testing.T) {
+	db := openEligibilityDB(t)
+	_, err := db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l');
+INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state) VALUES(10,1,'f','video',0,'processing');
+INSERT INTO post_ingest_task(id,media_id,generation,task_type,status) VALUES(40,10,0,'subtitle','waiting'),(41,10,0,'poster','waiting')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	types, err := PostIngestEligibleTaskTypes(context.Background(), db, ClaimRequest{Family: QueuePostIngest, TaskTypes: []string{"preview", "subtitle", "poster"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(types, ","), "subtitle,poster"; got != want {
+		t.Fatalf("eligible types=%q want %q", got, want)
+	}
+}
+
+func TestPostIngestEligibleTaskTypesUsesCanonicalLinkedEligibility(t *testing.T) {
+	db := openEligibilityDB(t)
+	_, err := db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l');
+INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state) VALUES(10,1,'f','video',1,'processing');
+INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(20,10,1,'scan','processing','{}',2);
+INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(30,20,10,1,'poster',1,'waiting'),(31,20,10,1,'encrypt',1,'waiting');
+INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(31,30,'success');
+INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(40,10,20,31,1,'encrypt','waiting')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := ClaimRequest{Family: QueuePostIngest, TaskTypes: []string{"encrypt"}}
+	types, err := PostIngestEligibleTaskTypes(context.Background(), db, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(types) != 0 {
+		t.Fatalf("blocked required linked type hinted eligible: %v", types)
+	}
+	if _, err := db.Exec(`UPDATE media_ingest_step SET status='done' WHERE id=30`); err != nil {
+		t.Fatal(err)
+	}
+	types, err = PostIngestEligibleTaskTypes(context.Background(), db, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(types) != 1 || types[0] != "encrypt" {
+		t.Fatalf("eligible required linked type missing: %v", types)
+	}
+}
 func TestPostingestClaimReturnsPublicationIdentity(t *testing.T) {
 	db := openEligibilityDB(t)
 	_, err := db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l'); INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state) VALUES(10,1,'f','video',1,'processing'); INSERT INTO media_ingest_run(id,media_id,generation,scan_task_id,reason,status,config_snapshot_json,policy_version) VALUES(20,10,1,NULL,'scan','processing','{}',2); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(30,20,10,1,'poster',1,'waiting'); INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(40,10,20,30,1,'poster','waiting')`)
@@ -184,7 +231,8 @@ func TestPrepareClaimsParentOnceBeforeRenditions(t *testing.T) {
 
 func TestClaimEligibleCommunitySkipsAbsentUnavailablePrepareTable(t *testing.T) {
 	db := openEligibilityDB(t)
-	if _, err := db.Exec(`DROP TABLE pretranscode_rendition_job; DROP TABLE pretranscode_task_meta; DROP TABLE transcode_task`); err != nil {
+	dropEnterprisePrepareTablesIfPresent(t, db)
+	if _, err := db.Exec(`DROP TABLE transcode_task`); err != nil {
 		t.Fatal(err)
 	}
 	registry := NewCapabilityMatrix([]string{"poster", "scrape"})
@@ -195,7 +243,8 @@ func TestClaimEligibleCommunitySkipsAbsentUnavailablePrepareTable(t *testing.T) 
 
 func TestClaimEligibleAdvertisedCapabilityMissingTableFailsClosed(t *testing.T) {
 	db := openEligibilityDB(t)
-	if _, err := db.Exec(`DROP TABLE pretranscode_rendition_job; DROP TABLE pretranscode_task_meta; DROP TABLE transcode_task`); err != nil {
+	dropEnterprisePrepareTablesIfPresent(t, db)
+	if _, err := db.Exec(`DROP TABLE transcode_task`); err != nil {
 		t.Fatal(err)
 	}
 	_, err := ClaimEligible(context.Background(), db, ClaimRequest{Family: QueuePrepare, TaskType: "prepare", Owner: "enterprise", Registry: NewCapabilityMatrix([]string{"prepare"})})
@@ -420,7 +469,11 @@ func TestCommunityAbsentPrepareTableRequiredAvailabilityMatrix(t *testing.T) {
 	for _, advertised := range []bool{false, true} {
 		t.Run(fmt.Sprintf("advertised=%v", advertised), func(t *testing.T) {
 			db := openEligibilityDB(t)
-			_, err := db.Exec(`DROP TABLE pretranscode_rendition_job; DROP TABLE pretranscode_task_meta; DROP TABLE transcode_task; INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l'); INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state) VALUES(10,1,'f','video',1,'processing'); INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(20,10,1,'scan','processing','{}',2); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(30,20,10,1,'poster',1,'waiting'); INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(40,10,20,30,1,'poster','waiting')`)
+			dropEnterprisePrepareTablesIfPresent(t, db)
+			if _, err := db.Exec(`DROP TABLE transcode_task`); err != nil {
+				t.Fatal(err)
+			}
+			_, err := db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l'); INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state) VALUES(10,1,'f','video',1,'processing'); INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(20,10,1,'scan','processing','{}',2); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(30,20,10,1,'poster',1,'waiting'); INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(40,10,20,30,1,'poster','waiting')`)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -518,8 +571,8 @@ func TestAgingEffectivePriorityClaimOrder(t *testing.T) {
 		INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status,
 			available_at,created_at,priority)
 			VALUES
-			 (40,10,20,30,1,'encrypt','waiting',`+now+`,`+now+`,50),
-			 (41,11,21,31,1,'encrypt','waiting',`+old+`,`+old+`,0);
+			 (40,10,20,30,1,'encrypt','waiting',` + now + `,` + now + `,50),
+			 (41,11,21,31,1,'encrypt','waiting',` + old + `,` + old + `,0);
 	`)
 	if err != nil {
 		t.Fatalf("seed: %v", err)
@@ -560,8 +613,8 @@ func TestEffectivePriorityNoAgingCap(t *testing.T) {
 		INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status,
 			available_at,created_at,priority,source_class,base_priority)
 			VALUES
-			 (40,10,20,30,1,'encrypt','waiting',`+now+`,`+now+`,0,400,400),
-			 (41,11,21,31,1,'encrypt','waiting',`+veryOld+`,`+veryOld+`,0,100,100);
+			 (40,10,20,30,1,'encrypt','waiting',` + now + `,` + now + `,0,400,400),
+			 (41,11,21,31,1,'encrypt','waiting',` + veryOld + `,` + veryOld + `,0,100,100);
 	`)
 	if err != nil {
 		t.Fatal(err)
@@ -788,5 +841,33 @@ func TestClaimWithAdmissionNoPolicyFallsThrough(t *testing.T) {
 	}
 	if result != nil {
 		t.Fatalf("expected nil AdmissionResult without policy, got %+v", result)
+	}
+}
+
+func TestScrapeLegacyGenerationZeroEligibleAndLinkedProtected(t *testing.T) {
+	db := openEligibilityDB(t)
+	if _, err := db.Exec(`INSERT INTO library(name,type,path) VALUES('l','video','/l');
+INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state) VALUES(10,1,'f','video',1,'processing');
+INSERT INTO scrape_task(id,media_id,status,generation) VALUES(40,10,'waiting',0),(41,10,'waiting',1)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		id   int64
+		want bool
+	}{{40, true}, {41, false}} {
+		var got bool
+		if err := db.QueryRow(`SELECT `+LinkedClaimEligibilitySQL("q")+` FROM scrape_task q WHERE q.id=?`, tc.id).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != tc.want {
+			t.Errorf("task %d eligible=%v want=%v", tc.id, got, tc.want)
+		}
+	}
+	claim, err := ClaimEligible(context.Background(), db, ClaimRequest{Family: QueueScrape, TaskType: "scrape", Owner: "legacy", QueueID: func() *int64 { v := int64(40); return &v }(), Registry: NewCapabilityMatrix([]string{"scrape"})})
+	if err != nil || claim == nil {
+		t.Fatalf("claim=%+v err=%v", claim, err)
+	}
+	if claim.RunID.Valid || claim.StepID.Valid || !claim.Generation.Valid || claim.Generation.Int64 != 0 {
+		t.Fatalf("legacy claim identity=%+v", claim)
 	}
 }

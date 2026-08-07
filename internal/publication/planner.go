@@ -34,14 +34,14 @@ type currentPolicy struct {
 
 type currentPlan struct {
 	mediaID, scanTaskID, ingestItemID int64
-	policy                           currentPolicy
-	reason                           PlanReason
-	preserve                         bool
-	metadata                         MetadataAttempt
-	required, optional, steps        []StepType
-	dependencies                     []Dependency
-	graph                            PlanGraph
-	snapshotJSON                     []byte
+	policy                            currentPolicy
+	reason                            PlanReason
+	preserve                          bool
+	metadata                          MetadataAttempt
+	required, optional, steps         []StepType
+	dependencies                      []Dependency
+	graph                             PlanGraph
+	snapshotJSON                      []byte
 }
 
 func (p *Planner) PlanNewMediaTx(ctx context.Context, tx *sql.Tx, media NewMedia) (Run, error) {
@@ -325,7 +325,8 @@ VALUES(?,?,?,?,?,?, ?,?,?)`, plan.mediaID, generation, nullScanTask(plan.scanTas
 		}
 		taskType := executionTaskType(step)
 		maxAttempts := DefaultMaxAttempts(string(taskType))
-		result, err = tx.ExecContext(ctx, `INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,node_key,required,status,max_attempts) VALUES(?,?,?,?,?,?,'waiting',?)`, runID, plan.mediaID, generation, step, nodeKeyForStep(step), requiredFlag, maxAttempts)
+		visible := step == StepMediaVisible && plan.preserve
+		result, err = tx.ExecContext(ctx, `INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,node_key,required,status,max_attempts,finished_at) VALUES(?,?,?,?,?,?,CASE WHEN ? THEN 'done' ELSE 'waiting' END,?,CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END)`, runID, plan.mediaID, generation, step, nodeKeyForStep(step), requiredFlag, boolDB(visible), maxAttempts, boolDB(visible))
 		if err != nil {
 			return Run{}, fmt.Errorf("publication planner: insert %s step: %w", step, err)
 		}

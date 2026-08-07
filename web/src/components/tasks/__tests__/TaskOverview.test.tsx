@@ -48,6 +48,17 @@ describe("TaskOverview", () => {
     expect(onDrill).toHaveBeenCalledWith("poster");
   });
 
+  it("hides type counts with zero count", async () => {
+    mockFetchOverview.mockResolvedValue(
+      makeOverview({ type_counts: { poster: 3, transcode: 0, preview: 4 } }),
+    );
+    render(<TaskOverview />);
+
+    await screen.findByText(/poster/i, {}, { timeout: 5000 });
+    expect(screen.queryByText(/transcode/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/preview/i)).toBeInTheDocument();
+  });
+
   it("shows loading placeholder", async () => {
     mockFetchOverview.mockReturnValue(new Promise(() => {}));
     render(<TaskOverview />);

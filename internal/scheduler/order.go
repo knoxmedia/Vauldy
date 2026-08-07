@@ -83,21 +83,39 @@ func nonNegativeWaitAge(now, availableAt, fallback time.Time) int64 {
 	return secs
 }
 
-// saturatingAdd returns a + b or math.MaxInt64 on overflow.
+// saturatingAdd returns a + b, clamped to the signed int64 range.
 func saturatingAdd(a, b int64) int64 {
-	if a > math.MaxInt64-b {
+	if b > 0 && a > math.MaxInt64-b {
 		return math.MaxInt64
+	}
+	if b < 0 && a < math.MinInt64-b {
+		return math.MinInt64
 	}
 	return a + b
 }
 
-// saturatingMul returns a * b or math.MaxInt64 on overflow.
+// saturatingMul returns a * b, clamped to the signed int64 range.
 func saturatingMul(a, b int64) int64 {
 	if a == 0 || b == 0 {
 		return 0
 	}
-	if a > math.MaxInt64/b {
+	if a == -1 && b == math.MinInt64 || b == -1 && a == math.MinInt64 {
 		return math.MaxInt64
+	}
+	if a > 0 {
+		if b > 0 && a > math.MaxInt64/b {
+			return math.MaxInt64
+		}
+		if b < 0 && b < math.MinInt64/a {
+			return math.MinInt64
+		}
+	} else {
+		if b > 0 && a < math.MinInt64/b {
+			return math.MinInt64
+		}
+		if b < 0 && a < math.MaxInt64/b {
+			return math.MaxInt64
+		}
 	}
 	return a * b
 }
@@ -140,64 +158,54 @@ func StableCompare(a, b CandidateOrder) int {
 	return 0
 }
 
-// LibraryFairnessPick returns the index of the next library candidate to serve
-// from the window. It skips removed and superseded libraries, wraps around
-// after the last-served library, and limits the search to maxLookahead to
-// avoid unbounded scans. If maxLookahead is <= 0, it defaults to 1.
-func LibraryFairnessPick(cursor *LibraryFairnessCursor, window []LibraryCandidate, maxLookahead int) int {
+// LibraryFairnessPick returns the row index for the next distinct eligible
+// library bucket. The input must be in canonical row order, so the first row
+// seen for a bucket is that bucket's best candidate. The boolean is false when
+// no eligible bucket exists.
+func LibraryFairnessPick(cursor *LibraryFairnessCursor, window []LibraryCandidate, maxLookahead int) (int, bool) {
 	if len(window) == 0 || maxLookahead <= 0 {
-		return 0
+		return 0, false
 	}
-
-	eligible := make([]int, 0, len(window))
-	for i, c := range window {
-		if !c.Removed && !c.Superseded {
-			eligible = append(eligible, i)
-		}
-	}
-	if len(eligible) == 0 {
-		return 0
-	}
-
-	// Build a map from library key to eligible index for fast lookup.
 	type libKey struct {
 		isNull bool
 		id     int64
 	}
-	keyOf := func(i int) libKey {
-		if window[i].LibraryID == nil {
+	keyOf := func(c LibraryCandidate) libKey {
+		if c.LibraryID == nil {
 			return libKey{isNull: true}
 		}
-		return libKey{isNull: false, id: *window[i].LibraryID}
+		return libKey{id: *c.LibraryID}
 	}
-
-	// Find the position after the last-served library.
-	lastKey := libKey{}
-	if cursor.LastServedLibrary != nil {
+	seen := make(map[libKey]struct{}, len(window))
+	eligible := make([]int, 0, len(window))
+	for i, c := range window {
+		if c.Removed || c.Superseded {
+			continue
+		}
+		key := keyOf(c)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		eligible = append(eligible, i)
+	}
+	if len(eligible) == 0 {
+		return 0, false
+	}
+	start := 0
+	if cursor != nil && cursor.LastServedLibrary != nil {
+		last := libKey{id: *cursor.LastServedLibrary}
 		if *cursor.LastServedLibrary == NullLibrarySentinel {
-			lastKey = libKey{isNull: true}
-		} else {
-			lastKey = libKey{isNull: false, id: *cursor.LastServedLibrary}
+			last = libKey{isNull: true}
+		}
+		for pos, idx := range eligible {
+			if keyOf(window[idx]) == last {
+				start = (pos + 1) % len(eligible)
+				break
+			}
 		}
 	}
-	// When LastServedLibrary is nil, the cursor is fresh and we start at
-	// position 0 (lastKey remains zero-value, which won't match any real key).
-
-	startPos := 0
-	for i, idx := range eligible {
-		if keyOf(idx) == lastKey {
-			startPos = i + 1
-			break
-		}
-	}
-
-	// Search forward from startPos, bounded by maxLookahead.
-	for offset := 0; offset < maxLookahead && offset < len(eligible); offset++ {
-		pos := (startPos + offset) % len(eligible)
-		return eligible[pos]
-	}
-
-	return eligible[0]
+	return eligible[start], true
 }
 
 // LibraryFairnessCommit records that the given candidate was served,
@@ -253,23 +261,36 @@ func WaitAgeSQL(alias string, now time.Time) string {
 func AgingBoostSQL(alias string, policy *Policy, now time.Time) string {
 	waitAge := WaitAgeSQL(alias, now)
 	interval := int64(policy.AgingIntervalSec)
-	step := int64(policy.AgingStep)
-	return fmt.Sprintf(
-		`MIN(9223372036854775807, (%s / %d) * %d)`,
-		waitAge, interval, step,
-	)
+	if interval <= 0 {
+		return "0"
+	}
+	steps := fmt.Sprintf("((%s) / %d)", waitAge, interval)
+	return saturatingMulSQL(steps, int64(policy.AgingStep))
 }
 
-// EffectivePrioritySQL returns a single SQL expression that computes the
-// effective ordering priority for alias q.  The expression is parameterized
-// with the Policy fields and the given now timestamp.
-//
-//	effective = base_priority + row_priority + run_now_boost + aging_boost
+func saturatingAddSQL(a, b string) string {
+	return fmt.Sprintf(`CASE WHEN (%[2]s)>0 AND (%[1]s)>9223372036854775807-(%[2]s) THEN 9223372036854775807 WHEN (%[2]s)<0 AND (%[1]s)<-9223372036854775807-1-(%[2]s) THEN -9223372036854775807-1 ELSE CAST((%[1]s)+(%[2]s) AS INTEGER) END`, a, b)
+}
+
+func saturatingMulSQL(a string, b int64) string {
+	if b == 0 {
+		return "0"
+	}
+	if b > 0 {
+		return fmt.Sprintf(`CASE WHEN (%[1]s)>9223372036854775807/%[2]d THEN 9223372036854775807 WHEN (%[1]s)<(-9223372036854775807-1)/%[2]d THEN -9223372036854775807-1 ELSE CAST((%[1]s)*%[2]d AS INTEGER) END`, a, b)
+	}
+	if b == math.MinInt64 {
+		return fmt.Sprintf(`CASE WHEN (%[1]s)>1 THEN -9223372036854775807-1 WHEN (%[1]s)<-1 THEN 9223372036854775807 WHEN (%[1]s)=-1 THEN 9223372036854775807 ELSE CAST((%[1]s)*(-9223372036854775807-1) AS INTEGER) END`, a)
+	}
+	return fmt.Sprintf(`CASE WHEN (%[1]s)>(-9223372036854775807-1)/%[2]d THEN -9223372036854775807-1 WHEN (%[1]s)<9223372036854775807/%[2]d THEN 9223372036854775807 ELSE CAST((%[1]s)*%[2]d AS INTEGER) END`, a, b)
+}
+
+// EffectivePrioritySQL computes the same signed saturating integer expression
+// as EffectivePriority without allowing SQLite to promote overflow to REAL.
 func EffectivePrioritySQL(alias string, policy *Policy, now time.Time) string {
-	aging := AgingBoostSQL(alias, policy, now)
-	runNow := RunNowBoostSQL(alias, policy, now)
-	return fmt.Sprintf(
-		`MIN(9223372036854775807, CAST(COALESCE(%s.base_priority, 0) + COALESCE(%s.priority, 0) + %s + %s AS INTEGER))`,
-		alias, alias, runNow, aging,
-	)
+	base := fmt.Sprintf("COALESCE(%s.base_priority,0)", alias)
+	row := fmt.Sprintf("COALESCE(%s.priority,0)", alias)
+	result := saturatingAddSQL(base, row)
+	result = saturatingAddSQL(result, AgingBoostSQL(alias, policy, now))
+	return saturatingAddSQL(result, RunNowBoostSQL(alias, policy, now))
 }

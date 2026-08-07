@@ -72,9 +72,11 @@ func seedTerminalRetry(t *testing.T, db *sql.DB, state string) (mediaID, runID i
 			if e != nil {
 				t.Fatal(e)
 			}
-			taskID, _ := task.LastInsertId()
-			if _, e = db.Exec(`INSERT INTO pretranscode_rendition_job(task_id,rendition_id,rendition_name,status,config_snapshot_json) VALUES(?,1,'old','failed','{"old":true}')`, taskID); e != nil {
-				t.Fatal(e)
+			if enterprisePrepareTablesPresent(t, db) {
+				taskID, _ := task.LastInsertId()
+				if _, e = db.Exec(`INSERT INTO pretranscode_rendition_job(task_id,rendition_id,rendition_name,status,config_snapshot_json) VALUES(?,1,'old','failed','{"old":true}')`, taskID); e != nil {
+					t.Fatal(e)
+				}
 			}
 		}
 	}
@@ -159,10 +161,13 @@ func TestRetryIngestDegradedCreatesVisibilityPreservingReplacement(t *testing.T)
 		t.Fatalf("old run changed=%s/%q/%q", oldStatus, oldError, oldFinished)
 	}
 	var oldSteps, oldTasks, oldJobs int
+	prepareTables := enterprisePrepareTablesPresent(t, db)
 	_ = db.QueryRow(`SELECT COUNT(*) FROM media_ingest_step WHERE run_id=? AND status='failed' AND attempts=0 AND last_error='old step outcome'`, oldRun).Scan(&oldSteps)
 	_ = db.QueryRow(`SELECT COUNT(*) FROM transcode_task WHERE ingest_run_id=? AND status='failed'`, oldRun).Scan(&oldTasks)
-	_ = db.QueryRow(`SELECT COUNT(*) FROM pretranscode_rendition_job j JOIN transcode_task t ON t.id=j.task_id WHERE t.ingest_run_id=? AND j.status='failed' AND j.config_snapshot_json='{"old":true}'`, oldRun).Scan(&oldJobs)
-	if oldSteps != 4 || oldTasks != 1 || oldJobs != 1 {
+	if prepareTables {
+		_ = db.QueryRow(`SELECT COUNT(*) FROM pretranscode_rendition_job j JOIN transcode_task t ON t.id=j.task_id WHERE t.ingest_run_id=? AND j.status='failed' AND j.config_snapshot_json='{"old":true}'`, oldRun).Scan(&oldJobs)
+	}
+	if oldSteps != 4 || oldTasks != 1 || (prepareTables && oldJobs != 1) {
 		t.Fatalf("old execution changed: steps=%d tasks=%d jobs=%d", oldSteps, oldTasks, oldJobs)
 	}
 }
@@ -170,7 +175,12 @@ func TestRetryIngestDegradedCreatesVisibilityPreservingReplacement(t *testing.T)
 func TestRetryIngestDegradedUsesCurrentPrepareCapability(t *testing.T) {
 	db := openRetryTestDB(t)
 	mediaID, oldRun, _ := seedTerminalRetry(t, db, "degraded")
-	if _, err := db.Exec(`DELETE FROM pretranscode_rendition_job WHERE task_id IN (SELECT id FROM transcode_task WHERE ingest_run_id=?); DELETE FROM transcode_task WHERE ingest_run_id=?; DELETE FROM media_ingest_step WHERE run_id=? AND step_type='prepare'; UPDATE media_ingest_run SET config_snapshot_json='{"policy_version":2,"library_id":1,"file_type":"video","steps":["poster"]}' WHERE id=?`, oldRun, oldRun, oldRun, oldRun); err != nil {
+	if enterprisePrepareTablesPresent(t, db) {
+		if _, err := db.Exec(`DELETE FROM pretranscode_rendition_job WHERE task_id IN (SELECT id FROM transcode_task WHERE ingest_run_id=?)`, oldRun); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`DELETE FROM transcode_task WHERE ingest_run_id=?; DELETE FROM media_ingest_step WHERE run_id=? AND step_type='prepare'; UPDATE media_ingest_run SET config_snapshot_json='{"policy_version":2,"library_id":1,"file_type":"video","steps":["poster"]}' WHERE id=?`, oldRun, oldRun, oldRun); err != nil {
 		t.Fatal(err)
 	}
 	prepare := &retryPreparePlanner{}
@@ -443,7 +453,9 @@ func TestRetryIngestDoesNotCopyOldSnapshotOrPrepareRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	var copied int
-	_ = db.QueryRow(`SELECT COUNT(*) FROM pretranscode_rendition_job j JOIN transcode_task t ON t.id=j.task_id WHERE t.media_id=? AND t.generation=2 AND j.config_snapshot_json='{"old":true}'`, mediaID).Scan(&copied)
+	if enterprisePrepareTablesPresent(t, db) {
+		_ = db.QueryRow(`SELECT COUNT(*) FROM pretranscode_rendition_job j JOIN transcode_task t ON t.id=j.task_id WHERE t.media_id=? AND t.generation=2 AND j.config_snapshot_json='{"old":true}'`, mediaID).Scan(&copied)
+	}
 	if snapshot == oldSnapshot || copied != 0 {
 		t.Fatalf("snapshotEqual=%v copiedPrepare=%d", snapshot == oldSnapshot, copied)
 	}

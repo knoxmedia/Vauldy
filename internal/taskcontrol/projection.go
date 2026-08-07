@@ -58,7 +58,7 @@ func normalizeStatus(raw string, terminalEvidence bool) NormalizedStatus {
 		return StatusRunning
 	case "done", "completed", "success", "finished":
 		return StatusDone
-	case "failed", "error", "permanent_failure":
+	case "failed", "error", "permanent_failure", "abandoned":
 		return StatusFailed
 	case "cancelled", "canceled", "aborted":
 		return StatusCancelled
@@ -74,15 +74,15 @@ func normalizeStatus(raw string, terminalEvidence bool) NormalizedStatus {
 
 // OwnerLeaseInfo captures the current owner and lease window.
 type OwnerLeaseInfo struct {
-	Owner     string     `json:"owner"`
+	Owner      string     `json:"owner"`
 	LeaseUntil *time.Time `json:"lease_until,omitempty"`
 }
 
 // AdmissionInfo reports scheduler admission status for a task.
 type AdmissionInfo struct {
-	Runnable bool              `json:"runnable"`
-	Blocker  string            `json:"blocker,omitempty"`
-	Details  map[string]any    `json:"details,omitempty"`
+	Runnable bool           `json:"runnable"`
+	Blocker  string         `json:"blocker,omitempty"`
+	Details  map[string]any `json:"details,omitempty"`
 }
 
 // DependencyInfo describes one upstream dependency.
@@ -105,62 +105,77 @@ type EvidenceEntry struct {
 // It is produced by reading authoritative execution/plan/scheduler state
 // through registered source adapters.
 type ProjectionRow struct {
-	TaskID           string           `json:"task_id"`
-	SourceKind       string           `json:"source_kind"`
-	SourceID         int64            `json:"source_id"`
-	TaskType         string           `json:"task_type"`
-	Family           string           `json:"family"`
-	NormalizedStatus NormalizedStatus `json:"normalized_status"`
-	RawStatus        string           `json:"raw_status"`
-	Revision         int64            `json:"revision"`
-	Generation       int64            `json:"generation"`
-	RetryRound       int              `json:"retry_round"`
-	Attempt          int              `json:"attempt"`
-	MaxAttempts      int              `json:"max_attempts"`
-	BasePriority     int64            `json:"base_priority"`
-	EffectivePriority int64           `json:"effective_priority"`
-	AvailableAt      *time.Time       `json:"available_at,omitempty"`
-	CreatedAt        time.Time        `json:"created_at"`
-	UpdatedAt        time.Time        `json:"updated_at"`
-	MediaID          *int64           `json:"media_id,omitempty"`
-	LibraryID        *int64           `json:"library_id,omitempty"`
-	Admission        *AdmissionInfo   `json:"admission,omitempty"`
-	OwnerLease       *OwnerLeaseInfo  `json:"owner_lease,omitempty"`
-	TerminalReason   string           `json:"terminal_reason,omitempty"`
-	Tombstone        bool             `json:"tombstone"`
-	RemovedAt        *time.Time       `json:"removed_at,omitempty"`
-	RemovedBy        string           `json:"removed_by,omitempty"`
-	RemoveReason     string           `json:"remove_reason,omitempty"`
-	Dependencies     []DependencyInfo `json:"dependencies,omitempty"`
-	Resources        []string         `json:"resources,omitempty"`
-	ProjectionError  string           `json:"projection_error,omitempty"`
+	TaskID            string           `json:"task_id"`
+	SourceKind        string           `json:"source_kind"`
+	SourceID          int64            `json:"source_id"`
+	TaskType          string           `json:"task_type"`
+	Family            string           `json:"family"`
+	NormalizedStatus  NormalizedStatus `json:"normalized_status"`
+	RawStatus         string           `json:"raw_status"`
+	Revision          int64            `json:"revision"`
+	Generation        int64            `json:"generation"`
+	RetryRound        int              `json:"retry_round"`
+	Attempt           int              `json:"attempt"`
+	MaxAttempts       int              `json:"max_attempts"`
+	BasePriority      int64            `json:"base_priority"`
+	EffectivePriority int64            `json:"effective_priority"`
+	AvailableAt       *time.Time       `json:"available_at,omitempty"`
+	CreatedAt         time.Time        `json:"created_at"`
+	UpdatedAt         time.Time        `json:"updated_at"`
+	MediaID           *int64           `json:"media_id,omitempty"`
+	MediaTitle        string           `json:"media_title,omitempty"`
+	MediaFilePath     string           `json:"media_file_path,omitempty"`
+	LibraryID         *int64           `json:"library_id,omitempty"`
+	Admission         *AdmissionInfo   `json:"admission,omitempty"`
+	OwnerLease        *OwnerLeaseInfo  `json:"owner_lease,omitempty"`
+	TerminalReason    string           `json:"terminal_reason,omitempty"`
+	Tombstone         bool             `json:"tombstone"`
+	RemovedAt         *time.Time       `json:"removed_at,omitempty"`
+	RemovedBy         string           `json:"removed_by,omitempty"`
+	RemoveReason      string           `json:"remove_reason,omitempty"`
+	Dependencies      []DependencyInfo `json:"dependencies,omitempty"`
+	Resources         []string         `json:"resources,omitempty"`
+	ProjectionError   string           `json:"projection_error,omitempty"`
+	AllowedActions    AllowedActions   `json:"allowed_actions"`
+	Linked            bool             `json:"-"`
+	LinkValid         bool             `json:"-"`
+	LinkCurrent       bool             `json:"-"`
+	LinkStale         bool             `json:"-"`
+	LinkOptional      bool             `json:"-"`
 }
 
 // RawTaskRow is a raw row read from a source table.
 type RawTaskRow struct {
-	SourceKind       string
-	SourceID         int64
-	TaskType         string
-	RawStatus        string
-	Generation       int64
-	RetryRound       int
-	Attempt          int
-	MaxAttempts      int
-	BasePriority     int64
-	AvailableAt      *time.Time
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
-	MediaID          *int64
-	LibraryID        *int64
-	Owner            string
-	LeaseUntil       *time.Time
-	TerminalReason   string
-	Tombstone        bool
-	RemovedAt        *time.Time
-	RemovedBy        string
-	RemoveReason     string
-	ExecutionID      string
-	RunNowExpires    *time.Time
+	SourceKind     string
+	SourceID       int64
+	TaskType       string
+	RawStatus      string
+	Generation     int64
+	RetryRound     int
+	Attempt        int
+	MaxAttempts    int
+	BasePriority   int64
+	AvailableAt    *time.Time
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+	MediaID        *int64
+	MediaTitle     string
+	MediaFilePath  string
+	LibraryID      *int64
+	Owner          string
+	LeaseUntil     *time.Time
+	TerminalReason string
+	Tombstone      bool
+	RemovedAt      *time.Time
+	RemovedBy      string
+	RemoveReason   string
+	ExecutionID    string
+	RunNowExpires  *time.Time
+	Linked         bool
+	LinkValid      bool
+	LinkCurrent    bool
+	LinkStale      bool
+	LinkOptional   bool
 }
 
 // SourceAdapter reads raw task rows from a Phase 1-3 source table.
@@ -180,9 +195,10 @@ type SourceAdapter interface {
 // ProjectionBuilder computes normalized ProjectionRows from source adapters
 // and the canonical projection revision store.
 type ProjectionBuilder struct {
-	db       *sql.DB
-	registry *Registry
-	adapters map[string]SourceAdapter
+	db             *sql.DB
+	registry       *Registry
+	adapters       map[string]SourceAdapter
+	actionResolver func(*ProjectionRow) AllowedActions
 }
 
 // NewProjectionBuilder creates a ProjectionBuilder backed by db.
@@ -201,7 +217,25 @@ func (b *ProjectionBuilder) RegisterAdapter(a SourceAdapter) {
 
 // adapterForKind returns the registered source adapter for kind, or nil.
 func (b *ProjectionBuilder) adapterForKind(kind string) SourceAdapter {
+	if kind == "post_ingest_task" {
+		kind = "orchestration"
+	}
 	return b.adapters[kind]
+}
+
+// SetActionResolver installs the server-authoritative operation capability resolver.
+func (b *ProjectionBuilder) SetActionResolver(resolver func(*ProjectionRow) AllowedActions) {
+	b.actionResolver = resolver
+}
+
+// RegisteredKinds reports adapters available in this process.
+func (b *ProjectionBuilder) RegisteredKinds() map[string]bool {
+	out := make(map[string]bool, len(b.adapters))
+	for kind := range b.adapters {
+		out[kind] = true
+	}
+	out["post_ingest_task"] = out["orchestration"]
+	return out
 }
 
 // snapshotRevision returns the current global projection revision (max revision value).
@@ -366,39 +400,51 @@ func (b *ProjectionBuilder) normalize(raw *RawTaskRow, kind string) *ProjectionR
 	status := normalizeStatus(raw.RawStatus, terminalEvidence)
 
 	row := &ProjectionRow{
-		SourceKind:       kind,
-		SourceID:         raw.SourceID,
-		TaskType:         taskType,
-		Family:           family,
-		NormalizedStatus: status,
-		RawStatus:        raw.RawStatus,
-		Generation:       raw.Generation,
-		RetryRound:       raw.RetryRound,
-		Attempt:          raw.Attempt,
-		MaxAttempts:      raw.MaxAttempts,
-		BasePriority:     raw.BasePriority,
+		SourceKind:        kind,
+		SourceID:          raw.SourceID,
+		TaskType:          taskType,
+		Family:            family,
+		NormalizedStatus:  status,
+		RawStatus:         raw.RawStatus,
+		Generation:        raw.Generation,
+		RetryRound:        raw.RetryRound,
+		Attempt:           raw.Attempt,
+		MaxAttempts:       raw.MaxAttempts,
+		BasePriority:      raw.BasePriority,
 		EffectivePriority: raw.BasePriority, // will be computed externally
-		AvailableAt:      raw.AvailableAt,
-		CreatedAt:        raw.CreatedAt,
-		UpdatedAt:        raw.UpdatedAt,
-		MediaID:          raw.MediaID,
-		LibraryID:        raw.LibraryID,
-		TerminalReason:   raw.TerminalReason,
-		Tombstone:        raw.Tombstone,
-		RemovedAt:        raw.RemovedAt,
-		RemovedBy:        raw.RemovedBy,
-		RemoveReason:     raw.RemoveReason,
+		AvailableAt:       raw.AvailableAt,
+		CreatedAt:         raw.CreatedAt,
+		UpdatedAt:         raw.UpdatedAt,
+		MediaID:           raw.MediaID,
+		MediaTitle:        raw.MediaTitle,
+		MediaFilePath:     raw.MediaFilePath,
+		LibraryID:         raw.LibraryID,
+		TerminalReason:    raw.TerminalReason,
+		Tombstone:         raw.Tombstone,
+		RemovedAt:         raw.RemovedAt,
+		RemovedBy:         raw.RemovedBy,
+		RemoveReason:      raw.RemoveReason,
+		Linked:            raw.Linked,
+		LinkValid:         raw.LinkValid,
+		LinkCurrent:       raw.LinkCurrent,
+		LinkStale:         raw.LinkStale,
+		LinkOptional:      raw.LinkOptional,
 	}
 
 	if raw.Owner != "" {
 		row.OwnerLease = &OwnerLeaseInfo{
-			Owner:     raw.Owner,
+			Owner:      raw.Owner,
 			LeaseUntil: raw.LeaseUntil,
 		}
 	}
 
 	if raw.RemovedAt == nil && raw.Tombstone == false {
 		row.ProjectionError = ""
+	}
+	if b.actionResolver != nil {
+		row.AllowedActions = b.actionResolver(row)
+	} else if kind == "orchestration" {
+		row.AllowedActions = ComputeActions(row, WithAITask(row.TaskType == "ai_analysis"))
 	}
 
 	return row
@@ -452,7 +498,9 @@ func (a *OracleAdapter) Read(ctx context.Context, tx *sql.Tx, id int64) (*RawTas
 		       COALESCE(base_priority,0), available_at, created_at, updated_at,
 		       media_id, library_id,
 		       removed_at, COALESCE(removed_by,''), COALESCE(remove_reason,''),
-		       COALESCE(run_now_expires, NULL) AS run_now_expires
+		       run_now_expires,
+		       COALESCE((SELECT title FROM media m WHERE m.id = post_ingest_task.media_id),''),
+		       COALESCE((SELECT file_path FROM media m WHERE m.id = post_ingest_task.media_id),'')
 		FROM post_ingest_task WHERE id=?`, id)
 	return scanOracleRow(row, id)
 }
@@ -471,7 +519,7 @@ func scanOracleRow(row *sql.Row, id int64) (*RawTaskRow, error) {
 		&r.BasePriority, &availableAt, &r.CreatedAt, &r.UpdatedAt,
 		&mediaID, &libraryID,
 		&removedAt, &r.RemovedBy, &r.RemoveReason,
-		&runNowExpires); err != nil {
+		&runNowExpires, &r.MediaTitle, &r.MediaFilePath); err != nil {
 		return nil, err
 	}
 	if removedAt.Valid {

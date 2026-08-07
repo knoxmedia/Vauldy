@@ -15,7 +15,6 @@ import (
 	"knox-media/api/middleware"
 
 	"knox-media/internal/coreiface"
-	"knox-media/internal/pretranscode"
 	"knox-media/internal/publication"
 )
 
@@ -88,12 +87,6 @@ func (h *Handler) AdminRetryOptionalScrape(c *gin.Context) {
 		err = publication.RetryOptionalPostIngest(c.Request.Context(), h.App.DB, publication.OptionalPostIngestRetryRequest{MediaID: mediaID, StepID: stepID, ActorID: middleware.UserID(c), Reason: body.Reason})
 	case "prepare":
 		req := publication.OptionalPrepareRetryRequest{MediaID: mediaID, StepID: stepID, ActorID: middleware.UserID(c), Reason: body.Reason}
-		if mod := pretranscode.ActiveModule(); mod != nil && mod.Worker != nil {
-			req.CaptureActive = func(taskID int64, retryRound int) func() {
-				_ = retryRound
-				return mod.Worker.CaptureParentCancellation(taskID)
-			}
-		}
 		err = publication.RetryOptionalPrepare(c.Request.Context(), h.App.DB, req, h.PublicationCapabilities)
 	default:
 		c.JSON(http.StatusConflict, gin.H{"code": "no_retryable_work", "error": "no retryable work"})

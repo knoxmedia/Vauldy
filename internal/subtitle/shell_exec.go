@@ -1,6 +1,7 @@
 package subtitle
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -8,6 +9,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"knox-media/internal/processmetrics"
+	"knox-media/internal/progressctx"
 )
 
 // stripShellCDPrefix removes a leading "cd /d ... &&" segment from Knox ASR shell templates.
@@ -109,4 +113,72 @@ func (s *Service) runShellCommand(ctx context.Context, sh string) ([]byte, error
 		}
 	}
 	return out, err
+}
+
+// runShellCommandLive runs a shell command while reporting every chunk of output
+// as liveness evidence, so a long-running ASR pipeline that keeps emitting
+// output is never mistaken for a stalled task by the dispatcher.
+func (s *Service) runShellCommandLive(ctx context.Context, sh string) ([]byte, error) {
+	cmd, ok := buildShellCommand(ctx, sh)
+	if !ok {
+		return nil, fmt.Errorf("empty shell command")
+	}
+	s.applyToolEnv(cmd)
+	if root := s.toolWorkDir(); root != "" {
+		cmd.Dir = root
+	}
+	out, err := runCombinedLive(cmd, func() { progressctx.Report(ctx) })
+	if err != nil {
+		detail := trimBytes(out)
+		if detail != "" {
+			return out, fmt.Errorf("%w: %s", err, detail)
+		}
+	}
+	return out, err
+}
+
+// runCombinedLive is CombinedOutput with an optional liveness callback invoked
+// on every write. When report is nil it falls back to CombinedOutput.
+func runCombinedLive(cmd *exec.Cmd, report func()) ([]byte, error) {
+	if report == nil {
+		return cmd.CombinedOutput()
+	}
+	var buf bytes.Buffer
+	live := &liveWriter{buf: &buf, report: report}
+	cmd.Stdout = live
+	cmd.Stderr = live
+	if err := cmd.Run(); err != nil {
+		return buf.Bytes(), err
+	}
+	return buf.Bytes(), nil
+}
+
+// runFFmpegCombinedLive is runCombinedLive for processmetrics.FFmpegCommand; it
+// preserves the launch metric recorded by Run.
+func runFFmpegCombinedLive(cmd *processmetrics.FFmpegCommand, report func()) ([]byte, error) {
+	if report == nil {
+		return cmd.CombinedOutput()
+	}
+	var buf bytes.Buffer
+	live := &liveWriter{buf: &buf, report: report}
+	cmd.Stdout = live
+	cmd.Stderr = live
+	if err := cmd.Run(); err != nil {
+		return buf.Bytes(), err
+	}
+	return buf.Bytes(), nil
+}
+
+// liveWriter buffers combined process output and reports each write as liveness
+// evidence for the progress-driven task timeout.
+type liveWriter struct {
+	buf    *bytes.Buffer
+	report func()
+}
+
+func (w *liveWriter) Write(p []byte) (int, error) {
+	if w.report != nil && len(p) > 0 {
+		w.report()
+	}
+	return w.buf.Write(p)
 }

@@ -50,6 +50,7 @@ function makeRow(overrides: Partial<ProjectionRow> = {}): ProjectionRow {
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     tombstone: false,
+    allowed_actions: { abort: false, remove: false, reset: false, run_now: false, skip: false, reopen: false },
     ...overrides,
   };
 }

@@ -36,25 +36,22 @@ import (
 	jitmetrics "knox-media/internal/jit/metrics"
 	jitsession "knox-media/internal/jit/session"
 	"knox-media/internal/keyframe"
-	// Enterprise module imports 闂?their init() registers into
+	// Enterprise module imports register their init() into
 	// coreiface.EnterpriseModules. The community build excludes these
 	// imports (and the packages themselves), leaving EnterpriseModules empty.
-	_ "knox-media/internal/license"
 	"knox-media/internal/lyrictask"
 	"knox-media/internal/metadatalib"
 	"knox-media/internal/monitor"
 	"knox-media/internal/photoclass"
 	"knox-media/internal/postingest"
-	_ "knox-media/internal/pretranscode"
 	"knox-media/internal/preview"
 	"knox-media/internal/publication"
-	"knox-media/internal/retirement"
 	"knox-media/internal/scancoord"
 	"knox-media/internal/scanner"
+	taskscheduler "knox-media/internal/scheduler"
 	"knox-media/internal/storage"
 	"knox-media/internal/store"
 	"knox-media/internal/subtitle"
-	taskscheduler "knox-media/internal/scheduler"
 	"knox-media/internal/taskcontrol"
 	"knox-media/internal/transcode"
 	"knox-media/internal/upload"
@@ -143,11 +140,11 @@ func main() {
 	}
 
 	// (2) 密钥库/派生资产存储，以及转码、预览、字幕等域内 Worker。
-	transcodeSettings := loadSystemOptionsTranscodeSettings(db)                   // 从 system_options 读取转码/硬编设置
-	keyVault, assetEnc := storage.NewAssetEncryptorFromConfig(cfg, db)            // 媒体加密密钥库与资产加密器
-	derivedStore := storage.NewDerivedAssetStoreFromConfig(cfg, db, keyVault)     // 派生资产（封面/预览等）存储
-	worker := transcode.NewWorker(db, cfg.FFmpeg.FFmpegPath, cfg.Data.Transcode)  // 常规转码 Worker
-	packageWorker := transcode.NewPackageWorker(db, cfg, keyVault)                // DRM/打包 Worker
+	transcodeSettings := loadSystemOptionsTranscodeSettings(db)                  // 从 system_options 读取转码/硬编设置
+	keyVault, assetEnc := storage.NewAssetEncryptorFromConfig(cfg, db)           // 媒体加密密钥库与资产加密器
+	derivedStore := storage.NewDerivedAssetStoreFromConfig(cfg, db, keyVault)    // 派生资产（封面/预览等）存储
+	worker := transcode.NewWorker(db, cfg.FFmpeg.FFmpegPath, cfg.Data.Transcode) // 常规转码 Worker
+	packageWorker := transcode.NewPackageWorker(db, cfg, keyVault)               // DRM/打包 Worker
 	go func() {
 		// 启动时修复历史损坏的 DRM init 文件。
 		scanned, fixed, err := packageWorker.HealLegacyInitFiles()
@@ -190,9 +187,9 @@ func main() {
 		MkvmergePath:   cfg.Subtitle.GraphicalOCR.MkvmergePath,
 	})
 	subSvc.AIProofread = cfg.SubtitleAIProofreadEnabled()
-	up := &upload.Service{UploadDir: cfg.Data.Upload, ChunksDir: cfg.Data.Chunks} // 分片上传服务
+	up := &upload.Service{UploadDir: cfg.Data.Upload, ChunksDir: cfg.Data.Chunks}                                                 // 分片上传服务
 	atrackWorker := atrack.NewWorker(db, keyVault, derivedStore, cfg.FFmpeg.FFmpegPath, cfg.FFmpeg.FFprobePath, cfg.Data.ATracks) // 音轨提取
-	keyframeWorker := keyframe.NewWorker(db, keyVault, derivedStore, cfg.FFmpeg.FFprobePath, cfg.Data.Keyframes)                 // 关键帧索引
+	keyframeWorker := keyframe.NewWorker(db, keyVault, derivedStore, cfg.FFmpeg.FFprobePath, cfg.Data.Keyframes)                  // 关键帧索引
 	lyricWorkDir := filepath.Join(cfg.Data.Dir, "lyrics")
 	lyricWorker := lyrictask.NewWorker(db, derivedStore, lyricWorkDir, cfg.FFmpeg.FFprobePath, subSvc) // 歌词任务
 	photoClassifyWorker := photoclass.NewWorker(db, keyVault, filepath.Dir(cfgPath), cfg.FFmpeg.FFmpegPath, cfg.Data.Preview, func() config.PhotoClassifyConfig {
@@ -333,7 +330,7 @@ func main() {
 	}) // 决定新媒体应排队哪些发布阶段
 
 	startupReady := make(chan struct{}) // 关闭后表示可接受扫描/监控等提交源
-	startupRoots := StartupRecoveryRoots{Encryption: postingest.EncryptionRecoveryRoots{Quarantine: assetEnc.EncryptionPrivateRoot(), Resolver: assetEnc}, Thumbnail: postingest.ThumbnailRecoveryRoots{Preview: filepath.Join(cfg.Data.Preview, "photos"), Derived: filepath.Join(cfg.Data.Dir, ".derived")}, Poster: postingest.PosterRecoveryRoots{Upload: cfg.Data.Upload, Derived: filepath.Join(cfg.Data.Dir, ".derived")}, ScrapeArtwork: cfg.Data.MetadataLibrary, Retirement: retirement.RecoveryOptions{QuarantineRoot: filepath.Join(cfg.Data.Dir, ".quarantine", "retirement")}}
+	startupRoots := StartupRecoveryRoots{Encryption: postingest.EncryptionRecoveryRoots{Quarantine: assetEnc.EncryptionPrivateRoot(), Resolver: assetEnc}, Thumbnail: postingest.ThumbnailRecoveryRoots{Preview: filepath.Join(cfg.Data.Preview, "photos"), Derived: filepath.Join(cfg.Data.Dir, ".derived")}, Poster: postingest.PosterRecoveryRoots{Upload: cfg.Data.Upload, Derived: filepath.Join(cfg.Data.Dir, ".derived")}, ScrapeArtwork: cfg.Data.MetadataLibrary}
 	enterpriseCtx, enterpriseCancel := context.WithCancel(serverCtx)
 	defer enterpriseCancel()
 	for _, mod := range coreiface.EnterpriseModules {
@@ -345,34 +342,17 @@ func main() {
 	preparePlanner = coreiface.IngestPreparePlannerHandle() // Init 后重新获取 prepare 句柄
 	publicationResources := serverPublicationResources{Vault: keyVault, Encryptor: assetEnc, Derived: derivedStore, PosterRoot: cfg.Data.Upload, ThumbnailRoot: filepath.Join(cfg.Data.Preview, "photos")}
 	publicationPlanner = publication.NewPlanner(publication.PlanOptions{SubtitleAuto: cfg.SubtitleAutoOnScan(), ATrackAuto: cfg.ATrackAutoOnScan(), EncryptGlobal: cfg.EncryptedAssetsEnabled(), PreparePlanner: preparePlanner, Capabilities: publicationCapabilities, EncryptionValidator: publicationResources, ExecutableAdapters: executableAdapters, EncryptedSourceStrategies: encryptedSourceStrategies})
-	// Background group owns retirement and stage reconcilers; created before claimers.
+	// Background group owns stage reconcilers; created before claimers.
 	background := &handler.BackgroundGroup{}
-	retirement.SetDefaultActiveConsumer(func(mediaID int64) bool {
-		return storage.HasActivePlaintextConsumer(db, mediaID)
-	})
-	retirementWorker := &retirement.Worker{
-		DB:    db,
-		Owner: "retirement-" + processID,
-		Seams: retirement.CrashSeams{
-			QuarantineRoot: startupRoots.Retirement.QuarantineRoot,
-			ActiveConsumer: func(mediaID int64) bool { return storage.HasActivePlaintextConsumer(db, mediaID) },
-		},
-	}
-	// Publication V2 启动：预检 → 恢复产物/租约 → 迁移 V1 → 校验 → 启动分发器/企业 Worker → 放开提交源。
+	// Publication V2 启动：预检 → 恢复产物/租约 → 迁移 V1 → 校验 → 启动分发器 → 放开提交源。
 	warnings, err := PreparePublicationV2Startup(serverCtx, publicationV2StartupHooks{
 		Preflight: func(ctx context.Context) ([]string, error) {
 			return publication.PreflightPublicationV2(ctx, db, publicationPlanner, publicationCapabilities, publicationResources)
 		},
 		RecoverArtifacts: func(ctx context.Context) error {
-			if err := recoverStartupArtifacts(ctx, db, startupRoots); err != nil {
-				return err
-			}
-			if svc := storage.DefaultTaskPlaintextTemp(); svc != nil {
-				return svc.Recover(ctx)
-			}
-			return nil
+			return recoverStartupArtifacts(ctx, db, startupRoots)
 		},
-		RecoverLeases:       func(ctx context.Context) error { return recoverStartupLeases(ctx, db, postIngestQueue) },
+		RecoverLeases: func(ctx context.Context) error { return recoverStartupLeases(ctx, db, postIngestQueue) },
 		RecoverReservations: func(ctx context.Context) error {
 			_, err := ReconcileStartupReservations(ctx, db, "startup-recovery-"+processID)
 			return err
@@ -383,16 +363,6 @@ func main() {
 		},
 		ValidateAggregateV2: func(ctx context.Context) error { return publication.ValidateAggregateCurrentV2(ctx, db) },
 		StartClaimers: func() {
-			background.Go(serverCtx, func(ctx context.Context) {
-				retirement.RunReconciler(ctx, db, startupRoots.Retirement, time.Minute, func(err error) {
-					log.Printf("retirement reconcile: %v", err)
-				})
-			})
-			background.Go(serverCtx, func(ctx context.Context) {
-				retirement.RunWorkerLoop(ctx, retirementWorker, 5*time.Second, func(err error) {
-					log.Printf("retirement worker: %v", err)
-				})
-			})
 			go func() {
 				err := dispatcher.Start(serverCtx) // 开始认领并执行入库后任务
 				dispatcherDone <- err
@@ -498,6 +468,7 @@ func main() {
 	background.Go(serverCtx, func(ctx context.Context) {
 		postingest.RunPosterStageReconciler(ctx, db, postingest.PosterRecoveryRoots{Upload: cfg.Data.Upload, Derived: filepath.Join(cfg.Data.Dir, ".derived")}, time.Minute, 100, func(err error) { log.Printf("poster stage reconcile: %v", err) })
 	}) // 封面阶段状态对账
+	scrapeController := taskcontrol.NewScrapeTaskController(db, publicationCapabilities)
 	deps := handler.Dependencies{
 		ServerContext: serverCtx, Background: background, StartupReady: startupReady,
 		Coordinator: coordinator, Queue: postIngestQueue, PostIngest: postIngestEnqueuer, Dispatcher: dispatcher, AdminOverviewBuilder: func() handler.OverviewBuilder {
@@ -509,7 +480,7 @@ func main() {
 		LyricWorker: lyricWorker, PhotoClassifyWorker: photoClassifyWorker, DocCoverWorker: docCoverWorker,
 		KeyVault: keyVault, AssetEncryptor: assetEnc, DerivedStore: derivedStore, PublicationPlanner: publicationPlanner, PublicationCapabilities: publicationCapabilities,
 		SchedulerAdmin: schedulerService,
-		TaskCtrl: buildTaskControl(db),
+		TaskCtrl:       buildTaskControl(db, dispatcher, coordinator, scrapeController), ScrapeController: scrapeController,
 	}
 
 	// (6) 注入依赖并创建 HTTP API 路由引擎。
@@ -756,12 +727,32 @@ func loadSystemOptionsTranscodeSettings(db *sql.DB) transcode.Settings {
 	return transcode.SettingsFromOptionsJSON(raw.String)
 }
 
-func buildTaskControl(db *sql.DB) *handler.TaskControl {
+func buildTaskControl(db *sql.DB, dispatcher *postingest.Dispatcher, coordinator *scancoord.Coordinator, scrapeController *taskcontrol.ScrapeTaskController) *handler.TaskControl {
 	registry := taskcontrol.NewRegistry()
 	projection := taskcontrol.NewProjectionBuilder(db, registry)
 	projection.RegisterAdapter(taskcontrol.NewOracleAdapter(db))
+	projection.RegisterAdapter(taskcontrol.NewTranscodeAdapter(db))
+	projection.RegisterAdapter(taskcontrol.NewScrapeAdapter(db))
+	projection.RegisterAdapter(taskcontrol.NewScanAdapter(db))
 	stream := taskcontrol.NewStreamBroker(db, projection, taskcontrol.StreamBrokerConfig{})
-	return handler.NewTaskControl(db, registry, projection, stream)
+	control := handler.NewTaskControl(db, registry, projection, stream)
+	projection.SetActionResolver(control.Mutations.AllowedActions)
+	if scrapeController != nil {
+		control.Mutations.SetExternalOperationRequestHandler("scrape_task", "abort", scrapeController.Abort, taskcontrol.ScrapeAbortAction)
+		control.Mutations.SetExternalOperationRequestHandler("scrape_task", "reset", scrapeController.Reset, taskcontrol.ScrapeResetAction)
+		control.Mutations.SetExternalOperationRequestHandler("scrape_task", "remove", scrapeController.Remove, taskcontrol.ScrapeRemoveAction)
+	}
+	if coordinator != nil {
+		scanController := taskcontrol.NewScanTaskController(db, coordinator)
+		control.Mutations.SetExternalOperationRequestHandler("scan_task", "abort", scanController.Abort, taskcontrol.ScanAbortAction)
+		control.Mutations.SetExternalOperationRequestHandler("scan_task", "reset", scanController.Reset, taskcontrol.ScanResetAction)
+		control.Mutations.SetExternalOperationRequestHandler("scan_task", "remove", scanController.Remove, taskcontrol.ScanRemoveAction)
+	}
+	if dispatcher != nil {
+		control.Mutations.SetAbortNotifier(dispatcher.CancelTask)
+	}
+	log.Printf("task control: community build; transcode_task abort/remove handlers not registered")
+	return control
 }
 
 func startupBuildLog(info buildinfo.Info, identity store.SQLiteDBIdentity) string {

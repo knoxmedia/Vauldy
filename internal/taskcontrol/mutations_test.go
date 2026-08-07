@@ -3,9 +3,14 @@ package taskcontrol
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 	"testing"
+
+	"knox-media/internal/store"
 
 	_ "modernc.org/sqlite"
 )
@@ -58,14 +63,38 @@ func createMutationTestSchema(t *testing.T, db *sql.DB) error {
 			run_now_expires TIMESTAMP,
 			removed_at TIMESTAMP,
 			removed_by TEXT NOT NULL DEFAULT '',
-			remove_reason TEXT NOT NULL DEFAULT '',
-			abort_requested_at TIMESTAMP,
-			abort_timeout_recovery_required INTEGER NOT NULL DEFAULT 0
+			remove_reason TEXT NOT NULL DEFAULT ''
+		)		`,
+		`CREATE TABLE transcode_task (
+			id INTEGER PRIMARY KEY,
+			status TEXT NOT NULL DEFAULT 'waiting'
+		)`,
+		`CREATE TABLE media (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			library_id INTEGER,
+			file_id TEXT UNIQUE,
+			title TEXT,
+			original_title TEXT,
+			file_path TEXT,
+			file_type TEXT,
+			status TEXT DEFAULT 'active',
+			publication_state TEXT NOT NULL DEFAULT 'published'
 		)`,
 		`CREATE TABLE task_projection_revision (
 			task_identity TEXT PRIMARY KEY,
 			revision INTEGER NOT NULL DEFAULT 0,
 			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE TABLE task_abort_intent (
+			task_identity TEXT PRIMARY KEY,
+			requested_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			requested_by TEXT NOT NULL DEFAULT '',
+			reason TEXT NOT NULL DEFAULT '',
+			owner_fence TEXT NOT NULL DEFAULT '',
+			deadline TIMESTAMP,
+			acknowledged_at TIMESTAMP,
+			outcome TEXT NOT NULL DEFAULT '',
+			recovery_required_at TIMESTAMP
 		)`,
 		`CREATE TABLE task_projection_sequence (
 			singleton_id INTEGER PRIMARY KEY,
@@ -94,8 +123,8 @@ func createMutationTestSchema(t *testing.T, db *sql.DB) error {
 			FOREIGN KEY (operation_id) REFERENCES task_batch_operation(operation_id) ON DELETE RESTRICT
 		)`,
 		`CREATE TABLE task_control_audit (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			task_identity TEXT NOT NULL DEFAULT '',
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			task_type TEXT NOT NULL DEFAULT '',
 			actor_id INTEGER NOT NULL DEFAULT 0,
 			actor_name TEXT NOT NULL DEFAULT '',
@@ -141,7 +170,6 @@ func createMutationTestSchema(t *testing.T, db *sql.DB) error {
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			execution_id TEXT NOT NULL UNIQUE,
 			task_type TEXT NOT NULL DEFAULT '',
-			task_identity TEXT NOT NULL DEFAULT '',
 			reserved_units INTEGER NOT NULL DEFAULT 0,
 			policy_revision_id INTEGER NOT NULL DEFAULT 0,
 			status TEXT NOT NULL DEFAULT 'active',
@@ -204,17 +232,17 @@ func TestAbortRequestPersistsBeforeSignal(t *testing.T) {
 		t.Fatalf("abort request: %v", err)
 	}
 
-	// Verify row still running with abort_requested_at set
+	// Verify row stays running with a durable abort intent
 	var status string
 	var abortReq sql.NullTime
-	if err := db.QueryRow(`SELECT status, abort_requested_at FROM post_ingest_task WHERE id=?`, id).Scan(&status, &abortReq); err != nil {
+	if err := db.QueryRow(`SELECT status, requested_at FROM post_ingest_task, task_abort_intent WHERE post_ingest_task.id=? AND task_abort_intent.task_identity='orchestration:' || post_ingest_task.id`, id).Scan(&status, &abortReq); err != nil {
 		t.Fatal(err)
 	}
 	if status != "running" {
 		t.Errorf("expected running after abort request, got %s", status)
 	}
 	if !abortReq.Valid {
-		t.Error("abort_requested_at should be set after request")
+		t.Error("abort intent requested_at should be set after request")
 	}
 }
 
@@ -261,7 +289,7 @@ func TestAbortAcknowledgeCommitsCancelled(t *testing.T) {
 	var status string
 	var leaseOwner string
 	var abortReq sql.NullTime
-	if err := db.QueryRow(`SELECT status, lease_owner, abort_requested_at FROM post_ingest_task WHERE id=?`, id).Scan(&status, &leaseOwner, &abortReq); err != nil {
+	if err := db.QueryRow(`SELECT status, lease_owner, acknowledged_at FROM post_ingest_task, task_abort_intent WHERE post_ingest_task.id=? AND task_abort_intent.task_identity='orchestration:' || post_ingest_task.id`, id).Scan(&status, &leaseOwner, &abortReq); err != nil {
 		t.Fatal(err)
 	}
 	if status != "cancelled" {
@@ -318,14 +346,14 @@ func TestAbortTimeoutSetsRecoveryRequired(t *testing.T) {
 
 	var status string
 	var recoveryReq int
-	if err := db.QueryRow(`SELECT status, abort_timeout_recovery_required FROM post_ingest_task WHERE id=?`, id).Scan(&status, &recoveryReq); err != nil {
+	if err := db.QueryRow(`SELECT status, CASE WHEN recovery_required_at IS NULL THEN 0 ELSE 1 END FROM post_ingest_task, task_abort_intent WHERE post_ingest_task.id=? AND task_abort_intent.task_identity='orchestration:' || post_ingest_task.id`, id).Scan(&status, &recoveryReq); err != nil {
 		t.Fatal(err)
 	}
 	if status != "running" {
 		t.Errorf("expected still running after timeout, got %s", status)
 	}
 	if recoveryReq != 1 {
-		t.Errorf("expected abort_timeout_recovery_required=1, got %d", recoveryReq)
+		t.Errorf("expected abort intent recovery_required_at, got %d", recoveryReq)
 	}
 }
 
@@ -334,11 +362,14 @@ func TestFencedLeaseRecoveryCommitsCancelled(t *testing.T) {
 	svc := NewMutateService(db)
 	id := insertTestTask(t, db, "transcode", "running", 0)
 	// Set expired lease
-	_, err := db.Exec(`UPDATE post_ingest_task SET lease_owner='old-owner/uuid', lease_until=datetime('now','-10 minutes'), abort_requested_at=CURRENT_TIMESTAMP WHERE id=?`, id)
+	_, err := db.Exec(`UPDATE post_ingest_task SET lease_owner='old-owner/uuid', lease_until=datetime('now','-10 minutes') WHERE id=?`, id)
 	if err != nil {
 		t.Fatalf("set expired lease: %v", err)
 	}
 	taskID := BuildIdentity("orchestration", id)
+	if _, err = db.Exec(`INSERT INTO task_abort_intent(task_identity, requested_by, reason, owner_fence) VALUES(?, '1', 'test', 'old-owner/uuid')`, taskID); err != nil {
+		t.Fatalf("insert abort intent: %v", err)
+	}
 
 	err = svc.FencedLeaseRecovery(context.Background(), FencedRecoveryParams{
 		TaskIdentity: taskID,
@@ -365,11 +396,14 @@ func TestFencedLeaseRecoveryReleasesReservationOnce(t *testing.T) {
 	db := openMutationTestDB(t)
 	svc := NewMutateService(db)
 	id := insertTestTask(t, db, "transcode", "running", 0)
-	_, err := db.Exec(`UPDATE post_ingest_task SET lease_owner='old-owner/uuid', lease_until=datetime('now','-10 minutes'), abort_requested_at=CURRENT_TIMESTAMP WHERE id=?`, id)
+	_, err := db.Exec(`UPDATE post_ingest_task SET lease_owner='old-owner/uuid', lease_until=datetime('now','-10 minutes') WHERE id=?`, id)
 	if err != nil {
 		t.Fatalf("set expired: %v", err)
 	}
 	taskID := BuildIdentity("orchestration", id)
+	if _, err = db.Exec(`INSERT INTO task_abort_intent(task_identity, requested_by, reason, owner_fence) VALUES(?, '1', 'test', 'old-owner/uuid')`, taskID); err != nil {
+		t.Fatalf("insert abort intent: %v", err)
+	}
 
 	// First recovery
 	if err := svc.FencedLeaseRecovery(context.Background(), FencedRecoveryParams{
@@ -412,11 +446,14 @@ func TestUncertainOwnershipRemainsNonterminal(t *testing.T) {
 	svc := NewMutateService(db)
 	id := insertTestTask(t, db, "transcode", "running", 0)
 	// Set owner without UUID suffix (uncertain)
-	_, err := db.Exec(`UPDATE post_ingest_task SET lease_owner='unknown', lease_until=datetime('now','-10 minutes'), abort_requested_at=CURRENT_TIMESTAMP WHERE id=?`, id)
+	_, err := db.Exec(`UPDATE post_ingest_task SET lease_owner='unknown', lease_until=datetime('now','-10 minutes') WHERE id=?`, id)
 	if err != nil {
 		t.Fatalf("set uncertain owner: %v", err)
 	}
 	taskID := BuildIdentity("orchestration", id)
+	if _, err = db.Exec(`INSERT INTO task_abort_intent(task_identity, requested_by, reason, owner_fence) VALUES(?, '1', 'test', 'old-owner/uuid')`, taskID); err != nil {
+		t.Fatalf("insert abort intent: %v", err)
+	}
 
 	err = svc.FencedLeaseRecovery(context.Background(), FencedRecoveryParams{
 		TaskIdentity: taskID,
@@ -465,6 +502,46 @@ func TestCancelRunningTaskWithoutAbortRequestFails(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error: cancel running requires abort first")
+	}
+}
+
+func TestAbortNotifierRunsAfterCommitOnly(t *testing.T) {
+	db := openMutationTestDB(t)
+	svc := NewMutateService(db)
+	id := insertRunningTask(t, db, "transcode")
+	called := make(chan int64, 1)
+	svc.SetAbortNotifier(func(taskID int64) { called <- taskID })
+	if err := svc.AbortRequest(context.Background(), AbortRequestParams{TaskIdentity: BuildIdentity("orchestration", id), ActorID: 1, Reason: "stop"}); err != nil {
+		t.Fatalf("abort request: %v", err)
+	}
+	select {
+	case got := <-called:
+		if got != id {
+			t.Fatalf("notified task=%d want %d", got, id)
+		}
+	default:
+		t.Fatal("abort notifier was not called")
+	}
+	waiting := insertTestTask(t, db, "preview", "waiting", 0)
+	if err := svc.AbortRequest(context.Background(), AbortRequestParams{TaskIdentity: BuildIdentity("orchestration", waiting), ActorID: 1, Reason: "invalid"}); err == nil {
+		t.Fatal("expected abort request failure")
+	}
+	select {
+	case got := <-called:
+		t.Fatalf("notifier called after rollback for task %d", got)
+	default:
+	}
+}
+
+func TestFencedLeaseRecoveryRequiresIntent(t *testing.T) {
+	db := openMutationTestDB(t)
+	svc := NewMutateService(db)
+	id := insertTestTask(t, db, "transcode", "running", 0)
+	if _, err := db.Exec(`UPDATE post_ingest_task SET lease_owner='old-owner/uuid', lease_until=datetime('now','-10 minutes') WHERE id=?`, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.FencedLeaseRecovery(context.Background(), FencedRecoveryParams{TaskIdentity: BuildIdentity("orchestration", id), Reason: "recover"}); err == nil {
+		t.Fatal("expected recovery without intent to fail")
 	}
 }
 
@@ -589,28 +666,83 @@ func TestRemoveNeverDeletesSource(t *testing.T) {
 	}
 }
 
-func TestRemoveRequestsAbortForCancellableRunning(t *testing.T) {
+func TestRemoveRunningTombstonesAndConvergesOnAbortAcknowledge(t *testing.T) {
 	db := openMutationTestDB(t)
 	svc := NewMutateService(db)
 	id := insertRunningTask(t, db, "transcode")
 	taskID := BuildIdentity("orchestration", id)
+	notified := make(chan int64, 1)
+	svc.SetAbortNotifier(func(taskID int64) { notified <- taskID })
 
-	err := svc.Remove(context.Background(), RemoveParams{
+	if err := svc.Remove(context.Background(), RemoveParams{
 		TaskIdentity: taskID,
-		ActorID:      1,
+		ActorID:      7,
 		Reason:       "force remove",
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatalf("remove running: %v", err)
 	}
 
-	// Should have set abort_requested_at
-	var abortReq sql.NullTime
-	if err := db.QueryRow(`SELECT abort_requested_at FROM post_ingest_task WHERE id=?`, id).Scan(&abortReq); err != nil {
+	var status, leaseOwner, removedBy, removeReason string
+	var leaseUntil, removedAt, requestedAt, acknowledgedAt sql.NullTime
+	var intentOutcome, auditAction string
+	if err := db.QueryRow(`SELECT t.status,t.lease_owner,t.lease_until,t.removed_at,t.removed_by,t.remove_reason,
+		i.requested_at,i.acknowledged_at,i.outcome
+		FROM post_ingest_task t JOIN task_abort_intent i ON i.task_identity=? WHERE t.id=?`, taskID, id).
+		Scan(&status, &leaseOwner, &leaseUntil, &removedAt, &removedBy, &removeReason, &requestedAt, &acknowledgedAt, &intentOutcome); err != nil {
 		t.Fatal(err)
 	}
-	if !abortReq.Valid {
-		t.Error("abort_requested_at should be set when removing running task")
+	if status != "running" || leaseOwner != "test-owner/uuid" || !leaseUntil.Valid {
+		t.Fatalf("running lease changed: status=%q owner=%q until=%v", status, leaseOwner, leaseUntil.Valid)
+	}
+	if !removedAt.Valid || removedBy != "7" || removeReason != "force remove" {
+		t.Fatalf("tombstone time=%v by=%q reason=%q", removedAt.Valid, removedBy, removeReason)
+	}
+	if !requestedAt.Valid || acknowledgedAt.Valid || intentOutcome != "" {
+		t.Fatalf("abort intent requested=%v acknowledged=%v outcome=%q", requestedAt.Valid, acknowledgedAt.Valid, intentOutcome)
+	}
+	var visible int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM post_ingest_task WHERE id=? AND removed_at IS NULL`, id).Scan(&visible); err != nil {
+		t.Fatal(err)
+	}
+	if visible != 0 {
+		t.Fatal("removed=exclude should hide the running task immediately")
+	}
+	if err := db.QueryRow(`SELECT action FROM task_control_audit WHERE task_identity=? ORDER BY id DESC LIMIT 1`, taskID).Scan(&auditAction); err != nil {
+		t.Fatal(err)
+	}
+	if auditAction != "remove_abort_request" {
+		t.Fatalf("audit action=%q", auditAction)
+	}
+	select {
+	case got := <-notified:
+		if got != id {
+			t.Fatalf("notified task=%d want=%d", got, id)
+		}
+	default:
+		t.Fatal("abort notifier did not fire after remove commit")
+	}
+
+	if err := svc.Remove(context.Background(), RemoveParams{TaskIdentity: taskID, ActorID: 7, Reason: "force remove"}); err != nil {
+		t.Fatalf("idempotent remove replay: %v", err)
+	}
+	select {
+	case got := <-notified:
+		t.Fatalf("remove replay unexpectedly notified task %d", got)
+	default:
+	}
+
+	if err := svc.AbortAcknowledge(context.Background(), AbortAckParams{
+		TaskIdentity: taskID,
+		OwnerFence:   "test-owner/uuid",
+	}); err != nil {
+		t.Fatalf("abort acknowledge: %v", err)
+	}
+	if err := db.QueryRow(`SELECT status,removed_at,removed_by,remove_reason FROM post_ingest_task WHERE id=?`, id).
+		Scan(&status, &removedAt, &removedBy, &removeReason); err != nil {
+		t.Fatal(err)
+	}
+	if status != "cancelled" || !removedAt.Valid || removedBy != "7" || removeReason != "force remove" {
+		t.Fatalf("ack result status=%q tombstone=%v by=%q reason=%q", status, removedAt.Valid, removedBy, removeReason)
 	}
 }
 
@@ -719,10 +851,10 @@ func TestResetValidatesGeneration(t *testing.T) {
 	taskID := BuildIdentity("orchestration", id)
 
 	err := svc.Reset(context.Background(), ResetParams{
-		TaskIdentity:         taskID,
-		ActorID:              1,
-		Reason:               "retry",
-		ExpectedGeneration:   99, // wrong generation
+		TaskIdentity:       taskID,
+		ActorID:            1,
+		Reason:             "retry",
+		ExpectedGeneration: 99, // wrong generation
 	})
 	if err == nil {
 		t.Fatal("expected error: generation mismatch")
@@ -748,18 +880,34 @@ func TestResetNonTerminalFails(t *testing.T) {
 func TestStaleRevisionReturnsLatestRow(t *testing.T) {
 	db := openMutationTestDB(t)
 	svc := NewMutateService(db)
-	id := insertTestTask(t, db, "transcode", "failed", 0)
+	id := insertTestTask(t, db, "transcode", "failed", 3)
 	taskID := BuildIdentity("orchestration", id)
+	if _, err := db.Exec(`INSERT INTO task_projection_revision(task_identity,revision) VALUES(?, 12)`, taskID); err != nil {
+		t.Fatal(err)
+	}
 
 	err := svc.Reset(context.Background(), ResetParams{
-		TaskIdentity:       taskID,
-		ActorID:            1,
-		Reason:             "retry",
-		ExpectedRevision:   999, // stale revision
+		TaskIdentity:     taskID,
+		ActorID:          1,
+		Reason:           "retry",
+		ExpectedRevision: 11,
 	})
-	// Stale revision should return the latest row without error (no mutation but returns current state)
-	if err != nil {
-		t.Fatalf("stale revision should return latest row: %v", err)
+	if !errors.Is(err, ErrStaleRevision) {
+		t.Fatalf("reset error=%v, want ErrStaleRevision", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "expected rev 11, got 12") {
+		t.Fatalf("stale revision details missing: %v", err)
+	}
+	var status string
+	var retryRound, audits int
+	if err := db.QueryRow(`SELECT status,retry_round FROM post_ingest_task WHERE id=?`, id).Scan(&status, &retryRound); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM task_control_audit WHERE task_identity=? AND action='reset'`, taskID).Scan(&audits); err != nil {
+		t.Fatal(err)
+	}
+	if status != "failed" || retryRound != 3 || audits != 0 {
+		t.Fatalf("stale reset mutated state: status=%q retry_round=%d audits=%d", status, retryRound, audits)
 	}
 }
 
@@ -770,10 +918,10 @@ func TestRetryRoundMonotonicallyIncreases(t *testing.T) {
 	taskID := BuildIdentity("orchestration", id)
 
 	if err := svc.Reset(context.Background(), ResetParams{
-		TaskIdentity:         taskID,
-		ActorID:              1,
-		Reason:               "retry",
-		ExpectedRetryRound:   5,
+		TaskIdentity:       taskID,
+		ActorID:            1,
+		Reason:             "retry",
+		ExpectedRetryRound: 5,
 	}); err != nil {
 		t.Fatalf("reset: %v", err)
 	}
@@ -1004,6 +1152,329 @@ func TestSkipRequiresPolicy(t *testing.T) {
 	}
 }
 
+func openLinkedMutationTestDB(t *testing.T) *sql.DB {
+	t.Helper()
+	db, err := store.OpenSQLite(":memory:")
+	if err != nil {
+		t.Fatalf("open linked mutation db: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+
+func seedLinkedMutationGraph(t *testing.T, db *sql.DB) (runID, sourceStepID, dependentStepID, sourceTaskID, dependentTaskID int64) {
+	t.Helper()
+	_, err := db.Exec(`
+INSERT INTO library(name,type,path) VALUES('taskcontrol','video','/taskcontrol');
+INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state) VALUES(1,1,'linked','video',1,'processing');
+INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(10,1,1,'scan','processing','{}',1);
+INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status,attempts,max_attempts,lease_owner,lease_until) VALUES
+ (11,10,1,1,'preview',0,'waiting',0,3,'stale-owner',datetime(CURRENT_TIMESTAMP,'+60 seconds')),
+ (12,10,1,1,'ai_analysis',0,'waiting',0,3,'dependent-owner',datetime(CURRENT_TIMESTAMP,'+60 seconds'));
+INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind) VALUES(12,11,'success');
+INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status,attempts,max_attempts,lease_owner,lease_until) VALUES
+ (111,1,10,11,1,'preview','waiting',0,3,'stale-owner',datetime(CURRENT_TIMESTAMP,'+60 seconds')),
+ (112,1,10,12,1,'ai_analysis','waiting',0,3,'dependent-owner',datetime(CURRENT_TIMESTAMP,'+60 seconds'));`)
+	if err != nil {
+		t.Fatalf("seed linked graph: %v", err)
+	}
+	return 10, 11, 12, 111, 112
+}
+
+func TestResetReopensLinkedRequiredStepRunAndMedia(t *testing.T) {
+	db := openLinkedMutationTestDB(t)
+	svc := NewMutateService(db)
+	_, err := db.Exec(`
+INSERT INTO library(name,type,path) VALUES('taskcontrol-reset','video','/taskcontrol-reset');
+INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state,published_at) VALUES(1,1,'linked-reset','video',1,'degraded',CURRENT_TIMESTAMP);
+INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version,preserve_visibility,finished_at) VALUES(20,1,1,'scan','degraded','{}',3,0,CURRENT_TIMESTAMP);
+INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status,attempts,max_attempts,last_error,retry_round) VALUES
+ (21,20,1,1,'poster',1,'failed',1,1,'context deadline exceeded',0),
+ (22,20,1,1,'media_visible',0,'cancelled',0,1,'',0);
+INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status,attempts,max_attempts,retry_round,last_error) VALUES
+ (200,1,20,21,1,'poster','failed',1,1,0,'context deadline exceeded');`)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	taskID := BuildIdentity("orchestration", 200)
+	if err := svc.Reset(context.Background(), ResetParams{TaskIdentity: taskID, ActorID: 1, Reason: "retry"}); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+
+	var status string
+	var retryRound, attempts int
+	if err := db.QueryRow(`SELECT status, retry_round, attempts FROM post_ingest_task WHERE id=200`).Scan(&status, &retryRound, &attempts); err != nil {
+		t.Fatal(err)
+	}
+	if status != "waiting" || retryRound != 1 || attempts != 0 {
+		t.Errorf("task not reset: status=%s retry_round=%d attempts=%d", status, retryRound, attempts)
+	}
+
+	var stepStatus string
+	var stepAttempts, stepRound int
+	if err := db.QueryRow(`SELECT status, attempts, retry_round FROM media_ingest_step WHERE id=21`).Scan(&stepStatus, &stepAttempts, &stepRound); err != nil {
+		t.Fatal(err)
+	}
+	if stepStatus != "waiting" || stepAttempts != 0 || stepRound != 1 {
+		t.Errorf("linked step not reopened: status=%s attempts=%d retry_round=%d", stepStatus, stepAttempts, stepRound)
+	}
+
+	var runStatus string
+	if err := db.QueryRow(`SELECT status FROM media_ingest_run WHERE id=20`).Scan(&runStatus); err != nil {
+		t.Fatal(err)
+	}
+	if runStatus != "processing" {
+		t.Errorf("run should be processing after required reset, got %s", runStatus)
+	}
+
+	var pubState string
+	if err := db.QueryRow(`SELECT publication_state FROM media WHERE id=1`).Scan(&pubState); err != nil {
+		t.Fatal(err)
+	}
+	if pubState != "processing" {
+		t.Errorf("media should be processing for non-preserve run, got %s", pubState)
+	}
+
+	// The claim eligibility predicate for a required linked step now holds:
+	// task waiting, step waiting, run processing.
+	var eligible int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM post_ingest_task q LEFT JOIN media_ingest_step st ON st.id=q.ingest_step_id WHERE q.id=200 AND q.status='waiting' AND st.status='waiting' AND st.required=1`).Scan(&eligible); err != nil {
+		t.Fatal(err)
+	}
+	if eligible != 1 {
+		t.Error("reset task should be claim-eligible with a waiting required step")
+	}
+}
+
+func TestResetLinkedOptionalStepKeepsPublishedRun(t *testing.T) {
+	db := openLinkedMutationTestDB(t)
+	svc := NewMutateService(db)
+	_, err := db.Exec(`
+INSERT INTO library(name,type,path) VALUES('taskcontrol-optional','video','/taskcontrol-optional');
+INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state,published_at) VALUES(1,1,'linked-optional','video',1,'published',CURRENT_TIMESTAMP);
+INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version,preserve_visibility,finished_at) VALUES(30,1,1,'scan','published','{}',3,0,CURRENT_TIMESTAMP);
+INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status,attempts,max_attempts,last_error,retry_round) VALUES
+ (31,30,1,1,'preview',0,'failed',1,3,'boom',0);
+INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status,attempts,max_attempts,retry_round,last_error) VALUES
+ (300,1,30,31,1,'preview','failed',1,3,0,'boom');`)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	taskID := BuildIdentity("orchestration", 300)
+	if err := svc.Reset(context.Background(), ResetParams{TaskIdentity: taskID, ActorID: 1, Reason: "retry"}); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+
+	var runStatus string
+	if err := db.QueryRow(`SELECT status FROM media_ingest_run WHERE id=30`).Scan(&runStatus); err != nil {
+		t.Fatal(err)
+	}
+	if runStatus != "published" {
+		t.Errorf("optional reset should keep run published, got %s", runStatus)
+	}
+
+	var pubState string
+	if err := db.QueryRow(`SELECT publication_state FROM media WHERE id=1`).Scan(&pubState); err != nil {
+		t.Fatal(err)
+	}
+	if pubState != "published" {
+		t.Errorf("media should stay published for optional reset, got %s", pubState)
+	}
+}
+
+func TestResetRejectsSupersededRun(t *testing.T) {
+	db := openLinkedMutationTestDB(t)
+	svc := NewMutateService(db)
+	_, err := db.Exec(`
+INSERT INTO library(name,type,path) VALUES('taskcontrol-superseded','video','/taskcontrol-superseded');
+INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state) VALUES(1,1,'linked-superseded','video',2,'published');
+INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version,superseded_at,superseded_by_generation,finished_at) VALUES(40,1,1,'scan','cancelled','{}',3,CURRENT_TIMESTAMP,2,CURRENT_TIMESTAMP);
+INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status,attempts,max_attempts,last_error,retry_round) VALUES
+ (41,40,1,1,'poster',1,'failed',1,1,'context deadline exceeded',0);
+INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status,attempts,max_attempts,retry_round,last_error) VALUES
+ (400,1,40,41,1,'poster','failed',1,1,0,'context deadline exceeded');`)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	taskID := BuildIdentity("orchestration", 400)
+	err = svc.Reset(context.Background(), ResetParams{TaskIdentity: taskID, ActorID: 1, Reason: "retry"})
+	if !errors.Is(err, ErrSuperseded) {
+		t.Fatalf("expected ErrSuperseded, got %v", err)
+	}
+
+	var status string
+	if err := db.QueryRow(`SELECT status FROM post_ingest_task WHERE id=400`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "failed" {
+		t.Fatalf("task must not be reset for superseded run, got %s", status)
+	}
+}
+
+func assertLinkedTerminalPropagation(t *testing.T, db *sql.DB, sourceStepID, dependentStepID, sourceTaskID, dependentTaskID int64, wantSource string) {
+	t.Helper()
+	var queueSource, stepSource, queueDependent, stepDependent string
+	var queueLease, stepLease sql.NullString
+	var stepFinished sql.NullTime
+	var stepReason string
+	if err := db.QueryRow(`SELECT status,lease_owner FROM post_ingest_task WHERE id=?`, sourceTaskID).Scan(&queueSource, &queueLease); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT status,lease_owner,finished_at,last_error FROM media_ingest_step WHERE id=?`, sourceStepID).Scan(&stepSource, &stepLease, &stepFinished, &stepReason); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT status FROM post_ingest_task WHERE id=?`, dependentTaskID).Scan(&queueDependent); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT status FROM media_ingest_step WHERE id=?`, dependentStepID).Scan(&stepDependent); err != nil {
+		t.Fatal(err)
+	}
+	if queueSource != wantSource || stepSource != wantSource || queueDependent != "skipped" || stepDependent != "skipped" {
+		t.Fatalf("queue/step source=%s/%s dependent=%s/%s", queueSource, stepSource, queueDependent, stepDependent)
+	}
+	if queueLease.Valid && queueLease.String != "" || stepLease.Valid && stepLease.String != "" || !stepFinished.Valid || stepReason == "" {
+		t.Fatalf("terminal fields queue lease=%q step lease=%q finished=%v reason=%q", queueLease.String, stepLease.String, stepFinished.Valid, stepReason)
+	}
+}
+
+func TestAbortAcknowledgeLinkedRunningTaskFinalizesStepAndIntent(t *testing.T) {
+	db := openLinkedMutationTestDB(t)
+	runID, sourceStep, dependentStep, sourceTask, dependentTask := seedLinkedMutationGraph(t, db)
+	owner := "linked-worker/abort-fence"
+	taskIdentity := BuildIdentity("orchestration", sourceTask)
+	if _, err := db.Exec(`UPDATE post_ingest_task SET status='running',lease_owner=?,lease_until=datetime(CURRENT_TIMESTAMP,'+60 seconds'),started_at=CURRENT_TIMESTAMP WHERE id=?`, owner, sourceTask); err != nil {
+		t.Fatalf("seed linked running queue: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE media_ingest_step SET status='running',lease_owner=?,lease_until=datetime(CURRENT_TIMESTAMP,'+60 seconds'),started_at=CURRENT_TIMESTAMP WHERE id=?`, owner, sourceStep); err != nil {
+		t.Fatalf("seed linked running step: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO task_abort_intent(task_identity,requested_by,reason,owner_fence,deadline) VALUES(?, '7', 'operator abort', ?, datetime(CURRENT_TIMESTAMP,'+10 seconds'))`, taskIdentity, owner); err != nil {
+		t.Fatalf("seed linked abort intent: %v", err)
+	}
+
+	svc := NewMutateService(db)
+	if err := svc.AbortAcknowledge(context.Background(), AbortAckParams{TaskIdentity: taskIdentity, OwnerFence: owner}); err != nil {
+		t.Fatalf("acknowledge linked abort: %v", err)
+	}
+
+	var queueStatus, stepStatus, intentOutcome string
+	var queueOwner, stepOwner sql.NullString
+	var acknowledgedAt sql.NullTime
+	if err := db.QueryRow(`SELECT status,lease_owner FROM post_ingest_task WHERE id=?`, sourceTask).Scan(&queueStatus, &queueOwner); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT status,lease_owner FROM media_ingest_step WHERE id=? AND run_id=?`, sourceStep, runID).Scan(&stepStatus, &stepOwner); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT acknowledged_at,outcome FROM task_abort_intent WHERE task_identity=?`, taskIdentity).Scan(&acknowledgedAt, &intentOutcome); err != nil {
+		t.Fatal(err)
+	}
+	if queueStatus != "cancelled" || stepStatus != "cancelled" || queueOwner.String != "" || stepOwner.String != "" {
+		t.Fatalf("terminal queue=%s owner=%q step=%s owner=%q", queueStatus, queueOwner.String, stepStatus, stepOwner.String)
+	}
+	if !acknowledgedAt.Valid || intentOutcome != "cancelled" {
+		t.Fatalf("intent acknowledged=%v outcome=%q", acknowledgedAt.Valid, intentOutcome)
+	}
+	var dependentQueueStatus, dependentStepStatus string
+	if err := db.QueryRow(`SELECT status FROM post_ingest_task WHERE id=?`, dependentTask).Scan(&dependentQueueStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT status FROM media_ingest_step WHERE id=?`, dependentStep).Scan(&dependentStepStatus); err != nil {
+		t.Fatal(err)
+	}
+	if dependentQueueStatus != "skipped" || dependentStepStatus != "skipped" {
+		t.Fatalf("publication finalization did not propagate dependency: queue=%s step=%s", dependentQueueStatus, dependentStepStatus)
+	}
+}
+func TestFencedLeaseRecoveryLinkedRunningTaskFinalizesStep(t *testing.T) {
+	db := openLinkedMutationTestDB(t)
+	_, sourceStep, dependentStep, sourceTask, dependentTask := seedLinkedMutationGraph(t, db)
+	owner := "linked-worker/recovery-fence"
+	taskIdentity := BuildIdentity("orchestration", sourceTask)
+	if _, err := db.Exec(`UPDATE post_ingest_task SET status='running',lease_owner=?,lease_until=datetime(CURRENT_TIMESTAMP,'-60 seconds'),started_at=CURRENT_TIMESTAMP WHERE id=?`, owner, sourceTask); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE media_ingest_step SET status='running',lease_owner=?,lease_until=datetime(CURRENT_TIMESTAMP,'-60 seconds'),started_at=CURRENT_TIMESTAMP WHERE id=?`, owner, sourceStep); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO task_abort_intent(task_identity,requested_by,reason,owner_fence,deadline,recovery_required_at,outcome) VALUES(?, '7', 'operator abort', ?, datetime(CURRENT_TIMESTAMP,'-50 seconds'), CURRENT_TIMESTAMP, 'timeout')`, taskIdentity, owner); err != nil {
+		t.Fatal(err)
+	}
+
+	svc := NewMutateService(db)
+	if err := svc.FencedLeaseRecovery(context.Background(), FencedRecoveryParams{TaskIdentity: taskIdentity, ActorID: 7, Reason: "abort timeout recovery"}); err != nil {
+		t.Fatalf("fenced linked recovery: %v", err)
+	}
+	assertLinkedTerminalPropagation(t, db, sourceStep, dependentStep, sourceTask, dependentTask, "cancelled")
+	var acknowledgedAt, recoveryAt sql.NullTime
+	var outcome string
+	if err := db.QueryRow(`SELECT acknowledged_at,recovery_required_at,outcome FROM task_abort_intent WHERE task_identity=?`, taskIdentity).Scan(&acknowledgedAt, &recoveryAt, &outcome); err != nil {
+		t.Fatal(err)
+	}
+	if !acknowledgedAt.Valid || !recoveryAt.Valid || outcome != "recovered" {
+		t.Fatalf("intent acknowledged=%v recovery=%v outcome=%q", acknowledgedAt.Valid, recoveryAt.Valid, outcome)
+	}
+}
+func TestRemoveLinkedWaitingTaskSynchronizesStepAndTombstone(t *testing.T) {
+	db := openLinkedMutationTestDB(t)
+	_, sourceStep, dependentStep, sourceTask, dependentTask := seedLinkedMutationGraph(t, db)
+	svc := NewMutateService(db)
+	if err := svc.Remove(context.Background(), RemoveParams{TaskIdentity: BuildIdentity("orchestration", sourceTask), ActorID: 7, Reason: "operator removal"}); err != nil {
+		t.Fatalf("remove linked task: %v", err)
+	}
+	assertLinkedTerminalPropagation(t, db, sourceStep, dependentStep, sourceTask, dependentTask, "cancelled")
+	var removedAt sql.NullTime
+	var removedBy, removeReason string
+	if err := db.QueryRow(`SELECT removed_at,removed_by,remove_reason FROM post_ingest_task WHERE id=?`, sourceTask).Scan(&removedAt, &removedBy, &removeReason); err != nil {
+		t.Fatal(err)
+	}
+	if !removedAt.Valid || removedBy != "7" || removeReason != "operator removal" {
+		t.Fatalf("tombstone time=%v by=%q reason=%q", removedAt.Valid, removedBy, removeReason)
+	}
+}
+
+func TestSkipLinkedWaitingTaskSynchronizesStepAndDependencies(t *testing.T) {
+	db := openLinkedMutationTestDB(t)
+	_, sourceStep, dependentStep, sourceTask, dependentTask := seedLinkedMutationGraph(t, db)
+	svc := NewMutateService(db)
+	if err := svc.Skip(context.Background(), SkipParams{TaskIdentity: BuildIdentity("orchestration", sourceTask), ActorID: 8, Reason: "policy skip"}); err != nil {
+		t.Fatalf("skip linked task: %v", err)
+	}
+	assertLinkedTerminalPropagation(t, db, sourceStep, dependentStep, sourceTask, dependentTask, "skipped")
+	var removedAt sql.NullTime
+	if err := db.QueryRow(`SELECT removed_at FROM post_ingest_task WHERE id=?`, sourceTask).Scan(&removedAt); err != nil {
+		t.Fatal(err)
+	}
+	if removedAt.Valid {
+		t.Fatal("skip must not tombstone the task")
+	}
+}
+
+func TestRemoveLinkedTaskRollsBackWhenFinalizationFails(t *testing.T) {
+	db := openLinkedMutationTestDB(t)
+	_, sourceStep, _, sourceTask, _ := seedLinkedMutationGraph(t, db)
+	if _, err := db.Exec(`CREATE TRIGGER fail_taskcontrol_plan BEFORE INSERT ON media_plan_completion BEGIN SELECT RAISE(ABORT,'plan blocked'); END`); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewMutateService(db)
+	if err := svc.Remove(context.Background(), RemoveParams{TaskIdentity: BuildIdentity("orchestration", sourceTask), ActorID: 9, Reason: "must rollback"}); err == nil {
+		t.Fatal("expected finalization failure")
+	}
+	var queueStatus, stepStatus string
+	var removedAt sql.NullTime
+	if err := db.QueryRow(`SELECT status,removed_at FROM post_ingest_task WHERE id=?`, sourceTask).Scan(&queueStatus, &removedAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT status FROM media_ingest_step WHERE id=?`, sourceStep).Scan(&stepStatus); err != nil {
+		t.Fatal(err)
+	}
+	if queueStatus != "waiting" || stepStatus != "waiting" || removedAt.Valid {
+		t.Fatalf("rollback queue=%s step=%s removed=%v", queueStatus, stepStatus, removedAt.Valid)
+	}
+}
 func TestSkipNonWaitingFails(t *testing.T) {
 	db := openMutationTestDB(t)
 	svc := NewMutateService(db)
@@ -1046,41 +1517,17 @@ func TestSkipPropagatesDependencyImpossibility(t *testing.T) {
 }
 
 func TestDependencyPropagationOnSkip(t *testing.T) {
-	db := openMutationTestDB(t)
+	db := openLinkedMutationTestDB(t)
+	_, sourceStep, dependentStep, sourceTask, dependentTask := seedLinkedMutationGraph(t, db)
 	svc := NewMutateService(db)
-
-	// Create two tasks: an ingest run with steps
-	_, err := db.Exec(`INSERT INTO media_ingest_run (id, media_id, generation, status) VALUES (1, 1, 1, 'processing')`)
-	if err != nil {
-		t.Fatalf("insert run: %v", err)
-	}
-	// Step 1 (subtitle_extract) with post_ingest_task
-	id1 := insertTestTask(t, db, "subtitle_extract", "waiting", 0)
-	_, err = db.Exec(`INSERT INTO media_ingest_step (id, run_id, media_id, generation, step_type, status) VALUES (10, 1, 1, 1, 'subtitle_extract', 'waiting')`)
-	if err != nil {
-		t.Fatalf("insert step: %v", err)
-	}
-	_, err = db.Exec(`UPDATE post_ingest_task SET ingest_run_id=1, ingest_step_id=10 WHERE id=?`, id1)
-	if err != nil {
-		t.Fatalf("link task to step: %v", err)
-	}
-	taskID := BuildIdentity("orchestration", id1)
-
 	if err := svc.Skip(context.Background(), SkipParams{
-		TaskIdentity: taskID,
+		TaskIdentity: BuildIdentity("orchestration", sourceTask),
 		ActorID:      1,
 		Reason:       "dep impossible",
 	}); err != nil {
 		t.Fatalf("skip: %v", err)
 	}
-
-	var status string
-	if err := db.QueryRow(`SELECT status FROM post_ingest_task WHERE id=?`, id1).Scan(&status); err != nil {
-		t.Fatal(err)
-	}
-	if status != "skipped" {
-		t.Errorf("expected skipped, got %s", status)
-	}
+	assertLinkedTerminalPropagation(t, db, sourceStep, dependentStep, sourceTask, dependentTask, "skipped")
 }
 
 // =============================================================================
@@ -1535,5 +1982,362 @@ func TestBatchResultSerializationForReplay(t *testing.T) {
 	}
 	if result1.RequestedCount != result2.RequestedCount {
 		t.Error("requested_count mismatch in replay")
+	}
+}
+
+func TestBatchAbortPersistsDistinctFencesAndNotifiesAfterCommit(t *testing.T) {
+	db := openMutationTestDB(t)
+	svc := NewMutateService(db)
+	id1 := insertRunningTask(t, db, "preview")
+	id2 := insertRunningTask(t, db, "preview")
+	if _, err := db.Exec(`UPDATE post_ingest_task SET lease_owner=CASE id WHEN ? THEN 'preview-owner/one' ELSE 'preview-owner/two' END WHERE id IN (?, ?)`, id1, id1, id2); err != nil {
+		t.Fatal(err)
+	}
+	taskID1 := BuildIdentity("orchestration", id1)
+	taskID2 := BuildIdentity("orchestration", id2)
+	var notified []int64
+	svc.SetAbortNotifier(func(taskID int64) {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM task_abort_intent WHERE task_identity=?`, BuildIdentity("orchestration", taskID)).Scan(&count); err != nil {
+			t.Errorf("query committed intent in notifier: %v", err)
+		} else if count != 1 {
+			t.Errorf("notifier ran before intent commit for task %d", taskID)
+		}
+		notified = append(notified, taskID)
+	})
+	params := BatchParams{
+		OperationID: "00000000-0000-0000-0000-000000000013",
+		Action:      "abort",
+		ActorID:     42,
+		Reason:      "stop previews",
+		Items:       []BatchItem{{TaskIdentity: taskID1}, {TaskIdentity: taskID2}},
+	}
+	result, err := svc.Batch(context.Background(), params)
+	if err != nil {
+		t.Fatalf("batch abort: %v", err)
+	}
+	if result.Succeeded != 2 || result.Failed != 0 || len(result.Items) != 2 {
+		t.Fatalf("result=%+v", result)
+	}
+	for taskID, fence := range map[string]string{taskID1: "preview-owner/one", taskID2: "preview-owner/two"} {
+		var gotFence, requestedBy, reason, status string
+		_, id, _ := parseIdentity(taskID)
+		if err := db.QueryRow(`SELECT i.owner_fence,i.requested_by,i.reason,t.status FROM task_abort_intent i JOIN post_ingest_task t ON t.id=? WHERE i.task_identity=?`, id, taskID).Scan(&gotFence, &requestedBy, &reason, &status); err != nil {
+			t.Fatal(err)
+		}
+		if gotFence != fence || requestedBy != "42" || reason != "stop previews" || status != "running" {
+			t.Errorf("task %s intent=(%q,%q,%q) status=%q", taskID, gotFence, requestedBy, reason, status)
+		}
+	}
+	if len(notified) != 2 || notified[0] != id1 || notified[1] != id2 {
+		t.Fatalf("notified=%v want [%d %d]", notified, id1, id2)
+	}
+
+	replay, err := svc.Batch(context.Background(), params)
+	if err != nil {
+		t.Fatalf("replay batch abort: %v", err)
+	}
+	if replay.Succeeded != 2 || replay.Failed != 0 || len(notified) != 2 {
+		t.Fatalf("replay=%+v notified=%v", replay, notified)
+	}
+}
+
+func TestBatchAbortMixedRunningAndWaiting(t *testing.T) {
+	db := openMutationTestDB(t)
+	svc := NewMutateService(db)
+	runningID := insertRunningTask(t, db, "preview")
+	waitingID := insertTestTask(t, db, "preview", "waiting", 0)
+	var notified []int64
+	svc.SetAbortNotifier(func(taskID int64) { notified = append(notified, taskID) })
+	result, err := svc.Batch(context.Background(), BatchParams{
+		OperationID: "00000000-0000-0000-0000-000000000014",
+		Action:      "abort",
+		ActorID:     7,
+		Reason:      "mixed abort",
+		Items: []BatchItem{
+			{TaskIdentity: BuildIdentity("orchestration", runningID)},
+			{TaskIdentity: BuildIdentity("orchestration", waitingID)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("batch abort: %v", err)
+	}
+	if result.Succeeded != 1 || result.Failed != 1 || len(result.Items) != 2 || !result.Items[0].Ok || result.Items[1].Ok || result.Items[1].OutcomeCode != "permanent_failure" {
+		t.Fatalf("result=%+v", result)
+	}
+	if len(notified) != 1 || notified[0] != runningID {
+		t.Fatalf("notified=%v want [%d]", notified, runningID)
+	}
+	var runningIntents, waitingIntents int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM task_abort_intent WHERE task_identity=?`, BuildIdentity("orchestration", runningID)).Scan(&runningIntents); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM task_abort_intent WHERE task_identity=?`, BuildIdentity("orchestration", waitingID)).Scan(&waitingIntents); err != nil {
+		t.Fatal(err)
+	}
+	if runningIntents != 1 || waitingIntents != 0 {
+		t.Fatalf("intent counts running=%d waiting=%d", runningIntents, waitingIntents)
+	}
+}
+
+func TestBatchAbortAuditFailureRollsBackIntentAndSkipsNotifier(t *testing.T) {
+	db := openMutationTestDB(t)
+	svc := NewMutateService(db)
+	id := insertRunningTask(t, db, "preview")
+	taskID := BuildIdentity("orchestration", id)
+	if _, err := db.Exec(`CREATE TRIGGER fail_abort_audit BEFORE INSERT ON task_control_audit WHEN NEW.action='abort_request' BEGIN SELECT RAISE(ABORT,'audit blocked'); END`); err != nil {
+		t.Fatal(err)
+	}
+	var notified []int64
+	svc.SetAbortNotifier(func(taskID int64) { notified = append(notified, taskID) })
+	result, err := svc.Batch(context.Background(), BatchParams{
+		OperationID: "00000000-0000-0000-0000-000000000015",
+		Action:      "abort",
+		ActorID:     9,
+		Reason:      "fault injection",
+		Items:       []BatchItem{{TaskIdentity: taskID}},
+	})
+	if err != nil {
+		t.Fatalf("batch abort: %v", err)
+	}
+	if result.Succeeded != 0 || result.Failed != 1 || len(result.Items) != 1 || result.Items[0].OutcomeCode != "retryable_failure" {
+		t.Fatalf("result=%+v", result)
+	}
+	var intents, audits int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM task_abort_intent WHERE task_identity=?`, taskID).Scan(&intents); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM task_control_audit WHERE task_identity=? AND action='abort_request'`, taskID).Scan(&audits); err != nil {
+		t.Fatal(err)
+	}
+	if intents != 0 || audits != 0 || len(notified) != 0 {
+		t.Fatalf("intents=%d audits=%d notified=%v", intents, audits, notified)
+	}
+}
+
+func TestBatchAbortCoversAllRegisteredPostIngestTypes(t *testing.T) {
+	db := openMutationTestDB(t)
+	svc := NewMutateService(db)
+
+	internalTypes := make(map[string]struct{})
+	for _, group := range NewRegistry().Groups {
+		for _, spec := range group.Types {
+			for _, mapping := range spec.SourceMappings {
+				if mapping.Kind == "post_ingest_task" && mapping.InternalType != "" {
+					internalTypes[mapping.InternalType] = struct{}{}
+				}
+			}
+		}
+	}
+	if len(internalTypes) < 10 {
+		t.Fatalf("discovered only %d post_ingest_task internal types: %v", len(internalTypes), internalTypes)
+	}
+	representativeTypes := []string{"poster", "poster_repair", "preview"}
+	if _, subtitleIsPostIngest := internalTypes["subtitle"]; subtitleIsPostIngest {
+		representativeTypes = append(representativeTypes, "subtitle")
+	}
+	for _, required := range representativeTypes {
+		if _, ok := internalTypes[required]; !ok {
+			t.Errorf("registry is missing required post_ingest_task type %q", required)
+		}
+	}
+
+	types := make([]string, 0, len(internalTypes))
+	for internalType := range internalTypes {
+		types = append(types, internalType)
+	}
+	sort.Strings(types)
+
+	items := make([]BatchItem, 0, len(types))
+	identityToFence := make(map[string]string, len(types))
+	identityToID := make(map[string]int64, len(types))
+	for index, internalType := range types {
+		id := insertTestTask(t, db, internalType, "running", 0)
+		fence := fmt.Sprintf("registry-owner/%02d-%s", index, internalType)
+		if _, err := db.Exec(`UPDATE post_ingest_task SET lease_owner=?, lease_until=datetime('now','+5 minutes') WHERE id=?`, fence, id); err != nil {
+			t.Fatalf("set %s lease: %v", internalType, err)
+		}
+		identity := BuildIdentity("orchestration", id)
+		items = append(items, BatchItem{TaskIdentity: identity})
+		identityToFence[identity] = fence
+		identityToID[identity] = id
+	}
+
+	notified := make(map[int64]int, len(types))
+	svc.SetAbortNotifier(func(taskID int64) { notified[taskID]++ })
+	result, err := svc.Batch(context.Background(), BatchParams{
+		OperationID: "00000000-0000-0000-0000-000000000016",
+		Action:      "abort",
+		ActorID:     77,
+		Reason:      "registry coverage",
+		Items:       items,
+	})
+	if err != nil {
+		t.Fatalf("batch abort: %v", err)
+	}
+	if result.Succeeded != len(types) || result.Failed != 0 || len(result.Retryable) != 0 || len(result.Items) != len(types) {
+		t.Fatalf("result=%+v discovered types=%v", result, types)
+	}
+	for _, item := range result.Items {
+		if !item.Ok || item.OutcomeCode != "success" {
+			t.Errorf("item=%+v", item)
+		}
+	}
+
+	for identity, fence := range identityToFence {
+		id := identityToID[identity]
+		var gotFence, outcome, status string
+		var acknowledgedAt sql.NullTime
+		if err := db.QueryRow(`SELECT i.owner_fence,i.outcome,i.acknowledged_at,t.status FROM task_abort_intent i JOIN post_ingest_task t ON t.id=? WHERE i.task_identity=?`, id, identity).Scan(&gotFence, &outcome, &acknowledgedAt, &status); err != nil {
+			t.Fatalf("read %s intent: %v", identity, err)
+		}
+		if gotFence != fence || outcome != "" || acknowledgedAt.Valid || status != "running" {
+			t.Errorf("identity=%s fence=%q want=%q outcome=%q acknowledged=%v status=%q", identity, gotFence, fence, outcome, acknowledgedAt.Valid, status)
+		}
+		var intentCount, auditCount int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM task_abort_intent WHERE task_identity=? AND owner_fence=? AND acknowledged_at IS NULL AND outcome=''`, identity, fence).Scan(&intentCount); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.QueryRow(`SELECT COUNT(*) FROM task_control_audit WHERE task_identity=? AND action='abort_request'`, identity).Scan(&auditCount); err != nil {
+			t.Fatal(err)
+		}
+		if intentCount != 1 || auditCount != 1 || notified[id] != 1 {
+			t.Errorf("identity=%s intents=%d audits=%d notifications=%d", identity, intentCount, auditCount, notified[id])
+		}
+	}
+	if len(notified) != len(types) {
+		t.Errorf("notified %d unique tasks, want %d", len(notified), len(types))
+	}
+}
+
+func TestAbortRequestRejectsNonOrchestrationIdentity(t *testing.T) {
+	db := openMutationTestDB(t)
+	svc := NewMutateService(db)
+	id := insertRunningTask(t, db, "preview")
+	wrongIdentity := BuildIdentity("preview_task", id)
+
+	_, helperErr := store.WithImmediateConnTx(context.Background(), db, func(tx store.ImmediateConnTx) error {
+		return AbortRequestInTx(context.Background(), tx, wrongIdentity, 1, "wrong kind")
+	})
+	if !errors.Is(helperErr, ErrInvalidOperation) {
+		t.Fatalf("helper error=%v want ErrInvalidOperation", helperErr)
+	}
+	if err := svc.AbortRequest(context.Background(), AbortRequestParams{TaskIdentity: wrongIdentity, ActorID: 1, Reason: "wrong kind"}); !errors.Is(err, ErrInvalidOperation) {
+		t.Fatalf("direct error=%v want ErrInvalidOperation", err)
+	}
+
+	var notified []int64
+	svc.SetAbortNotifier(func(taskID int64) { notified = append(notified, taskID) })
+	result, err := svc.Batch(context.Background(), BatchParams{
+		OperationID: "00000000-0000-0000-0000-000000000017",
+		Action:      "abort",
+		ActorID:     1,
+		Reason:      "wrong kind",
+		Items:       []BatchItem{{TaskIdentity: wrongIdentity}},
+	})
+	if err != nil {
+		t.Fatalf("batch: %v", err)
+	}
+	if result.Succeeded != 0 || result.Failed != 1 || len(result.Items) != 1 || result.Items[0].OutcomeCode != "retryable_failure" {
+		t.Fatalf("result=%+v", result)
+	}
+	var intents, audits int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM task_abort_intent`).Scan(&intents); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM task_control_audit WHERE action='abort_request'`).Scan(&audits); err != nil {
+		t.Fatal(err)
+	}
+	if intents != 0 || audits != 0 || len(notified) != 0 {
+		t.Fatalf("intents=%d audits=%d notified=%v", intents, audits, notified)
+	}
+}
+
+func TestAbortRequestUsesRegisteredExternalHandler(t *testing.T) {
+	db := openMutationTestDB(t)
+	svc := NewMutateService(db)
+	const id int64 = 91
+	identity := BuildIdentity("transcode_task", id)
+	if _, err := db.Exec(`INSERT INTO transcode_task(id,status) VALUES(?, 'running')`, id); err != nil {
+		t.Fatal(err)
+	}
+	var calledID int64
+	svc.SetExternalAbortHandler("transcode_task", func(ctx context.Context, gotID int64) error {
+		calledID = gotID
+		_, err := db.ExecContext(ctx, `UPDATE transcode_task SET status='cancelled' WHERE id=? AND status='running'`, gotID)
+		return err
+	})
+
+	if err := svc.AbortRequest(context.Background(), AbortRequestParams{
+		TaskIdentity: identity, ActorID: 17, Reason: "stop pretranscode",
+	}); err != nil {
+		t.Fatalf("AbortRequest: %v", err)
+	}
+	if calledID != id {
+		t.Fatalf("handler id = %d, want %d", calledID, id)
+	}
+	var status string
+	if err := db.QueryRow(`SELECT status FROM transcode_task WHERE id=?`, id).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "cancelled" {
+		t.Fatalf("status = %q, want cancelled", status)
+	}
+	var action, previous, next string
+	if err := db.QueryRow(`SELECT action,previous_status,new_status FROM task_control_audit WHERE task_identity=?`, identity).Scan(&action, &previous, &next); err != nil {
+		t.Fatal(err)
+	}
+	if action != "abort" || previous != "running" || next != "cancelled" {
+		t.Fatalf("audit=(%q,%q,%q)", action, previous, next)
+	}
+	var intents int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM task_abort_intent WHERE task_identity=?`, identity).Scan(&intents); err != nil {
+		t.Fatal(err)
+	}
+	if intents != 0 {
+		t.Fatalf("external abort created %d durable intents", intents)
+	}
+}
+
+func TestAbortRequestPropagatesExternalHandlerError(t *testing.T) {
+	db := openMutationTestDB(t)
+	svc := NewMutateService(db)
+	want := errors.New("cancel failed")
+	svc.SetExternalAbortHandler("transcode_task", func(context.Context, int64) error { return want })
+	err := svc.AbortRequest(context.Background(), AbortRequestParams{
+		TaskIdentity: BuildIdentity("transcode_task", 3), ActorID: 17, Reason: "stop",
+	})
+	if !errors.Is(err, want) {
+		t.Fatalf("error=%v want callback error", err)
+	}
+	var audits int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM task_control_audit`).Scan(&audits); err != nil {
+		t.Fatal(err)
+	}
+	if audits != 0 {
+		t.Fatalf("callback failure wrote %d audits", audits)
+	}
+}
+
+func TestExternalRemoveRoutesHandlerAndDoesNotUseBatchTransaction(t *testing.T) {
+	db := openMutationTestDB(t)
+	svc := NewMutateService(db)
+	var gotID int64
+	svc.SetExternalOperationHandler("transcode_task", "remove", func(_ context.Context, id int64) error {
+		gotID = id
+		return nil
+	})
+	if err := svc.Remove(context.Background(), RemoveParams{TaskIdentity: "transcode_task:81", ActorID: 7, Reason: "operator cleanup"}); err != nil {
+		t.Fatalf("external remove: %v", err)
+	}
+	if gotID != 81 {
+		t.Fatalf("handler id=%d want 81", gotID)
+	}
+	var batchRows int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM task_batch_operation`).Scan(&batchRows); err != nil {
+		t.Fatal(err)
+	}
+	if batchRows != 0 {
+		t.Fatalf("external single remove unexpectedly created %d batch operations", batchRows)
 	}
 }

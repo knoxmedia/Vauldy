@@ -8,6 +8,8 @@
 package keyframes
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -23,6 +25,7 @@ import (
 	"time"
 
 	"knox-media/internal/keystore"
+	"knox-media/internal/progressctx"
 	"knox-media/internal/storage"
 )
 
@@ -264,20 +267,99 @@ func probeKeyframeEntries(ctx context.Context, ffprobe, srcPath string) (pts []f
 		"-of", "csv=print_section=0",
 		srcPath,
 	)
-	out, err := cmd.Output()
+	// Stream stdout so a long probe keeps reporting forward progress: every
+	// parsed packet line is liveness evidence for the progress-driven task
+	// timeout, distinguishing a healthy (if slow) scan from a hung ffprobe.
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		var ee *exec.ExitError
-		stderr := ""
-		if errors.As(err, &ee) {
-			stderr = strings.TrimSpace(string(ee.Stderr))
-		}
-		if stderr != "" {
-			return nil, nil, fmt.Errorf("ffprobe show_packets failed: %v: %s", err, stderr)
-		}
+		return nil, nil, fmt.Errorf("ffprobe stdout pipe: %w", err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
 		return nil, nil, fmt.Errorf("ffprobe show_packets failed: %w", err)
 	}
-	pts, pos = entriesToPTSPos(parseKeyframePacketEntries(string(out)))
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	var entries []packetEntry
+	lines := 0
+	for scanner.Scan() {
+		if e, ok := parsePacketEntryLine(scanner.Text()); ok {
+			entries = append(entries, e)
+		}
+		lines++
+		if lines%256 == 0 {
+			progressctx.Report(ctx)
+		}
+	}
+	waitErr := cmd.Wait()
+	if scanErr := scanner.Err(); scanErr != nil {
+		return nil, nil, fmt.Errorf("ffprobe show_packets read: %w", scanErr)
+	}
+	if waitErr != nil {
+		stderrText := strings.TrimSpace(stderr.String())
+		var ee *exec.ExitError
+		if errors.As(waitErr, &ee) && stderrText == "" {
+			stderrText = strings.TrimSpace(string(ee.Stderr))
+		}
+		if stderrText != "" {
+			return nil, nil, fmt.Errorf("ffprobe show_packets failed: %v: %s", waitErr, stderrText)
+		}
+		return nil, nil, fmt.Errorf("ffprobe show_packets failed: %w", waitErr)
+	}
+	progressctx.Report(ctx)
+	pts, pos = entriesToPTSPos(entries)
 	return pts, pos, nil
+}
+
+// parsePacketEntryLine parses one CSV `pts_time,pos,flags` line into a keyframe
+// packet entry. Returns ok=false for blank or non-keyframe lines.
+func parsePacketEntryLine(line string) (packetEntry, bool) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return packetEntry{}, false
+	}
+	fields := strings.Split(line, ",")
+	if len(fields) < 2 {
+		return packetEntry{}, false
+	}
+	ptsField := strings.TrimSpace(fields[0])
+	posField := ""
+	flags := ""
+	if len(fields) == 2 {
+		flags = strings.TrimSpace(fields[1])
+	} else {
+		posField = strings.TrimSpace(fields[1])
+		flags = strings.TrimSpace(fields[2])
+	}
+	if !strings.ContainsAny(flags, "Kk") {
+		return packetEntry{}, false
+	}
+	if ptsField == "" || ptsField == "N/A" {
+		return packetEntry{}, false
+	}
+	pts, err := strconv.ParseFloat(ptsField, 64)
+	if err != nil {
+		return packetEntry{}, false
+	}
+	pos := int64(-1)
+	if posField != "" && posField != "N/A" {
+		if p, perr := strconv.ParseInt(posField, 10, 64); perr == nil {
+			pos = p
+		}
+	}
+	return packetEntry{PTS: pts, Pos: pos}, true
+}
+
+// parseKeyframePacketEntries accepts CSV `pts_time,pos,flags` and returns keyframe rows.
+func parseKeyframePacketEntries(s string) []packetEntry {
+	out := make([]packetEntry, 0, 256)
+	for _, line := range strings.Split(s, "\n") {
+		if e, ok := parsePacketEntryLine(line); ok {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 func entriesToPTSPos(entries []packetEntry) (pts []float64, pos []int64) {
@@ -333,48 +415,6 @@ type packetEntry struct {
 func probeKeyframes(ctx context.Context, ffprobe, srcPath string) ([]float64, error) {
 	pts, _, err := probeKeyframeEntries(ctx, ffprobe, srcPath)
 	return pts, err
-}
-
-// parseKeyframePacketEntries accepts CSV `pts_time,pos,flags` and returns keyframe rows.
-func parseKeyframePacketEntries(s string) []packetEntry {
-	out := make([]packetEntry, 0, 256)
-	for _, line := range strings.Split(s, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		fields := strings.Split(line, ",")
-		if len(fields) < 2 {
-			continue
-		}
-		ptsField := strings.TrimSpace(fields[0])
-		posField := ""
-		flags := ""
-		if len(fields) == 2 {
-			flags = strings.TrimSpace(fields[1])
-		} else {
-			posField = strings.TrimSpace(fields[1])
-			flags = strings.TrimSpace(fields[2])
-		}
-		if !strings.ContainsAny(flags, "Kk") {
-			continue
-		}
-		if ptsField == "" || ptsField == "N/A" {
-			continue
-		}
-		pts, err := strconv.ParseFloat(ptsField, 64)
-		if err != nil {
-			continue
-		}
-		pos := int64(-1)
-		if posField != "" && posField != "N/A" {
-			if p, perr := strconv.ParseInt(posField, 10, 64); perr == nil {
-				pos = p
-			}
-		}
-		out = append(out, packetEntry{PTS: pts, Pos: pos})
-	}
-	return out
 }
 
 // parseKeyframePackets accepts legacy CSV `pts_time,flags` or `pts_time,pos,flags`.

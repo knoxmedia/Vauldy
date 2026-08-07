@@ -1,4 +1,4 @@
-﻿package postingest
+package postingest
 
 import (
 	"context"
@@ -607,23 +607,30 @@ func TestQueue_RecoverExpired(t *testing.T) {
 		scan          any
 		attempts, max int
 		expired       bool
+		nullLease     bool
 		want          Status
-	}{{scanCancelled, 1, 3, true, StatusCancelled}, {scanStatus, 1, 3, true, StatusCancelled}, {nil, 3, 3, true, StatusFailed}, {nil, 1, 3, true, StatusWaiting}, {nil, 1, 3, false, StatusRunning}} {
+	}{{scanCancelled, 1, 3, true, false, StatusCancelled}, {scanStatus, 1, 3, true, false, StatusCancelled}, {nil, 3, 3, true, false, StatusFailed}, {nil, 1, 3, true, false, StatusWaiting}, {nil, 1, 3, false, false, StatusRunning}, {nil, 3, 3, true, true, StatusFailed}, {nil, 1, 3, true, true, StatusWaiting}} {
 		mid := insertQueueMedia(t, db, libraryID, fmt.Sprintf("recover-%d", i))
 		modifier := "-1 second"
 		if !tc.expired {
 			modifier = "+1 hour"
 		}
-		res, err := db.Exec(`INSERT INTO post_ingest_task(media_id,scan_task_id,task_type,status,attempts,max_attempts,lease_owner,lease_until) VALUES (?,?,?,'running',?,?,'old',datetime(CURRENT_TIMESTAMP,?))`, mid, tc.scan, TaskPoster, tc.attempts, tc.max, modifier)
+		var res sql.Result
+		var err error
+		if tc.nullLease {
+			res, err = db.Exec(`INSERT INTO post_ingest_task(media_id,scan_task_id,task_type,status,attempts,max_attempts,lease_owner,lease_until) VALUES (?,?,?,'running',?,?,'old',NULL)`, mid, tc.scan, TaskPoster, tc.attempts, tc.max)
+		} else {
+			res, err = db.Exec(`INSERT INTO post_ingest_task(media_id,scan_task_id,task_type,status,attempts,max_attempts,lease_owner,lease_until) VALUES (?,?,?,'running',?,?,'old',datetime(CURRENT_TIMESTAMP,?))`, mid, tc.scan, TaskPoster, tc.attempts, tc.max, modifier)
+		}
 		if err != nil {
 			t.Fatal(err)
 		}
 		id, _ := res.LastInsertId()
-		rows = append(rows, row{id, tc.want, tc.expired})
+		rows = append(rows, row{id, tc.want, tc.expired || tc.nullLease})
 	}
 	n, err := NewQueue(db, "recovery", nil).RecoverExpired(context.Background())
-	if err != nil || n != 4 {
-		t.Fatalf("RecoverExpired=(%d,%v), want (4,nil)", n, err)
+	if err != nil || n != 6 {
+		t.Fatalf("RecoverExpired=(%d,%v), want (6,nil)", n, err)
 	}
 	for _, tc := range rows {
 		status, _, _, owner, lease, last, finished, _ := readTaskState(t, db, tc.id)
@@ -1738,6 +1745,20 @@ func TestQueue_ClaimAnyAvoidsIdleImmediateTransactions(t *testing.T) {
 	}
 }
 
+func TestQueue_ClaimAnySkipsAbsentTypesBeforeSubtitle(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	metrics := &store.SQLiteMetrics{}
+	q := NewQueue(db, "claim-any-subtitle", metrics)
+	enqueueDispatcherTasks(t, q, 3, TaskSubtitle)
+
+	task, err := q.ClaimAny(context.Background(), taskTypes)
+	if err != nil || task == nil || task.Type != TaskSubtitle {
+		t.Fatalf("subtitle claim=(%+v,%v)", task, err)
+	}
+	if got := metrics.ImmediateTransactions.Load(); got != 1 {
+		t.Fatalf("subtitle claim immediate transactions=%d want 1", got)
+	}
+}
 func TestQueue_ClaimAnyUsesOneImmediateTransactionPerClaim(t *testing.T) {
 	db, _ := openQueueTestDB(t)
 	metrics := &store.SQLiteMetrics{}
@@ -2383,75 +2404,44 @@ func TestQueue_FailureShutdownUsesLightLinkedSync(t *testing.T) {
 // TestLibraryFairnessCursorPersistence verifies that the last-served library
 // cursor is updated after each claim.
 func TestLibraryFairnessCursorPersistence(t *testing.T) {
-	db, _ := openQueueTestDB(t)
+	db, path := openQueueTestDB(t)
 	seedQueueAdmissionPolicy(t, db)
-	q := NewQueue(db, "worker", nil)
+	_, err := db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1,'lib1','video','/lib1'),(2,'lib2','video','/lib2'); INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state) VALUES(10,1,'f10','video',1,'processing'),(11,2,'f11','video',1,'processing'); INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(20,10,1,'scan','processing','{}',2),(21,11,1,'scan','processing','{}',2); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(30,20,10,1,'encrypt',1,'waiting'),(31,21,11,1,'encrypt',1,'waiting'); INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status,available_at,created_at,priority,library_id) VALUES(40,10,20,30,1,'encrypt','waiting',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,0,1),(41,11,21,31,1,'encrypt','waiting',datetime(CURRENT_TIMESTAMP,'-10 seconds'),datetime(CURRENT_TIMESTAMP,'-10 seconds'),0,2)`)
+	if err != nil {
+		t.Fatal(err)
+	}
 	policy := scheduler.PolicyDefaults()
 	policy.TypeConcurrency["encrypt"] = 5
+	q := NewQueue(db, "worker", nil, publication.NewCapabilityMatrix([]string{"encrypt"}))
 	q.SetSchedulerPolicy(&policy)
-
-	// Seed: library 1 and 2; two tasks with different libraries.
-	_, err := db.Exec(`
-		INSERT INTO library(id,name,type,path) VALUES(1,'lib1','video','/lib1'),(2,'lib2','video','/lib2');
-		INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state)
-			VALUES(10,1,'f10','video',1,'processing'),(11,2,'f11','video',1,'processing');
-		INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version)
-			VALUES(20,10,1,'scan','processing','{}',2),(21,11,1,'scan','processing','{}',2);
-		INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status)
-			VALUES(30,20,10,1,'encrypt',1,'waiting'),(31,21,11,1,'encrypt',1,'waiting');
-		INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status,
-			available_at,created_at,priority,library_id)
-			VALUES
-			 (40,10,20,30,1,'encrypt','waiting',datetime(CURRENT_TIMESTAMP),datetime(CURRENT_TIMESTAMP),0,1),
-			 (41,11,21,31,1,'encrypt','waiting',datetime(CURRENT_TIMESTAMP,'-10 seconds'),datetime(CURRENT_TIMESTAMP,'-10 seconds'),0,2);
-	`)
+	first, err := q.Claim(context.Background(), TaskEncrypt)
+	if err != nil || first == nil || first.LibraryID == nil || *first.LibraryID != 1 {
+		t.Fatalf("first=%+v err=%v", first, err)
+	}
+	if err := q.Complete(context.Background(), *first); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db2, err := store.OpenSQLite(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry := publication.NewCapabilityMatrix([]string{"encrypt"})
-	q.registry = registry
-
-	// Claim first task.
-	task, err := q.Claim(context.Background(), TaskEncrypt)
-	if err != nil {
+	defer db2.Close()
+	q2 := NewQueue(db2, "worker2", nil, publication.NewCapabilityMatrix([]string{"encrypt"}))
+	q2.SetSchedulerPolicy(&policy)
+	second, err := q2.Claim(context.Background(), TaskEncrypt)
+	if err != nil || second == nil || second.LibraryID == nil || *second.LibraryID != 2 {
+		t.Fatalf("restart second=%+v err=%v", second, err)
+	}
+	var last sql.NullInt64
+	var revision int64
+	if err := db2.QueryRow(`SELECT last_library_id,revision FROM scheduler_fairness WHERE task_type='encrypt'`).Scan(&last, &revision); err != nil {
 		t.Fatal(err)
 	}
-	if task == nil {
-		t.Fatal("expected a claim")
-	}
-	// Verify cursor was updated with the claimed library.
-	cursor := q.fairnessCursors["encrypt"]
-	if cursor == nil {
-		t.Fatal("expected fairness cursor for encrypt")
-	}
-	if cursor.LastServedLibrary == nil {
-		t.Fatal("expected last-served library to be set")
-	}
-	if task.LibraryID == nil || *cursor.LastServedLibrary != *task.LibraryID {
-		t.Fatalf("cursor last-served=%v, want=%v", cursor.LastServedLibrary, task.LibraryID)
-	}
-	_ = cursor
-
-	// Complete the first task.
-	if err := q.Complete(context.Background(), *task); err != nil {
-		t.Fatal(err)
-	}
-
-	// Claim second task.
-	task2, err := q.Claim(context.Background(), TaskEncrypt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if task2 == nil {
-		t.Fatal("expected a second claim")
-	}
-	// Verify cursor was updated again.
-	cursor2 := q.fairnessCursors["encrypt"]
-	if cursor2 == nil || cursor2.LastServedLibrary == nil {
-		t.Fatal("expected updated cursor")
-	}
-	if task2.LibraryID == nil || *cursor2.LastServedLibrary != *task2.LibraryID {
-		t.Fatalf("cursor last-served=%v, want=%v", cursor2.LastServedLibrary, task2.LibraryID)
+	if !last.Valid || last.Int64 != 2 || revision != 2 {
+		t.Fatalf("cursor last=%v revision=%d", last, revision)
 	}
 }
 

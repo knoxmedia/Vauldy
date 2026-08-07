@@ -302,8 +302,9 @@ export default function MusicBrowse({ libraryId, libraryName, onEmpty, signal }:
     try {
       await createScrapeTasks(ids);
       message.success(t("components.media_menu.scrape_task_created"));
-    } catch {
-      message.error(t("components.media_menu.operation_failed"));
+    } catch (err: unknown) {
+      const ax = err as { response?: { data?: { message?: string; error?: string } }; message?: string };
+      message.error(ax.response?.data?.message || ax.response?.data?.error || ax.message || t("components.media_menu.operation_failed"));
     }
   }
 

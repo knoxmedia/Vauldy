@@ -34,6 +34,7 @@ describe("TaskDetailDrawer", () => {
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
       tombstone: false,
+    allowed_actions: { abort: false, remove: false, reset: false, run_now: false, skip: false, reopen: false },
       ...overrides,
     };
   }
@@ -91,5 +92,12 @@ describe("TaskDetailDrawer", () => {
       // Task ID should be visible
       expect(screen.getByText("orchestration:1")).toBeInTheDocument();
     }, { timeout: 5000 });
+  });
+  it("hides unsupported detail actions", async () => {
+    mockFetchDetail.mockResolvedValue({ row: makeRow({ source_kind: "scan_task", task_id: "scan_task:1", normalized_status: "running", raw_status: "running", allowed_actions: { abort: true, remove: false, reset: false, run_now: false, skip: false, reopen: false } }) });
+    render(<TaskDetailDrawer taskId="scan_task:1" onClose={() => {}} />);
+    await screen.findByText("scan_task:1", {}, { timeout: 5000 });
+    expect(document.querySelector(".anticon-stop")).toBeInTheDocument();
+    expect(document.querySelector(".anticon-reload")).not.toBeInTheDocument();
   });
 });

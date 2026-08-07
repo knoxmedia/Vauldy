@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"time"
 )
 
@@ -82,20 +83,20 @@ func NewOverviewBuilder(builder *ProjectionBuilder) *OverviewBuilder {
 	}
 }
 
-// Compute builds the Overview model by querying counts and sections from
-// the projection sources.
+// Compute builds the Overview model by querying every available public task
+// type. Public type filters are disjoint even when several types share a source.
 func (ob *OverviewBuilder) Compute(ctx context.Context) (*Overview, error) {
 	o := &Overview{TypeCounts: make(OverviewTypeCounts)}
+	types := ob.availableTypes()
 
-	// Compute status counts via count queries per status
 	for _, status := range AllNormalizedStatuses {
-		filter := QueryFilter{
-			Status:  string(status),
-			Removed: "exclude",
-		}
-		total, err := ob.qs.Total(ctx, filter)
-		if err != nil {
-			return nil, fmt.Errorf("overview count %s: %w", status, err)
+		var total int64
+		for _, taskType := range types {
+			count, err := ob.qs.Total(ctx, QueryFilter{TaskType: taskType, Status: string(status), Removed: "exclude"})
+			if err != nil {
+				return nil, fmt.Errorf("overview count %s/%s: %w", status, taskType, err)
+			}
+			total += count
 		}
 		switch status {
 		case StatusWaiting:
@@ -113,82 +114,119 @@ func (ob *OverviewBuilder) Compute(ctx context.Context) (*Overview, error) {
 		}
 	}
 
-	// Compute type counts by querying per type in the registry
-	if reg := ob.builder.Registry(); reg != nil {
-		for _, g := range reg.Groups {
-			for _, spec := range g.Types {
-				if !spec.Available {
-					continue
-				}
-				filter := QueryFilter{
-					TaskType: spec.Type,
-					Removed:  "exclude",
-				}
-				total, err := ob.qs.Total(ctx, filter)
-				if err != nil {
-					return nil, fmt.Errorf("overview type count %s: %w", spec.Type, err)
-				}
-				o.TypeCounts[spec.Type] = total
-			}
+	for _, taskType := range types {
+		total, err := ob.qs.Total(ctx, QueryFilter{TaskType: taskType, Removed: "exclude"})
+		if err != nil {
+			return nil, fmt.Errorf("overview type count %s: %w", taskType, err)
 		}
+		o.TypeCounts[taskType] = total
 	}
 
-	// Running section: most recently started running tasks
-	runningRes, err := ob.qs.List(ctx, QueryFilter{Status: "running", Removed: "exclude"}, "", 5)
+	var err error
+	o.Running.Items, err = ob.sectionItems(ctx, types, StatusRunning, false)
 	if err != nil {
 		return nil, fmt.Errorf("overview running: %w", err)
 	}
-	o.Running = OverviewSection{Label: "running", Items: runningRes.Items}
-
-	// Oldest section: oldest waiting tasks by available_at
-	oldestRes, err := ob.qs.List(ctx, QueryFilter{Status: "waiting", Removed: "exclude"}, "", 5)
+	o.Running.Label = "running"
+	o.Oldest.Items, err = ob.sectionItems(ctx, types, StatusWaiting, true)
 	if err != nil {
 		return nil, fmt.Errorf("overview oldest: %w", err)
 	}
-	o.Oldest = OverviewSection{Label: "oldest", Items: oldestRes.Items}
-
-	// Blocked section: failed tasks (terminal with errors)
-	blockedRes, err := ob.qs.List(ctx, QueryFilter{Status: "failed", Removed: "exclude"}, "", 5)
+	o.Oldest.Label = "oldest"
+	o.Blocked.Items, err = ob.sectionItems(ctx, types, StatusFailed, false)
 	if err != nil {
 		return nil, fmt.Errorf("overview blocked: %w", err)
 	}
-	o.Blocked = OverviewSection{Label: "blocked", Items: blockedRes.Items}
-
-	// No-worker section: tasks of types without capable workers
-	// (in Phase 4, we approximate with types having 0 count)
-	o.NoWorker = OverviewSection{Label: "no_worker"}
-
-	// Expired section: cancelled tasks
-	expiredRes, err := ob.qs.List(ctx, QueryFilter{Status: "cancelled", Removed: "exclude"}, "", 5)
+	o.Blocked.Label = "blocked"
+	o.Expired.Items, err = ob.sectionItems(ctx, types, StatusCancelled, false)
 	if err != nil {
 		return nil, fmt.Errorf("overview expired: %w", err)
 	}
-	o.Expired = OverviewSection{Label: "expired", Items: expiredRes.Items}
-
-	// Recovery section: tasks that are in retry rounds
-	// (approximation: list failed tasks with retry_round > 0)
+	o.Expired.Label = "expired"
+	o.NoWorker = OverviewSection{Label: "no_worker"}
 	o.Recovery = OverviewSection{Label: "recovery"}
 
-	// Cleanup section: removed-only tasks
+	// Tombstones are currently authoritative only in the orchestration source.
 	cleanupRes, err := ob.qs.List(ctx, QueryFilter{Removed: "only"}, "", 5)
 	if err != nil {
 		return nil, fmt.Errorf("overview cleanup: %w", err)
 	}
 	o.Cleanup = OverviewSection{Label: "cleanup", Items: cleanupRes.Items}
 
-	// Snapshot revision
 	tx, err := ob.builder.DB().BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("overview snapshot tx: %w", err)
 	}
 	snapRev, err := ob.builder.snapshotRevision(ctx, tx)
-	tx.Rollback()
+	_ = tx.Rollback()
 	if err != nil {
 		return nil, fmt.Errorf("overview snapshot revision: %w", err)
 	}
 	o.SnapshotRev = snapRev
-
 	return o, nil
+}
+
+func (ob *OverviewBuilder) availableTypes() []string {
+	reg := ob.builder.Registry()
+	if reg == nil {
+		return nil
+	}
+	var types []string
+	for _, group := range reg.Groups {
+		for _, spec := range group.Types {
+			if spec.Available {
+				types = append(types, spec.Type)
+			}
+		}
+	}
+	return types
+}
+
+func (ob *OverviewBuilder) sectionItems(ctx context.Context, types []string, status NormalizedStatus, oldestFirst bool) ([]ProjectionRow, error) {
+	byID := make(map[string]ProjectionRow)
+	for _, taskType := range types {
+		filter := QueryFilter{TaskType: taskType, Status: string(status), Removed: "exclude"}
+		for cursor := ""; ; {
+			result, err := ob.qs.List(ctx, filter, cursor, 200)
+			if err != nil {
+				return nil, fmt.Errorf("%s/%s: %w", status, taskType, err)
+			}
+			for _, item := range result.Items {
+				byID[item.TaskID] = item
+			}
+			if !result.HasMore || result.NextCursor == "" {
+				break
+			}
+			cursor = result.NextCursor
+		}
+	}
+	items := make([]ProjectionRow, 0, len(byID))
+	for _, item := range byID {
+		items = append(items, item)
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if oldestFirst {
+			iAt, jAt := items[i].CreatedAt, items[j].CreatedAt
+			if items[i].AvailableAt != nil {
+				iAt = *items[i].AvailableAt
+			}
+			if items[j].AvailableAt != nil {
+				jAt = *items[j].AvailableAt
+			}
+			if !iAt.Equal(jAt) {
+				return iAt.Before(jAt)
+			}
+		} else if !items[i].UpdatedAt.Equal(items[j].UpdatedAt) {
+			return items[i].UpdatedAt.After(items[j].UpdatedAt)
+		} else if !items[i].CreatedAt.Equal(items[j].CreatedAt) {
+			return items[i].CreatedAt.After(items[j].CreatedAt)
+		}
+		return items[i].TaskID < items[j].TaskID
+	})
+	if len(items) > 5 {
+		items = items[:5]
+	}
+	return items, nil
 }
 
 // SetResourceBudgets populates resource budget information from a
@@ -226,7 +264,7 @@ func computeRecoveryTasks(ctx context.Context, db *sql.DB) ([]ProjectionRow, err
 			COALESCE(base_priority,0), available_at, created_at, updated_at,
 			media_id, library_id,
 			removed_at, COALESCE(removed_by,''), COALESCE(remove_reason,''),
-			COALESCE(run_now_expires, NULL)
+			run_now_expires
 		FROM post_ingest_task WHERE retry_round > 0 AND status = 'failed'
 		ORDER BY created_at DESC LIMIT 5`)
 	if err != nil {
@@ -275,21 +313,21 @@ func scanProjectionRows(rows *sql.Rows) ([]ProjectionRow, error) {
 			r.RemovedAt = &removedAt.Time
 		}
 		row := ProjectionRow{
-			TaskID:           BuildIdentity("orchestration", r.SourceID),
-			SourceKind:       "orchestration",
-			SourceID:         r.SourceID,
-			TaskType:         r.TaskType,
-			NormalizedStatus: normalizeStatus(r.RawStatus, false),
-			RawStatus:        r.RawStatus,
-			Generation:       r.Generation,
-			RetryRound:       r.RetryRound,
-			Attempt:          r.Attempt,
-			MaxAttempts:      r.MaxAttempts,
-			BasePriority:     r.BasePriority,
+			TaskID:            BuildIdentity("orchestration", r.SourceID),
+			SourceKind:        "orchestration",
+			SourceID:          r.SourceID,
+			TaskType:          r.TaskType,
+			NormalizedStatus:  normalizeStatus(r.RawStatus, false),
+			RawStatus:         r.RawStatus,
+			Generation:        r.Generation,
+			RetryRound:        r.RetryRound,
+			Attempt:           r.Attempt,
+			MaxAttempts:       r.MaxAttempts,
+			BasePriority:      r.BasePriority,
 			EffectivePriority: r.BasePriority,
-			CreatedAt:        r.CreatedAt,
-			UpdatedAt:        r.UpdatedAt,
-			TerminalReason:   r.TerminalReason,
+			CreatedAt:         r.CreatedAt,
+			UpdatedAt:         r.UpdatedAt,
+			TerminalReason:    r.TerminalReason,
 		}
 		if mediaID.Valid {
 			row.MediaID = &mediaID.Int64

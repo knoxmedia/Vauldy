@@ -260,6 +260,49 @@ func EncoderListedInFFmpeg(ffmpegPath, encoderID string) bool {
 	return strings.Contains(ffout, " "+encoderID)
 }
 
+// HardwareDecoderAvailable reports whether ffmpeg's build ships a hardware
+// decoder that can feed the full-hardware pipeline (PipelineHWFull) of the
+// given encoder for a source stream using sourceCodec. NVENC uses NVDEC
+// decoders (named *_cuvid) and QSV uses *_qsv decoders. Encoders whose
+// full-hardware chain does not rely on hardware decoding (AMF scales on the
+// CPU; VAAPI uploads explicitly before scale_vaapi) always report true, so
+// their pipeline is never downgraded.
+func HardwareDecoderAvailable(ffmpegPath, sourceCodec string, encoder ID) bool {
+	decoders, ok := ffmpegDecodersLower(ffmpegPath)
+	if !ok {
+		return false
+	}
+	return hardwareDecoderAvailableInList(decoders, sourceCodec, encoder)
+}
+
+// hardwareDecoderAvailableInList decides whether a decoder list produced by
+// ffmpeg -decoders provides a hardware decoder for sourceCodec on the given
+// encoder's acceleration family. Encoders whose full-hardware chain does not
+// rely on hardware decoding (AMF scales on the CPU; VAAPI uploads explicitly
+// before scale_vaapi) always report true so their pipeline is never downgraded.
+func hardwareDecoderAvailableInList(decoders, sourceCodec string, encoder ID) bool {
+	sourceCodec = strings.ToLower(strings.TrimSpace(sourceCodec))
+	if sourceCodec == "" {
+		return false
+	}
+	switch encoder {
+	case H264NVENC, HEVCNVENC:
+		return strings.Contains(decoders, " "+sourceCodec+"_cuvid")
+	case H264QSV, HEVCQSV:
+		return strings.Contains(decoders, " "+sourceCodec+"_qsv")
+	default:
+		return true
+	}
+}
+
+func ffmpegDecodersLower(ffmpegPath string) (string, bool) {
+	out, err := processmetrics.NewFFmpegCommand(ffmpegPath, "-hide_banner", "-decoders").CombinedOutput()
+	if err != nil {
+		return "", false
+	}
+	return strings.ToLower(string(out)), true
+}
+
 // ParseEncoder maps env/config strings to ID; second return is false if unknown.
 func ParseEncoder(s string) (ID, bool) {
 	switch strings.ToLower(strings.TrimSpace(s)) {

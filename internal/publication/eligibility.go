@@ -131,18 +131,49 @@ func sqlPlaceholders(n int) string {
 	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
 }
 
-// PostIngestCandidateHint reports whether any eligible post-ingest candidate
-// exists among the requested task types. It is a cheap read-only fast path used
-// to avoid write-lock admission transactions when there is nothing to claim.
-func PostIngestCandidateHint(ctx context.Context, db *sql.DB, req ClaimRequest) (bool, error) {
+// PostIngestEligibleTaskTypes returns requested task types that currently have
+// an eligible post-ingest candidate, preserving request order. This is an
+// advisory read-only hint: the claim transaction remains authoritative because
+// eligibility can change after this query returns.
+func PostIngestEligibleTaskTypes(ctx context.Context, db *sql.DB, req ClaimRequest) ([]string, error) {
+	if len(req.TaskTypes) == 0 {
+		return nil, nil
+	}
 	args := make([]any, len(req.TaskTypes))
 	for i, typ := range req.TaskTypes {
 		args[i] = typ
 	}
-	query := fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM post_ingest_task q LEFT JOIN media_ingest_step st ON st.id=q.ingest_step_id WHERE %s AND q.task_type IN (%s) AND (%s OR (%s) OR (q.task_type='poster_repair' AND q.ingest_run_id IS NOT NULL AND q.ingest_step_id IS NULL AND q.generation>0 AND EXISTS(SELECT 1 FROM media m JOIN media_ingest_run r ON r.id=q.ingest_run_id WHERE m.id=q.media_id AND m.ingest_generation=q.generation AND m.publication_state IN ('published','degraded') AND m.published_at IS NOT NULL AND r.media_id=q.media_id AND r.generation=q.generation AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL))))`, familyDueSQL(QueuePostIngest, "q"), sqlPlaceholders(len(args)), familyLegacySQL(QueuePostIngest, "q"), linkedEligibilitySQL("q"))
-	var available bool
-	err := db.QueryRowContext(ctx, query, args...).Scan(&available)
-	return available, err
+	query := fmt.Sprintf(`SELECT DISTINCT q.task_type FROM post_ingest_task q LEFT JOIN media_ingest_step st ON st.id=q.ingest_step_id WHERE %s AND q.task_type IN (%s) AND (%s OR (%s) OR (q.task_type='poster_repair' AND q.ingest_run_id IS NOT NULL AND q.ingest_step_id IS NULL AND q.generation>0 AND EXISTS(SELECT 1 FROM media m JOIN media_ingest_run r ON r.id=q.ingest_run_id WHERE m.id=q.media_id AND m.ingest_generation=q.generation AND m.publication_state IN ('published','degraded') AND m.published_at IS NOT NULL AND r.media_id=q.media_id AND r.generation=q.generation AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL)))`, familyDueSQL(QueuePostIngest, "q"), sqlPlaceholders(len(args)), familyLegacySQL(QueuePostIngest, "q"), linkedEligibilitySQL("q"))
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	available := make(map[string]struct{}, len(req.TaskTypes))
+	for rows.Next() {
+		var typ string
+		if err := rows.Scan(&typ); err != nil {
+			return nil, err
+		}
+		available[typ] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	eligible := make([]string, 0, len(available))
+	for _, typ := range req.TaskTypes {
+		if _, ok := available[typ]; ok {
+			eligible = append(eligible, typ)
+		}
+	}
+	return eligible, nil
+}
+
+// PostIngestCandidateHint reports whether any requested type currently has an
+// eligible post-ingest candidate.
+func PostIngestCandidateHint(ctx context.Context, db *sql.DB, req ClaimRequest) (bool, error) {
+	types, err := PostIngestEligibleTaskTypes(ctx, db, req)
+	return len(types) > 0, err
 }
 
 func claimEligibleAnyTx(ctx context.Context, tx store.ImmediateConnTx, req ClaimRequest, owner string) (*ClaimPayload, error) {
@@ -254,7 +285,7 @@ func linkedEligibilitySQL(alias string) string {
 SELECT 1 FROM media_ingest_step st JOIN media_ingest_run r ON r.id=st.run_id JOIN media m ON m.id=st.media_id
 WHERE st.id=%[1]s.ingest_step_id AND st.run_id=%[1]s.ingest_run_id AND st.media_id=%[1]s.media_id AND st.generation=%[1]s.generation
 AND r.media_id=st.media_id AND r.generation=st.generation AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND m.ingest_generation=st.generation
-AND st.status='waiting' AND ((st.required=1 AND r.status='processing') OR (st.required=0 AND m.published_at IS NOT NULL AND ((r.status='processing' AND m.publication_state IN ('published','degraded')) OR (r.status='published' AND NOT EXISTS(SELECT 1 FROM media_ingest_step rr WHERE rr.run_id=r.id AND rr.required=1 AND rr.status NOT IN ('done','skipped'))) OR (r.status='degraded' AND NOT EXISTS(SELECT 1 FROM media_ingest_step rr WHERE rr.run_id=r.id AND rr.required=1 AND rr.status IN ('waiting','running'))))))
+AND st.status='waiting' AND ((st.required=1 AND r.status='processing') OR (st.required=0 AND m.published_at IS NOT NULL AND ((r.status='processing' AND m.publication_state IN ('processing','published','degraded')) OR (r.status='published' AND NOT EXISTS(SELECT 1 FROM media_ingest_step rr WHERE rr.run_id=r.id AND rr.required=1 AND rr.status NOT IN ('done','skipped'))) OR (r.status='degraded' AND NOT EXISTS(SELECT 1 FROM media_ingest_step rr WHERE rr.run_id=r.id AND rr.required=1 AND rr.status IN ('waiting','running'))))))
 AND NOT EXISTS(SELECT 1 FROM media_ingest_step_dependency d LEFT JOIN media_ingest_step dep ON dep.id=d.depends_on_step_id WHERE d.step_id=st.id AND NOT ((d.dependency_kind='success' AND dep.id IS NOT NULL AND dep.run_id=st.run_id AND dep.media_id=st.media_id AND dep.generation=st.generation AND dep.status='done') OR (d.dependency_kind='terminal' AND dep.id IS NOT NULL AND dep.run_id=st.run_id AND dep.media_id=st.media_id AND dep.generation=st.generation AND dep.status IN ('done','skipped','failed','cancelled')))))`, alias)
 }
 
@@ -290,7 +321,7 @@ func familyLegacySQL(f QueueFamily, alias string) string {
 	if f == QueuePostIngest {
 		return fmt.Sprintf("(%s.ingest_run_id IS NULL AND %s.ingest_step_id IS NULL AND %s.generation=0)", alias, alias, alias)
 	}
-	return fmt.Sprintf("(%s.ingest_run_id IS NULL AND %s.ingest_step_id IS NULL AND %s.generation IS NULL)", alias, alias, alias)
+	return fmt.Sprintf("(%s.ingest_run_id IS NULL AND %s.ingest_step_id IS NULL AND COALESCE(%s.generation,0)=0)", alias, alias, alias)
 }
 
 // SelectFamilyCandidateTx returns the best eligible candidate id for a claim
@@ -298,6 +329,14 @@ func familyLegacySQL(f QueueFamily, alias string) string {
 // required step and whether it is linked to an ingest run/step.
 func SelectFamilyCandidateTx(ctx context.Context, tx store.SQLExecutor, req ClaimRequest) (id int64, required, linked bool, err error) {
 	return selectFamilyCandidate(ctx, tx, req)
+}
+
+func fairnessLibraryCandidate(ctx context.Context, tx store.SQLExecutor, req ClaimRequest, due, eligibility string, now time.Time) (sql.NullInt64, error) {
+	order := familyOrderSQL(QueuePostIngest, "q", req.SchedulerPolicy, now)
+	query := fmt.Sprintf("WITH eligible AS (SELECT q.library_id,ROW_NUMBER() OVER (PARTITION BY q.library_id ORDER BY %s) AS row_rank FROM post_ingest_task q LEFT JOIN media_ingest_step st ON st.id=q.ingest_step_id WHERE %s AND q.task_type=? AND (%s)), buckets AS (SELECT library_id FROM eligible WHERE row_rank=1), cursor AS (SELECT last_library_id,initialized FROM scheduler_fairness WHERE task_type=?), ranked AS (SELECT b.library_id,ROW_NUMBER() OVER (ORDER BY CASE WHEN b.library_id IS NULL THEN 0 ELSE 1 END,b.library_id) AS bucket_rank,COUNT(*) OVER () AS bucket_count FROM buckets b), last_rank AS (SELECT r.bucket_rank FROM ranked r,cursor c WHERE c.initialized=1 AND r.library_id IS c.last_library_id) SELECT library_id FROM ranked ORDER BY CASE WHEN EXISTS(SELECT 1 FROM last_rank) THEN (bucket_rank-(SELECT bucket_rank FROM last_rank)+bucket_count-1)%%bucket_count ELSE bucket_rank-1 END LIMIT 1", order, due, eligibility)
+	var library sql.NullInt64
+	err := tx.QueryRowContext(ctx, query, req.TaskType, req.TaskType).Scan(&library)
+	return library, err
 }
 
 func selectFamilyCandidate(ctx context.Context, tx store.SQLExecutor, req ClaimRequest) (id int64, required, linked bool, err error) {
@@ -318,7 +357,21 @@ func selectFamilyCandidate(ctx context.Context, tx store.SQLExecutor, req ClaimR
 	if req.Family == QueuePostIngest && req.TaskType == "poster_repair" {
 		repair = `q.task_type='poster_repair' AND q.ingest_run_id IS NOT NULL AND q.ingest_step_id IS NULL AND q.generation>0 AND EXISTS(SELECT 1 FROM media m JOIN media_ingest_run r ON r.id=q.ingest_run_id WHERE m.id=q.media_id AND m.ingest_generation=q.generation AND m.publication_state IN ('published','degraded') AND m.published_at IS NOT NULL AND r.media_id=q.media_id AND r.generation=q.generation AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL)`
 	}
-	query := fmt.Sprintf(`SELECT q.id,COALESCE(st.required,0),q.ingest_run_id IS NOT NULL FROM %s q LEFT JOIN media_ingest_step st ON st.id=q.ingest_step_id WHERE %s%s AND (%s OR (%s) OR (%s)) ORDER BY %s LIMIT 1`, table, due, typeFilter, familyLegacySQL(req.Family, alias), link, repair, familyOrderSQL(req.Family, alias, req.SchedulerPolicy, time.Now()))
+	now := time.Now()
+	eligibility := fmt.Sprintf("%s OR (%s) OR (%s)", familyLegacySQL(req.Family, alias), link, repair)
+	if req.Family == QueuePostIngest && req.SchedulerPolicy != nil && req.QueueID == nil {
+		library, pickErr := fairnessLibraryCandidate(ctx, tx, req, due, eligibility, now)
+		if pickErr != nil {
+			return 0, false, false, pickErr
+		}
+		typeFilter += " AND q.library_id IS ?"
+		if library.Valid {
+			args = append(args, library.Int64)
+		} else {
+			args = append(args, nil)
+		}
+	}
+	query := fmt.Sprintf(`SELECT q.id,COALESCE(st.required,0),q.ingest_run_id IS NOT NULL FROM %s q LEFT JOIN media_ingest_step st ON st.id=q.ingest_step_id WHERE %s%s AND (%s) ORDER BY %s LIMIT 1`, table, due, typeFilter, eligibility, familyOrderSQL(req.Family, alias, req.SchedulerPolicy, now))
 	err = tx.QueryRowContext(ctx, query, args...).Scan(&id, &required, &linked)
 	return
 }
@@ -541,7 +594,7 @@ func claimByOwner(ctx context.Context, db *sql.DB, f QueueFamily, owner string) 
 
 // LinkedClaimEligibilitySQL is the canonical linked-or-legacy dependency predicate.
 func LinkedClaimEligibilitySQL(alias string) string {
-	return fmt.Sprintf(`((%[1]s.ingest_run_id IS NULL AND %[1]s.ingest_step_id IS NULL AND %[1]s.generation IS NULL) OR (%s))`, alias, linkedEligibilitySQL(alias))
+	return fmt.Sprintf(`((%[1]s.ingest_run_id IS NULL AND %[1]s.ingest_step_id IS NULL AND COALESCE(%[1]s.generation,0)=0) OR (%s))`, alias, linkedEligibilitySQL(alias))
 }
 
 // ClaimWithAdmission orchestrates a claim admission inside one BEGIN IMMEDIATE
@@ -631,11 +684,15 @@ func ClaimWithAdmission(ctx context.Context, db *sql.DB, req ClaimRequest) (*Cla
 				return fmt.Errorf("publication claim admission: insert reservation: %w", err)
 			}
 
-			// Step 7: Advance fairness cursor
+			// Step 7: Advance the authoritative cursor in this claim transaction.
+			var library any
+			if p.LibraryID.Valid {
+				library = p.LibraryID.Int64
+			}
 			if _, err := tx.ExecContext(attempt,
-				`INSERT INTO scheduler_fairness(task_type,cursor,updated_at) VALUES(?,?,?)
-				 ON CONFLICT(task_type) DO UPDATE SET cursor=?, updated_at=?`,
-				req.TaskType, now, now, now, now); err != nil {
+				`INSERT INTO scheduler_fairness(task_type,last_library_id,initialized,revision,updated_at) VALUES(?,?,1,1,?)
+				 ON CONFLICT(task_type) DO UPDATE SET last_library_id=excluded.last_library_id,initialized=1,revision=scheduler_fairness.revision+1,updated_at=excluded.updated_at`,
+				req.TaskType, library, now); err != nil {
 				return fmt.Errorf("publication claim admission: advance fairness: %w", err)
 			}
 

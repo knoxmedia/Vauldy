@@ -1353,7 +1353,7 @@ func TestMigrateIngestPublicationV2EnterpriseManagedIndexesCreatedOnce(t *testin
 	if err = migrateIngestPublication(context.Background(), db); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"idx_post_ingest_claim", "idx_post_ingest_scan", "idx_post_ingest_run", "idx_post_ingest_step", "idx_scrape_task_claim", "idx_scrape_task_ingest", "idx_scrape_task_media", "idx_pretranscode_job_status", "idx_pretranscode_job_task", "idx_asset_stage_recovery"} {
+	for _, name := range []string{"idx_post_ingest_claim", "idx_post_ingest_scan", "idx_post_ingest_run", "idx_post_ingest_step", "idx_scrape_task_claim", "idx_scrape_task_ingest", "idx_scrape_task_media", "idx_asset_stage_recovery"} {
 		var n int
 		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?`, name).Scan(&n); err != nil || n != 1 {
 			t.Fatalf("managed index %s count=%d err=%v", name, n, err)
@@ -1369,7 +1369,7 @@ func TestMigrateIngestPublicationV2PreservesCustomIndexOnEveryGraphTableOnce(t *
 	defer db.Close()
 	custom := map[string]string{
 		"media_ingest_step": "id,step_type", "post_ingest_task": "id,task_type", "scrape_task": "id,status", "transcode_task": "id,status",
-		"pretranscode_task_meta": "task_id,priority", "pretranscode_rendition_job": "id,status", "media_ingest_step_dependency": "step_id,dependency_kind",
+		"media_ingest_step_dependency": "step_id,dependency_kind",
 		"media_ingest_evidence": "id,kind", "media_asset_stage_journal": "stage_id,state",
 	}
 	for table, cols := range custom {
@@ -2444,8 +2444,8 @@ func TestOpenSQLiteFreshPublicationSchemaMatchesCanonical(t *testing.T) {
 	}
 	defer conn.Close()
 	for table, canonical := range map[string]string{
-		"media_ingest_run":       canonicalMediaIngestRunV2Schema(),
-		"media_ingest_step":      func() string {
+		"media_ingest_run": canonicalMediaIngestRunV2Schema(),
+		"media_ingest_step": func() string {
 			var count int
 			if err := conn.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='document_artifact'`).Scan(&count); err == nil && count > 0 {
 				return canonicalMediaIngestStepPhase5Schema()
@@ -3419,6 +3419,34 @@ func TestSchedulerMigrationForeignKeyRecovery(t *testing.T) {
 	assertNoForeignKeyViolations(t, db)
 }
 
+func TestSchedulerMigrationPreservesLegacyFairnessRows(t *testing.T) {
+	db := openSchedulerMigrationTestDB(t)
+	ctx := context.Background()
+	if _, err := db.Exec(`CREATE TABLE scheduler_fairness(task_type TEXT PRIMARY KEY,cursor TIMESTAMP NOT NULL,updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP); INSERT INTO scheduler_fairness(task_type,cursor,updated_at) VALUES('encrypt','2026-01-01 00:00:00','2026-01-02 00:00:00')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateSchedulerSchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	var initialized int
+	var revision int64
+	var library sql.NullInt64
+	var updated string
+	if err := db.QueryRow(`SELECT last_library_id,initialized,revision,CAST(updated_at AS TEXT) FROM scheduler_fairness WHERE task_type='encrypt'`).Scan(&library, &initialized, &revision, &updated); err != nil {
+		t.Fatal(err)
+	}
+	if library.Valid || initialized != 0 || revision != 0 || !strings.HasPrefix(updated, "2026-01-02") {
+		t.Fatalf("migrated row library=%v initialized=%d revision=%d updated=%q", library, initialized, revision, updated)
+	}
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := exactPublicationTable(ctx, conn, "scheduler_fairness", strings.Replace(SchedulerFairnessSchema, "CREATE TABLE IF NOT EXISTS", "CREATE TABLE", 1)); err != nil {
+		t.Fatal(err)
+	}
+}
 func TestSchedulerMigrationIdempotent(t *testing.T) {
 	db := openSchedulerMigrationTestDB(t)
 	ctx := context.Background()
@@ -3720,24 +3748,24 @@ func TestTaskControlMigrationControlAuditSchema(t *testing.T) {
 		t.Fatal(err)
 	}
 	expected := map[string]string{
-		"id":                    "INTEGER",
-		"task_identity":         "TEXT",
-		"task_type":             "TEXT",
-		"action":                "TEXT",
-		"actor_id":              "INTEGER",
-		"actor_name":            "TEXT",
-		"reason":                "TEXT",
-		"previous_status":       "TEXT",
-		"previous_revision":     "INTEGER",
-		"previous_generation":   "INTEGER",
-		"previous_retry_round":  "INTEGER",
-		"new_status":            "TEXT",
-		"new_revision":          "INTEGER",
-		"new_retry_round":       "INTEGER",
-		"operation_id":          "TEXT",
-		"outcome_code":          "TEXT",
-		"metadata_json":         "TEXT",
-		"created_at":            "TIMESTAMP",
+		"id":                   "INTEGER",
+		"task_identity":        "TEXT",
+		"task_type":            "TEXT",
+		"action":               "TEXT",
+		"actor_id":             "INTEGER",
+		"actor_name":           "TEXT",
+		"reason":               "TEXT",
+		"previous_status":      "TEXT",
+		"previous_revision":    "INTEGER",
+		"previous_generation":  "INTEGER",
+		"previous_retry_round": "INTEGER",
+		"new_status":           "TEXT",
+		"new_revision":         "INTEGER",
+		"new_retry_round":      "INTEGER",
+		"operation_id":         "TEXT",
+		"outcome_code":         "TEXT",
+		"metadata_json":        "TEXT",
+		"created_at":           "TIMESTAMP",
 	}
 	rows, err := db.Query(`PRAGMA table_info("task_control_audit")`)
 	if err != nil {

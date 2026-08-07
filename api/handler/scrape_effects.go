@@ -232,7 +232,7 @@ func syncSeriesCollectionMetaExecutor(ctx context.Context, q store.SQLExecutor, 
 		return err
 	}
 	for _, v := range siblings {
-		merged, err := scraper.MergeMetaJSON(v.meta, sharedPatch)
+		merged, err := scraper.MergeSeriesFieldsPreservingEpisode(v.meta, sharedPatch)
 		if err != nil {
 			return err
 		}

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"knox-media/internal/atrack"
@@ -611,6 +612,12 @@ func (a *encryptAdapter) ExecuteWithResult(ctx context.Context, task Task) (Exec
 	if a == nil || a.enc == nil {
 		return ordinary, unavailableWorkerError(TaskEncrypt, "encryptor is not configured")
 	}
+	// Long-running encryption is progress-driven: while the resume checkpoint
+	// offset advances, the task reports progress so the dispatcher never
+	// cancels it on wall clock alone. A stalled encryption (no checkpoint for
+	// ProgressIdleTimeout) is force-cancelled by the heartbeat loop instead.
+	stopProgress := a.watchEncryptProgress(ctx, task.MediaID)
+	defer stopProgress()
 	dbp, hasDB := a.enc.(encryptionDBProvider)
 	stager, canStage := a.enc.(mediaEncryptionStager)
 	if !hasDB || dbp.EncryptionDB() == nil {
@@ -655,6 +662,18 @@ func (a *encryptAdapter) ExecuteWithResult(ctx context.Context, task Task) (Exec
 			if !canStage {
 				return ordinary, permanentAdapterError(TaskEncrypt, "staged encryption is not configured")
 			}
+			// A media item may already hold a valid encrypted artifact even
+			// though media.file_path no longer equals the recorded enc_path
+			// (e.g. encryption committed in an earlier generation and the user
+			// retried the ingest run, so the original plaintext is gone).
+			// Re-encrypting is impossible in that case; treat the existing
+			// artifact as success so the queue row and linked step complete
+			// instead of failing with "file does not exist".
+			if ready, readyErr := usableEncryptedOutput(ctx, db, task.MediaID); readyErr != nil {
+				return ordinary, readyErr
+			} else if ready {
+				return ordinary, nil
+			}
 			staged, err = stager.StageMediaEncryption(ctx, task.MediaID)
 			if err == nil {
 				err = insertEncryptionStageJournal(ctx, db, task, staged)
@@ -662,6 +681,19 @@ func (a *encryptAdapter) ExecuteWithResult(ctx context.Context, task Task) (Exec
 		}
 	}
 	if err != nil {
+		// loadSelectedEncryptionStage matched the encrypted asset record but
+		// fingerprinting the original plaintext failed because the plaintext
+		// was already cleaned up by the earlier encryption commit. For a
+		// re-submitted media that already holds a valid encrypted artifact this
+		// is not an error: complete the step without re-encrypting. Any other
+		// source-path error is surfaced unchanged.
+		if isMissingSourcePathError(err) {
+			if ready, readyErr := usableEncryptedOutput(ctx, db, task.MediaID); readyErr != nil {
+				return ordinary, readyErr
+			} else if ready {
+				return ordinary, nil
+			}
+		}
 		return ordinary, classifyEncryptError(err)
 	}
 	rootProvider, ok := a.enc.(encryptionPrivateRootProvider)
@@ -683,6 +715,45 @@ func (a *encryptAdapter) ExecuteWithResult(ctx context.Context, task Task) (Exec
 	}
 	return ExecutionResult{Completion: AlreadyCommittedAtomically}, nil
 }
+
+// watchEncryptProgress reports forward progress while the media's encryption
+// resume checkpoint advances. The dispatcher uses the reported progress to keep
+// long-running encryption tasks alive; when the checkpoint stops advancing for
+// ProgressIdleTimeout the task is force-cancelled as stalled.
+func (a *encryptAdapter) watchEncryptProgress(ctx context.Context, mediaID int64) func() {
+	dbp, ok := a.enc.(encryptionDBProvider)
+	if !ok || dbp.EncryptionDB() == nil {
+		return func() {}
+	}
+	db := dbp.EncryptionDB()
+	done := make(chan struct{})
+	var once sync.Once
+	stop := func() { once.Do(func() { close(done) }) }
+	go func() {
+		lastOffset := int64(-1)
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-done:
+				return
+			case <-ticker.C:
+				var offset int64
+				if err := db.QueryRowContext(context.WithoutCancel(ctx), `SELECT COALESCE(plain_offset,0) FROM media_encrypt_resume WHERE media_id=? ORDER BY id DESC LIMIT 1`, mediaID).Scan(&offset); err != nil {
+					continue
+				}
+				if offset > lastOffset {
+					lastOffset = offset
+					ReportProgress(ctx)
+				}
+			}
+		}
+	}()
+	return stop
+}
+
 func classifyEncryptError(err error) error {
 	if err == nil {
 		return nil
@@ -745,9 +816,10 @@ func commitEncryptionStage(ctx context.Context, db *sql.DB, task Task, s storage
 	if err := db.QueryRowContext(ctx, `SELECT COALESCE(policy_version,1) FROM media_ingest_run WHERE id=?`, *task.RunID).Scan(&policyVersion); err != nil {
 		return err
 	}
-	handoff := encryptionUsesRetirementHandoff(policyVersion)
 	quarantinePath := ""
-	// New policy generations leave plaintext present and hand cleanup to retirement.
+	// New policy generations leave plaintext present; the commercial build hands
+	// cleanup to the retirement worker. The community build excludes retirement,
+	// so v3+ generations keep plaintext in place and never record cleanup intents.
 	// Legacy generations keep the quarantine-before-commit state machine; staged/
 	// quarantined recovery remains for those in-flight journals.
 	if !alreadySelected && encryptionQuarantinesBeforeCommit(policyVersion) {
@@ -773,25 +845,22 @@ func commitEncryptionStage(ctx context.Context, db *sql.DB, task Task, s storage
 		return errors.New("encrypt commit staged identity invalid")
 	}
 	if !alreadySelected && quarantinePath != "" {
-		quarantineHash, hashErr := encryptionCommitFileSHA256(quarantinePath)
+		algo, wantHash, fpOK := publication.FingerprintHash(s.SourceFingerprint)
+		if !fpOK || wantHash == "" {
+			return errors.New("quarantine source hash unavailable")
+		}
+		var quarantineHash string
+		var hashErr error
+		if algo == "sha256" {
+			quarantineHash, hashErr = encryptionCommitFileSHA256(quarantinePath)
+		} else {
+			quarantineHash, hashErr = fileImoHash(quarantinePath)
+		}
 		if hashErr != nil {
 			return hashErr
 		}
-		sourceHash := s.SourceFingerprint[strings.LastIndex(s.SourceFingerprint, "sha256:")+7:]
-		if !strings.EqualFold(quarantineHash, sourceHash) {
+		if !strings.EqualFold(quarantineHash, wantHash) {
 			return errors.New("quarantine source hash mismatch")
-		}
-	}
-	if !alreadySelected && handoff {
-		if _, statErr := os.Stat(s.OriginalPath); statErr != nil {
-			return fmt.Errorf("encrypt handoff source missing: %w", statErr)
-		}
-		fp, fpErr := encryptionSourceFingerprint(s.OriginalPath)
-		if fpErr != nil {
-			return fpErr
-		}
-		if err = errOrMismatch(nil, fp, s.SourceFingerprint); err != nil {
-			return err
 		}
 	}
 
@@ -836,26 +905,12 @@ func commitEncryptionStage(ctx context.Context, db *sql.DB, task Task, s storage
 			return err
 		}
 		_, _ = tx.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='committed',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state IN ('staged','quarantined')`, s.StageID)
-		if handoff {
-			if err = upsertEncryptionRetirementIntentTx(ctx, tx, task, s, ""); err != nil {
-				return err
-			}
-		}
 		if err = finishEncryptionLifecycleTx(ctx, tx, task); err != nil {
 			return err
 		}
 		return publication.FinalizeNodeTransitionTx(ctx, tx, *task.RunID)
 	})
 	if err == nil {
-		if handoff {
-			// Cleanup failures must never fail encryption: retirement owns blockers.
-			marker := "verified_committed"
-			if s.CleanupPlaintext {
-				marker = "retirement_handoff"
-			}
-			_, _ = db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET recovery_error=?,next_retry_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='committed'`, marker, s.StageID)
-			return nil
-		}
 		// Encryption is already committed/done. Cleanup errors are journaled for
 		// recovery and must not fail the encrypt task/queue path.
 		outcome, cleanupErr := cleanupCommittedEncryptionPlaintext(quarantineRoot, task.MediaID, task.Generation, s.StageID, quarantinePath, encryptionFileOpsForCleanup())
@@ -959,6 +1014,23 @@ func finishEncryptionLifecycleTx(ctx context.Context, tx store.SQLExecutor, task
 }
 func usableEncryptedOutput(ctx context.Context, db *sql.DB, mediaID int64) (bool, error) {
 	return storage.IsEncryptedAssetRecordValid(ctx, db, mediaID)
+}
+
+// isMissingSourcePathError reports whether err originates from a source path
+// that no longer exists. loadSelectedEncryptionStage computes a fingerprint of
+// the original plaintext; once encryption has committed and cleaned up the
+// plaintext, that path is gone even though the encrypted artifact is valid.
+func isMissingSourcePathError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if os.IsNotExist(err) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "cannot find the file") || strings.Contains(message, "cannot find the path") ||
+		strings.Contains(message, "getfileattributesex") || strings.Contains(message, "no such file") ||
+		strings.Contains(message, "file does not exist")
 }
 
 func isPermanentEncryptError(err error) bool {

@@ -42,10 +42,14 @@ func ResetInterruptedTasks(db *sql.DB) {
 		SET status = 'waiting', progress = 0, error_message = ?
 		WHERE status = 'running'`, restartResetMessage)
 
-	reset("pretranscode_rendition_job", `
-		UPDATE pretranscode_rendition_job
-		SET status = 'waiting', progress = 0, error_message = ?, available_at=CURRENT_TIMESTAMP, lease_owner=NULL, lease_until=NULL
-		WHERE status = 'running'`, restartResetMessage)
+	// The community build has no pretranscode_rendition_job table; only reset
+	// it when the commercial schema is present so restart never logs an error.
+	if _, err := db.Exec(`SELECT 1 FROM pretranscode_rendition_job LIMIT 1`); err == nil {
+		reset("pretranscode_rendition_job", `
+			UPDATE pretranscode_rendition_job
+			SET status = 'waiting', progress = 0, error_message = ?, available_at=CURRENT_TIMESTAMP, lease_owner=NULL, lease_until=NULL
+			WHERE status = 'running'`, restartResetMessage)
+	}
 
 	reset("linked prepare step", `
 		UPDATE media_ingest_step

@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -36,6 +37,7 @@ type CursorPayload struct {
 	SnapshotAt int64  `json:"sa"`
 	ID         int64  `json:"id"`
 	Priority   int64  `json:"pr"`
+	Kind       string `json:"k,omitempty"`
 }
 
 // EncodeCursor serializes a cursor payload to an opaque base64 string.
@@ -184,6 +186,17 @@ func (q *QueryService) List(ctx context.Context, filter QueryFilter, cursor stri
 		afterPri = cp.Priority
 	}
 
+	if sources := q.adaptersForPublicType(filter.TaskType); len(sources) > 0 {
+		result, err := q.listAdaptersTx(ctx, tx, sources, filter, cpKind(cursor), afterID, afterPri, limit, snapRev, filterHash)
+		if err != nil {
+			return nil, err
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, fmt.Errorf("list commit: %w", err)
+		}
+		return result, nil
+	}
+
 	// Build WHERE clause for oracle adapter
 	where, args := buildOracleWhere(filter)
 	// Add cursor pagination
@@ -211,7 +224,9 @@ func (q *QueryService) List(ctx context.Context, filter QueryFilter, cursor stri
 		COALESCE(base_priority,0), available_at, created_at, updated_at,
 		media_id, library_id,
 		removed_at, COALESCE(removed_by,''), COALESCE(remove_reason,''),
-		COALESCE(run_now_expires, NULL) AS run_now_expires
+		run_now_expires,
+		COALESCE((SELECT title FROM media m WHERE m.id = post_ingest_task.media_id),''),
+		COALESCE((SELECT file_path FROM media m WHERE m.id = post_ingest_task.media_id),'')
 	FROM post_ingest_task` + where + ` ORDER BY COALESCE(base_priority,0) DESC, id ASC LIMIT ?`
 	args = append(args, limit+1)
 
@@ -282,8 +297,143 @@ func (q *QueryService) Detail(ctx context.Context, taskIdentity string) (*Detail
 	return &DetailResult{Row: *row}, nil
 }
 
+type resolvedSource struct {
+	mapping SourceMapping
+	adapter SourceAdapter
+}
+
+func (q *QueryService) adaptersForPublicType(taskType string) []resolvedSource {
+	if taskType == "" || q.builder.Registry() == nil {
+		return nil
+	}
+	for _, group := range q.builder.Registry().Groups {
+		for _, spec := range group.Types {
+			if spec.Type != taskType || !spec.Available {
+				continue
+			}
+			var all []resolvedSource
+			seen := map[string]bool{}
+			for _, mapping := range spec.SourceMappings {
+				adapter := q.builder.adapterForKind(mapping.Kind)
+				if adapter == nil {
+					continue
+				}
+				key := adapter.Kind() + "\x00" + mapping.InternalType
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+				r := resolvedSource{mapping: mapping, adapter: adapter}
+				all = append(all, r)
+			}
+			// Merge every resolvable mapping. Identity-level deduplication happens
+			// during list projection; cross-source rows are distinct unless an adapter
+			// can provide a proven logical-link key (none currently do).
+			return all
+		}
+	}
+	return nil
+}
+
+func adapterFilters(filter QueryFilter, mapping SourceMapping) Filters {
+	taskType := mapping.InternalType
+	if taskType == "" {
+		taskType = filter.TaskType
+	}
+	return Filters{TaskType: taskType, Status: filter.Status, Generation: filter.Generation,
+		LibraryID: filter.LibraryID, Removed: filter.Removed, Owner: filter.Owner}
+}
+
+func cpKind(cursor string) string {
+	if cursor == "" {
+		return ""
+	}
+	p, err := DecodeCursor(cursor)
+	if err != nil {
+		return ""
+	}
+	return p.Kind
+}
+
+func (q *QueryService) listAdaptersTx(ctx context.Context, tx *sql.Tx, sources []resolvedSource, filter QueryFilter, afterKind string, afterID, afterPri int64, limit int, snapRev int64, filterHash string) (*ListResult, error) {
+	byIdentity := make(map[string]ProjectionRow)
+	for _, source := range sources {
+		ids, err := source.adapter.ListIDs(ctx, tx, adapterFilters(filter, source.mapping))
+		if err != nil {
+			return nil, fmt.Errorf("list query %s: %w", source.adapter.Kind(), err)
+		}
+		for _, id := range ids {
+			identity := BuildIdentity(source.adapter.Kind(), id)
+			if _, exists := byIdentity[identity]; exists {
+				continue
+			}
+			row, err := q.builder.ProjectTx(ctx, tx, identity)
+			if err != nil {
+				return nil, fmt.Errorf("list project: %w", err)
+			}
+			if row != nil {
+				row.Revision = snapRev
+				byIdentity[identity] = *row
+			}
+		}
+	}
+	items := make([]ProjectionRow, 0, len(byIdentity))
+	for _, row := range byIdentity {
+		items = append(items, row)
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].EffectivePriority != items[j].EffectivePriority {
+			return items[i].EffectivePriority > items[j].EffectivePriority
+		}
+		if items[i].SourceKind != items[j].SourceKind {
+			return items[i].SourceKind < items[j].SourceKind
+		}
+		return items[i].SourceID < items[j].SourceID
+	})
+	total := int64(len(items))
+	start := 0
+	if afterID != 0 {
+		for start < len(items) {
+			r := items[start]
+			if r.EffectivePriority < afterPri || (r.EffectivePriority == afterPri && (r.SourceKind > afterKind || (r.SourceKind == afterKind && r.SourceID > afterID))) {
+				break
+			}
+			start++
+		}
+	}
+	end := start + limit
+	hasMore := end < len(items)
+	if end > len(items) {
+		end = len(items)
+	}
+	items = items[start:end]
+	result := &ListResult{Items: items, Total: total, HasMore: hasMore, SnapshotRevision: snapRev}
+	if hasMore && len(items) > 0 {
+		last := items[len(items)-1]
+		result.NextCursor = EncodeCursor(CursorPayload{Version: CursorVersion, Order: "claim_order", FilterHash: filterHash, SnapshotAt: snapRev, ID: last.SourceID, Priority: last.EffectivePriority, Kind: last.SourceKind})
+	}
+	return result, nil
+}
+
 // Total returns the exact filtered count independently of pagination.
 func (q *QueryService) Total(ctx context.Context, filter QueryFilter) (int64, error) {
+	if sources := q.adaptersForPublicType(filter.TaskType); len(sources) > 0 {
+		tx, err := q.db.BeginTx(ctx, nil)
+		if err != nil {
+			return 0, fmt.Errorf("total begin tx: %w", err)
+		}
+		defer func() { _ = tx.Rollback() }()
+		var total int64
+		for _, source := range sources {
+			n, err := source.adapter.Count(ctx, tx, adapterFilters(filter, source.mapping))
+			if err != nil {
+				return 0, fmt.Errorf("total %s: %w", source.adapter.Kind(), err)
+			}
+			total += n
+		}
+		return total, tx.Commit()
+	}
+
 	where, args := buildOracleWhere(filter)
 	var total int64
 	if err := q.db.QueryRowContext(ctx,
@@ -379,7 +529,7 @@ func scanOracleRowSimple(rows *sql.Rows) (RawTaskRow, error) {
 		&r.BasePriority, &availableAt, &r.CreatedAt, &r.UpdatedAt,
 		&mediaID, &libraryID,
 		&removedAt, &r.RemovedBy, &r.RemoveReason,
-		&runNowExpires); err != nil {
+		&runNowExpires, &r.MediaTitle, &r.MediaFilePath); err != nil {
 		return r, err
 	}
 	r.TaskType = typ

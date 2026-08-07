@@ -234,3 +234,63 @@ func TestPlanCompletionFinalizePropagatesSkipFromFailedPreview(t *testing.T) {
 	}
 	assertLifecycleSnapshot(t, db, runID, previewStep, aiStep, previewTask, aiTask, "failed", "skipped", 1, "published")
 }
+
+func TestFinalizeRequiredFailureConvergesTerminalRunAtomically(t *testing.T) {
+	db := completionTestDB(t)
+	_, err := db.Exec(`
+INSERT INTO library(name,type,path) VALUES('terminal','video','/terminal');
+INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state) VALUES(1,1,'terminal','video',1,'processing');
+INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(10,1,1,'scan','processing','{}',3);
+INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status,last_error) VALUES
+ (11,10,1,1,'poster',1,'failed','context deadline exceeded'),
+ (12,10,1,1,'media_visible',0,'waiting',''),
+ (13,10,1,1,'scrape',0,'waiting',''),
+ (14,10,1,1,'preview',0,'running',''),
+ (15,10,1,1,'subtitle_extract',0,'waiting','');
+INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status,lease_owner,lease_until) VALUES
+ (114,1,10,14,1,'preview','running','preview-owner',datetime(CURRENT_TIMESTAMP,'+60 seconds')),
+ (115,1,10,15,1,'subtitle','waiting',NULL,NULL);
+INSERT INTO scrape_task(id,media_id,source,status,progress,ingest_run_id,ingest_step_id,generation,lease_owner,lease_until) VALUES
+ (113,1,'auto-scan','waiting',0,10,13,1,NULL,NULL);`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = FinalizeNodeTransitionTx(context.Background(), tx, 10); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if err = tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	assertTerminalRunConverged(t, db, 10)
+}
+
+func assertTerminalRunConverged(t *testing.T, db *sql.DB, runID int64) {
+	t.Helper()
+	var runStatus string
+	var waiting, running, cancelled, failed int
+	if err := db.QueryRow(`SELECT status FROM media_ingest_run WHERE id=?`, runID).Scan(&runStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COALESCE(SUM(status='waiting'),0),COALESCE(SUM(status='running'),0),COALESCE(SUM(status='cancelled'),0),COALESCE(SUM(status='failed'),0) FROM media_ingest_step WHERE run_id=?`, runID).Scan(&waiting, &running, &cancelled, &failed); err != nil {
+		t.Fatal(err)
+	}
+	var queueWaiting, queueRunning, queueCancelled int
+	if err := db.QueryRow(`SELECT
+ (SELECT COUNT(*) FROM post_ingest_task WHERE ingest_run_id=? AND status='waiting')+(SELECT COUNT(*) FROM scrape_task WHERE ingest_run_id=? AND status='waiting'),
+ (SELECT COUNT(*) FROM post_ingest_task WHERE ingest_run_id=? AND status='running')+(SELECT COUNT(*) FROM scrape_task WHERE ingest_run_id=? AND status='running'),
+ (SELECT COUNT(*) FROM post_ingest_task WHERE ingest_run_id=? AND status='cancelled')+(SELECT COUNT(*) FROM scrape_task WHERE ingest_run_id=? AND status='cancelled')`, runID, runID, runID, runID, runID, runID).Scan(&queueWaiting, &queueRunning, &queueCancelled); err != nil {
+		t.Fatal(err)
+	}
+	var allTerminal, completionWaiting int
+	if err := db.QueryRow(`SELECT all_terminal,waiting_count FROM media_plan_completion WHERE run_id=?`, runID).Scan(&allTerminal, &completionWaiting); err != nil {
+		t.Fatal(err)
+	}
+	if runStatus != "failed" || waiting != 0 || running != 0 || cancelled != 4 || failed != 1 || queueWaiting != 0 || queueRunning != 0 || queueCancelled != 3 || allTerminal != 1 || completionWaiting != 0 {
+		t.Fatalf("run=%s steps waiting/running/cancelled/failed=%d/%d/%d/%d queues waiting/running/cancelled=%d/%d/%d completion=%d/%d", runStatus, waiting, running, cancelled, failed, queueWaiting, queueRunning, queueCancelled, allTerminal, completionWaiting)
+	}
+}

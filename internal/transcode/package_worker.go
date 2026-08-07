@@ -308,24 +308,14 @@ func (w *PackageWorker) RunTask(ctx context.Context, taskID int64) error {
 
 	var fileID, sourcePath sql.NullString
 	var sourceHeight sql.NullInt64
-	var cleanupFlag sql.NullInt64
 	if err := w.DB.QueryRow(`
-		SELECT COALESCE(m.file_id,''), COALESCE(m.file_path,''), COALESCE(m.height,1080), COALESCE(l.cleanup_local_source_after_package,0)
+		SELECT COALESCE(m.file_id,''), COALESCE(m.file_path,''), COALESCE(m.height,1080)
 		FROM media m
-		LEFT JOIN library l ON l.id = m.library_id
 		WHERE m.id = ?
 		LIMIT 1
-	`, mediaID).Scan(&fileID, &sourcePath, &sourceHeight, &cleanupFlag); err != nil {
+	`, mediaID).Scan(&fileID, &sourcePath, &sourceHeight); err != nil {
 		_, _ = w.DB.Exec(`UPDATE package_task SET status='failed', progress=0, drm_status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE id = ?`, trimErrorMessage(err.Error()), taskID)
 		return err
-	}
-	// Capture generation at packaging start for mid-flight fence at retirement handoff.
-	// packagedGenerationOK distinguishes captured 0 from "capture failed / unknown".
-	packagedGeneration := int64(0)
-	packagedGenerationOK := false
-	if g, genErr := readMediaIngestGeneration(ctx2, w.DB, mediaID); genErr == nil {
-		packagedGeneration = g
-		packagedGenerationOK = true
 	}
 
 	ladder := chooseLadder(int(sourceHeight.Int64), 1080, nil)
@@ -388,10 +378,10 @@ func (w *PackageWorker) RunTask(ctx context.Context, taskID int64) error {
 		_, _ = w.DB.Exec(`DELETE FROM drm_asset WHERE media_id = ?`, mediaID)
 	}
 
+	// The community build has no retirement worker, so packaged plaintext
+	// sources are never scheduled for deletion; source_cleanup_status stays
+	// 'skipped'.
 	cleanupStatus := "skipped"
-	if cleanupFlag.Int64 == 1 && shouldCleanup(w.UploadDir, sourcePath.String) {
-		cleanupStatus = "pending"
-	}
 	tx, err := w.DB.BeginTx(ctx2, nil)
 	if err != nil {
 		_, _ = w.DB.Exec(`UPDATE package_task SET status='failed', progress=0, drm_status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE id = ?`, trimErrorMessage(err.Error()), taskID)
@@ -409,23 +399,6 @@ func (w *PackageWorker) RunTask(ctx context.Context, taskID int64) error {
 		WHERE id = ?
 	`, outMaster, cleanupStatus, taskID); err != nil {
 		return failHandoff(err)
-	}
-	if cleanupStatus == "pending" {
-		if packageHandoffHook != nil {
-			packageHandoffHook(mediaID, tx)
-		}
-		req, ok, resolveErr := resolveAuthoritativePackageRetirement(ctx2, tx, mediaID, sourcePath.String, packagedGeneration, packagedGenerationOK)
-		if resolveErr != nil {
-			return failHandoff(resolveErr)
-		}
-		if ok {
-			req.PackageTaskID = taskID
-			if upsertErr := upsertPackageRetirementIntentTx(ctx2, tx, req); upsertErr != nil {
-				return failHandoff(upsertErr)
-			}
-		}
-		// ok=false with nil error: schema present but no authoritative current
-		// generation — leave done+pending without inventing a retirement row.
 	}
 	if err = tx.Commit(); err != nil {
 		return failHandoff(err)

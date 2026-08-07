@@ -77,9 +77,9 @@ func NewRegistry() *Registry {
 		Selectable: false,
 		Types: []TaskSpec{
 			{
-				Type:  "transcode",
-				Group: "tasks.group.video",
-				Route: "tasks/video/transcode",
+				Type:   "transcode",
+				Group:  "tasks.group.video",
+				Route:  "tasks/video/transcode",
 				Family: "video_post_processing",
 				SourceMappings: []SourceMapping{
 					{Kind: "transcode_task"},
@@ -94,9 +94,9 @@ func NewRegistry() *Registry {
 				Available:    true,
 			},
 			{
-				Type:  "optimize",
-				Group: "tasks.group.video",
-				Route: "tasks/video/optimize",
+				Type:   "optimize",
+				Group:  "tasks.group.video",
+				Route:  "tasks/video/optimize",
 				Family: "video_post_processing",
 				SourceMappings: []SourceMapping{
 					{Kind: "optimize_task"},
@@ -107,12 +107,12 @@ func NewRegistry() *Registry {
 				)),
 				Filters:      commonTaskFilters(),
 				Capabilities: sortedStrings([]string{"encoding", "optimization", "video"}),
-				Available:    true,
+				Available:    false,
 			},
 			{
-				Type:  "package",
-				Group: "tasks.group.video",
-				Route: "tasks/video/package",
+				Type:   "package",
+				Group:  "tasks.group.video",
+				Route:  "tasks/video/package",
 				Family: "video_post_processing",
 				SourceMappings: []SourceMapping{
 					{Kind: "post_ingest_task", InternalType: "package"},
@@ -128,25 +128,25 @@ func NewRegistry() *Registry {
 				Available:    true,
 			},
 			{
-				Type:  "encrypt",
-				Group: "tasks.group.video",
-				Route: "tasks/video/encrypt",
+				Type:   "encrypt",
+				Group:  "tasks.group.video",
+				Route:  "tasks/video/encrypt",
 				Family: "video_post_processing",
 				SourceMappings: []SourceMapping{
 					{Kind: "post_ingest_task", InternalType: "encrypt"},
 				},
-				Columns: sortedColumns(commonTaskColumns()),
+				Columns:      sortedColumns(commonTaskColumns()),
 				Filters:      commonTaskFilters(),
 				Capabilities: sortedStrings([]string{"drm", "encryption", "video"}),
 				Available:    true,
 			},
 			{
-				Type:  "pretranscode",
-				Group: "tasks.group.video",
-				Route: "tasks/video/pretranscode",
+				Type:   "pretranscode",
+				Group:  "tasks.group.video",
+				Route:  "tasks/video/pretranscode",
 				Family: "video_post_processing",
 				SourceMappings: []SourceMapping{
-					{Kind: "post_ingest_task", InternalType: "pretranscode"},
+					{Kind: "transcode_task", InternalType: "pretranscode"},
 				},
 				Columns: sortedColumns(append(commonTaskColumns(),
 					ColumnSpec{Key: "output_path", Label: "tasks.column.output_path"},
@@ -164,36 +164,36 @@ func NewRegistry() *Registry {
 		Selectable: false,
 		Types: []TaskSpec{
 			{
-				Type:  "poster",
-				Group: "tasks.group.ingestion",
-				Route: "tasks/ingestion/poster",
+				Type:   "poster",
+				Group:  "tasks.group.ingestion",
+				Route:  "tasks/ingestion/poster",
 				Family: "media_ingestion",
 				SourceMappings: []SourceMapping{
 					{Kind: "post_ingest_task", InternalType: "poster"},
 					{Kind: "post_ingest_task", InternalType: "poster_repair"},
 				},
-				Columns: sortedColumns(commonTaskColumns()),
+				Columns:      sortedColumns(commonTaskColumns()),
 				Filters:      commonTaskFilters(),
 				Capabilities: sortedStrings([]string{"image", "poster"}),
 				Available:    true,
 			},
 			{
-				Type:  "thumbnail",
-				Group: "tasks.group.ingestion",
-				Route: "tasks/ingestion/thumbnail",
+				Type:   "thumbnail",
+				Group:  "tasks.group.ingestion",
+				Route:  "tasks/ingestion/thumbnail",
 				Family: "media_ingestion",
 				SourceMappings: []SourceMapping{
 					{Kind: "post_ingest_task", InternalType: "thumbnail"},
 				},
-				Columns: sortedColumns(commonTaskColumns()),
+				Columns:      sortedColumns(commonTaskColumns()),
 				Filters:      commonTaskFilters(),
 				Capabilities: sortedStrings([]string{"image", "thumbnail"}),
 				Available:    true,
 			},
 			{
-				Type:  "preview",
-				Group: "tasks.group.ingestion",
-				Route: "tasks/ingestion/preview",
+				Type:   "preview",
+				Group:  "tasks.group.ingestion",
+				Route:  "tasks/ingestion/preview",
 				Family: "media_ingestion",
 				SourceMappings: []SourceMapping{
 					{Kind: "post_ingest_task", InternalType: "preview"},
@@ -212,9 +212,9 @@ func NewRegistry() *Registry {
 				Available:    true,
 			},
 			{
-				Type:  "keyframe",
-				Group: "tasks.group.ingestion",
-				Route: "tasks/ingestion/keyframe",
+				Type:   "keyframe",
+				Group:  "tasks.group.ingestion",
+				Route:  "tasks/ingestion/keyframe",
 				Family: "media_ingestion",
 				SourceMappings: []SourceMapping{
 					{Kind: "post_ingest_task", InternalType: "keyframe"},
@@ -230,35 +230,35 @@ func NewRegistry() *Registry {
 				Available:    true,
 			},
 			{
-				Type:  "subtitle_extract",
-				Group: "tasks.group.ingestion",
-				Route: "tasks/ingestion/subtitle_extract",
+				Type:   "subtitle_extract",
+				Group:  "tasks.group.ingestion",
+				Route:  "tasks/ingestion/subtitle_extract",
 				Family: "media_ingestion",
 				SourceMappings: []SourceMapping{
 					{Kind: "post_ingest_task", InternalType: "subtitle_extract"},
 				},
-				Columns: sortedColumns(commonTaskColumns()),
+				Columns:      sortedColumns(commonTaskColumns()),
 				Filters:      commonTaskFilters(),
 				Capabilities: sortedStrings([]string{"subtitle", "text"}),
 				Available:    true,
 			},
 			{
-				Type:  "subtitle_recognize",
-				Group: "tasks.group.ingestion",
-				Route: "tasks/ingestion/subtitle_recognize",
+				Type:   "subtitle_recognize",
+				Group:  "tasks.group.ingestion",
+				Route:  "tasks/ingestion/subtitle_recognize",
 				Family: "media_ingestion",
 				SourceMappings: []SourceMapping{
 					{Kind: "post_ingest_task", InternalType: "subtitle_recognize"},
 				},
-				Columns: sortedColumns(commonTaskColumns()),
+				Columns:      sortedColumns(commonTaskColumns()),
 				Filters:      commonTaskFilters(),
 				Capabilities: sortedStrings([]string{"asr", "speech", "text"}),
 				Available:    true,
 			},
 			{
-				Type:  "atrack_extract",
-				Group: "tasks.group.ingestion",
-				Route: "tasks/ingestion/atrack_extract",
+				Type:   "atrack_extract",
+				Group:  "tasks.group.ingestion",
+				Route:  "tasks/ingestion/atrack_extract",
 				Family: "media_ingestion",
 				SourceMappings: []SourceMapping{
 					{Kind: "post_ingest_task", InternalType: "atrack"},
@@ -273,9 +273,9 @@ func NewRegistry() *Registry {
 				Available:    true,
 			},
 			{
-				Type:  "metadata_scrape",
-				Group: "tasks.group.ingestion",
-				Route: "tasks/ingestion/metadata_scrape",
+				Type:   "metadata_scrape",
+				Group:  "tasks.group.ingestion",
+				Route:  "tasks/ingestion/metadata_scrape",
 				Family: "media_ingestion",
 				SourceMappings: []SourceMapping{
 					{Kind: "post_ingest_task", InternalType: "metadata"},
@@ -292,22 +292,22 @@ func NewRegistry() *Registry {
 				Available:    true,
 			},
 			{
-				Type:  "ai_analysis",
-				Group: "tasks.group.ingestion",
-				Route: "tasks/ingestion/ai_analysis",
+				Type:   "ai_analysis",
+				Group:  "tasks.group.ingestion",
+				Route:  "tasks/ingestion/ai_analysis",
 				Family: "media_ingestion",
 				SourceMappings: []SourceMapping{
 					{Kind: "post_ingest_task", InternalType: "ai_analysis"},
 				},
-				Columns: sortedColumns(commonTaskColumns()),
+				Columns:      sortedColumns(commonTaskColumns()),
 				Filters:      commonTaskFilters(),
 				Capabilities: sortedStrings([]string{"ai", "analysis"}),
 				Available:    true,
 			},
 			{
-				Type:  "media_visible",
-				Group: "tasks.group.ingestion",
-				Route: "tasks/ingestion/media_visible",
+				Type:   "media_visible",
+				Group:  "tasks.group.ingestion",
+				Route:  "tasks/ingestion/media_visible",
 				Family: "media_ingestion",
 				SourceMappings: []SourceMapping{
 					{Kind: "post_ingest_task", InternalType: "media_visible"},
@@ -326,9 +326,9 @@ func NewRegistry() *Registry {
 		Selectable: false,
 		Types: []TaskSpec{
 			{
-				Type:  "photo_classify",
-				Group: "tasks.group.image",
-				Route: "tasks/image/photo_classify",
+				Type:   "photo_classify",
+				Group:  "tasks.group.image",
+				Route:  "tasks/image/photo_classify",
 				Family: "image_processing",
 				SourceMappings: []SourceMapping{
 					{Kind: "photo_classify_task"},
@@ -336,12 +336,12 @@ func NewRegistry() *Registry {
 				Columns:      sortedColumns(commonTaskColumns()),
 				Filters:      commonTaskFilters(),
 				Capabilities: sortedStrings([]string{"ai", "classification", "image"}),
-				Available:    true,
+				Available:    false,
 			},
 			{
-				Type:  "photo_geocode",
-				Group: "tasks.group.image",
-				Route: "tasks/image/photo_geocode",
+				Type:   "photo_geocode",
+				Group:  "tasks.group.image",
+				Route:  "tasks/image/photo_geocode",
 				Family: "image_processing",
 				SourceMappings: []SourceMapping{
 					{Kind: "photo_geocode_task"},
@@ -349,12 +349,12 @@ func NewRegistry() *Registry {
 				Columns:      sortedColumns(commonTaskColumns()),
 				Filters:      commonTaskFilters(),
 				Capabilities: sortedStrings([]string{"geo", "image"}),
-				Available:    true,
+				Available:    false,
 			},
 			{
-				Type:  "photo_face",
-				Group: "tasks.group.image",
-				Route: "tasks/image/photo_face",
+				Type:   "photo_face",
+				Group:  "tasks.group.image",
+				Route:  "tasks/image/photo_face",
 				Family: "image_processing",
 				SourceMappings: []SourceMapping{
 					{Kind: "photo_face_task"},
@@ -362,12 +362,12 @@ func NewRegistry() *Registry {
 				Columns:      sortedColumns(commonTaskColumns()),
 				Filters:      commonTaskFilters(),
 				Capabilities: sortedStrings([]string{"ai", "face", "image"}),
-				Available:    true,
+				Available:    false,
 			},
 			{
-				Type:  "image_ocr",
-				Group: "tasks.group.image",
-				Route: "tasks/image/image_ocr",
+				Type:   "image_ocr",
+				Group:  "tasks.group.image",
+				Route:  "tasks/image/image_ocr",
 				Family: "image_processing",
 				SourceMappings: []SourceMapping{
 					{Kind: "image_ocr_task"},
@@ -386,9 +386,9 @@ func NewRegistry() *Registry {
 		Selectable: false,
 		Types: []TaskSpec{
 			{
-				Type:  "lyric_recognize",
-				Group: "tasks.group.audio",
-				Route: "tasks/audio/lyric_recognize",
+				Type:   "lyric_recognize",
+				Group:  "tasks.group.audio",
+				Route:  "tasks/audio/lyric_recognize",
 				Family: "audio_processing",
 				SourceMappings: []SourceMapping{
 					{Kind: "lyric_task"},
@@ -399,12 +399,12 @@ func NewRegistry() *Registry {
 				)),
 				Filters:      commonTaskFilters(),
 				Capabilities: sortedStrings([]string{"ai", "audio", "lyrics"}),
-				Available:    true,
+				Available:    false,
 			},
 			{
-				Type:  "audio_analysis",
-				Group: "tasks.group.audio",
-				Route: "tasks/audio/audio_analysis",
+				Type:   "audio_analysis",
+				Group:  "tasks.group.audio",
+				Route:  "tasks/audio/audio_analysis",
 				Family: "audio_processing",
 				SourceMappings: []SourceMapping{
 					{Kind: "audio_analysis_task"},
@@ -415,9 +415,9 @@ func NewRegistry() *Registry {
 				Available:    false,
 			},
 			{
-				Type:  "audio_ai_analysis",
-				Group: "tasks.group.audio",
-				Route: "tasks/audio/audio_ai_analysis",
+				Type:   "audio_ai_analysis",
+				Group:  "tasks.group.audio",
+				Route:  "tasks/audio/audio_ai_analysis",
 				Family: "audio_processing",
 				SourceMappings: []SourceMapping{
 					{Kind: "audio_ai_analysis_task"},
@@ -436,9 +436,9 @@ func NewRegistry() *Registry {
 		Selectable: false,
 		Types: []TaskSpec{
 			{
-				Type:  "person_scrape",
-				Group: "tasks.group.person",
-				Route: "tasks/person/person_scrape",
+				Type:   "person_scrape",
+				Group:  "tasks.group.person",
+				Route:  "tasks/person/person_scrape",
 				Family: "system",
 				SourceMappings: []SourceMapping{
 					{Kind: "person_scrape_task"},
@@ -457,9 +457,9 @@ func NewRegistry() *Registry {
 		Selectable: false,
 		Types: []TaskSpec{
 			{
-				Type:  "artwork_cover",
-				Group: "tasks.group.artwork",
-				Route: "tasks/artwork/artwork_cover",
+				Type:   "artwork_cover",
+				Group:  "tasks.group.artwork",
+				Route:  "tasks/artwork/artwork_cover",
 				Family: "media_ingestion",
 				SourceMappings: []SourceMapping{
 					{Kind: "artwork_cover_task"},
@@ -478,9 +478,9 @@ func NewRegistry() *Registry {
 		Selectable: false,
 		Types: []TaskSpec{
 			{
-				Type:  "document_convert",
-				Group: "tasks.group.document",
-				Route: "tasks/document/document_convert",
+				Type:   "document_convert",
+				Group:  "tasks.group.document",
+				Route:  "tasks/document/document_convert",
 				Family: "document_processing",
 				SourceMappings: []SourceMapping{
 					{Kind: "document_convert_task"},
@@ -491,9 +491,9 @@ func NewRegistry() *Registry {
 				Available:    false,
 			},
 			{
-				Type:  "document_fulltext",
-				Group: "tasks.group.document",
-				Route: "tasks/document/document_fulltext",
+				Type:   "document_fulltext",
+				Group:  "tasks.group.document",
+				Route:  "tasks/document/document_fulltext",
 				Family: "document_processing",
 				SourceMappings: []SourceMapping{
 					{Kind: "document_fulltext_task"},
@@ -512,9 +512,9 @@ func NewRegistry() *Registry {
 		Selectable: false,
 		Types: []TaskSpec{
 			{
-				Type:  "scan",
-				Group: "tasks.group.system",
-				Route: "tasks/system/scan",
+				Type:   "scan",
+				Group:  "tasks.group.system",
+				Route:  "tasks/system/scan",
 				Family: "system",
 				SourceMappings: []SourceMapping{
 					{Kind: "scan_task"},
@@ -533,9 +533,9 @@ func NewRegistry() *Registry {
 				Available:    true,
 			},
 			{
-				Type:  "scheduled",
-				Group: "tasks.group.system",
-				Route: "tasks/system/scheduled",
+				Type:   "scheduled",
+				Group:  "tasks.group.system",
+				Route:  "tasks/system/scheduled",
 				Family: "system",
 				SourceMappings: []SourceMapping{
 					{Kind: "scheduled_task"},
@@ -551,20 +551,20 @@ func NewRegistry() *Registry {
 				)),
 				Filters:      commonTaskFilters(),
 				Capabilities: sortedStrings([]string{"scheduled"}),
-				Available:    true,
+				Available:    false,
 			},
 			{
-				Type:  "subtitle",
-				Group: "tasks.group.system",
-				Route: "tasks/system/subtitle",
+				Type:   "subtitle",
+				Group:  "tasks.group.system",
+				Route:  "tasks/system/subtitle",
 				Family: "system",
 				SourceMappings: []SourceMapping{
 					{Kind: "subtitle_task"},
 				},
-				Columns: sortedColumns(commonTaskColumns()),
+				Columns:      sortedColumns(commonTaskColumns()),
 				Filters:      commonTaskFilters(),
 				Capabilities: sortedStrings([]string{"subtitle"}),
-				Available:    true,
+				Available:    false,
 			},
 		},
 	})
