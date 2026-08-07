@@ -5,7 +5,7 @@ server:
 # Web UI branding (sidebar title, browser tab, favicon).
 
 branding:
-  app_name: "Knox-Media"
+  app_name: "Vauldy"
   # Optional custom favicon (.svg/.png/.ico), path relative to this file or absolute.
 
   favicon_path: ""
