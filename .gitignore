@@ -13,3 +13,5 @@ tools/doctran/fixtures/
 
 
 .worktrees/
+/.github/
+/docs/
