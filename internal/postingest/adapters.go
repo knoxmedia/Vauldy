@@ -816,9 +816,10 @@ func commitEncryptionStage(ctx context.Context, db *sql.DB, task Task, s storage
 	if err := db.QueryRowContext(ctx, `SELECT COALESCE(policy_version,1) FROM media_ingest_run WHERE id=?`, *task.RunID).Scan(&policyVersion); err != nil {
 		return err
 	}
-	handoff := encryptionUsesRetirementHandoff(policyVersion)
 	quarantinePath := ""
-	// New policy generations leave plaintext present and hand cleanup to retirement.
+	// New policy generations leave plaintext present; the commercial build hands
+	// cleanup to the retirement worker. The community build excludes retirement,
+	// so v3+ generations keep plaintext in place and never record cleanup intents.
 	// Legacy generations keep the quarantine-before-commit state machine; staged/
 	// quarantined recovery remains for those in-flight journals.
 	if !alreadySelected && encryptionQuarantinesBeforeCommit(policyVersion) {
@@ -860,18 +861,6 @@ func commitEncryptionStage(ctx context.Context, db *sql.DB, task Task, s storage
 		}
 		if !strings.EqualFold(quarantineHash, wantHash) {
 			return errors.New("quarantine source hash mismatch")
-		}
-	}
-	if !alreadySelected && handoff {
-		if _, statErr := os.Stat(s.OriginalPath); statErr != nil {
-			return fmt.Errorf("encrypt handoff source missing: %w", statErr)
-		}
-		fp, fpErr := encryptionSourceFingerprint(s.OriginalPath)
-		if fpErr != nil {
-			return fpErr
-		}
-		if err = errOrMismatch(nil, fp, s.SourceFingerprint); err != nil {
-			return err
 		}
 	}
 
@@ -916,26 +905,12 @@ func commitEncryptionStage(ctx context.Context, db *sql.DB, task Task, s storage
 			return err
 		}
 		_, _ = tx.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='committed',updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state IN ('staged','quarantined')`, s.StageID)
-		if handoff {
-			if err = upsertEncryptionRetirementIntentTx(ctx, tx, task, s, ""); err != nil {
-				return err
-			}
-		}
 		if err = finishEncryptionLifecycleTx(ctx, tx, task); err != nil {
 			return err
 		}
 		return publication.FinalizeNodeTransitionTx(ctx, tx, *task.RunID)
 	})
 	if err == nil {
-		if handoff {
-			// Cleanup failures must never fail encryption: retirement owns blockers.
-			marker := "verified_committed"
-			if s.CleanupPlaintext {
-				marker = "retirement_handoff"
-			}
-			_, _ = db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET recovery_error=?,next_retry_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='committed'`, marker, s.StageID)
-			return nil
-		}
 		// Encryption is already committed/done. Cleanup errors are journaled for
 		// recovery and must not fail the encrypt task/queue path.
 		outcome, cleanupErr := cleanupCommittedEncryptionPlaintext(quarantineRoot, task.MediaID, task.Generation, s.StageID, quarantinePath, encryptionFileOpsForCleanup())

@@ -326,8 +326,8 @@ func TestReconcileCommittedCleanupUnsafeFirstContinuesToLaterJournal(t *testing.
 }
 
 func TestReconcileCommittedCleanupTransientLstatRetriesThenSucceeds(t *testing.T) {
-	// Committed recovery no longer deletes quarantine; handoff completes without
-	// filesystem cleanup lstat retries.
+	// Community build: committed recovery marks verified_committed without a
+	// retirement handoff (the retirement module is commercial-only).
 	db, _ := openQueueTestDB(t)
 	if _, err := db.Exec(`PRAGMA foreign_keys=OFF`); err != nil {
 		t.Fatal(err)
@@ -350,15 +350,11 @@ func TestReconcileCommittedCleanupTransientLstatRetriesThenSucceeds(t *testing.T
 	if err := db.QueryRow(`SELECT state,recovery_error FROM media_encryption_stage_journal WHERE stage_id=?`, stage).Scan(&state, &marker); err != nil {
 		t.Fatal(err)
 	}
-	if state != "committed" || marker != "retirement_handoff" {
+	if state != "committed" || marker != "verified_committed" {
 		t.Fatalf("state=%s marker=%q", state, marker)
 	}
 	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("quarantine must remain after handoff: %v", err)
-	}
-	var n int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM media_plaintext_retirement WHERE encryption_stage_id=?`, stage).Scan(&n); err != nil || n != 1 {
-		t.Fatalf("retirement rows=%d err=%v", n, err)
+		t.Fatalf("quarantine must remain after commit verification: %v", err)
 	}
 }
 

@@ -1457,13 +1457,22 @@ func (q *Queue) AdminPurgeEncrypt(ctx context.Context, id, actorID int64) error 
 			if !removedAt.Valid {
 				return fmt.Errorf("postingest queue: encrypt task %d is not tombstoned", id)
 			}
-			var journals, retirements, deps int
-			if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM media_encryption_stage_journal WHERE task_id=?`, id).Scan(&journals); err != nil {
-				return err
-			}
+		var journals, retirements, deps int
+		if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM media_encryption_stage_journal WHERE task_id=?`, id).Scan(&journals); err != nil {
+			return err
+		}
+		// The community build has no retirement module/table; treat references
+		// as absent so purge is not falsely blocked.
+		retirements = 0
+		var retirementExists int
+		if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='media_plaintext_retirement')`).Scan(&retirementExists); err != nil {
+			return err
+		}
+		if retirementExists == 1 {
 			if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM media_plaintext_retirement WHERE media_id=? AND generation=?`, mediaID, generation).Scan(&retirements); err != nil {
 				return err
 			}
+		}
 			if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM media_ingest_step_dependency d JOIN post_ingest_task p ON p.ingest_step_id=d.step_id OR p.ingest_step_id=d.depends_on_step_id WHERE p.id=?`, id).Scan(&deps); err != nil {
 				return err
 			}

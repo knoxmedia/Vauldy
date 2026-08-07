@@ -36,19 +36,16 @@ import (
 	jitmetrics "knox-media/internal/jit/metrics"
 	jitsession "knox-media/internal/jit/session"
 	"knox-media/internal/keyframe"
-	// Enterprise module imports 闂?their init() registers into
+	// Enterprise module imports register their init() into
 	// coreiface.EnterpriseModules. The community build excludes these
 	// imports (and the packages themselves), leaving EnterpriseModules empty.
-	_ "knox-media/internal/license"
 	"knox-media/internal/lyrictask"
 	"knox-media/internal/metadatalib"
 	"knox-media/internal/monitor"
 	"knox-media/internal/photoclass"
 	"knox-media/internal/postingest"
-	"knox-media/internal/pretranscode"
 	"knox-media/internal/preview"
 	"knox-media/internal/publication"
-	"knox-media/internal/retirement"
 	"knox-media/internal/scancoord"
 	"knox-media/internal/scanner"
 	taskscheduler "knox-media/internal/scheduler"
@@ -333,7 +330,7 @@ func main() {
 	}) // 决定新媒体应排队哪些发布阶段
 
 	startupReady := make(chan struct{}) // 关闭后表示可接受扫描/监控等提交源
-	startupRoots := StartupRecoveryRoots{Encryption: postingest.EncryptionRecoveryRoots{Quarantine: assetEnc.EncryptionPrivateRoot(), Resolver: assetEnc}, Thumbnail: postingest.ThumbnailRecoveryRoots{Preview: filepath.Join(cfg.Data.Preview, "photos"), Derived: filepath.Join(cfg.Data.Dir, ".derived")}, Poster: postingest.PosterRecoveryRoots{Upload: cfg.Data.Upload, Derived: filepath.Join(cfg.Data.Dir, ".derived")}, ScrapeArtwork: cfg.Data.MetadataLibrary, Retirement: retirement.RecoveryOptions{QuarantineRoot: filepath.Join(cfg.Data.Dir, ".quarantine", "retirement"), Timeout: 10 * time.Minute}}
+	startupRoots := StartupRecoveryRoots{Encryption: postingest.EncryptionRecoveryRoots{Quarantine: assetEnc.EncryptionPrivateRoot(), Resolver: assetEnc}, Thumbnail: postingest.ThumbnailRecoveryRoots{Preview: filepath.Join(cfg.Data.Preview, "photos"), Derived: filepath.Join(cfg.Data.Dir, ".derived")}, Poster: postingest.PosterRecoveryRoots{Upload: cfg.Data.Upload, Derived: filepath.Join(cfg.Data.Dir, ".derived")}, ScrapeArtwork: cfg.Data.MetadataLibrary}
 	enterpriseCtx, enterpriseCancel := context.WithCancel(serverCtx)
 	defer enterpriseCancel()
 	for _, mod := range coreiface.EnterpriseModules {
@@ -345,33 +342,15 @@ func main() {
 	preparePlanner = coreiface.IngestPreparePlannerHandle() // Init 后重新获取 prepare 句柄
 	publicationResources := serverPublicationResources{Vault: keyVault, Encryptor: assetEnc, Derived: derivedStore, PosterRoot: cfg.Data.Upload, ThumbnailRoot: filepath.Join(cfg.Data.Preview, "photos")}
 	publicationPlanner = publication.NewPlanner(publication.PlanOptions{SubtitleAuto: cfg.SubtitleAutoOnScan(), ATrackAuto: cfg.ATrackAutoOnScan(), EncryptGlobal: cfg.EncryptedAssetsEnabled(), PreparePlanner: preparePlanner, Capabilities: publicationCapabilities, EncryptionValidator: publicationResources, ExecutableAdapters: executableAdapters, EncryptedSourceStrategies: encryptedSourceStrategies})
-	// Background group owns retirement and stage reconcilers; created before claimers.
+	// Background group owns stage reconcilers; created before claimers.
 	background := &handler.BackgroundGroup{}
-	retirement.SetDefaultActiveConsumer(func(mediaID int64) bool {
-		return storage.HasActivePlaintextConsumer(db, mediaID)
-	})
-	retirementWorker := &retirement.Worker{
-		DB:    db,
-		Owner: "retirement-" + processID,
-		Seams: retirement.CrashSeams{
-			QuarantineRoot: startupRoots.Retirement.QuarantineRoot,
-			ActiveConsumer: func(mediaID int64) bool { return storage.HasActivePlaintextConsumer(db, mediaID) },
-			ExecuteTimeout: 10 * time.Minute,
-		},
-	}
-	// Publication V2 启动：预检 → 恢复产物/租约 → 迁移 V1 → 校验 → 启动分发器/企业 Worker → 放开提交源。
+	// Publication V2 启动：预检 → 恢复产物/租约 → 迁移 V1 → 校验 → 启动分发器 → 放开提交源。
 	warnings, err := PreparePublicationV2Startup(serverCtx, publicationV2StartupHooks{
 		Preflight: func(ctx context.Context) ([]string, error) {
 			return publication.PreflightPublicationV2(ctx, db, publicationPlanner, publicationCapabilities, publicationResources)
 		},
 		RecoverArtifacts: func(ctx context.Context) error {
-			if err := recoverStartupArtifacts(ctx, db, startupRoots); err != nil {
-				return err
-			}
-			if svc := storage.DefaultTaskPlaintextTemp(); svc != nil {
-				return svc.Recover(ctx)
-			}
-			return nil
+			return recoverStartupArtifacts(ctx, db, startupRoots)
 		},
 		RecoverLeases: func(ctx context.Context) error { return recoverStartupLeases(ctx, db, postIngestQueue) },
 		RecoverReservations: func(ctx context.Context) error {
@@ -384,16 +363,6 @@ func main() {
 		},
 		ValidateAggregateV2: func(ctx context.Context) error { return publication.ValidateAggregateCurrentV2(ctx, db) },
 		StartClaimers: func() {
-			background.Go(serverCtx, func(ctx context.Context) {
-				retirement.RunReconciler(ctx, db, startupRoots.Retirement, time.Minute, func(err error) {
-					log.Printf("retirement reconcile: %v", err)
-				})
-			})
-			background.Go(serverCtx, func(ctx context.Context) {
-				retirement.RunWorkerLoop(ctx, retirementWorker, 5*time.Second, func(err error) {
-					log.Printf("retirement worker: %v", err)
-				})
-			})
 			go func() {
 				err := dispatcher.Start(serverCtx) // 开始认领并执行入库后任务
 				dispatcherDone <- err
@@ -782,16 +751,7 @@ func buildTaskControl(db *sql.DB, dispatcher *postingest.Dispatcher, coordinator
 	if dispatcher != nil {
 		control.Mutations.SetAbortNotifier(dispatcher.CancelTask)
 	}
-	if module := pretranscode.ActiveModule(); module != nil && module.Task != nil {
-		control.Mutations.SetExternalAbortHandler("transcode_task", func(ctx context.Context, id int64) error {
-			return module.Task.CancelTask(id)
-		})
-		control.Mutations.SetExternalOperationHandler("transcode_task", "remove", func(ctx context.Context, id int64) error {
-			return module.Task.DeleteTask(id)
-		}, func(row *taskcontrol.ProjectionRow) bool { return !row.Linked })
-	} else {
-		log.Printf("task control: pretranscode module unavailable; transcode_task abort disabled")
-	}
+	log.Printf("task control: community build; transcode_task abort/remove handlers not registered")
 	return control
 }
 

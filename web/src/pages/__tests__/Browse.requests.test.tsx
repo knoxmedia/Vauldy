@@ -46,7 +46,6 @@ vi.mock("@ant-design/icons", () => ({
 vi.mock("../../components/AddToFavoriteFolderPickerModal", () => ({ default: () => null }));
 vi.mock("../../components/AddToPlaylistModal", () => ({ default: () => null }));
 vi.mock("../../components/MediaMatchModal", () => ({ default: () => null }));
-vi.mock("../../components/VideoOptimizationModal", () => ({ default: () => null }));
 vi.mock("../../components/mediaMenuItems", () => ({ buildMediaMenuItems: (_item: unknown, _nav: unknown, extras: Record<string, unknown>) => {
   mocks.mediaMenuExtras.push(extras);
   return { items: [] };

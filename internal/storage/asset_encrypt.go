@@ -110,11 +110,6 @@ func (s *AssetEncryptor) encryptMedia(ctx context.Context, mediaID int64, manual
 	if !manual && encLib != 1 {
 		return nil
 	}
-	if cleanupPlain == 1 {
-		if _, err := lookupEncryptionRetirementIdentity(ctx, s.DB, mediaID, generation); err != nil {
-			return err
-		}
-	}
 	plainPath := strings.TrimSpace(filePath)
 	if plainPath == "" {
 		if manual {
@@ -244,9 +239,6 @@ func (s *AssetEncryptor) encryptMedia(ctx context.Context, mediaID int64, manual
 		SET state = 'abandoned', updated_at = CURRENT_TIMESTAMP
 		WHERE media_id = ? AND generation = ?
 	`, mediaID, generation); err != nil {
-		return err
-	}
-	if err := upsertManualEncryptRetirementTx(ctx, tx, mediaID, generation, plainPath, output, cleanupPlain == 1); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {

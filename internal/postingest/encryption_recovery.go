@@ -106,9 +106,10 @@ func ReconcileEncryptionStages(ctx context.Context, db *sql.DB, roots Encryption
 				retErr = errors.Join(retErr, errors.New("committed encryption recovery mismatch"))
 				continue
 			}
-			// Committed encryption no longer deletes plaintext. Hand cleanup to a
-			// durable retirement intent; leave source present or already quarantined.
-			if err = handoffCommittedEncryptionRetirement(ctx, db, r.stage, r.task, r.retryRound, r.attempt, r.media, r.run, r.step, r.generation, r.source, r.fp, r.quarantine, r.cleanup == 1); err != nil {
+			// Committed encryption leaves plaintext in place; the community build
+			// has no retirement worker, so no cleanup intent is recorded. Mark the
+			// committed state as verified so recovery does not retry the stage.
+			if err = markCommittedEncryptionVerified(ctx, db, r.stage); err != nil {
 				return checked, cleaned, err
 			}
 			continue
@@ -361,28 +362,13 @@ func recordCommittedCleanupOutcome(ctx context.Context, db *sql.DB, stageID stri
 	return err
 }
 
-func handoffCommittedEncryptionRetirement(ctx context.Context, db *sql.DB, stageID string, taskID, retryRound, attempt, mediaID, runID, stepID, generation int64, source, fingerprint, quarantinePath string, cleanup bool) error {
+func markCommittedEncryptionVerified(ctx context.Context, db *sql.DB, stageID string) error {
 	_, err := store.WithImmediateConnTx(ctx, db, func(tx store.ImmediateConnTx) error {
-		marker := "verified_committed"
-		if cleanup {
-			run, step := runID, stepID
-			task := Task{
-				ID: taskID, MediaID: mediaID, Type: TaskEncrypt, Generation: generation, RetryRound: int(retryRound),
-				RunID: &run, StepID: &step, Attempts: int(attempt),
-			}
-			staged := storage.StagedMediaEncryption{
-				StageID: stageID, MediaID: mediaID, OriginalPath: source, SourceFingerprint: fingerprint, CleanupPlaintext: true,
-			}
-			if e := upsertEncryptionRetirementIntentTx(ctx, tx, task, staged, quarantinePath); e != nil {
-				return e
-			}
-			marker = "retirement_handoff"
-		}
-		_, e := tx.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET recovery_error=?,next_retry_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='committed'`, marker, stageID)
+		_, e := tx.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET recovery_error='verified_committed',next_retry_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='committed'`, stageID)
 		return e
 	})
 	if err != nil {
-		pending := boundedRecoveryError("retirement_handoff_pending: ", err)
+		pending := boundedRecoveryError("committed_marker_pending: ", err)
 		_, updateErr := db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET recovery_error=?,recovery_attempts=recovery_attempts+1,next_retry_at=datetime(CURRENT_TIMESTAMP,'+' || min(3600,30*(1 << min(recovery_attempts,7))) || ' seconds'),updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='committed'`, pending, stageID)
 		return errors.Join(err, updateErr)
 	}

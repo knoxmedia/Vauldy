@@ -58,8 +58,15 @@ func CancelRunTx(ctx context.Context, tx store.SQLExecutor, runID int64, reason 
 		{`UPDATE media_ingest_step SET status='cancelled',last_error=CASE WHEN last_error='' THEN ? ELSE last_error END,lease_owner=NULL,lease_until=NULL,finished_at=COALESCE(finished_at,CURRENT_TIMESTAMP),updated_at=CURRENT_TIMESTAMP WHERE run_id=? AND status IN ('waiting','running')`, []any{reason, runID}},
 		{`UPDATE post_ingest_task SET status='cancelled',last_error=CASE WHEN last_error='' THEN ? ELSE last_error END,lease_owner=NULL,lease_until=NULL,finished_at=COALESCE(finished_at,CURRENT_TIMESTAMP),updated_at=CURRENT_TIMESTAMP WHERE ingest_run_id=? AND status IN ('waiting','running')`, []any{reason, runID}},
 		{`UPDATE scrape_task SET status='cancelled',message=CASE WHEN COALESCE(message,'')='' THEN ? ELSE message END,lease_owner=NULL,lease_until=NULL,finished_at=COALESCE(finished_at,CURRENT_TIMESTAMP) WHERE ingest_run_id=? AND status IN ('waiting','running')`, []any{reason, runID}},
-		{`UPDATE pretranscode_rendition_job SET status='cancelled',error_message=CASE WHEN COALESCE(error_message,'')='' THEN ? ELSE error_message END,lease_owner=NULL,lease_until=NULL,completed_at=COALESCE(completed_at,CURRENT_TIMESTAMP) WHERE task_id IN (SELECT id FROM transcode_task WHERE ingest_run_id=?) AND status IN ('waiting','running')`, []any{reason, runID}},
 		{`UPDATE transcode_task SET status='cancelled',error_message=CASE WHEN COALESCE(error_message,'')='' THEN ? ELSE error_message END,lease_owner=NULL,lease_until=NULL,completed_at=COALESCE(completed_at,CURRENT_TIMESTAMP) WHERE ingest_run_id=? AND status IN ('waiting','running','paused')`, []any{reason, runID}},
+	}
+	// The community build has no pretranscode_rendition_job table; cancel its
+	// rendition jobs only when the commercial schema is present.
+	if jobsExist, e := publicationTableExistsTx(ctx, tx, "pretranscode_rendition_job"); e == nil && jobsExist {
+		statements = append(statements, struct {
+			query string
+			args  []any
+		}{`UPDATE pretranscode_rendition_job SET status='cancelled',error_message=CASE WHEN COALESCE(error_message,'')='' THEN ? ELSE error_message END,lease_owner=NULL,lease_until=NULL,completed_at=COALESCE(completed_at,CURRENT_TIMESTAMP) WHERE task_id IN (SELECT id FROM transcode_task WHERE ingest_run_id=?) AND status IN ('waiting','running')`, []any{reason, runID}})
 	}
 	for _, stmt := range statements {
 		if _, err = tx.ExecContext(ctx, stmt.query, stmt.args...); err != nil {

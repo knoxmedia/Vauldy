@@ -231,7 +231,8 @@ func TestPrepareClaimsParentOnceBeforeRenditions(t *testing.T) {
 
 func TestClaimEligibleCommunitySkipsAbsentUnavailablePrepareTable(t *testing.T) {
 	db := openEligibilityDB(t)
-	if _, err := db.Exec(`DROP TABLE pretranscode_rendition_job; DROP TABLE pretranscode_task_meta; DROP TABLE transcode_task`); err != nil {
+	dropEnterprisePrepareTablesIfPresent(t, db)
+	if _, err := db.Exec(`DROP TABLE transcode_task`); err != nil {
 		t.Fatal(err)
 	}
 	registry := NewCapabilityMatrix([]string{"poster", "scrape"})
@@ -242,7 +243,8 @@ func TestClaimEligibleCommunitySkipsAbsentUnavailablePrepareTable(t *testing.T) 
 
 func TestClaimEligibleAdvertisedCapabilityMissingTableFailsClosed(t *testing.T) {
 	db := openEligibilityDB(t)
-	if _, err := db.Exec(`DROP TABLE pretranscode_rendition_job; DROP TABLE pretranscode_task_meta; DROP TABLE transcode_task`); err != nil {
+	dropEnterprisePrepareTablesIfPresent(t, db)
+	if _, err := db.Exec(`DROP TABLE transcode_task`); err != nil {
 		t.Fatal(err)
 	}
 	_, err := ClaimEligible(context.Background(), db, ClaimRequest{Family: QueuePrepare, TaskType: "prepare", Owner: "enterprise", Registry: NewCapabilityMatrix([]string{"prepare"})})
@@ -467,7 +469,11 @@ func TestCommunityAbsentPrepareTableRequiredAvailabilityMatrix(t *testing.T) {
 	for _, advertised := range []bool{false, true} {
 		t.Run(fmt.Sprintf("advertised=%v", advertised), func(t *testing.T) {
 			db := openEligibilityDB(t)
-			_, err := db.Exec(`DROP TABLE pretranscode_rendition_job; DROP TABLE pretranscode_task_meta; DROP TABLE transcode_task; INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l'); INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state) VALUES(10,1,'f','video',1,'processing'); INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(20,10,1,'scan','processing','{}',2); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(30,20,10,1,'poster',1,'waiting'); INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(40,10,20,30,1,'poster','waiting')`)
+			dropEnterprisePrepareTablesIfPresent(t, db)
+			if _, err := db.Exec(`DROP TABLE transcode_task`); err != nil {
+				t.Fatal(err)
+			}
+			_, err := db.Exec(`INSERT INTO library(id,name,type,path) VALUES(1,'l','video','/l'); INSERT INTO media(id,library_id,file_id,file_type,ingest_generation,publication_state) VALUES(10,1,'f','video',1,'processing'); INSERT INTO media_ingest_run(id,media_id,generation,reason,status,config_snapshot_json,policy_version) VALUES(20,10,1,'scan','processing','{}',2); INSERT INTO media_ingest_step(id,run_id,media_id,generation,step_type,required,status) VALUES(30,20,10,1,'poster',1,'waiting'); INSERT INTO post_ingest_task(id,media_id,ingest_run_id,ingest_step_id,generation,task_type,status) VALUES(40,10,20,30,1,'poster','waiting')`)
 			if err != nil {
 				t.Fatal(err)
 			}

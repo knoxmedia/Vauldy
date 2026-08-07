@@ -1353,7 +1353,7 @@ func TestMigrateIngestPublicationV2EnterpriseManagedIndexesCreatedOnce(t *testin
 	if err = migrateIngestPublication(context.Background(), db); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"idx_post_ingest_claim", "idx_post_ingest_scan", "idx_post_ingest_run", "idx_post_ingest_step", "idx_scrape_task_claim", "idx_scrape_task_ingest", "idx_scrape_task_media", "idx_pretranscode_job_status", "idx_pretranscode_job_task", "idx_asset_stage_recovery"} {
+	for _, name := range []string{"idx_post_ingest_claim", "idx_post_ingest_scan", "idx_post_ingest_run", "idx_post_ingest_step", "idx_scrape_task_claim", "idx_scrape_task_ingest", "idx_scrape_task_media", "idx_asset_stage_recovery"} {
 		var n int
 		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?`, name).Scan(&n); err != nil || n != 1 {
 			t.Fatalf("managed index %s count=%d err=%v", name, n, err)
@@ -1369,7 +1369,7 @@ func TestMigrateIngestPublicationV2PreservesCustomIndexOnEveryGraphTableOnce(t *
 	defer db.Close()
 	custom := map[string]string{
 		"media_ingest_step": "id,step_type", "post_ingest_task": "id,task_type", "scrape_task": "id,status", "transcode_task": "id,status",
-		"pretranscode_task_meta": "task_id,priority", "pretranscode_rendition_job": "id,status", "media_ingest_step_dependency": "step_id,dependency_kind",
+		"media_ingest_step_dependency": "step_id,dependency_kind",
 		"media_ingest_evidence": "id,kind", "media_asset_stage_journal": "stage_id,state",
 	}
 	for table, cols := range custom {

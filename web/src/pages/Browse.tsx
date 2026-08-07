@@ -29,8 +29,6 @@ import { buildMediaMenuItems } from "../components/mediaMenuItems";
 import AddToFavoriteFolderPickerModal from "../components/AddToFavoriteFolderPickerModal";
 import AddToPlaylistModal from "../components/AddToPlaylistModal";
 import MediaMatchModal from "../components/MediaMatchModal";
-import VideoOptimizationModal from "../components/VideoOptimizationModal";
-import { useLicenseStatus } from "../enterprise";
 import {
   MediaItem,
   PLAYLIST_PLAY_SESSION_KEY,
@@ -273,9 +271,6 @@ export default function BrowsePage() {
   const [playlistModalMediaIds, setPlaylistModalMediaIds] = useState<number[] | null>(null);
   const [addToFavoriteFolderMediaId, setAddToFavoriteFolderMediaId] = useState<number | null>(null);
   const [matchMedia, setMatchMedia] = useState<MediaItem | null>(null);
-  const [optimizationModalMediaId, setOptimizationModalMediaId] = useState<number | null>(null);
-  const [optimizationModalTitle, setOptimizationModalTitle] = useState<string | undefined>();
-  const { status: licenseStatus } = useLicenseStatus();
   const [recentPlaylistMenu, setRecentPlaylistMenu] = useState(readRecentPlaylists);
   const { recentFavoriteFolders, rememberFolderMenuAdded } = useFavoriteFolderMenuRecents();
   const [resolution, setResolution] = useState<LibraryResolution>(() => ({
@@ -984,12 +979,6 @@ export default function BrowsePage() {
         }
       },
       onAddToFavoriteFolder: (mediaId: number) => setAddToFavoriteFolderMediaId(mediaId),
-      onOpenOptimization: licenseStatus?.pretranscode
-        ? (mediaId: number) => {
-            setOptimizationModalMediaId(mediaId);
-            setOptimizationModalTitle(undefined);
-          }
-        : undefined,
       optimizationAvailable: r.file_type === "video" && optimizationAssetRecorded(r),
       recentFavoriteFolders,
       onQuickAddToFavoriteFolder: async (mediaId: number, folderId: number) => {
@@ -1668,20 +1657,6 @@ export default function BrowsePage() {
         onClose={() => setMatchMedia(null)}
         onMatched={(update) => applyMediaMatchUpdate(update, activeRouteKey)}
       />
-      {optimizationModalMediaId !== null && (
-        <VideoOptimizationModal
-          mediaId={optimizationModalMediaId}
-          mediaTitle={optimizationModalTitle}
-          open={optimizationModalMediaId !== null}
-          onClose={() => {
-            setOptimizationModalMediaId(null);
-            setOptimizationModalTitle(undefined);
-          }}
-          onOptimized={() => {
-            load();
-          }}
-        />
-      )}
     </div>
   );
 }

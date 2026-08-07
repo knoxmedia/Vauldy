@@ -312,11 +312,8 @@ func (h *Handler) batchTranscodeCancel(id int64) error {
 func (h *Handler) batchTranscodeRetry(id int64) error {
 	var taskType string
 	if err := h.App.DB.QueryRow(`SELECT COALESCE(task_type,'batch') FROM transcode_task WHERE id=?`, id).Scan(&taskType); err == nil && taskType == "pretranscode" {
-		mod := pretranscodeModule()
-		if mod == nil {
-			return fmt.Errorf("pretranscode module not available")
-		}
-		return mod.Task.RetryTask(id)
+		// Community build has no pretranscode module; such tasks cannot be retried.
+		return fmt.Errorf("pretranscode module not available")
 	}
 	var next int64
 	_ = h.App.DB.QueryRow(`SELECT COALESCE(MAX(priority),0)+1 FROM transcode_task`).Scan(&next)

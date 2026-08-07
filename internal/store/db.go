@@ -1596,6 +1596,12 @@ func OpenSQLiteContext(ctx context.Context, path string) (opened *sql.DB, return
 		_ = db.Close()
 		return nil, fmt.Errorf("orchestration phase 5 migration: %w", err)
 	}
+	// Community build: keep transcode_task linkage columns so publication-v2
+	// query paths work without the commercial pretranscode_* tables.
+	if err := withStartupBusyRetry(ctx, func() error { return migrateCommunityTranscodeTaskColumns(ctx, db) }); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("community transcode_task column migration: %w", err)
+	}
 	// Apply enterprise migrations registered via RegisterEnterpriseMigration.
 	// In the community build this slice is empty; commercial init() functions
 	// append migrations for pretranscode/license tables before main runs.
