@@ -1,6 +1,6 @@
 {
   "common": {
-    "app_name": "Knox-Media",
+    "app_name": "Vauldy",
     "save": "保存",
     "cancel": "キャンセル",
     "confirm": "OK",
@@ -366,7 +366,7 @@
       "save_failed": "Save failed",
       "startup_section": "起動",
       "start_on_boot": "起動時に実行",
-      "start_on_boot_desc": "Starts the tray icon when Windows boots (desktop install). If Knox runs as a Windows service, disable this and start the service on boot instead.",
+      "start_on_boot_desc": "Starts the tray icon when Windows boots (desktop install). If Vauldy runs as a Windows service, disable this and start the service on boot instead.",
       "open_browser_first_start": "Open browser on first server start",
       "open_browser_first_start_desc": "Opens the default browser to the web UI only on the first start; not repeated after process restarts.",
       "maintenance_section": "メンテナンスモード",

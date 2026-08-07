@@ -7,7 +7,7 @@ export type BrandingState = {
   load: () => Promise<void>;
 };
 
-const DEFAULT_APP_NAME = "Knox-Media";
+const DEFAULT_APP_NAME = "Vauldy";
 
 function applyBrandingToDocument(appName: string, faviconUrl: string) {
   if (typeof document === "undefined") return;
