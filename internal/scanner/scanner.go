@@ -617,6 +617,11 @@ func (s *Scanner) loadPretranscodeOutputRoots() []string {
 	if s == nil || s.DB == nil {
 		return nil
 	}
+	var n int
+	if err := s.DB.QueryRow(`SELECT COUNT(1) FROM sqlite_master WHERE type='table' AND name='pretranscode_task_meta'`).Scan(&n); err != nil || n == 0 {
+		// The community build never creates pretranscode_task_meta.
+		return nil
+	}
 	rows, err := s.DB.Query(`SELECT DISTINCT COALESCE(output_path,'') FROM pretranscode_task_meta WHERE COALESCE(output_path,'') != ''`)
 	if err != nil {
 		return nil

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 
@@ -54,6 +55,7 @@ func (h *Handler) TaskControlOverview(c *gin.Context) {
 	}
 	overview, err := h.TaskCtrl.Overview.Compute(c.Request.Context())
 	if err != nil {
+		log.Printf("task control overview failed: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "overview_failed"})
 		return
 	}

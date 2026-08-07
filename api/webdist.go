@@ -47,15 +47,22 @@ func resolveWebBundle() webBundle {
 	return webBundle{}
 }
 
-// resolveWebDistDisk returns web/dist from cwd or next to the running executable.
+// resolveWebDistDisk returns web/dist from cwd or an ancestor of the running executable.
+// It walks upward from the executable directory so layouts like the dev debug build
+// (exe under cmd/server/) and packaged builds (exe under bin/) both resolve to the
+// repository's web/dist.
 func resolveWebDistDisk() string {
 	candidates := []string{"web/dist"}
 	if exe, err := os.Executable(); err == nil {
 		dir := filepath.Dir(exe)
-		candidates = append(candidates,
-			filepath.Join(dir, "web", "dist"),
-			filepath.Join(dir, "..", "web", "dist"),
-		)
+		for depth := 0; depth < 6; depth++ {
+			candidates = append(candidates, filepath.Join(dir, "web", "dist"))
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+		}
 	}
 	for _, c := range candidates {
 		if fi, err := os.Stat(c); err == nil && fi.IsDir() {

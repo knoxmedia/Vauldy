@@ -6,18 +6,54 @@ import (
 )
 
 // TranscodeAdapter projects transcode_task rows into task-control rows.
-type TranscodeAdapter struct{ db *sql.DB }
-
-const transcodePretranscodePredicate = `(LOWER(TRIM(COALESCE(t.task_type,'')))='pretranscode' OR EXISTS(SELECT 1 FROM pretranscode_task_meta pm WHERE pm.task_id=t.id))`
+type TranscodeAdapter struct {
+	db *sql.DB
+	// pretranscodeMetaExists is true when the pretranscode_task_meta table is
+	// present. The community build never creates it (the commercial
+	// pretranscode subsystem is excluded), so queries must not reference it.
+	pretranscodeMetaExists bool
+}
 
 // NewTranscodeAdapter creates a transcode_task source adapter.
-func NewTranscodeAdapter(db *sql.DB) *TranscodeAdapter { return &TranscodeAdapter{db: db} }
+func NewTranscodeAdapter(db *sql.DB) *TranscodeAdapter {
+	a := &TranscodeAdapter{db: db}
+	a.pretranscodeMetaExists = a.tableExists("pretranscode_task_meta")
+	return a
+}
+
+func (a *TranscodeAdapter) tableExists(table string) bool {
+	var n int
+	if err := a.db.QueryRow(
+		`SELECT COUNT(1) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&n); err != nil {
+		return false
+	}
+	return n > 0
+}
+
+// pretranscodePredicate returns a SQL predicate identifying pretranscode rows,
+// or "" when the meta table is absent (no pretranscode rows can exist).
+func (a *TranscodeAdapter) pretranscodePredicate() string {
+	if !a.pretranscodeMetaExists {
+		return ""
+	}
+	return `(LOWER(TRIM(COALESCE(t.task_type,'')))='pretranscode' OR EXISTS(SELECT 1 FROM pretranscode_task_meta pm WHERE pm.task_id=t.id))`
+}
+
+// taskTypeExpr returns a SQL expression classifying a transcode_task row as
+// 'pretranscode' or 'transcode'.
+func (a *TranscodeAdapter) taskTypeExpr() string {
+	pred := a.pretranscodePredicate()
+	if pred == "" {
+		return `'transcode'`
+	}
+	return `CASE WHEN ` + pred + ` THEN 'pretranscode' ELSE 'transcode' END`
+}
 
 // Kind returns the persistent source identity used by task details.
 func (a *TranscodeAdapter) Kind() string { return "transcode_task" }
 
 func (a *TranscodeAdapter) Read(ctx context.Context, tx *sql.Tx, id int64) (*RawTaskRow, error) {
-	row := tx.QueryRowContext(ctx, `SELECT t.id, CASE WHEN `+transcodePretranscodePredicate+` THEN 'pretranscode' ELSE 'transcode' END,
+	row := tx.QueryRowContext(ctx, `SELECT t.id, `+a.taskTypeExpr()+`,
 		COALESCE(t.status,'waiting'), COALESCE(t.generation,0), COALESCE(t.retry_round,0), COALESCE(t.lease_owner,''),
 		t.lease_until, COALESCE(t.error_message,''), t.created_at, t.created_at,
 		m.id, COALESCE(m.title,''), COALESCE(m.file_path,''), m.library_id,
@@ -46,7 +82,7 @@ func (a *TranscodeAdapter) Read(ctx context.Context, tx *sql.Tx, id int64) (*Raw
 }
 
 func (a *TranscodeAdapter) ListIDs(ctx context.Context, tx *sql.Tx, filters Filters) ([]int64, error) {
-	where, args, impossible := buildTranscodeWhere(filters)
+	where, args, impossible := a.buildTranscodeWhere(filters)
 	if impossible {
 		return nil, nil
 	}
@@ -68,7 +104,7 @@ func (a *TranscodeAdapter) ListIDs(ctx context.Context, tx *sql.Tx, filters Filt
 }
 
 func (a *TranscodeAdapter) Count(ctx context.Context, tx *sql.Tx, filters Filters) (int64, error) {
-	where, args, impossible := buildTranscodeWhere(filters)
+	where, args, impossible := a.buildTranscodeWhere(filters)
 	if impossible {
 		return 0, nil
 	}
@@ -78,16 +114,21 @@ func (a *TranscodeAdapter) Count(ctx context.Context, tx *sql.Tx, filters Filter
 	return count, err
 }
 
-func buildTranscodeWhere(f Filters) (string, []any, bool) {
+func (a *TranscodeAdapter) buildTranscodeWhere(f Filters) (string, []any, bool) {
 	if f.Removed == "only" {
 		return "", nil, true
 	}
 	clauses := make([]string, 0, 5)
 	args := make([]any, 0, 5)
+	pred := a.pretranscodePredicate()
 	if f.TaskType == "pretranscode" {
-		clauses = append(clauses, transcodePretranscodePredicate)
-	} else {
-		clauses = append(clauses, "NOT "+transcodePretranscodePredicate)
+		if pred == "" {
+			// No pretranscode rows exist without the meta table.
+			return "", nil, true
+		}
+		clauses = append(clauses, pred)
+	} else if pred != "" {
+		clauses = append(clauses, "NOT "+pred)
 	}
 	if f.Status != "" {
 		clauses = append(clauses, "t.status = ?")
@@ -104,6 +145,9 @@ func buildTranscodeWhere(f Filters) (string, []any, bool) {
 	if f.Owner != "" {
 		clauses = append(clauses, "t.lease_owner = ?")
 		args = append(args, f.Owner)
+	}
+	if len(clauses) == 0 {
+		return "", nil, false
 	}
 	return " WHERE " + joinWithAnd(clauses), args, false
 }
