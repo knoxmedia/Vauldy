@@ -24,12 +24,14 @@ Vauldy ships as a single binary with an embedded web UI, or as a Docker containe
 
 | Item         | Details                                            |
 | ------------ | -------------------------------------------------- |
-| Backend      | Go 1.22+ · Gin · SQLite · Redis (optional)         |
-| Frontend     | React 19 · TypeScript · Ant Design 6 · Vite 8      |
+| Backend      | Go 1.25+ · Gin · SQLite · Redis (optional)         |
+| Frontend     | React 19 · TypeScript 6 · Ant Design 6 · Vite 8    |
 | Media Engine | FFmpeg / FFprobe · Shaka Packager                  |
 | Encryption   | Widevine · FairPlay · PowerDRM · HLS AES-128       |
+| Task Control | Unified task plane · resource scheduler · durable ingest & publication |
 | Default Port | `8200`                                             |
 | Platforms    | Windows / Linux / macOS / Docker                   |
+| Releases     | `build.ps1` cross-compiles 6 binaries (Win/Linux/macOS × amd64/arm64) |
 
 
 **Default demo accounts** (auto-created on first boot — change immediately in production):
@@ -61,12 +63,15 @@ Vauldy ships as a single binary with an embedded web UI, or as a Docker containe
 | Domain              | Capabilities                                                                                      |
 | ------------------- | ------------------------------------------------------------------------------------------------- |
 | 🏦 Media Vault       | Movies · TV · Anime · Music · Photos · Documents — multiple libraries, each with dedicated browse & playback UI |
-| 🔐 Content Encryption | Widevine · FairPlay · PowerDRM · HLS AES-128, built-in license server                             |
+| 🔐 Content Encryption | Widevine · FairPlay · PowerDRM · HLS AES-128, built-in license server, resumable AES-CTR sessions  |
 | ▶️ Secure Playback   | Direct MP4 · HLS/DASH adaptive streaming · JIT on-demand transcode · Global music player          |
-| 🔍 Metadata          | TMDB · TVDB · Douban · Bangumi · OMDb · AI LLM fallback                                           |
-| 🖼️ Previews          | Scrubber sprite thumbnails + WebVTT timeline                                                      |
-| 📝 Subtitles         | Embedded extraction · Sidecar scan · PGS bitmap OCR · Whisper ASR                                 |
+| 🔍 Metadata          | TMDB · TVDB · Douban · Bangumi · OMDb · AI LLM fallback · cast/crew scraping                     |
+| 🖼️ Previews          | Scrubber sprite thumbnails + WebVTT timeline, poster pre-capture during scan                      |
+| 📝 Subtitles         | Embedded extraction · Sidecar scan · PGS bitmap OCR · Whisper ASR · LLM proofreading              |
 | 🎵 Multi-audio       | Pre-extracted audio tracks, multi-audio HLS master playlist                                       |
+| ⚙️ Task Manager      | Unified task control plane · overview & drill-down · batch actions · alignment display            |
+| 🛠️ Resource Scheduler | Capacity reservations · queue claims · admission explain · aging & library fairness              |
+| 🔄 Durable Ingest    | Enqueue/claim/recovery · immutable processing lifecycle · publication policy v2 · scan coordination |
 | 👥 Access Control    | Multi-role accounts · Library-level ACL · Parental controls (ratings + PIN + time windows)        |
 | 🔒 Auth & Tokens     | JWT sessions · OAuth client credentials · Bearer / Query token dual mode                          |
 | 🛠️ Scale             | Embedded single-binary → Docker → Distributed Redis cluster                                       |
@@ -93,6 +98,12 @@ flowchart TB
 
   subgraph Core["Core Layer (internal/)"]
     Scanner["Library Scan & File Watch"]
+    Ingest["Ingest (enqueue/claim/recovery)"]
+    Publication["Publication (policy v2 DAG)"]
+    PostIngest["Post-ingest (poster/encrypt)"]
+    Scheduler["Resource Scheduler"]
+    TaskCtrl["Task Control Plane"]
+    TaskAlign["Task Alignment"]
     Scraper["Metadata Scraping"]
     TVStore["Series / Season / Episode"]
     MusicStore["Albums / Artists / Genres"]
@@ -129,6 +140,11 @@ flowchart TB
   APIClient --> Router
   Router --> Auth --> Handler
   Handler --> Core
+  Scanner --> Ingest
+  Ingest --> Publication
+  Publication --> PostIngest
+  Scheduler --> Workers
+  TaskCtrl --> TaskAlign
   Core --> Workers
   Core --> SQLite
   Workers --> FS
@@ -164,11 +180,12 @@ flowchart LR
 ### Key Design Principles
 
 1. **Data never leaves your home.** All storage is local or mounted via your own filesystem. No cloud dependencies.
-2. **Encryption at rest and in transit.** DRM packaging for video content, AES-128 for HLS streams, built-in license service with audit trail.
+2. **Encryption at rest and in transit.** DRM packaging for video content, AES-128 for HLS streams, resumable AES-CTR sessions, built-in license service with audit trail.
 3. **Single-binary simplicity.** `cmd/server` embeds the React frontend — one command, one process, one port.
-4. **Permissions you control.** Per-library ACL, parental controls with PIN and schedule windows, OAuth credentials for external integrations.
-5. **Optional scale-out.** Redis-backed distributed transcode/slice workers when a single machine isn't enough. Graceful fallback to in-process mode.
-6. **Air-gap friendly.** Run fully disconnected after the initial tool/model download. No internet? No problem.
+4. **Durable by design.** Ingest, publication, and task control persist every step — crash-safe with startup recovery and self-repair.
+5. **Permissions you control.** Per-library ACL, parental controls with PIN and schedule windows, OAuth credentials for external integrations.
+6. **Optional scale-out.** Redis-backed distributed transcode/slice workers when a single machine isn't enough. Graceful fallback to in-process mode.
+7. **Air-gap friendly.** Run fully disconnected after the initial tool/model download. No internet? No problem.
 
 ---
 
@@ -183,14 +200,27 @@ vauldy/
 │   ├── sliceworker/      # Distributed slice worker
 │   ├── sliceworkerd/     # Slice daemon (standalone)
 │   ├── transcodeworker/  # Distributed transcode worker
-│   └── transcodeworkerd/ # Transcode daemon (standalone)
+│   ├── transcodeworkerd/ # Transcode daemon (standalone)
+│   ├── buildinfo-check/  # Release metadata validation helper
+│   ├── dedupe-scheduled/ # Scheduled dedupe helper
+│   └── doctrans-test/    # Office→PDF conversion smoke test
 ├── api/
-│   ├── handler/          # REST handlers (~68 files)
+│   ├── handler/          # REST handlers (~86 files)
 │   ├── middleware/       # JWT · CORS
 │   └── router.go
 ├── internal/
 │   ├── scanner/          # Library scan & fsnotify watcher
+│   ├── ingest/           # Durable enqueue / claim / recovery
+│   ├── publication/      # Immutable processing lifecycle (policy v2 DAG)
+│   ├── postingest/       # Post-ingest orchestration (poster / encrypt)
+│   ├── scheduler/        # Resource scheduler, reservations, admission
+│   ├── taskcontrol/      # Unified task control plane (overview/query/mutations)
+│   ├── taskalign/        # Per-media task alignment & display status
+│   ├── scancoord/        # Scan coordination / concurrency guard
+│   ├── sqliteretry/      # Safe SQLite busy/retry handling
 │   ├── scraper/          # TMDB / Douban / Bangumi providers
+│   ├── caststore/        # Cast & crew metadata store
+│   ├── personscrape/     # Person metadata scraping
 │   ├── tvparse/          # TV filename parser
 │   ├── tvstore/          # Series · season · episode models
 │   ├── musicparse/       # Music filename / ID3 parser
@@ -207,7 +237,7 @@ vauldy/
 │   ├── doctrans/         # Office → PDF preview
 │   ├── transcode/        # HLS transcode & CMAF DRM packaging
 │   ├── drm/              # Local license service
-│   ├── jit/              # On-demand transcode sessions
+│   ├── jit/              # On-demand transcode sessions (+ hwenc detection)
 │   ├── preview/          # Scrubber sprite thumbnails
 │   ├── subtitle/         # Subtitle pipeline (extract/OCR/ASR)
 │   ├── recognition/      # ASR/OCR tool install & probe
@@ -217,9 +247,16 @@ vauldy/
 │   ├── monitor/          # Real-time filesystem watcher
 │   ├── metadatalib/      # Local artwork library
 │   ├── mediautil/        # Codec compatibility checks
+│   ├── storage/          # Encryption, staging, volume guards
+│   ├── crypto/           # Resumable AES-CTR encryption sessions
+│   ├── libraryprocessing/# Per-library processing option wiring
+│   ├── branding/         # App name / favicon branding
+│   ├── progressctx/      # Progress-driven task timeouts
+│   ├── playback/         # Playback plan & completion evidence
 │   ├── config/           # YAML config loading
 │   ├── store/            # SQLite schema & migrations
 │   ├── auth/             # JWT generate & validate
+│   ├── webembed/         # Embedded web/dist (go:embed)
 │   └── model/            # Internal data models
 ├── pkg/
 │   ├── ffprobe/          # FFprobe wrapper
@@ -227,8 +264,8 @@ vauldy/
 │   └── hashutil/         # Hash utilities
 ├── web/                  # React SPA frontend
 │   └── src/
-│       ├── pages/        # Home · Browse · Play/Read · Admin · Settings
-│       ├── components/   # Music player · Photo lightbox · TV/music widgets
+│       ├── pages/        # Home · Browse · Play/Read · Admin · Task Manager
+│       ├── components/   # Task manager · music player · photo lightbox
 │       └── i18n/         # Locales: zh-CN, zh-TW, en, ja, ko
 ├── tools/
 │   ├── ffmpeg/bin/       # ffmpeg/ffprobe binaries
@@ -240,6 +277,7 @@ vauldy/
 │   └── doctran/          # Portable LibreOffice (doc preview)
 ├── data/                 # Runtime data (DB/caches/uploads)
 ├── config.yml            # Runtime configuration
+├── build.ps1             # Release build (6-platform cross-compile)
 ├── Dockerfile
 └── docker-compose.yml
 ```
@@ -250,7 +288,7 @@ vauldy/
 
 #### Prerequisites
 
-- Go 1.22+
+- Go 1.25+
 - Node.js 20+ (frontend dev only)
 - FFmpeg / FFprobe
 
@@ -262,9 +300,18 @@ Edit `config.yml` before first deployment — at minimum:
 security:
   jwt_secret: "change-me-in-production-use-long-random-string"  # ⚠️ Required
 
+branding:
+  app_name: "Vauldy"   # Shown in sidebar, browser tab, favicon
+
 ffmpeg:
   ffprobe_path: "tools/ffmpeg/bin/ffprobe.exe"   # Windows
   ffmpeg_path:  "tools/ffmpeg/bin/ffmpeg.exe"    # Linux: /usr/bin/ffmpeg
+
+# Optional: restrict media extensions per category (defaults cover all built-in types)
+scan:
+  file_extensions:
+    video: [".mp4", ".mkv", ".webm", ".avi", ".mov", ".ts"]
+    audio: [".mp3", ".flac", ".wav", ".aac", ".m4a"]
 
 # DRM encryption
 drm:
@@ -282,6 +329,17 @@ go run ./cmd/server
 
 # Frontend (separate terminal)
 cd web && npm install && npm run dev   # http://localhost:5173 → proxies API to :8200
+```
+
+#### Release Build
+
+```powershell
+# Cross-compiles 6 binaries (Windows/Linux/macOS × amd64/arm64)
+# with the web UI embedded — requires a clean working tree.
+.\build.ps1
+# Development artifact from a dirty tree:
+.\build.ps1 -AllowDirty
+# Outputs land in bin/
 ```
 
 #### Production
@@ -324,13 +382,25 @@ docker run -d \
 - Multi-folder paths, enable/disable, auto-scan, **real-time filesystem watch** (fsnotify)
 - Full & incremental scan tasks with progress, cancel, and **scan logs**
 - Detects **video / audio / image / document** by extension; ffprobe for video, EPUB/PDF parsers for documents
+- **Configurable media extension maps** (`scan.file_extensions`) for video/audio/document categories
 - **Episode filename parsing** (`S01E01`, `Season 1`, etc.) and **series aggregation** with season/episode detail views
 - Scan tuning: `fast_ffprobe`, optional file hashing (`file_hash_on_scan`)
+
+#### Durable Ingest & Publication
+
+- **Durable ingest pipeline**: enqueue, claim, scoped startup locking, and crash recovery
+- **Immutable processing lifecycle**: scan → poster → scrape → prepare → post-ingest, with dependency enforcement
+- **Publication policy v2**: capability-driven planning, generation superseding, idempotent artifacts
+- **Startup preflight & self-repair**: stale/orphaned plan dependencies recovered automatically
+- **Poster pre-capture** during scan; poster retry on ingest stalls (fixes head-of-line starvation)
+- **Scan coordination**: ingest progress surfaced during scans, poster capture outside the scan transaction
+- **Resource scheduler**: capacity reservations, queue claims, admission explanations, aging & library fairness
 
 #### Metadata Scraping
 
 - Providers: **TMDB, TVDB, Douban, Bangumi, OMDb**, plus **AI LLM** fallback
 - Auto-scrape on ingest and batch scrape tasks
+- **Cast & crew scraping** and **person management UI** (persons, filmographies)
 - Manual match/unmatch, title parsing, TMDb image search
 - Local artwork storage; poster / backdrop / logo management
 - TV episode-level scraping tied to series metadata
@@ -340,6 +410,7 @@ docker run -d \
 - **Direct progressive** playback for browser-compatible MP4
 - **HLS / DASH adaptive transcode** (multi-bitrate; DASH for DRM paths)
 - **JIT on-demand transcode** (Redis cluster or in-process sessions; seek/pause/resume/end)
+- **Hardware acceleration detection**: NVENC / QSV / AMF / VAAPI, configurable in system options
 - Player engines: **PowerPlayer, xgplayer, Shaka Player** (auto-selected per scenario)
 - **Preview thumbnails** on the progress bar (sprite + WebVTT)
 - Multi-audio HLS; embedded & external subtitles as WebVTT
@@ -350,12 +421,14 @@ docker run -d \
 - Per-library `drm_enabled`; CMAF fMP4 HLS packaging (Shaka Packager + FFmpeg fallback)
 - **Widevine, FairPlay, PowerDRM, HLS AES-128** playback paths
 - Built-in license endpoints; admin audit & license verification tools
+- **Resumable AES-CTR encryption sessions** with checkpointed media encryption; staged-encryption resume
 - Optional local-source cleanup after packaging (upload-origin files only)
 
 #### Subtitles & Audio
 
 - Auto subtitle tasks on scan: embedded track extraction, sidecar files (srt/ass/ssa/vtt/sub/…)
 - Optional **Whisper ASR** speech-to-text and **PGS bitmap OCR** (Tesseract)
+- **LLM-powered proofreading** after ASR/OCR with inline edit dialogs
 - Pre-extracted audio tracks for cheaper video-only HLS segments, multi-track switching
 
 #### Music Module
@@ -395,7 +468,10 @@ docker run -d \
 #### Admin Console
 
 - Library CRUD & scan control; enqueue **full-library photo classify** for photo libraries
-- Task manager: transcode / preview / scrape / subtitle / **lyrics** / scan / audio / keyframe / scheduled
+- **Task Manager**: unified task control plane with **overview counts, drill-down details, and authoritative actions** (retry/cancel/batch)
+- Independent **grouped task tabs** with zero-count hiding; **task alignment display** (per-media current-generation status)
+- Task types: transcode / preview / scrape / subtitle / lyrics / scan / audio / keyframe / ASR / AI / scheduled
+- **Progress-driven timeouts** for long-running task types; audited mutations and idempotent batch operations
 - **System options**: probe, test, and one-click install for ASR/OCR/photo classify/face/doc conversion
 - Scrape config (provider toggles & priority), AI Provider config (OpenAI / DeepSeek / Tongyi / Ollama)
 - User management (roles / permissions / library scope / parental controls), API credentials
@@ -469,12 +545,14 @@ docker run -d \
 | Area                   | Status          | Description                                                                              |
 | ---------------------- | --------------- | ---------------------------------------------------------------------------------------- |
 | Core vault & playback  | ✅ Baseline     | Movies/TV/anime/music/photos/documents with browsing, playback, DRM encryption           |
-| Metadata scraping      | ✅ Baseline     | TMDB/TVDB/Douban/Bangumi/OMDb/Fanart + Whisper ASR                                       |
+| Metadata scraping      | ✅ Baseline     | TMDB/TVDB/Douban/Bangumi/OMDb/Fanart + Whisper ASR + cast/crew + person management       |
 | Music module           | ✅ Baseline     | Albums/artists/genres/tracks, global player, ASR lyrics                                  |
 | Photo module           | ✅ Baseline     | Timeline, AI tags, faces/places                                                          |
 | Document module        | ✅ Baseline     | Multi-format ingest, PDF/EPUB/Office reading, progress sync                              |
 | UI i18n                | ✅ Baseline     | Frontend zh-CN/zh-TW/en/ja/ko                                                            |
-| GPU acceleration       | Planned         | NVENC/QSV/AMF/VAAPI hardware transcode                                                   |
+| Task manager           | ✅ Baseline     | Unified task control plane, overview/drill-down, batch ops, alignment display            |
+| Ingest orchestration   | ✅ Baseline     | Durable ingest, publication policy v2, resource scheduler, scan coordination             |
+| GPU acceleration       | ✅ Baseline     | NVENC/QSV/AMF/VAAPI hardware transcode detection & config                                |
 | Client bitrate switch  | Planned         | Manual quality/bitrate selection in player                                               |
 | Transcode cache reuse  | Planned         | Reuse prior transcode outputs                                                            |
 | One-click import       | Planned         | Migrate from Plex/Emby/Jellyfin                                                          |
@@ -498,6 +576,7 @@ docker run -d \
 | Document                                             | Purpose                                |
 | ---------------------------------------------------- | -------------------------------------- |
 | [FUNCTIONAL_TEST.md](./FUNCTIONAL_TEST.md)           | Manual regression checklist            |
+| [.release-notes-v0.1.4.md](./.release-notes-v0.1.4.md) | Release 0.1.4 notes (what's new)      |
 | [cmd/scheduler/README.md](./cmd/scheduler/README.md) | JIT transcode scheduler design         |
 | [docs/](docs/)                                       | Additional technical documentation     |
 
@@ -514,12 +593,14 @@ Vauldy 以单一二进制文件（内置 Web UI）或 Docker 容器形式发布�
 
 | 项目     | 说明                                            |
 | ------ | --------------------------------------------- |
-| 后端     | Go 1.22+ · Gin · SQLite · Redis（可选）           |
-| 前端     | React 19 · TypeScript · Ant Design 6 · Vite 8 |
+| 后端     | Go 1.25+ · Gin · SQLite · Redis（可选）           |
+| 前端     | React 19 · TypeScript 6 · Ant Design 6 · Vite 8 |
 | 媒体引擎   | FFmpeg / FFprobe · Shaka Packager             |
 | 加密     | Widevine · FairPlay · PowerDRM · HLS AES-128  |
+| 任务控制   | 统一任务面 · 资源调度器 · 持久化摄入与发布编排                  |
 | 默认端口   | `8200`                                        |
 | 运行环境   | Windows / Linux / macOS / Docker              |
+| 发布     | `build.ps1` 交叉编译 6 平台二进制（Win/Linux/macOS × amd64/arm64） |
 
 
 **默认演示账号**（首次启动自动创建，生产环境请立即修改）：
@@ -551,12 +632,15 @@ Vauldy 以单一二进制文件（内置 Web UI）或 Docker 容器形式发布�
 | 功能域      | 核心能力                                                        |
 | -------- | ----------------------------------------------------------- |
 | 🏦 媒体库   | 电影 · 剧集 · 动漫 · 音乐 · 图片 · 文档，多路径多库管理，各类型均有专属浏览/播放或阅读 UI     |
-| 🔐 内容加密  | Widevine · FairPlay · PowerDRM · HLS AES-128，内置许可证服务        |
+| 🔐 内容加密  | Widevine · FairPlay · PowerDRM · HLS AES-128，内置许可证服务，AES-CTR 加密断点续传      |
 | ▶️ 安全播放  | 直链 MP4 · HLS/DASH 自适应转码 · JIT 按需切片 · 音乐全局播放器 · 多播放器引擎自动切换 |
-| 🔍 元数据刮削 | TMDB · TVDB · 豆瓣 · Bangumi · OMDb · AI 大模型兜底                |
-| 🖼️ 预览图  | 进度条 sprite 缩略图 + WebVTT 时间线                                 |
-| 📝 字幕    | 内嵌轨提取 · Sidecar 扫描 · PGS 图形 OCR · Whisper ASR               |
+| 🔍 元数据刮削 | TMDB · TVDB · 豆瓣 · Bangumi · OMDb · AI 大模型兜底 · 演职人员刮削       |
+| 🖼️ 预览图  | 进度条 sprite 缩略图 + WebVTT 时间线，扫描期海报预捕获                   |
+| 📝 字幕    | 内嵌轨提取 · Sidecar 扫描 · PGS 图形 OCR · Whisper ASR · LLM 校对    |
 | 🎵 多音轨   | 音轨预提取，多音轨 HLS master playlist                               |
+| ⚙️ 任务管理器 | 统一任务控制面 · 概览与钻取 · 批量操作 · 任务对齐展示                    |
+| 🛠️ 资源调度器 | 容量预留 · 队列声明 · 准入决策说明 · 老化与库公平                       |
+| 🔄 持久化摄入 | 入队/认领/恢复 · 不可变处理生命周期 · 发布策略 v2 · 扫描协调               |
 | 👥 访问控制  | 多角色账户 · 库级 ACL · 家长控制（分级+PIN+时段窗口）                           |
 | 🔒 认证令牌  | JWT 会话 · OAuth 客户端凭证 · Bearer / Query Token 双模式              |
 | 🛠️ 扩展   | 单机嵌入 → Docker → 分布式 Redis 集群                                |
@@ -574,6 +658,17 @@ go run ./cmd/server
 
 # 前端（另开终端）
 cd web && npm install && npm run dev    # http://localhost:5173，API 代理到 :8200
+```
+
+#### 发布构建
+
+```powershell
+# 交叉编译 6 个平台二进制（Windows/Linux/macOS × amd64/arm64），内嵌 Web UI
+# 需要干净工作区。
+.\build.ps1
+# 工作区有未提交改动时（开发产物）：
+.\build.ps1 -AllowDirty
+# 产物输出到 bin/
 ```
 
 #### 生产模式
@@ -610,7 +705,7 @@ docker run -d \
 
 ### 已实现功能
 
-（参见上方 English 部分 [Implemented Features](#implemented-features) 的完整列表。）
+（参见上方 English 部分 [Implemented Features](#implemented-features) 的完整列表。社区版主要亮点：统一任务管理器（概览/钻取/批量操作）、持久化摄入与发布策略 v2、资源调度器、可配置媒体扩展名、海报预捕获、加密断点续传、硬件加速转码、演职人员与人物管理。）
 
 ---
 
