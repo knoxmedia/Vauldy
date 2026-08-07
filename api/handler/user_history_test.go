@@ -90,10 +90,59 @@ func TestUserHistoryWithoutLibraryTypeFilter(t *testing.T) {
 	}
 }
 
-func TestUserHistoryHidesUnpublishedMedia(t *testing.T) {
+func TestUserHistoryDuplicateCompletionDominatesAndFreshestRowDisplays(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		rows string
+	}{
+		{
+			name: "completed inserted first with mixed timestamps",
+			rows: `(1,'f-movie',940,1,'2026-07-19T01:00:00Z'),
+			       (1,'f-movie',120,0,'2026-07-19 02:00:00'),
+			       (2,'f-movie',500,1,'2026-07-19 03:00:00')`,
+		},
+		{
+			name: "completed inserted last with equal timestamps",
+			rows: `(1,'f-movie',120,0,'2026-07-19 02:00:00'),
+			       (2,'f-movie',500,1,'2026-07-19 03:00:00'),
+			       (1,'f-movie',940,1,'2026-07-19 02:00:00')`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			h := setupUserHistoryTestDB(t)
+			if _, err := h.App.DB.Exec(`DELETE FROM play_progress; INSERT INTO user (id,username,password,role,can_play,library_scope) VALUES (2,'other','x','user',1,'all'); INSERT INTO play_progress(user_id,file_id,position,completed,update_at) VALUES ` + tc.rows); err != nil {
+				t.Fatal(err)
+			}
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/user/history?limit=10", nil)
+			setUserCtx(c, 1, "user", "viewer")
+			h.UserHistory(c)
+			if w.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+			}
+			var payload struct {
+				Items []map[string]any `json:"items"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+				t.Fatal(err)
+			}
+			if len(payload.Items) != 0 {
+				t.Fatalf("any current-user completed duplicate must exclude history; other user must not affect result: %s", w.Body.String())
+			}
+		})
+	}
+}
+
+func TestUserHistoryOtherUserCompletionDoesNotExcludeCurrentUser(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	h := setupUserHistoryTestDB(t)
-	if _, err := h.App.DB.Exec(`UPDATE media SET publication_state='processing' WHERE id=10`); err != nil {
+	if _, err := h.App.DB.Exec(`DELETE FROM play_progress;
+		INSERT INTO user (id,username,password,role,can_play,library_scope) VALUES (2,'other','x','user',1,'all');
+		INSERT INTO play_progress(user_id,file_id,position,completed,update_at) VALUES
+		(2,'f-movie',900,1,'2026-07-19 03:00:00'),
+		(1,'f-movie',240,0,'2026-07-19 02:00:00')`); err != nil {
 		t.Fatal(err)
 	}
 	w := httptest.NewRecorder()
@@ -103,13 +152,71 @@ func TestUserHistoryHidesUnpublishedMedia(t *testing.T) {
 	h.UserHistory(c)
 	var payload struct {
 		Items []struct {
-			MediaID int64 `json:"media_id"`
+			Position  int64 `json:"position"`
+			Completed int64 `json:"completed"`
 		} `json:"items"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if w.Code != http.StatusOK || len(payload.Items) != 1 || payload.Items[0].MediaID != 20 {
-		t.Fatalf("items=%+v body=%s", payload.Items, w.Body.String())
+	if w.Code != http.StatusOK || len(payload.Items) != 1 || payload.Items[0].Position != 240 || payload.Items[0].Completed != 0 {
+		t.Fatalf("other-user completion leaked into current history: status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestUserHistoryDuplicateIncompleteRowsUseFreshestDisplayRow(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := setupUserHistoryTestDB(t)
+	if _, err := h.App.DB.Exec(`DELETE FROM play_progress; INSERT INTO play_progress(user_id,file_id,position,completed,update_at) VALUES
+		(1,'f-movie',120,0,'2026-07-19T01:00:00Z'),
+		(1,'f-movie',240,0,'2026-07-19 02:00:00'),
+		(1,'f-movie',360,0,'2026-07-19 02:00:00')`); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/user/history?limit=10", nil)
+	setUserCtx(c, 1, "user", "viewer")
+	h.UserHistory(c)
+	var payload struct {
+		Items []struct {
+			Position int64  `json:"position"`
+			UpdateAt string `json:"update_at"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if w.Code != http.StatusOK || len(payload.Items) != 1 || payload.Items[0].Position != 360 || payload.Items[0].UpdateAt != "2026-07-19T02:00:00Z" {
+		t.Fatalf("freshest row must be deterministic by update_at then id: status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestUserHistoryHidesUnpublishedMediaFromHomeLookup(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := setupUserHistoryTestDB(t)
+	if _, err := h.App.DB.Exec(`UPDATE media SET publication_state='processing' WHERE id=10;
+		INSERT INTO play_progress(user_id,file_id,position,play_count,update_at) VALUES(1,'orphan-file',30,1,datetime('now','+1 minute'))`); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/user/history?limit=10", nil)
+	setUserCtx(c, 1, "user", "viewer")
+	h.UserHistory(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var payload struct {
+		Items []struct {
+			MediaID int64  `json:"media_id"`
+			FileID  string `json:"file_id"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Items) != 1 || payload.Items[0].MediaID != 20 || payload.Items[0].FileID != "f-music" {
+		t.Fatalf("Home history retained unpublished or orphan ghost rows: %+v body=%s", payload.Items, w.Body.String())
 	}
 }

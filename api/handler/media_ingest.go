@@ -86,9 +86,8 @@ func (h *Handler) AdminRetryOptionalScrape(c *gin.Context) {
 	case "preview", "subtitle":
 		err = publication.RetryOptionalPostIngest(c.Request.Context(), h.App.DB, publication.OptionalPostIngestRetryRequest{MediaID: mediaID, StepID: stepID, ActorID: middleware.UserID(c), Reason: body.Reason})
 	case "prepare":
-		// Community builds omit prepare capability registration; RetryOptionalPrepare
-		// fails closed with ErrPrepareCapabilityUnavailable when unavailable.
-		err = publication.RetryOptionalPrepare(c.Request.Context(), h.App.DB, publication.OptionalPrepareRetryRequest{MediaID: mediaID, StepID: stepID, ActorID: middleware.UserID(c), Reason: body.Reason}, h.PublicationCapabilities)
+		req := publication.OptionalPrepareRetryRequest{MediaID: mediaID, StepID: stepID, ActorID: middleware.UserID(c), Reason: body.Reason}
+		err = publication.RetryOptionalPrepare(c.Request.Context(), h.App.DB, req, h.PublicationCapabilities)
 	default:
 		c.JSON(http.StatusConflict, gin.H{"code": "no_retryable_work", "error": "no retryable work"})
 		return

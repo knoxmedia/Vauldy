@@ -7,11 +7,12 @@ import (
 	"log"
 	"math"
 	"os"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
 
+	"knox-media/internal/progressctx"
+	"knox-media/internal/scheduler"
 	"knox-media/internal/storage"
 )
 
@@ -38,6 +39,20 @@ func executeTask(ctx context.Context, executor Executor, task Task) (ExecutionRe
 	return ExecutionResult{Completion: CompleteThroughQueue}, executor.Execute(ctx, task)
 }
 
+// WithProgressReporter attaches a progress callback to ctx. Long-running
+// executors call ReportProgress while their underlying work advances so the
+// dispatcher can distinguish a healthy task from a stalled one.
+func WithProgressReporter(ctx context.Context, report func()) context.Context {
+	return progressctx.WithReporter(ctx, report)
+}
+
+// ReportProgress signals that the current task made forward progress. It is a
+// no-op when the context carries no reporter (e.g. tests or non-dispatcher
+// execution).
+func ReportProgress(ctx context.Context) {
+	progressctx.Report(ctx)
+}
+
 type ClassifiedError struct {
 	Kind FailureKind
 	Err  error
@@ -51,36 +66,38 @@ func (e ClassifiedError) Error() string {
 }
 func (e ClassifiedError) Unwrap() error { return e.Err }
 
-type BudgetSnapshot struct {
-	GlobalLimit, GlobalUsed, PosterLimit, PosterUsed, PreviewLimit, PreviewUsed, SubtitleLimit, SubtitleUsed int
-}
 type DispatcherOptions struct {
-	OwnerID                                                              string
-	Global, Poster, Preview, Subtitle                                    int
-	SubtitleTimeoutRealtimeFactor                                        float64
-	PollInterval, LeaseDuration, HeartbeatInterval, RecoverInterval      time.Duration
-	ExecutorStopGrace                                                    time.Duration
-	Timeouts                                                             map[TaskType]time.Duration
+	OwnerID                                                         string
+	SubtitleTimeoutRealtimeFactor                                   float64
+	PollInterval, LeaseDuration, HeartbeatInterval, RecoverInterval time.Duration
+	ExecutorStopGrace                                               time.Duration
+	// ProgressIdleTimeout bounds how long a task may run without reporting any
+	// progress. Long-running workers (encryption, preview, keyframe) report
+	// progress while they advance; a task that stops reporting for this long is
+	// considered stalled and is force-cancelled instead of waiting for the
+	// fixed wall-clock Timeouts entry.
+	ProgressIdleTimeout time.Duration
+	// MaxRuntime is the absolute upper bound for progress-driven tasks. It
+	// replaces the fixed Timeouts entry as the task-context deadline once
+	// progress reporting is active, so a healthy task never times out purely on
+	// wall clock. Zero keeps the per-task Timeouts behavior.
+	MaxRuntime time.Duration
+	Timeouts   map[TaskType]time.Duration
 }
 
 func DefaultDispatcherOptions() DispatcherOptions {
-	global := runtime.NumCPU() / 2
-	if global < 2 {
-		global = 2
-	}
-	if global > 4 {
-		global = 4
-	}
-	return DispatcherOptions{Global: global, Poster: min(2, global), Preview: 1, Subtitle: 1, SubtitleTimeoutRealtimeFactor: 2.0, PollInterval: 250 * time.Millisecond, LeaseDuration: leaseDuration, HeartbeatInterval: 30 * time.Second, RecoverInterval: 30 * time.Second, ExecutorStopGrace: 10 * time.Second, Timeouts: map[TaskType]time.Duration{
-		TaskPoster: 2 * time.Minute, TaskPosterRepair: 2 * time.Minute, TaskThumbnail: 2 * time.Minute, TaskPreview: 30 * time.Minute, TaskKeyframe: 30 * time.Minute, TaskSubtitle: 60 * time.Minute, TaskAtrack: 30 * time.Minute, TaskEncrypt: 120 * time.Minute,
+	return DispatcherOptions{SubtitleTimeoutRealtimeFactor: 2.0, PollInterval: 250 * time.Millisecond, LeaseDuration: leaseDuration, HeartbeatInterval: 30 * time.Second, RecoverInterval: 30 * time.Second, ExecutorStopGrace: 10 * time.Second, ProgressIdleTimeout: 15 * time.Minute, MaxRuntime: 12 * time.Hour, Timeouts: map[TaskType]time.Duration{
+		TaskPoster: 2 * time.Minute, TaskPosterRepair: 2 * time.Minute, TaskThumbnail: 2 * time.Minute, TaskPreview: 30 * time.Minute, TaskKeyframe: 30 * time.Minute, TaskSubtitle: 60 * time.Minute, TaskSubtitleRecognize: 60 * time.Minute, TaskAIAnalysis: 15 * time.Minute, TaskAtrack: 30 * time.Minute, TaskEncrypt: 120 * time.Minute,
 	}}
 }
 
 type workerState struct {
-	cancel context.CancelFunc
-	mu     sync.Mutex
-	kind   FailureKind
-	cause  error
+	cancel       context.CancelFunc
+	mu           sync.Mutex
+	kind         FailureKind
+	cause        error
+	progressSeen bool
+	lastProgress time.Time
 }
 
 func (w *workerState) stop(kind FailureKind, cause error) {
@@ -98,52 +115,65 @@ func (w *workerState) reason() (FailureKind, error) {
 	return w.kind, w.cause
 }
 
-type Dispatcher struct {
-	q                                   *Queue
-	executor                            Executor
-	opts                                DispatcherOptions
-	global, poster, preview, subtitle             chan struct{}
-	mu                                            sync.Mutex
-	globalUsed, posterUsed, previewUsed, subtitleUsed int
-	highPriorityUsed                              int
-	bandNext                                      []int
-	running                                       map[int64]*workerState
-	sourceLookupBudget                            time.Duration
-	sourceSize                                    func(context.Context, Task) int64
-	mediaDuration                                 func(context.Context, Task) int64
-	sourceLookups                                 chan struct{}
-	scans                                         map[int64]map[int64]*workerState
-	wg                                            sync.WaitGroup
-	startMu                                       sync.Mutex
-	started                                       bool
-	beforeRegister                                func(Task)
-	beforeRun                                     func(Task)
+// reportProgress records the task as making forward progress. Executors call it
+// through ReportProgress whenever their underlying work advances, so the
+// dispatcher can distinguish a healthy long-running task from a stalled one.
+func (w *workerState) reportProgress() {
+	w.mu.Lock()
+	w.progressSeen = true
+	w.lastProgress = time.Now()
+	w.mu.Unlock()
 }
 
-func NewDispatcher(q *Queue, executor Executor, opts DispatcherOptions) (*Dispatcher, error) {
+// progressStale reports whether a progress-reporting task has been silent for
+// longer than idle. Tasks that never report progress (short captures, subtitle
+// inference) are never considered stale: their fixed Timeouts still apply.
+func (w *workerState) progressStale(idle time.Duration) bool {
+	if idle <= 0 {
+		return false
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.progressSeen {
+		return false
+	}
+	return time.Since(w.lastProgress) > idle
+}
+
+type Dispatcher struct {
+	q                  *Queue
+	executor           Executor
+	opts               DispatcherOptions
+	svc                *scheduler.Service
+	mu                 sync.Mutex
+	running            map[int64]*workerState
+	sourceLookupBudget time.Duration
+	sourceSize         func(context.Context, Task) int64
+	mediaDuration      func(context.Context, Task) int64
+	sourceLookups      chan struct{}
+	scans              map[int64]map[int64]*workerState
+	wg                 sync.WaitGroup
+	startMu            sync.Mutex
+	started            bool
+	beforeRegister     func(Task)
+	beforeRun          func(Task)
+}
+
+func NewDispatcher(q *Queue, executor Executor, opts DispatcherOptions, svc *scheduler.Service) (*Dispatcher, error) {
 	if q == nil {
 		return nil, errors.New("Dispatcher.Queue is required")
 	}
 	if executor == nil {
 		return nil, errors.New("Dispatcher.Executor is required")
 	}
+	if svc == nil {
+		return nil, errors.New("Dispatcher.SchedulerService is required")
+	}
 	if strings.TrimSpace(opts.OwnerID) == "" || opts.OwnerID != strings.TrimSpace(opts.OwnerID) || strings.Contains(opts.OwnerID, "/") {
 		return nil, fmt.Errorf("Dispatcher.OwnerID is invalid")
 	}
 	if q.owner != opts.OwnerID {
 		return nil, fmt.Errorf("Dispatcher.OwnerID must match Queue owner")
-	}
-	if opts.Global < 1 || opts.Global > 32 {
-		return nil, fmt.Errorf("Dispatcher.Global must be in [1,32]")
-	}
-	if opts.Poster < 1 || opts.Poster > 2 || opts.Poster > opts.Global {
-		return nil, fmt.Errorf("Dispatcher.Poster must be in [1,2] and <= Global")
-	}
-	if opts.Preview < 1 || opts.Preview > 2 || opts.Preview > opts.Global {
-		return nil, fmt.Errorf("Dispatcher.Preview must be in [1,2] and <= Global")
-	}
-	if opts.Subtitle < 1 || opts.Subtitle > opts.Global {
-		return nil, fmt.Errorf("Dispatcher.Subtitle must be in [1,Global]")
 	}
 	if opts.SubtitleTimeoutRealtimeFactor <= 0 || opts.SubtitleTimeoutRealtimeFactor > 10 {
 		return nil, fmt.Errorf("Dispatcher.SubtitleTimeoutRealtimeFactor must be in (0,10]")
@@ -163,32 +193,32 @@ func NewDispatcher(q *Queue, executor Executor, opts DispatcherOptions) (*Dispat
 	if opts.RecoverInterval <= 0 {
 		return nil, fmt.Errorf("Dispatcher.RecoverInterval must be positive")
 	}
+	if opts.ProgressIdleTimeout < 0 {
+		return nil, fmt.Errorf("Dispatcher.ProgressIdleTimeout must not be negative")
+	}
+	if opts.MaxRuntime < 0 {
+		return nil, fmt.Errorf("Dispatcher.MaxRuntime must not be negative")
+	}
 	for _, typ := range taskTypes {
 		if timeout, ok := opts.Timeouts[typ]; !ok || timeout <= 0 {
 			return nil, fmt.Errorf("Dispatcher.Timeouts[%s] must be positive", typ)
 		}
 	}
-	globalCap := opts.Global + priorityBurstSlots
-	d := &Dispatcher{q: q, executor: executor, opts: opts, global: make(chan struct{}, globalCap), poster: make(chan struct{}, opts.Poster), preview: make(chan struct{}, opts.Preview), subtitle: make(chan struct{}, opts.Subtitle), bandNext: make([]int, len(priorityBands)), running: map[int64]*workerState{}, sourceLookupBudget: 2 * time.Second, sourceLookups: make(chan struct{}, globalCap), scans: map[int64]map[int64]*workerState{}}
+	d := &Dispatcher{q: q, executor: executor, opts: opts, svc: svc, running: map[int64]*workerState{}, sourceLookupBudget: 2 * time.Second, sourceLookups: make(chan struct{}, 16), scans: map[int64]map[int64]*workerState{}}
 	d.sourceSize = d.posterSourceSize
 	d.mediaDuration = d.mediaDurationSec
+	svc.SetClaimer(d.schedulerClaim)
 	return d, nil
 }
 
-var taskTypes = []TaskType{TaskPoster, TaskPosterRepair, TaskThumbnail, TaskPreview, TaskKeyframe, TaskSubtitle, TaskAtrack, TaskEncrypt}
+var taskTypes = []TaskType{TaskPoster, TaskPosterRepair, TaskThumbnail, TaskPreview, TaskKeyframe, TaskSubtitle, TaskSubtitleRecognize, TaskAIAnalysis, TaskAtrack, TaskEncrypt}
 
-// priorityBands is highest-priority first. Types in the same band are equal and rotate.
-var priorityBands = [][]TaskType{
-	{TaskPoster, TaskPosterRepair},
-	{TaskEncrypt},
-	{TaskPreview, TaskThumbnail, TaskKeyframe, TaskAtrack},
-	{TaskSubtitle},
-}
-
-const priorityBurstSlots = 1
-
-func isHighPriorityTask(typ TaskType) bool {
-	return typ == TaskPoster || typ == TaskPosterRepair || typ == TaskEncrypt
+func taskTypeNames() []string {
+	out := make([]string, 0, len(taskTypes))
+	for _, typ := range taskTypes {
+		out = append(out, string(typ))
+	}
+	return out
 }
 
 const (
@@ -204,8 +234,26 @@ func sizedTaskTimeout(typ TaskType) bool {
 	return typ == TaskPoster || typ == TaskPosterRepair || typ == TaskEncrypt
 }
 
+// progressDrivenTask reports whether the task type is driven by forward-progress
+// reporting instead of a fixed wall-clock deadline: a healthy task keeps
+// reporting progress (encryption checkpoints, ffmpeg output, OCR/ASR/LLM batch
+// completion, ffprobe packet streams) and therefore must not be cancelled on
+// time alone; a stalled task is force-cancelled by the heartbeat loop after
+// ProgressIdleTimeout. Each listed type must report progress from its executor,
+// otherwise its stall detection never activates and MaxRuntime becomes the only
+// ceiling.
+func progressDrivenTask(typ TaskType) bool {
+	switch typ {
+	case TaskEncrypt, TaskPreview, TaskSubtitle, TaskSubtitleRecognize,
+		TaskAIAnalysis, TaskKeyframe, TaskAtrack:
+		return true
+	default:
+		return false
+	}
+}
+
 func deferredTaskTimeout(typ TaskType) bool {
-	return sizedTaskTimeout(typ) || typ == TaskSubtitle
+	return sizedTaskTimeout(typ) || progressDrivenTask(typ) || typ == TaskSubtitle || typ == TaskSubtitleRecognize
 }
 
 // subtitleTaskTimeout returns min(8h, max(base, durationSec*factor seconds)).
@@ -284,6 +332,13 @@ func (d *Dispatcher) timeoutForTask(ctx context.Context, task Task, heartbeat *t
 	if !deferredTaskTimeout(task.Type) {
 		return base, ctx.Err() == nil
 	}
+	if d.opts.MaxRuntime > 0 && progressDrivenTask(task.Type) {
+		// Progress-driven tasks (encryption, preview) report forward progress
+		// while they advance, and the heartbeat loop force-cancels them when
+		// progress stops for ProgressIdleTimeout. MaxRuntime is only the
+		// absolute wall-clock ceiling.
+		return d.opts.MaxRuntime, ctx.Err() == nil
+	}
 	select {
 	case d.sourceLookups <- struct{}{}:
 	default:
@@ -295,7 +350,7 @@ func (d *Dispatcher) timeoutForTask(ctx context.Context, task Task, heartbeat *t
 	// call retains its slot, so later tasks fall back instead of amplifying leaks.
 	go func() {
 		defer func() { <-d.sourceLookups }()
-		if task.Type == TaskSubtitle {
+		if task.Type == TaskSubtitle || task.Type == TaskSubtitleRecognize {
 			lookup := d.mediaDuration
 			if lookup == nil {
 				lookup = d.mediaDurationSec
@@ -310,7 +365,7 @@ func (d *Dispatcher) timeoutForTask(ctx context.Context, task Task, heartbeat *t
 	for {
 		select {
 		case value := <-result:
-			if task.Type == TaskSubtitle {
+			if task.Type == TaskSubtitle || task.Type == TaskSubtitleRecognize {
 				return subtitleTaskTimeout(base, value, d.opts.SubtitleTimeoutRealtimeFactor), ctx.Err() == nil
 			}
 			return taskTimeoutForSource(task.Type, base, value), ctx.Err() == nil
@@ -381,25 +436,22 @@ func (d *Dispatcher) Start(ctx context.Context) error {
 			return nil
 		}
 		for {
-			allowed := d.allowedTaskTypes()
-			if len(allowed) == 0 {
-				break
-			}
-			task, err := d.q.ClaimAny(ctx, allowed)
+			claim, err := d.svc.Claim(ctx, d.opts.OwnerID, taskTypeNames())
 			if err != nil {
 				if ctx.Err() == nil {
-					log.Printf("postingest dispatcher claim sweep: %v", err)
+					log.Printf("postingest dispatcher claim: %v", err)
 				}
 				break
 			}
-			if task == nil {
+			if claim == nil {
 				break
 			}
-			d.noteClaimed(task.Type)
-			if !d.tryAcquire(task.Type) {
-				return fmt.Errorf("postingest dispatcher claimed unavailable task type %s", task.Type)
+			task, ok := claim.Payload.(Task)
+			if !ok {
+				log.Printf("postingest dispatcher: scheduler returned unsupported claim payload %T", claim.Payload)
+				break
 			}
-			d.launch(ctx, *task)
+			d.launch(ctx, task)
 		}
 		select {
 		case <-ctx.Done():
@@ -419,157 +471,31 @@ func (d *Dispatcher) Start(ctx context.Context) error {
 	}
 }
 
-func (d *Dispatcher) allowedTaskTypes() []TaskType {
-	d.mu.Lock()
-	globalUsed := d.globalUsed
-	highUsed := d.highPriorityUsed
-	posterAvailable := d.posterUsed < d.opts.Poster
-	previewAvailable := d.previewUsed < d.opts.Preview
-	subtitleAvailable := d.subtitleUsed < d.opts.Subtitle
-	bandNext := append([]int(nil), d.bandNext...)
-	d.mu.Unlock()
-
-	// Soft-cap oversubscribe (Global+1): prefer high-priority burst; otherwise allow one
-	// subtitle so ASR is not starved behind a full poster/preview mid-band backlog.
-	burstHigh := false
-	burstSubtitleOnly := false
-	switch {
-	case globalUsed < d.opts.Global:
-	case globalUsed < d.opts.Global+priorityBurstSlots && highUsed == 0:
-		burstHigh = true
-	case globalUsed < d.opts.Global+priorityBurstSlots && subtitleAvailable:
-		burstSubtitleOnly = true
-	default:
-		return nil
+// schedulerClaim is the scheduler service claimer. It asks the queue for the
+// next eligible post-ingest unit; the queue performs scheduler admission and
+// only returns tasks with a durable reservation, which become the sole units
+// the dispatcher launches.
+func (d *Dispatcher) schedulerClaim(ctx context.Context, owner string, taskTypeNames []string) (*scheduler.ClaimResult, error) {
+	types := make([]TaskType, 0, len(taskTypeNames))
+	for _, name := range taskTypeNames {
+		types = append(types, TaskType(name))
 	}
-
-	allowed := make([]TaskType, 0, len(taskTypes))
-	for band, types := range priorityBands {
-		if burstSubtitleOnly {
-			if len(types) != 1 || types[0] != TaskSubtitle {
-				continue
-			}
-		} else if burstHigh && band > 1 && !(len(types) == 1 && types[0] == TaskSubtitle) {
-			// High-priority bands only, plus subtitle so ClaimAny can fall through when
-			// no high-priority work is eligible.
-			continue
-		}
-		n := len(types)
-		start := 0
-		if band < len(bandNext) && n > 0 {
-			start = bandNext[band] % n
-		}
-		for i := 0; i < n; i++ {
-			typ := types[(start+i)%n]
-			if (typ == TaskPoster || typ == TaskPosterRepair) && !posterAvailable {
-				continue
-			}
-			if typ == TaskPreview && !previewAvailable {
-				continue
-			}
-			if typ == TaskSubtitle && !subtitleAvailable {
-				continue
-			}
-			allowed = append(allowed, typ)
-		}
+	task, err := d.q.ClaimAny(ctx, types)
+	if err != nil {
+		return nil, err
 	}
-	return allowed
-}
-
-func (d *Dispatcher) noteClaimed(typ TaskType) {
-	for band, types := range priorityBands {
-		for i, candidate := range types {
-			if candidate != typ {
-				continue
-			}
-			d.mu.Lock()
-			if band < len(d.bandNext) && len(types) > 0 {
-				d.bandNext[band] = (i + 1) % len(types)
-			}
-			d.mu.Unlock()
-			return
-		}
+	if task == nil {
+		return nil, nil
 	}
-}
-
-func (d *Dispatcher) tryAcquire(typ TaskType) bool {
-	d.mu.Lock()
-	atSoftCap := d.globalUsed >= d.opts.Global
-	atHardCap := d.globalUsed >= d.opts.Global+priorityBurstSlots
-	highUsed := d.highPriorityUsed
-	d.mu.Unlock()
-	if atHardCap {
-		return false
-	}
-	if atSoftCap {
-		highBurstOK := isHighPriorityTask(typ) && highUsed == 0
-		subtitleBurstOK := typ == TaskSubtitle
-		if !highBurstOK && !subtitleBurstOK {
-			return false
-		}
-	}
-	select {
-	case d.global <- struct{}{}:
-	default:
-		return false
-	}
-	var sub chan struct{}
-	if typ == TaskPoster || typ == TaskPosterRepair {
-		sub = d.poster
-	} else if typ == TaskPreview {
-		sub = d.preview
-	} else if typ == TaskSubtitle {
-		sub = d.subtitle
-	}
-	if sub != nil {
-		select {
-		case sub <- struct{}{}:
-		default:
-			<-d.global
-			return false
-		}
-	}
-	d.mu.Lock()
-	d.globalUsed++
-	if isHighPriorityTask(typ) {
-		d.highPriorityUsed++
-	}
-	if typ == TaskPoster || typ == TaskPosterRepair {
-		d.posterUsed++
-	}
-	if typ == TaskPreview {
-		d.previewUsed++
-	}
-	if typ == TaskSubtitle {
-		d.subtitleUsed++
-	}
-	d.mu.Unlock()
-	return true
-}
-func (d *Dispatcher) release(typ TaskType) {
-	if typ == TaskPoster || typ == TaskPosterRepair {
-		<-d.poster
-	} else if typ == TaskPreview {
-		<-d.preview
-	} else if typ == TaskSubtitle {
-		<-d.subtitle
-	}
-	<-d.global
-	d.mu.Lock()
-	d.globalUsed--
-	if isHighPriorityTask(typ) {
-		d.highPriorityUsed--
-	}
-	if typ == TaskPoster || typ == TaskPosterRepair {
-		d.posterUsed--
-	}
-	if typ == TaskPreview {
-		d.previewUsed--
-	}
-	if typ == TaskSubtitle {
-		d.subtitleUsed--
-	}
-	d.mu.Unlock()
+	return &scheduler.ClaimResult{
+		ExecutionID: task.ExecutionID,
+		TaskType:    string(task.Type),
+		Owner:       owner,
+		QueueID:     task.ID,
+		MediaID:     task.MediaID,
+		LeaseUntil:  task.LeaseUntil,
+		Payload:     *task,
+	}, nil
 }
 
 func (d *Dispatcher) launch(parent context.Context, task Task) {
@@ -583,7 +509,7 @@ func (d *Dispatcher) launch(parent context.Context, task Task) {
 	} else {
 		lifecycleCtx, cancel = context.WithTimeout(parent, d.opts.Timeouts[task.Type])
 	}
-	state := &workerState{cancel: cancel}
+	state := &workerState{cancel: cancel, lastProgress: time.Now()}
 	d.mu.Lock()
 	d.running[task.ID] = state
 	if task.ScanTaskID != nil {
@@ -606,7 +532,7 @@ func (d *Dispatcher) runTask(parent, lifecycleCtx context.Context, task Task, st
 	}
 	defer state.cancel()
 	var cleanupOnce sync.Once
-	cleanup := func() { cleanupOnce.Do(func() { d.unregister(task, state); d.release(task.Type) }) }
+	cleanup := func() { cleanupOnce.Do(func() { d.unregister(task, state); d.releaseReservation(task) }) }
 	handedOff := false
 	defer func() {
 		if !handedOff {
@@ -654,6 +580,9 @@ func (d *Dispatcher) runTask(parent, lifecycleCtx context.Context, task Task, st
 		taskCtx, taskCancel = context.WithTimeout(lifecycleCtx, timeout)
 	}
 	defer taskCancel()
+	// Executors report forward progress through the task context; the heartbeat
+	// loop below force-cancels tasks that stop reporting for ProgressIdleTimeout.
+	taskCtx = WithProgressReporter(taskCtx, state.reportProgress)
 	if taskCtx.Err() != nil {
 		d.failBeforeExecute(parent, task, state)
 		return
@@ -673,6 +602,10 @@ func (d *Dispatcher) runTask(parent, lifecycleCtx context.Context, task Task, st
 			execResult, execErr = outcome.result, outcome.err
 			goto finish
 		case <-heartbeat.C:
+			if d.opts.ProgressIdleTimeout > 0 && state.progressStale(d.opts.ProgressIdleTimeout) {
+				log.Printf("postingest dispatcher task %d (%s media %d) stalled: no progress for %v; force-cancelling", task.ID, task.Type, task.MediaID, d.opts.ProgressIdleTimeout)
+				state.stop(FailureRetryable, errors.New("task stalled: no progress reported"))
+			}
 			d.heartbeatTask(taskCtx, task, state)
 		case <-taskCtx.Done():
 			timer := time.NewTimer(d.opts.ExecutorStopGrace)
@@ -788,6 +721,21 @@ func (d *Dispatcher) unregister(task Task, state *workerState) {
 		}
 	}
 }
+
+// releaseReservation frees the task's scheduler reservation when its execution
+// unit finally ends. Normal complete/fail paths already released it (the
+// compare-and-set makes a duplicate release a no-op); the shutdown-unresponsive
+// path retains budget while the executor is unresponsive and releases here.
+func (d *Dispatcher) releaseReservation(task Task) {
+	if task.ExecutionID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := releaseReservationDirect(ctx, d.q.db, task, "execution_end"); err != nil {
+		log.Printf("postingest dispatcher release reservation %s: %v", task.ExecutionID, err)
+	}
+}
 func (d *Dispatcher) cancelAll(kind FailureKind, cause error) {
 	d.mu.Lock()
 	states := make([]*workerState, 0, len(d.running))
@@ -844,8 +792,12 @@ func (d *Dispatcher) CancelTask(taskID int64) {
 	}()
 }
 
-func (d *Dispatcher) Snapshot() BudgetSnapshot {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return BudgetSnapshot{d.opts.Global, d.globalUsed, d.opts.Poster, d.posterUsed, d.opts.Preview, d.previewUsed, d.opts.Subtitle, d.subtitleUsed}
+// Snapshot reports scheduler usage and limits for the compatibility overview.
+// Usage is derived from durable reservations; limits come from the effective
+// scheduler policy.
+func (d *Dispatcher) Snapshot(ctx context.Context) (scheduler.BudgetSnapshot, error) {
+	if d == nil || d.svc == nil {
+		return scheduler.BudgetSnapshot{}, nil
+	}
+	return d.svc.Snapshot(ctx)
 }

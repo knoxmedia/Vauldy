@@ -6,20 +6,23 @@ import (
 	"time"
 
 	"knox-media/internal/coreiface"
+	"knox-media/internal/scheduler"
 	"knox-media/internal/store"
 )
 
 type TaskType string
 
 const (
-	TaskPoster       TaskType = "poster"
-	TaskPosterRepair TaskType = "poster_repair"
-	TaskThumbnail    TaskType = "thumbnail"
-	TaskPreview      TaskType = "preview"
-	TaskKeyframe     TaskType = "keyframe"
-	TaskSubtitle     TaskType = "subtitle"
-	TaskAtrack       TaskType = "atrack"
-	TaskEncrypt      TaskType = "encrypt"
+	TaskPoster            TaskType = "poster"
+	TaskPosterRepair      TaskType = "poster_repair"
+	TaskThumbnail         TaskType = "thumbnail"
+	TaskPreview           TaskType = "preview"
+	TaskKeyframe          TaskType = "keyframe"
+	TaskSubtitle          TaskType = "subtitle"
+	TaskAtrack            TaskType = "atrack"
+	TaskEncrypt           TaskType = "encrypt"
+	TaskSubtitleRecognize TaskType = "subtitle_recognize"
+	TaskAIAnalysis        TaskType = "ai_analysis"
 )
 
 type Status string
@@ -56,6 +59,14 @@ type Task struct {
 	LeaseOwner  string
 	LeaseUntil  time.Time
 	LastError   string
+	// Scheduler admission metadata frozen at enqueue.
+	SourceClass            int
+	BasePriority           int
+	LibraryID              *int64
+	ResourceProfileVersion int
+	ResourceProfileJSON    string
+	// Scheduler reservation identity propagated from claim.
+	ExecutionID string
 }
 
 type Queue struct {
@@ -65,15 +76,14 @@ type Queue struct {
 	isScanCancelled      func(context.Context, int64) (bool, error)
 	beforeFailTransition func()
 	registry             coreiface.CapabilityRegistry
+	// immediateTx overrides store.WithImmediateConnTx for tests (ambiguous commit seams).
+	immediateTx     func(context.Context, *sql.DB, func(store.ImmediateConnTx) error) (store.ImmediateOutcome, error)
+	schedulerPolicy *scheduler.Policy
 }
 
 type compatibilityCapabilities struct{}
 
-// Available reports true for community post-ingest/scrape adapters and false for
-// prepare, which requires enterprise tables and an explicit capability registry.
-func (compatibilityCapabilities) Available(step string) bool {
-	return step != "" && step != "prepare"
-}
+func (compatibilityCapabilities) Available(string) bool { return true }
 
 func NewQueue(db *sql.DB, owner string, metrics *store.SQLiteMetrics, registries ...coreiface.CapabilityRegistry) *Queue {
 	var registry coreiface.CapabilityRegistry = compatibilityCapabilities{}
@@ -81,4 +91,18 @@ func NewQueue(db *sql.DB, owner string, metrics *store.SQLiteMetrics, registries
 		registry = registries[0]
 	}
 	return &Queue{db: db, owner: owner, metrics: metrics, registry: registry}
+}
+
+// SetSchedulerPolicy configures the scheduler policy used for claim ordering
+// and library fairness. If policy is nil, effective-priority ordering is
+// disabled and raw priority ordering is used instead.
+func (q *Queue) SetSchedulerPolicy(policy *scheduler.Policy) {
+	q.schedulerPolicy = policy
+}
+
+func (q *Queue) withImmediate(ctx context.Context, fn func(store.ImmediateConnTx) error) (store.ImmediateOutcome, error) {
+	if q != nil && q.immediateTx != nil {
+		return q.immediateTx(ctx, q.db, fn)
+	}
+	return store.WithImmediateConnTx(ctx, q.db, fn)
 }

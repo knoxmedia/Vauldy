@@ -77,13 +77,15 @@ func BuildInstantVideoArgs(plan InstantVideoPlan) []string {
 		if plan.Mode == PipelineHWFull {
 			vf = "scale_qsv=" + wPx + ":" + hPx
 		}
-		return append([]string{
+		args := []string{
 			"-vf", vf,
 			"-c:v", "h264_qsv",
 			"-preset", mapX264PresetToQSV(preset),
 			"-b:v", plan.Bitrate, "-maxrate", plan.Bitrate, "-bufsize", "2M",
 			"-profile:v", "high",
-		}, gops...)
+		}
+		args = append(noAutoScaleFor(plan.Mode), args...)
+		return append(args, gops...)
 	case H264AMF:
 		vf := "scale=" + wPx + ":" + hPx + ",format=nv12"
 		return append([]string{
@@ -98,13 +100,15 @@ func BuildInstantVideoArgs(plan InstantVideoPlan) []string {
 		if plan.Mode == PipelineHWFull {
 			vf = "scale_cuda=" + wPx + ":" + hPx + ":format=nv12"
 		}
-		return append([]string{
+		args := []string{
 			"-vf", vf,
 			"-c:v", "h264_nvenc",
 			"-preset", mapX264PresetToNVENC(preset),
 			"-b:v", plan.Bitrate, "-maxrate", plan.Bitrate, "-bufsize", "2M",
 			"-profile:v", "high",
-		}, gops...)
+		}
+		args = append(noAutoScaleFor(plan.Mode), args...)
+		return append(args, gops...)
 	case H264VAAPI:
 		vf := "format=nv12,hwupload,scale_vaapi=w=" + wPx + ":h=" + hPx
 		return append([]string{
@@ -123,6 +127,20 @@ func BuildInstantVideoArgs(plan InstantVideoPlan) []string {
 			SessionGOP: plan.SessionGOP,
 		})
 	}
+}
+
+func noAutoScaleFor(mode PipelineMode) []string {
+	if mode != PipelineHWFull {
+		return nil
+	}
+	// With -hwaccel cuda -hwaccel_output_format cuda the decoded frames stay on
+	// the GPU. FFmpeg still auto-inserts a software auto_scale filter between the
+	// explicit scale_cuda filter and the nvenc encoder, and that CPU scaler
+	// cannot negotiate CUDA-resident frames, aborting the graph with
+	// "Impossible to convert between the formats supported by the filter ...".
+	// The explicit -vf scale_cuda already performs the required scaling and
+	// format conversion on the GPU, so disabling the auto-scaler is safe.
+	return []string{"-noautoscale"}
 }
 
 func instantGOPArgs(sessionGOP bool) []string {

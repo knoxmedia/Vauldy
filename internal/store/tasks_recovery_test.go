@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"knox-media/internal/postingest"
+	_ "knox-media/internal/publication"
 	"knox-media/internal/store"
 )
 
@@ -128,81 +129,3 @@ func TestRestartRecoveryResetInterruptedTasksPreservesResourceControlledScans(t 
 		t.Fatalf("post status=%s owner=%v want waiting,nil", postStatus, owner)
 	}
 }
-
-func TestRestartRecoveryResetsLinkedPrepareStepWithTask(t *testing.T) {
-	if !storeEnterprisePrepareReady(t) {
-		t.Skip("enterprise prepare tables unavailable in community build")
-	}
-	db, err := store.OpenSQLite(filepath.Join(t.TempDir(), "prepare-restart.sqlite"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	res, err := db.Exec(`INSERT INTO library(name,type,path) VALUES('prepare','video','/prepare')`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	libraryID, _ := res.LastInsertId()
-	res, err = db.Exec(`INSERT INTO media(library_id,file_id,file_type,ingest_generation,publication_state) VALUES(?,'restart-prepare','video',1,'processing')`, libraryID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	mediaID, _ := res.LastInsertId()
-	res, err = db.Exec(`INSERT INTO media_ingest_run(media_id,generation,reason,status,preserve_visibility,config_snapshot_json) VALUES(?,1,'scan','processing',0,'{}')`, mediaID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	runID, _ := res.LastInsertId()
-	res, err = db.Exec(`INSERT INTO media_ingest_step(run_id,media_id,generation,step_type,required,status,attempts,lease_owner) VALUES(?,?,1,'prepare',1,'running',1,'dead')`, runID, mediaID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	stepID, _ := res.LastInsertId()
-	res, err = db.Exec(`INSERT INTO transcode_task(file_id,status,task_type,media_id,ingest_run_id,ingest_step_id,generation) VALUES('restart-prepare','running','pretranscode',?,?,?,1)`, mediaID, runID, stepID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	taskID, _ := res.LastInsertId()
-	if _, err = db.Exec(`INSERT INTO pretranscode_rendition_job(task_id,rendition_id,rendition_name,status,lease_owner,lease_until) VALUES(?,1,'360p','running','dead-owner',datetime(CURRENT_TIMESTAMP,'+1 hour'))`, taskID); err != nil {
-		t.Fatal(err)
-	}
-	store.ResetInterruptedTasks(db)
-	var task, job, step string
-	var owner, jobOwner, jobLease sql.NullString
-	_ = db.QueryRow(`SELECT status FROM transcode_task WHERE id=?`, taskID).Scan(&task)
-	_ = db.QueryRow(`SELECT status,lease_owner,lease_until FROM pretranscode_rendition_job WHERE task_id=?`, taskID).Scan(&job, &jobOwner, &jobLease)
-	_ = db.QueryRow(`SELECT status,lease_owner FROM media_ingest_step WHERE id=?`, stepID).Scan(&step, &owner)
-	if task != "waiting" || job != "waiting" || step != "waiting" || owner.Valid || jobOwner.Valid || jobLease.Valid {
-		t.Fatalf("recovered=%s/%s/%s owner=%v", task, job, step, owner)
-	}
-}
-
-func TestResetInterruptedPrepareJobMakesAvailabilityCurrent(t *testing.T) {
-	if !storeEnterprisePrepareReady(t) {
-		t.Skip("enterprise prepare tables unavailable in community build")
-	}
-	db, err := store.OpenSQLite(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if _, err = db.Exec(`PRAGMA foreign_keys=OFF`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = db.Exec(`INSERT INTO pretranscode_rendition_job(task_id,rendition_id,rendition_name,status,available_at,lease_owner,lease_until) VALUES(999,1,'720p','running','2040-01-01','dead','2040-01-01')`); err != nil {
-		t.Fatal(err)
-	}
-	store.ResetInterruptedTasks(db)
-	var status string
-	var due int
-	if err = db.QueryRow(`SELECT status,COALESCE(available_at,CURRENT_TIMESTAMP)<=CURRENT_TIMESTAMP FROM pretranscode_rendition_job WHERE task_id=999`).Scan(&status, &due); err != nil {
-		t.Fatal(err)
-	}
-	if status != "waiting" || due != 1 {
-		t.Fatalf("status=%s due=%d", status, due)
-	}
-}
-
-
-
-

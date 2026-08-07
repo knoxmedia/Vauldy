@@ -8,8 +8,8 @@ import (
 )
 
 func TestPlanReplacementSupersedesActiveGenerationGraph(t *testing.T) {
-	skipIfEnterprisePrepareUnavailable(t)
 	db := openPlannerTestDB(t)
+	requireEnterprisePrepareTables(t, db)
 	_, mediaID, scanID := seedPlannerMedia(t, db, "video", 0, 0, 0)
 	old := planAndCommit(t, db, NewPlanner(PlanOptions{}), NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
 	if _, err := db.Exec(`UPDATE media_ingest_run SET error_message='immutable error' WHERE id=?`, old.ID); err != nil {
@@ -156,8 +156,8 @@ func TestPlanReplacementSupportsCommunityWithoutEnterpriseTables(t *testing.T) {
 }
 
 func TestPlanReplacementRejectsPartialEnterpriseSchema(t *testing.T) {
-	skipIfEnterprisePrepareUnavailable(t)
 	db := openPlannerTestDB(t)
+	requireEnterprisePrepareTables(t, db)
 	_, mediaID, scanID := seedPlannerMedia(t, db, "video", 0, 0, 0)
 	old := planAndCommit(t, db, NewPlanner(PlanOptions{}), NewMedia{MediaID: mediaID, ScanTaskID: scanID, FileType: "video"})
 	if _, err := db.Exec(`DROP TABLE pretranscode_rendition_job`); err != nil {

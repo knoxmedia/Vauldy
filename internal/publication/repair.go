@@ -11,12 +11,15 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"knox-media/internal/scraper"
 	"knox-media/internal/store"
+
+	"github.com/kalafut/imohash"
 )
 
 // RepairLegacyMedia creates bounded, visibility-preserving ingest generations
@@ -80,6 +83,17 @@ var repairRetryPolicy = store.RetryPolicy{
 }
 
 func repairLegacyMediaOne(ctx context.Context, db *sql.DB, planner *Planner, mediaID int64) (bool, error) {
+	// A current non-published repair already owns this media's required work.
+	// Check database state before preflight because preflight may hash a
+	// multi-GB source file on every server restart.
+	covered, err := currentRepairCoversRequiredKindsDB(ctx, db, planner, mediaID)
+	if err != nil {
+		return false, err
+	}
+	if covered {
+		return false, nil
+	}
+
 	preflight, err := loadRepairPreflight(ctx, db, planner, mediaID)
 	if err != nil || preflight == nil {
 		return false, err
@@ -163,10 +177,76 @@ func repairLegacyMediaOneAttempt(ctx context.Context, db *sql.DB, planner *Plann
 	if run.ID == 0 {
 		return false, nil
 	}
+	if err = adoptRepairOptionalEvidenceTx(ctx, tx, mediaID, run); err != nil {
+		return false, err
+	}
 	if err = tx.Commit(); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+func adoptRepairOptionalEvidenceTx(ctx context.Context, tx *sql.Tx, mediaID int64, run Run) error {
+	rows, err := tx.QueryContext(ctx, `SELECT id,step_type FROM media_ingest_step WHERE run_id=? AND media_id=? AND generation=? AND required=0 AND status='waiting' ORDER BY id`, run.ID, mediaID, run.Generation)
+	if err != nil {
+		return err
+	}
+	type candidate struct {
+		id   int64
+		step StepType
+	}
+	var candidates []candidate
+	for rows.Next() {
+		var c candidate
+		if err := rows.Scan(&c.id, &c.step); err != nil {
+			rows.Close()
+			return err
+		}
+		candidates = append(candidates, c)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, c := range candidates {
+		evidenceStep := c.step
+		switch c.step {
+		case StepSubtitleExtract:
+			evidenceStep = StepSubtitle
+		case StepAtrackExtract:
+			evidenceStep = StepAtrack
+		case StepKeyframeExtract:
+			evidenceStep = StepKeyframe
+		case StepMediaVisible:
+			var visible int
+			if err := tx.QueryRowContext(ctx, `SELECT publication_state IN ('published','degraded') FROM media WHERE id=?`, mediaID).Scan(&visible); err != nil {
+				return err
+			}
+			if visible == 0 {
+				continue
+			}
+		}
+		ok, err := stepEvidenceTx(ctx, tx, mediaID, evidenceStep)
+		if err != nil {
+			return err
+		}
+		status := "done"
+		if c.step != StepMediaVisible && !ok {
+			status = "skipped"
+		}
+		if _, err = tx.ExecContext(ctx, `UPDATE media_ingest_step SET status=?,last_error='',lease_owner=NULL,lease_until=NULL,finished_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='waiting'`, status, c.id); err != nil {
+			return err
+		}
+		if _, err = tx.ExecContext(ctx, `UPDATE post_ingest_task SET status=?,last_error='',lease_owner=NULL,lease_until=NULL,finished_at=CURRENT_TIMESTAMP WHERE ingest_step_id=? AND status='waiting'`, status, c.id); err != nil {
+			return err
+		}
+		if _, err = tx.ExecContext(ctx, `UPDATE scrape_task SET status=?,progress=100,message='',lease_owner=NULL,lease_until=NULL,finished_at=CURRENT_TIMESTAMP WHERE ingest_step_id=? AND status='waiting'`, status, c.id); err != nil {
+			return err
+		}
+		if _, err = tx.ExecContext(ctx, `UPDATE transcode_task SET status=?,error_message='',lease_owner=NULL,lease_until=NULL,completed_at=CURRENT_TIMESTAMP WHERE ingest_step_id=? AND status='waiting'`, status, c.id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func currentRepairCoversRequiredKindsTx(ctx context.Context, tx *sql.Tx, mediaID int64, required []StepType) (bool, error) {
@@ -264,23 +344,16 @@ func stepEvidenceTx(ctx context.Context, tx *sql.Tx, mediaID int64, step StepTyp
 		}
 		return taskDone == 1 || scraper.HasScrapedMetaJSON(metaJSON), nil
 	case StepPreview:
-		query = `SELECT EXISTS(SELECT 1 FROM preview_task WHERE media_id=? AND status='done' AND (TRIM(COALESCE(sprite_path,''))<>'' OR TRIM(COALESCE(vtt_path,''))<>'')) OR EXISTS(SELECT 1 FROM post_ingest_task WHERE media_id=? AND task_type='preview' AND status='done')`
+		query = `SELECT EXISTS(SELECT 1 FROM preview_task WHERE media_id=? AND status IN ('ready','done') AND (TRIM(COALESCE(sprite_path,''))<>'' OR TRIM(COALESCE(vtt_path,''))<>'')) OR EXISTS(SELECT 1 FROM post_ingest_task WHERE media_id=? AND task_type='preview' AND status='done')`
 	case StepKeyframe:
 		query = `SELECT EXISTS(SELECT 1 FROM keyframe_task WHERE media_id=? AND status='done' AND (COALESCE(keyframe_count,0)>0 OR TRIM(COALESCE(output_dir,''))<>'')) OR EXISTS(SELECT 1 FROM post_ingest_task WHERE media_id=? AND task_type='keyframe' AND status='done')`
 	case StepSubtitle:
-		query = `SELECT EXISTS(SELECT 1 FROM media_subtitle WHERE media_id=? AND status='ready') OR EXISTS(SELECT 1 FROM subtitle_task WHERE media_id=? AND status='done') OR EXISTS(SELECT 1 FROM post_ingest_task WHERE media_id=? AND task_type='subtitle' AND status='done')`
+		query = `SELECT EXISTS(SELECT 1 FROM media_subtitle WHERE media_id=? AND status='ready' AND TRIM(COALESCE(vtt_path,''))<>'') OR EXISTS(SELECT 1 FROM subtitle_task WHERE media_id=? AND status='done') OR EXISTS(SELECT 1 FROM post_ingest_task WHERE media_id=? AND task_type='subtitle' AND status='done')`
 	case StepAtrack:
 		query = `SELECT EXISTS(SELECT 1 FROM atrack_task WHERE media_id=? AND status='done') OR EXISTS(SELECT 1 FROM media_derived_assets WHERE media_id=? AND artifact_kind IN ('atrack_playlist','atrack_segment')) OR EXISTS(SELECT 1 FROM post_ingest_task WHERE media_id=? AND task_type='atrack' AND status='done')`
 	case StepEncrypt:
 		return encryptionEvidenceTx(ctx, tx, mediaID)
 	case StepPrepare:
-		hasTaskType, err := publicationColumnExistsTx(ctx, tx, "transcode_task", "task_type")
-		if err != nil {
-			return false, err
-		}
-		if !hasTaskType {
-			return false, nil
-		}
 		query = `SELECT EXISTS(SELECT 1 FROM transcode_task WHERE file_id=(SELECT file_id FROM media WHERE id=?) AND task_type='pretranscode' AND status='done')`
 	default:
 		return false, fmt.Errorf("unknown step %q", step)
@@ -398,12 +471,12 @@ func loadRepairPreflight(ctx context.Context, db *sql.DB, planner *Planner, medi
 	// committed journal's plaintext fingerprint rather than hashing ciphertext.
 	if samePath(selected, encPath) {
 		if regularFile(plainPath) {
-			preflight.sourceFingerprint, err = SourceFingerprint(plainPath)
+			preflight.sourceFingerprint, err = cachedRepairSourceFingerprint(ctx, db, mediaID, generation, plainPath)
 		} else {
 			err = db.QueryRowContext(ctx, `SELECT source_fingerprint FROM media_encryption_stage_journal WHERE media_id=? AND state='committed' AND enc_path=? ORDER BY updated_at DESC LIMIT 1`, mediaID, encPath).Scan(&preflight.sourceFingerprint)
 		}
 	} else if regularFile(selected) {
-		preflight.sourceFingerprint, err = SourceFingerprint(selected)
+		preflight.sourceFingerprint, err = cachedRepairSourceFingerprint(ctx, db, mediaID, generation, selected)
 	}
 	if errors.Is(err, sql.ErrNoRows) {
 		err = nil
@@ -414,6 +487,17 @@ func loadRepairPreflight(ctx context.Context, db *sql.DB, planner *Planner, medi
 	preflight.encryptionRequired = planner.options.EncryptGlobal && libraryEncrypt == 1
 	if preflight.encryptionRequired {
 		if preflight.fileType == "video" {
+			// Encryption compliance requires the committed plaintext digest; an
+			// identity-only poster placeholder is insufficient for this safety check.
+			if isPrecapturePlaceholderFingerprint(preflight.sourceFingerprint) {
+				var realFP string
+				journalErr := db.QueryRowContext(ctx, `SELECT source_fingerprint FROM media_encryption_stage_journal WHERE media_id=? AND state='committed' AND enc_path=? ORDER BY updated_at DESC LIMIT 1`, mediaID, encPath).Scan(&realFP)
+				if journalErr == nil {
+					preflight.sourceFingerprint = realFP
+				} else if !errors.Is(journalErr, sql.ErrNoRows) {
+					return nil, journalErr
+				}
+			}
 			preflight.preserveVisibility, err = selectedVideoEncryptionCompliant(ctx, db, mediaID, selected, encPath, preflight.sourceFingerprint)
 		} else {
 			preflight.preserveVisibility = samePath(selected, encPath) && regularFile(selected)
@@ -455,9 +539,87 @@ func SourceFingerprint(path string) (string, error) {
 	return SourceFingerprintContext(context.Background(), path)
 }
 
+// cachedRepairSourceFingerprint returns the source fingerprint for a media file
+// without reading it when an existing evidence identity (path|size|mtime) still
+// matches the current file. The startup repair sweep walks every published
+// media, so re-hashing every multi-GB source on each boot would stall the
+// server on disk I/O. Full SHA-256 is only computed on identity mismatch or
+// when no reusable evidence exists.
+func cachedRepairSourceFingerprint(ctx context.Context, db *sql.DB, mediaID, generation int64, path string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	wantIdentity := fmt.Sprintf("%s|%d|%d", filepath.Clean(abs), info.Size(), info.ModTime().UnixNano())
+	// Generation replacement does not change the source bytes. Search current
+	// generation first, then prior generations for the same media.
+	rows, err := db.QueryContext(ctx, `SELECT source_fingerprint FROM media_ingest_evidence WHERE media_id=? AND kind IN ('poster','thumbnail','encrypt') ORDER BY CASE WHEN generation=? THEN 0 ELSE 1 END,id DESC LIMIT 16`, mediaID, generation)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var fp string
+		if err := rows.Scan(&fp); err != nil {
+			return "", err
+		}
+		if identity, ok := FingerprintIdentityKey(fp); ok && identity == wantIdentity {
+			return fp, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	return SourceIdentityFingerprint(path)
+}
+
+// SourceIdentityFingerprint returns a path/size/mtime identity fingerprint
+// without reading source bytes. Its zero digest marks an identity-only repair
+// placeholder and must not be treated as a content hash.
+func SourceIdentityFingerprint(path string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s|%d|%d|sha256:%s", filepath.Clean(abs), info.Size(), info.ModTime().UnixNano(), strings.Repeat("0", 64)), nil
+}
+
 // SourceFingerprintContext binds publication evidence to exact source bytes and
-// identity, stopping the full-file hash when ctx is canceled.
+// identity using a sampled imohash (16KiB from the beginning, middle, and end of
+// the file combined with file size). imohash itself has no context parameter, so
+// the caller's context is checked before and after the bounded sample read.
 func SourceFingerprintContext(ctx context.Context, path string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	digest, err := imoHashFile(ctx, path)
+	if err != nil {
+		return "", err
+	}
+	canonical, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s|%d|%d|imohash:%s", filepath.Clean(canonical), info.Size(), info.ModTime().UnixNano(), digest), nil
+}
+
+// SourceFingerprintContextSHA256 binds publication evidence to exact source
+// bytes and identity using the legacy full-file SHA-256 digest, stopping the
+// read when ctx is canceled. It exists only to verify stored sha256:-format
+// fingerprints written before the imohash migration.
+func SourceFingerprintContextSHA256(ctx context.Context, path string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -479,6 +641,23 @@ func SourceFingerprintContext(ctx context.Context, path string) (string, error) 
 		return "", err
 	}
 	return fmt.Sprintf("%s|%d|%d|sha256:%s", filepath.Clean(canonical), info.Size(), info.ModTime().UnixNano(), hex.EncodeToString(h.Sum(nil))), nil
+}
+
+// imoHashFile hashes a file with imohash's default sample parameters (16KiB x 3
+// = 48KiB total plus file size). The caller's context is checked before and
+// after the sample read so cancellation still aborts a fingerprint.
+func imoHashFile(ctx context.Context, path string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	sum, err := imohash.SumFile(path)
+	if err != nil {
+		return "", err
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(sum[:]), nil
 }
 
 var (
@@ -522,18 +701,137 @@ func hasCompleteRepairEvidenceTx(ctx context.Context, tx *sql.Tx, mediaID int64,
 	return true, nil
 }
 
-// fingerprintIdentityKey returns path|size|mtime from a SourceFingerprint-style value.
-func fingerprintIdentityKey(fp string) (string, bool) {
+// FingerprintIdentityKey returns the path|size|mtime identity prefix from a
+// SourceFingerprint-style value. It is used to reuse a previously committed
+// fingerprint without re-hashing the file when the file's identity is unchanged.
+// Both the legacy full-file sha256: and the current sampled imohash: formats are
+// recognized so rows written before the imohash migration keep matching.
+func FingerprintIdentityKey(fp string) (string, bool) {
+	identity, _, _, ok := fingerprintParts(fp)
+	return identity, ok && identity != ""
+}
+
+// FingerprintHash returns the hash algorithm name and hex digest stored in a
+// SourceFingerprint value. ok is false when the value does not use a recognized
+// format (for example a malformed or opaque placeholder value).
+func FingerprintHash(fp string) (algo, digest string, ok bool) {
+	_, algo, digest, ok = fingerprintParts(fp)
+	return algo, digest, ok
+}
+
+// fingerprintParts splits a SourceFingerprint value into its identity prefix
+// (clean-abs-path|size|mtime), the hash algorithm name, and the hex digest. The
+// rightmost recognized separator wins, so paths that themselves contain a
+// "|sha256:" or "|imohash:" substring are handled correctly.
+func fingerprintParts(fp string) (identity, algo, digest string, ok bool) {
 	fp = strings.TrimSpace(fp)
-	idx := strings.LastIndex(fp, "|sha256:")
-	if idx <= 0 {
-		return "", false
+	bestIdx := -1
+	bestSep, bestName := "", ""
+	for _, p := range [...]struct{ sep, name string }{
+		{"|sha256:", "sha256"},
+		{"|imohash:", "imohash"},
+	} {
+		if idx := strings.LastIndex(fp, p.sep); idx > bestIdx {
+			bestIdx = idx
+			bestSep, bestName = p.sep, p.name
+		}
 	}
-	return fp[:idx], true
+	if bestIdx <= 0 {
+		return "", "", "", false
+	}
+	return fp[:bestIdx], bestName, fp[bestIdx+len(bestSep):], true
 }
 
 func isPrecapturePlaceholderFingerprint(fp string) bool {
-	return strings.HasSuffix(strings.TrimSpace(fp), "|sha256:"+strings.Repeat("0", 64))
+	fp = strings.TrimSpace(fp)
+	return strings.HasSuffix(fp, "|sha256:"+strings.Repeat("0", 64)) ||
+		strings.HasSuffix(fp, "|imohash:"+strings.Repeat("0", 32))
+}
+
+// SourceFingerprintMatches reports whether the file at path matches the stored
+// fingerprint value, honoring the algorithm recorded in the fingerprint. Stored
+// sha256: values (written before the imohash migration) are verified with a
+// full-file SHA-256; imohash: values use sampled hashing. A malformed or
+// unrecognized stored value fails closed with an error.
+func SourceFingerprintMatches(ctx context.Context, expected, path string) (bool, error) {
+	expected = strings.TrimSpace(expected)
+	if expected == "" {
+		return false, nil
+	}
+	_, algo, _, ok := fingerprintParts(expected)
+	if !ok {
+		return false, errors.New("source fingerprint: unrecognized format")
+	}
+	var (
+		got string
+		err error
+	)
+	switch algo {
+	case "sha256":
+		got, err = SourceFingerprintContextSHA256(ctx, path)
+	case "imohash":
+		got, err = SourceFingerprintContext(ctx, path)
+	default:
+		return false, fmt.Errorf("source fingerprint: unsupported algorithm %q", algo)
+	}
+	if err != nil {
+		return false, err
+	}
+	return got == expected, nil
+}
+
+// FingerprintIdentityMatch reports whether the file at path still matches the
+// identity prefix (canonical path, size, mtime) recorded in a SourceFingerprint
+// value without re-hashing the file. It lets the retirement barrier gate legacy
+// sha256: fingerprints (written before the imohash migration) cheaply; byte-level
+// verification still runs in the delete path before any bytes are removed.
+// A malformed or unrecognized stored value fails closed with an error.
+func FingerprintIdentityMatch(ctx context.Context, expected, path string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	identity, _, _, ok := fingerprintParts(expected)
+	if !ok || identity == "" {
+		return false, errors.New("source fingerprint: unrecognized format")
+	}
+	size, mtimeNs, idPath, ok := parseFingerprintIdentity(identity)
+	if !ok {
+		return false, errors.New("source fingerprint: malformed identity")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return false, err
+	}
+	if info.Size() != size || info.ModTime().UnixNano() != mtimeNs {
+		return false, nil
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return false, err
+	}
+	return identitiesEqual(filepath.Clean(abs), idPath), nil
+}
+
+// parseFingerprintIdentity splits the path|size|mtime identity prefix recorded
+// by SourceFingerprintContext and SourceFingerprintContextSHA256.
+func parseFingerprintIdentity(identity string) (size, mtimeNs int64, path string, ok bool) {
+	sep := strings.LastIndex(identity, "|")
+	if sep <= 0 {
+		return 0, 0, "", false
+	}
+	prev := strings.LastIndex(identity[:sep], "|")
+	if prev <= 0 {
+		return 0, 0, "", false
+	}
+	size, err := strconv.ParseInt(identity[prev+1:sep], 10, 64)
+	if err != nil {
+		return 0, 0, "", false
+	}
+	mtimeNs, err = strconv.ParseInt(identity[sep+1:], 10, 64)
+	if err != nil {
+		return 0, 0, "", false
+	}
+	return size, mtimeNs, identity[:prev], true
 }
 
 func identitiesEqual(a, b string) bool {
@@ -548,7 +846,7 @@ func exactRepairEvidenceTx(ctx context.Context, tx *sql.Tx, mediaID int64, step 
 	if err != nil || ok || step != StepPoster {
 		return ok, err
 	}
-	// Scan precapture stores a zero content hash for speed. After encrypt
+	// Scan precapture stores a zero-digest identity placeholder for speed. After encrypt
 	// cleanup the plaintext is gone and repair binds the journal's real hash;
 	// accept placeholder/precapture poster evidence when identity matches and
 	// artifact refs still validate.
@@ -568,7 +866,7 @@ func loadRepairEvidenceRefs(ctx context.Context, tx *sql.Tx, mediaID int64, step
 }
 
 func loadRepairPosterEvidenceByIdentity(ctx context.Context, tx *sql.Tx, mediaID int64, fingerprint string) (bool, error) {
-	wantIdentity, ok := fingerprintIdentityKey(fingerprint)
+	wantIdentity, ok := FingerprintIdentityKey(fingerprint)
 	if !ok {
 		return false, nil
 	}
@@ -582,7 +880,7 @@ func loadRepairPosterEvidenceByIdentity(ctx context.Context, tx *sql.Tx, mediaID
 		if err = rows.Scan(&evidenceFP, &refs, &reason); err != nil {
 			return false, err
 		}
-		gotIdentity, ok := fingerprintIdentityKey(evidenceFP)
+		gotIdentity, ok := FingerprintIdentityKey(evidenceFP)
 		if !ok || !identitiesEqual(wantIdentity, gotIdentity) {
 			continue
 		}
@@ -597,11 +895,36 @@ func loadRepairPosterEvidenceByIdentity(ctx context.Context, tx *sql.Tx, mediaID
 	return false, rows.Err()
 }
 
+// posterEvidenceURLMatches reports whether the media's displayed poster URL is
+// consistent with committed poster evidence. The scrape pipeline may legitimately
+// repoint meta.scrape.poster at its own staged artwork after the poster step
+// committed, so a locally-managed poster artifact is accepted in addition to an
+// exact URL match. Arbitrary/external display pointers are still rejected so a
+// missing or tampered pointer forces a repair.
+func posterEvidenceURLMatches(selected, evidenceURL string) bool {
+	if selected == evidenceURL {
+		return true
+	}
+	return isLocallyManagedPosterURL(selected)
+}
+
+func isLocallyManagedPosterURL(u string) bool {
+	u = strings.TrimSpace(u)
+	if u == "" {
+		return false
+	}
+	return strings.HasPrefix(u, "/uploads/posters/") ||
+		strings.HasPrefix(u, "/metadata/library/") ||
+		strings.HasPrefix(u, "/api/v1/media/")
+}
+
 func validateRepairEvidenceRefsTx(ctx context.Context, tx *sql.Tx, mediaID int64, step StepType, raw string) (bool, error) {
 	if step == StepPoster {
 		var evidence struct {
-			Path, URL, SHA256 string
-			Size              int64
+			Path   string `json:"path"`
+			URL    string `json:"url"`
+			SHA256 string `json:"sha256"`
+			Size   int64  `json:"size"`
 		}
 		if json.Unmarshal([]byte(raw), &evidence) != nil || !validFileHash(evidence.Path, evidence.Size, evidence.SHA256) {
 			return false, nil
@@ -626,7 +949,7 @@ func validateRepairEvidenceRefsTx(ctx context.Context, tx *sql.Tx, mediaID int64
 		if selected == "" {
 			selected = strings.TrimSpace(meta.Scrape.Extra.Poster)
 		}
-		if selected == "" || selected != strings.TrimSpace(evidence.URL) {
+		if selected == "" || !posterEvidenceURLMatches(selected, strings.TrimSpace(evidence.URL)) {
 			return false, nil
 		}
 		if encrypted == 0 {

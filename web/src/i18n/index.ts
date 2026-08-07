@@ -187,15 +187,13 @@ export function I18nProvider({ children, locale: locked }: I18nProviderProps) {
     return initial;
   });
 
-  const desiredLocale = locked
-    ? resolveLocale(locked)
-    : storeLocale
-      ? resolveLocale(storeLocale)
-      : null;
-  if (desiredLocale && desiredLocale !== localeState) {
-    activeLocale = desiredLocale;
-    setLocaleState(desiredLocale);
-  }
+  // React to changes in the auth store's uiLocale (e.g. after login or settings save).
+  useEffect(() => {
+    if (locked) return;
+    if (!storeLocale) return;
+    const next = resolveLocale(storeLocale);
+    setLocaleState((prev) => (prev === next ? prev : next));
+  }, [storeLocale, locked]);
 
   useEffect(() => {
     activeLocale = localeState;
@@ -210,13 +208,10 @@ export function I18nProvider({ children, locale: locked }: I18nProviderProps) {
   }, [localeState]);
 
   const setLocale = useCallback((next: string) => {
-    const resolved = resolveLocale(next);
-    setLocaleState((prev) => (prev === resolved ? prev : resolved));
-    try {
-      useAuthStore.setState({ uiLocale: resolved });
-    } catch {
-      /* ignore */
-    }
+    setLocaleState((prev) => {
+      const resolved = resolveLocale(next);
+      return prev === resolved ? prev : resolved;
+    });
   }, []);
 
   const t = useCallback<TranslateFn>(
@@ -272,12 +267,7 @@ export function useI18n(): I18nContextValue {
 }
 
 export function useT(): TranslateFn {
-  const { t, locale } = useI18n();
-  return useMemo(() => {
-    const bound: TranslateFn = (key, paramsOrFallback, fallback) =>
-      t(key, paramsOrFallback, fallback);
-    return bound;
-  }, [t, locale]);
+  return useI18n().t;
 }
 
 /** Get the display label for a locale code in its own script. */

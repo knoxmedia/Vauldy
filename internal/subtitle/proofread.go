@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	"knox-media/internal/progressctx"
 	"knox-media/internal/scraper"
 )
 
@@ -72,6 +73,7 @@ func ProofreadContent(ctx context.Context, content, lang string, providers []scr
 		for i := range batch {
 			cues[start+i].Text = fixed[i]
 		}
+		progressctx.Report(ctx)
 	}
 	_ = ctx
 	return RenderCues(cues, format), nil

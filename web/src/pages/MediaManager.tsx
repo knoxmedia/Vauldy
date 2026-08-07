@@ -86,7 +86,7 @@ function readStringList(...sources: unknown[]): string[] {
   const out: string[] = [];
   for (const src of sources) {
     if (typeof src === "string") {
-      for (const part of src.split(/[,銆?|]/)) {
+      for (const part of src.split(/[,、/|]/)) {
         out.push(part.trim());
       }
       continue;
@@ -323,7 +323,7 @@ function toLibraryDisplayRelativePath(fullPath: string, libraryRoots?: string[])
 }
 
 function nodeTitle(name: string, kind: "dir" | "file") {
-  return <span>{kind === "dir" ? `馃搧 ${name}` : `馃幀 ${name}`}</span>;
+  return <span>{kind === "dir" ? `📁 ${name}` : `🎬 ${name}`}</span>;
 }
 
 function isRequestCancellation(error: unknown, signal: AbortSignal) {

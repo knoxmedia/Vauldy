@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -12,6 +13,8 @@ import (
 	"github.com/google/uuid"
 
 	"knox-media/internal/publication"
+	"knox-media/internal/scheduler"
+	"knox-media/internal/storage"
 
 	"knox-media/internal/store"
 )
@@ -42,7 +45,7 @@ func (q *Queue) validate(needOwner bool) error {
 
 func validTaskType(typ TaskType) bool {
 	switch typ {
-	case TaskPoster, TaskPosterRepair, TaskThumbnail, TaskPreview, TaskKeyframe, TaskSubtitle, TaskAtrack, TaskEncrypt:
+	case TaskPoster, TaskPosterRepair, TaskThumbnail, TaskPreview, TaskKeyframe, TaskSubtitle, TaskAtrack, TaskEncrypt, TaskSubtitleRecognize, TaskAIAnalysis:
 		return true
 	default:
 		return false
@@ -84,25 +87,45 @@ func nullableTaskID(id *int64) any {
 	return *id
 }
 
-func syncLinkedStepTx(ctx context.Context, tx *sql.Tx, taskID int64) error {
-	_, err := tx.ExecContext(ctx, `UPDATE media_ingest_step SET
-		status=(SELECT status FROM post_ingest_task WHERE id=?), attempts=(SELECT attempts FROM post_ingest_task WHERE id=?), max_attempts=(SELECT max_attempts FROM post_ingest_task WHERE id=?), last_error=(SELECT last_error FROM post_ingest_task WHERE id=?), available_at=(SELECT available_at FROM post_ingest_task WHERE id=?), lease_owner=(SELECT lease_owner FROM post_ingest_task WHERE id=?), lease_until=(SELECT lease_until FROM post_ingest_task WHERE id=?), started_at=(SELECT started_at FROM post_ingest_task WHERE id=?), finished_at=(SELECT finished_at FROM post_ingest_task WHERE id=?), updated_at=CURRENT_TIMESTAMP
-		WHERE id=(SELECT ingest_step_id FROM post_ingest_task WHERE id=?)`, taskID, taskID, taskID, taskID, taskID, taskID, taskID, taskID, taskID, taskID)
+// mirrorLinkedStepTx copies queue status/lease fields onto the linked ingest step.
+func mirrorLinkedStepTx(ctx context.Context, tx store.SQLExecutor, taskID int64) (runID sql.NullInt64, err error) {
+	_, err = tx.ExecContext(ctx, `UPDATE media_ingest_step SET
+		status=(SELECT status FROM post_ingest_task WHERE id=?), attempts=(SELECT attempts FROM post_ingest_task WHERE id=?), max_attempts=(SELECT max_attempts FROM post_ingest_task WHERE id=?), retry_round=(SELECT retry_round FROM post_ingest_task WHERE id=?), last_error=(SELECT last_error FROM post_ingest_task WHERE id=?), available_at=(SELECT available_at FROM post_ingest_task WHERE id=?), lease_owner=(SELECT lease_owner FROM post_ingest_task WHERE id=?), lease_until=(SELECT lease_until FROM post_ingest_task WHERE id=?), started_at=(SELECT started_at FROM post_ingest_task WHERE id=?), finished_at=(SELECT finished_at FROM post_ingest_task WHERE id=?), updated_at=CURRENT_TIMESTAMP
+		WHERE id=(SELECT ingest_step_id FROM post_ingest_task WHERE id=?)`, taskID, taskID, taskID, taskID, taskID, taskID, taskID, taskID, taskID, taskID, taskID)
+	if err != nil {
+		return runID, err
+	}
+	err = tx.QueryRowContext(ctx, `SELECT ingest_run_id FROM post_ingest_task WHERE id=?`, taskID).Scan(&runID)
+	return runID, err
+}
+
+// syncLinkedStepLeaseTx mirrors running/lease metadata without plan projection.
+// Use for heartbeat Renew and FailureShutdown last-error-only writes: status stays
+// running, so waiting/running counts, dependency skips, retirement barrier, and
+// aggregate must not thrash.
+func syncLinkedStepLeaseTx(ctx context.Context, tx store.SQLExecutor, taskID int64) error {
+	_, err := mirrorLinkedStepTx(ctx, tx, taskID)
+	return err
+}
+
+// syncLinkedStepTx mirrors queue/step status and fully finalizes linked plan projection
+// (propagate, completion, retirement barrier hook, aggregate) when the task belongs to
+// an ingest run. Use for Complete/Fail/Cancel/Recover/Retry and other status changes.
+func syncLinkedStepTx(ctx context.Context, tx store.SQLExecutor, taskID int64) error {
+	runID, err := mirrorLinkedStepTx(ctx, tx, taskID)
 	if err != nil {
 		return err
 	}
-	var runID sql.NullInt64
-	if err := tx.QueryRowContext(ctx, `SELECT ingest_run_id FROM post_ingest_task WHERE id=?`, taskID).Scan(&runID); err != nil {
-		return err
-	}
 	if runID.Valid {
-		return publication.AggregateTx(ctx, tx, runID.Int64)
+		return publication.FinalizeNodeTransitionTx(ctx, tx, runID.Int64)
 	}
 	return nil
 }
 
-// SyncLinkedStepTx mirrors queue/step status for a post_ingest_task row inside an open transaction.
-func SyncLinkedStepTx(ctx context.Context, tx *sql.Tx, taskID int64) error {
+// SyncLinkedStepTx mirrors queue/step status for a post_ingest_task row inside an open
+// transaction and finalizes linked plan projection (propagate, completion, retirement
+// barrier hook, aggregate) when the task belongs to an ingest run.
+func SyncLinkedStepTx(ctx context.Context, tx store.SQLExecutor, taskID int64) error {
 	return syncLinkedStepTx(ctx, tx, taskID)
 }
 
@@ -123,9 +146,9 @@ func (q *Queue) Enqueue(ctx context.Context, mediaID int64, scanTaskID *int64, t
 	var inserted bool
 	err := store.WithBusyRetry(ctx, q.metrics, func() error {
 		result, err := q.db.ExecContext(ctx, `
-			INSERT INTO post_ingest_task (media_id, scan_task_id, generation, task_type, max_attempts)
-			SELECT ?, ?, COALESCE(ingest_generation, 0), ?, ? FROM media WHERE id=?
-			ON CONFLICT(media_id, generation, task_type) DO NOTHING`, mediaID, nullableInt64(scanTaskID), typ, publication.DefaultMaxAttempts(string(typ)), mediaID)
+			INSERT INTO post_ingest_task (media_id, scan_task_id, generation, task_type, max_attempts, source_class, base_priority, library_id, resource_profile_version, resource_profile_json)
+			SELECT ?, ?, COALESCE(ingest_generation, 0), ?, ?, 200, 200, library_id, ?, '{}' FROM media WHERE id=?
+			ON CONFLICT(media_id, generation, task_type) DO NOTHING`, mediaID, nullableInt64(scanTaskID), typ, publication.DefaultMaxAttempts(string(typ)), publication.CurrentPolicyVersion, mediaID)
 		if err != nil {
 			return err
 		}
@@ -223,11 +246,34 @@ func (q *Queue) ClaimAny(ctx context.Context, types []TaskType) (*Task, error) {
 		}
 		requested = append(requested, string(typ))
 	}
-	payload, err := publication.ClaimEligibleAny(ctx, q.db, publication.ClaimRequest{Family: publication.QueuePostIngest, TaskTypes: requested, Owner: q.owner, Registry: q.registry, Metrics: q.metrics})
+	var payload *publication.ClaimPayload
+	var admitResult *scheduler.AdmissionResult
+	var err error
+	if q.schedulerPolicy != nil {
+		// Cheap read-only fast path: skip write-lock admission transactions when
+		// no candidate is eligible, so idle claim polls do not contend with the
+		// write transactions executors use to complete or fail tasks.
+		eligibleTypes, hintErr := publication.PostIngestEligibleTaskTypes(ctx, q.db, publication.ClaimRequest{Family: publication.QueuePostIngest, TaskTypes: requested, Owner: q.owner, Registry: q.registry, Metrics: q.metrics, SchedulerPolicy: q.schedulerPolicy})
+		if hintErr != nil || len(eligibleTypes) == 0 {
+			return nil, hintErr
+		}
+		for _, typ := range eligibleTypes {
+			payload, admitResult, _, err = publication.ClaimWithAdmission(ctx, q.db, publication.ClaimRequest{Family: publication.QueuePostIngest, TaskType: typ, Owner: q.owner, Registry: q.registry, Metrics: q.metrics, SchedulerPolicy: q.schedulerPolicy})
+			if err != nil || payload != nil {
+				break
+			}
+		}
+	} else {
+		payload, err = publication.ClaimEligibleAny(ctx, q.db, publication.ClaimRequest{Family: publication.QueuePostIngest, TaskTypes: requested, Owner: q.owner, Registry: q.registry, Metrics: q.metrics, SchedulerPolicy: q.schedulerPolicy})
+	}
 	if err != nil || payload == nil {
 		return nil, err
 	}
-	return q.taskFromClaimPayload(ctx, payload)
+	task, err := q.taskFromClaimPayload(ctx, payload, admitResult)
+	if err != nil || task == nil {
+		return nil, err
+	}
+	return task, nil
 }
 func (q *Queue) Claim(ctx context.Context, typ TaskType) (*Task, error) {
 	if err := q.validate(true); err != nil {
@@ -236,14 +282,26 @@ func (q *Queue) Claim(ctx context.Context, typ TaskType) (*Task, error) {
 	if err := validateTaskType(typ); err != nil {
 		return nil, err
 	}
-	payload, err := publication.ClaimEligible(ctx, q.db, publication.ClaimRequest{Family: publication.QueuePostIngest, TaskType: string(typ), Owner: q.owner, Registry: q.registry, Metrics: q.metrics})
+	req := publication.ClaimRequest{Family: publication.QueuePostIngest, TaskType: string(typ), Owner: q.owner, Registry: q.registry, Metrics: q.metrics, SchedulerPolicy: q.schedulerPolicy}
+	var payload *publication.ClaimPayload
+	var admitResult *scheduler.AdmissionResult
+	var err error
+	if q.schedulerPolicy != nil {
+		payload, admitResult, _, err = publication.ClaimWithAdmission(ctx, q.db, req)
+	} else {
+		payload, err = publication.ClaimEligible(ctx, q.db, req)
+	}
 	if err != nil || payload == nil {
 		return nil, err
 	}
-	return q.taskFromClaimPayload(ctx, payload)
+	task, err := q.taskFromClaimPayload(ctx, payload, admitResult)
+	if err != nil || task == nil {
+		return nil, err
+	}
+	return task, nil
 }
 
-func (q *Queue) taskFromClaimPayload(ctx context.Context, payload *publication.ClaimPayload) (*Task, error) {
+func (q *Queue) taskFromClaimPayload(ctx context.Context, payload *publication.ClaimPayload, admitResult *scheduler.AdmissionResult) (*Task, error) {
 	var stillOwned int
 	if err := q.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM post_ingest_task WHERE id=? AND status='running' AND lease_owner=? AND ((ingest_run_id IS NULL AND ingest_step_id IS NULL AND ? IS NULL AND ? IS NULL) OR (ingest_run_id=? AND ingest_step_id=? AND generation=? AND retry_round=? AND media_id=? AND EXISTS(SELECT 1 FROM media_ingest_step st JOIN media_ingest_run r ON r.id=st.run_id JOIN media m ON m.id=st.media_id WHERE st.id=post_ingest_task.ingest_step_id AND st.status='running' AND st.lease_owner=post_ingest_task.lease_owner AND st.run_id=post_ingest_task.ingest_run_id AND st.media_id=post_ingest_task.media_id AND st.generation=post_ingest_task.generation AND r.superseded_at IS NULL AND r.superseded_by_generation IS NULL AND m.ingest_generation=post_ingest_task.generation)))`, payload.QueueID, payload.Owner, nullableNullInt(payload.RunID), nullableNullInt(payload.StepID), nullableNullInt(payload.RunID), nullableNullInt(payload.StepID), payload.Generation.Int64, payload.RetryRound, payload.MediaID).Scan(&stillOwned); err != nil {
 		return nil, err
@@ -257,7 +315,14 @@ func (q *Queue) taskFromClaimPayload(ctx context.Context, payload *publication.C
 	if stillOwned != 1 {
 		return nil, nil
 	}
-	task := &Task{ID: payload.QueueID, MediaID: payload.MediaID, Type: TaskType(payload.TaskType), Status: StatusRunning, Attempts: payload.Attempts, MaxAttempts: payload.MaxAttempts, RetryRound: payload.RetryRound, LeaseOwner: payload.Owner, LeaseUntil: payload.LeaseUntil}
+	task := &Task{ID: payload.QueueID, MediaID: payload.MediaID, Type: TaskType(payload.TaskType), Status: StatusRunning, Attempts: payload.Attempts, MaxAttempts: payload.MaxAttempts, RetryRound: payload.RetryRound, LeaseOwner: payload.Owner, LeaseUntil: payload.LeaseUntil, SourceClass: payload.SourceClass, BasePriority: payload.BasePriority, ResourceProfileVersion: payload.ResourceProfileVersion, ResourceProfileJSON: payload.ResourceProfileJSON}
+	if admitResult != nil {
+		task.ExecutionID = admitResult.ExecutionID
+	}
+	if payload.LibraryID.Valid {
+		v := payload.LibraryID.Int64
+		task.LibraryID = &v
+	}
 	if payload.ScanTaskID.Valid {
 		v := payload.ScanTaskID.Int64
 		task.ScanTaskID = &v
@@ -273,6 +338,10 @@ func (q *Queue) taskFromClaimPayload(ctx context.Context, payload *publication.C
 	if payload.Generation.Valid {
 		v := payload.Generation.Int64
 		task.Generation = v
+	}
+	if payload.LibraryID.Valid {
+		v := payload.LibraryID.Int64
+		task.LibraryID = &v
 	}
 	return task, nil
 }
@@ -322,6 +391,11 @@ func (q *Queue) Renew(ctx context.Context, task Task) (bool, error) {
 			}
 			n, _ := r.RowsAffected()
 			renewed = n == 1
+			if renewed && task.ExecutionID != "" {
+				if re := scheduler.RenewReservationDirect(ctx, q.db, task.ExecutionID, leaseDuration); re != nil {
+					return re
+				}
+			}
 			return nil
 		})
 		return renewed, err
@@ -348,8 +422,13 @@ func (q *Queue) Renew(ctx context.Context, task Task) (bool, error) {
 		}
 		renewed = n == 1
 		if renewed {
-			if err := syncLinkedStepTx(ctx, tx, task.ID); err != nil {
+			if err := syncLinkedStepLeaseTx(ctx, tx, task.ID); err != nil {
 				return err
+			}
+			if task.ExecutionID != "" {
+				if err := scheduler.RenewReservationTx(ctx, tx, task.ExecutionID, leaseDuration); err != nil {
+					return err
+				}
 			}
 		}
 		if err := tx.Commit(); err != nil {
@@ -387,6 +466,8 @@ func (q *Queue) Complete(ctx context.Context, task Task) error {
 		if n != 1 {
 			return q.ownerWriteError(ctx, task.ID, task.LeaseOwner, "complete")
 		}
+		releaseTaskPlaintextTemp(task)
+		_ = releaseReservationDirect(ctx, q.db, task, "complete")
 		return nil
 	}
 	var updated bool
@@ -411,6 +492,9 @@ func (q *Queue) Complete(ctx context.Context, task Task) error {
 		}
 		updated = n == 1
 		if updated {
+			if err := releaseReservationIfNeeded(ctx, tx, task, "complete"); err != nil {
+				return err
+			}
 			if err := syncLinkedStepTx(ctx, tx, task.ID); err != nil {
 				return err
 			}
@@ -425,6 +509,7 @@ func (q *Queue) Complete(ctx context.Context, task Task) error {
 		return err
 	}
 	if updated {
+		releaseTaskPlaintextTemp(task)
 		return nil
 	}
 	return q.ownerWriteError(ctx, task.ID, task.LeaseOwner, "complete")
@@ -446,6 +531,21 @@ func failureText(cause error) string {
 		return "post-ingest task failed without an error"
 	}
 	return truncateUTF8(cause.Error(), 4096)
+}
+
+func failReservationReason(kind FailureKind) string {
+	switch kind {
+	case FailureRetryable:
+		return "retryable_fail"
+	case FailurePermanent:
+		return "permanent_fail"
+	case FailureCancelled:
+		return "cancelled"
+	case FailureShutdown:
+		return "shutdown"
+	default:
+		return "failed"
+	}
 }
 
 func (q *Queue) Fail(ctx context.Context, task *Task, kind FailureKind, cause error) error {
@@ -478,6 +578,10 @@ func (q *Queue) Fail(ctx context.Context, task *Task, kind FailureKind, cause er
 		if n != 1 {
 			return q.ownerWriteError(ctx, task.ID, task.LeaseOwner, "fail")
 		}
+		if kind != FailureShutdown {
+			releaseTaskPlaintextTemp(*task)
+		}
+		_ = releaseReservationDirect(ctx, q.db, *task, failReservationReason(kind))
 		return nil
 	}
 	requestedKind := kind
@@ -541,7 +645,16 @@ func (q *Queue) Fail(ctx context.Context, task *Task, kind FailureKind, cause er
 		}
 		updated = n == 1
 		if updated {
-			if err := syncLinkedStepTx(ctx, tx, task.ID); err != nil {
+			if kind != FailureShutdown {
+				if err := releaseReservationIfNeeded(ctx, tx, *task, failReservationReason(kind)); err != nil {
+					return err
+				}
+			}
+			sync := syncLinkedStepTx
+			if kind == FailureShutdown {
+				sync = syncLinkedStepLeaseTx
+			}
+			if err := sync(ctx, tx, task.ID); err != nil {
 				return err
 			}
 		}
@@ -551,10 +664,58 @@ func (q *Queue) Fail(ctx context.Context, task *Task, kind FailureKind, cause er
 		committed = true
 		return nil
 	})
-	if err != nil || updated {
+	if err != nil {
 		return err
 	}
+	if updated {
+		if kind != FailureShutdown {
+			releaseTaskPlaintextTemp(*task)
+		}
+		return nil
+	}
 	return q.ownerWriteError(ctx, task.ID, task.LeaseOwner, "fail")
+}
+
+func releaseTaskPlaintextTemp(task Task) {
+	_ = storage.ReleaseBoundForTask(storage.BoundFromPostIngestTask(task.MediaID, task.Generation, task.ID, string(task.Type), task.LeaseOwner))
+}
+
+// releaseReservationIfNeeded releases a scheduler reservation in the open
+// transaction if the task has a non-empty execution ID. Returns nil on success
+// or if no reservation exists (caller should not treat a missing reservation as
+// fatal - a claim may not have produced one). An already-released reservation
+// is a successful no-op: exactly-once release makes a duplicate a normal
+// outcome (e.g. after a GPU fallback fence).
+func releaseReservationIfNeeded(ctx context.Context, tx store.SQLExecutor, task Task, reason string) error {
+	if task.ExecutionID == "" {
+		return nil
+	}
+	err := scheduler.ReleaseReservationTx(ctx, tx, task.ExecutionID, reason, task.LeaseOwner)
+	if err == nil || errors.Is(err, scheduler.ErrReservationNotActive) {
+		return nil
+	}
+	return err
+}
+
+// releaseReservationDirect releases a scheduler reservation outside a
+// transaction using the database connection directly. Already-released
+// reservations are a successful no-op.
+func releaseReservationDirect(ctx context.Context, db *sql.DB, task Task, reason string) error {
+	if task.ExecutionID == "" {
+		return nil
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := scheduler.ReleaseReservationTx(ctx, tx, task.ExecutionID, reason, task.LeaseOwner); err != nil {
+		if errors.Is(err, scheduler.ErrReservationNotActive) {
+			return nil
+		}
+		return err
+	}
+	return tx.Commit()
 }
 
 func (q *Queue) ownerWriteError(ctx context.Context, taskID int64, leaseToken string, operation string) error {
@@ -600,17 +761,29 @@ func (q *Queue) recoverRunning(ctx context.Context, onlyExpired bool) (int64, er
 	if err := q.validate(false); err != nil {
 		return 0, err
 	}
-	selectSQL := `SELECT id FROM post_ingest_task WHERE status='running'`
+	// Identity includes media/generation so we can release lease-bound plaintext
+	// temps after the previous lease ends. Requeue to waiting still releases:
+	// the next claim must materialize a fresh bound under the same task id.
+	selectSQL := `SELECT id, media_id, generation FROM post_ingest_task WHERE status='running'`
 	updateSQL := `UPDATE post_ingest_task SET status=CASE WHEN scan_task_id IS NOT NULL AND EXISTS(SELECT 1 FROM scan_task s WHERE s.id=post_ingest_task.scan_task_id AND (s.cancelled=1 OR s.status='cancelled')) THEN 'cancelled' WHEN attempts>=max_attempts THEN 'failed' ELSE 'waiting' END,last_error=CASE WHEN attempts>=max_attempts THEN ? ELSE last_error END,available_at=CURRENT_TIMESTAMP,lease_owner=NULL,lease_until=NULL,finished_at=CASE WHEN attempts>=max_attempts OR (scan_task_id IS NOT NULL AND EXISTS(SELECT 1 FROM scan_task s WHERE s.id=post_ingest_task.scan_task_id AND (s.cancelled=1 OR s.status='cancelled'))) THEN CURRENT_TIMESTAMP ELSE NULL END,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='running'`
+	reservationSelectSQL := `SELECT execution_id FROM scheduler_reservation WHERE status='active'`
+	reservationReleaseSQL := `UPDATE scheduler_reservation SET status='released', released_at=CURRENT_TIMESTAMP, release_reason=?, released_by=?, updated_at=CURRENT_TIMESTAMP WHERE execution_id=? AND status='active'`
 	exhaustedMsg := "interrupted and attempts exhausted"
+	recoveryReason := "startup_interruption"
 	if onlyExpired {
-		selectSQL += ` AND lease_until<CURRENT_TIMESTAMP`
-		updateSQL += ` AND lease_until<CURRENT_TIMESTAMP`
+		selectSQL += ` AND (lease_until IS NULL OR lease_until<CURRENT_TIMESTAMP)`
+		updateSQL += ` AND (lease_until IS NULL OR lease_until<CURRENT_TIMESTAMP)`
+		reservationSelectSQL += ` AND (lease_until IS NULL OR lease_until<CURRENT_TIMESTAMP)`
 		exhaustedMsg = "lease expired and attempts exhausted"
+		recoveryReason = "expired_recovery"
 	}
 	selectSQL += ` ORDER BY id LIMIT ?`
+	type recoverAttempt struct{ taskID, mediaID, generation int64 }
 	var n int64
+	var released []recoverAttempt
 	err := store.WithBusyRetry(ctx, q.metrics, func() error {
+		n = 0
+		released = nil
 		tx, err := q.db.BeginTx(ctx, nil)
 		if err != nil {
 			return err
@@ -621,18 +794,45 @@ func (q *Queue) recoverRunning(ctx context.Context, onlyExpired bool) (int64, er
 				_ = tx.Rollback()
 			}
 		}()
+		// Release orphaned reservations alongside queue rows.
+		resRows, err := tx.QueryContext(ctx, reservationSelectSQL)
+		if err != nil {
+			return err
+		}
+		var resEIDs []string
+		for resRows.Next() {
+			var eid string
+			if err := resRows.Scan(&eid); err != nil {
+				_ = resRows.Close()
+				return err
+			}
+			resEIDs = append(resEIDs, eid)
+		}
+		if err := resRows.Err(); err != nil {
+			_ = resRows.Close()
+			return err
+		}
+		if err := resRows.Close(); err != nil {
+			return err
+		}
+		for _, eid := range resEIDs {
+			if _, err := tx.ExecContext(ctx, reservationReleaseSQL, recoveryReason, "recovery", eid); err != nil {
+				return err
+			}
+		}
+
 		rows, err := tx.QueryContext(ctx, selectSQL, recoverExpiredLimit)
 		if err != nil {
 			return err
 		}
-		var ids []int64
+		var attempts []recoverAttempt
 		for rows.Next() {
-			var id int64
-			if err := rows.Scan(&id); err != nil {
+			var a recoverAttempt
+			if err := rows.Scan(&a.taskID, &a.mediaID, &a.generation); err != nil {
 				_ = rows.Close()
 				return err
 			}
-			ids = append(ids, id)
+			attempts = append(attempts, a)
 		}
 		if err := rows.Err(); err != nil {
 			_ = rows.Close()
@@ -641,8 +841,9 @@ func (q *Queue) recoverRunning(ctx context.Context, onlyExpired bool) (int64, er
 		if err := rows.Close(); err != nil {
 			return err
 		}
-		for _, id := range ids {
-			result, err := tx.ExecContext(ctx, updateSQL, exhaustedMsg, id)
+		var batch []recoverAttempt
+		for _, a := range attempts {
+			result, err := tx.ExecContext(ctx, updateSQL, exhaustedMsg, a.taskID)
 			if err != nil {
 				return err
 			}
@@ -652,18 +853,26 @@ func (q *Queue) recoverRunning(ctx context.Context, onlyExpired bool) (int64, er
 			}
 			n += changed
 			if changed == 1 {
-				if err := syncLinkedStepTx(ctx, tx, id); err != nil {
+				if err := syncLinkedStepTx(ctx, tx, a.taskID); err != nil {
 					return err
 				}
+				batch = append(batch, a)
 			}
 		}
 		if err := tx.Commit(); err != nil {
 			return err
 		}
 		committed = true
+		released = batch
 		return nil
 	})
-	return n, err
+	if err != nil {
+		return n, err
+	}
+	for _, a := range released {
+		publication.ReleasePostIngestTempAttempt(a.mediaID, a.generation, a.taskID)
+	}
+	return n, nil
 }
 
 func (q *Queue) CancelScan(ctx context.Context, id int64) (int64, error) {
@@ -674,6 +883,8 @@ func (q *Queue) CancelScan(ctx context.Context, id int64) (int64, error) {
 		return 0, fmt.Errorf("postingest queue: scan task id must be positive: %d", id)
 	}
 	var n int64
+	type legacyAttempt struct{ taskID, mediaID, generation int64 }
+	var legacy []legacyAttempt
 	_, err := store.WithImmediateConnTx(ctx, q.db, func(tx store.ImmediateConnTx) error {
 		if scanErr := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM post_ingest_task WHERE scan_task_id=? AND status IN ('waiting','running')`, id).Scan(&n); scanErr != nil {
 			return scanErr
@@ -700,12 +911,38 @@ func (q *Queue) CancelScan(ctx context.Context, id int64) (int64, error) {
 			}
 		}
 		// Legacy unlinked tasks still need durable cancellation.
+		legacyRows, err := tx.QueryContext(ctx, `SELECT id, media_id, generation FROM post_ingest_task WHERE scan_task_id=? AND ingest_run_id IS NULL AND status IN ('waiting','running')`, id)
+		if err != nil {
+			return err
+		}
+		legacy = nil
+		for legacyRows.Next() {
+			var a legacyAttempt
+			if err = legacyRows.Scan(&a.taskID, &a.mediaID, &a.generation); err != nil {
+				_ = legacyRows.Close()
+				return err
+			}
+			legacy = append(legacy, a)
+		}
+		if err = legacyRows.Err(); err != nil {
+			_ = legacyRows.Close()
+			return err
+		}
+		if err = legacyRows.Close(); err != nil {
+			return err
+		}
 		if _, err = tx.ExecContext(ctx, `UPDATE post_ingest_task SET status='cancelled',lease_owner=NULL,lease_until=NULL,last_error='scan cancelled',finished_at=COALESCE(finished_at,CURRENT_TIMESTAMP),updated_at=CURRENT_TIMESTAMP WHERE scan_task_id=? AND ingest_run_id IS NULL AND status IN ('waiting','running')`, id); err != nil {
 			return err
 		}
 		return nil
 	})
-	return n, err
+	if err != nil {
+		return n, err
+	}
+	for _, a := range legacy {
+		publication.ReleasePostIngestTempAttempt(a.mediaID, a.generation, a.taskID)
+	}
+	return n, nil
 }
 
 func (q *Queue) IsScanCancelled(ctx context.Context, scanTaskID int64) (bool, error) {
@@ -747,7 +984,8 @@ type EncryptTaskRow struct {
 }
 
 // ListEncrypt returns encrypt tasks newest-first, optionally filtered by status.
-func (q *Queue) ListEncrypt(ctx context.Context, status string, limit int) ([]EncryptTaskRow, error) {
+// By default tombstoned rows are hidden; includeRemoved surfaces them.
+func (q *Queue) ListEncrypt(ctx context.Context, status string, limit int, includeRemoved bool) ([]EncryptTaskRow, error) {
 	if err := q.validate(false); err != nil {
 		return nil, err
 	}
@@ -763,6 +1001,9 @@ FROM post_ingest_task p
 LEFT JOIN media m ON m.id=p.media_id
 WHERE p.task_type='encrypt'`
 	args := []any{}
+	if !includeRemoved {
+		query += ` AND p.removed_at IS NULL`
+	}
 	if status != "" && status != "all" {
 		query += ` AND p.status=?`
 		args = append(args, status)
@@ -797,40 +1038,42 @@ func (q *Queue) EnqueueEncryptManual(ctx context.Context, mediaID int64) (taskID
 	}
 	err = store.WithBusyRetry(ctx, q.metrics, func() error {
 		taskID, alreadyActive = 0, false
-		tx, err := q.db.BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		committed := false
-		defer func() {
-			if !committed {
-				_ = tx.Rollback()
-			}
-		}()
-		var generation int64
-		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(ingest_generation,0) FROM media WHERE id=?`, mediaID).Scan(&generation); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("postingest queue: media %d not found", mediaID)
-			}
-			return err
-		}
-		var existingID int64
-		var existingStatus Status
-		err = tx.QueryRowContext(ctx, `SELECT id,status FROM post_ingest_task WHERE media_id=? AND generation=? AND task_type='encrypt'`, mediaID, generation).Scan(&existingID, &existingStatus)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-		if err == nil {
-			switch existingStatus {
-			case StatusWaiting, StatusRunning:
-				taskID, alreadyActive = existingID, true
-				if err := tx.Commit(); err != nil {
-					return err
+		_, err := q.withImmediate(ctx, func(tx store.ImmediateConnTx) error {
+			var generation int64
+			if err := tx.QueryRowContext(ctx, `SELECT COALESCE(ingest_generation,0) FROM media WHERE id=?`, mediaID).Scan(&generation); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					return fmt.Errorf("postingest queue: media %d not found", mediaID)
 				}
-				committed = true
-				return nil
-			case StatusFailed, StatusCancelled, StatusDone:
-				result, e := tx.ExecContext(ctx, `UPDATE post_ingest_task SET status='waiting',last_error='',lease_owner=NULL,lease_until=NULL,started_at=NULL,finished_at=NULL,attempts=0,available_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND task_type='encrypt' AND status=?`, existingID, existingStatus)
+				return err
+			}
+			var existingID int64
+			var existingStatus Status
+			var prevRound, attempts int
+			var removedAt sql.NullString
+			err := tx.QueryRowContext(ctx, `SELECT id,status,retry_round,attempts,CAST(removed_at AS TEXT) FROM post_ingest_task WHERE media_id=? AND generation=? AND task_type='encrypt'`, mediaID, generation).Scan(&existingID, &existingStatus, &prevRound, &attempts, &removedAt)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+			if err == nil {
+				switch existingStatus {
+				case StatusWaiting, StatusRunning:
+					if !removedAt.Valid {
+						taskID, alreadyActive = existingID, true
+						return nil
+					}
+					// Tombstoned waiting/running: reopen with monotonic retry_round.
+				case StatusFailed, StatusCancelled, StatusDone:
+				default:
+					return fmt.Errorf("postingest queue: encrypt task %d in status %s", existingID, existingStatus)
+				}
+				nextRound := prevRound + 1
+				action := "reset"
+				reason := "enqueue_reopen"
+				if removedAt.Valid {
+					action = "reset_from_removed"
+					reason = "enqueue_revive"
+				}
+				result, e := tx.ExecContext(ctx, `UPDATE post_ingest_task SET status='waiting',last_error='',lease_owner=NULL,lease_until=NULL,started_at=NULL,finished_at=NULL,attempts=0,retry_round=?,removed_at=NULL,removed_by='',remove_reason='',available_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND task_type='encrypt' AND generation=? AND retry_round=? AND (status IN ('failed','cancelled','done') OR removed_at IS NOT NULL)`, nextRound, existingID, generation, prevRound)
 				if e != nil {
 					return e
 				}
@@ -841,33 +1084,27 @@ func (q *Queue) EnqueueEncryptManual(ctx context.Context, mediaID int64) (taskID
 				if n != 1 {
 					return fmt.Errorf("postingest queue: encrypt task %d reset raced", existingID)
 				}
+				if _, e = tx.ExecContext(ctx, `INSERT INTO media_encrypt_admin_audit(task_id,media_id,generation,action,actor_id,reason,previous_status,previous_attempts,previous_retry_round,new_retry_round,previous_error) VALUES(?,?,?,?,0,?,?,?,?,?,?)`, existingID, mediaID, generation, action, reason, existingStatus, attempts, prevRound, nextRound, ""); e != nil {
+					return e
+				}
 				if e := syncLinkedStepTx(ctx, tx, existingID); e != nil {
 					return e
 				}
 				taskID = existingID
-				if err := tx.Commit(); err != nil {
-					return err
-				}
-				committed = true
 				return nil
-			default:
-				return fmt.Errorf("postingest queue: encrypt task %d in status %s", existingID, existingStatus)
 			}
-		}
-		result, err := tx.ExecContext(ctx, `INSERT INTO post_ingest_task(media_id,generation,task_type,status,max_attempts) VALUES(?,?,'encrypt','waiting',?)`, mediaID, generation, publication.DefaultMaxAttempts(string(TaskEncrypt)))
-		if err != nil {
-			return err
-		}
-		id, err := result.LastInsertId()
-		if err != nil {
-			return err
-		}
-		taskID = id
-		if err := tx.Commit(); err != nil {
-			return err
-		}
-		committed = true
-		return nil
+			result, err := tx.ExecContext(ctx, `INSERT INTO post_ingest_task(media_id,generation,task_type,status,max_attempts,source_class,base_priority,library_id,resource_profile_version,resource_profile_json) VALUES(?,?,'encrypt','waiting',?,400,400,(SELECT library_id FROM media WHERE id=?),?,'{}')`, mediaID, generation, publication.DefaultMaxAttempts(string(TaskEncrypt)), mediaID, publication.CurrentPolicyVersion)
+			if err != nil {
+				return err
+			}
+			id, err := result.LastInsertId()
+			if err != nil {
+				return err
+			}
+			taskID = id
+			return nil
+		})
+		return err
 	})
 	return taskID, alreadyActive, err
 }
@@ -955,8 +1192,10 @@ func (q *Queue) adminMutateAny(ctx context.Context, id int64, updateSQL, op stri
 		return fmt.Errorf("postingest queue: task id must be positive: %d", id)
 	}
 	var updated bool
+	var mediaID, generation int64
 	err := store.WithBusyRetry(ctx, q.metrics, func() error {
 		updated = false
+		mediaID, generation = 0, 0
 		tx, err := q.db.BeginTx(ctx, nil)
 		if err != nil {
 			return err
@@ -967,6 +1206,12 @@ func (q *Queue) adminMutateAny(ctx context.Context, id int64, updateSQL, op stri
 				_ = tx.Rollback()
 			}
 		}()
+		if err := tx.QueryRowContext(ctx, `SELECT media_id, generation FROM post_ingest_task WHERE id=?`, id).Scan(&mediaID, &generation); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil
+			}
+			return err
+		}
 		result, err := tx.ExecContext(ctx, updateSQL, id)
 		if err != nil {
 			return err
@@ -991,6 +1236,8 @@ func (q *Queue) adminMutateAny(ctx context.Context, id int64, updateSQL, op stri
 		return err
 	}
 	if updated {
+		// Admin cancel (and any mutate that ends the lease) drops lease-bound temps.
+		publication.ReleasePostIngestTempAttempt(mediaID, generation, id)
 		return nil
 	}
 	var status Status
@@ -1004,12 +1251,100 @@ func (q *Queue) adminMutateAny(ctx context.Context, id int64, updateSQL, op stri
 }
 
 // AdminResetEncrypt requeues failed/cancelled/done or stranded (expired-lease) running encrypt tasks.
-func (q *Queue) AdminResetEncrypt(ctx context.Context, id int64) error {
-	return q.adminMutateEncrypt(ctx, id, `UPDATE post_ingest_task SET status='waiting',last_error='',lease_owner=NULL,lease_until=NULL,started_at=NULL,finished_at=NULL,attempts=0,available_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND task_type='encrypt' AND (status IN ('failed','cancelled','done') OR (status='running' AND (lease_until IS NULL OR lease_until<CURRENT_TIMESTAMP)))`, "reset")
+// It increments retry_round monotonically and never reuses historical (task_id,retry_round,attempt) identity.
+// Clearing a tombstone is audited as reset_from_removed.
+func (q *Queue) AdminResetEncrypt(ctx context.Context, id, actorID int64) error {
+	if err := q.validate(false); err != nil {
+		return err
+	}
+	if id <= 0 {
+		return fmt.Errorf("postingest queue: task id must be positive: %d", id)
+	}
+	var updated bool
+	var mediaID, generation int64
+	var nextRound int
+	err := store.WithBusyRetry(ctx, q.metrics, func() error {
+		updated = false
+		mediaID, generation, nextRound = 0, 0, 0
+		outcome, err := q.withImmediate(ctx, func(tx store.ImmediateConnTx) error {
+			var status Status
+			var attempts, retryRound int
+			var lastError string
+			var leaseUntil, removedAt sql.NullString
+			var mediaGen int64
+			err := tx.QueryRowContext(ctx, `SELECT p.media_id,p.generation,p.status,p.attempts,p.retry_round,COALESCE(p.last_error,''),CAST(p.lease_until AS TEXT),CAST(p.removed_at AS TEXT),COALESCE(m.ingest_generation,0)
+FROM post_ingest_task p JOIN media m ON m.id=p.media_id WHERE p.id=? AND p.task_type='encrypt'`, id).Scan(&mediaID, &generation, &status, &attempts, &retryRound, &lastError, &leaseUntil, &removedAt, &mediaGen)
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("postingest queue: encrypt task %d not found", id)
+			}
+			if err != nil {
+				return err
+			}
+			if generation > 0 && generation != mediaGen {
+				return fmt.Errorf("postingest queue: encrypt task %d generation %d is stale (media generation %d)", id, generation, mediaGen)
+			}
+			switch status {
+			case StatusFailed, StatusCancelled, StatusDone:
+			case StatusRunning:
+				if leaseUntil.Valid && leaseUntil.String != "" {
+					var active int
+					if e := tx.QueryRowContext(ctx, `SELECT CASE WHEN lease_until IS NOT NULL AND lease_until>=CURRENT_TIMESTAMP THEN 1 ELSE 0 END FROM post_ingest_task WHERE id=?`, id).Scan(&active); e != nil {
+						return e
+					}
+					if active == 1 {
+						return fmt.Errorf("postingest queue: encrypt task %d in status %s cannot be reset", id, status)
+					}
+				}
+			default:
+				return fmt.Errorf("postingest queue: encrypt task %d in status %s cannot be reset", id, status)
+			}
+			nextRound = retryRound + 1
+			action, reason := "reset", "admin_reset"
+			if removedAt.Valid {
+				action, reason = "reset_from_removed", "admin_revive"
+			}
+			result, err := tx.ExecContext(ctx, `UPDATE post_ingest_task SET status='waiting',last_error='',lease_owner=NULL,lease_until=NULL,started_at=NULL,finished_at=NULL,attempts=0,retry_round=?,removed_at=NULL,removed_by='',remove_reason='',available_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND task_type='encrypt' AND retry_round=? AND (status IN ('failed','cancelled','done') OR (status='running' AND (lease_until IS NULL OR lease_until<CURRENT_TIMESTAMP)))`, nextRound, id, retryRound)
+			if err != nil {
+				return err
+			}
+			n, err := result.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if n != 1 {
+				return fmt.Errorf("postingest queue: encrypt task %d reset raced", id)
+			}
+			if _, err = tx.ExecContext(ctx, `INSERT INTO media_encrypt_admin_audit(task_id,media_id,generation,action,actor_id,reason,previous_status,previous_attempts,previous_retry_round,new_retry_round,previous_error) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, id, mediaID, generation, action, actorID, reason, status, attempts, retryRound, nextRound, lastError); err != nil {
+				return err
+			}
+			if err := syncLinkedStepTx(ctx, tx, id); err != nil {
+				return err
+			}
+			updated = true
+			return nil
+		})
+		if err != nil && outcome.CommitAttempted {
+			var round int
+			if q.db.QueryRowContext(ctx, `SELECT retry_round FROM post_ingest_task WHERE id=?`, id).Scan(&round) == nil && nextRound > 0 && round == nextRound {
+				updated = true
+				return nil
+			}
+		}
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	if updated {
+		publication.ReleasePostIngestTempAttempt(mediaID, generation, id)
+		return nil
+	}
+	return fmt.Errorf("postingest queue: encrypt task %d cannot be reset", id)
 }
 
-// AdminRemoveEncrypt deletes a non-running encrypt queue row.
-func (q *Queue) AdminRemoveEncrypt(ctx context.Context, id int64) error {
+// AdminRemoveEncrypt logically tombstones a non-running encrypt queue row.
+// The HTTP DELETE route is a compatibility logical-remove endpoint; physical purge is AdminPurgeEncrypt.
+func (q *Queue) AdminRemoveEncrypt(ctx context.Context, id, actorID int64) error {
 	if err := q.validate(false); err != nil {
 		return err
 	}
@@ -1019,58 +1354,67 @@ func (q *Queue) AdminRemoveEncrypt(ctx context.Context, id int64) error {
 	var updated bool
 	err := store.WithBusyRetry(ctx, q.metrics, func() error {
 		updated = false
-		tx, err := q.db.BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		committed := false
-		defer func() {
-			if !committed {
-				_ = tx.Rollback()
-			}
-		}()
-		var status Status
-		var stepID sql.NullInt64
-		var runID sql.NullInt64
-		if err := tx.QueryRowContext(ctx, `SELECT status,ingest_step_id,ingest_run_id FROM post_ingest_task WHERE id=? AND task_type='encrypt'`, id).Scan(&status, &stepID, &runID); err != nil {
+		outcome, err := q.withImmediate(ctx, func(tx store.ImmediateConnTx) error {
+			var status Status
+			var mediaID, generation, mediaGen int64
+			var attempts, retryRound int
+			var lastError string
+			var removedAt sql.NullString
+			err := tx.QueryRowContext(ctx, `SELECT p.media_id,p.generation,p.status,p.attempts,p.retry_round,COALESCE(p.last_error,''),CAST(p.removed_at AS TEXT),COALESCE(m.ingest_generation,0)
+FROM post_ingest_task p JOIN media m ON m.id=p.media_id WHERE p.id=? AND p.task_type='encrypt'`, id).Scan(&mediaID, &generation, &status, &attempts, &retryRound, &lastError, &removedAt, &mediaGen)
 			if errors.Is(err, sql.ErrNoRows) {
 				return fmt.Errorf("postingest queue: encrypt task %d not found", id)
 			}
-			return err
-		}
-		if status == StatusRunning {
-			return fmt.Errorf("postingest queue: encrypt task %d is running", id)
-		}
-		if status != StatusWaiting && status != StatusFailed && status != StatusCancelled {
-			return fmt.Errorf("postingest queue: encrypt task %d in status %s cannot be removed", id, status)
-		}
-		if stepID.Valid {
-			if _, err := tx.ExecContext(ctx, `UPDATE media_ingest_step SET status='cancelled',lease_owner=NULL,lease_until=NULL,last_error='encrypt task removed',finished_at=COALESCE(finished_at,CURRENT_TIMESTAMP),updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('waiting','running','failed')`, stepID.Int64); err != nil {
+			if err != nil {
 				return err
 			}
-		}
-		result, err := tx.ExecContext(ctx, `DELETE FROM post_ingest_task WHERE id=? AND task_type='encrypt' AND status IN ('waiting','failed','cancelled')`, id)
-		if err != nil {
-			return err
-		}
-		n, err := result.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if n != 1 {
-			return fmt.Errorf("postingest queue: encrypt task %d remove raced", id)
-		}
-		if runID.Valid {
-			if err := publication.AggregateTx(ctx, tx, runID.Int64); err != nil {
+			if generation > 0 && generation != mediaGen {
+				return fmt.Errorf("postingest queue: encrypt task %d generation %d is stale (media generation %d)", id, generation, mediaGen)
+			}
+			if removedAt.Valid {
+				updated = true
+				return nil
+			}
+			if status == StatusRunning {
+				return fmt.Errorf("postingest queue: encrypt task %d is running", id)
+			}
+			if status != StatusWaiting && status != StatusFailed && status != StatusCancelled && status != StatusDone {
+				return fmt.Errorf("postingest queue: encrypt task %d in status %s cannot be removed", id, status)
+			}
+			newStatus := status
+			if status == StatusWaiting {
+				newStatus = StatusCancelled
+			}
+			removedBy := strconv.FormatInt(actorID, 10)
+			result, err := tx.ExecContext(ctx, `UPDATE post_ingest_task SET status=?,removed_at=CURRENT_TIMESTAMP,removed_by=?,remove_reason='admin_remove',lease_owner=NULL,lease_until=NULL,finished_at=COALESCE(finished_at,CURRENT_TIMESTAMP),updated_at=CURRENT_TIMESTAMP WHERE id=? AND task_type='encrypt' AND removed_at IS NULL AND status=? AND generation=?`, newStatus, removedBy, id, status, generation)
+			if err != nil {
 				return err
 			}
+			n, err := result.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if n != 1 {
+				return fmt.Errorf("postingest queue: encrypt task %d remove raced", id)
+			}
+			if _, err = tx.ExecContext(ctx, `INSERT INTO media_encrypt_admin_audit(task_id,media_id,generation,action,actor_id,reason,previous_status,previous_attempts,previous_retry_round,new_retry_round,previous_error) VALUES(?,?,?,'remove',?,'admin_remove',?,?,?,?,?)`, id, mediaID, generation, actorID, status, attempts, retryRound, retryRound, lastError); err != nil {
+				return err
+			}
+			// Do not cancel linked steps or delete journals: recovery continues through the tombstone.
+			if err := syncLinkedStepTx(ctx, tx, id); err != nil {
+				return err
+			}
+			updated = true
+			return nil
+		})
+		if err != nil && outcome.CommitAttempted {
+			var removed sql.NullString
+			if q.db.QueryRowContext(ctx, `SELECT CAST(removed_at AS TEXT) FROM post_ingest_task WHERE id=?`, id).Scan(&removed) == nil && removed.Valid {
+				updated = true
+				return nil
+			}
 		}
-		if err := tx.Commit(); err != nil {
-			return err
-		}
-		committed = true
-		updated = true
-		return nil
+		return err
 	})
 	if err != nil {
 		return err
@@ -1081,6 +1425,99 @@ func (q *Queue) AdminRemoveEncrypt(ctx context.Context, id int64) error {
 	return nil
 }
 
+func (q *Queue) appendPurgeRejectedAudit(ctx context.Context, id, mediaID, generation, actorID int64, reason string) {
+	_, _ = store.WithImmediateConnTx(ctx, q.db, func(tx store.ImmediateConnTx) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO media_encrypt_admin_audit(task_id,media_id,generation,action,actor_id,reason,previous_status,previous_attempts,previous_retry_round,new_retry_round) VALUES(?,?,?,'purge_rejected',?,?, 'removed',0,0,0)`, id, mediaID, generation, actorID, reason)
+		return err
+	})
+}
+
+// AdminPurgeEncrypt physically deletes a tombstoned encrypt row when no journal,
+// retirement, or dependency references remain. Audits alone do not block: they are
+// archived then removed in the same transaction so ON DELETE RESTRICT is satisfied.
+func (q *Queue) AdminPurgeEncrypt(ctx context.Context, id, actorID int64) error {
+	if err := q.validate(false); err != nil {
+		return err
+	}
+	if id <= 0 {
+		return fmt.Errorf("postingest queue: task id must be positive: %d", id)
+	}
+	return store.WithBusyRetry(ctx, q.metrics, func() error {
+		var mediaID, generation int64
+		var rejectReason string
+		_, err := q.withImmediate(ctx, func(tx store.ImmediateConnTx) error {
+			var removedAt sql.NullString
+			err := tx.QueryRowContext(ctx, `SELECT media_id,generation,CAST(removed_at AS TEXT) FROM post_ingest_task WHERE id=? AND task_type='encrypt'`, id).Scan(&mediaID, &generation, &removedAt)
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("postingest queue: encrypt task %d not found", id)
+			}
+			if err != nil {
+				return err
+			}
+			if !removedAt.Valid {
+				return fmt.Errorf("postingest queue: encrypt task %d is not tombstoned", id)
+			}
+		var journals, retirements, deps int
+		if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM media_encryption_stage_journal WHERE task_id=?`, id).Scan(&journals); err != nil {
+			return err
+		}
+		// The community build has no retirement module/table; treat references
+		// as absent so purge is not falsely blocked.
+		retirements = 0
+		var retirementExists int
+		if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='media_plaintext_retirement')`).Scan(&retirementExists); err != nil {
+			return err
+		}
+		if retirementExists == 1 {
+			if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM media_plaintext_retirement WHERE media_id=? AND generation=?`, mediaID, generation).Scan(&retirements); err != nil {
+				return err
+			}
+		}
+			if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM media_ingest_step_dependency d JOIN post_ingest_task p ON p.ingest_step_id=d.step_id OR p.ingest_step_id=d.depends_on_step_id WHERE p.id=?`, id).Scan(&deps); err != nil {
+				return err
+			}
+			if journals > 0 {
+				rejectReason = "journal_refs"
+				return fmt.Errorf("postingest queue: encrypt task %d purge rejected while journal references remain", id)
+			}
+			if retirements > 0 {
+				rejectReason = "retirement_refs"
+				return fmt.Errorf("postingest queue: encrypt task %d purge rejected while retirement references remain", id)
+			}
+			if deps > 0 {
+				rejectReason = "dependency_refs"
+				return fmt.Errorf("postingest queue: encrypt task %d purge rejected while dependency references remain", id)
+			}
+			if _, err = tx.ExecContext(ctx, `INSERT INTO media_encrypt_admin_audit_archive(task_id,media_id,generation,action,actor_id,reason,previous_status,previous_attempts,previous_retry_round,new_retry_round,previous_error,created_at,archived_at)
+SELECT task_id,media_id,generation,action,actor_id,reason,previous_status,previous_attempts,previous_retry_round,new_retry_round,previous_error,created_at,CURRENT_TIMESTAMP FROM media_encrypt_admin_audit WHERE task_id=?`, id); err != nil {
+				return err
+			}
+			if _, err = tx.ExecContext(ctx, `INSERT INTO media_encrypt_admin_audit_archive(task_id,media_id,generation,action,actor_id,reason,previous_status,previous_attempts,previous_retry_round,new_retry_round) VALUES(?,?,?,'purge',?,'admin_purge','removed',0,0,0)`, id, mediaID, generation, actorID); err != nil {
+				return err
+			}
+			if _, err = tx.ExecContext(ctx, `DELETE FROM media_encrypt_admin_audit WHERE task_id=?`, id); err != nil {
+				return err
+			}
+			res, err := tx.ExecContext(ctx, `DELETE FROM post_ingest_task WHERE id=? AND task_type='encrypt' AND removed_at IS NOT NULL`, id)
+			if err != nil {
+				return err
+			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if n != 1 {
+				return fmt.Errorf("postingest queue: encrypt task %d purge raced", id)
+			}
+			return nil
+		})
+		if err != nil && rejectReason != "" {
+			q.appendPurgeRejectedAudit(ctx, id, mediaID, generation, actorID, rejectReason)
+		}
+		return err
+	})
+}
+
 func (q *Queue) adminMutateEncrypt(ctx context.Context, id int64, updateSQL, op string) error {
 	if err := q.validate(false); err != nil {
 		return err
@@ -1089,8 +1526,10 @@ func (q *Queue) adminMutateEncrypt(ctx context.Context, id int64, updateSQL, op 
 		return fmt.Errorf("postingest queue: task id must be positive: %d", id)
 	}
 	var updated bool
+	var mediaID, generation int64
 	err := store.WithBusyRetry(ctx, q.metrics, func() error {
 		updated = false
+		mediaID, generation = 0, 0
 		tx, err := q.db.BeginTx(ctx, nil)
 		if err != nil {
 			return err
@@ -1101,6 +1540,12 @@ func (q *Queue) adminMutateEncrypt(ctx context.Context, id int64, updateSQL, op 
 				_ = tx.Rollback()
 			}
 		}()
+		if err := tx.QueryRowContext(ctx, `SELECT media_id, generation FROM post_ingest_task WHERE id=? AND task_type='encrypt'`, id).Scan(&mediaID, &generation); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil
+			}
+			return err
+		}
 		result, err := tx.ExecContext(ctx, updateSQL, id)
 		if err != nil {
 			return err
@@ -1125,6 +1570,7 @@ func (q *Queue) adminMutateEncrypt(ctx context.Context, id int64, updateSQL, op 
 		return err
 	}
 	if updated {
+		publication.ReleasePostIngestTempAttempt(mediaID, generation, id)
 		return nil
 	}
 	var status Status

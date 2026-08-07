@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"knox-media/api/middleware"
+	"knox-media/internal/coreiface"
 	"knox-media/internal/mediastore"
 	"knox-media/internal/musicstore"
 	"knox-media/internal/photoface"
@@ -261,6 +262,11 @@ func (h *Handler) DeleteMedia(c *gin.Context) {
 		return
 	}
 	libraryID := info.LibraryID
+	// Cascade pretranscode cleanup (SRS STOR-04 / AC-15) before deleting the
+	// media row so the playback module can resolve file_id → output_path.
+	if mod := coreiface.PretranscodeModuleHandle(); mod != nil && info.FileID != "" {
+		_ = mod.OnMediaDeleted(c.Request.Context(), info.ID, []string{info.FileID})
+	}
 	cleanup, err := h.deleteMediaRecords(c.Request.Context(), info)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})

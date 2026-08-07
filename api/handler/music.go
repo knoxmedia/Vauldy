@@ -15,8 +15,6 @@ import (
 	"knox-media/internal/textencoding"
 )
 
-var fetchAggregateImageCandidates = scraper.FetchImageCandidates
-
 // ListLibraryAlbums returns albums grouped for a music library.
 func (h *Handler) ListLibraryAlbums(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
@@ -292,14 +290,6 @@ func (h *Handler) GetAlbum(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid album id"})
 		return
 	}
-	var accessLibID int64
-	if err := h.App.DB.QueryRowContext(ctx, `SELECT library_id FROM music_album WHERE id=?`, albumID).Scan(&accessLibID); err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
-		return
-	}
-	if !h.requireSpecializedAggregateAccess(c, accessLibID) {
-		return
-	}
 	row := h.App.DB.QueryRowContext(ctx, `
 		SELECT a.id, a.library_id, a.title, a.title_norm, COALESCE(a.year, 0), COALESCE(a.genre, ''),
 			COALESCE(a.artwork_path, ''), COALESCE(a.is_unknown, 0), COALESCE(a.rating, 0),
@@ -307,7 +297,7 @@ func (h *Handler) GetAlbum(c *gin.Context) {
 			a.created_at, a.updated_at
 		FROM music_album a
 		LEFT JOIN music_artist ar ON ar.id = a.album_artist_id
-		WHERE a.id = ? AND EXISTS (SELECT 1 FROM music_track mt JOIN media m ON m.id=mt.media_id WHERE mt.album_id=a.id AND m.publication_state IN ('published','degraded'))
+		WHERE a.id = ?
 	`, albumID)
 	var id, libID, year, artistID, rating, isUnknown int64
 	var title, titleNorm, genre, artwork, artistName, metaJSON, created, updated sql.NullString
@@ -317,6 +307,9 @@ func (h *Handler) GetAlbum(c *gin.Context) {
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if !h.requireSpecializedAggregateAccess(c, libID) {
 		return
 	}
 	tracks, err := h.queryLibraryTracksContext(ctx, libID, albumID, 0, "")
@@ -354,7 +347,7 @@ func (h *Handler) GetAlbumPlayTarget(c *gin.Context) {
 		SELECT a.library_id, mt.media_id
 		FROM music_album a
 		JOIN music_track mt ON mt.album_id = a.id
-		JOIN media m ON m.id=mt.media_id
+		JOIN media m ON m.id = mt.media_id
 		WHERE a.id = ? AND m.publication_state IN ('published','degraded')
 		ORDER BY mt.sort_order ASC, mt.track_number ASC, mt.id ASC
 		LIMIT 1
@@ -394,15 +387,11 @@ func (h *Handler) ServeAlbumArtwork(c *gin.Context) {
 		c.JSON(http.StatusRequestTimeout, gin.H{"error": err.Error()})
 		return
 	}
-	if err := h.App.DB.QueryRowContext(ctx, `SELECT library_id FROM music_album WHERE id=?`, albumID).Scan(&libID); err != nil {
-		c.AbortWithStatus(http.StatusNotFound)
+	if err := h.App.DB.QueryRowContext(ctx, `SELECT library_id, artwork_path FROM music_album WHERE id = ?`, albumID).Scan(&libID, &artworkPath); err != nil {
+		c.Status(http.StatusNotFound)
 		return
 	}
 	if !h.requireSpecializedAggregateAccess(c, libID) {
-		return
-	}
-	if err := h.App.DB.QueryRowContext(ctx, `SELECT a.artwork_path FROM music_album a WHERE a.id = ? AND EXISTS (SELECT 1 FROM music_track mt JOIN media m ON m.id=mt.media_id WHERE mt.album_id=a.id AND m.publication_state IN ('published','degraded'))`, albumID).Scan(&artworkPath); err != nil {
-		c.AbortWithStatus(http.StatusNotFound)
 		return
 	}
 	stored := strings.TrimSpace(artworkPath.String)
@@ -428,17 +417,11 @@ func (h *Handler) ListArtistAlbums(c *gin.Context) {
 		return
 	}
 	var libID int64
-	if err := h.App.DB.QueryRowContext(ctx, `SELECT library_id FROM music_artist WHERE id=?`, artistID).Scan(&libID); err != nil {
+	if err := h.App.DB.QueryRowContext(ctx, `SELECT library_id FROM music_artist WHERE id = ?`, artistID).Scan(&libID); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 		return
 	}
 	if !h.requireSpecializedAggregateAccess(c, libID) {
-		return
-	}
-	query := `SELECT 1 FROM music_artist ar WHERE ar.id=? AND ` + visibleArtistExistsSQL
-	var visible int
-	if err := h.App.DB.QueryRowContext(ctx, query, artistID).Scan(&visible); err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 		return
 	}
 	var artistName sql.NullString
@@ -571,16 +554,14 @@ func (h *Handler) ListAlbumImageCandidates(c *gin.Context) {
 	var libraryID int64
 	var title string
 	var year int
-	if err := h.App.DB.QueryRow(`SELECT library_id FROM music_album WHERE id=?`, albumID).Scan(&libraryID); err != nil {
+	if err := h.App.DB.QueryRow(
+		`SELECT library_id, COALESCE(title, ''), COALESCE(year, 0) FROM music_album WHERE id = ?`,
+		albumID,
+	).Scan(&libraryID, &title, &year); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "album not found"})
 		return
 	}
 	if !h.requireSpecializedAggregateAccess(c, libraryID) {
-		return
-	}
-	query := `SELECT COALESCE(a.title, ''), COALESCE(a.year, 0) FROM music_album a WHERE a.id = ? AND ` + visibleAlbumExistsSQL
-	if err := h.App.DB.QueryRow(query, albumID).Scan(&title, &year); err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "album not found"})
 		return
 	}
 	keyword := strings.TrimSpace(title)
@@ -589,7 +570,7 @@ func (h *Handler) ListAlbumImageCandidates(c *gin.Context) {
 		return
 	}
 	cfg := h.readLibraryScrapeConfig(libraryID)
-	candidates, errs, scraped := fetchAggregateImageCandidates(cfg, keyword, year, kind, "")
+	candidates, errs, scraped := scraper.FetchImageCandidates(cfg, keyword, year, kind, "")
 	if candidates == nil {
 		candidates = []scraper.ImageCandidate{}
 	}
@@ -611,20 +592,18 @@ func (h *Handler) GetArtist(c *gin.Context) {
 	}
 	var libID int64
 	var name, nameNorm, artwork sql.NullString
-	if err := h.App.DB.QueryRowContext(ctx, `SELECT library_id FROM music_artist WHERE id=?`, artistID).Scan(&libID); err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
-		return
-	}
-	if !h.requireSpecializedAggregateAccess(c, libID) {
-		return
-	}
-	query := `SELECT name, name_norm, COALESCE(artwork_path,'') FROM music_artist ar WHERE ar.id=? AND ` + visibleArtistExistsSQL
-	if err := h.App.DB.QueryRowContext(ctx, query, artistID).Scan(&name, &nameNorm, &artwork); err != nil {
+	if err := h.App.DB.QueryRowContext(ctx, `
+		SELECT library_id, name, name_norm, COALESCE(artwork_path, '')
+		FROM music_artist WHERE id = ?
+	`, artistID).Scan(&libID, &name, &nameNorm, &artwork); err != nil {
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if !h.requireSpecializedAggregateAccess(c, libID) {
 		return
 	}
 	var albumCount, trackCount int64
@@ -720,16 +699,14 @@ func (h *Handler) ListArtistImageCandidates(c *gin.Context) {
 
 	var libraryID int64
 	var name string
-	if err := h.App.DB.QueryRow(`SELECT library_id FROM music_artist WHERE id=?`, artistID).Scan(&libraryID); err != nil {
+	if err := h.App.DB.QueryRow(
+		`SELECT library_id, COALESCE(name, '') FROM music_artist WHERE id = ?`,
+		artistID,
+	).Scan(&libraryID, &name); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "artist not found"})
 		return
 	}
 	if !h.requireSpecializedAggregateAccess(c, libraryID) {
-		return
-	}
-	query := `SELECT COALESCE(ar.name, '') FROM music_artist ar WHERE ar.id = ? AND ` + visibleArtistExistsSQL
-	if err := h.App.DB.QueryRow(query, artistID).Scan(&name); err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "artist not found"})
 		return
 	}
 	keyword := strings.TrimSpace(name)
@@ -738,7 +715,7 @@ func (h *Handler) ListArtistImageCandidates(c *gin.Context) {
 		return
 	}
 	cfg := h.readLibraryScrapeConfig(libraryID)
-	candidates, errs, scraped := fetchAggregateImageCandidates(cfg, keyword, 0, kind, "")
+	candidates, errs, scraped := scraper.FetchImageCandidates(cfg, keyword, 0, kind, "")
 	if candidates == nil {
 		candidates = []scraper.ImageCandidate{}
 	}

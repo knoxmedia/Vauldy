@@ -64,7 +64,7 @@ func (a *thumbnailAdapter) ExecuteWithResult(ctx context.Context, task Task) (Ex
 	}
 	worker, ok := a.worker.(thumbnailStageWorker)
 	if !ok || worker == nil {
-		return ordinary, permanentAdapterError(TaskThumbnail, "staging worker is not configured")
+		return ordinary, unavailableWorkerError(TaskThumbnail, "staging worker is not configured")
 	}
 	var fileType string
 	if err := a.db.QueryRowContext(ctx, `SELECT COALESCE(file_type,'') FROM media WHERE id=?`, task.MediaID).Scan(&fileType); err != nil {
@@ -170,7 +170,7 @@ func commitStagedThumbnail(ctx context.Context, db *sql.DB, task Task, staged im
 		if n != 1 {
 			return fmt.Errorf("thumbnail commit: step completion fence lost")
 		}
-		return publication.AggregateTx(ctx, tx, *task.RunID)
+		return publication.FinalizeNodeTransitionTx(ctx, tx, *task.RunID)
 	})
 	if err != nil {
 		var uncertain *store.ImmediateCommitError

@@ -30,9 +30,9 @@ type docTransTestBody struct {
 }
 
 type docTransInstallResult struct {
-	OK       bool                   `json:"ok"`
-	Message  string                 `json:"message"`
-	DocTrans *SystemOptionsDocTrans `json:"doc_trans,omitempty"`
+	OK       bool                    `json:"ok"`
+	Message  string                  `json:"message"`
+	DocTrans *SystemOptionsDocTrans  `json:"doc_trans,omitempty"`
 	Engines  []doctrans.EngineStatus `json:"engines,omitempty"`
 }
 

@@ -45,4 +45,3 @@ func TestUpdateMediaTitleAndMetaTxUpdatesDerivedFields(t *testing.T) {
 }
 
 var _ = store.PhotoPlaceID
-

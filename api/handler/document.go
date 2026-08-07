@@ -48,10 +48,8 @@ func (h *Handler) ListDocumentNodes(c *gin.Context) {
 	parent := strings.TrimSpace(c.Query("parent"))
 	q := `
 		SELECT node_path, node_name, node_type, media_id
-		FROM library_node ln
-		LEFT JOIN media m ON m.id=ln.media_id
-		WHERE ln.library_id = ? AND COALESCE(ln.parent_path, '') = ?
-		  AND (ln.media_id IS NULL OR m.publication_state IN ('published','degraded'))
+		FROM library_node
+		WHERE library_id = ? AND COALESCE(parent_path, '') = ?
 		ORDER BY node_type DESC, node_name COLLATE NOCASE`
 	rows, err := h.App.DB.Query(q, libID, parent)
 	if err != nil {
@@ -131,7 +129,7 @@ func (h *Handler) queryDocumentsContext(ctx context.Context, libID int64, qp doc
 			COALESCE(CAST(json_extract(m.meta_json, '$.document.page_count') AS INTEGER), 0) AS page_count,
 			(SELECT MAX(rp.update_at) FROM read_progress rp WHERE rp.media_id = m.id) AS last_read_at
 		FROM media m
-		WHERE m.library_id = ? AND m.file_type = 'document' AND m.status = 'active' AND m.publication_state IN ('published','degraded')`
+		WHERE m.library_id = ? AND m.file_type = 'document' AND m.status = 'active'`
 	args := []any{libID}
 	if qp.Author != "" {
 		q += ` AND json_extract(m.meta_json, '$.document.author') = ?`
@@ -286,25 +284,25 @@ func (h *Handler) queryDocumentFacets(libID int64, kind string) ([]gin.H, error)
 	switch kind {
 	case "author":
 		q = `
-			SELECT COALESCE(NULLIF(json_extract(meta_json, '$.document.author'), ''), 'unknown') AS name, COUNT(1) AS cnt
-			FROM media WHERE library_id = ? AND file_type = 'document' AND status = 'active' AND publication_state IN ('published','degraded')
+			SELECT COALESCE(NULLIF(json_extract(meta_json, '$.document.author'), ''), '鏈煡浣滆€?) AS name, COUNT(1) AS cnt
+			FROM media WHERE library_id = ? AND file_type = 'document' AND status = 'active'
 			GROUP BY name ORDER BY cnt DESC, name COLLATE NOCASE LIMIT 200`
 	case "format":
 		q = `
 			SELECT LOWER(COALESCE(NULLIF(json_extract(meta_json, '$.document.format'), ''), format, 'unknown')) AS name, COUNT(1) AS cnt
-			FROM media WHERE library_id = ? AND file_type = 'document' AND status = 'active' AND publication_state IN ('published','degraded')
+			FROM media WHERE library_id = ? AND file_type = 'document' AND status = 'active'
 			GROUP BY name ORDER BY cnt DESC, name COLLATE NOCASE LIMIT 50`
 	case "year":
 		q = `
 			SELECT CAST(COALESCE(json_extract(meta_json, '$.document.year'), 0) AS TEXT) AS name, COUNT(1) AS cnt
-			FROM media WHERE library_id = ? AND file_type = 'document' AND status = 'active' AND publication_state IN ('published','degraded')
+			FROM media WHERE library_id = ? AND file_type = 'document' AND status = 'active'
 			GROUP BY name HAVING name != '0' ORDER BY name DESC LIMIT 100`
 	case "tag":
 		q = `
 			SELECT MIN(dt.tag) AS name, COUNT(1) AS cnt
 			FROM document_tag dt
 			JOIN media m ON m.id = dt.media_id
-			WHERE m.library_id = ? AND m.file_type = 'document' AND m.status = 'active' AND m.publication_state IN ('published','degraded')
+			WHERE m.library_id = ? AND m.file_type = 'document' AND m.status = 'active'
 			GROUP BY dt.tag COLLATE NOCASE ORDER BY cnt DESC, name COLLATE NOCASE LIMIT 200`
 	}
 	rows, err := h.App.DB.Query(q, libID)
@@ -416,7 +414,7 @@ func (h *Handler) ServeDocumentCover(c *gin.Context) {
 	}
 	if strings.EqualFold(format.String, "epub") {
 		epubPath := filePath.String
-		if work, cleanup, err := storage.MaterializePlaintextTemp(h.App.DB, h.KeyVault, id, epubPath); err == nil {
+		if work, cleanup, err := storage.MaterializePlaintextTempUnsafeLegacy(h.App.DB, h.KeyVault, id, epubPath); err == nil {
 			epubPath = work
 			defer cleanup()
 		}
@@ -545,7 +543,7 @@ func (h *Handler) ListRecentDocuments(c *gin.Context) {
 			rp.position, rp.percent, rp.update_at
 		FROM read_progress rp
 		JOIN media m ON m.id = rp.media_id
-		WHERE rp.user_id = ? AND m.file_type = 'document' AND m.status = 'active' AND m.publication_state IN ('published','degraded')`
+		WHERE rp.user_id = ? AND m.file_type = 'document' AND m.status = 'active'`
 	args := []any{uid}
 	if libParam != "" {
 		q += ` AND m.library_id = ?`
@@ -583,39 +581,26 @@ type batchDownloadBody struct {
 }
 
 func (h *Handler) BatchDownloadDocuments(c *gin.Context) {
-	var profile *userPermissionProfile
 	if !middleware.IsAPIClient(c) {
 		uid := middleware.UserID(c)
 		if uid <= 0 {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 			return
 		}
-		loaded, err := h.loadUserPermissionProfile(uid)
+		profile, err := h.loadUserPermissionProfile(uid)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		if !loaded.CanDownload {
+		if !profile.CanDownload {
 			c.JSON(http.StatusForbidden, gin.H{"error": "download denied"})
 			return
 		}
-		profile = &loaded
 	}
 	var body batchDownloadBody
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
-	}
-	if profile != nil {
-		allowed, err := h.documentDownloadRequestAllowed(*profile, body)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
-		if !allowed {
-			c.JSON(http.StatusForbidden, gin.H{"error": "document download access denied"})
-			return
-		}
 	}
 	paths, titles, err := h.resolveDocumentDownloadPaths(body.MediaIDs, body.DirPath)
 	if err != nil {
@@ -648,39 +633,6 @@ func (h *Handler) BatchDownloadDocuments(c *gin.Context) {
 	}
 }
 
-func documentDownloadTargetAllowed(profile userPermissionProfile, libraryID int64, filePath string) bool {
-	if !strings.EqualFold(profile.LibraryScope, "selected") {
-		return true
-	}
-	if _, ok := profile.AllowedLibraryIDs[libraryID]; !ok {
-		return false
-	}
-	folders := profile.AllowedLibraryFolders[libraryID]
-	return len(folders) == 0 || pathMatchesAnyFolder(filePath, folders)
-}
-
-func (h *Handler) documentDownloadRequestAllowed(profile userPermissionProfile, body batchDownloadBody) (bool, error) {
-	if dir := strings.TrimSpace(body.DirPath); dir != "" {
-		var libraryID int64
-		if err := h.App.DB.QueryRow(`SELECT library_id FROM library_node WHERE node_path=? AND node_type='dir'`, dir).Scan(&libraryID); err != nil {
-			return false, fmt.Errorf("directory not found")
-		}
-		return documentDownloadTargetAllowed(profile, libraryID, dir), nil
-	}
-	for _, id := range body.MediaIDs {
-		if id <= 0 {
-			return false, nil
-		}
-		var libraryID int64
-		var filePath string
-		err := h.App.DB.QueryRow(`SELECT library_id, COALESCE(file_path,'') FROM media WHERE id=? AND file_type='document' AND status='active' AND publication_state IN ('published','degraded')`, id).Scan(&libraryID, &filePath)
-		if err != nil || !documentDownloadTargetAllowed(profile, libraryID, filePath) {
-			return false, nil
-		}
-	}
-	return len(body.MediaIDs) > 0, nil
-}
-
 func (h *Handler) resolveDocumentDownloadPaths(ids []int64, dirPath string) ([]string, []string, error) {
 	if strings.TrimSpace(dirPath) != "" {
 		return h.resolveDirDownloadPaths(dirPath)
@@ -692,7 +644,7 @@ func (h *Handler) resolveDocumentDownloadPaths(ids []int64, dirPath string) ([]s
 			continue
 		}
 		var p, title, fileType sql.NullString
-		if err := h.App.DB.QueryRow(`SELECT file_path, title, file_type FROM media WHERE id = ? AND status = 'active' AND publication_state IN ('published','degraded')`, id).Scan(&p, &title, &fileType); err != nil {
+		if err := h.App.DB.QueryRow(`SELECT file_path, title, file_type FROM media WHERE id = ? AND status = 'active'`, id).Scan(&p, &title, &fileType); err != nil {
 			continue
 		}
 		if fileType.String != "document" {
@@ -722,7 +674,7 @@ func (h *Handler) resolveDirDownloadPaths(dirPath string) ([]string, []string, e
 		JOIN media m ON m.id = ln.media_id
 		WHERE ln.library_id = ? AND ln.node_type = 'file'
 		  AND (ln.node_path = ? OR ln.node_path LIKE ? ESCAPE '\')
-		  AND m.file_type = 'document' AND m.status = 'active' AND m.publication_state IN ('published','degraded')`,
+		  AND m.file_type = 'document' AND m.status = 'active'`,
 		libID, dirPath, escapeLike(dirPath)+"/%")
 	if err != nil {
 		return nil, nil, err
@@ -879,7 +831,7 @@ func documentTagTargetsFrom(ctx context.Context, q permissionQueryer, ids []int6
 	for i, id := range ids {
 		args[i] = id
 	}
-	rows, err := q.QueryContext(ctx, `SELECT id, library_id, COALESCE(file_path,'') FROM media WHERE id IN (`+documentTagPlaceholders(len(ids))+`) AND file_type='document' AND status='active' AND publication_state IN ('published','degraded')`, args...)
+	rows, err := q.QueryContext(ctx, `SELECT id, library_id, COALESCE(file_path,'') FROM media WHERE id IN (`+documentTagPlaceholders(len(ids))+`) AND file_type='document' AND status='active'`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1197,13 +1149,6 @@ func (h *Handler) UpdateDocumentMeta(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
-func respondDocumentQueryError(c *gin.Context, ctx context.Context, err error, prefix string) {
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		c.JSON(http.StatusGatewayTimeout, gin.H{"code": prefix + "_timeout"})
-		return
-	}
-	c.JSON(http.StatusInternalServerError, gin.H{"code": prefix + "_internal"})
-}
 func (h *Handler) ListScanLogs(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
 	defer cancel()
@@ -1224,7 +1169,7 @@ func (h *Handler) ListScanLogs(c *gin.Context) {
 	args = append(args, limit)
 	rows, err := h.App.DB.QueryContext(ctx, q, args...)
 	if err != nil {
-		respondDocumentQueryError(c, ctx, err, "scan_logs")
+		respondScanQueryError(c, ctx, err, "scan_logs")
 		return
 	}
 	defer rows.Close()
@@ -1234,7 +1179,7 @@ func (h *Handler) ListScanLogs(c *gin.Context) {
 		var path, action, msg, created sql.NullString
 		if err := rows.Scan(&id, &task, &library, &path, &action, &msg, &created); err != nil {
 			rows.Close()
-			respondDocumentQueryError(c, ctx, err, "scan_logs")
+			respondScanQueryError(c, ctx, err, "scan_logs")
 			return
 		}
 		items = append(items, gin.H{
@@ -1243,7 +1188,7 @@ func (h *Handler) ListScanLogs(c *gin.Context) {
 		})
 	}
 	if err := rows.Err(); err != nil {
-		respondDocumentQueryError(c, ctx, err, "scan_logs")
+		respondScanQueryError(c, ctx, err, "scan_logs")
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"items": items})

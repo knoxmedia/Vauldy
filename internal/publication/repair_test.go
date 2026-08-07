@@ -17,6 +17,8 @@ import (
 
 	"knox-media/internal/coreiface"
 	"knox-media/internal/store"
+
+	"github.com/kalafut/imohash"
 )
 
 func openRepairTestDB(t *testing.T) *sql.DB {
@@ -75,7 +77,7 @@ func TestRepairLegacyMediaCreatesGenerationForMissingPoster(t *testing.T) {
 	_ = db.QueryRow(`SELECT COUNT(*) FROM media_ingest_step WHERE media_id=?`, mediaID).Scan(&steps)
 	_ = db.QueryRow(`SELECT COUNT(*) FROM post_ingest_task WHERE media_id=? AND generation=1`, mediaID).Scan(&post)
 	_ = db.QueryRow(`SELECT COUNT(*) FROM scrape_task WHERE media_id=? AND generation=1`, mediaID).Scan(&scrape)
-	if steps != 2 || post != 1 || scrape != 1 {
+	if steps != 3 || post != 1 || scrape != 1 {
 		t.Fatalf("steps=%d post=%d scrape=%d", steps, post, scrape)
 	}
 }
@@ -258,7 +260,7 @@ func TestRepairLegacyAcceptsPrecaptureZeroHashPosterAfterPlaintextCleanup(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity, ok := fingerprintIdentityKey(fp)
+	identity, ok := FingerprintIdentityKey(fp)
 	if !ok {
 		t.Fatalf("fingerprint identity: %q", fp)
 	}
@@ -422,14 +424,101 @@ func TestRepairLegacyMediaCreatesNextGenerationWhenRequirementsExpand(t *testing
 	}
 }
 
+func TestRepairLegacyMediaAdoptsCompletedOptionalWorkBeforeDispatch(t *testing.T) {
+	db := openRepairTestDB(t)
+	mediaID := seedLegacyVideo(t, db, 1, "published")
+	if _, err := db.Exec(`UPDATE library SET preview_extract=1,subtitle_extract=1 WHERE id=(SELECT library_id FROM media WHERE id=?)`, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	addRepairEvidence(t, db, mediaID, StepScrape)
+	addRepairEvidence(t, db, mediaID, StepPreview)
+	addRepairEvidence(t, db, mediaID, StepSubtitle)
+
+	if n, err := RepairLegacyMedia(context.Background(), db, NewPlanner(PlanOptions{}), 4); err != nil || n != 1 {
+		t.Fatalf("repair=%d err=%v", n, err)
+	}
+	var runID int64
+	if err := db.QueryRow(`SELECT id FROM media_ingest_run WHERE media_id=? AND reason='repair' ORDER BY id DESC LIMIT 1`, mediaID).Scan(&runID); err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range []StepType{StepScrape, StepPreview, StepSubtitleExtract} {
+		var status string
+		if err := db.QueryRow(`SELECT status FROM media_ingest_step WHERE run_id=? AND step_type=?`, runID, step).Scan(&status); err != nil {
+			t.Fatalf("%s step: %v", step, err)
+		}
+		if status != "done" {
+			t.Fatalf("%s status=%s want done", step, status)
+		}
+	}
+	var waitingHeavy int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM post_ingest_task WHERE ingest_run_id=? AND task_type IN ('preview','subtitle') AND status='waiting'`, runID).Scan(&waitingHeavy); err != nil {
+		t.Fatal(err)
+	}
+	if waitingHeavy != 0 {
+		t.Fatalf("waiting heavy optional tasks=%d want 0", waitingHeavy)
+	}
+	var waitingScrape int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM scrape_task WHERE ingest_run_id=? AND status='waiting'`, runID).Scan(&waitingScrape); err != nil {
+		t.Fatal(err)
+	}
+	if waitingScrape != 0 {
+		t.Fatalf("waiting scrape tasks=%d want 0", waitingScrape)
+	}
+}
+func TestRepairLegacyMediaSkipsOptionalWorkWithoutHistoricalEvidence(t *testing.T) {
+	db := openRepairTestDB(t)
+	mediaID := seedLegacyVideo(t, db, 1, "published")
+	if _, err := db.Exec(`UPDATE library SET preview_extract=1,subtitle_extract=1 WHERE id=(SELECT library_id FROM media WHERE id=?)`, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := RepairLegacyMedia(context.Background(), db, NewPlanner(PlanOptions{}), 4); err != nil || n != 1 {
+		t.Fatalf("repair=%d err=%v", n, err)
+	}
+	var runID int64
+	if err := db.QueryRow(`SELECT id FROM media_ingest_run WHERE media_id=? AND reason='repair'`, mediaID).Scan(&runID); err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range []StepType{StepScrape, StepPreview, StepSubtitleExtract} {
+		var status string
+		if err := db.QueryRow(`SELECT status FROM media_ingest_step WHERE run_id=? AND step_type=?`, runID, step).Scan(&status); err != nil {
+			t.Fatal(err)
+		}
+		if status != "skipped" {
+			t.Fatalf("%s status=%s want skipped", step, status)
+		}
+	}
+	var queued int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM post_ingest_task WHERE ingest_run_id=? AND task_type IN ('preview','subtitle') AND status='waiting'`, runID).Scan(&queued); err != nil {
+		t.Fatal(err)
+	}
+	if queued != 0 {
+		t.Fatalf("queued heavy optional tasks=%d", queued)
+	}
+}
 func TestRepairLegacyMediaPendingCurrentRepairSkipsDuplicate(t *testing.T) {
 	db := openRepairTestDB(t)
 	mediaID := seedLegacyVideo(t, db, 1, "published")
 	if n, err := RepairLegacyMedia(context.Background(), db, NewPlanner(PlanOptions{}), 4); err != nil || n != 1 {
 		t.Fatalf("first=%d err=%v", n, err)
 	}
+	sourceFingerprintReadMu.Lock()
+	originalRead := sourceFingerprintRead
+	readCalls := 0
+	sourceFingerprintRead = func(r io.Reader, p []byte) (int, error) {
+		readCalls++
+		return originalRead(r, p)
+	}
+	sourceFingerprintReadMu.Unlock()
+	t.Cleanup(func() {
+		sourceFingerprintReadMu.Lock()
+		sourceFingerprintRead = originalRead
+		sourceFingerprintReadMu.Unlock()
+	})
 	if n, err := RepairLegacyMedia(context.Background(), db, NewPlanner(PlanOptions{}), 4); err != nil || n != 0 {
 		t.Fatalf("second=%d err=%v", n, err)
+	}
+	if readCalls != 0 {
+		t.Fatalf("pending current repair re-read source %d times", readCalls)
 	}
 	if repairRunCount(t, db, mediaID) != 1 {
 		t.Fatalf("runs=%d", repairRunCount(t, db, mediaID))
@@ -512,7 +601,7 @@ func TestRepairLegacyMediaConcurrentCallsCreateOneGeneration(t *testing.T) {
 	_ = db1.QueryRow(`SELECT COUNT(*) FROM media_ingest_step WHERE media_id=?`, mediaID).Scan(&steps)
 	_ = db1.QueryRow(`SELECT COUNT(*) FROM post_ingest_task WHERE media_id=?`, mediaID).Scan(&post)
 	_ = db1.QueryRow(`SELECT COUNT(*) FROM scrape_task WHERE media_id=? AND ingest_run_id IS NOT NULL`, mediaID).Scan(&scrape)
-	if generation != 1 || runs != 1 || current != 1 || steps != 2 || post != 1 || scrape != 1 {
+	if generation != 1 || runs != 1 || current != 1 || steps != 3 || post != 1 || scrape != 1 {
 		t.Fatalf("generation=%d runs=%d current=%d steps=%d post=%d scrape=%d", generation, runs, current, steps, post, scrape)
 	}
 }
@@ -665,8 +754,11 @@ func TestSourceFingerprintContextPreservesFormatAndWrapperCompatibility(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	digest := sha256.Sum256(contents)
-	want := fmt.Sprintf("%s|%d|%d|sha256:%s", filepath.Clean(absolute), info.Size(), info.ModTime().UnixNano(), hex.EncodeToString(digest[:]))
+	sum, err := imohash.SumFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf("%s|%d|%d|imohash:%s", filepath.Clean(absolute), info.Size(), info.ModTime().UnixNano(), hex.EncodeToString(sum[:]))
 
 	got, err := SourceFingerprintContext(context.Background(), path)
 	if err != nil {
@@ -675,12 +767,26 @@ func TestSourceFingerprintContextPreservesFormatAndWrapperCompatibility(t *testi
 	if got != want {
 		t.Fatalf("fingerprint = %q, want %q", got, want)
 	}
+	if len(got) < len("|imohash:") || !strings.HasSuffix(got, "|imohash:"+hex.EncodeToString(sum[:])) {
+		t.Fatalf("fingerprint %q must carry an imohash: digest", got)
+	}
 	legacy, err := SourceFingerprint(path)
 	if err != nil {
 		t.Fatalf("SourceFingerprint: %v", err)
 	}
 	if legacy != got {
-		t.Fatalf("legacy fingerprint = %q, context fingerprint = %q", legacy, got)
+		t.Fatalf("legacy wrapper fingerprint = %q, context fingerprint = %q", legacy, got)
+	}
+	// The sha256 compatibility function must keep producing the pre-migration
+	// full-file digest format so stored sha256: rows can still be verified.
+	legacySHA, err := SourceFingerprintContextSHA256(context.Background(), path)
+	if err != nil {
+		t.Fatalf("SourceFingerprintContextSHA256: %v", err)
+	}
+	digest := sha256.Sum256(contents)
+	wantLegacy := fmt.Sprintf("%s|%d|%d|sha256:%s", filepath.Clean(absolute), info.Size(), info.ModTime().UnixNano(), hex.EncodeToString(digest[:]))
+	if legacySHA != wantLegacy {
+		t.Fatalf("legacy sha256 fingerprint = %q, want %q", legacySHA, wantLegacy)
 	}
 }
 
@@ -722,7 +828,12 @@ func TestSourceFingerprintContextCancelsDuringRealFileRead(t *testing.T) {
 		sourceFingerprintReadMu.Unlock()
 	})
 
-	_, err := SourceFingerprintContext(ctx, path)
+	// The imohash path only samples ~48KiB and checks the context before and
+	// after, so it cannot be interrupted mid-read. The full-file SHA-256
+	// compatibility path (used to verify legacy sha256: fingerprints) still
+	// reads through the context-aware chunked loop and must stop as soon as the
+	// context cancels.
+	_, err := SourceFingerprintContextSHA256(ctx, path)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context.Canceled", err)
 	}
@@ -763,5 +874,35 @@ func TestCopyFingerprintContextStopsAfterCancellation(t *testing.T) {
 	}
 	if !reader.read {
 		t.Fatal("reader was not called")
+	}
+}
+
+func TestRepairLegacyMediaAcceptsMetadataLibraryPosterPointer(t *testing.T) {
+	db := openRepairTestDB(t)
+	mediaID, _ := seedCompliantEncryptedVideoEvidence(t, db)
+	if _, err := db.Exec(`UPDATE library SET encrypted_assets_enabled=0 WHERE id=(SELECT library_id FROM media WHERE id=?)`, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	local := fmt.Sprintf("/metadata/library/00/%02x/%d/poster.jpg", mediaID&0xff, mediaID)
+	meta := fmt.Sprintf(`{"scrape":{"poster":%q,"extra":{"poster":%q}}}`, local, local)
+	if _, err := db.Exec(`UPDATE media SET meta_json=? WHERE id=?`, meta, mediaID); err != nil {
+		t.Fatal(err)
+	}
+	if repaired, err := RepairLegacyMedia(context.Background(), db, NewPlanner(PlanOptions{}), 4); err != nil || repaired != 0 {
+		t.Fatalf("repaired=%d err=%v", repaired, err)
+	}
+	var after string
+	if err := db.QueryRow(`SELECT meta_json FROM media WHERE id=?`, mediaID).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if after != meta {
+		t.Fatalf("poster changed after repair: %s", after)
+	}
+	var repairs int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM media_ingest_run WHERE media_id=? AND reason='repair'`, mediaID).Scan(&repairs); err != nil {
+		t.Fatal(err)
+	}
+	if repairs != 0 {
+		t.Fatalf("repair runs=%d", repairs)
 	}
 }

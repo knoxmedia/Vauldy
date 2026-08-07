@@ -33,7 +33,42 @@ func TestBuildInstantVideoArgsNVENCFull(t *testing.T) {
 		SessionGOP: false,
 	})
 	all := strings.Join(args, " ")
-	for _, want := range []string{"h264_nvenc", "scale_cuda=1280:720", "-preset", "p2"} {
+	for _, want := range []string{"h264_nvenc", "scale_cuda=1280:720", "-noautoscale", "-preset", "p2"} {
+		if !strings.Contains(all, want) {
+			t.Fatalf("missing %q in %s", want, all)
+		}
+	}
+}
+
+func TestBuildInstantVideoArgsNVENCDisableAutoScaleOnlyFullHW(t *testing.T) {
+	encodeOnly := BuildInstantVideoArgs(InstantVideoPlan{
+		Encoder:    H264NVENC,
+		Mode:       PipelineHWEncodeOnly,
+		Resolution: "1280x720",
+		Bitrate:    "2000k",
+	})
+	software := BuildInstantVideoArgs(InstantVideoPlan{
+		Encoder:    Libx264,
+		Mode:       PipelineSoftware,
+		Resolution: "1280x720",
+		Bitrate:    "2000k",
+	})
+	for name, args := range map[string][]string{"encode_only": encodeOnly, "software": software} {
+		if strings.Contains(strings.Join(args, " "), "-noautoscale") {
+			t.Fatalf("expected no -noautoscale for %s, got %s", name, strings.Join(args, " "))
+		}
+	}
+}
+
+func TestBuildInstantVideoArgsQSVAutoScaleDisabled(t *testing.T) {
+	args := BuildInstantVideoArgs(InstantVideoPlan{
+		Encoder:    H264QSV,
+		Mode:       PipelineHWFull,
+		Resolution: "1280x720",
+		Bitrate:    "2000k",
+	})
+	all := strings.Join(args, " ")
+	for _, want := range []string{"h264_qsv", "scale_qsv=1280:720", "-noautoscale"} {
 		if !strings.Contains(all, want) {
 			t.Fatalf("missing %q in %s", want, all)
 		}

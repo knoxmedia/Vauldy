@@ -182,7 +182,7 @@ func (h *Handler) queryVideoPreviewCandidatesContext(ctx context.Context, librar
 				NULLIF(TRIM(json_extract(m.meta_json, '$.scrape.extra.poster')), '')
 			) AS poster_url
 		FROM media m
-		WHERE m.library_id = ? AND m.file_type = 'video' AND m.status = 'active' AND m.publication_state IN ('published','degraded')
+		WHERE m.library_id = ? AND m.file_type = 'video' AND m.status = 'active'
 		ORDER BY datetime(m.created_at) DESC, m.id DESC
 		LIMIT ?`, libraryID, limit)
 	if err != nil {
@@ -199,7 +199,7 @@ func (h *Handler) queryPhotoPreviewCandidatesContext(ctx context.Context, librar
 	rows, err := h.App.DB.QueryContext(ctx, `
 		SELECT m.id, ''
 		FROM media m
-		WHERE m.library_id = ? AND m.file_type = 'image' AND m.status = 'active' AND m.publication_state IN ('published','degraded')
+		WHERE m.library_id = ? AND m.file_type = 'image' AND m.status = 'active'
 		ORDER BY datetime(m.created_at) DESC, m.id DESC
 		LIMIT ?`, libraryID, limit)
 	if err != nil {
@@ -227,7 +227,7 @@ func (h *Handler) queryDocumentPreviewCandidatesContext(ctx context.Context, lib
 	rows, err := h.App.DB.QueryContext(ctx, `
 		SELECT m.id, ''
 		FROM media m
-		WHERE m.library_id = ? AND m.file_type = 'document' AND m.status = 'active' AND m.publication_state IN ('published','degraded')
+		WHERE m.library_id = ? AND m.file_type = 'document' AND m.status = 'active'
 		ORDER BY datetime(m.created_at) DESC, m.id DESC
 		LIMIT ?`, libraryID, limit)
 	if err != nil {
@@ -257,17 +257,13 @@ func (h *Handler) queryMusicPreviewCandidatesContext(ctx context.Context, librar
 			COALESCE((
 				SELECT mt.media_id
 				FROM music_track mt
-				JOIN media m ON m.id = mt.media_id AND m.status = 'active' AND m.publication_state IN ('published','degraded')
+				JOIN media m ON m.id = mt.media_id AND m.status = 'active'
 				WHERE mt.album_id = a.id
 				ORDER BY mt.sort_order ASC, mt.track_number ASC, mt.media_id ASC
 				LIMIT 1
 			), 0)
 		FROM music_album a
-		WHERE a.library_id = ? AND EXISTS (
-			SELECT 1 FROM music_track visible_mt
-			JOIN media visible_m ON visible_m.id = visible_mt.media_id
-			WHERE visible_mt.album_id = a.id AND visible_m.publication_state IN ('published','degraded')
-		)
+		WHERE a.library_id = ?
 		ORDER BY datetime(COALESCE(a.updated_at, a.created_at)) DESC, a.id DESC
 		LIMIT ?`, libraryID, limit)
 	if err != nil {

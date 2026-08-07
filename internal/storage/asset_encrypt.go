@@ -249,9 +249,7 @@ func (s *AssetEncryptor) encryptMedia(ctx context.Context, mediaID int64, manual
 		_ = os.Remove(output.BackupPath)
 	}
 	persistPlainMD5AfterEncrypt(s.DB, mediaID, plainPath)
-	if cleanupPlain == 1 {
-		cleanupPlaintextAfterEncrypt(s.DB, mediaID, plainPath)
-	}
+	// Authoritative plaintext deletion is owned by retirement; never os.Remove the source here.
 	if remuxed && ft == "video" {
 		markKeyframeReindex(s.DB, mediaID)
 	}

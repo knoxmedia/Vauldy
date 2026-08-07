@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"knox-media/internal/processmetrics"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -16,6 +16,7 @@ import (
 
 	"knox-media/internal/jit/hwenc"
 	"knox-media/internal/storage"
+	"knox-media/pkg/ffprobe"
 )
 
 func seekTimeForTranscode(s *Session, targetSec float64, in *storage.FFmpegInput) float64 {
@@ -123,6 +124,35 @@ func (s *Session) openTranscodeInput(sourcePath string) (*storage.FFmpegInput, e
 	return &storage.FFmpegInput{Path: sourcePath}, nil
 }
 
+// sourceSupportsHardwareDecode reports whether the local source's video codec
+// has a hardware decoder in the current ffmpeg build. When probing fails it
+// conservatively reports false so playback still works through the
+// encode-only hardware pipeline (software scaling + hardware encoding)
+// instead of aborting the full-hardware filter graph on unsupported codecs
+// such as RealVideo (rv40) or other formats NVDEC/QSV cannot decode.
+func (s *Session) sourceSupportsHardwareDecode(cfg TranscodeConfig, sourcePath string) bool {
+	codec := s.probeSourceVideoCodec(sourcePath)
+	if codec == "" {
+		return false
+	}
+	return hwenc.HardwareDecoderAvailable(s.ffmpegPath, codec, cfg.VideoEncoder)
+}
+
+func (s *Session) probeSourceVideoCodec(sourcePath string) string {
+	if s.mgr == nil || sourcePath == "" {
+		return ""
+	}
+	probe := strings.TrimSpace(s.mgr.ffprobePath)
+	if probe == "" {
+		probe = "ffprobe"
+	}
+	info, err := ffprobe.ProbeOptions(probe, sourcePath, ffprobe.ScanProbeExtraFast())
+	if err != nil || info == nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(info.VideoCodec))
+}
+
 func transcodeAttempts(cfg TranscodeConfig) []TranscodeConfig {
 	if !cfg.UseHWEncoding || cfg.VideoEncoder == "" || cfg.VideoEncoder == hwenc.Libx264 {
 		sw := cfg
@@ -143,6 +173,13 @@ func (s *Session) runTranscodeOnce(ctx context.Context, cfg TranscodeConfig, ffm
 	args := []string{"-hide_banner", "-loglevel", "error"}
 	localFile := strings.TrimSpace(ffmpegIn.Path) != "" && !ffmpegIn.FromEnc
 	pipeline := hwenc.PipelineModeForInput(cfg.UseHWEncoding, localFile)
+	if pipeline == hwenc.PipelineHWFull && !s.sourceSupportsHardwareDecode(cfg, ffmpegIn.Path) {
+		logger.Info("source has no hardware decoder; using encode-only hardware pipeline",
+			zap.String("encoder", string(cfg.VideoEncoder)),
+			zap.String("source", ffmpegIn.Path),
+		)
+		pipeline = hwenc.PipelineHWEncodeOnly
+	}
 	if pipeline == hwenc.PipelineHWFull {
 		args = append(args, hwenc.InputAccelArgs(cfg.VideoEncoder)...)
 	}
@@ -249,8 +286,8 @@ func (s *Session) runTranscodeOnce(ctx context.Context, cfg TranscodeConfig, ffm
 	if ffmpeg == "" {
 		ffmpeg = "ffmpeg"
 	}
-	cmd := exec.CommandContext(ctx, ffmpeg, args...)
-	s.SetCmd(cmd)
+	cmd := processmetrics.NewFFmpegCommandContext(ctx, ffmpeg, args...)
+	s.SetCmd(cmd.Cmd)
 	if stdin != nil {
 		cmd.Stdin = stdin
 	}

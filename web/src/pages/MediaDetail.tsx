@@ -71,6 +71,7 @@ import {
   removeFavorite,
   savePlaybackProgress,
   type MediaMatchListUpdate,
+  optimizationAssetRecorded,
 } from "../api/client";
 import AddToFavoriteFolderPickerModal from "../components/AddToFavoriteFolderPickerModal";
 import AddToPlaylistModal from "../components/AddToPlaylistModal";
@@ -1212,6 +1213,7 @@ export default function MediaDetailPage() {
           }
         },
         onGetInfo: scrollToFileInfo,
+        optimizationAvailable: detail.file_type === "video" && optimizationAssetRecorded(detail),
       },
     );
   }, [detail, nav, recentPlaylistMenu, recentFavoriteFolders, rememberFolderMenuAdded, reloadDetail, scrollToFileInfo, t]);

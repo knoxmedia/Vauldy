@@ -4,13 +4,16 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
+	"knox-media/internal/publication"
 	"knox-media/internal/storage"
+	"knox-media/internal/store"
 )
 
 const (
@@ -37,20 +40,21 @@ func ReconcileEncryptionStages(ctx context.Context, db *sql.DB, roots Encryption
 	if limit <= 0 || limit > encryptionStageBatchMax {
 		limit = encryptionStageBatchMax
 	}
-	rows, err := db.QueryContext(ctx, `SELECT j.stage_id,j.task_id,j.attempt,j.media_id,j.run_id,j.step_id,j.generation,j.owner_token,j.source_path,j.quarantine_path,j.source_fingerprint,j.enc_path,j.wrapped_dek,j.iv,j.enc_sha256,j.enc_size,j.state FROM media_encryption_stage_journal j WHERE (j.state IN ('staged','quarantining','quarantined') OR (j.state='failed_closed' AND j.quarantine_path<>'' AND j.recovery_error LIKE 'restore_pending:%' AND j.recovery_attempts<? AND j.next_retry_at<=CURRENT_TIMESTAMP) OR (j.state='committed' AND j.recovery_attempts<? AND (j.recovery_error='' OR (j.recovery_error LIKE 'plaintext_cleanup_pending:%' AND j.next_retry_at<=CURRENT_TIMESTAMP)))) AND (j.state='committed' OR j.state='quarantining' OR NOT EXISTS(SELECT 1 FROM post_ingest_task p WHERE p.id=j.task_id AND p.attempts=j.attempt AND p.status='running' AND p.lease_owner=j.owner_token)) ORDER BY CASE WHEN j.state='failed_closed' THEN j.next_retry_at ELSE j.updated_at END,j.stage_id LIMIT ?`, encryptionRecoveryMaxAttempts, encryptionRecoveryMaxAttempts, limit)
+	rows, err := db.QueryContext(ctx, `SELECT j.stage_id,j.task_id,j.retry_round,j.attempt,j.media_id,j.run_id,j.step_id,j.generation,j.owner_token,j.source_path,j.quarantine_path,j.source_fingerprint,j.enc_path,j.wrapped_dek,j.iv,j.enc_sha256,j.enc_size,j.cleanup_plaintext,j.state FROM media_encryption_stage_journal j WHERE (j.state IN ('staged','quarantining','quarantined') OR (j.state='failed_closed' AND j.quarantine_path<>'' AND j.recovery_error LIKE 'restore_pending:%' AND j.recovery_attempts<? AND j.next_retry_at<=CURRENT_TIMESTAMP) OR (j.state='committed' AND j.recovery_attempts<? AND (j.recovery_error='' OR ((j.recovery_error LIKE 'plaintext_cleanup_pending:%' OR j.recovery_error LIKE 'retirement_handoff_pending:%') AND j.next_retry_at<=CURRENT_TIMESTAMP)))) AND (j.state='committed' OR j.state='quarantining' OR NOT EXISTS(SELECT 1 FROM post_ingest_task p WHERE p.id=j.task_id AND p.retry_round=j.retry_round AND p.attempts=j.attempt AND p.status='running' AND p.lease_owner=j.owner_token)) ORDER BY CASE WHEN j.state='failed_closed' THEN j.next_retry_at ELSE j.updated_at END,j.stage_id LIMIT ?`, encryptionRecoveryMaxAttempts, encryptionRecoveryMaxAttempts, limit)
 	if err != nil {
 		return 0, 0, err
 	}
 	type row struct {
-		stage                                                        string
-		task, attempt, media, run, step, generation                  int64
-		owner, source, quarantine, fp, enc, wrapped, iv, hash, state string
-		size                                                         int64
+		stage                                                               string
+		task, retryRound, attempt, media, run, step, generation             int64
+		owner, source, quarantine, fp, enc, wrapped, iv, hash, state        string
+		size                                                                int64
+		cleanup                                                             int
 	}
 	var batch []row
 	for rows.Next() {
 		var r row
-		if err = rows.Scan(&r.stage, &r.task, &r.attempt, &r.media, &r.run, &r.step, &r.generation, &r.owner, &r.source, &r.quarantine, &r.fp, &r.enc, &r.wrapped, &r.iv, &r.hash, &r.size, &r.state); err != nil {
+		if err = rows.Scan(&r.stage, &r.task, &r.retryRound, &r.attempt, &r.media, &r.run, &r.step, &r.generation, &r.owner, &r.source, &r.quarantine, &r.fp, &r.enc, &r.wrapped, &r.iv, &r.hash, &r.size, &r.cleanup, &r.state); err != nil {
 			rows.Close()
 			return checked, cleaned, err
 		}
@@ -76,7 +80,7 @@ func ReconcileEncryptionStages(ctx context.Context, db *sql.DB, roots Encryption
 		}
 		quarantineRoot := resolveEncryptionQuarantineRoot(r.source, roots.Quarantine)
 		if !managedEncryptionPath(stageRoot, r.enc) || r.quarantine != "" && !managedEncryptionPath(quarantineRoot, r.quarantine) {
-			if _, err = db.ExecContext(ctx, `UPDATE media SET publication_state='failed',last_error='unsafe encryption recovery path' WHERE id=?`, r.media); err != nil {
+			if _, err = db.ExecContext(ctx, `UPDATE media SET publication_state='failed',publication_error='unsafe encryption recovery path' WHERE id=?`, r.media); err != nil {
 				return checked, cleaned, err
 			}
 			if _, err = db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET state='failed_closed',recovery_error='unsafe_path',updated_at=CURRENT_TIMESTAMP WHERE stage_id=?`, r.stage); err != nil {
@@ -102,14 +106,16 @@ func ReconcileEncryptionStages(ctx context.Context, db *sql.DB, roots Encryption
 				retErr = errors.Join(retErr, errors.New("committed encryption recovery mismatch"))
 				continue
 			}
-			outcome, cleanupErr := cleanupCommittedEncryptionPlaintext(quarantineRoot, r.media, r.generation, r.stage, r.quarantine, defaultEncryptionFileOps())
-			if err = recordCommittedCleanupOutcome(ctx, db, r.stage, outcome, cleanupErr); err != nil {
+			// Committed encryption leaves plaintext in place; the community build
+			// has no retirement worker, so no cleanup intent is recorded. Mark the
+			// committed state as verified so recovery does not retry the stage.
+			if err = markCommittedEncryptionVerified(ctx, db, r.stage); err != nil {
 				return checked, cleaned, err
 			}
 			continue
 		}
 		var active int
-		if err = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM post_ingest_task WHERE id=? AND attempts=? AND status='running' AND lease_owner=?`, r.task, r.attempt, r.owner).Scan(&active); err != nil {
+		if err = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM post_ingest_task WHERE id=? AND retry_round=(SELECT retry_round FROM media_encryption_stage_journal WHERE stage_id=?) AND attempts=? AND status='running' AND lease_owner=?`, r.task, r.stage, r.attempt, r.owner).Scan(&active); err != nil {
 			return checked, cleaned, err
 		}
 		if active == 1 && r.state != "quarantining" {
@@ -201,11 +207,16 @@ const (
 type plaintextIdentity struct {
 	size int64
 	hash string
+	algo string
 }
 
 func plaintextIdentityFromFingerprint(fingerprint string) (plaintextIdentity, error) {
-	hashAt := strings.LastIndex(fingerprint, "|sha256:")
-	if hashAt < 0 || hashAt+8 >= len(fingerprint) {
+	algo, digest, ok := publication.FingerprintHash(fingerprint)
+	if !ok {
+		return plaintextIdentity{}, errors.New("invalid encryption source fingerprint")
+	}
+	hashAt := strings.LastIndex(fingerprint, "|"+algo+":")
+	if hashAt < 0 || hashAt+len(algo)+2 >= len(fingerprint) {
 		return plaintextIdentity{}, errors.New("invalid encryption source fingerprint")
 	}
 	prefix := fingerprint[:hashAt]
@@ -222,10 +233,10 @@ func plaintextIdentityFromFingerprint(fingerprint string) (plaintextIdentity, er
 	if err != nil || size < 0 {
 		return plaintextIdentity{}, errors.New("invalid encryption source fingerprint")
 	}
-	return plaintextIdentity{size: size, hash: fingerprint[hashAt+8:]}, nil
+	return plaintextIdentity{size: size, hash: digest, algo: algo}, nil
 }
 
-func regularPlaintextIdentity(path string) (plaintextIdentity, bool, error) {
+func regularPlaintextIdentity(path, algo string) (plaintextIdentity, bool, error) {
 	info, err := encryptionLstat(path)
 	if os.IsNotExist(err) {
 		return plaintextIdentity{}, false, nil
@@ -236,11 +247,19 @@ func regularPlaintextIdentity(path string) (plaintextIdentity, bool, error) {
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return plaintextIdentity{}, true, errUnsafeEncryptionQuarantinePath
 	}
-	hash, err := fileSHA256(path)
+	var hash string
+	switch algo {
+	case "imohash":
+		hash, err = fileImoHash(path)
+	case "sha256":
+		hash, err = fileSHA256(path)
+	default:
+		return plaintextIdentity{}, true, fmt.Errorf("unsupported encryption fingerprint algorithm %q", algo)
+	}
 	if err != nil {
 		return plaintextIdentity{}, true, err
 	}
-	return plaintextIdentity{size: info.Size(), hash: hash}, true, nil
+	return plaintextIdentity{size: info.Size(), hash: hash, algo: algo}, true, nil
 }
 
 func syncRestoredPlaintext(source, quarantine string, ops encryptionFileOps) error {
@@ -264,14 +283,14 @@ func reconcilePlaintextRestore(quarantine, source, root, fingerprint string, med
 	if err != nil {
 		return plaintextRestoreRetry, err
 	}
-	sourceID, sourceExists, err := regularPlaintextIdentity(source)
+	sourceID, sourceExists, err := regularPlaintextIdentity(source, expected.algo)
 	if err != nil {
 		return plaintextRestoreConflict, err
 	}
 	var quarantineID plaintextIdentity
 	quarantineExists := qState == quarantineLeafExists
 	if quarantineExists {
-		quarantineID, _, err = regularPlaintextIdentity(qPath)
+		quarantineID, _, err = regularPlaintextIdentity(qPath, expected.algo)
 		if err != nil {
 			return plaintextRestoreConflict, err
 		}
@@ -341,6 +360,19 @@ func recordCommittedCleanupOutcome(ctx context.Context, db *sql.DB, stageID stri
 		return errors.New("unknown committed cleanup outcome")
 	}
 	return err
+}
+
+func markCommittedEncryptionVerified(ctx context.Context, db *sql.DB, stageID string) error {
+	_, err := store.WithImmediateConnTx(ctx, db, func(tx store.ImmediateConnTx) error {
+		_, e := tx.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET recovery_error='verified_committed',next_retry_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='committed'`, stageID)
+		return e
+	})
+	if err != nil {
+		pending := boundedRecoveryError("committed_marker_pending: ", err)
+		_, updateErr := db.ExecContext(ctx, `UPDATE media_encryption_stage_journal SET recovery_error=?,recovery_attempts=recovery_attempts+1,next_retry_at=datetime(CURRENT_TIMESTAMP,'+' || min(3600,30*(1 << min(recovery_attempts,7))) || ' seconds'),updated_at=CURRENT_TIMESTAMP WHERE stage_id=? AND state='committed'`, pending, stageID)
+		return errors.Join(err, updateErr)
+	}
+	return nil
 }
 
 func cleanupCommittedEncryptionPlaintext(root string, mediaID, generation int64, stageID, quarantine string, ops encryptionFileOps) (committedCleanupOutcome, error) {

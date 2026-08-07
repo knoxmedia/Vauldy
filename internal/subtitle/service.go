@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"knox-media/internal/keystore"
+	"knox-media/internal/progressctx"
 	"knox-media/internal/scraper"
 	"knox-media/internal/storage"
 )
@@ -211,16 +212,64 @@ WHERE m.library_id = ? AND m.file_type = 'video' AND COALESCE(m.status, 'active'
 	return processed, errs
 }
 
-// ProcessMedia scans sidecars, embedded tracks, and optional ASR for one media row.
+// ProcessMedia runs extraction then recognition for legacy fused callers.
 func (s *Service) ProcessMedia(ctx context.Context, mediaID int64) error {
-	var status string
-	var savedMessage sql.NullString
-	qerr := s.DB.QueryRowContext(ctx, `SELECT status,message FROM subtitle_task WHERE media_id=?`, mediaID).Scan(&status, &savedMessage)
+	return s.runSubtitlePhase(ctx, mediaID, subtitleStageFused, func(ctx context.Context, mediaID int64) error {
+		if err := s.extractMediaContent(ctx, mediaID); err != nil {
+			return err
+		}
+		return s.recognizeMediaContent(ctx, mediaID)
+	})
+}
+
+// ExtractMedia discovers sidecars and extracts embedded/OCR-capable artifacts without ASR/OCR.
+func (s *Service) ExtractMedia(ctx context.Context, mediaID int64) error {
+	return s.runSubtitlePhase(ctx, mediaID, subtitleStageExtract, s.extractMediaContent)
+}
+
+// RecognizeMedia performs OCR/ASR on prerequisite artifacts without repeating extraction.
+func (s *Service) RecognizeMedia(ctx context.Context, mediaID int64) error {
+	return s.runSubtitlePhase(ctx, mediaID, subtitleStageRecognize, s.recognizeMediaContent)
+}
+
+type subtitleStage string
+
+const (
+	subtitleStageExtract   subtitleStage = "extract"
+	subtitleStageRecognize subtitleStage = "recognize"
+	subtitleStageFused     subtitleStage = "fused"
+)
+
+func (s *Service) runSubtitlePhase(ctx context.Context, mediaID int64, stage subtitleStage, phase func(context.Context, int64) error) error {
+	var status, extractStatus, recognizeStatus string
+	var savedMessage, extractMessage, recognizeMessage sql.NullString
+	qerr := s.DB.QueryRowContext(ctx, `
+SELECT status,message,
+       COALESCE(extract_status,'pending'),extract_message,
+       COALESCE(recognize_status,'pending'),recognize_message
+FROM subtitle_task WHERE media_id=?`, mediaID).Scan(
+		&status, &savedMessage, &extractStatus, &extractMessage, &recognizeStatus, &recognizeMessage)
 	if qerr != nil && !errors.Is(qerr, sql.ErrNoRows) {
 		return qerr
 	}
-	if qerr == nil && status == "failed" {
-		return fmt.Errorf("subtitle task failed: %s", savedMessage.String)
+	if qerr == nil {
+		switch stage {
+		case subtitleStageExtract, subtitleStageRecognize:
+			// Stage failures do not permanently block their own queue retries; sibling
+			// stages never consult each other's failed bit (see stage isolation tests).
+		case subtitleStageFused:
+			// Legacy fused path still treats any durable failure as terminal.
+			if status == "failed" || extractStatus == "failed" || recognizeStatus == "failed" {
+				msg := savedMessage.String
+				if msg == "" {
+					msg = extractMessage.String
+				}
+				if msg == "" {
+					msg = recognizeMessage.String
+				}
+				return fmt.Errorf("subtitle task failed: %s", msg)
+			}
+		}
 	}
 
 	unlock := s.lockMedia(mediaID)
@@ -228,10 +277,10 @@ func (s *Service) ProcessMedia(ctx context.Context, mediaID int64) error {
 	if err := validateCommitGuard(ctx); err != nil {
 		return err
 	}
-	if err := s.upsertTaskRunning(ctx, mediaID); err != nil {
+	if err := s.upsertTaskRunning(ctx, mediaID, stage); err != nil {
 		return err
 	}
-	process := s.processMediaContent
+	process := phase
 	if s.processMediaHook != nil {
 		process = s.processMediaHook
 	}
@@ -243,42 +292,70 @@ func (s *Service) ProcessMedia(ctx context.Context, mediaID int64) error {
 			return errors.Join(processErr, guardErr)
 		}
 		if errors.Is(processErr, context.Canceled) || errors.Is(processErr, context.DeadlineExceeded) {
-			if stateErr := s.setTaskWaiting(cleanupCtx, mediaID, processErr.Error()); stateErr != nil {
+			if stateErr := s.setTaskWaiting(cleanupCtx, mediaID, stage, processErr.Error()); stateErr != nil {
 				return errors.Join(processErr, stateErr)
 			}
 			return processErr
 		}
-		if stateErr := s.upsertTaskFailed(cleanupCtx, mediaID, processErr.Error()); stateErr != nil {
+		if stateErr := s.upsertTaskFailed(cleanupCtx, mediaID, stage, processErr.Error()); stateErr != nil {
 			return errors.Join(processErr, stateErr)
 		}
 		return processErr
 	}
-	return s.setTaskDoneGuarded(ctx, mediaID)
+	return s.setTaskDoneGuarded(ctx, mediaID, stage)
 }
 
-func (s *Service) processMediaContent(ctx context.Context, mediaID int64) error {
+func (s *Service) mediaVideoPath(ctx context.Context, mediaID int64) (string, error) {
 	var videoPath string
 	if err := s.DB.QueryRowContext(ctx, `SELECT file_path FROM media WHERE id=? AND file_type='video'`, mediaID).Scan(&videoPath); err != nil {
-		return err
+		return "", err
 	}
 	videoPath = strings.TrimSpace(videoPath)
 	if videoPath == "" {
-		return fmt.Errorf("empty path")
+		return "", fmt.Errorf("empty path")
 	}
 	if fi, err := os.Stat(videoPath); err != nil || fi.IsDir() {
-		return fmt.Errorf("video missing")
+		return "", fmt.Errorf("video missing")
 	}
+	return videoPath, nil
+}
+
+func (s *Service) subtitleOutDir(mediaID int64) (string, error) {
 	outDir := filepath.Join(s.SubtitleDir, strconv.FormatInt(mediaID, 10))
 	if root := s.toolWorkDir(); root != "" && !filepath.IsAbs(outDir) {
 		outDir = filepath.Clean(filepath.Join(root, outDir))
 	}
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		return "", err
+	}
+	return outDir, nil
+}
+
+func (s *Service) extractMediaContent(ctx context.Context, mediaID int64) error {
+	videoPath, err := s.mediaVideoPath(ctx, mediaID)
+	if err != nil {
+		return err
+	}
+	outDir, err := s.subtitleOutDir(mediaID)
+	if err != nil {
 		return err
 	}
 	if err := s.syncEmbedded(ctx, mediaID, videoPath, outDir); err != nil {
 		return err
 	}
-	if err := s.syncSidecars(ctx, mediaID, videoPath, outDir); err != nil {
+	return s.syncSidecars(ctx, mediaID, videoPath, outDir)
+}
+
+func (s *Service) recognizeMediaContent(ctx context.Context, mediaID int64) error {
+	videoPath, err := s.mediaVideoPath(ctx, mediaID)
+	if err != nil {
+		return err
+	}
+	outDir, err := s.subtitleOutDir(mediaID)
+	if err != nil {
+		return err
+	}
+	if err := s.recognizePendingOCR(ctx, mediaID, videoPath); err != nil {
 		return err
 	}
 	hasAny, err := s.hasAnySubtitleContext(ctx, mediaID)
@@ -296,6 +373,14 @@ func (s *Service) processMediaContent(ctx context.Context, mediaID int64) error 
 		}
 	}
 	return nil
+}
+
+// processMediaContent keeps the historical fused path for hooks/tests.
+func (s *Service) processMediaContent(ctx context.Context, mediaID int64) error {
+	if err := s.extractMediaContent(ctx, mediaID); err != nil {
+		return err
+	}
+	return s.recognizeMediaContent(ctx, mediaID)
 }
 
 func (s *Service) hasAnySubtitleContext(ctx context.Context, mediaID int64) (bool, error) {
@@ -337,34 +422,8 @@ func (s *Service) syncEmbedded(ctx context.Context, mediaID int64, videoPath, ou
 			}
 			label := strings.TrimSpace(st.Title)
 			outPath := filepath.Join(outDir, fmt.Sprintf("embedded-ocr-%d.vtt", st.Index))
-			if err := s.upsertPlaceholder(ctx, mediaID, dedupe, "embedded_ocr", st.Index, codec, lang, langSrc, label, "", outPath); err != nil {
-				return err
-			}
-			if !s.OCR.Enabled || strings.TrimSpace(s.OCR.ScriptPath) == "" {
-				msg := "graphic/bitmap subtitle (PGS/VobSub); enable subtitle.graphical_ocr and set script_path"
-				if guardErr := validateCommitGuard(ctx); guardErr != nil {
-					return guardErr
-				}
-				if _, dbErr := s.DB.ExecContext(ctx, `UPDATE media_subtitle SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`,
-					msg, mediaID, dedupe); dbErr != nil {
-					return dbErr
-				}
-				continue
-			}
-			if err := s.RunBitmapSubtitleOCR(ctx, mediaID, videoPath, st.Index, outPath); err != nil {
-				if guardErr := validateCommitGuard(ctx); guardErr != nil {
-					return guardErr
-				}
-				if _, dbErr := s.DB.ExecContext(ctx, `UPDATE media_subtitle SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`,
-					trimErr(err), mediaID, dedupe); dbErr != nil {
-					return dbErr
-				}
-				continue
-			}
-			if perr := s.ProofreadFileInPlace(ctx, outPath, lang); perr != nil {
-				log.Printf("subtitle ai-proofread media=%d dedupe=%s err=%v", mediaID, dedupe, perr)
-			}
-			if err := s.markSubtitleReady(ctx, mediaID, dedupe, filepath.Base(outPath), outPath); err != nil {
+			// Extraction only records OCR-capable artifacts; recognition performs OCR.
+			if err := s.upsertPendingOCR(ctx, mediaID, dedupe, "embedded_ocr", st.Index, codec, lang, langSrc, label, "", outPath); err != nil {
 				return err
 			}
 			continue
@@ -394,6 +453,99 @@ func (s *Service) syncEmbedded(ctx context.Context, mediaID int64, videoPath, ou
 		if err := s.markSubtitleReady(ctx, mediaID, dedupe, filepath.Base(outPath), outPath); err != nil {
 			return err
 		}
+		progressctx.Report(ctx)
+	}
+	return nil
+}
+
+
+func (s *Service) upsertPendingOCR(ctx context.Context, mediaID int64, dedupe, kind string, streamIdx int, codec, lang, langSrc, label, srcPath, vttPath string) error {
+	if err := validateCommitGuard(ctx); err != nil {
+		return err
+	}
+	var si any
+	if streamIdx >= 0 {
+		si = streamIdx
+	}
+	_, err := s.DB.ExecContext(ctx, `
+		INSERT INTO media_subtitle (media_id, dedupe_key, source_kind, stream_index, codec_name, lang, lang_source, label, source_path, vtt_path, status, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_ocr', CURRENT_TIMESTAMP)
+		ON CONFLICT(media_id, dedupe_key) DO UPDATE SET
+			stream_index=excluded.stream_index,
+			codec_name=excluded.codec_name,
+			lang=excluded.lang,
+			lang_source=excluded.lang_source,
+			label=excluded.label,
+			source_path=excluded.source_path,
+			vtt_path=excluded.vtt_path,
+			status=CASE WHEN media_subtitle.status='ready' THEN media_subtitle.status ELSE 'pending_ocr' END,
+			error_message=NULL,
+			updated_at=CURRENT_TIMESTAMP
+	`, mediaID, dedupe, kind, si, nullStr(codec), nullStr(lang), nullStr(langSrc), nullStr(label), nullStr(srcPath), vttPath)
+	return err
+}
+
+func (s *Service) recognizePendingOCR(ctx context.Context, mediaID int64, videoPath string) error {
+	rows, err := s.DB.QueryContext(ctx, `
+		SELECT dedupe_key, source_kind, COALESCE(stream_index,-1), COALESCE(lang,'und'), COALESCE(source_path,''), vtt_path
+		FROM media_subtitle
+		WHERE media_id=? AND status='pending_ocr' AND source_kind IN ('embedded_ocr','external_ocr')
+		ORDER BY id`, mediaID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type pending struct {
+		dedupe, kind, lang, src, vtt string
+		stream                       int
+	}
+	var list []pending
+	for rows.Next() {
+		var p pending
+		if err := rows.Scan(&p.dedupe, &p.kind, &p.stream, &p.lang, &p.src, &p.vtt); err != nil {
+			return err
+		}
+		list = append(list, p)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, p := range list {
+		if !s.OCR.Enabled || strings.TrimSpace(s.OCR.ScriptPath) == "" {
+			msg := "graphic/bitmap subtitle (PGS/VobSub); enable subtitle.graphical_ocr and set script_path"
+			if guardErr := validateCommitGuard(ctx); guardErr != nil {
+				return guardErr
+			}
+			if _, dbErr := s.DB.ExecContext(ctx, `UPDATE media_subtitle SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`, msg, mediaID, p.dedupe); dbErr != nil {
+				return dbErr
+			}
+			continue
+		}
+		var ocrErr error
+		switch p.kind {
+		case "embedded_ocr":
+			ocrErr = s.RunBitmapSubtitleOCR(ctx, mediaID, videoPath, p.stream, p.vtt)
+		case "external_ocr":
+			ocrErr = s.RunVobSubIdxOCR(ctx, p.src, p.vtt)
+		default:
+			continue
+		}
+		if ocrErr != nil {
+			if guardErr := validateCommitGuard(ctx); guardErr != nil {
+				return guardErr
+			}
+			if _, dbErr := s.DB.ExecContext(ctx, `UPDATE media_subtitle SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`, trimErr(ocrErr), mediaID, p.dedupe); dbErr != nil {
+				return dbErr
+			}
+			continue
+		}
+		if perr := s.ProofreadFileInPlace(ctx, p.vtt, p.lang); perr != nil {
+			log.Printf("subtitle ai-proofread media=%d dedupe=%s err=%v", mediaID, p.dedupe, perr)
+		}
+		if err := s.markSubtitleReady(ctx, mediaID, p.dedupe, filepath.Base(p.vtt), p.vtt); err != nil {
+			return err
+		}
+		progressctx.Report(ctx)
 	}
 	return nil
 }
@@ -434,10 +586,8 @@ func nullStr(s string) any {
 func (s *Service) extractEmbedded(ctx context.Context, mediaID int64, videoPath string, streamIndex int, outPath string) error {
 	mapArg := fmt.Sprintf("0:%d", streamIndex)
 	post := []string{"-map", mapArg, "-vn", "-an", "-c:s", "webvtt", outPath}
-	if _, err := storage.RunFFmpeg(ctx, s.DB, s.Vault, s.FFmpegPath, mediaID, videoPath, 0, 0, nil, post, ""); err != nil {
-		return err
-	}
-	return nil
+	_, err := storage.RunFFmpegWithLiveness(ctx, s.DB, s.Vault, s.FFmpegPath, mediaID, videoPath, 0, 0, nil, post, "", func() { progressctx.Report(ctx) })
+	return err
 }
 
 func (s *Service) syncSidecars(ctx context.Context, mediaID int64, videoPath, outDir string) error {
@@ -466,9 +616,6 @@ func (s *Service) syncSidecars(ctx context.Context, mediaID int64, videoPath, ou
 			if fi, err := os.Stat(subCompanion); err != nil || fi.IsDir() {
 				continue
 			}
-			if !s.OCR.Enabled || strings.TrimSpace(s.OCR.ScriptPath) == "" {
-				continue
-			}
 			dedupe := "ext-ocr:" + strings.ToLower(full)
 			lang, langSrc := "und", "default"
 			if c, ok := DetectLanguageFromFilename(name); ok {
@@ -477,29 +624,15 @@ func (s *Service) syncSidecars(ctx context.Context, mediaID int64, videoPath, ou
 			}
 			outName := fmt.Sprintf("sidecar-ocr-%s.vtt", safeFileToken(strings.TrimSuffix(name, ext)))
 			outPath := filepath.Join(outDir, outName)
-			if err := s.upsertPlaceholder(ctx, mediaID, dedupe, "external_ocr", -1, "vobsub", lang, langSrc, "", full, outPath); err != nil {
-				return err
-			}
-			if err := s.RunVobSubIdxOCR(ctx, full, outPath); err != nil {
-				if guardErr := validateCommitGuard(ctx); guardErr != nil {
-					return guardErr
-				}
-				if _, dbErr := s.DB.ExecContext(ctx, `UPDATE media_subtitle SET status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE media_id=? AND dedupe_key=?`, trimErr(err), mediaID, dedupe); dbErr != nil {
-					return dbErr
-				}
-				continue
-			}
-			if perr := s.ProofreadFileInPlace(ctx, outPath, lang); perr != nil {
-				log.Printf("subtitle ai-proofread media=%d dedupe=%s err=%v", mediaID, dedupe, perr)
-			}
-			if err := s.markSubtitleReady(ctx, mediaID, dedupe, filepath.Base(outPath), outPath); err != nil {
+			// Extraction discovers VobSub pairs; recognition performs OCR.
+			if err := s.upsertPendingOCR(ctx, mediaID, dedupe, "external_ocr", -1, "vobsub", lang, langSrc, "", full, outPath); err != nil {
 				return err
 			}
 			continue
 		}
 		if ext == ".sub" {
 			idxCompanion := filepath.Join(dir, strings.TrimSuffix(name, ext)+".idx")
-			if _, err := os.Stat(idxCompanion); err == nil && s.OCR.Enabled && strings.TrimSpace(s.OCR.ScriptPath) != "" {
+			if _, err := os.Stat(idxCompanion); err == nil {
 				continue
 			}
 		}
@@ -526,7 +659,7 @@ func (s *Service) syncSidecars(ctx context.Context, mediaID int64, videoPath, ou
 			}
 		} else {
 			cmd := processmetrics.NewFFmpegCommandContext(ctx, s.FFmpegPath, "-y", "-i", full, "-c:s", "webvtt", outPath)
-			out, err := cmd.CombinedOutput()
+			out, err := runFFmpegCombinedLive(cmd, func() { progressctx.Report(ctx) })
 			if err != nil {
 				if guardErr := validateCommitGuard(ctx); guardErr != nil {
 					return guardErr
@@ -540,6 +673,7 @@ func (s *Service) syncSidecars(ctx context.Context, mediaID int64, videoPath, ou
 		if err := s.markSubtitleReady(ctx, mediaID, dedupe, filepath.Base(outPath), outPath); err != nil {
 			return err
 		}
+		progressctx.Report(ctx)
 	}
 	return nil
 }
@@ -628,7 +762,7 @@ func copyOrWriteVTT(ctx context.Context, ffmpegPath, src, dst string) error {
 		return os.WriteFile(dst, b, 0o644)
 	}
 	cmd := processmetrics.NewFFmpegCommandContext(ctx, ffmpegPath, "-y", "-i", src, "-c:s", "webvtt", dst)
-	out, err := cmd.CombinedOutput()
+	out, err := runFFmpegCombinedLive(cmd, func() { progressctx.Report(ctx) })
 	if err != nil {
 		return fmt.Errorf("%w: %s", err, trimBytes(out))
 	}
@@ -667,7 +801,7 @@ func (s *Service) runASR(ctx context.Context, mediaID int64, videoPath, outDir s
 		if root := s.toolWorkDir(); root != "" {
 			cmd.Dir = root
 		}
-		out, err := cmd.CombinedOutput()
+		out, err := runCombinedLive(cmd, func() { progressctx.Report(ctx) })
 		if err != nil {
 			if guardErr := validateCommitGuard(ctx); guardErr != nil {
 				return guardErr
@@ -705,7 +839,7 @@ func (s *Service) runASR(ctx context.Context, mediaID int64, videoPath, outDir s
 		sh = strings.ReplaceAll(sh, "{output_vtt}", outPath)
 		sh = appendASRShellFlags(sh, s.ASR)
 		sh = resolveShellMediaPaths(sh, s.MediaRoot)
-		out, err := s.runShellCommand(ctx, sh)
+		out, err := s.runShellCommandLive(ctx, sh)
 		if err != nil {
 			if guardErr := validateCommitGuard(ctx); guardErr != nil {
 				return guardErr

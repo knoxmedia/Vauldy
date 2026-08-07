@@ -11,6 +11,7 @@ import (
 	"knox-media/api/middleware"
 	"knox-media/internal/app"
 	"knox-media/internal/config"
+	"knox-media/internal/coreiface"
 	"knox-media/internal/metadatalib"
 )
 
@@ -34,8 +35,6 @@ func NewEngine(cfg *config.Config, application *app.App, deps handler.Dependenci
 	if deps.DocCoverWorker != nil {
 		deps.DocCoverWorker.SetOnCoverReady(h.ScheduleLibraryPreviewRefreshForMedia)
 	}
-	// Defer claim loops until publication v2 startup finishes preflight/recovery.
-	// Preview/subtitle/keyframe/atrack execute through the post-ingest dispatcher.
 	startLoop := func(loop func(context.Context)) {
 		deps.Background.Go(deps.ServerContext, func(ctx context.Context) {
 			if deps.StartupReady != nil {
@@ -65,7 +64,7 @@ func NewEngine(cfg *config.Config, application *app.App, deps handler.Dependenci
 			case <-ctx.Done():
 				return
 			case <-timer.C:
-				deps.DocCoverWorker.BackfillAllLibraries()
+				deps.DocCoverWorker.BackfillAllLibrariesContext(ctx)
 			}
 		})
 	}
@@ -232,6 +231,7 @@ func NewEngine(cfg *config.Config, application *app.App, deps handler.Dependenci
 		admStream.Use(middleware.RequireAdmin())
 		{
 			admStream.GET("/admin/overview/stream", h.AdminOverviewStream)
+			admStream.GET("/admin/tasks/stream", h.TaskControlStream)
 		}
 
 		// Admin only: media management + uploads + transcode control
@@ -377,6 +377,35 @@ func NewEngine(cfg *config.Config, application *app.App, deps handler.Dependenci
 			adm.PUT("/admin/users/:id", h.UpdateUserAdmin)
 			adm.DELETE("/admin/users/:id", h.DeleteUserAdmin)
 			adm.POST("/admin/users/:id/reset-password", h.ResetUserPasswordAdmin)
+
+			// --- Scheduler runtime overrides and controls ---
+			adm.GET("/admin/scheduler/policy", h.SchedulerAdminGetPolicy)
+			adm.PUT("/admin/scheduler/policy", h.SchedulerAdminPutPolicy)
+			adm.PATCH("/admin/scheduler/policy", h.SchedulerAdminPatchPolicy)
+			adm.POST("/admin/scheduler/control", h.SchedulerAdminControl)
+			adm.POST("/admin/scheduler/explain", h.SchedulerAdminExplainTask)
+
+			// --- Unified task control plane (Phase 4) ---
+			adm.GET("/admin/tasks/registry", h.TaskControlRegistry)
+			adm.GET("/admin/tasks/overview", h.TaskControlOverview)
+			adm.GET("/admin/tasks", h.TaskControlList)
+			adm.GET("/admin/tasks/:task_id", h.TaskControlDetail)
+			adm.POST("/admin/tasks/:task_id/actions", h.TaskControlActions)
+			adm.POST("/admin/tasks/batch", h.TaskControlBatch)
+
+			// --- Enterprise modules (commercial) ---
+			// Register routes from enterprise modules (e.g., license status).
+			// The community build leaves EnterpriseModules empty, so this is a no-op.
+			for _, mod := range coreiface.EnterpriseModules {
+				mod.RegisterRoutes(adm, coreiface.ModuleDeps{
+					DB:           application.DB,
+					Config:       cfg,
+					Vault:        deps.KeyVault,
+					TranscodeDir: cfg.Data.Transcode,
+					FFmpegPath:   cfg.FFmpeg.FFmpegPath,
+					FFprobePath:  cfg.FFmpeg.FFprobePath,
+				})
+			}
 		}
 	}
 

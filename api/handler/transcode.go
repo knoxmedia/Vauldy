@@ -152,7 +152,14 @@ func (h *Handler) RetryTranscodeTask(c *gin.Context) {
 		return
 	}
 
-	res, err := h.App.DB.Exec(`UPDATE transcode_task SET status='waiting', progress=0, error_message=NULL WHERE id=? AND status IN ('failed','cancelled')`, id)
+	var taskType string
+	if err := h.App.DB.QueryRow(`SELECT COALESCE(task_type,'batch') FROM transcode_task WHERE id=?`, id).Scan(&taskType); err == nil && taskType == "pretranscode" {
+		// Community build has no pretranscode module; such tasks cannot be retried.
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "pretranscode module not available"})
+		return
+	}
+
+	res, err := h.App.DB.Exec(`UPDATE transcode_task SET status='waiting', progress=0, error_message=NULL WHERE id=? AND status IN ('failed','cancelled') AND COALESCE(task_type,'batch')='batch'`, id)
 	if err == nil {
 		n, _ := res.RowsAffected()
 		if n > 0 {

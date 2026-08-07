@@ -12,13 +12,13 @@ import (
 )
 
 const (
-	lyricWorkerInterval  = 8 * time.Second
-	lyricWorkerBatchMax  = 5
+	lyricWorkerInterval = 8 * time.Second
+	lyricWorkerBatchMax = 5
 )
 
 // StartLyricTaskLoop drains pending lyric recognition tasks in the background.
 func (h *Handler) StartLyricTaskLoop(ctx context.Context) {
-	go h.runLyricWorkerOnce()
+	h.runLyricWorkerOnce(ctx)
 	tk := time.NewTicker(lyricWorkerInterval)
 	defer tk.Stop()
 	for {
@@ -26,12 +26,12 @@ func (h *Handler) StartLyricTaskLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-tk.C:
-			h.runLyricWorkerOnce()
+			h.runLyricWorkerOnce(ctx)
 		}
 	}
 }
 
-func (h *Handler) runLyricWorkerOnce() {
+func (h *Handler) runLyricWorkerOnce(ctx context.Context) {
 	if h == nil || h.LyricWorker == nil || h.App == nil || h.App.DB == nil {
 		return
 	}
@@ -44,7 +44,7 @@ func (h *Handler) runLyricWorkerOnce() {
 	if limit > lyricWorkerBatchMax {
 		limit = lyricWorkerBatchMax
 	}
-	done, failed := h.LyricWorker.RunBatch(context.Background(), limit)
+	done, failed := h.LyricWorker.RunBatch(ctx, limit)
 	if done+failed > 0 {
 		log.Printf("lyric worker: processed=%d ok=%d fail=%d", done+failed, done, failed)
 	}

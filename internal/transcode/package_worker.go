@@ -252,10 +252,9 @@ func (w *PackageWorker) StartWaiting(ctx context.Context, limit int) int {
 			continue
 		}
 		started++
-		id := taskID
-		go func() {
-			_ = w.RunTask(context.Background(), id)
-		}()
+		if err := w.RunTask(ctx, taskID); err != nil && ctx.Err() != nil {
+			return started
+		}
 	}
 	return started
 }
@@ -309,14 +308,12 @@ func (w *PackageWorker) RunTask(ctx context.Context, taskID int64) error {
 
 	var fileID, sourcePath sql.NullString
 	var sourceHeight sql.NullInt64
-	var cleanupFlag sql.NullInt64
 	if err := w.DB.QueryRow(`
-		SELECT COALESCE(m.file_id,''), COALESCE(m.file_path,''), COALESCE(m.height,1080), COALESCE(l.cleanup_local_source_after_package,0)
+		SELECT COALESCE(m.file_id,''), COALESCE(m.file_path,''), COALESCE(m.height,1080)
 		FROM media m
-		LEFT JOIN library l ON l.id = m.library_id
 		WHERE m.id = ?
 		LIMIT 1
-	`, mediaID).Scan(&fileID, &sourcePath, &sourceHeight, &cleanupFlag); err != nil {
+	`, mediaID).Scan(&fileID, &sourcePath, &sourceHeight); err != nil {
 		_, _ = w.DB.Exec(`UPDATE package_task SET status='failed', progress=0, drm_status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE id = ?`, trimErrorMessage(err.Error()), taskID)
 		return err
 	}
@@ -381,19 +378,31 @@ func (w *PackageWorker) RunTask(ctx context.Context, taskID int64) error {
 		_, _ = w.DB.Exec(`DELETE FROM drm_asset WHERE media_id = ?`, mediaID)
 	}
 
+	// The community build has no retirement worker, so packaged plaintext
+	// sources are never scheduled for deletion; source_cleanup_status stays
+	// 'skipped'.
 	cleanupStatus := "skipped"
-	if cleanupFlag.Int64 == 1 && shouldCleanup(w.UploadDir, sourcePath.String) {
-		if err := os.Remove(sourcePath.String); err != nil {
-			cleanupStatus = "failed"
-		} else {
-			cleanupStatus = "success"
-		}
+	tx, err := w.DB.BeginTx(ctx2, nil)
+	if err != nil {
+		_, _ = w.DB.Exec(`UPDATE package_task SET status='failed', progress=0, drm_status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE id = ?`, trimErrorMessage(err.Error()), taskID)
+		return err
 	}
-	_, _ = w.DB.Exec(`
+	failHandoff := func(cause error) error {
+		_ = tx.Rollback()
+		msg := trimErrorMessage(cause.Error())
+		_, _ = w.DB.Exec(`UPDATE package_task SET status='failed', progress=0, drm_status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE id = ?`, msg, taskID)
+		return cause
+	}
+	if _, err = tx.ExecContext(ctx2, `
 		UPDATE package_task
 		SET status='done', progress=100, drm_status='done', output_path=?, source_cleanup_status=?, error_message=NULL, updated_at=CURRENT_TIMESTAMP
 		WHERE id = ?
-	`, outMaster, cleanupStatus, taskID)
+	`, outMaster, cleanupStatus, taskID); err != nil {
+		return failHandoff(err)
+	}
+	if err = tx.Commit(); err != nil {
+		return failHandoff(err)
+	}
 	return nil
 }
 

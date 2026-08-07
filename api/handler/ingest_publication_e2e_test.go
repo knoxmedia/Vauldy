@@ -95,8 +95,7 @@ func newPublicationE2E(t *testing.T, all bool) *publicationE2E {
 	}
 	cfg := &config.Config{}
 	cfg.Data.Upload = upload
-	communityCaps := publication.NewCapabilityMatrix([]string{"poster", "thumbnail", "preview", "keyframe", "subtitle", "atrack", "encrypt", "scrape"})
-	h := &Handler{App: &app.App{DB: db, Config: cfg}, Queue: postingest.NewQueue(db, "task15", nil, communityCaps), PublicationCapabilities: communityCaps, runningScans: map[int64]scanRuntime{}}
+	h := &Handler{App: &app.App{DB: db, Config: cfg}, Queue: postingest.NewQueue(db, "task15", nil), runningScans: map[int64]scanRuntime{}}
 	return &publicationE2E{db: db, h: h, root: root, upload: upload, libraryID: libraryID, scanID: scanID, mediaID: mediaID, runID: runID}
 }
 
@@ -153,19 +152,6 @@ func completeScrape(t *testing.T, e *publicationE2E) {
 	if err = completeScrapeTaskTx(context.Background(), e.db, id, e.mediaID, "auto-scan", "task15", "done", `{"ok":true}`, claim.Owner); err != nil {
 		t.Fatal(err)
 	}
-}
-
-func completePrepare(t *testing.T, e *publicationE2E) {
-	t.Helper()
-	var prepareSteps int
-	if err := e.db.QueryRow(`SELECT COUNT(*) FROM media_ingest_step WHERE run_id=? AND step_type='prepare'`, e.runID).Scan(&prepareSteps); err != nil {
-		t.Fatal(err)
-	}
-	if prepareSteps == 0 {
-		// Community builds omit prepare when no capability is registered.
-		return
-	}
-	t.Skip("enterprise prepare worker unavailable in community build")
 }
 
 func TestNewVideoHiddenUntilRequiredIngestCompletes(t *testing.T) {
@@ -230,13 +216,13 @@ func TestNewVideoHiddenUntilRequiredIngestCompletes(t *testing.T) {
 		got = append(got, s.Type+":"+s.Status+":"+requiredness)
 	}
 	sort.Strings(got)
-	want := []string{"encrypt:waiting:required", "poster:waiting:required", "preview:waiting:optional", "scrape:waiting:optional", "subtitle:waiting:optional"}
+	want := []string{"atrack_extract:waiting:optional", "encrypt:waiting:required", "media_visible:waiting:optional", "poster:waiting:required", "preview:waiting:optional", "scrape:waiting:optional", "subtitle_extract:waiting:optional"}
 	if coreiface.IngestPreparePlannerHandle() != nil {
 		want = append(want, "prepare:waiting:optional")
-		sort.Strings(want)
 	}
+	sort.Strings(want)
 	if fmt.Sprint(got) != fmt.Sprint(want) || ingest.Run.ID != e.runID {
-		t.Fatalf("run=%d steps=%v want=%v", ingest.Run.ID, got, want)
+		t.Fatalf("run=%d steps=%v", ingest.Run.ID, got)
 	}
 }
 
@@ -271,12 +257,8 @@ func TestNewVideoPublishesAfterRequiredStepsWhileOptionalRemainWaiting(t *testin
 	if err := e.db.QueryRow(`SELECT COUNT(*) FROM media_ingest_step WHERE run_id=? AND required=0 AND status='waiting'`, e.runID).Scan(&optionalWaiting); err != nil {
 		t.Fatal(err)
 	}
-	wantOptional := 3
-	if coreiface.IngestPreparePlannerHandle() != nil {
-		wantOptional = 4
-	}
-	if optionalWaiting != wantOptional {
-		t.Fatalf("optional waiting steps=%d, want %d", optionalWaiting, wantOptional)
+	if optionalWaiting != 6 {
+		t.Fatalf("optional waiting steps=%d, want 6", optionalWaiting)
 	}
 	w = e2eRequest(t, e, false, http.MethodGet, fmt.Sprintf("/api/v1/media/%d/poster.jpg", e.mediaID), e.h.ServeMediaPoster)
 	if w.Code != 200 || w.Body.String() != "jpeg" {
@@ -287,6 +269,11 @@ func TestNewVideoPublishesAfterRequiredStepsWhileOptionalRemainWaiting(t *testin
 func TestNewVideoBecomesFailedAndRemainsHiddenAfterRequiredExhaustion(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	e := newPublicationE2E(t, false)
+	// Local poster defaults to a single attempt; raise the bound to exercise exhaustion.
+	if _, err := e.db.Exec(`UPDATE post_ingest_task SET max_attempts=3 WHERE ingest_run_id=? AND task_type='poster';
+UPDATE media_ingest_step SET max_attempts=3 WHERE run_id=? AND step_type='poster'`, e.runID, e.runID); err != nil {
+		t.Fatal(err)
+	}
 	for attempt := 0; attempt < 3; attempt++ {
 		task, err := e.h.Queue.Claim(context.Background(), postingest.TaskPoster)
 		if err != nil || task == nil {
@@ -319,6 +306,11 @@ func TestNewVideoBecomesFailedAndRemainsHiddenAfterRequiredExhaustion(t *testing
 func TestRestartRecoversRunningGeneration(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	e := newPublicationE2E(t, false)
+	// Local defaults are single-attempt; allow one reclaim after lease expiry.
+	if _, err := e.db.Exec(`UPDATE post_ingest_task SET max_attempts=2 WHERE ingest_run_id=? AND task_type='poster';
+UPDATE media_ingest_step SET max_attempts=2 WHERE run_id=? AND step_type='poster'`, e.runID, e.runID); err != nil {
+		t.Fatal(err)
+	}
 	task, err := e.h.Queue.Claim(context.Background(), postingest.TaskPoster)
 	if err != nil || task == nil {
 		t.Fatalf("claim=%v %v", task, err)
