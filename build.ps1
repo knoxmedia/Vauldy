@@ -65,7 +65,7 @@ $version = (& git describe --tags --always).Trim()
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($version)) { throw "git describe failed" }
 $commit = (& git rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($commit)) { throw "git rev-parse HEAD failed" }
-$dirtyOutput = @(& git status --porcelain)
+$dirtyOutput = @(& git status --porcelain --ignore-submodules=dirty)
 if ($LASTEXITCODE -ne 0) { throw "git status --porcelain failed" }
 $dirty = if ($dirtyOutput.Count -gt 0) { "true" } else { "false" }
 if ($dirty -eq "true" -and -not $AllowDirty) { throw "refusing dirty release build; pass -AllowDirty for a development artifact" }
