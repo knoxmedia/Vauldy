@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -381,6 +382,9 @@ func (q *Queue) Renew(ctx context.Context, task Task) (bool, error) {
 	if err := q.validateClaimedTask(task); err != nil {
 		return false, err
 	}
+	if q.renewLeaseAttempt != nil {
+		return q.renewLeaseAttempt(ctx, task)
+	}
 	if posterRepairTask(task) {
 		var renewed bool
 		err := store.WithBusyRetry(ctx, q.metrics, func() error {
@@ -735,14 +739,22 @@ func (q *Queue) ownerWriteError(ctx context.Context, taskID int64, leaseToken st
 
 // RecoverExpired resets running tasks whose leases have expired so they can be reclaimed.
 func (q *Queue) RecoverExpired(ctx context.Context) (int64, error) {
-	return q.recoverRunning(ctx, true)
+	return q.recoverRunning(ctx, true, nil, nil)
+}
+
+// RecoverExpiredSkipping resets expired leases except for the given in-memory
+// task IDs and scheduler execution IDs. The dispatcher passes the tasks it is
+// currently executing so a lease that lapsed only under transient SQLite lock
+// contention is not marked failed while its executor is still running.
+func (q *Queue) RecoverExpiredSkipping(ctx context.Context, skipTasks map[int64]struct{}, skipExecutions map[string]struct{}) (int64, error) {
+	return q.recoverRunning(ctx, true, skipTasks, skipExecutions)
 }
 
 // RecoverInterrupted resets every running post-ingest task (startup / process takeover).
 // Unlike RecoverExpired, it does not wait for lease expiry—safe because a new process
 // owner never inherits in-memory executors from the previous process.
 func (q *Queue) RecoverInterrupted(ctx context.Context) (int64, error) {
-	return q.recoverRunning(ctx, false)
+	return q.recoverRunning(ctx, false, nil, nil)
 }
 
 // RecoverAllInterrupted drains RecoverInterrupted until a batch returns zero rows.
@@ -757,7 +769,25 @@ func (q *Queue) RecoverAllInterrupted(ctx context.Context) (int64, error) {
 	}
 }
 
-func (q *Queue) recoverRunning(ctx context.Context, onlyExpired bool) (int64, error) {
+func sortedSkipTaskIDs(skip map[int64]struct{}) []int64 {
+	ids := make([]int64, 0, len(skip))
+	for id := range skip {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	return ids
+}
+
+func sortedSkipExecutionIDs(skip map[string]struct{}) []string {
+	ids := make([]string, 0, len(skip))
+	for id := range skip {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func (q *Queue) recoverRunning(ctx context.Context, onlyExpired bool, skipTasks map[int64]struct{}, skipExecutions map[string]struct{}) (int64, error) {
 	if err := q.validate(false); err != nil {
 		return 0, err
 	}
@@ -777,7 +807,28 @@ func (q *Queue) recoverRunning(ctx context.Context, onlyExpired bool) (int64, er
 		exhaustedMsg = "lease expired and attempts exhausted"
 		recoveryReason = "expired_recovery"
 	}
+	var selectArgs []any
+	if len(skipTasks) > 0 {
+		ids := sortedSkipTaskIDs(skipTasks)
+		placeholders := strings.Repeat("?,", len(ids))
+		placeholders = placeholders[:len(placeholders)-1]
+		selectSQL += ` AND id NOT IN (` + placeholders + `)`
+		for _, id := range ids {
+			selectArgs = append(selectArgs, id)
+		}
+	}
 	selectSQL += ` ORDER BY id LIMIT ?`
+	selectArgs = append(selectArgs, recoverExpiredLimit)
+	var reservationArgs []any
+	if len(skipExecutions) > 0 {
+		ids := sortedSkipExecutionIDs(skipExecutions)
+		placeholders := strings.Repeat("?,", len(ids))
+		placeholders = placeholders[:len(placeholders)-1]
+		reservationSelectSQL += ` AND execution_id NOT IN (` + placeholders + `)`
+		for _, id := range ids {
+			reservationArgs = append(reservationArgs, id)
+		}
+	}
 	type recoverAttempt struct{ taskID, mediaID, generation int64 }
 	var n int64
 	var released []recoverAttempt
@@ -795,7 +846,7 @@ func (q *Queue) recoverRunning(ctx context.Context, onlyExpired bool) (int64, er
 			}
 		}()
 		// Release orphaned reservations alongside queue rows.
-		resRows, err := tx.QueryContext(ctx, reservationSelectSQL)
+		resRows, err := tx.QueryContext(ctx, reservationSelectSQL, reservationArgs...)
 		if err != nil {
 			return err
 		}
@@ -821,7 +872,7 @@ func (q *Queue) recoverRunning(ctx context.Context, onlyExpired bool) (int64, er
 			}
 		}
 
-		rows, err := tx.QueryContext(ctx, selectSQL, recoverExpiredLimit)
+		rows, err := tx.QueryContext(ctx, selectSQL, selectArgs...)
 		if err != nil {
 			return err
 		}

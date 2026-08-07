@@ -8,15 +8,21 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 
 	"knox-media/internal/scancoord"
 	"knox-media/internal/scanner"
 	"knox-media/internal/scheduler"
 	"knox-media/internal/store"
+	"knox-media/internal/progressctx"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 type executorFunc func(context.Context, Task) error
@@ -53,6 +59,16 @@ func waitUntil(t *testing.T, timeout time.Duration, condition func() bool) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("condition not met before timeout")
+}
+
+// sqliteBusyError builds a typed *sqlite.Error with SQLITE_BUSY so the queue's
+// busy classification (store.IsSQLiteBusy) recognizes it.
+func sqliteBusyError(t *testing.T) error {
+	t.Helper()
+	err := &sqlite.Error{}
+	field := reflect.ValueOf(err).Elem().FieldByName("code")
+	reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().SetInt(int64(sqlite3.SQLITE_BUSY))
+	return err
 }
 
 func TestDefaultDispatcherOptions(t *testing.T) {
@@ -1534,6 +1550,210 @@ func TestDispatcher_HeartbeatRenewsAndObservesScanCancellation(t *testing.T) {
 			// Persistent cancellation can be observed by preflight before executor start.
 		}
 	})
+}
+
+// TestDispatcher_BusyRenewDoesNotFailRunningTask verifies that a lease renewal
+// failing on SQLite lock contention is retried within the remaining lease budget
+// (mirroring scancoord's busy-aware heartbeat) and never fails a task whose
+// executor is still running normally. The recovery loop also skips in-memory
+// tasks, so the task completes normally once the DB contention clears.
+func TestDispatcher_BusyRenewDoesNotFailRunningTask(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	q := NewQueue(db, "busy-owner", nil)
+	id := insertDispatcherTask(t, q, TaskPreview, nil, "busy-renew")
+	started := make(chan struct{})
+	finish := make(chan struct{})
+	var startOnce sync.Once
+	exec := executorFunc(func(ctx context.Context, _ Task) error {
+		startOnce.Do(func() { close(started) })
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-finish:
+			return nil
+		}
+	})
+	// First renewal is busy, then renewals succeed. The task must not fail.
+	var renews atomic.Int32
+	q.renewLeaseAttempt = func(context.Context, Task) (bool, error) {
+		if renews.Add(1) <= 3 {
+			return false, sqliteBusyError(t)
+		}
+		return true, nil
+	}
+	o := dispatcherOptions("busy-owner")
+	o.HeartbeatInterval = 25 * time.Millisecond
+	o.RecoverInterval = 25 * time.Millisecond
+	d := schedulerDispatcher(t, q, scheduler.PolicyDefaults(), exec, o)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- d.Start(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("dispatcher shutdown: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("dispatcher did not stop during cleanup")
+		}
+	})
+	<-started
+	// Give the heartbeat a few chances to renew; transient busy must be absorbed.
+	waitUntil(t, 5*time.Second, func() bool {
+		var status Status
+		_ = db.QueryRow(`SELECT status FROM post_ingest_task WHERE id=?`, id).Scan(&status)
+		return status == StatusRunning && renews.Load() > 3
+	})
+	if renews.Load() <= 3 {
+		t.Fatalf("renew attempts=%d want >3", renews.Load())
+	}
+	close(finish)
+	waitUntil(t, 5*time.Second, func() bool {
+		var status Status
+		_ = db.QueryRow(`SELECT status FROM post_ingest_task WHERE id=?`, id).Scan(&status)
+		return status == StatusDone
+	})
+	var last string
+	_ = db.QueryRow(`SELECT COALESCE(last_error,'') FROM post_ingest_task WHERE id=?`, id).Scan(&last)
+	if strings.Contains(last, "lease") {
+		t.Fatalf("task last_error=%q contains lease failure", last)
+	}
+}
+
+// TestDispatcher_BusyRenewPersistentDefersWhileExecutorAlive verifies that when
+// DB lock contention persists past the lease budget but the executor is still
+// making progress, the dispatcher defers the failure instead of failing the
+// task, and the periodic recovery loop skips the in-memory task.
+func TestDispatcher_BusyRenewPersistentDefersWhileExecutorAlive(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	q := NewQueue(db, "persistent-busy-owner", nil)
+	id := insertDispatcherTask(t, q, TaskPreview, nil, "persistent-busy")
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var startOnce sync.Once
+	exec := executorFunc(func(ctx context.Context, _ Task) error {
+		startOnce.Do(func() { close(started) })
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-release:
+			return nil
+		}
+	})
+	// Renewals keep failing with SQLITE_BUSY forever; the task must stay alive.
+	q.renewLeaseAttempt = func(context.Context, Task) (bool, error) {
+		return false, sqliteBusyError(t)
+	}
+	o := dispatcherOptions("persistent-busy-owner")
+	o.HeartbeatInterval = 25 * time.Millisecond
+	o.RecoverInterval = 25 * time.Millisecond
+	// ProgressIdleTimeout is large so progressStale is never true here; the task
+	// reports progress implicitly through the heartbeat still being serviced.
+	o.ProgressIdleTimeout = time.Minute
+	d := schedulerDispatcher(t, q, scheduler.PolicyDefaults(), exec, o)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- d.Start(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("dispatcher shutdown: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("dispatcher did not stop during cleanup")
+		}
+	})
+	<-started
+	// Expire the lease in the database directly (renewals are all failing with
+	// busy, so the durable lease is never extended). The periodic recovery loop
+	// must skip this in-memory task and its reservation rather than mark it
+	// failed while the executor is alive.
+	if _, err := db.Exec(`UPDATE post_ingest_task SET lease_until=datetime('now','-1 minute') WHERE id=?`, id); err != nil {
+		t.Fatal(err)
+	}
+	// Give several recovery cycles the chance to (incorrectly) fail the task.
+	time.Sleep(200 * time.Millisecond)
+	var status Status
+	if err := db.QueryRow(`SELECT status FROM post_ingest_task WHERE id=?`, id).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != StatusRunning {
+		t.Fatalf("task status=%s want running while executor alive under persistent busy (recovery loop must skip in-memory task)", status)
+	}
+	// Let the executor finish; completion must not be poisoned by the earlier
+	// renewal failures.
+	close(release)
+	waitUntil(t, 5*time.Second, func() bool {
+		var s Status
+		_ = db.QueryRow(`SELECT status FROM post_ingest_task WHERE id=?`, id).Scan(&s)
+		return s == StatusDone
+	})
+	var last string
+	_ = db.QueryRow(`SELECT COALESCE(last_error,'') FROM post_ingest_task WHERE id=?`, id).Scan(&last)
+	if strings.Contains(last, "lease") {
+		t.Fatalf("task last_error=%q contains lease failure", last)
+	}
+}
+
+// TestDispatcher_BusyRenewStopsStalledTask verifies that a renewal that fails
+// with SQLITE_BUSY still fails the task when the executor has stopped making
+// progress (progressStale): the busy deferral is only for healthy tasks.
+func TestDispatcher_BusyRenewStopsStalledTask(t *testing.T) {
+	db, _ := openQueueTestDB(t)
+	q := NewQueue(db, "stalled-busy-owner", nil)
+	id := insertDispatcherTask(t, q, TaskPreview, nil, "stalled-busy")
+	started := make(chan struct{})
+	var startOnce sync.Once
+	exec := executorFunc(func(ctx context.Context, _ Task) error {
+		startOnce.Do(func() {
+			close(started)
+			// Report forward progress once; then the executor stalls forever.
+			progressctx.Report(ctx)
+		})
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	q.renewLeaseAttempt = func(context.Context, Task) (bool, error) {
+		return false, sqliteBusyError(t)
+	}
+	o := dispatcherOptions("stalled-busy-owner")
+	o.HeartbeatInterval = 25 * time.Millisecond
+	o.RecoverInterval = 25 * time.Millisecond
+	o.ProgressIdleTimeout = 50 * time.Millisecond
+	d := schedulerDispatcher(t, q, scheduler.PolicyDefaults(), exec, o)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- d.Start(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("dispatcher shutdown: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("dispatcher did not stop during cleanup")
+		}
+	})
+	<-started
+	// The executor reported progress once then went silent, and the lease renewal
+	// keeps failing with busy; the progress-stale force-cancel must win over the
+	// busy deferral and take the task out of the running state (it is re-queued,
+	// since the test task still has retry attempts left).
+	waitUntil(t, 5*time.Second, func() bool {
+		var status Status
+		_ = db.QueryRow(`SELECT status FROM post_ingest_task WHERE id=?`, id).Scan(&status)
+		return status != StatusRunning
+	})
+	var last string
+	_ = db.QueryRow(`SELECT COALESCE(last_error,'') FROM post_ingest_task WHERE id=?`, id).Scan(&last)
+	if !strings.Contains(last, "stalled") {
+		t.Fatalf("stalled task last_error=%q want stalled cause", last)
+	}
 }
 
 func TestDispatcher_CancelScanOnlyLocalMatchingScan(t *testing.T) {

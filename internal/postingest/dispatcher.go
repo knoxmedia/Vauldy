@@ -14,6 +14,7 @@ import (
 	"knox-media/internal/progressctx"
 	"knox-media/internal/scheduler"
 	"knox-media/internal/storage"
+	"knox-media/internal/store"
 )
 
 type Executor interface {
@@ -93,6 +94,7 @@ func DefaultDispatcherOptions() DispatcherOptions {
 
 type workerState struct {
 	cancel       context.CancelFunc
+	executionID  string
 	mu           sync.Mutex
 	kind         FailureKind
 	cause        error
@@ -404,6 +406,23 @@ func (d *Dispatcher) heartbeatTask(ctx context.Context, task Task, state *worker
 	defer cancel()
 	ok, err := d.q.Renew(renewCtx, task)
 	if err != nil {
+		// A lease renewal that fails on SQLite lock contention (SQLITE_BUSY) must
+		// not fail a task whose executor is still running normally. Mirrors
+		// scancoord's busy-aware heartbeat: retry within the remaining lease
+		// budget first; if the database stays locked past the lease budget, defer
+		// the failure while the executor is alive and making progress — the next
+		// heartbeat renews again once contention clears.
+		if store.IsSQLiteBusy(err) {
+			if renewed, renewErr := d.renewLeaseWithBusyRetry(task); renewErr == nil && renewed {
+				return true
+			} else if renewErr != nil {
+				err = renewErr
+			}
+			if store.IsSQLiteBusy(err) && !state.progressStale(d.opts.ProgressIdleTimeout) {
+				log.Printf("postingest dispatcher task %d (%s media %d) lease renew blocked by SQLite lock contention past lease budget; executor still running, deferring failure", task.ID, task.Type, task.MediaID)
+				return true
+			}
+		}
 		state.stop(FailureRetryable, fmt.Errorf("renew lease: %w", err))
 		return false
 	}
@@ -414,6 +433,47 @@ func (d *Dispatcher) heartbeatTask(ctx context.Context, task Task, state *worker
 	return true
 }
 
+// renewLeaseWithBusyRetry renews the task lease while retrying SQLITE_BUSY
+// errors for a bounded window (mirroring scancoord.heartbeat). A momentarily
+// locked database (e.g. a concurrent batch of ingest writes) must not kill a
+// long-running task like preview; the renewal is retried within the budget, and
+// if the database stays locked the caller defers the failure while the executor
+// is still running. The window is bounded by the heartbeat interval so a single
+// heartbeat never monopolizes the run loop for the full lease.
+func (d *Dispatcher) renewLeaseWithBusyRetry(task Task) (bool, error) {
+	remaining := time.Until(task.LeaseUntil)
+	if remaining <= 0 {
+		// Fall back to the configured lease duration if the in-memory copy is stale.
+		remaining = d.opts.LeaseDuration
+	}
+	if remaining > d.opts.HeartbeatInterval {
+		remaining = d.opts.HeartbeatInterval
+	}
+	safety := d.opts.HeartbeatInterval / 4
+	if safety > 250*time.Millisecond {
+		safety = 250 * time.Millisecond
+	}
+	policy := store.HeartbeatLeaseRetryPolicy("postingest_lease_renew", remaining, safety)
+	ctx, cancel := context.WithTimeout(context.Background(), remaining)
+	defer cancel()
+	var renewed bool
+	err := store.WithBusyRetryPolicyContext(ctx, d.q.metrics, policy, func(attemptCtx context.Context) error {
+		ok, renewErr := d.q.Renew(attemptCtx, task)
+		if renewErr != nil {
+			return renewErr
+		}
+		if !ok {
+			return errors.New("post-ingest lease lost")
+		}
+		renewed = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return renewed, nil
+}
+
 func (d *Dispatcher) Start(ctx context.Context) error {
 	d.startMu.Lock()
 	if d.started {
@@ -422,6 +482,8 @@ func (d *Dispatcher) Start(ctx context.Context) error {
 	}
 	d.started = true
 	d.startMu.Unlock()
+	// Startup recovery reclaims leases orphaned by a previous process. No
+	// in-memory executors exist yet, so nothing needs to be skipped.
 	if _, err := d.q.RecoverExpired(ctx); err != nil {
 		return fmt.Errorf("recover expired post-ingest tasks: %w", err)
 	}
@@ -459,7 +521,12 @@ func (d *Dispatcher) Start(ctx context.Context) error {
 			d.wg.Wait()
 			return nil
 		case <-recoverTicker.C:
-			if n, err := d.q.RecoverExpired(ctx); err != nil {
+			// Skip tasks this process is still executing. A task whose lease
+			// lapsed under SQLite lock contention is still running normally
+			// in-memory; recovering it here would mark it failed even though its
+			// executor is healthy (see heartbeatTask's busy-aware renewal).
+			skipTasks, skipExecutions := d.runningSnapshot()
+			if n, err := d.q.RecoverExpiredSkipping(ctx, skipTasks, skipExecutions); err != nil {
 				if ctx.Err() == nil {
 					log.Printf("postingest dispatcher recover expired: %v", err)
 				}
@@ -469,6 +536,24 @@ func (d *Dispatcher) Start(ctx context.Context) error {
 		case <-ticker.C:
 		}
 	}
+}
+
+// runningSnapshot returns the task IDs and scheduler execution IDs currently
+// executing in this process. The periodic recovery loop skips these so a task
+// whose lease expired only because of transient database lock contention is not
+// marked failed while its executor is still alive.
+func (d *Dispatcher) runningSnapshot() (map[int64]struct{}, map[string]struct{}) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	tasks := make(map[int64]struct{}, len(d.running))
+	executions := make(map[string]struct{}, len(d.running))
+	for id, state := range d.running {
+		tasks[id] = struct{}{}
+		if state.executionID != "" {
+			executions[state.executionID] = struct{}{}
+		}
+	}
+	return tasks, executions
 }
 
 // schedulerClaim is the scheduler service claimer. It asks the queue for the
@@ -509,7 +594,7 @@ func (d *Dispatcher) launch(parent context.Context, task Task) {
 	} else {
 		lifecycleCtx, cancel = context.WithTimeout(parent, d.opts.Timeouts[task.Type])
 	}
-	state := &workerState{cancel: cancel, lastProgress: time.Now()}
+	state := &workerState{cancel: cancel, executionID: task.ExecutionID, lastProgress: time.Now()}
 	d.mu.Lock()
 	d.running[task.ID] = state
 	if task.ScanTaskID != nil {

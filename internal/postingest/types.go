@@ -76,6 +76,8 @@ type Queue struct {
 	isScanCancelled      func(context.Context, int64) (bool, error)
 	beforeFailTransition func()
 	registry             coreiface.CapabilityRegistry
+	// renewLeaseAttempt overrides the lease renewal for tests (busy-injection seams).
+	renewLeaseAttempt func(context.Context, Task) (bool, error)
 	// immediateTx overrides store.WithImmediateConnTx for tests (ambiguous commit seams).
 	immediateTx     func(context.Context, *sql.DB, func(store.ImmediateConnTx) error) (store.ImmediateOutcome, error)
 	schedulerPolicy *scheduler.Policy
