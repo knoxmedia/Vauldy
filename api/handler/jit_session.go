@@ -14,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"knox-media/internal/coreiface"
 	"knox-media/internal/jit/hwenc"
 	"knox-media/internal/jit/session"
 	"knox-media/internal/playback"
@@ -150,8 +151,15 @@ func (h *Handler) tryReviveJITSession(c *gin.Context, sessionID, asset string) (
 	if s.StreamEncryption == nil {
 		pol := h.loadStreamPolicy(mediaID)
 		if pol.DRMEnabled {
-			if streamEnc, encErr := h.ensureStreamJITEncryption(mediaID, pol, s.TempDir); encErr == nil {
-				s.StreamEncryption = streamEnc
+			if drmMod := coreiface.DRMModuleHandle(); drmMod != nil {
+				if streamEnc, encErr := drmMod.StreamEncryption(mediaID, pol.DRMEnabled, pol.EncryptionMode, s.TempDir); encErr == nil && streamEnc != nil {
+					s.StreamEncryption = &session.StreamEncryption{
+						Mode:        streamEnc.Mode,
+						KidHex:      streamEnc.KidHex,
+						KeyHex:      streamEnc.KeyHex,
+						KeyInfoPath: streamEnc.KeyInfoPath,
+					}
+				}
 			}
 		}
 	}
@@ -460,8 +468,16 @@ func (h *Handler) generateMasterM3U8(s *session.Session, c *gin.Context) string 
 	var sb strings.Builder
 	sb.WriteString("#EXTM3U\n")
 	sb.WriteString("#EXT-X-VERSION:3\n")
-	if keyLine := h.streamDRMPlaylistKeyLine(base, s, c); keyLine != "" {
-		sb.WriteString(keyLine + "\n")
+	if drmMod := coreiface.DRMModuleHandle(); drmMod != nil && s.StreamEncryption != nil {
+		enc := &coreiface.DRMStreamEncryption{
+			Mode:        s.StreamEncryption.Mode,
+			KidHex:      s.StreamEncryption.KidHex,
+			KeyHex:      s.StreamEncryption.KeyHex,
+			KeyInfoPath: s.StreamEncryption.KeyInfoPath,
+		}
+		if keyLine := drmMod.PlaylistKeyLine(base, s.MediaID, enc, jitAccessToken(c)); keyLine != "" {
+			sb.WriteString(keyLine + "\n")
+		}
 	}
 	sb.WriteString(fmt.Sprintf("#EXT-X-TARGETDURATION:%d\n", int(segDuration)+1))
 	sb.WriteString(fmt.Sprintf("#EXT-X-MEDIA-SEQUENCE:%d\n", s.StartSeg))

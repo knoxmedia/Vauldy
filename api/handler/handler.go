@@ -44,6 +44,11 @@ type PostIngestEnqueuer interface {
 	EnqueueMedia(context.Context, int64, *int64, string) ([]postingest.TaskType, error)
 }
 
+// drmModuleSetter is populated by the commercial-only api/handler/drm_adapter.go
+// init(). The community build (no adapter file) leaves it nil so the DRM
+// capability handle stays nil and DRM routes/paths degrade to absent.
+var drmModuleSetter func(*Handler)
+
 type Dependencies struct {
 	ServerContext           context.Context
 	Background              *BackgroundGroup
@@ -135,6 +140,9 @@ func New(a *app.App, deps Dependencies) *Handler {
 	}
 	if deps.ServerContext != nil && deps.Background != nil {
 		h.libraryPreviewScheduler = newLibraryPreviewScheduler(deps.ServerContext, deps.Background, libraryPreviewMaxConcurrent, libraryPreviewMaxPending, h.runLibraryPreviewRefresh)
+	}
+	if drmModuleSetter != nil {
+		drmModuleSetter(h)
 	}
 	if a == nil || a.DB == nil || a.Config == nil {
 		return h
