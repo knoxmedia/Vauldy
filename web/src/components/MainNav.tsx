@@ -48,17 +48,15 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
 
   const [libs, setLibs] = useState<Library[]>([]);
   const [libsLoading, setLibsLoading] = useState(true);
-  const [widevineEnabled, setWidevineEnabled] = useState(false);
 
   useEffect(() => {
     const controller = new AbortController();
     setLibsLoading(true);
     const request = libraryRequests?.load(controller.signal) ?? fetchLibrariesWithCapabilities(controller.signal);
     void request
-      .then(({ items, drmCapabilities }) => {
+      .then(({ items }) => {
         if (!controller.signal.aborted) {
           setLibs(Array.isArray(items) ? items : []);
-          setWidevineEnabled(!!drmCapabilities.widevine_enabled);
         }
       })
       .catch(() => {
@@ -88,7 +86,6 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
     if (path.startsWith("/media-manager")) return ["media-manager"];
     if (path.startsWith("/person")) return ["persons"];
     if (path.startsWith("/tasks")) return ["tasks"];
-    if (path.startsWith("/drm-license-audit")) return ["drm-license-audit"];
     if (path.startsWith("/access-logs")) return ["access-logs"];
     if (path.startsWith("/api-credentials")) return ["api-credentials"];
     if (path.startsWith("/users")) return ["users"];
@@ -111,7 +108,6 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
         path.startsWith("/media-manager") ||
         path.startsWith("/person") ||
         path.startsWith("/tasks") ||
-        path.startsWith("/drm-license-audit") ||
         path.startsWith("/access-logs") ||
         path.startsWith("/api-credentials") ||
         path.startsWith("/users") ||
@@ -238,18 +234,6 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
         ),
       },
       ];
-      if (widevineEnabled) {
-        items.push({
-          key: "drm-license-audit",
-          icon: <HistoryOutlined />,
-          title: t("nav.drm_audit"),
-          label: (
-            <Link to="/drm-license-audit" onClick={onNavigate}>
-              {t("nav.drm_audit")}
-            </Link>
-          ),
-        });
-      }
       items.push(
       {
         key: "access-logs",
@@ -304,7 +288,7 @@ export default function MainNav({ onNavigate, inlineCollapsed }: MainNavProps) {
       );
       return items;
     },
-    [onNavigate, t, widevineEnabled],
+    [onNavigate, t],
   );
 
   const menuItems: MenuProps["items"] = useMemo(() => {

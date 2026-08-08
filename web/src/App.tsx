@@ -44,7 +44,6 @@ import LoginPage from "./pages/Login";
 import AdminConsolePage from "./pages/AdminConsole";
 import MediaManagerPage from "./pages/MediaManager";
 import TaskManagerPage from "./pages/TaskManager";
-import DRMLicenseAuditPage from "./pages/DRMLicenseAudit";
 import AccessLogsPage from "./pages/AccessLogs";
 import ApiCredentialsPage from "./pages/ApiCredentials";
 import UsersPage from "./pages/Users";
@@ -213,7 +212,6 @@ function MainShell() {
     if (p.startsWith("/upload")) return t("shell.title.upload");
     if (p.startsWith("/media-manager")) return t("shell.title.media_manager");
     if (p.startsWith("/tasks")) return t("shell.title.tasks");
-    if (p.startsWith("/drm-license-audit")) return t("shell.title.drm_audit");
     if (p.startsWith("/access-logs")) return t("shell.title.access_logs");
     if (p.startsWith("/api-credentials")) return t("shell.title.api_credentials");
     if (p.startsWith("/users")) return t("shell.title.users");
@@ -512,7 +510,6 @@ export default function App() {
             <Route path="upload" element={<UploadPage />} />
             <Route path="media-manager" element={<MediaManagerPage />} />
             <Route path="tasks" element={<TaskManagerPage />} />
-            <Route path="drm-license-audit" element={<DRMLicenseAuditPage />} />
             <Route path="access-logs" element={<AccessLogsPage />} />
             <Route path="api-credentials" element={<ApiCredentialsPage />} />
             <Route path="users" element={<UsersPage />} />

@@ -20,6 +20,8 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"knox-media/api/middleware"
+	"knox-media/internal/coreiface"
+	"knox-media/internal/jit/session"
 	"knox-media/internal/mediautil"
 	"knox-media/internal/playback"
 	"knox-media/internal/playcompletion"
@@ -541,13 +543,20 @@ func (h *Handler) HLSInfo(c *gin.Context) {
 				}
 				log.Printf("stream drm jit session create failed media=%d: %v", id, err)
 			} else {
-				if streamEnc, encErr := h.ensureStreamJITEncryption(id, pol, s.TempDir); encErr == nil {
-					s.StreamEncryption = streamEnc
-				} else {
-					log.Printf("stream jit encryption setup failed media=%d: %v", id, encErr)
-					h.SessionManager.CancelSession(s.ID)
-					c.JSON(http.StatusInternalServerError, gin.H{"error": "stream encryption setup failed"})
-					return
+				if drmMod := coreiface.DRMModuleHandle(); drmMod != nil {
+					if streamEnc, encErr := drmMod.StreamEncryption(id, pol.DRMEnabled, pol.EncryptionMode, s.TempDir); encErr != nil {
+						log.Printf("stream jit encryption setup failed media=%d: %v", id, encErr)
+						h.SessionManager.CancelSession(s.ID)
+						c.JSON(http.StatusInternalServerError, gin.H{"error": "stream encryption setup failed"})
+						return
+					} else if streamEnc != nil {
+						s.StreamEncryption = &session.StreamEncryption{
+							Mode:        streamEnc.Mode,
+							KidHex:      streamEnc.KidHex,
+							KeyHex:      streamEnc.KeyHex,
+							KeyInfoPath: streamEnc.KeyInfoPath,
+						}
+					}
 				}
 				masterBase := fmt.Sprintf("%s/api/v1/jit/session/%s/master.m3u8", base, s.ID)
 				mq := url.Values{}

@@ -17,6 +17,7 @@ import (
 	"sync"
 
 	"knox-media/internal/config"
+	"knox-media/internal/coreiface"
 	"knox-media/internal/keystore"
 	"knox-media/internal/storage"
 )
@@ -305,6 +306,14 @@ func (w *PackageWorker) RunTask(ctx context.Context, taskID int64) error {
 	if err := w.DB.QueryRow(`SELECT media_id, pipeline_type FROM package_task WHERE id = ? LIMIT 1`, taskID).Scan(&mediaID, &pipelineType); err != nil {
 		return err
 	}
+	// DRM packaging is commercial-only: every package pipeline (hls_aes_128,
+	// hls_powerdrm, cmaf_drm) writes drm_* tables and serves keys through the
+	// /drm/* routes. The community build has no DRM module, so reject package
+	// tasks up front instead of failing on missing tables mid-package.
+	if coreiface.DRMModuleHandle() == nil {
+		_, _ = w.DB.Exec(`UPDATE package_task SET status='failed', progress=0, drm_status='failed', error_message=?, updated_at=CURRENT_TIMESTAMP WHERE id = ?`, trimErrorMessage("drm packaging unavailable in this build"), taskID)
+		return nil
+	}
 
 	var fileID, sourcePath sql.NullString
 	var sourceHeight sql.NullInt64
@@ -341,7 +350,9 @@ func (w *PackageWorker) RunTask(ctx context.Context, taskID int64) error {
 	case encryptionModePowerDRM:
 		outMaster, err = w.runAESHLSPackage(ctx2, taskID, mediaID, sourcePath.String, outDir, ladder, keyHex, kidHex)
 		if err == nil {
-			err = rewriteManifestsToPowerDRM(outDir, kidHex)
+			if drmMod := coreiface.DRMModuleHandle(); drmMod != nil {
+				err = drmMod.RewriteManifestsToPowerDRM(outDir, kidHex)
+			}
 		}
 	default:
 		outMaster, err = w.runCMAFDRMPackage(ctx2, taskID, mediaID, sourcePath.String, outDir, ladder, keyHex, kidHex)

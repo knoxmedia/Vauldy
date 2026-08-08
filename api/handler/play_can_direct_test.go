@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -13,6 +14,10 @@ import (
 	"knox-media/internal/jit/session"
 	"knox-media/internal/store"
 )
+
+func contains(s, sub string) bool {
+	return strings.Contains(s, sub)
+}
 
 func TestContainerMimeType(t *testing.T) {
 	cases := []struct{ in, want string }{

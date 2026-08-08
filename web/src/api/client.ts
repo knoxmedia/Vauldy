@@ -1949,16 +1949,6 @@ export type AccessLogItem = {
   created_at: string;
 };
 
-export type DRMLicenseAuditItem = {
-  id: number;
-  media_id: number;
-  drm_type: string;
-  result: string;
-  reason: string;
-  client_ip: string;
-  created_at: string;
-};
-
 export async function fetchAccessLogs(params?: {
   limit?: number;
   action?: string;
@@ -1973,54 +1963,6 @@ export async function fetchAccessLogs(params?: {
     params: { limit, action, range, from: params?.from, to: params?.to },
   });
   return data.items ?? [];
-}
-
-export async function fetchDRMLicenseAudits(params?: {
-  limit?: number;
-  media_id?: number;
-  drm_type?: string;
-  result?: string;
-  reason?: string;
-  range?: "all" | "today" | "7d" | "30d" | "custom";
-  from?: string;
-  to?: string;
-}) {
-  const { data } = await api.get<{ items: DRMLicenseAuditItem[] }>("/api/v1/admin/drm-license-audit", {
-    params: {
-      limit: params?.limit ?? 100,
-      media_id: params?.media_id,
-      drm_type: params?.drm_type ?? "all",
-      result: params?.result ?? "all",
-      reason: params?.reason,
-      range: params?.range ?? "all",
-      from: params?.from,
-      to: params?.to,
-    },
-  });
-  return data.items ?? [];
-}
-
-export type VerifyDRMLicenseResponse = {
-  valid: boolean;
-  canonical?: string;
-  code?: string;
-  claims?: {
-    drm_type: string;
-    media_id: number;
-    kid: string;
-    kid_version: string;
-    key_ref: string;
-    nonce: string;
-    iat: number;
-    exp: number;
-    sig_version: string;
-  };
-  error?: string;
-};
-
-export async function verifyDRMLicense(payload: { license: string; sig: string }) {
-  const { data } = await api.post<VerifyDRMLicenseResponse>("/api/v1/admin/drm/license/verify", payload);
-  return data;
 }
 
 export type TranscodeTask = {
