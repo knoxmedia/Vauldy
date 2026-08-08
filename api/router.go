@@ -15,6 +15,22 @@ import (
 	"knox-media/internal/metadatalib"
 )
 
+// drmLicenseMiddleware gates the commercial DRM license/packaging routes. The
+// community build (config.Edition != "commercial") answers 404 so the DRM
+// surface behaves as if the routes do not exist; the commercial build is
+// unaffected. Unlike pretranscode, DRM is not license-feature gated because
+// license signing is itself part of the DRM feature set — edition is the
+// build-time boundary.
+func drmLicenseMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if config.Edition != "commercial" {
+			c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "not found"})
+			return
+		}
+		c.Next()
+	}
+}
+
 func NewEngine(cfg *config.Config, application *app.App, deps handler.Dependencies) *gin.Engine {
 	if deps.ServerContext == nil || deps.Background == nil {
 		panic("api: ServerContext and Background dependencies are required")
@@ -207,12 +223,17 @@ func NewEngine(cfg *config.Config, application *app.App, deps handler.Dependenci
 			play.GET("/media/:id/atrack/:stream/index.m3u8", h.ServeAtrackPlaylist)
 			play.GET("/media/:id/atrack/:stream/seg/:seg", h.ServeAtrackSegment)
 			play.GET("/transcode/task/:id/status", h.GetTranscodeTaskStatus)
-			play.GET("/drm/widevine/service-cert", h.WidevineServiceCert)
-			play.POST("/drm/widevine/license", h.WidevineLicense)
-			play.GET("/drm/powerdrm/key", h.PowerDRMKey)
-			play.GET("/drm/hls/aes128/key", h.HLSAES128Key)
-			play.GET("/drm/fairplay/cert", h.FairPlayCert)
-			play.POST("/drm/fairplay/license", h.FairPlayLicense)
+			// DRM license/packaging endpoints are commercial-only. The
+			// drmLicenseMiddleware returns 404 in the community build, so
+			// /drm/* behaves as absent there.
+			drmPlay := play.Group("/drm")
+			drmPlay.Use(drmLicenseMiddleware())
+			drmPlay.GET("/widevine/service-cert", h.WidevineServiceCert)
+			drmPlay.POST("/widevine/license", h.WidevineLicense)
+			drmPlay.GET("/powerdrm/key", h.PowerDRMKey)
+			drmPlay.GET("/hls/aes128/key", h.HLSAES128Key)
+			drmPlay.GET("/fairplay/cert", h.FairPlayCert)
+			drmPlay.POST("/fairplay/license", h.FairPlayLicense)
 			if deps.Instant != nil {
 				deps.Instant.RegisterRoutes(play)
 			}
@@ -311,7 +332,7 @@ func NewEngine(cfg *config.Config, application *app.App, deps handler.Dependenci
 			adm.POST("/transcode/task/batch", h.BatchTranscodeTasks)
 			adm.POST("/transcode/task/cleanup-failed", h.CleanupFailedTranscodeTasks)
 			adm.POST("/transcode/task/cleanup-failed-before", h.CleanupFailedTranscodeTasksBefore)
-			adm.POST("/transcode/drm/repair", h.RepairDRMOutputs)
+			adm.POST("/transcode/drm/repair", drmLicenseMiddleware(), h.RepairDRMOutputs)
 			adm.GET("/preview/task", h.ListPreviewTasks)
 			adm.POST("/preview/task/:mediaId/retry", h.RetryPreviewTask)
 			adm.POST("/preview/task/batch", h.BatchPreviewTasks)
@@ -366,8 +387,8 @@ func NewEngine(cfg *config.Config, application *app.App, deps handler.Dependenci
 
 			adm.GET("/admin/overview", h.AdminOverview)
 			adm.GET("/admin/access-log", h.ListAccessLogs)
-			adm.GET("/admin/drm-license-audit", h.ListDRMLicenseAudits)
-			adm.POST("/admin/drm/license/verify", h.VerifyLicense)
+			adm.GET("/admin/drm-license-audit", drmLicenseMiddleware(), h.ListDRMLicenseAudits)
+			adm.POST("/admin/drm/license/verify", drmLicenseMiddleware(), h.VerifyLicense)
 
 			adm.GET("/admin/api-clients", h.ListAPIClients)
 			adm.POST("/admin/api-clients", h.CreateAPIClient)
