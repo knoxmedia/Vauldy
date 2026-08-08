@@ -174,40 +174,6 @@ CREATE TABLE IF NOT EXISTS package_task (
     UNIQUE(id,media_id)
 );
 
-CREATE TABLE IF NOT EXISTS drm_asset (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    media_id INTEGER NOT NULL UNIQUE,
-    kid TEXT NOT NULL,
-    key_ref TEXT NOT NULL,
-    manifest_path TEXT NOT NULL,
-    license_policy_json TEXT DEFAULT '{}',
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (media_id) REFERENCES media(id)
-);
-
-CREATE TABLE IF NOT EXISTS drm_license_audit (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    media_id INTEGER,
-    drm_type TEXT NOT NULL,
-    result TEXT NOT NULL,
-    reason TEXT,
-    client_ip TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (media_id) REFERENCES media(id)
-);
-
-CREATE TABLE IF NOT EXISTS drm_key_material (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    media_id INTEGER NOT NULL UNIQUE,
-    mode TEXT NOT NULL,
-    kid TEXT NOT NULL,
-    key_hex TEXT NOT NULL,
-    iv_hex TEXT NOT NULL,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (media_id) REFERENCES media(id)
-);
-
 CREATE TABLE IF NOT EXISTS preview_task (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     media_id INTEGER NOT NULL UNIQUE,
@@ -493,8 +459,6 @@ CREATE INDEX IF NOT EXISTS idx_scan_task_library ON scan_task(library_id, id DES
 CREATE INDEX IF NOT EXISTS idx_scan_task_status ON scan_task(status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_package_task_media ON package_task(media_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_package_task_status ON package_task(status, updated_at);
-CREATE INDEX IF NOT EXISTS idx_drm_license_audit_media ON drm_license_audit(media_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_drm_key_material_media ON drm_key_material(media_id, updated_at);
 CREATE INDEX IF NOT EXISTS idx_user_library_permission_user ON user_library_permission(user_id, library_id);
 CREATE INDEX IF NOT EXISTS idx_user_library_folder_permission_user ON user_library_folder_permission(user_id, library_id);
 

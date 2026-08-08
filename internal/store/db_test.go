@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-func TestOpenSQLiteAddsDRMColumns(t *testing.T) {
+func TestOpenSQLiteAddsProcessingColumns(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "db.sqlite")
 	db, err := OpenSQLite(dbPath)
 	if err != nil {
@@ -43,9 +43,6 @@ func TestOpenSQLiteAddsDRMColumns(t *testing.T) {
 	assertColumn("library", "encrypted_assets_custom_dir")
 	assertColumn("library", "cleanup_local_source_after_package")
 	assertColumn("package_task", "pipeline_type")
-	assertColumn("drm_asset", "kid")
-	assertColumn("drm_license_audit", "drm_type")
-	assertColumn("drm_key_material", "key_hex")
 }
 
 func TestRecoverStalePhotoTasksResetsRunning(t *testing.T) {
