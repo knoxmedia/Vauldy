@@ -186,18 +186,24 @@ func (ob *OverviewBuilder) sectionItems(ctx context.Context, types []string, sta
 	byID := make(map[string]ProjectionRow)
 	for _, taskType := range types {
 		filter := QueryFilter{TaskType: taskType, Status: string(status), Removed: "exclude"}
-		for cursor := ""; ; {
-			result, err := ob.qs.List(ctx, filter, cursor, 200)
-			if err != nil {
-				return nil, fmt.Errorf("%s/%s: %w", status, taskType, err)
-			}
-			for _, item := range result.Items {
-				byID[item.TaskID] = item
-			}
-			if !result.HasMore || result.NextCursor == "" {
-				break
-			}
-			cursor = result.NextCursor
+		// Each adapter resolves the top-5 rows directly in SQL (ORDER BY +
+		// LIMIT). The oldest section needs the global oldest rows, which is a
+		// subset of the per-type top-5s; other sections show only the 5 most
+		// recently updated. This avoids paging the full waiting/failed set,
+		// which is pathological on a network database with thousands of tasks:
+		// the old code issued ~800 projection queries per 200-row page.
+		var result []ProjectionRow
+		var err error
+		if oldestFirst {
+			result, err = ob.qs.ListOldest(ctx, filter, 5)
+		} else {
+			result, err = ob.qs.ListRecent(ctx, filter, 5)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("%s/%s: %w", status, taskType, err)
+		}
+		for _, item := range result {
+			byID[item.TaskID] = item
 		}
 	}
 	items := make([]ProjectionRow, 0, len(byID))

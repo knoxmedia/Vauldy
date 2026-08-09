@@ -190,6 +190,15 @@ type SourceAdapter interface {
 	ListIDs(ctx context.Context, tx *sql.Tx, filters Filters) ([]int64, error)
 	// Count returns the exact count matching the filters.
 	Count(ctx context.Context, tx *sql.Tx, filters Filters) (int64, error)
+	// Oldest returns up to limit source-ids with the earliest available
+	// time (falling back to created time) among rows matching the filters,
+	// ordered oldest first. The adapter must apply the filters and the
+	// ordering in SQL with a LIMIT — overview "oldest" sections rely on
+	// this to avoid paging the full waiting set over the network.
+	Oldest(ctx context.Context, tx *sql.Tx, filters Filters, limit int) ([]int64, error)
+	// Recent returns up to limit source-ids with the most recent update
+	// time among rows matching the filters, ordered newest first.
+	Recent(ctx context.Context, tx *sql.Tx, filters Filters, limit int) ([]int64, error)
 }
 
 // ProjectionBuilder computes normalized ProjectionRows from source adapters
@@ -573,6 +582,50 @@ func (a *OracleAdapter) Count(ctx context.Context, tx *sql.Tx, filters Filters) 
 		return 0, err
 	}
 	return count, nil
+}
+
+// Oldest returns up to limit post_ingest_task ids with the earliest
+// available time (falling back to created time) matching the filters.
+func (a *OracleAdapter) Oldest(ctx context.Context, tx *sql.Tx, filters Filters, limit int) ([]int64, error) {
+	where, args := compileFiltersSQL(filters, "post_ingest_task", "status", "task_type")
+	rows, err := tx.QueryContext(ctx,
+		`SELECT id FROM post_ingest_task`+where+` ORDER BY COALESCE(available_at, created_at) ASC, id ASC LIMIT ?`,
+		append(args, limit)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// Recent returns up to limit post_ingest_task ids with the most recent
+// update time matching the filters.
+func (a *OracleAdapter) Recent(ctx context.Context, tx *sql.Tx, filters Filters, limit int) ([]int64, error) {
+	where, args := compileFiltersSQL(filters, "post_ingest_task", "status", "task_type")
+	rows, err := tx.QueryContext(ctx,
+		`SELECT id FROM post_ingest_task`+where+` ORDER BY COALESCE(updated_at, created_at) DESC, id DESC LIMIT ?`,
+		append(args, limit)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 // Filters is a placeholder for query filter parameters.

@@ -218,7 +218,7 @@ func adoptRepairOptionalEvidenceTx(ctx context.Context, tx *sql.Tx, mediaID int6
 			evidenceStep = StepKeyframe
 		case StepMediaVisible:
 			var visible int
-			if err := tx.QueryRowContext(ctx, `SELECT publication_state IN ('published','degraded') FROM media WHERE id=?`, mediaID).Scan(&visible); err != nil {
+			if err := tx.QueryRowContext(ctx, `SELECT CASE WHEN publication_state IN ('published','degraded') THEN 1 ELSE 0 END FROM media WHERE id=?`, mediaID).Scan(&visible); err != nil {
 				return err
 			}
 			if visible == 0 {
@@ -264,7 +264,7 @@ func currentRepairCoversRequiredKindsTx(ctx context.Context, tx *sql.Tx, mediaID
 	}
 	for _, step := range required {
 		var present int
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM media_ingest_step WHERE run_id=? AND step_type=? AND required=1)`, runID, step).Scan(&present); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT CASE WHEN EXISTS(SELECT 1 FROM media_ingest_step WHERE run_id=? AND step_type=? AND required=1) THEN 1 ELSE 0 END`, runID, step).Scan(&present); err != nil {
 			return false, err
 		}
 		if present == 0 {
@@ -323,7 +323,7 @@ func stepEvidenceTx(ctx context.Context, tx *sql.Tx, mediaID int64, step StepTyp
 		return false, nil
 	}
 	var done int
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM media_ingest_step s JOIN media_ingest_run r ON r.id=s.run_id WHERE s.media_id=? AND s.step_type=? AND s.status IN ('done','skipped') AND r.status IN ('published','degraded'))`, mediaID, step).Scan(&done); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT CASE WHEN EXISTS(SELECT 1 FROM media_ingest_step s JOIN media_ingest_run r ON r.id=s.run_id WHERE s.media_id=? AND s.step_type=? AND s.status IN ('done','skipped') AND r.status IN ('published','degraded')) THEN 1 ELSE 0 END`, mediaID, step).Scan(&done); err != nil {
 		return false, err
 	}
 	if done == 1 {
@@ -333,28 +333,28 @@ func stepEvidenceTx(ctx context.Context, tx *sql.Tx, mediaID int64, step StepTyp
 	var query string
 	switch step {
 	case StepPoster:
-		query = `SELECT EXISTS(SELECT 1 FROM media_derived_assets WHERE media_id=? AND artifact_kind='poster' AND TRIM(COALESCE(enc_path,''))<>'') OR EXISTS(SELECT 1 FROM media WHERE id=? AND (json_valid(meta_json) AND (TRIM(COALESCE(json_extract(meta_json,'$.scrape.poster'),''))<>'' OR TRIM(COALESCE(json_extract(meta_json,'$.scrape.extra.poster'),''))<>''))) OR EXISTS(SELECT 1 FROM post_ingest_task WHERE media_id=? AND task_type='poster' AND status='done')`
+		query = `SELECT CASE WHEN EXISTS(SELECT 1 FROM media_derived_assets WHERE media_id=? AND artifact_kind='poster' AND TRIM(COALESCE(enc_path,''))<>'') OR EXISTS(SELECT 1 FROM media WHERE id=? AND (json_valid(meta_json) AND (TRIM(COALESCE(json_extract(meta_json,'$.scrape.poster'),''))<>'' OR TRIM(COALESCE(json_extract(meta_json,'$.scrape.extra.poster'),''))<>''))) OR EXISTS(SELECT 1 FROM post_ingest_task WHERE media_id=? AND task_type='poster' AND status='done') THEN 1 ELSE 0 END`
 	case StepThumbnail:
 		return thumbnailEvidenceTx(ctx, tx, mediaID)
 	case StepScrape:
 		var taskDone int
 		var metaJSON string
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM scrape_task WHERE media_id=? AND status='done'),COALESCE((SELECT meta_json FROM media WHERE id=?),'')`, mediaID, mediaID).Scan(&taskDone, &metaJSON); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT CASE WHEN EXISTS(SELECT 1 FROM scrape_task WHERE media_id=? AND status='done') THEN 1 ELSE 0 END,COALESCE((SELECT meta_json FROM media WHERE id=?),'')`, mediaID, mediaID).Scan(&taskDone, &metaJSON); err != nil {
 			return false, err
 		}
 		return taskDone == 1 || scraper.HasScrapedMetaJSON(metaJSON), nil
 	case StepPreview:
-		query = `SELECT EXISTS(SELECT 1 FROM preview_task WHERE media_id=? AND status IN ('ready','done') AND (TRIM(COALESCE(sprite_path,''))<>'' OR TRIM(COALESCE(vtt_path,''))<>'')) OR EXISTS(SELECT 1 FROM post_ingest_task WHERE media_id=? AND task_type='preview' AND status='done')`
+		query = `SELECT CASE WHEN EXISTS(SELECT 1 FROM preview_task WHERE media_id=? AND status IN ('ready','done') AND (TRIM(COALESCE(sprite_path,''))<>'' OR TRIM(COALESCE(vtt_path,''))<>'')) OR EXISTS(SELECT 1 FROM post_ingest_task WHERE media_id=? AND task_type='preview' AND status='done') THEN 1 ELSE 0 END`
 	case StepKeyframe:
-		query = `SELECT EXISTS(SELECT 1 FROM keyframe_task WHERE media_id=? AND status='done' AND (COALESCE(keyframe_count,0)>0 OR TRIM(COALESCE(output_dir,''))<>'')) OR EXISTS(SELECT 1 FROM post_ingest_task WHERE media_id=? AND task_type='keyframe' AND status='done')`
+		query = `SELECT CASE WHEN EXISTS(SELECT 1 FROM keyframe_task WHERE media_id=? AND status='done' AND (COALESCE(keyframe_count,0)>0 OR TRIM(COALESCE(output_dir,''))<>'')) OR EXISTS(SELECT 1 FROM post_ingest_task WHERE media_id=? AND task_type='keyframe' AND status='done') THEN 1 ELSE 0 END`
 	case StepSubtitle:
-		query = `SELECT EXISTS(SELECT 1 FROM media_subtitle WHERE media_id=? AND status='ready' AND TRIM(COALESCE(vtt_path,''))<>'') OR EXISTS(SELECT 1 FROM subtitle_task WHERE media_id=? AND status='done') OR EXISTS(SELECT 1 FROM post_ingest_task WHERE media_id=? AND task_type='subtitle' AND status='done')`
+		query = `SELECT CASE WHEN EXISTS(SELECT 1 FROM media_subtitle WHERE media_id=? AND status='ready' AND TRIM(COALESCE(vtt_path,''))<>'') OR EXISTS(SELECT 1 FROM subtitle_task WHERE media_id=? AND status='done') OR EXISTS(SELECT 1 FROM post_ingest_task WHERE media_id=? AND task_type='subtitle' AND status='done') THEN 1 ELSE 0 END`
 	case StepAtrack:
-		query = `SELECT EXISTS(SELECT 1 FROM atrack_task WHERE media_id=? AND status='done') OR EXISTS(SELECT 1 FROM media_derived_assets WHERE media_id=? AND artifact_kind IN ('atrack_playlist','atrack_segment')) OR EXISTS(SELECT 1 FROM post_ingest_task WHERE media_id=? AND task_type='atrack' AND status='done')`
+		query = `SELECT CASE WHEN EXISTS(SELECT 1 FROM atrack_task WHERE media_id=? AND status='done') OR EXISTS(SELECT 1 FROM media_derived_assets WHERE media_id=? AND artifact_kind IN ('atrack_playlist','atrack_segment')) OR EXISTS(SELECT 1 FROM post_ingest_task WHERE media_id=? AND task_type='atrack' AND status='done') THEN 1 ELSE 0 END`
 	case StepEncrypt:
 		return encryptionEvidenceTx(ctx, tx, mediaID)
 	case StepPrepare:
-		query = `SELECT EXISTS(SELECT 1 FROM transcode_task WHERE file_id=(SELECT file_id FROM media WHERE id=?) AND task_type='pretranscode' AND status='done')`
+		query = `SELECT CASE WHEN EXISTS(SELECT 1 FROM transcode_task WHERE file_id=(SELECT file_id FROM media WHERE id=?) AND task_type='pretranscode' AND status='done') THEN 1 ELSE 0 END`
 	default:
 		return false, fmt.Errorf("unknown step %q", step)
 	}

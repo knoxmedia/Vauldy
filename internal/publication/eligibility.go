@@ -371,7 +371,7 @@ func selectFamilyCandidate(ctx context.Context, tx store.SQLExecutor, req ClaimR
 			args = append(args, nil)
 		}
 	}
-	query := fmt.Sprintf(`SELECT q.id,COALESCE(st.required,0),q.ingest_run_id IS NOT NULL FROM %s q LEFT JOIN media_ingest_step st ON st.id=q.ingest_step_id WHERE %s%s AND (%s) ORDER BY %s LIMIT 1`, table, due, typeFilter, eligibility, familyOrderSQL(req.Family, alias, req.SchedulerPolicy, now))
+	query := fmt.Sprintf(`SELECT q.id,COALESCE(st.required,0),CASE WHEN q.ingest_run_id IS NOT NULL THEN 1 ELSE 0 END FROM %s q LEFT JOIN media_ingest_step st ON st.id=q.ingest_step_id WHERE %s%s AND (%s) ORDER BY %s LIMIT 1`, table, due, typeFilter, eligibility, familyOrderSQL(req.Family, alias, req.SchedulerPolicy, now))
 	err = tx.QueryRowContext(ctx, query, args...).Scan(&id, &required, &linked)
 	return
 }
