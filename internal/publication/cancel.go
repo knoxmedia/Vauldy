@@ -90,14 +90,14 @@ func CancelRunForRequiredStepTx(ctx context.Context, tx store.SQLExecutor, runID
 		return false, fmt.Errorf("publication cancel target: invalid transaction, run, step, task, or reason")
 	}
 	var valid int
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
+	if err := tx.QueryRowContext(ctx, `SELECT CASE WHEN EXISTS(
 		SELECT 1 FROM media_ingest_run r
 		JOIN media m ON m.id=r.media_id AND m.ingest_generation=r.generation
 		JOIN media_ingest_step s ON s.id=? AND s.run_id=r.id AND s.media_id=r.media_id AND s.generation=r.generation
 		JOIN transcode_task t ON t.id=? AND t.ingest_run_id=r.id AND t.ingest_step_id=s.id AND t.media_id=r.media_id AND t.generation=r.generation
 		WHERE r.id=? AND r.status='processing' AND r.superseded_by_generation IS NULL AND r.superseded_at IS NULL
 		AND s.step_type='prepare' AND s.required=1 AND s.status IN ('waiting','running')
-		AND t.task_type='pretranscode' AND t.status IN ('waiting','running','paused'))`, stepID, taskID, runID).Scan(&valid); err != nil {
+		AND t.task_type='pretranscode' AND t.status IN ('waiting','running','paused')) THEN 1 ELSE 0 END`, stepID, taskID, runID).Scan(&valid); err != nil {
 		return false, err
 	}
 	if valid != 1 {

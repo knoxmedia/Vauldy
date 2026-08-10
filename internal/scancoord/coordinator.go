@@ -243,7 +243,7 @@ func (c *Coordinator) Submit(ctx context.Context, req ScanRequest) (SubmitResult
 			var previousOwner string
 			var previousExpired bool
 			err = tx.QueryRowContext(attemptCtx, `
-				SELECT scan_task_id, owner_id, lease_until < CURRENT_TIMESTAMP
+				SELECT scan_task_id, owner_id, CASE WHEN lease_until < CURRENT_TIMESTAMP THEN 1 ELSE 0 END
 				FROM scan_lease WHERE library_id=?`, req.LibraryID).Scan(&previousTaskID, &previousOwner, &previousExpired)
 			if err != nil && !errors.Is(err, sql.ErrNoRows) {
 				return err

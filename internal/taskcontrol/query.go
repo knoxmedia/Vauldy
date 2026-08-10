@@ -297,6 +297,140 @@ func (q *QueryService) Detail(ctx context.Context, taskIdentity string) (*Detail
 	return &DetailResult{Row: *row}, nil
 }
 
+// ListOldest returns up to limit projection rows with the earliest available
+// time (falling back to created time) matching the filter. Unlike List, it
+// asks each source adapter for its oldest ids in SQL (ORDER BY + LIMIT), so
+// overview "oldest" sections never page the full waiting set over the network.
+func (q *QueryService) ListOldest(ctx context.Context, filter QueryFilter, limit int) ([]ProjectionRow, error) {
+	if limit <= 0 {
+		limit = 5
+	}
+	return q.listHead(ctx, filter, limit, true)
+}
+
+// ListRecent returns up to limit projection rows with the most recent update
+// time matching the filter.
+func (q *QueryService) ListRecent(ctx context.Context, filter QueryFilter, limit int) ([]ProjectionRow, error) {
+	if limit <= 0 {
+		limit = 5
+	}
+	return q.listHead(ctx, filter, limit, false)
+}
+
+// listHead is the shared implementation behind ListOldest/ListRecent.
+func (q *QueryService) listHead(ctx context.Context, filter QueryFilter, limit int, oldest bool) ([]ProjectionRow, error) {
+	tx, err := q.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("list head begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	snapRev, err := q.builder.snapshotRevision(ctx, tx)
+	if err != nil {
+		return nil, fmt.Errorf("list head snapshot revision: %w", err)
+	}
+
+	byIdentity := make(map[string]ProjectionRow)
+	if sources := q.adaptersForPublicType(filter.TaskType); len(sources) > 0 {
+		for _, source := range sources {
+			var ids []int64
+			if oldest {
+				ids, err = source.adapter.Oldest(ctx, tx, adapterFilters(filter, source.mapping), limit)
+			} else {
+				ids, err = source.adapter.Recent(ctx, tx, adapterFilters(filter, source.mapping), limit)
+			}
+			if err != nil {
+				return nil, fmt.Errorf("list head %s: %w", source.adapter.Kind(), err)
+			}
+			for _, id := range ids {
+				identity := BuildIdentity(source.adapter.Kind(), id)
+				if _, exists := byIdentity[identity]; exists {
+					continue
+				}
+				row, err := q.builder.ProjectTx(ctx, tx, identity)
+				if err != nil {
+					return nil, fmt.Errorf("list head project: %w", err)
+				}
+				if row != nil {
+					row.Revision = snapRev
+					byIdentity[identity] = *row
+				}
+			}
+		}
+	} else {
+		// Fallback: no registered adapters, query post_ingest_task directly.
+		where, args := buildOracleWhere(filter)
+		var order string
+		if oldest {
+			order = "COALESCE(available_at, created_at) ASC, id ASC"
+		} else {
+			order = "COALESCE(updated_at, created_at) DESC, id DESC"
+		}
+		query := `SELECT id, task_type, status, COALESCE(attempts,0), COALESCE(max_attempts,3),
+			COALESCE(generation,1), COALESCE(retry_round,0),
+			COALESCE(lease_owner,''), lease_until, COALESCE(last_error,''),
+			COALESCE(base_priority,0), available_at, created_at, updated_at,
+			media_id, library_id,
+			removed_at, COALESCE(removed_by,''), COALESCE(remove_reason,''),
+			run_now_expires,
+			COALESCE((SELECT title FROM media m WHERE m.id = post_ingest_task.media_id),''),
+			COALESCE((SELECT file_path FROM media m WHERE m.id = post_ingest_task.media_id),'')
+		FROM post_ingest_task` + where + ` ORDER BY ` + order + ` LIMIT ?`
+		args = append(args, limit)
+		rows, err := tx.QueryContext(ctx, query, args...)
+		if err != nil {
+			return nil, fmt.Errorf("list head query: %w", err)
+		}
+		for rows.Next() {
+			raw, err := scanOracleRowSimple(rows)
+			if err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("list head scan: %w", err)
+			}
+			row := q.builder.normalize(&raw, "orchestration")
+			row.Revision = snapRev
+			row.TaskID = BuildIdentity("orchestration", raw.SourceID)
+			byIdentity[row.TaskID] = *row
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+	}
+
+	items := make([]ProjectionRow, 0, len(byIdentity))
+	for _, row := range byIdentity {
+		items = append(items, row)
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if oldest {
+			iAt, jAt := items[i].CreatedAt, items[j].CreatedAt
+			if items[i].AvailableAt != nil {
+				iAt = *items[i].AvailableAt
+			}
+			if items[j].AvailableAt != nil {
+				jAt = *items[j].AvailableAt
+			}
+			if !iAt.Equal(jAt) {
+				return iAt.Before(jAt)
+			}
+		} else if !items[i].UpdatedAt.Equal(items[j].UpdatedAt) {
+			return items[i].UpdatedAt.After(items[j].UpdatedAt)
+		} else if !items[i].CreatedAt.Equal(items[j].CreatedAt) {
+			return items[i].CreatedAt.After(items[j].CreatedAt)
+		}
+		return items[i].TaskID < items[j].TaskID
+	})
+	if len(items) > limit {
+		items = items[:limit]
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("list head commit: %w", err)
+	}
+	return items, nil
+}
+
 type resolvedSource struct {
 	mapping SourceMapping
 	adapter SourceAdapter

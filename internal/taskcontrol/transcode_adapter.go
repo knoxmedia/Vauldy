@@ -52,14 +52,21 @@ func (a *TranscodeAdapter) taskTypeExpr() string {
 // Kind returns the persistent source identity used by task details.
 func (a *TranscodeAdapter) Kind() string { return "transcode_task" }
 
+// transcodeMediaJoin is the portable media lookup used by every TranscodeAdapter
+// query. transcode_task.media_id may be NULL with only file_id populated, so the
+// media row is resolved by media_id first and falls back to the (unique) file_id
+// match. A correlated scalar subquery inside JOIN ... ON works on SQLite/MySQL/
+// PostgreSQL but some backends execute it pathologically; the two LEFT JOIN form
+// is equivalent because media.file_id is UNIQUE.
+const transcodeMediaJoin = ` LEFT JOIN media mf2 ON mf2.file_id=t.file_id LEFT JOIN media m ON m.id=COALESCE(t.media_id, mf2.id)`
+
 func (a *TranscodeAdapter) Read(ctx context.Context, tx *sql.Tx, id int64) (*RawTaskRow, error) {
 	row := tx.QueryRowContext(ctx, `SELECT t.id, `+a.taskTypeExpr()+`,
 		COALESCE(t.status,'waiting'), COALESCE(t.generation,0), COALESCE(t.retry_round,0), COALESCE(t.lease_owner,''),
 		t.lease_until, COALESCE(t.error_message,''), t.created_at, t.created_at,
 		m.id, COALESCE(m.title,''), COALESCE(m.file_path,''), m.library_id,
 		CASE WHEN t.ingest_run_id IS NOT NULL OR t.ingest_step_id IS NOT NULL OR t.generation IS NOT NULL THEN 1 ELSE 0 END
-		FROM transcode_task t LEFT JOIN media m ON m.id=COALESCE(t.media_id,
-		(SELECT mf.id FROM media mf WHERE mf.file_id=t.file_id LIMIT 1)) WHERE t.id=?`, id)
+		FROM transcode_task t`+transcodeMediaJoin+` WHERE t.id=?`, id)
 	r := &RawTaskRow{SourceKind: a.Kind(), SourceID: id}
 	var leaseUntil sql.NullTime
 	var mediaID, libraryID sql.NullInt64
@@ -86,8 +93,7 @@ func (a *TranscodeAdapter) ListIDs(ctx context.Context, tx *sql.Tx, filters Filt
 	if impossible {
 		return nil, nil
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT t.id FROM transcode_task t LEFT JOIN media m ON m.id=COALESCE(t.media_id,
-		(SELECT mf.id FROM media mf WHERE mf.file_id=t.file_id LIMIT 1))`+where+` ORDER BY t.id ASC`, args...)
+	rows, err := tx.QueryContext(ctx, `SELECT t.id FROM transcode_task t`+transcodeMediaJoin+where+` ORDER BY t.id ASC`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -109,9 +115,58 @@ func (a *TranscodeAdapter) Count(ctx context.Context, tx *sql.Tx, filters Filter
 		return 0, nil
 	}
 	var count int64
-	err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM transcode_task t LEFT JOIN media m ON m.id=COALESCE(t.media_id,
-		(SELECT mf.id FROM media mf WHERE mf.file_id=t.file_id LIMIT 1))`+where, args...).Scan(&count)
+	err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM transcode_task t`+transcodeMediaJoin+where, args...).Scan(&count)
 	return count, err
+}
+
+// Oldest returns up to limit transcode_task ids with the earliest created
+// time matching the filters.
+func (a *TranscodeAdapter) Oldest(ctx context.Context, tx *sql.Tx, filters Filters, limit int) ([]int64, error) {
+	where, args, impossible := a.buildTranscodeWhere(filters)
+	if impossible {
+		return nil, nil
+	}
+	rows, err := tx.QueryContext(ctx,
+		`SELECT t.id FROM transcode_task t`+transcodeMediaJoin+where+` ORDER BY t.created_at ASC, t.id ASC LIMIT ?`,
+		append(args, limit)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// Recent returns up to limit transcode_task ids with the most recent
+// created time matching the filters.
+func (a *TranscodeAdapter) Recent(ctx context.Context, tx *sql.Tx, filters Filters, limit int) ([]int64, error) {
+	where, args, impossible := a.buildTranscodeWhere(filters)
+	if impossible {
+		return nil, nil
+	}
+	rows, err := tx.QueryContext(ctx,
+		`SELECT t.id FROM transcode_task t`+transcodeMediaJoin+where+` ORDER BY t.created_at DESC, t.id DESC LIMIT ?`,
+		append(args, limit)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 func (a *TranscodeAdapter) buildTranscodeWhere(f Filters) (string, []any, bool) {

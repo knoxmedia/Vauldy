@@ -82,6 +82,52 @@ func (a *ScrapeAdapter) Count(ctx context.Context, tx *sql.Tx, f Filters) (int64
 	return n, e
 }
 
+// Oldest returns up to limit scrape_task ids with the earliest available
+// time (falling back to created time) matching the filters.
+func (a *ScrapeAdapter) Oldest(ctx context.Context, tx *sql.Tx, f Filters, limit int) ([]int64, error) {
+	w, args, bad := simpleExternalWhere(f, "q", "m.library_id", true)
+	if bad {
+		return nil, nil
+	}
+	rows, e := tx.QueryContext(ctx, `SELECT q.id FROM scrape_task q LEFT JOIN media m ON m.id=q.media_id`+w+` ORDER BY COALESCE(q.available_at, q.created_at) ASC, q.id ASC LIMIT ?`, append(args, limit)...)
+	if e != nil {
+		return nil, e
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if e = rows.Scan(&id); e != nil {
+			return nil, e
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// Recent returns up to limit scrape_task ids with the most recent created
+// time matching the filters.
+func (a *ScrapeAdapter) Recent(ctx context.Context, tx *sql.Tx, f Filters, limit int) ([]int64, error) {
+	w, args, bad := simpleExternalWhere(f, "q", "m.library_id", true)
+	if bad {
+		return nil, nil
+	}
+	rows, e := tx.QueryContext(ctx, `SELECT q.id FROM scrape_task q LEFT JOIN media m ON m.id=q.media_id`+w+` ORDER BY q.created_at DESC, q.id DESC LIMIT ?`, append(args, limit)...)
+	if e != nil {
+		return nil, e
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if e = rows.Scan(&id); e != nil {
+			return nil, e
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 // ScanAdapter projects process-level library scans.
 type ScanAdapter struct{ db *sql.DB }
 
@@ -129,6 +175,52 @@ func (a *ScanAdapter) Count(ctx context.Context, tx *sql.Tx, f Filters) (int64, 
 	var n int64
 	e := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM scan_task t LEFT JOIN scan_lease l ON l.scan_task_id=t.id`+w, args...).Scan(&n)
 	return n, e
+}
+
+// Oldest returns up to limit scan_task ids with the earliest created time
+// matching the filters.
+func (a *ScanAdapter) Oldest(ctx context.Context, tx *sql.Tx, f Filters, limit int) ([]int64, error) {
+	w, args, bad := simpleExternalWhere(f, "t", "t.library_id", false)
+	if bad {
+		return nil, nil
+	}
+	rows, e := tx.QueryContext(ctx, `SELECT t.id FROM scan_task t LEFT JOIN scan_lease l ON l.scan_task_id=t.id`+w+` ORDER BY t.created_at ASC, t.id ASC LIMIT ?`, append(args, limit)...)
+	if e != nil {
+		return nil, e
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if e = rows.Scan(&id); e != nil {
+			return nil, e
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// Recent returns up to limit scan_task ids with the most recent updated
+// time (falling back to created time) matching the filters.
+func (a *ScanAdapter) Recent(ctx context.Context, tx *sql.Tx, f Filters, limit int) ([]int64, error) {
+	w, args, bad := simpleExternalWhere(f, "t", "t.library_id", false)
+	if bad {
+		return nil, nil
+	}
+	rows, e := tx.QueryContext(ctx, `SELECT t.id FROM scan_task t LEFT JOIN scan_lease l ON l.scan_task_id=t.id`+w+` ORDER BY COALESCE(t.updated_at, t.created_at) DESC, t.id DESC LIMIT ?`, append(args, limit)...)
+	if e != nil {
+		return nil, e
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if e = rows.Scan(&id); e != nil {
+			return nil, e
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 func simpleExternalWhere(f Filters, alias, libraryExpr string, hasGeneration bool) (string, []any, bool) {

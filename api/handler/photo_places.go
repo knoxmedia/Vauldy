@@ -39,7 +39,7 @@ func (h *Handler) ListPhotoPlaces(c *gin.Context) {
 		FROM media
 		WHERE library_id = ? AND file_type = 'image' AND status = 'active'
 			AND NULLIF(json_extract(meta_json, '$.photo.place_id'), '') IS NOT NULL
-		GROUP BY place_id, location_name
+		GROUP BY json_extract(meta_json, '$.photo.place_id'), json_extract(meta_json, '$.photo.location_name')
 		ORDER BY cnt DESC, location_name ASC`, libraryID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
