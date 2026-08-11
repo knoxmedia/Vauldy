@@ -42,21 +42,79 @@ RUN set -eu; \
     CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -tags embedweb -ldflags="$ldflags" -o /knox-media ./cmd/server; \
     rm -f /buildinfo-check
 
+# Extract the special HW-accelerated ffmpeg from the release bundle.
+# The bundle only exists for linux/amd64; on arm64 this stage stays empty
+# and the runtime image falls back to Debian's ffmpeg (software transcode).
+FROM debian:bookworm-slim AS ffmpeg-special
+ARG TARGETARCH
+ARG FFMPEG_PACKAGE_URL
+RUN set -eu; \
+    mkdir -p /ffmpeg-bin; \
+    if [ "$TARGETARCH" = "amd64" ] && [ -n "$FFMPEG_PACKAGE_URL" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+            && rm -rf /var/lib/apt/lists/*; \
+        curl -fsSL "$FFMPEG_PACKAGE_URL" -o /tmp/ffpkg.tar.gz; \
+        tar -xzf /tmp/ffpkg.tar.gz -C /tmp --wildcards '*/tools/ffmpeg/bin/*'; \
+        cp -a /tmp/vauldy/tools/ffmpeg/bin/* /ffmpeg-bin/; \
+        rm -rf /tmp/ffpkg.tar.gz /tmp/vauldy; \
+    fi
+
 # Runtime image
 FROM debian:bookworm-slim
+ARG TARGETARCH
 ARG VERSION=dev
+ARG FFMPEG_PACKAGE_URL
 LABEL org.opencontainers.image.title="Vauldy" \
       org.opencontainers.image.description="Private, permanent, secure family digital safe" \
       org.opencontainers.image.source="https://github.com/knoxmedia/Vauldy" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.version="$VERSION"
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates ffmpeg \
-    && rm -rf /var/lib/apt/lists/*
+RUN set -eu; \
+    if [ "$TARGETARCH" = "amd64" ] && [ -n "$FFMPEG_PACKAGE_URL" ]; then \
+        # special ffmpeg needs libfdk-aac (non-free) plus a legacy libvpx.so.3
+        # (Debian bookworm only ships libvpx.so.7), fetched from the Ubuntu archive.
+        echo "deb http://deb.debian.org/debian bookworm main non-free contrib" \
+            > /etc/apt/sources.list.d/bookworm-nonfree.list; \
+    fi; \
+    apt-get update; \
+    if [ "$TARGETARCH" = "amd64" ] && [ -n "$FFMPEG_PACKAGE_URL" ]; then \
+        apt-get install -y --no-install-recommends \
+            ca-certificates curl libstdc++6 libnuma1 libopus0 libmp3lame0 \
+            libx11-6 libfdk-aac2; \
+        curl -fsSL "https://archive.ubuntu.com/ubuntu/pool/main/libv/libvpx/libvpx3_1.5.0-2ubuntu1.1_amd64.deb" \
+            -o /tmp/libvpx3.deb; \
+        dpkg-deb -x /tmp/libvpx3.deb /tmp/libvpx3; \
+        cp -a /tmp/libvpx3/usr/lib/x86_64-linux-gnu/libvpx.so.3.0.0 /usr/lib/x86_64-linux-gnu/; \
+        ln -sf libvpx.so.3.0.0 /usr/lib/x86_64-linux-gnu/libvpx.so.3; \
+        rm -rf /tmp/libvpx3 /tmp/libvpx3.deb; \
+    else \
+        apt-get install -y --no-install-recommends ca-certificates ffmpeg; \
+    fi; \
+    rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=gobuild /knox-media /app/knox-media
+# On amd64 this is the special ffmpeg bundle; on arm64 it stays empty and
+# /usr/bin/ffmpeg (installed above) is used instead.
+COPY --from=ffmpeg-special /ffmpeg-bin /app/tools/ffmpeg/bin
 COPY docker/config.yml /app/config.yml
+# Point the config at the special ffmpeg on amd64; keep /usr/bin paths on arm64.
+RUN if [ "$TARGETARCH" = "amd64" ] && [ -n "$FFMPEG_PACKAGE_URL" ]; then \
+        sed -i -e 's#ffprobe_path: "/usr/bin/ffprobe"#ffprobe_path: "/app/tools/ffmpeg/bin/ffprobe"#' \
+               -e 's#ffmpeg_path: "/usr/bin/ffmpeg"#ffmpeg_path: "/app/tools/ffmpeg/bin/ffmpeg"#' \
+            /app/config.yml; \
+    fi
 ENV KNOX_MEDIA_CONFIG=/app/config.yml
+# The special ffmpeg loads bundled libdrm/libnppi/libva/libXfixes from its dir.
+ENV LD_LIBRARY_PATH=/app/tools/ffmpeg/bin
+ENV PATH=/app/tools/ffmpeg/bin:$PATH
 EXPOSE 8200
 VOLUME ["/app/data"]
+# Self-check: the special ffmpeg must actually start inside the container
+# (validates the libvpx.so.3 / libfdk-aac compatibility on this base image).
+RUN if [ "$TARGETARCH" = "amd64" ] && [ -n "$FFMPEG_PACKAGE_URL" ]; then \
+        /app/tools/ffmpeg/bin/ffmpeg -version >/dev/null && echo "special ffmpeg OK"; \
+        /app/tools/ffmpeg/bin/ffmpeg -hide_banner -encoders 2>/dev/null | grep -q nvenc && echo "NVENC encoder available" || echo "NVENC not compiled-in"; \
+    else \
+        /usr/bin/ffmpeg -version >/dev/null && echo "debian ffmpeg OK"; \
+    fi
 CMD ["/app/knox-media"]

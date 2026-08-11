@@ -62,8 +62,10 @@ jobs:
           if [ -z "$VERSION" ]; then
             VERSION="$(git describe --tags --always)"
           fi
+          # Release assets use the bare version without a leading "v".
+          URL_VERSION="${VERSION#v}"
           BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          TAGS="${{ env.IMAGE }}:${VERSION}"
+          TAGS="${{ env.IMAGE }}:${URL_VERSION}"
           PUSH_LATEST="${{ inputs.push_latest }}"
           if [ "${{ github.event_name }}" = "push" ]; then
             PUSH_LATEST="true"
@@ -71,10 +73,12 @@ jobs:
           if [ "$PUSH_LATEST" = "true" ]; then
             TAGS="${{ env.IMAGE }}:latest,${TAGS}"
           fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          FFMPEG_URL="https://github.com/knoxmedia/Vauldy/releases/download/${URL_VERSION}/vauldy_linux_amd64.tar.gz"
+          echo "version=$URL_VERSION" >> "$GITHUB_OUTPUT"
           echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
           echo "build_time=$BUILD_TIME" >> "$GITHUB_OUTPUT"
-          echo "Built with version=$VERSION tags=$TAGS"
+          echo "ffmpeg_package_url=$FFMPEG_URL" >> "$GITHUB_OUTPUT"
+          echo "Built with version=$URL_VERSION tags=$TAGS ffmpeg=$FFMPEG_URL"
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -89,5 +93,6 @@ jobs:
             BUILD_TIME=${{ steps.meta.outputs.build_time }}
             DIRTY=false
             ALLOW_DIRTY=false
+            FFMPEG_PACKAGE_URL=${{ steps.meta.outputs.ffmpeg_package_url }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

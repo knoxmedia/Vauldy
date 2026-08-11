@@ -375,6 +375,23 @@ docker compose up -d   # uses knoxmedia/vauldy:latest
 
 > The image ships ffmpeg/ffprobe plus a container-friendly default config. Mount your own config at `/app/config.yml` to override, and mount your media directories wherever you like (then add those paths as library folders in the admin console). Build from source with `docker build -t knoxmedia/vauldy:local .`.
 
+**Hardware transcoding (NVENC)**
+
+- **linux/amd64** images bundle the release ffmpeg build with NVENC / NPP / fdk-aac, so NVIDIA GPU transcoding works out of the box.
+- **linux/arm64** images use Debian's ffmpeg (software transcode only).
+
+To enable NVENC you need the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) on the host, then pass `--gpus all`:
+
+```bash
+docker run -d \
+  --name vauldy \
+  --gpus all \
+  -p 8200:8200 \
+  -v ./data:/app/data \
+  -v /your/media:/media \
+  knoxmedia/vauldy:latest
+```
+
 #### First Use
 
 1. Open `http://localhost:8200` in a browser
@@ -713,6 +730,23 @@ docker compose up -d   # 使用 knoxmedia/vauldy:latest
 ```
 
 > 镜像内置 ffmpeg/ffprobe 及容器友好默认配置；如需覆盖配置，可将自定义 config.yml 挂载到 `/app/config.yml`，并将媒体目录挂载后，在管理后台中添加对应路径为媒体库文件夹。从源码自建镜像：`docker build -t knoxmedia/vauldy:local .`
+
+**硬件转码（NVENC）**
+
+- **linux/amd64** 镜像内置 release 特殊编译的 ffmpeg（含 NVENC / NPP / fdk-aac），NVIDIA GPU 转码开箱即用。
+- **linux/arm64** 镜像使用 Debian 自带 ffmpeg（仅软件转码）。
+
+启用 NVENC 需在宿主机安装 [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)，并在运行时加 `--gpus all`：
+
+```bash
+docker run -d \
+  --name vauldy \
+  --gpus all \
+  -p 8200:8200 \
+  -v ./data:/app/data \
+  -v /your/media:/media \
+  knoxmedia/vauldy:latest
+```
 
 #### 首次使用
 
