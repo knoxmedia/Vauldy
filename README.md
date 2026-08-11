@@ -31,7 +31,7 @@ Vauldy ships as a single binary with an embedded web UI, or as a Docker containe
 | Task Control | Unified task plane · resource scheduler · durable ingest & publication |
 | Default Port | `8200`                                             |
 | Platforms    | Windows / Linux / macOS / Docker                   |
-| Releases     | `build.ps1` cross-compiles 6 binaries (Win/Linux/macOS × amd64/arm64) |
+| Releases     | `build.ps1` cross-compiles 6 binaries (Win/Linux/macOS × amd64/arm64) · Docker Hub `knoxmedia/vauldy` (amd64/arm64) |
 
 
 **Default demo accounts** (auto-created on first boot — change immediately in production):
@@ -193,6 +193,7 @@ flowchart LR
 
 ```
 vauldy/
+├── .github/workflows/   # CI: desktop builds + Docker Hub publishing
 ├── cmd/
 │   ├── server/           # Main entrypoint
 │   ├── scheduler/        # JIT scheduler (Redis)
@@ -278,6 +279,7 @@ vauldy/
 ├── data/                 # Runtime data (DB/caches/uploads)
 ├── config.yml            # Runtime configuration
 ├── build.ps1             # Release build (6-platform cross-compile)
+├── docker/               # Container-friendly default config.yml
 ├── Dockerfile
 └── docker-compose.yml
 ```
@@ -352,16 +354,26 @@ go build -o vauldy ./cmd/server
 
 #### Docker
 
+Pre-built images (**linux/amd64 + linux/arm64**) are published to **Docker Hub** as `knoxmedia/vauldy`:
+
 ```bash
-docker build -t vauldy .
+docker pull knoxmedia/vauldy:latest
 
 docker run -d \
   --name vauldy \
   -p 8200:8200 \
   -v ./data:/app/data \
   -v /your/media:/media \
-  vauldy
+  knoxmedia/vauldy:latest
 ```
+
+Or with the bundled `docker-compose.yml`:
+
+```bash
+docker compose up -d   # uses knoxmedia/vauldy:latest
+```
+
+> The image ships ffmpeg/ffprobe plus a container-friendly default config. Mount your own config at `/app/config.yml` to override, and mount your media directories wherever you like (then add those paths as library folders in the admin console). Build from source with `docker build -t knoxmedia/vauldy:local .`.
 
 #### First Use
 
@@ -600,7 +612,7 @@ Vauldy 以单一二进制文件（内置 Web UI）或 Docker 容器形式发布�
 | 任务控制   | 统一任务面 · 资源调度器 · 持久化摄入与发布编排                  |
 | 默认端口   | `8200`                                        |
 | 运行环境   | Windows / Linux / macOS / Docker              |
-| 发布     | `build.ps1` 交叉编译 6 平台二进制（Win/Linux/macOS × amd64/arm64） |
+| 发布     | `build.ps1` 交叉编译 6 平台二进制（Win/Linux/macOS × amd64/arm64）· Docker Hub `knoxmedia/vauldy`（amd64/arm64） |
 
 
 **默认演示账号**（首次启动自动创建，生产环境请立即修改）：
@@ -681,16 +693,26 @@ go build -o vauldy ./cmd/server
 
 #### Docker
 
+预构建镜像（**linux/amd64 + linux/arm64**）已发布到 **Docker Hub**，镜像名为 `knoxmedia/vauldy`：
+
 ```bash
-docker build -t vauldy .
+docker pull knoxmedia/vauldy:latest
 
 docker run -d \
   --name vauldy \
   -p 8200:8200 \
   -v ./data:/app/data \
   -v /your/media:/media \
-  vauldy
+  knoxmedia/vauldy:latest
 ```
+
+或使用仓库自带的 `docker-compose.yml`：
+
+```bash
+docker compose up -d   # 使用 knoxmedia/vauldy:latest
+```
+
+> 镜像内置 ffmpeg/ffprobe 及容器友好默认配置；如需覆盖配置，可将自定义 config.yml 挂载到 `/app/config.yml`，并将媒体目录挂载后，在管理后台中添加对应路径为媒体库文件夹。从源码自建镜像：`docker build -t knoxmedia/vauldy:local .`
 
 #### 首次使用
 

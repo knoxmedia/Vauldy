@@ -1,0 +1,121 @@
+# Default runtime configuration shipped inside the Docker image.
+# Everything is relative to /app inside the container. Override by mounting
+# your own config at /app/config.yml, e.g.:
+#   -v ./my-config.yml:/app/config.yml
+server:
+  host: "0.0.0.0"
+  port: 8200
+  mode: "release" # debug | release
+branding:
+  app_name: "Vauldy"
+  favicon_path: ""
+  hls_multi_audio_enabled: false
+data:
+  dir: "/app/data"
+  db: "/app/data/knox-media.db"
+  transcode: "/app/data/transcode"
+  preview: "/app/data/preview"
+  subtitle: "/app/data/subtitles"
+  upload: "/app/data/upload"
+  chunks: "/app/data/upload/chunks"
+  static: "/app/data/static"
+security:
+  jwt_secret: "change-me-in-production-use-long-random-string"
+  token_hours: 168
+# ffmpeg/ffprobe are installed into the image from Debian bookworm.
+ffmpeg:
+  ffprobe_path: "/usr/bin/ffprobe"
+  ffmpeg_path: "/usr/bin/ffmpeg"
+drm_packaging:
+  engine_order:
+    - ffmpeg
+  shaka_packager_path: ""
+  segment_seconds: 4
+drm:
+  widevine:
+    enabled: false
+    emit_service_cert_url: false
+    private_module_url: ""
+    private_module_token: ""
+    private_module_timeout_seconds: 8
+  powerdrm:
+    enabled: true
+playback:
+  engines:
+    progressive_hls: ["powerplayer", "xgplayer"] # native + clear HLS (hls, jit_hls, hls_aes_128)
+    hls_powerdrm: ["powerplayer"]
+    drm: ["powerplayer", "shaka", "xgplayer"] # Widevine/FairPlay HLS or DASH
+encrypted_assets:
+  enabled: true
+  cleanup_plaintext_default: false
+scan:
+  file_hash_on_scan: false
+  fast_ffprobe: true
+  precapture_poster_timeout_seconds: 120
+subtitle:
+  auto_on_scan: true
+  # ASR requires a Python venv that is not included in the image.
+  # Mount a tools/ directory with tools/recognition/.venv and set the paths
+  # below (plus tools/asr) to enable Whisper/OCR features.
+  asr:
+    provider: shell
+    engine: faster-whisper
+    model: base
+    language: zh
+    device: ""
+    whisper_path: "tools/recognition/.venv/bin/whisper"
+    extra_args: []
+    shell: '"tools/recognition/.venv/bin/python" "tools/asr/asr_to_vtt.py" --input "{input}" --output-vtt "{output_vtt}"'
+  graphical_ocr:
+    enabled: false
+    tesseract_path: tesseract
+    tessdata_prefix: ""
+    languages: chi_sim+eng
+    python_path: "tools/recognition/.venv/bin/python"
+    script_path: "tools/subtitle_ocr/bitmap_subtitle_ocr.py"
+    pgsrip_path: "tools/recognition/.venv/bin/pgsrip"
+    mkvextract_path: ""
+    mkvmerge_path: ""
+  ai_proofread: true
+atrack:
+  auto_on_scan: false
+lyric:
+  # Requires the ASR venv above; disabled by default in the image.
+  auto_on_scan: false
+photo_classify:
+  # Requires the ONNX Python venv; disabled by default in the image.
+  auto_on_scan: false
+  engine: auto
+  python_path: "tools/recognition/.venv/bin/python"
+  script_path: "tools/photo_classify/classify.py"
+  model_path: "tools/photo_classify/models/mobilenetv2-7.onnx"
+  labels_path: "tools/photo_classify/imagenet_labels.txt"
+photo_face:
+  # Requires the InsightFace Python venv; disabled by default in the image.
+  auto_on_scan: false
+  python_path: "tools/recognition/.venv/bin/python"
+  script_path: "tools/photo_face/detect.py"
+  similarity_threshold: 0.45
+  max_concurrent: 0
+  batch_limit: 0
+  poll_interval_seconds: 0
+  failed_retry_minutes: 0
+  thumbnail_repair_batch: 0
+  thumbnail_repair_audit_hours: 0
+doc_trans:
+  # LibreOffice is not included in the image; disabled by default.
+  enabled: false
+  engine_order:
+    - libreoffice
+  libreoffice_path: ""
+  soffice_path: ""
+  office_path: ""
+  wps_path: ""
+  cache_dir: ""
+  cache_ttl_days: 30
+  timeout_seconds: 600
+jit:
+  continuous_hls_enabled: true
+cors:
+  allow_origins:
+    - "*"

@@ -1,11 +1,18 @@
 services:
-  knox-media:
-    build: .
-    image: knox-media:latest
+  vauldy:
+    # Published image from Docker Hub. Build from source instead by adding:
+    #   build: .
+    image: knoxmedia/vauldy:latest
+    container_name: vauldy
     ports:
       - "8200:8200"
     volumes:
+      # Persistent runtime data (database, caches, uploads).
       - ./data:/app/data
+      # Mount your media libraries here, e.g.:
+      # - /your/media:/media
+      # Optional: override the default container config.
+      # - ./my-config.yml:/app/config.yml:ro
     environment:
       KNOX_MEDIA_CONFIG: /app/config.yml
     restart: unless-stopped
