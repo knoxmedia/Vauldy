@@ -453,6 +453,70 @@ func TestStartupRejectsV3PersistedGraphDrift(t *testing.T) {
 	}
 }
 
+// TestStartupRepairsEmptyPersistedV3GraphEdgesFromSnapshot covers the
+// cross-edition failure mode where media_ingest_step_dependency is emptied
+// (publication schema rebuild) while steps and the v3 snapshot graph remain.
+// Startup must restore missing edges from the snapshot rather than aborting
+// with "persisted policy v3 graph differs from snapshot".
+func TestStartupRepairsEmptyPersistedV3GraphEdgesFromSnapshot(t *testing.T) {
+	db := openPlannerTestDB(t)
+	_, mid, scan := seedPlannerMedia(t, db, "video", 1, 0, 0)
+	run := planAndCommit(t, db, NewPlanner(PlanOptions{SubtitleAuto: true}), NewMedia{MediaID: mid, ScanTaskID: scan, FileType: "video"})
+
+	var before int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM media_ingest_step_dependency d JOIN media_ingest_step s ON s.id=d.step_id WHERE s.run_id=?`, run.ID).Scan(&before); err != nil || before == 0 {
+		t.Fatalf("setup deps=%d err=%v", before, err)
+	}
+	if _, err := db.Exec(`DELETE FROM media_ingest_step_dependency`); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateAggregateCurrentV2(context.Background(), db); err != nil {
+		t.Fatalf("startup failed to repair empty dependency table: %v", err)
+	}
+	var after int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM media_ingest_step_dependency d JOIN media_ingest_step s ON s.id=d.step_id WHERE s.run_id=?`, run.ID).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Fatalf("restored deps=%d want %d", after, before)
+	}
+	persisted, err := loadPersistedPlanGraph(context.Background(), db, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw string
+	if err := db.QueryRow(`SELECT config_snapshot_json FROM media_ingest_run WHERE id=?`, run.ID).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	var snapshot ConfigSnapshot
+	if err := json.Unmarshal([]byte(raw), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if !planGraphsEqual(persisted, snapshot.Graph) {
+		t.Fatal("persisted graph still differs from snapshot after repair")
+	}
+}
+
+func TestStartupRepairsPartialMissingPersistedV3GraphEdges(t *testing.T) {
+	db := openPlannerTestDB(t)
+	_, mid, scan := seedPlannerMedia(t, db, "video", 1, 0, 0)
+	run := planAndCommit(t, db, NewPlanner(PlanOptions{SubtitleAuto: true}), NewMedia{MediaID: mid, ScanTaskID: scan, FileType: "video"})
+	var scrape int64
+	if err := db.QueryRow(`SELECT id FROM media_ingest_step WHERE run_id=? AND step_type='scrape'`, run.ID).Scan(&scrape); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DELETE FROM media_ingest_step_dependency WHERE step_id=?`, scrape); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateAggregateCurrentV2(context.Background(), db); err != nil {
+		t.Fatalf("startup failed to repair partial missing edges: %v", err)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM media_ingest_step_dependency WHERE step_id=?`, scrape).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("scrape deps=%d err=%v", count, err)
+	}
+}
+
 // TestStartupAcceptsPersistedV3GraphEdgeReordering guards against order-only
 // mismatches between the snapshot edge list (plan construction order) and the
 // persisted dependency rows (read back ordered by step id). When encrypt is a

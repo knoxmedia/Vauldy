@@ -129,6 +129,12 @@ func ValidateAggregateCurrentPolicy(ctx context.Context, db *sql.DB, adapters ..
 	logStep := func(step string) {
 		log.Printf("publication v2 validate: %s in %s", step, time.Since(totalStart))
 	}
+	if n, err := RepairMissingPersistedPlanEdges(ctx, db); err != nil {
+		return fmt.Errorf("publication current-policy startup repair missing plan edges: %w", err)
+	} else if n > 0 {
+		log.Printf("publication v2 validate: repaired %d missing persisted plan edge(s)", n)
+	}
+	logStep("missing persisted plan edges repair done")
 	if err := validateCurrentPolicyAdmission(ctx, db, firstAdapterRegistry(adapters)); err != nil {
 		return err
 	}
@@ -995,6 +1001,124 @@ func firstAdapterRegistry(registries []ExecutableAdapterRegistry) ExecutableAdap
 // v1 replacement plus current-policy (v2/v3) startup path.
 func ReconcileStartupPublicationV2(ctx context.Context, db *sql.DB, planner *Planner) (int, error) {
 	return ReconcileStartupPublicationCurrentPolicy(ctx, db, planner)
+}
+
+// RepairMissingPersistedPlanEdges restores dependency rows that are present in an
+// active policy-v3 snapshot graph but missing from media_ingest_step_dependency.
+// It only runs when persisted nodes still match the snapshot; true node/edge
+// identity drift is left for admission validation to reject.
+//
+// This recovers from cross-edition / publication-schema rebuilds that empty the
+// dependency table while leaving steps and config_snapshot_json intact.
+func RepairMissingPersistedPlanEdges(ctx context.Context, db *sql.DB) (int, error) {
+	if db == nil {
+		return 0, errors.New("publication plan edge repair: database is required")
+	}
+	repaired := 0
+	_, err := store.WithImmediateConnTx(ctx, db, func(tx store.ImmediateConnTx) error {
+		n, e := repairMissingPersistedPlanEdgesTx(ctx, tx)
+		repaired = n
+		return e
+	})
+	return repaired, err
+}
+
+func repairMissingPersistedPlanEdgesTx(ctx context.Context, q store.SQLExecutor) (int, error) {
+	rows, err := q.QueryContext(ctx, `SELECT r.id,r.config_snapshot_json FROM media_ingest_run r JOIN media m ON m.id=r.media_id AND m.ingest_generation=r.generation WHERE r.policy_version=3 AND r.superseded_at IS NULL ORDER BY r.id`)
+	if err != nil {
+		return 0, err
+	}
+	type candidate struct {
+		id       int64
+		snapshot ConfigSnapshot
+	}
+	var candidates []candidate
+	for rows.Next() {
+		var item candidate
+		var raw string
+		if err = rows.Scan(&item.id, &raw); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		if err = json.Unmarshal([]byte(raw), &item.snapshot); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("publication plan edge repair run %d: malformed policy v3 snapshot", item.id)
+		}
+		candidates = append(candidates, item)
+	}
+	if err = rows.Close(); err != nil {
+		return 0, err
+	}
+	inserted := 0
+	for _, item := range candidates {
+		if item.snapshot.PolicyVersion != PolicyV3 || len(item.snapshot.Graph.Nodes) == 0 || len(item.snapshot.Graph.Edges) == 0 {
+			continue
+		}
+		persisted, loadErr := loadPersistedPlanGraph(ctx, q, item.id)
+		if loadErr != nil {
+			return inserted, loadErr
+		}
+		if !reflect.DeepEqual(persisted.Nodes, item.snapshot.Graph.Nodes) {
+			continue
+		}
+		if planGraphsEqual(persisted, item.snapshot.Graph) {
+			continue
+		}
+		if err = ValidatePlanGraph(item.snapshot.Graph); err != nil {
+			return inserted, fmt.Errorf("publication plan edge repair run %d: invalid policy v3 graph: %w", item.id, err)
+		}
+		stepIDs, loadErr := loadRunStepIDs(ctx, q, item.id)
+		if loadErr != nil {
+			return inserted, loadErr
+		}
+		for _, edge := range item.snapshot.Graph.Edges {
+			if edge.DependsOn == nil {
+				return inserted, fmt.Errorf("publication plan edge repair run %d: snapshot edge %q missing depends_on", item.id, edge.Step)
+			}
+			if edge.Kind != DependencySuccess && edge.Kind != DependencyTerminal {
+				return inserted, fmt.Errorf("publication plan edge repair run %d: unsupported dependency kind %q", item.id, edge.Kind)
+			}
+			stepID, ok := stepIDs[edge.Step]
+			if !ok || stepID <= 0 {
+				return inserted, fmt.Errorf("publication plan edge repair run %d: missing step %q", item.id, edge.Step)
+			}
+			depID, ok := stepIDs[*edge.DependsOn]
+			if !ok || depID <= 0 {
+				return inserted, fmt.Errorf("publication plan edge repair run %d: missing dependency target %q", item.id, *edge.DependsOn)
+			}
+			res, execErr := q.ExecContext(ctx, `INSERT INTO media_ingest_step_dependency(step_id,depends_on_step_id,dependency_kind)
+SELECT ?,?,?
+WHERE NOT EXISTS (
+  SELECT 1 FROM media_ingest_step_dependency
+  WHERE step_id=? AND depends_on_step_id=? AND dependency_kind=?
+)`, stepID, depID, edge.Kind, stepID, depID, edge.Kind)
+			if execErr != nil {
+				return inserted, fmt.Errorf("publication plan edge repair run %d: insert %q→%q: %w", item.id, edge.Step, *edge.DependsOn, execErr)
+			}
+			if n, _ := res.RowsAffected(); n > 0 {
+				inserted += int(n)
+			}
+		}
+	}
+	return inserted, nil
+}
+
+func loadRunStepIDs(ctx context.Context, q store.SQLExecutor, runID int64) (map[StepType]int64, error) {
+	rows, err := q.QueryContext(ctx, `SELECT id,step_type FROM media_ingest_step WHERE run_id=? ORDER BY id`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[StepType]int64{}
+	for rows.Next() {
+		var id int64
+		var step StepType
+		if err = rows.Scan(&id, &step); err != nil {
+			return nil, err
+		}
+		out[step] = id
+	}
+	return out, rows.Err()
 }
 
 func validateCurrentPolicyAdmission(ctx context.Context, q store.SQLExecutor, adapters ExecutableAdapterRegistry) error {
